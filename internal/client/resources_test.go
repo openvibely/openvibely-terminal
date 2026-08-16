@@ -300,3 +300,36 @@ func TestPageTextPrefersNamedElement(t *testing.T) {
 		t.Errorf("text = %q", text)
 	}
 }
+
+func TestGetPersonalityFallsBackToWholeDocument(t *testing.T) {
+	c := htmlServer(t, `<html><body>no container here</body></html>`)
+	text, err := c.GetPersonality(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "no container here" {
+		t.Errorf("text = %q", text)
+	}
+}
+
+func TestGetWorkerSettingsReturnsPageText(t *testing.T) {
+	c := htmlServer(t, `<html><body>worker settings text</body></html>`)
+	text, err := c.GetWorkerSettings(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "worker settings text" {
+		t.Errorf("text = %q", text)
+	}
+}
+
+func TestGetChannelsReturnsPageText(t *testing.T) {
+	c := htmlServer(t, `<html><body>channels text</body></html>`)
+	text, err := c.GetChannels(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text != "channels text" {
+		t.Errorf("text = %q", text)
+	}
+}

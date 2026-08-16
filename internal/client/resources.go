@@ -316,11 +316,7 @@ func (c *Client) DeleteSchedule(ctx context.Context, scheduleID string) error {
 
 // GetWorkerSettings returns the Workers screen as text.
 func (c *Client) GetWorkerSettings(ctx context.Context, projectID string) (string, error) {
-	root, err := c.getHTML(ctx, "/workers"+query("project_id", projectID))
-	if err != nil {
-		return "", err
-	}
-	return NodeText(root), nil
+	return c.pageText(ctx, "/workers"+query("project_id", projectID), "")
 }
 
 // SetGlobalWorkerLimit updates the global max worker count.
@@ -341,23 +337,12 @@ func (c *Client) SetProjectWorkerLimit(ctx context.Context, projectID string, li
 
 // GetChannels returns the Channels (integrations) screen as text.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
-	root, err := c.getHTML(ctx, "/channels"+query("project_id", projectID))
-	if err != nil {
-		return "", err
-	}
-	return NodeText(root), nil
+	return c.pageText(ctx, "/channels"+query("project_id", projectID), "")
 }
 
 // GetPersonality returns the Personality screen as text.
 func (c *Client) GetPersonality(ctx context.Context, projectID string) (string, error) {
-	root, err := c.getHTML(ctx, "/personality"+query("project_id", projectID))
-	if err != nil {
-		return "", err
-	}
-	if n := findByID(root, "personality-container"); n != nil {
-		return NodeText(n), nil
-	}
-	return NodeText(root), nil
+	return c.pageText(ctx, "/personality"+query("project_id", projectID), "personality-container")
 }
 
 // SavePersonality sets the active personality preset.
