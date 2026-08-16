@@ -1835,3 +1835,77 @@ func TestAgentsMetricsFetchesConcurrently(t *testing.T) {
 		}
 	})
 }
+
+// TestDestructiveEmptyRefShowsUsageError verifies that every destructive
+// command immediately returns a usage error when called with no target
+// argument, without prompting the user or making any backend HTTP calls.
+func TestDestructiveEmptyRefShowsUsageError(t *testing.T) {
+	cases := []struct {
+		name    string
+		cmd     string
+		wantMsg string
+	}{
+		{"tasks_delete", "/tasks delete", "usage: /tasks delete"},
+		{"alerts_delete", "/alerts delete", "usage: /alerts delete"},
+		{"automations_delete", "/automations delete", "usage: /automations delete"},
+		{"skills_delete", "/skills delete", "usage: /skills delete"},
+		{"agents_delete", "/agents delete", "usage: /agents delete"},
+		{"models_delete", "/models delete", "usage: /models delete"},
+		{"schedule_delete", "/schedule delete", "usage: /schedule delete"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.cmd)
+			out := transcript(m)
+			if !strings.Contains(strings.ToLower(out), "usage") {
+				t.Errorf("expected usage error, got:\n%s", out)
+			}
+			if m.pendingConfirmation != nil {
+				t.Error("pendingConfirmation must NOT be set when ref is empty")
+			}
+			rec.mu.Lock()
+			nCalls := len(rec.calls)
+			rec.mu.Unlock()
+			if nCalls != 0 {
+				t.Errorf("expected zero backend calls, got %d:\n%s", nCalls, rec.all())
+			}
+		})
+	}
+}
+
+// TestDestructiveNonEmptyRefStillConfirms verifies that supplying a non-empty
+// ref to a destructive command still sets pendingConfirmation (i.e. the
+// confirmation prompt is shown as before the fix).
+func TestDestructiveNonEmptyRefStillConfirms(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer"
+		data-agent-name="Reviewer" data-agent-description="reviews code"
+		data-agent-model="claude" data-agent-scope="project"></div>`
+	const skillsHTML = `<div data-skill-handle="my-skill" data-skill-name="My Skill"
+		data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
+
+	t.Run("tasks_delete_with_ref", func(t *testing.T) {
+		m, _ := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks delete t-1")
+		if m.pendingConfirmation == nil {
+			t.Error("pendingConfirmation must be set for /tasks delete <ref>")
+		}
+	})
+
+	t.Run("agents_delete_with_ref", func(t *testing.T) {
+		m, _ := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, "/agents delete Reviewer")
+		if m.pendingConfirmation == nil {
+			t.Error("pendingConfirmation must be set for /agents delete <ref>")
+		}
+	})
+
+	t.Run("skills_delete_with_ref", func(t *testing.T) {
+		m, _ := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		m = runLine(t, m, "/skills delete my-skill")
+		if m.pendingConfirmation == nil {
+			t.Error("pendingConfirmation must be set for /skills delete <ref>")
+		}
+	})
+}

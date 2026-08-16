@@ -299,6 +299,9 @@ func tasksCommand() command {
 				})
 
 			case "run", "stop", "delete":
+				if action == "delete" && ref == "" {
+					return m, errCmd("usage: /tasks delete <task>")
+				}
 				cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
@@ -531,6 +534,9 @@ func scheduleCommand() command {
 				})
 			case "delete", "toggle":
 				ref := strings.Join(rest, " ")
+				if action == "delete" && ref == "" {
+					return m, errCmd("usage: /schedule delete <id>")
+				}
 				cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
 					entries, _, err := c.GetSchedule(ctx, pid)
 					if err != nil {
@@ -647,6 +653,9 @@ func alertsCommand() command {
 					"use --force to confirm deleting all alerts",
 					cmd)
 			default:
+				if action == "delete" && ref == "" {
+					return m, errCmd("usage: /alerts delete <alert>")
+				}
 				cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
 					alerts, err := c.ListAlerts(ctx, pid)
 					if err != nil {
@@ -773,6 +782,9 @@ func skillsCommand() command {
 					return "updated skill " + handle, nil
 				})
 			default:
+				if action == "delete" && ref == "" {
+					return m, errCmd("usage: /skills delete <skill>")
+				}
 				cmd := run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
 					skills, err := c.ListSkills(ctx, pid)
 					if err != nil {
@@ -883,6 +895,9 @@ func agentsCommand() command {
 						renderAgents)
 				})
 			case "delete":
+				if ref == "" {
+					return m, errCmd("usage: /agents delete <agent>")
+				}
 				cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
 					agents, err := c.ListAgents(ctx, pid)
 					if err != nil {
@@ -958,6 +973,9 @@ func modelsCommand() command {
 					return renderModelCapacity(caps), nil
 				})
 			default:
+				if action == "delete" && ref == "" {
+					return m, errCmd("usage: /models delete <model>")
+				}
 				cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
 					list, err := c.ListModels(ctx, pid)
 					if err != nil {
@@ -1297,6 +1315,9 @@ func automationsCommand() command {
 					return c.GetAutomations(ctx, pid)
 				})
 			default:
+				if action == "delete" && ref == "" {
+					return m, errCmd("usage: /automations delete <automation>")
+				}
 				cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
 					if ref == "" {
 						return "", fmt.Errorf("usage: /automations %s <automation>", action)
