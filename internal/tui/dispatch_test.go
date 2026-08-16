@@ -948,3 +948,224 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 		}
 	})
 }
+
+// newModelFromHandler wires a Model to a custom HTTP handler.
+func newModelFromHandler(t *testing.T, h http.HandlerFunc) Model {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	return m
+}
+
+// TestGenerateThenFetch verifies that pulseCommand, reflectionCommand, and
+// insightsCommand delegate to generateThenFetch: the no-action path fetches
+// without calling generate, and the trigger-action path calls generate then
+// fetch with a generate failure short-circuiting before fetch.
+func TestGenerateThenFetch(t *testing.T) {
+	// pulse: bare command — only fetch, no generate
+	t.Run("pulse show fetches without generate", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/upcoming": "<div>upcoming briefing</div>"})
+		m = runLine(t, m, "/pulse")
+		if !rec.saw("GET", "/upcoming") {
+			t.Errorf("expected GET /upcoming; calls:\n%s", rec.all())
+		}
+		if rec.saw("POST", "/upcoming/summary") {
+			t.Errorf("unexpected POST /upcoming/summary for bare /pulse; calls:\n%s", rec.all())
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	// pulse: summary — generate then fetch; generate failure short-circuits
+	t.Run("pulse summary calls generate then fetch", func(t *testing.T) {
+		var generateCalled, fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			if r.Method == "POST" && r.URL.Path == "/upcoming/summary" {
+				generateCalled = true
+				_, _ = w.Write([]byte("ok"))
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/upcoming" {
+				fetchCalled = true
+				_, _ = w.Write([]byte("<div>upcoming briefing</div>"))
+				return
+			}
+			_, _ = w.Write([]byte("{}"))
+		})
+		m = runLine(t, m, "/pulse summary")
+		if !generateCalled {
+			t.Error("expected GeneratePulseSummary (POST /upcoming/summary) to be called")
+		}
+		if !fetchCalled {
+			t.Error("expected GetPulse (GET /upcoming) to be called after generate")
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("pulse summary generate failure short-circuits", func(t *testing.T) {
+		var fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && r.URL.Path == "/upcoming/summary" {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/upcoming" {
+				fetchCalled = true
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<div>upcoming briefing</div>"))
+		})
+		m = runLine(t, m, "/pulse summary")
+		if fetchCalled {
+			t.Error("fetch (GET /upcoming) must not be called when generate fails")
+		}
+		if !strings.Contains(transcript(m), "error:") {
+			t.Errorf("expected error in transcript:\n%s", transcript(m))
+		}
+	})
+
+	// reflection: bare command — only fetch, no generate
+	t.Run("reflection show fetches without generate", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/history": "<div>history debrief</div>"})
+		m = runLine(t, m, "/reflection")
+		if !rec.saw("GET", "/history") {
+			t.Errorf("expected GET /history; calls:\n%s", rec.all())
+		}
+		if rec.saw("POST", "/history/summary") {
+			t.Errorf("unexpected POST /history/summary for bare /reflection; calls:\n%s", rec.all())
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	// reflection: summary — generate then fetch; generate failure short-circuits
+	t.Run("reflection summary calls generate then fetch", func(t *testing.T) {
+		var generateCalled, fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			if r.Method == "POST" && r.URL.Path == "/history/summary" {
+				generateCalled = true
+				_, _ = w.Write([]byte("ok"))
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/history" {
+				fetchCalled = true
+				_, _ = w.Write([]byte("<div>history debrief</div>"))
+				return
+			}
+			_, _ = w.Write([]byte("{}"))
+		})
+		m = runLine(t, m, "/reflection summary")
+		if !generateCalled {
+			t.Error("expected GenerateReflectionSummary (POST /history/summary) to be called")
+		}
+		if !fetchCalled {
+			t.Error("expected GetReflection (GET /history) to be called after generate")
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("reflection summary generate failure short-circuits", func(t *testing.T) {
+		var fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && r.URL.Path == "/history/summary" {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/history" {
+				fetchCalled = true
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<div>history debrief</div>"))
+		})
+		m = runLine(t, m, "/reflection summary")
+		if fetchCalled {
+			t.Error("fetch (GET /history) must not be called when generate fails")
+		}
+		if !strings.Contains(transcript(m), "error:") {
+			t.Errorf("expected error in transcript:\n%s", transcript(m))
+		}
+	})
+
+	// insights: bare command — only fetch, no generate
+	t.Run("insights show fetches without generate", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/insights": "<div>insights content</div>"})
+		m = runLine(t, m, "/insights")
+		if !rec.saw("GET", "/insights") {
+			t.Errorf("expected GET /insights; calls:\n%s", rec.all())
+		}
+		if rec.saw("POST", "/insights/analyze") {
+			t.Errorf("unexpected POST /insights/analyze for bare /insights; calls:\n%s", rec.all())
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	// insights: analyze — generate then fetch; generate failure short-circuits
+	t.Run("insights analyze calls generate then fetch", func(t *testing.T) {
+		var generateCalled, fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			if r.Method == "POST" && r.URL.Path == "/insights/analyze" {
+				generateCalled = true
+				_, _ = w.Write([]byte("ok"))
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/insights" {
+				fetchCalled = true
+				_, _ = w.Write([]byte("<div>insights content</div>"))
+				return
+			}
+			_, _ = w.Write([]byte("{}"))
+		})
+		m = runLine(t, m, "/insights analyze")
+		if !generateCalled {
+			t.Error("expected RunInsightsAnalysis (POST /insights/analyze) to be called")
+		}
+		if !fetchCalled {
+			t.Error("expected GetInsights (GET /insights) to be called after generate")
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("insights analyze generate failure short-circuits", func(t *testing.T) {
+		var fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && r.URL.Path == "/insights/analyze" {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/insights" {
+				fetchCalled = true
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<div>insights content</div>"))
+		})
+		m = runLine(t, m, "/insights analyze")
+		if fetchCalled {
+			t.Error("fetch (GET /insights) must not be called when generate fails")
+		}
+		if !strings.Contains(transcript(m), "error:") {
+			t.Errorf("expected error in transcript:\n%s", transcript(m))
+		}
+	})
+}
