@@ -714,6 +714,9 @@ func skillsCommand() command {
 				}
 				parts := strings.SplitN(ref, "|", 3)
 				name := strings.TrimSpace(parts[0])
+				if name == "" {
+					return m, errCmd("usage: /skills add <name> [| <description>] [| <body>]")
+				}
 				desc, body := "", ""
 				if len(parts) > 1 {
 					desc = strings.TrimSpace(parts[1])

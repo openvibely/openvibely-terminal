@@ -274,6 +274,39 @@ func TestTasksNewEmptyTitleFromPipeInput(t *testing.T) {
 	})
 }
 
+func TestSkillsAddEmptyNameFromPipeInput(t *testing.T) {
+	const skillsHTML = `<div data-skill-handle="my-skill" data-skill-name="My Skill"
+		data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
+
+	t.Run("pipe_only_is_rejected", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/skills add | some description")
+		out := transcript(m)
+		if !strings.Contains(strings.ToLower(out), "usage") {
+			t.Errorf("expected usage error, got:\n%s", out)
+		}
+		if rec.saw("POST", "/skills") {
+			t.Errorf("CreateSkill must NOT be called when name is empty, calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("name_with_pipe_succeeds", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		runLine(t, m, "/skills add my-skill | description | body")
+		if !rec.saw("POST", "/skills") {
+			t.Errorf("expected CreateSkill call, calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("name_without_pipe_succeeds", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		runLine(t, m, "/skills add my-skill")
+		if !rec.saw("POST", "/skills") {
+			t.Errorf("expected CreateSkill call, calls:\n%s", rec.all())
+		}
+	})
+}
+
 func TestAlertsCommandChainsDelete(t *testing.T) {
 	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
 	  data-search-text="build failed">
