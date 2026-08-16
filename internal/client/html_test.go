@@ -167,6 +167,35 @@ func BenchmarkGetHTML(b *testing.B) {
 	}
 }
 
+// TestDedupedCards verifies that dedupedCards scrapes and deduplicates in one step.
+func TestDedupedCards(t *testing.T) {
+	// Two elements share the same marker value; a third has a unique value.
+	// The duplicate pair should be collapsed to one card (the one with more attrs).
+	const body = `<!DOCTYPE html><html><body>
+		<div data-skill-handle="alpha" data-skill-name="A"></div>
+		<div data-skill-handle="alpha" data-skill-name="A" data-skill-extra="yes"></div>
+		<div data-skill-handle="beta" data-skill-name="B"></div>
+	</body></html>`
+	root, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+	cards := dedupedCards(root, "data-skill-handle")
+	if got, want := len(cards), 2; got != want {
+		t.Fatalf("len(cards) = %d, want %d", got, want)
+	}
+	if cards[0].Attrs["data-skill-handle"] != "alpha" {
+		t.Errorf("cards[0] handle = %q, want %q", cards[0].Attrs["data-skill-handle"], "alpha")
+	}
+	// The richer duplicate (with data-skill-extra) should be kept.
+	if cards[0].Attrs["data-skill-extra"] != "yes" {
+		t.Errorf("cards[0] missing data-skill-extra; got attrs %v", cards[0].Attrs)
+	}
+	if cards[1].Attrs["data-skill-handle"] != "beta" {
+		t.Errorf("cards[1] handle = %q, want %q", cards[1].Attrs["data-skill-handle"], "beta")
+	}
+}
+
 // BenchmarkStringReaderOld isolates the old extra-copy pattern:
 // string(body) allocates a full N-byte copy; strings.NewReader wraps it.
 // This is what each HTML fetch cost before the fix.

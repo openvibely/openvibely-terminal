@@ -118,7 +118,7 @@ func (c *Client) ListSkills(ctx context.Context, projectID string) ([]Skill, err
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupeCards(scrapeCards(root, "data-skill-handle"), "data-skill-handle")
+	cards := dedupedCards(root, "data-skill-handle")
 	out := make([]Skill, 0, len(cards))
 	for _, card := range cards {
 		out = append(out, Skill{
@@ -190,7 +190,7 @@ func (c *Client) ListModels(ctx context.Context, projectID string) ([]LLMModel, 
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupeCards(scrapeCards(root, "data-model-id"), "data-model-id")
+	cards := dedupedCards(root, "data-model-id")
 	out := make([]LLMModel, 0, len(cards))
 	for _, card := range cards {
 		if card.Get("model-name") == "" {
@@ -235,7 +235,7 @@ func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, 
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupeCards(scrapeCards(root, "data-agent-id"), "data-agent-id")
+	cards := dedupedCards(root, "data-agent-id")
 	out := make([]AgentDef, 0, len(cards))
 	for _, card := range cards {
 		if card.Get("agent-name") == "" {
@@ -280,7 +280,7 @@ func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleE
 	if err != nil {
 		return nil, "", err
 	}
-	cards := dedupeCards(scrapeCards(root, "data-task-id"), "data-task-id")
+	cards := dedupedCards(root, "data-task-id")
 	out := make([]ScheduleEntry, 0, len(cards))
 	for _, card := range cards {
 		out = append(out, ScheduleEntry{

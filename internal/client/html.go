@@ -152,6 +152,11 @@ func dedupeCards(cards []Card, marker string) []Card {
 	return out
 }
 
+// dedupedCards is a convenience wrapper that scrapes and deduplicates in one step.
+func dedupedCards(root *html.Node, marker string) []Card {
+	return dedupeCards(scrapeCards(root, marker), marker)
+}
+
 // firstLine returns the first non-empty line of a card's text, which is how
 // the templates render a card's primary label.
 func firstLine(s string) string {
