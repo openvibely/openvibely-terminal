@@ -289,6 +289,27 @@ func TestCreateScheduleSendsRepeat(t *testing.T) {
 	}
 }
 
+func TestCreateScheduleTranslatesHourlyToHours(t *testing.T) {
+	var form url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		form = r.PostForm
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	if err := c.CreateSchedule(context.Background(), "t1", "2026-01-02T09:00", "hourly", 1); err != nil {
+		t.Fatal(err)
+	}
+	if form.Get("repeat_type") != "hours" {
+		t.Errorf("repeat_type = %q, want %q", form.Get("repeat_type"), "hours")
+	}
+	if form.Get("repeat_interval") != "1" {
+		t.Errorf("repeat_interval = %q", form.Get("repeat_interval"))
+	}
+}
+
 func TestPageTextPrefersNamedElement(t *testing.T) {
 	c := htmlServer(t, `<html><body><nav>skip me</nav>
 		<div id="personality-container">friendly and concise</div></body></html>`)
