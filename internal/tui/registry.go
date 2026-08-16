@@ -1237,43 +1237,13 @@ func (m Model) pickProject(name string) (Model, tea.Cmd) {
 // matchProject resolves a project reference, preferring the most specific
 // match: exact ID, exact name, then ID/name prefix, then name substring.
 func matchProject(projects []client.Project, ref string) (client.Project, error) {
-	var zero client.Project
 	if strings.TrimSpace(ref) == "" {
+		var zero client.Project
 		return zero, fmt.Errorf("missing project name")
 	}
-	lower := strings.ToLower(strings.TrimSpace(ref))
-
-	for _, p := range projects {
-		if strings.EqualFold(p.ID, ref) || strings.EqualFold(p.Name, ref) {
-			return p, nil
-		}
-	}
-	for _, tier := range []func(client.Project) bool{
-		func(p client.Project) bool {
-			return strings.HasPrefix(strings.ToLower(p.Name), lower) ||
-				strings.HasPrefix(strings.ToLower(p.ID), lower)
-		},
-		func(p client.Project) bool { return strings.Contains(strings.ToLower(p.Name), lower) },
-	} {
-		var hits []client.Project
-		for _, p := range projects {
-			if tier(p) {
-				hits = append(hits, p)
-			}
-		}
-		if len(hits) == 1 {
-			return hits[0], nil
-		}
-		if len(hits) > 1 {
-			var names []string
-			for _, h := range hits {
-				names = append(names, h.Name)
-			}
-			return zero, fmt.Errorf("%q matches %d projects: %s — use the full name",
-				ref, len(hits), strings.Join(names, ", "))
-		}
-	}
-	return zero, fmt.Errorf("no project matching %q", ref)
+	return matchRef(projects, ref,
+		func(p client.Project) string { return p.ID },
+		func(p client.Project) string { return p.Name })
 }
 
 // errCmd reports a usage error in the transcript.
