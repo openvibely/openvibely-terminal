@@ -260,10 +260,10 @@ func (c *Client) GetAllAgentMetrics(ctx context.Context) ([]AgentMetric, error) 
 	return out, err
 }
 
-// GetBestAgent asks the backend which model performs best for a task type.
-func (c *Client) GetBestAgent(ctx context.Context, taskType string) (*AgentRecommendation, error) {
+// agentRecommendation is the shared fetch/decode logic for agent recommendation endpoints.
+func (c *Client) agentRecommendation(ctx context.Context, kind, taskType string) (*AgentRecommendation, error) {
 	var out AgentRecommendation
-	path := "/api/workflows/best-agent"
+	path := "/api/workflows/" + kind
 	if taskType != "" {
 		path += "?task_type=" + url.QueryEscape(taskType)
 	}
@@ -273,17 +273,14 @@ func (c *Client) GetBestAgent(ctx context.Context, taskType string) (*AgentRecom
 	return &out, nil
 }
 
+// GetBestAgent asks the backend which model performs best for a task type.
+func (c *Client) GetBestAgent(ctx context.Context, taskType string) (*AgentRecommendation, error) {
+	return c.agentRecommendation(ctx, "best-agent", taskType)
+}
+
 // GetCheapestAgent asks for the cheapest model meeting a quality threshold.
 func (c *Client) GetCheapestAgent(ctx context.Context, taskType string) (*AgentRecommendation, error) {
-	var out AgentRecommendation
-	path := "/api/workflows/cheapest-agent"
-	if taskType != "" {
-		path += "?task_type=" + url.QueryEscape(taskType)
-	}
-	if err := c.getJSON(ctx, path, &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return c.agentRecommendation(ctx, "cheapest-agent", taskType)
 }
 
 // GetVoteRecords fetches vote records for a parallel workflow step execution.
