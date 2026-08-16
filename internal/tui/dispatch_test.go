@@ -659,12 +659,19 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 	})
 
 	t.Run("agents", func(t *testing.T) {
+		// Use "agents delete" rather than "generate": delete performs a
+		// pre-mutation ListAgents lookup (via matchRef) followed by the
+		// post-mutation refreshAndRender refetch, producing two GETs to
+		// /agents. This ensures failEndpointAfterFirstGET actually fails
+		// the second (refresh) GET and meaningfully exercises the
+		// swallow path. "generate" issues only one GET (the refresh
+		// itself), so the failure would never trigger.
 		const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
 			data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`
 		m := newModel(t, failEndpointAfterFirstGET("/agents", agentsHTML))
-		m = runLine(t, m, "/agents generate a reviewer agent")
+		m = runLine(t, m, "/agents delete reviewer")
 		out := transcript(m)
-		if !strings.Contains(out, "generated an agent from your description") {
+		if !strings.Contains(out, "deleted Reviewer") {
 			t.Errorf("expected status line despite refresh failure:\n%s", out)
 		}
 		if strings.Contains(out, "refresh failed") {
