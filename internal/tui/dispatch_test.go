@@ -20,6 +20,20 @@ type recorder struct {
 	// project a command was scoped to.
 	urls []string
 	body func(path string) string
+	// forms captures method, path, and posted form data for POST requests.
+	forms []string
+}
+
+// sawForm reports whether any recorded form submission contained the given substring.
+func (r *recorder) sawForm(substr string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, f := range r.forms {
+		if strings.Contains(f, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *recorder) record(method, path string) {
@@ -71,6 +85,10 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.record(r.Method, r.URL.Path)
+		_ = r.ParseForm()
+		rec.mu.Lock()
+		rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
+		rec.mu.Unlock()
 		if body, ok := bodies[r.URL.Path]; ok {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(body))
@@ -293,6 +311,29 @@ func TestWorkersLimitValidatesArgument(t *testing.T) {
 	if !rec2.saw("POST", "/workers") {
 		t.Errorf("valid limit should be sent:\n%s", rec2.all())
 	}
+
+	m3, rec3 := dispatchModel(t, nil)
+	m3 = runLine(t, m3, "/workers limit -1")
+	if rec3.saw("POST", "/workers") {
+		t.Error("a negative limit must not be sent")
+	}
+	if !strings.Contains(transcript(m3), "positive number") {
+		t.Errorf("expected a validation message:\n%s", transcript(m3))
+	}
+}
+
+func TestWorkersLimitZeroMeansUnlimited(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	m = runLine(t, m, "/workers limit 0")
+	if !rec.saw("POST", "/workers") {
+		t.Errorf("zero limit should be sent:\n%s", rec.all())
+	}
+	if !rec.sawForm("max_workers=0") {
+		t.Errorf("expected max_workers=0 in form data:\n%v", rec.forms)
+	}
+	if !strings.Contains(transcript(m), "unlimited") {
+		t.Errorf("expected an unlimited status message:\n%s", transcript(m))
+	}
 }
 
 func TestCommandsRequiringProjectReportMissingSelection(t *testing.T) {
@@ -364,6 +405,20 @@ func TestWorkersProjectLimit(t *testing.T) {
 	runLine(t, m, "/workers project 3")
 	if !rec.saw("POST", "/workers/projects/p1/limit") {
 		t.Errorf("calls:\n%s", rec.all())
+	}
+}
+
+func TestWorkersProjectLimitZeroMeansNoLimit(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	m = runLine(t, m, "/workers project 0")
+	if !rec.saw("POST", "/workers/projects/p1/limit") {
+		t.Errorf("calls:\n%s", rec.all())
+	}
+	if !rec.sawForm("max_workers=0") {
+		t.Errorf("expected max_workers=0 in form data:\n%v", rec.forms)
+	}
+	if !strings.Contains(transcript(m), "no limit") && !strings.Contains(transcript(m), "unlimited") {
+		t.Errorf("expected a no-limit/unlimited status message:\n%s", transcript(m))
 	}
 }
 

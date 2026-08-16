@@ -821,8 +821,8 @@ func workersCommand() command {
 		desc:    "worker pool stats and concurrency caps",
 		usage: []string{
 			"workers                                    show pool stats and settings",
-			"workers limit <n>                          set the global worker cap",
-			"workers project <n>                        set this project's worker cap",
+			"workers limit <n>                          set the global worker cap (0 = unlimited)",
+			"workers project <n>                        set this project's worker cap (0 = no limit)",
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
@@ -832,7 +832,7 @@ func workersCommand() command {
 					return m, errCmd("usage: /workers " + action + " <n>")
 				}
 				n := atoiSafe(rest[0])
-				if n <= 0 {
+				if n < 0 {
 					return m, errCmd("worker limit must be a positive number")
 				}
 				if action == "project" {
@@ -845,12 +845,18 @@ func workersCommand() command {
 						if err := c.SetProjectWorkerLimit(ctx, pid, n); err != nil {
 							return "", err
 						}
+						if n == 0 {
+							return fmt.Sprintf("worker limit for %s removed (unlimited)", name), nil
+						}
 						return fmt.Sprintf("worker limit for %s set to %d", name, n), nil
 					})
 				}
 				return m, run("Workers", cmdTimeout, func(ctx context.Context) (string, error) {
 					if err := c.SetGlobalWorkerLimit(ctx, n); err != nil {
 						return "", err
+					}
+					if n == 0 {
+						return "global worker limit set to unlimited", nil
 					}
 					return fmt.Sprintf("global worker limit set to %d", n), nil
 				})
