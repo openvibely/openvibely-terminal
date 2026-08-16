@@ -241,6 +241,46 @@ func TestCLIRunsAutomationsPause(t *testing.T) {
 	}
 }
 
+// One-shot CLI mode works headlessly for the new channels actions,
+// exiting cleanly on success and nonzero on a backend failure.
+func TestCLIRunsChannelsTest(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "test", "email"}); err != nil {
+		t.Fatalf("channels test failed: %v", err)
+	}
+	if !rec.saw("POST", "/channels/email/test") {
+		t.Fatalf("no channel test call, calls:\n%s", rec.all())
+	}
+}
+
+func TestCLIChannelsTestFailsOnBackendError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.URL.Path == "/channels/telegram/test":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "test", "telegram"}); err == nil {
+		t.Fatal("expected a nonzero exit on backend failure")
+	}
+}
+
 func TestCLIAutomationsPauseFailsOnBackendError(t *testing.T) {
 	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p1">
 		<div class="card-body relative">

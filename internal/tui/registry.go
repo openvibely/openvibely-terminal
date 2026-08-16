@@ -894,10 +894,53 @@ func workersCommand() command {
 // --- channels / personality ---
 
 func channelsCommand() command {
-	return page("channels", "integrations: Telegram, Slack, Discord, GitHub, email, webhooks",
-		func(c *client.Client, ctx context.Context, pid string) (string, error) {
-			return c.GetChannels(ctx, pid)
-		}, "integrations")
+	actions := []string{"list", "test", "remove"}
+	return command{
+		name:    "channels",
+		aliases: []string{"integrations"},
+		args:    "[action] [channel]",
+		actions: actions,
+		desc:    "integrations: Telegram, Slack, Discord, GitHub, email, webhooks",
+		usage: []string{
+			"channels                                   list configured integrations",
+			"channels test <channel>                    send a test message (telegram, slack, discord, email)",
+			"channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)",
+			"Note: GitHub and Slack OAuth connect/callback require a browser (known parity gap).",
+		},
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			action, rest := splitAction(actions, args)
+			c, pid := m.client, m.selectedID
+			ref := strings.Join(rest, " ")
+
+			switch action {
+			case "", "list":
+				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+					return c.GetChannels(ctx, pid)
+				})
+			default:
+				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+					if ref == "" {
+						return "", fmt.Errorf("usage: /channels %s <channel>", action)
+					}
+					ch, err := matchRef(client.KnownChannels, ref,
+						func(ch client.Channel) string { return ch.Type },
+						func(ch client.Channel) string { return ch.Name })
+					if err != nil {
+						return "", err
+					}
+					if err := c.ChannelAction(ctx, ch.Type, action, pid); err != nil {
+						return "", err
+					}
+					status := action + ": " + ch.Name
+					text, err := c.GetChannels(ctx, pid)
+					if err != nil {
+						return status, nil
+					}
+					return status + "\n\n" + text, nil
+				})
+			}
+		},
+	}
 }
 
 func personalityCommand() command {
