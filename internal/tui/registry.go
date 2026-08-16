@@ -115,7 +115,7 @@ func tasksCommand() command {
 			"tasks run|stop|delete <task>               run, cancel or delete",
 			"tasks move <task> <backlog|active|completed>",
 			"tasks order <task> <position>              reorder within its column",
-			"tasks goal <task> <objective>              set a goal (\"clear\" removes it)",
+			"tasks goal <task> | <objective>            set a goal (\"clear\" removes it)",
 			"tasks reply <task> | <message>             post to the task thread",
 			"tasks activate                             activate the whole backlog",
 			"tasks sweep                                sweep finished tasks",
@@ -289,12 +289,12 @@ func tasksCommand() command {
 				})
 
 			case "goal":
-				if len(rest) < 2 {
-					return m, errCmd("usage: /tasks goal <task> <objective>  (objective \"clear\" removes it)")
+				if len(rest) < 1 {
+					return m, errCmd("usage: /tasks goal <task> | <objective>  (objective \"clear\" removes it)")
 				}
 				target, objective := splitPipe(strings.Join(rest, " "))
 				if objective == "" {
-					target, objective = rest[0], strings.Join(rest[1:], " ")
+					return m, errCmd("usage: /tasks goal <task> | <objective>  (objective \"clear\" removes it)\nhint: separate the task reference and objective with a | character")
 				}
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)
@@ -314,12 +314,12 @@ func tasksCommand() command {
 				})
 
 			case "reply":
-				if len(rest) < 2 {
+				if len(rest) < 1 {
 					return m, errCmd("usage: /tasks reply <task> | <message>")
 				}
 				target, message := splitPipe(strings.Join(rest, " "))
 				if message == "" {
-					target, message = rest[0], strings.Join(rest[1:], " ")
+					return m, errCmd("usage: /tasks reply <task> | <message>\nhint: separate the task reference and message with a | character")
 				}
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)

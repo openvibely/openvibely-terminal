@@ -421,6 +421,55 @@ func TestTaskEditAndOrder(t *testing.T) {
 	})
 }
 
+// TestTasksGoalAndReplyRequirePipe verifies that omitting the | separator in
+// /tasks goal and /tasks reply produces a clear error rather than silently
+// mis-splitting a multi-word task title.
+func TestTasksGoalAndReplyRequirePipe(t *testing.T) {
+	t.Run("goal_multiword_no_pipe_is_rejected", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks goal Refactor the API all tests pass")
+		// Must not have called the goal endpoint.
+		if rec.saw("POST", "/tasks/t-1/goal") {
+			t.Errorf("expected no goal POST on pipe-less input, but got one")
+		}
+		// Must surface a helpful error message.
+		out := transcript(m)
+		if !strings.Contains(out, "|") {
+			t.Errorf("expected error mentioning '|' separator, got:\n%s", out)
+		}
+	})
+
+	t.Run("reply_multiword_no_pipe_is_rejected", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks reply Refactor the API also update the docs")
+		// Must not have called the thread endpoint.
+		if rec.saw("POST", "/tasks/t-1/thread") {
+			t.Errorf("expected no thread POST on pipe-less input, but got one")
+		}
+		// Must surface a helpful error message.
+		out := transcript(m)
+		if !strings.Contains(out, "|") {
+			t.Errorf("expected error mentioning '|' separator, got:\n%s", out)
+		}
+	})
+
+	t.Run("goal_with_pipe_still_works", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		runLine(t, m, "/tasks goal Refactor the API | all tests pass")
+		if !rec.saw("POST", "/tasks/t-1/goal") {
+			t.Errorf("expected goal POST with pipe syntax, calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("reply_with_pipe_still_works", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		runLine(t, m, "/tasks reply Refactor the API | also update the docs")
+		if !rec.saw("POST", "/tasks/t-1/thread") {
+			t.Errorf("expected thread POST with pipe syntax, calls:\n%s", rec.all())
+		}
+	})
+}
+
 func TestWorkersProjectLimit(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	runLine(t, m, "/workers project 3")
