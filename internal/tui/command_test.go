@@ -312,7 +312,9 @@ func TestHelpListsEveryRegisteredCommand(t *testing.T) {
 }
 
 // Listing action names isn't enough to use a command, so every command with
-// actions must also spell out their concrete syntax.
+// actions must also spell out their concrete syntax. VISION.md "Friendly By
+// Default" further requires examples, not only syntax — so every command with
+// a usage block must have at least one concrete worked example.
 func TestCommandsWithActionsDocumentTheirSyntax(t *testing.T) {
 	for _, c := range commands {
 		if len(c.actions) == 0 {
@@ -328,6 +330,40 @@ func TestCommandsWithActionsDocumentTheirSyntax(t *testing.T) {
 				t.Errorf("%s%s help omits the %q action:\n%s", cmdPrefix, c.name, a, detail)
 			}
 		}
+		if len(c.examples) == 0 {
+			t.Errorf("%s%s has usage lines but no examples (VISION.md: help must include examples)", cmdPrefix, c.name)
+		}
+	}
+}
+
+// renderCommandHelp must include an "examples:" block for commands that have
+// examples populated, and must not render an empty block for those that don't.
+func TestRenderCommandHelpExamplesBlock(t *testing.T) {
+	withExamples := command{
+		name:     "demo",
+		desc:     "a demo command",
+		usage:    []string{"demo do-it"},
+		examples: []string{"demo do-it foo", "demo do-it bar"},
+	}
+	got := renderCommandHelp(withExamples)
+	if !strings.Contains(got, "examples:") {
+		t.Error("renderCommandHelp: expected 'examples:' header for command with examples")
+	}
+	if !strings.Contains(got, "demo do-it foo") {
+		t.Error("renderCommandHelp: expected first example in output")
+	}
+	if !strings.Contains(got, "demo do-it bar") {
+		t.Error("renderCommandHelp: expected second example in output")
+	}
+
+	withoutExamples := command{
+		name:  "demo2",
+		desc:  "another demo command",
+		usage: []string{"demo2 do-it"},
+	}
+	got2 := renderCommandHelp(withoutExamples)
+	if strings.Contains(got2, "examples:") {
+		t.Error("renderCommandHelp: must not render 'examples:' block when command has no examples")
 	}
 }
 

@@ -29,7 +29,11 @@ type command struct {
 	// "move <task> <backlog|active|completed>". Listing the action names alone
 	// isn't enough to actually use a command, so /help <command> prints these.
 	usage []string
-	desc  string
+	// examples holds concrete runnable invocations shown after the usage block
+	// in /help <command> output, satisfying VISION.md "Help should include
+	// examples, not only syntax."
+	examples []string
+	desc     string
 	run   func(m Model, args []string) (Model, tea.Cmd)
 }
 

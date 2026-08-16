@@ -142,6 +142,12 @@ func tasksCommand() command {
 			"tasks sweep                                sweep finished tasks",
 			"tasks clear <backlog|completed>            clear a column",
 		},
+		examples: []string{
+			`tasks new Fix login bug | Investigate and resolve the OAuth redirect failure`,
+			`tasks move "Fix login bug" active`,
+			`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
+			`tasks reply "Fix login bug" | PR is up — please review`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
 			if !ok {
@@ -450,6 +456,11 @@ func scheduleCommand() command {
 			"schedule delete <id>                       remove a schedule",
 			"schedule toggle <id>                       enable/disable a schedule",
 		},
+		examples: []string{
+			`schedule add "Daily standup report" 2026-01-20T09:00 daily`,
+			`schedule add "Weekly metrics" 2026-01-22T08:00 weekly`,
+			`schedule toggle a1b2c3`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
 			if !ok {
@@ -569,6 +580,11 @@ func alertsCommand() command {
 			"alerts read-all                            mark every alert read",
 			"alerts clear                               delete every alert",
 		},
+		examples: []string{
+			`alerts approve "Add retry logic to HTTP client"`,
+			`alerts reject "Refactor database layer"`,
+			`alerts read-all`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -657,6 +673,11 @@ func skillsCommand() command {
 			"skills delete <skill>                      remove a skill",
 			"skills enable|disable <skill>              toggle availability",
 			"skills always <skill>                      always load this skill",
+		},
+		examples: []string{
+			`skills add retry-logic | Wrap HTTP calls in exponential backoff`,
+			`skills edit retry-logic | Always retry on 429 and 503 with jitter up to 60s`,
+			`skills always retry-logic`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
@@ -775,6 +796,11 @@ func agentsCommand() command {
 			"agents delete <agent>                      remove an agent definition",
 			"agents metrics                             per-agent workflow metrics",
 		},
+		examples: []string{
+			`agents generate A code reviewer that checks Go PRs for style and correctness`,
+			`agents delete reviewer`,
+			`agents metrics`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -856,6 +882,11 @@ func modelsCommand() command {
 			"models delete <model>                      remove a model",
 			"models capacity                            per-model capacity and usage",
 		},
+		examples: []string{
+			`models default gpt-4o`,
+			`models capacity`,
+			`models delete claude-haiku`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -928,6 +959,11 @@ func workersCommand() command {
 			"workers limit <n>                          set the global worker cap (0 = unlimited)",
 			"workers project <n>                        set this project's worker cap (0 = no limit)",
 		},
+		examples: []string{
+			`workers limit 4`,
+			`workers project 2`,
+			`workers limit 0`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -993,6 +1029,11 @@ func channelsCommand() command {
 			"channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)",
 			"Note: GitHub and Slack OAuth connect/callback require a browser (known parity gap).",
 		},
+		examples: []string{
+			`channels test telegram`,
+			`channels test email`,
+			`channels remove discord`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -1040,6 +1081,10 @@ func personalityCommand() command {
 			"personality                                show the current personality",
 			"personality set <preset>                   switch personality preset",
 		},
+		examples: []string{
+			`personality`,
+			`personality set concise`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -1075,6 +1120,10 @@ func pulseCommand() command {
 			"pulse                                      show the upcoming-work briefing",
 			"pulse summary                              regenerate the briefing",
 		},
+		examples: []string{
+			`pulse`,
+			`pulse summary`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -1097,6 +1146,10 @@ func reflectionCommand() command {
 		usage: []string{
 			"reflection                                 show the completed-work debrief",
 			"reflection summary                         regenerate the debrief",
+		},
+		examples: []string{
+			`reflection`,
+			`reflection summary`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, _ := splitAction(actions, args)
@@ -1134,6 +1187,10 @@ func insightsCommand() command {
 			"insights                                   show current insights",
 			"insights analyze                           run a fresh analysis pass",
 		},
+		examples: []string{
+			`insights`,
+			`insights analyze`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -1160,6 +1217,11 @@ func automationsCommand() command {
 			"automations pause <automation>              pause an active automation",
 			"automations resume <automation>             resume a paused automation",
 			"automations delete <automation>             remove an automation",
+		},
+		examples: []string{
+			`automations run-now "Nightly sweep"`,
+			`automations pause "Nightly sweep"`,
+			`automations resume "Nightly sweep"`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
@@ -1227,6 +1289,11 @@ func analyticsCommand() command {
 			"analytics failures                         failed-task patterns",
 			"analytics skills                           skill usage and follow-through",
 			"analytics trends                           usage trends over time",
+		},
+		examples: []string{
+			`analytics`,
+			`analytics usage`,
+			`analytics failures`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, _ := splitAction(actions, args)

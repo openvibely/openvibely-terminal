@@ -691,6 +691,12 @@ func renderCommandHelp(c command) string {
 	} else {
 		fmt.Fprintf(&b, "  %s\n", c.label())
 	}
+	if len(c.examples) > 0 {
+		fmt.Fprintf(&b, "\n%s\n", dimStyle.Render("examples:"))
+		for _, ex := range c.examples {
+			fmt.Fprintf(&b, "  %s\n", dimStyle.Render(cmdPrefix+ex))
+		}
+	}
 	if len(c.aliases) > 0 {
 		fmt.Fprintf(&b, "\n  aliases: %s\n", strings.Join(c.aliases, ", "))
 	}
