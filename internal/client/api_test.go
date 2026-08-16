@@ -1,0 +1,149 @@
+package client
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"testing"
+)
+
+func TestGetUsageAnalytics(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/usage" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q", got)
+		}
+		json.NewEncoder(w).Encode(UsageAnalytics{
+			Totals:         UsageTotals{CallCount: 10, TotalTokens: 5000, CostUSD: 0.42, CostAvailable: true},
+			ModelBreakdown: []ModelUsagePoint{{Model: "gpt-x", CallCount: 10, Percent: 100}},
+		})
+	}))
+
+	u, err := c.GetUsageAnalytics(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetUsageAnalytics: %v", err)
+	}
+	if u.Totals.CallCount != 10 || len(u.ModelBreakdown) != 1 {
+		t.Errorf("unexpected usage: %+v", u)
+	}
+}
+
+func TestGetSkillAnalytics(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/skills" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode(SkillAnalytics{
+			TopSkills: []SkillMetric{{SkillHandle: "debug_go_tests", ActivityCount: 7}},
+		})
+	}))
+
+	s, err := c.GetSkillAnalytics(context.Background(), "")
+	if err != nil {
+		t.Fatalf("GetSkillAnalytics: %v", err)
+	}
+	if len(s.TopSkills) != 1 || s.TopSkills[0].SkillHandle != "debug_go_tests" {
+		t.Errorf("unexpected skills: %+v", s)
+	}
+}
+
+func TestGetModelCapacities(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/capacity/models" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode([]ModelCapacity{{ID: "m1", Name: "Sonnet", Running: 1, HasCapacity: true}})
+	}))
+
+	caps, err := c.GetModelCapacities(context.Background())
+	if err != nil {
+		t.Fatalf("GetModelCapacities: %v", err)
+	}
+	if len(caps) != 1 || caps[0].Name != "Sonnet" {
+		t.Errorf("unexpected caps: %+v", caps)
+	}
+}
+
+func TestGetBestAgent(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"agent":   map[string]string{"name": "Claude", "model": "claude-sonnet"},
+			"metrics": AgentMetric{TaskType: "general", AvgQualityScore: 0.9},
+		})
+	}))
+
+	rec, err := c.GetBestAgent(context.Background(), "general")
+	if err != nil {
+		t.Fatalf("GetBestAgent: %v", err)
+	}
+	if rec.AgentName() != "Claude" {
+		t.Errorf("AgentName = %q", rec.AgentName())
+	}
+	if rec.Metrics == nil || rec.Metrics.AvgQualityScore != 0.9 {
+		t.Errorf("metrics = %+v", rec.Metrics)
+	}
+}
+
+func TestGetBestAgentNoData(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"message": "No performance data available"})
+	}))
+
+	rec, err := c.GetBestAgent(context.Background(), "")
+	if err != nil {
+		t.Fatalf("GetBestAgent: %v", err)
+	}
+	if rec.Message == "" {
+		t.Error("expected message for no-data response")
+	}
+}
+
+func TestTriggerAutonomousBuild(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/autonomous/trigger" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q", got)
+		}
+		w.Write([]byte("<div>ok</div>")) // backend responds with HTML
+	}))
+
+	if err := c.TriggerAutonomousBuild(context.Background(), "p1"); err != nil {
+		t.Fatalf("TriggerAutonomousBuild: %v", err)
+	}
+}
+
+func TestPostJSONServerError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{"error": "autonomous build service not available"})
+	}))
+
+	err := c.TriggerAutonomousBuild(context.Background(), "p1")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !contains(err.Error(), "autonomous build service not available") {
+		t.Errorf("error = %v", err)
+	}
+}
+
+func TestListTaskLifecycleExecutions(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks/t1/lifecycle-executions" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode([]LifecycleExecution{{ID: "le1", SkillKey: "router", Status: "completed"}})
+	}))
+
+	execs, err := c.ListTaskLifecycleExecutions(context.Background(), "t1")
+	if err != nil {
+		t.Fatalf("ListTaskLifecycleExecutions: %v", err)
+	}
+	if len(execs) != 1 || execs[0].SkillKey != "router" {
+		t.Errorf("unexpected execs: %+v", execs)
+	}
+}

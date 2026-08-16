@@ -1,0 +1,386 @@
+package tui
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/openvibely/openvibely-tui/internal/client"
+)
+
+func TestSplitActionRecognisesKnownActions(t *testing.T) {
+	actions := []string{"list", "run", "delete"}
+
+	action, rest := splitAction(actions, []string{"run", "my", "task"})
+	if action != "run" || strings.Join(rest, " ") != "my task" {
+		t.Errorf("got %q %v", action, rest)
+	}
+
+	// An unknown first word is treated as an argument, so "/tasks some title"
+	// still works as a filter.
+	action, rest = splitAction(actions, []string{"some", "title"})
+	if action != "" || strings.Join(rest, " ") != "some title" {
+		t.Errorf("got %q %v", action, rest)
+	}
+
+	action, rest = splitAction(actions, nil)
+	if action != "" || rest != nil {
+		t.Errorf("empty args should yield nothing, got %q %v", action, rest)
+	}
+}
+
+func TestSplitPipe(t *testing.T) {
+	left, right := splitPipe("my skill | does a thing")
+	if left != "my skill" || right != "does a thing" {
+		t.Errorf("got %q / %q", left, right)
+	}
+	left, right = splitPipe("just a title")
+	if left != "just a title" || right != "" {
+		t.Errorf("got %q / %q", left, right)
+	}
+}
+
+func TestMatchRefByIDPrefixAndName(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "abc123", Title: "Refactor the API"},
+		{ID: "def456", Title: "Write docs"},
+	}
+	id := func(t client.Task) string { return t.ID }
+	name := func(t client.Task) string { return t.Title }
+
+	got, err := matchRef(tasks, "abc", id, name)
+	if err != nil || got.ID != "abc123" {
+		t.Errorf("id prefix: %+v %v", got, err)
+	}
+
+	got, err = matchRef(tasks, "docs", id, name)
+	if err != nil || got.ID != "def456" {
+		t.Errorf("name substring: %+v %v", got, err)
+	}
+
+	if _, err = matchRef(tasks, "missing", id, name); err == nil {
+		t.Error("expected a not-found error")
+	}
+
+	ambiguous := []client.Task{{ID: "1", Title: "deploy api"}, {ID: "2", Title: "deploy web"}}
+	if _, err = matchRef(ambiguous, "deploy", id, name); err == nil ||
+		!strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("expected an ambiguity error, got %v", err)
+	}
+}
+
+// An exact title must win over a longer title that contains it, whatever the
+// listing order.
+func TestMatchRefPrefersExactName(t *testing.T) {
+	id := func(t client.Task) string { return t.ID }
+	name := func(t client.Task) string { return t.Title }
+
+	for _, tasks := range [][]client.Task{
+		{{ID: "1", Title: "deploy api service"}, {ID: "2", Title: "deploy"}},
+		{{ID: "2", Title: "deploy"}, {ID: "1", Title: "deploy api service"}},
+	} {
+		got, err := matchRef(tasks, "deploy", id, name)
+		if err != nil || got.ID != "2" {
+			t.Errorf("matchRef = %+v, %v; want the exactly-titled task", got, err)
+		}
+	}
+}
+
+// A name prefix outranks a mid-string substring match.
+func TestMatchRefPrefersPrefixOverSubstring(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "1", Title: "rewrite the api docs"},
+		{ID: "2", Title: "api gateway"},
+	}
+	got, err := matchRef(tasks, "api",
+		func(t client.Task) string { return t.ID },
+		func(t client.Task) string { return t.Title })
+	if err != nil || got.ID != "2" {
+		t.Errorf("matchRef = %+v, %v; want the prefix match", got, err)
+	}
+}
+
+func TestSuggestFiltersByPrefix(t *testing.T) {
+	if got := suggest("sk"); len(got) != 1 || got[0].name != "skills" {
+		t.Errorf("suggest(sk) = %v", got)
+	}
+	if got := suggest(""); len(got) != len(commands) {
+		t.Errorf("empty prefix should list everything, got %d", len(got))
+	}
+	if got := suggest("zzz"); len(got) != 0 {
+		t.Errorf("no command should match zzz, got %v", got)
+	}
+}
+
+func TestEveryCommandHasDescriptionAndRunner(t *testing.T) {
+	seen := map[string]bool{}
+	for _, c := range commands {
+		if c.desc == "" {
+			t.Errorf("/%s has no description", c.name)
+		}
+		if c.run == nil {
+			t.Errorf("/%s has no runner", c.name)
+		}
+		if seen[c.name] {
+			t.Errorf("/%s is registered twice", c.name)
+		}
+		seen[c.name] = true
+		for _, a := range c.aliases {
+			if seen[a] {
+				t.Errorf("alias %q collides with another command", a)
+			}
+			seen[a] = true
+		}
+	}
+}
+
+func TestRegistryCoversEveryWebUIScreen(t *testing.T) {
+	// Each OpenVibely web-UI screen must be reachable from the chat.
+	for _, screen := range []string{
+		"tasks", "schedule", "alerts", "skills", "agents", "models", "workers",
+		"channels", "personality", "pulse", "reflection", "grades", "insights",
+		"analytics", "automations", "projects",
+	} {
+		if lookupCommand(screen) == nil {
+			t.Errorf("no command for the %s screen", screen)
+		}
+	}
+}
+
+func TestRenderBoardGroupsByColumn(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "t1", Title: "Backlog item", Category: "backlog", Status: "pending"},
+		{ID: "t2", Title: "Running item", Category: "active", Status: "running"},
+		{ID: "t3", Title: "Done item", Category: "completed", Status: "completed"},
+	}
+	out := renderBoard(tasks, "")
+	for _, want := range []string{"Backlog", "Active", "Completed", "Backlog item", "Running item", "Done item"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("board missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderBoardFilters(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "t1", Title: "Refactor API", Category: "backlog"},
+		{ID: "t2", Title: "Write docs", Category: "backlog"},
+	}
+	out := renderBoard(tasks, "docs")
+	if strings.Contains(out, "Refactor API") {
+		t.Errorf("filter should exclude non-matching tasks:\n%s", out)
+	}
+	if !strings.Contains(out, "Write docs") {
+		t.Errorf("filter dropped the match:\n%s", out)
+	}
+}
+
+func TestRenderTaskDetailShowsTabs(t *testing.T) {
+	task := client.Task{ID: "t1", Title: "Refactor", Category: "active"}
+	detail := &client.TaskDetail{
+		Task:     client.Task{Status: "running"},
+		Details:  "the prompt",
+		Thread:   "agent: working",
+		Changes:  "2 files",
+		Schedule: "daily",
+		Chaining: "then deploy",
+		Attach:   "spec.md",
+		Life:     "pre_task ok",
+	}
+	out := renderTaskDetail(task, detail, "")
+	for _, want := range []string{"Thread", "Changes", "Schedules", "Chaining", "Attachments", "Lifecycle"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("detail missing the %s section:\n%s", want, out)
+		}
+	}
+
+	only := renderTaskDetail(task, detail, "thread")
+	if !strings.Contains(only, "agent: working") {
+		t.Errorf("tab view missing its content:\n%s", only)
+	}
+	if strings.Contains(only, "2 files") {
+		t.Errorf("tab view should show one tab only:\n%s", only)
+	}
+}
+
+func TestRenderAlertsAndSkills(t *testing.T) {
+	alerts := renderAlerts([]client.Alert{{ID: "a1", Title: "Build failed"}}, "")
+	if !strings.Contains(alerts, "Build failed") {
+		t.Errorf("alerts render:\n%s", alerts)
+	}
+	if !strings.Contains(renderAlerts(nil, ""), "no alerts") {
+		t.Error("empty alerts should say so")
+	}
+
+	skills := renderSkills([]client.Skill{
+		{Handle: "deploy", Name: "Deploy", Enabled: true, AlwaysUse: true, Scope: "project"},
+	}, "")
+	if !strings.Contains(skills, "deploy") || !strings.Contains(skills, "always") {
+		t.Errorf("skills render:\n%s", skills)
+	}
+}
+
+func TestBarScalesToMax(t *testing.T) {
+	full := bar(10, 10, 10)
+	if strings.Count(full, "█") != 10 {
+		t.Errorf("full bar = %q", full)
+	}
+	half := bar(5, 10, 10)
+	if strings.Count(half, "█") != 5 {
+		t.Errorf("half bar = %q", half)
+	}
+	// A non-zero value always shows at least one block.
+	tiny := bar(1, 1000, 10)
+	if strings.Count(tiny, "█") != 1 {
+		t.Errorf("tiny bar = %q", tiny)
+	}
+	if bar(1, 0, 10) != "" {
+		t.Error("zero max should render nothing")
+	}
+}
+
+func TestHumanIntAndMs(t *testing.T) {
+	cases := map[int64]string{999: "999", 1500: "1.5k", 2_000_000: "2.0M"}
+	for in, want := range cases {
+		if got := humanInt(in); got != want {
+			t.Errorf("humanInt(%d) = %q, want %q", in, got, want)
+		}
+	}
+	msCases := map[float64]string{500: "500ms", 1500: "1.5s", 120000: "2.0m"}
+	for in, want := range msCases {
+		if got := humanMs(in); got != want {
+			t.Errorf("humanMs(%v) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRenderUsageIncludesCostAndBreakdown(t *testing.T) {
+	usage := &client.UsageAnalytics{
+		Totals: client.UsageTotals{
+			CallCount: 10, InputTokens: 1000, OutputTokens: 500,
+			TotalTokens: 1500, CostUSD: 1.25, CostAvailable: true,
+		},
+		ModelBreakdown: []client.ModelUsagePoint{
+			{Model: "claude-sonnet-4", CallCount: 10, TotalTokens: 1500, CostUSD: 1.25, Percent: 100},
+		},
+	}
+	out := renderUsage(usage)
+	for _, want := range []string{"10 calls", "$1.25", "claude-sonnet-4", "█"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage render missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderRatesDrawsGauge(t *testing.T) {
+	out := renderRates([]client.SuccessFailureRate{
+		{Period: "2026-08", SuccessCount: 8, FailureCount: 2, TotalCount: 10, SuccessRate: 80},
+	})
+	if !strings.Contains(out, "2026-08") || !strings.Contains(out, "80.0%") {
+		t.Errorf("rates render:\n%s", out)
+	}
+	if !strings.Contains(out, "8 ok / 2 fail") {
+		t.Errorf("counts missing:\n%s", out)
+	}
+}
+
+func TestRenderStatusReportsConnection(t *testing.T) {
+	m := newTestModel(t)
+	m.connected = true
+	m.capacity = &client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 1, QueueSize: 2, AvailableSlots: 3}
+	m.auth = &client.AuthStatus{Authenticated: true, Username: "dubee"}
+
+	out := m.renderStatus()
+	for _, want := range []string{"connected", "dubee", "1 running / 4 max"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// Help must document every command, otherwise features are unreachable in
+// practice: a command that isn't listed is a command nobody finds.
+func TestHelpListsEveryRegisteredCommand(t *testing.T) {
+	help := renderHelp()
+	for _, c := range commands {
+		if !strings.Contains(help, cmdPrefix+c.name) {
+			t.Errorf("%s%s is missing from /help", cmdPrefix, c.name)
+		}
+		if !strings.Contains(help, c.desc) {
+			t.Errorf("%s%s description is missing from /help", cmdPrefix, c.name)
+		}
+	}
+}
+
+// Listing action names isn't enough to use a command, so every command with
+// actions must also spell out their concrete syntax.
+func TestCommandsWithActionsDocumentTheirSyntax(t *testing.T) {
+	for _, c := range commands {
+		if len(c.actions) == 0 {
+			continue
+		}
+		if len(c.usage) == 0 {
+			t.Errorf("%s%s lists actions but has no usage lines", cmdPrefix, c.name)
+			continue
+		}
+		detail := renderCommandHelp(c)
+		for _, a := range c.actions {
+			if !strings.Contains(detail, a) {
+				t.Errorf("%s%s help omits the %q action:\n%s", cmdPrefix, c.name, a, detail)
+			}
+		}
+	}
+}
+
+// Every action the help advertises must actually be accepted, and every action
+// the implementation handles must be advertised.
+func TestAdvertisedActionsMatchImplementation(t *testing.T) {
+	// Actions implemented but deliberately not advertised as separate entries.
+	extra := map[string][]string{
+		// "/tasks clear" takes a column argument rather than being an action.
+		"tasks": {"backlog", "completed"},
+	}
+	for _, c := range commands {
+		for _, a := range c.actions {
+			action, rest := splitAction(c.actions, []string{a, "x"})
+			if action != a {
+				t.Errorf("%s%s does not accept its advertised action %q", cmdPrefix, c.name, a)
+			}
+			if len(rest) != 1 || rest[0] != "x" {
+				t.Errorf("%s%s %s mis-parsed its arguments: %v", cmdPrefix, c.name, a, rest)
+			}
+		}
+		_ = extra[c.name]
+	}
+}
+
+// Help detail must be usable in both modes: slashes in the chat window,
+// bare subcommands on the command line.
+func TestHelpPrefixFollowsMode(t *testing.T) {
+	defer func() { cmdPrefix = "/" }()
+
+	cmdPrefix = "/"
+	if got := lookupCommand("tasks").summary(); !strings.HasPrefix(got, "/tasks") {
+		t.Errorf("TUI summary = %q, want a leading slash", got)
+	}
+	if h := renderHelp(); !strings.Contains(h, "/tasks") {
+		t.Error("TUI help lost its slashes")
+	}
+
+	cmdPrefix = ""
+	if got := lookupCommand("tasks").summary(); strings.HasPrefix(got, "/") {
+		t.Errorf("CLI summary = %q, want no leading slash", got)
+	}
+	if s := CommandSummary(); !strings.Contains(s, "tasks") || strings.Contains(s, "/tasks") {
+		t.Errorf("CLI command summary should list bare names:\n%s", s)
+	}
+}
+
+// The -h/--help output must list the commands, not just the flags.
+func TestCommandSummaryListsEveryCommand(t *testing.T) {
+	s := CommandSummary()
+	for _, c := range commands {
+		if !strings.Contains(s, c.name) {
+			t.Errorf("%s missing from the CLI command summary", c.name)
+		}
+	}
+}
