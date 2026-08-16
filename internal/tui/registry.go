@@ -1050,16 +1050,7 @@ func automationsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					switch action {
-					case "run-now":
-						err = c.RunAutomationNow(ctx, a.ID, pid)
-					case "pause":
-						err = c.PauseAutomation(ctx, a.ID, pid)
-					case "resume":
-						err = c.ResumeAutomation(ctx, a.ID, pid)
-					case "delete":
-						err = c.DeleteAutomation(ctx, a.ID, pid)
-					}
+					err = c.AutomationAction(ctx, a.ID, action, pid)
 					if err != nil {
 						return "", err
 					}

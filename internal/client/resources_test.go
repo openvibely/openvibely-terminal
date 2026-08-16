@@ -240,13 +240,13 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "POST", path: "/upcoming/summary"},
 		{name: "insights analyze", fn: func() error { return c.RunInsightsAnalysis(ctx, "p1") },
 			method: "POST", path: "/insights/analyze"},
-		{name: "automation run-now", fn: func() error { return c.RunAutomationNow(ctx, "au1", "p1") },
+		{name: "automation run-now", fn: func() error { return c.AutomationAction(ctx, "au1", "run-now", "p1") },
 			method: "POST", path: "/automations/au1/run-now"},
-		{name: "automation pause", fn: func() error { return c.PauseAutomation(ctx, "au1", "p1") },
+		{name: "automation pause", fn: func() error { return c.AutomationAction(ctx, "au1", "pause", "p1") },
 			method: "POST", path: "/automations/au1/pause"},
-		{name: "automation resume", fn: func() error { return c.ResumeAutomation(ctx, "au1", "p1") },
+		{name: "automation resume", fn: func() error { return c.AutomationAction(ctx, "au1", "resume", "p1") },
 			method: "POST", path: "/automations/au1/resume"},
-		{name: "automation delete", fn: func() error { return c.DeleteAutomation(ctx, "au1", "p1") },
+		{name: "automation delete", fn: func() error { return c.AutomationAction(ctx, "au1", "delete", "p1") },
 			method: "POST", path: "/automations/au1/delete"},
 	}
 

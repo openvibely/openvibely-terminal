@@ -439,28 +439,10 @@ func (c *Client) ListAutomations(ctx context.Context, projectID string) ([]Autom
 	return out, nil
 }
 
-// RunAutomationNow triggers an immediate run of one automation.
-func (c *Client) RunAutomationNow(ctx context.Context, automationID, projectID string) error {
+// AutomationAction runs run-now/pause/resume/delete on one automation.
+func (c *Client) AutomationAction(ctx context.Context, automationID, action, projectID string) error {
 	return c.doForm(ctx, http.MethodPost,
-		"/automations/"+url.PathEscape(automationID)+"/run-now"+query("project_id", projectID), nil)
-}
-
-// PauseAutomation pauses one automation.
-func (c *Client) PauseAutomation(ctx context.Context, automationID, projectID string) error {
-	return c.doForm(ctx, http.MethodPost,
-		"/automations/"+url.PathEscape(automationID)+"/pause"+query("project_id", projectID), nil)
-}
-
-// ResumeAutomation resumes one paused automation.
-func (c *Client) ResumeAutomation(ctx context.Context, automationID, projectID string) error {
-	return c.doForm(ctx, http.MethodPost,
-		"/automations/"+url.PathEscape(automationID)+"/resume"+query("project_id", projectID), nil)
-}
-
-// DeleteAutomation removes one automation.
-func (c *Client) DeleteAutomation(ctx context.Context, automationID, projectID string) error {
-	return c.doForm(ctx, http.MethodPost,
-		"/automations/"+url.PathEscape(automationID)+"/delete"+query("project_id", projectID), nil)
+		"/automations/"+url.PathEscape(automationID)+"/"+action+query("project_id", projectID), nil)
 }
 
 // pageText fetches a page and returns the text of elementID (or the whole
