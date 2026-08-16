@@ -47,6 +47,13 @@ type entry struct {
 	text string
 }
 
+// pendingCmd holds a destructive command that is waiting for explicit user
+// confirmation before it is allowed to execute.
+type pendingCmd struct {
+	message string  // confirmation prompt shown in the status area
+	cmd     tea.Cmd // executed when the user types "yes" and presses Enter
+}
+
 // Model is the root Bubble Tea model: one chat transcript plus one input.
 type Model struct {
 	client *client.Client
@@ -89,6 +96,10 @@ type Model struct {
 	// in-flight chat
 	pendingMsgID string
 	busy         bool
+
+	// pendingConfirmation holds a destructive command awaiting explicit
+	// confirmation ("yes" + Enter executes it; Esc or anything else cancels).
+	pendingConfirmation *pendingCmd
 
 	// live events
 	showEvents    bool // stream events into the transcript
@@ -433,6 +444,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc":
+		if m.pendingConfirmation != nil {
+			m.pendingConfirmation = nil
+			m.input.SetValue("")
+			m.append(entry{role: "system", text: "cancelled"})
+			return m, nil
+		}
 		if len(m.menu) > 0 {
 			m.menu = nil
 			return m, nil
@@ -441,6 +458,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
+		if m.pendingConfirmation != nil {
+			text := strings.TrimSpace(m.input.Value())
+			pending := m.pendingConfirmation
+			m.pendingConfirmation = nil
+			m.input.SetValue("")
+			m.menu = nil
+			if text == "yes" {
+				m.busy = true
+				return m, pending.cmd
+			}
+			m.append(entry{role: "system", text: "cancelled"})
+			return m, nil
+		}
 		return m.submit()
 
 	case "tab":

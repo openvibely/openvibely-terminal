@@ -46,7 +46,7 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "", []string{"help"}); err != nil {
+	if err := RunCLI(c, &out, "", []string{"help"}, false); err != nil {
 		t.Fatalf("help failed: %v", err)
 	}
 	// CLI help lists bare subcommands, since that is how they are invoked
@@ -76,7 +76,7 @@ func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"tasks"}); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"tasks"}, false); err != nil {
 		t.Fatalf("tasks failed: %v", err)
 	}
 	if !rec.saw("GET", "/tasks") {
@@ -95,7 +95,7 @@ func TestCLISelectsRequestedProject(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "other", []string{"tasks"}); err != nil {
+	if err := RunCLI(c, &out, "other", []string{"tasks"}, false); err != nil {
 		t.Fatalf("tasks failed: %v", err)
 	}
 	if !rec.sawQuery("project_id=p2") {
@@ -108,7 +108,7 @@ func TestCLIUnknownProjectFails(t *testing.T) {
 	c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects})
 
 	var out bytes.Buffer
-	err := RunCLI(c, &out, "nope", []string{"tasks"})
+	err := RunCLI(c, &out, "nope", []string{"tasks"}, false)
 	if err == nil {
 		t.Fatal("expected an error for an unknown project")
 	}
@@ -121,7 +121,7 @@ func TestCLIUnknownCommandFails(t *testing.T) {
 	c, _ := cliServer(t, nil)
 
 	var out bytes.Buffer
-	err := RunCLI(c, &out, "", []string{"frobnicate"})
+	err := RunCLI(c, &out, "", []string{"frobnicate"}, false)
 	if err == nil || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("err = %v, want unknown command", err)
 	}
@@ -129,7 +129,7 @@ func TestCLIUnknownCommandFails(t *testing.T) {
 
 func TestCLINoArgsFails(t *testing.T) {
 	c, _ := cliServer(t, nil)
-	if err := RunCLI(c, &bytes.Buffer{}, "", nil); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "", nil, false); err == nil {
 		t.Fatal("expected an error with no command")
 	}
 }
@@ -138,7 +138,7 @@ func TestCLINoArgsFails(t *testing.T) {
 func TestCLIAcceptsLeadingSlash(t *testing.T) {
 	c, _ := client.New("http://127.0.0.1:1")
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "", []string{"/help"}); err != nil {
+	if err := RunCLI(c, &out, "", []string{"/help"}, false); err != nil {
 		t.Fatalf("/help failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "tasks") {
@@ -161,7 +161,7 @@ func TestCLIReportsBackendErrors(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := client.New(srv.URL)
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks"}); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks"}, false); err == nil {
 		t.Fatal("expected a backend error")
 	}
 }
@@ -188,7 +188,7 @@ func TestCLIChatSendsAndPrintsReply(t *testing.T) {
 
 	c, _ := client.New(srv.URL)
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"chat", "ship the docs"}); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"chat", "ship the docs"}, false); err != nil {
 		t.Fatalf("chat failed: %v", err)
 	}
 	if !rec.saw("POST", "/api/chat/message") {
@@ -210,7 +210,7 @@ func TestCLIRunsTaskMutation(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"tasks", "run", "Refactor"}); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "run", "Refactor"}, false); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
 	if !rec.saw("POST", "/tasks/t-1/run") {
@@ -233,7 +233,7 @@ func TestCLIRunsAutomationsPause(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"automations", "pause", "Native"}); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"automations", "pause", "Native"}, false); err != nil {
 		t.Fatalf("pause failed: %v", err)
 	}
 	if !rec.saw("POST", "/automations/au-1/pause") {
@@ -249,7 +249,7 @@ func TestCLIRunsChannelsTest(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"channels", "test", "email"}); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"channels", "test", "email"}, false); err != nil {
 		t.Fatalf("channels test failed: %v", err)
 	}
 	if !rec.saw("POST", "/channels/email/test") {
@@ -276,7 +276,7 @@ func TestCLIChannelsTestFailsOnBackendError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "test", "telegram"}); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "test", "telegram"}, false); err == nil {
 		t.Fatal("expected a nonzero exit on backend failure")
 	}
 }
@@ -309,7 +309,130 @@ func TestCLIAutomationsPauseFailsOnBackendError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "pause", "Native"}); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "pause", "Native"}, false); err == nil {
 		t.Fatal("expected a nonzero exit on backend failure")
 	}
+}
+
+// TestCLIDestructiveCommandsRequireForce verifies the --force gate on every
+// destructive one-shot CLI command: exit nonzero without the flag, exit zero
+// with it, and only call the backend when --force is present.
+func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
+	const taskBoard = `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+
+	t.Run("tasks_delete/without_force_exits_nonzero", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/tasks":        taskBoard,
+		})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "delete", "Refactor"}, false)
+		if err == nil {
+			t.Fatal("expected nonzero exit without --force")
+		}
+		if !strings.Contains(err.Error(), "--force") {
+			t.Errorf("error should mention --force, got: %v", err)
+		}
+		if rec.saw("DELETE", "/tasks/t-1") {
+			t.Error("must not call backend without --force")
+		}
+	})
+
+	t.Run("tasks_delete/with_force_calls_backend", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/tasks":        taskBoard,
+		})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "delete", "Refactor"}, true); err != nil {
+			t.Fatalf("expected zero exit with --force: %v", err)
+		}
+		if !rec.saw("DELETE", "/tasks/t-1") {
+			t.Errorf("expected backend call with --force:\n%s", rec.all())
+		}
+	})
+
+	t.Run("tasks_clear/without_force_exits_nonzero", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "clear", "completed"}, false)
+		if err == nil {
+			t.Fatal("expected nonzero exit without --force")
+		}
+		if !strings.Contains(err.Error(), "--force") {
+			t.Errorf("error should mention --force, got: %v", err)
+		}
+		if rec.saw("DELETE", "/tasks/completed") {
+			t.Error("must not call backend without --force")
+		}
+	})
+
+	t.Run("tasks_clear/with_force_calls_backend", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "clear", "completed"}, true); err != nil {
+			t.Fatalf("expected zero exit with --force: %v", err)
+		}
+		if !rec.saw("DELETE", "/tasks/completed") {
+			t.Errorf("expected backend call with --force:\n%s", rec.all())
+		}
+	})
+
+	t.Run("alerts_clear/without_force_exits_nonzero", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "clear"}, false)
+		if err == nil {
+			t.Fatal("expected nonzero exit without --force")
+		}
+		if !strings.Contains(err.Error(), "--force") {
+			t.Errorf("error should mention --force, got: %v", err)
+		}
+		if rec.saw("DELETE", "/alerts") {
+			t.Error("must not call backend without --force")
+		}
+	})
+
+	t.Run("alerts_clear/with_force_calls_backend", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "clear"}, true); err != nil {
+			t.Fatalf("expected zero exit with --force: %v", err)
+		}
+		if !rec.saw("DELETE", "/alerts") {
+			t.Errorf("expected backend call with --force:\n%s", rec.all())
+		}
+	})
+
+	t.Run("agents_delete/without_force_exits_nonzero", func(t *testing.T) {
+		const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer"
+			data-agent-name="Reviewer" data-agent-description="reviews code"
+			data-agent-model="claude" data-agent-scope="project"></div>`
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/agents":       agentsHTML,
+		})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", "Reviewer"}, false)
+		if err == nil {
+			t.Fatal("expected nonzero exit without --force")
+		}
+		if !strings.Contains(err.Error(), "--force") {
+			t.Errorf("error should mention --force, got: %v", err)
+		}
+		if rec.saw("DELETE", "/agents/ag-1") {
+			t.Error("must not call backend without --force")
+		}
+	})
+
+	t.Run("agents_delete/with_force_calls_backend", func(t *testing.T) {
+		const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer"
+			data-agent-name="Reviewer" data-agent-description="reviews code"
+			data-agent-model="claude" data-agent-scope="project"></div>`
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/agents":       agentsHTML,
+		})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", "Reviewer"}, true); err != nil {
+			t.Fatalf("expected zero exit with --force: %v", err)
+		}
+		if !rec.saw("DELETE", "/agents/ag-1") {
+			t.Errorf("expected backend call with --force:\n%s", rec.all())
+		}
+	})
 }

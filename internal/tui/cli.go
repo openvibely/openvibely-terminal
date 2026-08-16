@@ -30,12 +30,30 @@ import (
 // cliDeadline bounds a headless command, including chat polling.
 const cliDeadline = 10 * time.Minute
 
+// cliMode is true while RunCLI is executing. It is used by registry.go to
+// apply the --force gate rather than a TUI confirmation prompt.
+var cliMode bool
+
+// forceMode is true when the CLI --force flag was provided. Destructive
+// commands execute without a confirmation prompt only when this is set.
+var forceMode bool
+
 // RunCLI executes one command without starting the interactive UI and writes
 // its output to out. It returns an error when the command reported one.
-func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string) error {
+// force corresponds to the --force CLI flag: when true destructive commands
+// skip their guard and execute immediately.
+func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, force bool) error {
 	if len(args) == 0 {
 		return errors.New("no command given")
 	}
+	// Activate CLI mode so destructive commands apply --force gating instead
+	// of a TUI confirmation prompt.
+	cliMode = true
+	forceMode = force
+	defer func() {
+		cliMode = false
+		forceMode = false
+	}()
 	// In CLI mode commands are shell subcommands, so help should print them
 	// without the chat window's leading slash.
 	cmdPrefix = ""

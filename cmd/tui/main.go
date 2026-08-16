@@ -49,6 +49,8 @@ func run() error {
 	username := flag.String("user", os.Getenv("OPENVIBELY_AUTH_USERNAME"), "username (only needed when server auth is enabled)")
 	password := flag.String("pass", os.Getenv("OPENVIBELY_AUTH_PASSWORD"), "password (only needed when server auth is enabled)")
 	project := flag.String("project", os.Getenv("OPENVIBELY_PROJECT"), "project to select: name, ID or unique prefix")
+	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear)")
+	flag.BoolVar(force, "f", false, "shorthand for -force")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -69,7 +71,7 @@ func run() error {
 
 	// Arguments after the flags mean "run this one command and exit".
 	if args := flag.Args(); len(args) > 0 {
-		return tui.RunCLI(c, os.Stdout, *project, args)
+		return tui.RunCLI(c, os.Stdout, *project, args, *force)
 	}
 
 	return runTUI(c, *project)

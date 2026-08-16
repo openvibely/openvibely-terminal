@@ -111,6 +111,15 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 	return m, rec
 }
 
+// confirmDestructive simulates the two-step TUI confirmation flow for
+// destructive commands: it types the command (which parks a pendingConfirmation
+// instead of executing immediately) and then types "yes" to confirm execution.
+func confirmDestructive(t *testing.T, m Model, line string) Model {
+	t.Helper()
+	m = runLine(t, m, line) // step 1: sets pendingConfirmation
+	return runLine(t, m, "yes") // step 2: confirms and executes
+}
+
 // runLine types a command and synchronously executes the command it returns,
 // feeding the resulting message back into the model.
 func runLine(t *testing.T, m Model, line string) Model {
@@ -185,7 +194,7 @@ func TestTasksRunResolvesTaskByTitle(t *testing.T) {
 func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
-		runLine(t, m, "/tasks delete t-1")
+		confirmDestructive(t, m, "/tasks delete t-1")
 		if !rec.saw("DELETE", "/tasks/t-1") {
 			t.Errorf("calls:\n%s", rec.all())
 		}
@@ -249,7 +258,8 @@ func TestAlertsCommandChainsDelete(t *testing.T) {
 		t.Errorf("alerts missing:\n%s", transcript(m))
 	}
 
-	runLine(t, m, "/alerts delete a-1")
+	m = runLine(t, m, "/alerts delete a-1") // sets pendingConfirmation
+	runLine(t, m, "yes")                    // confirms and executes
 	if !rec.saw("DELETE", "/alerts/a-1") {
 		t.Errorf("expected a delete call:\n%s", rec.all())
 	}
@@ -277,7 +287,7 @@ func TestSkillsCommandAddAndToggle(t *testing.T) {
 
 	t.Run("delete", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
-		runLine(t, m, "/skills delete deploy")
+		confirmDestructive(t, m, "/skills delete deploy")
 		if !rec.saw("DELETE", "/skills/deploy") {
 			t.Errorf("calls:\n%s", rec.all())
 		}
@@ -603,7 +613,7 @@ func TestModelsDelete(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
 	m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
-	runLine(t, m, "/models delete Sonnet")
+	confirmDestructive(t, m, "/models delete Sonnet")
 	if !rec.saw("DELETE", "/models/m-1") {
 		t.Errorf("calls:\n%s", rec.all())
 	}
@@ -673,7 +683,7 @@ func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 
 	t.Run("unique substring match", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
-		m = runLine(t, m, "/automations delete GitHub")
+		confirmDestructive(t, m, "/automations delete GitHub")
 		if !rec.saw("POST", "/automations/au-2/delete") {
 			t.Errorf("calls:\n%s", rec.all())
 		}
@@ -697,7 +707,13 @@ func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 
 	t.Run("unknown reference rejected", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+		// Step 1: destructive command parks a pendingConfirmation; no backend call yet.
 		m = runLine(t, m, "/automations delete nope")
+		if rec.saw("POST", "/automations/au-1/delete") || rec.saw("POST", "/automations/au-2/delete") {
+			t.Errorf("no backend call must occur before confirmation:\n%s", rec.all())
+		}
+		// Step 2: confirm with "yes" — the error surfaces during resolution.
+		m = runLine(t, m, "yes")
 		if rec.saw("POST", "/automations/au-1/delete") || rec.saw("POST", "/automations/au-2/delete") {
 			t.Errorf("unknown reference must not dispatch a mutation:\n%s", rec.all())
 		}
@@ -749,6 +765,10 @@ func TestAutomationsCommandBackendFailures(t *testing.T) {
 			m.selectedName = "demo"
 
 			m = runLine(t, m, "/automations "+tc.action+" au-1")
+			// delete requires explicit confirmation in TUI mode.
+			if tc.action == "delete" {
+				m = runLine(t, m, "yes")
+			}
 			out := transcript(m)
 			if !strings.Contains(out, "error:") {
 				t.Errorf("expected a backend error for %s:\n%s", tc.action, out)
@@ -788,7 +808,8 @@ func TestTasksActivateSweepClear(t *testing.T) {
 	})
 	t.Run("clear completed", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
-		m = runLine(t, m, "/tasks clear completed")
+		m = runLine(t, m, "/tasks clear completed") // sets pendingConfirmation
+		m = runLine(t, m, "yes")                    // confirms and executes
 		if !rec.saw("DELETE", "/tasks/completed") {
 			t.Errorf("calls:\n%s", rec.all())
 		}
@@ -881,7 +902,8 @@ func TestAgentsGenerateDelete(t *testing.T) {
 
 	t.Run("delete", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
-		m = runLine(t, m, "/agents delete Reviewer")
+		m = runLine(t, m, "/agents delete Reviewer") // sets pendingConfirmation
+		m = runLine(t, m, "yes")                     // confirms and executes
 		if !rec.saw("DELETE", "/agents/ag-1") {
 			t.Errorf("calls:\n%s", rec.all())
 		}
@@ -973,7 +995,8 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 		const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
 			data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`
 		m := newModel(t, failEndpointAfterFirstGET("/agents", agentsHTML))
-		m = runLine(t, m, "/agents delete reviewer")
+		m = runLine(t, m, "/agents delete reviewer") // sets pendingConfirmation
+		m = runLine(t, m, "yes")                     // confirms and executes
 		out := transcript(m)
 		if !strings.Contains(out, "deleted Reviewer") {
 			t.Errorf("expected status line despite refresh failure:\n%s", out)
@@ -1356,6 +1379,130 @@ func TestGenerateThenFetch(t *testing.T) {
 		}
 		if !strings.Contains(transcript(m), "error:") {
 			t.Errorf("expected error in transcript:\n%s", transcript(m))
+		}
+	})
+}
+
+// TestDestructiveCommandsRequireConfirmation verifies VISION.md §"Operator Trust
+// Matters": destructive commands in TUI mode must not call the backend until the
+// user explicitly types "yes" and presses Enter, and must do nothing if the user
+// cancels (types anything else or presses Esc).
+func TestDestructiveCommandsRequireConfirmation(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer"
+		data-agent-name="Reviewer" data-agent-description="reviews code"
+		data-agent-model="claude" data-agent-scope="project"></div>`
+
+	// /tasks delete — no call before confirm, called after "yes", not called after "no".
+	t.Run("tasks_delete/no_call_before_confirm", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks delete t-1")
+		if rec.saw("DELETE", "/tasks/t-1") {
+			t.Error("backend must not be called before confirmation")
+		}
+		if m.pendingConfirmation == nil {
+			t.Error("pendingConfirmation must be set")
+		}
+	})
+	t.Run("tasks_delete/called_after_yes", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		confirmDestructive(t, m, "/tasks delete t-1")
+		if !rec.saw("DELETE", "/tasks/t-1") {
+			t.Errorf("expected DELETE after yes:\n%s", rec.all())
+		}
+	})
+	t.Run("tasks_delete/not_called_after_no", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks delete t-1")
+		m = runLine(t, m, "no")
+		if rec.saw("DELETE", "/tasks/t-1") {
+			t.Errorf("backend must not be called after 'no':\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "cancelled") {
+			t.Errorf("expected cancellation message:\n%s", transcript(m))
+		}
+	})
+	t.Run("tasks_delete/not_called_after_esc", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks delete t-1")
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if rec.saw("DELETE", "/tasks/t-1") {
+			t.Errorf("backend must not be called after Esc:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "cancelled") {
+			t.Errorf("expected cancellation message:\n%s", transcript(m))
+		}
+	})
+
+	// /alerts clear — extra-dangerous bulk delete.
+	t.Run("alerts_clear/no_call_before_confirm", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/alerts clear")
+		if rec.saw("DELETE", "/alerts") {
+			t.Error("backend must not be called before confirmation")
+		}
+		if m.pendingConfirmation == nil {
+			t.Error("pendingConfirmation must be set for /alerts clear")
+		}
+	})
+	t.Run("alerts_clear/called_after_yes", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		confirmDestructive(t, m, "/alerts clear")
+		if !rec.saw("DELETE", "/alerts") {
+			t.Errorf("expected DELETE /alerts after yes:\n%s", rec.all())
+		}
+	})
+	t.Run("alerts_clear/not_called_after_no", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/alerts clear")
+		m = runLine(t, m, "no")
+		if rec.saw("DELETE", "/alerts") {
+			t.Errorf("backend must not be called after 'no':\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "cancelled") {
+			t.Errorf("expected cancellation message:\n%s", transcript(m))
+		}
+	})
+
+	// /agents delete.
+	t.Run("agents_delete/no_call_before_confirm", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, "/agents delete Reviewer")
+		if rec.saw("DELETE", "/agents/ag-1") {
+			t.Error("backend must not be called before confirmation")
+		}
+		if m.pendingConfirmation == nil {
+			t.Error("pendingConfirmation must be set for /agents delete")
+		}
+	})
+	t.Run("agents_delete/called_after_yes", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		confirmDestructive(t, m, "/agents delete Reviewer")
+		if !rec.saw("DELETE", "/agents/ag-1") {
+			t.Errorf("expected DELETE after yes:\n%s", rec.all())
+		}
+	})
+	t.Run("agents_delete/not_called_after_esc", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, "/agents delete Reviewer")
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if rec.saw("DELETE", "/agents/ag-1") {
+			t.Errorf("backend must not be called after Esc:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "cancelled") {
+			t.Errorf("expected cancellation message:\n%s", transcript(m))
+		}
+	})
+
+	// Confirm that the prompt message is visible in the view.
+	t.Run("confirmation_message_visible_in_view", func(t *testing.T) {
+		m, _ := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m.width, m.height = 120, 40
+		m = runLine(t, m, "/tasks delete t-1")
+		view := m.View()
+		if !strings.Contains(view, "yes") {
+			t.Errorf("confirmation prompt should be visible in view:\n%s", view)
 		}
 	})
 }

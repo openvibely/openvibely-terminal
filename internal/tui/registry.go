@@ -96,6 +96,27 @@ func titleFor(name string) string {
 	return strings.ToUpper(name[:1]) + name[1:]
 }
 
+// confirmOr gates a destructive command behind a TUI confirmation prompt or
+// the CLI --force flag.
+//
+//   - TUI mode: sets m.pendingConfirmation with displayMsg and returns a nil
+//     cmd; the caller must type "yes" and Enter before cmd executes.
+//   - CLI mode without --force: returns an errCmd with cliMsg so the process
+//     exits nonzero with a clear hint.
+//   - CLI mode with --force: returns the original cmd immediately.
+func confirmOr(m Model, displayMsg, cliMsg string, cmd tea.Cmd) (Model, tea.Cmd) {
+	if cliMode {
+		if forceMode {
+			return m, cmd
+		}
+		return m, errCmd(cliMsg)
+	}
+	// TUI mode: park the command until the user confirms.
+	m.busy = false
+	m.pendingConfirmation = &pendingCmd{message: displayMsg, cmd: cmd}
+	return m, nil
+}
+
 // --- tasks ---
 
 func tasksCommand() command {
@@ -248,7 +269,7 @@ func tasksCommand() command {
 				})
 
 			case "run", "stop", "delete":
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
@@ -268,6 +289,13 @@ func tasksCommand() command {
 						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
 						renderBoard)
 				})
+				if action == "delete" {
+					return confirmOr(m,
+						fmt.Sprintf("Delete task %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("use --force to confirm deletion of task %q", ref),
+						cmd)
+				}
+				return m, cmd
 
 			case "move":
 				if len(rest) < 2 {
@@ -357,15 +385,16 @@ func tasksCommand() command {
 				if len(rest) > 0 {
 					column = strings.ToLower(rest[0])
 				}
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				if column != "backlog" && column != "completed" {
+					return m, errCmd("clear which column? backlog or completed")
+				}
+				cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					var err error
 					switch column {
 					case "backlog":
 						err = c.ClearBacklogTasks(ctx, pid)
 					case "completed":
 						err = c.ClearCompletedTasks(ctx, pid)
-					default:
-						return "", fmt.Errorf("clear which column? backlog or completed")
 					}
 					if err != nil {
 						return "", err
@@ -374,6 +403,10 @@ func tasksCommand() command {
 						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
 						renderBoard)
 				})
+				return confirmOr(m,
+					fmt.Sprintf("Clear all %s tasks? Type 'yes' to confirm or Esc to cancel.", column),
+					fmt.Sprintf("use --force to confirm clearing the %s column", column),
+					cmd)
 			}
 			return m, nil
 		},
@@ -460,7 +493,7 @@ func scheduleCommand() command {
 				})
 			case "delete", "toggle":
 				ref := strings.Join(rest, " ")
-				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
 					entries, _, err := c.GetSchedule(ctx, pid)
 					if err != nil {
 						return "", err
@@ -485,6 +518,13 @@ func scheduleCommand() command {
 					entries, summary, _ := c.GetSchedule(ctx, pid)
 					return action + "d schedule\n\n" + renderSchedule(entries, summary), nil
 				})
+				if action == "delete" {
+					return confirmOr(m,
+						fmt.Sprintf("Delete schedule %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("use --force to confirm deletion of schedule %q", ref),
+						cmd)
+				}
+				return m, cmd
 			}
 			return m, nil
 		},
@@ -550,14 +590,18 @@ func alertsCommand() command {
 						renderAlerts)
 				})
 			case "clear":
-				return m, run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
 					if err := c.DeleteAllAlerts(ctx, pid); err != nil {
 						return "", err
 					}
 					return "deleted all alerts", nil
 				})
+				return confirmOr(m,
+					"Delete ALL alerts? Type 'yes' to confirm or Esc to cancel.",
+					"use --force to confirm deleting all alerts",
+					cmd)
 			default:
-				return m, run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
 					alerts, err := c.ListAlerts(ctx, pid)
 					if err != nil {
 						return "", err
@@ -580,6 +624,13 @@ func alertsCommand() command {
 						func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
 						renderAlerts)
 				})
+				if action == "delete" {
+					return confirmOr(m,
+						fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("use --force to confirm deletion of alert %q", ref),
+						cmd)
+				}
+				return m, cmd
 			}
 		},
 	}
@@ -665,7 +716,7 @@ func skillsCommand() command {
 					return "updated skill " + handle, nil
 				})
 			default:
-				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
 					skills, err := c.ListSkills(ctx, pid)
 					if err != nil {
 						return "", err
@@ -693,6 +744,13 @@ func skillsCommand() command {
 						func() ([]client.Skill, error) { return c.ListSkills(ctx, pid) },
 						renderSkills)
 				})
+				if action == "delete" {
+					return confirmOr(m,
+						fmt.Sprintf("Delete skill %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("use --force to confirm deletion of skill %q", ref),
+						cmd)
+				}
+				return m, cmd
 			}
 		},
 	}
@@ -751,7 +809,7 @@ func agentsCommand() command {
 						renderAgents)
 				})
 			case "delete":
-				return m, run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
 					agents, err := c.ListAgents(ctx, pid)
 					if err != nil {
 						return "", err
@@ -769,6 +827,10 @@ func agentsCommand() command {
 						func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
 						renderAgents)
 				})
+				return confirmOr(m,
+					fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", ref),
+					fmt.Sprintf("use --force to confirm deletion of agent %q", ref),
+					cmd)
 			}
 			return m, nil
 		},
@@ -814,7 +876,7 @@ func modelsCommand() command {
 					return renderModelCapacity(caps), nil
 				})
 			default:
-				return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
 					list, err := c.ListModels(ctx, pid)
 					if err != nil {
 						return "", err
@@ -837,6 +899,13 @@ func modelsCommand() command {
 						func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
 						renderModels)
 				})
+				if action == "delete" {
+					return confirmOr(m,
+						fmt.Sprintf("Delete model %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("use --force to confirm deletion of model %q", ref),
+						cmd)
+				}
+				return m, cmd
 			}
 		},
 	}
@@ -1100,7 +1169,7 @@ func automationsCommand() command {
 					return c.GetAutomations(ctx, pid)
 				})
 			default:
-				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
 					if ref == "" {
 						return "", fmt.Errorf("usage: /automations %s <automation>", action)
 					}
@@ -1125,6 +1194,13 @@ func automationsCommand() command {
 					}
 					return status + "\n\n" + items, nil
 				})
+				if action == "delete" {
+					return confirmOr(m,
+						fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("use --force to confirm deletion of automation %q", ref),
+						cmd)
+				}
+				return m, cmd
 			}
 		},
 	}

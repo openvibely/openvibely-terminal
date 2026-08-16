@@ -31,7 +31,11 @@ func (m Model) View() string {
 		b.WriteString(menu + "\n")
 	}
 	b.WriteString(m.input.View() + "\n")
-	b.WriteString(helpStyle.Render(m.hint()))
+	if m.pendingConfirmation != nil {
+		b.WriteString(noticeStyle.Render("⚠  " + m.pendingConfirmation.message))
+	} else {
+		b.WriteString(helpStyle.Render(m.hint()))
+	}
 	return b.String()
 }
 
