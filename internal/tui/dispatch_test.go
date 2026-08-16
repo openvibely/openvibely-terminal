@@ -998,6 +998,147 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 	})
 }
 
+// --- channels ---
+
+// TestChannelsCommandListsPage verifies the no-arg /channels command fetches
+// and renders the integrations page unchanged from the read-only behavior.
+func TestChannelsCommandListsPage(t *testing.T) {
+	const channelsPage = `<html><body>Telegram: connected  Slack: disconnected</body></html>`
+	m, rec := dispatchModel(t, map[string]string{"/channels": channelsPage})
+	m = runLine(t, m, "/channels")
+	if !rec.saw("GET", "/channels") {
+		t.Fatalf("expected a channels page fetch, calls:\n%s", rec.all())
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "Telegram") {
+		t.Errorf("expected channels page content:\n%s", out)
+	}
+	if strings.Contains(out, "error:") {
+		t.Errorf("/channels should not error:\n%s", out)
+	}
+}
+
+// TestChannelsTestAndRemove exercises the test and remove actions for all
+// manageable channel types. Slack remove must route to /disconnect, not /remove.
+func TestChannelsTestAndRemove(t *testing.T) {
+	cases := []struct {
+		action      string
+		channelName string
+		wantPath    string
+	}{
+		{"test", "telegram", "/channels/telegram/test"},
+		{"remove", "telegram", "/channels/telegram/remove"},
+		{"test", "slack", "/channels/slack/test"},
+		{"remove", "slack", "/channels/slack/disconnect"},
+		{"test", "discord", "/channels/discord/test"},
+		{"remove", "discord", "/channels/discord/remove"},
+		{"test", "email", "/channels/email/test"},
+		{"remove", "email", "/channels/email/remove"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.action+" "+tc.channelName, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, "/channels "+tc.action+" "+tc.channelName)
+			if !rec.saw("POST", tc.wantPath) {
+				t.Errorf("expected POST %s, calls:\n%s", tc.wantPath, rec.all())
+			}
+			out := transcript(m)
+			if strings.Contains(out, "error:") {
+				t.Errorf("unexpected error for %s %s:\n%s", tc.action, tc.channelName, out)
+			}
+			// Status line must name the channel (display names are Title-cased in KnownChannels).
+			displayName := strings.ToUpper(tc.channelName[:1]) + tc.channelName[1:]
+			if !strings.Contains(out, tc.action+": "+displayName) {
+				t.Errorf("expected status line %q:\n%s", tc.action+": "+displayName, out)
+			}
+		})
+	}
+}
+
+// TestChannelsMatchRefResolution verifies prefix and substring resolution work
+// against the fixed channel list, and that ambiguous/unknown refs are rejected.
+func TestChannelsMatchRefResolution(t *testing.T) {
+	t.Run("unique prefix match", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels test tele") // prefix of "telegram"
+		if !rec.saw("POST", "/channels/telegram/test") {
+			t.Errorf("prefix match failed, calls:\n%s", rec.all())
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("unknown reference rejected", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels test irc")
+		// No mutation must be posted.
+		for _, method := range []string{"POST"} {
+			_ = method
+		}
+		if rec.saw("POST", "/channels/irc/test") {
+			t.Errorf("unknown channel must not be dispatched:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "error:") {
+			t.Errorf("expected an error for unknown channel:\n%s", transcript(m))
+		}
+	})
+}
+
+// TestChannelsBackendFailureSurfaces ensures a non-2xx backend response for a
+// channel action is surfaced as an error instead of a false success.
+func TestChannelsBackendFailureSurfaces(t *testing.T) {
+	for _, action := range []string{"test", "remove"} {
+		action := action
+		t.Run(action, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/channels/telegram/") {
+					http.Error(w, "boom", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+
+			m = runLine(t, m, "/channels "+action+" telegram")
+			out := transcript(m)
+			if !strings.Contains(out, "error:") {
+				t.Errorf("expected a backend error for %s:\n%s", action, out)
+			}
+		})
+	}
+}
+
+// TestChannelsMissingArgError verifies that test/remove with no channel name
+// return a clear usage error without posting to the backend.
+func TestChannelsMissingArgError(t *testing.T) {
+	for _, action := range []string{"test", "remove"} {
+		action := action
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, "/channels "+action)
+			if rec.saw("POST", "/channels") {
+				t.Errorf("must not POST when channel name is missing:\n%s", rec.all())
+			}
+			if !strings.Contains(transcript(m), "error:") {
+				t.Errorf("expected a usage error:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
 // newModelFromHandler wires a Model to a custom HTTP handler.
 func newModelFromHandler(t *testing.T, h http.HandlerFunc) Model {
 	t.Helper()

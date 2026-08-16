@@ -341,9 +341,39 @@ func (c *Client) SetProjectWorkerLimit(ctx context.Context, projectID string, li
 
 // --- channels & personality ---
 
+// Channel is one manageable integration on the Channels screen.
+// GitHub and Slack OAuth connect/callback flows require a browser and are not
+// exposed here (known TUI parity gap).
+type Channel struct {
+	Type string // telegram, slack, discord, email
+	Name string // display name
+}
+
+// KnownChannels is the fixed set of TUI-manageable channel integrations.
+var KnownChannels = []Channel{
+	{Type: "telegram", Name: "Telegram"},
+	{Type: "slack", Name: "Slack"},
+	{Type: "discord", Name: "Discord"},
+	{Type: "email", Name: "Email"},
+}
+
 // GetChannels returns the Channels (integrations) screen as text.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
 	return c.pageText(ctx, "/channels"+query("project_id", projectID), "")
+}
+
+// ChannelAction runs test or remove on a channel integration.
+// Supported channel types: telegram, slack, discord, email.
+// Supported actions: test, remove.
+// For Slack, the backend remove route is /channels/slack/disconnect; all other
+// channel types use /channels/<type>/remove.
+func (c *Client) ChannelAction(ctx context.Context, channelType, action, projectID string) error {
+	verb := action
+	if action == "remove" && channelType == "slack" {
+		verb = "disconnect"
+	}
+	return c.doForm(ctx, http.MethodPost,
+		"/channels/"+url.PathEscape(channelType)+"/"+verb+query("project_id", projectID), nil)
 }
 
 // GetPersonality returns the Personality screen as text.

@@ -249,6 +249,20 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "POST", path: "/automations/au1/resume"},
 		{name: "automation delete", fn: func() error { return c.AutomationAction(ctx, "au1", "delete", "p1") },
 			method: "POST", path: "/automations/au1/delete"},
+		{name: "channel test telegram", fn: func() error { return c.ChannelAction(ctx, "telegram", "test", "p1") },
+			method: "POST", path: "/channels/telegram/test"},
+		{name: "channel remove telegram", fn: func() error { return c.ChannelAction(ctx, "telegram", "remove", "p1") },
+			method: "POST", path: "/channels/telegram/remove"},
+		{name: "channel test discord", fn: func() error { return c.ChannelAction(ctx, "discord", "test", "p1") },
+			method: "POST", path: "/channels/discord/test"},
+		{name: "channel remove discord", fn: func() error { return c.ChannelAction(ctx, "discord", "remove", "p1") },
+			method: "POST", path: "/channels/discord/remove"},
+		{name: "channel test email", fn: func() error { return c.ChannelAction(ctx, "email", "test", "p1") },
+			method: "POST", path: "/channels/email/test"},
+		{name: "channel remove email", fn: func() error { return c.ChannelAction(ctx, "email", "remove", "p1") },
+			method: "POST", path: "/channels/email/remove"},
+		{name: "channel test slack", fn: func() error { return c.ChannelAction(ctx, "slack", "test", "p1") },
+			method: "POST", path: "/channels/slack/test"},
 	}
 
 	for _, tc := range tests {
@@ -389,5 +403,25 @@ func TestGetChannelsReturnsPageText(t *testing.T) {
 	}
 	if text != "channels text" {
 		t.Errorf("text = %q", text)
+	}
+}
+
+// TestChannelActionSlackRemoteTranslatesToDisconnect verifies that "remove" for
+// Slack routes to /channels/slack/disconnect (not /channels/slack/remove),
+// matching the backend's OAuth disconnect route.
+func TestChannelActionSlackRemoveTranslatesToDisconnect(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	if err := c.ChannelAction(context.Background(), "slack", "remove", "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/channels/slack/disconnect" {
+		t.Errorf("path = %q, want /channels/slack/disconnect", gotPath)
 	}
 }
