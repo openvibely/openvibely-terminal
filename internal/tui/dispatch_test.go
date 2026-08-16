@@ -442,3 +442,247 @@ func TestModelsDefault(t *testing.T) {
 		t.Errorf("calls:\n%s", rec.all())
 	}
 }
+
+func TestModelsDelete(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+	m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
+	runLine(t, m, "/models delete Sonnet")
+	if !rec.saw("DELETE", "/models/m-1") {
+		t.Errorf("calls:\n%s", rec.all())
+	}
+}
+
+func TestTasksActivateSweepClear(t *testing.T) {
+	t.Run("activate", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks activate")
+		if !rec.saw("POST", "/tasks/backlog/activate") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "activated the backlog") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+		if !strings.Contains(out, "Refactor the API") {
+			t.Errorf("expected refreshed board:\n%s", out)
+		}
+	})
+	t.Run("sweep", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks sweep")
+		if !rec.saw("POST", "/tasks/move-completed") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "swept finished tasks") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+		if !strings.Contains(out, "Refactor the API") {
+			t.Errorf("expected refreshed board:\n%s", out)
+		}
+	})
+	t.Run("clear completed", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks clear completed")
+		if !rec.saw("DELETE", "/tasks/completed") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "cleared completed") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+		if !strings.Contains(out, "Refactor the API") {
+			t.Errorf("expected refreshed board:\n%s", out)
+		}
+	})
+}
+
+func TestAlertsApproveRejectDismiss(t *testing.T) {
+	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
+	  data-search-text="build failed">
+	  <p class="font-semibold">Build failed</p>
+	</div>`
+	for _, action := range []string{"approve", "reject", "dismiss"} {
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/alerts": alertsHTML})
+			m = runLine(t, m, "/alerts "+action+" a-1")
+			if !rec.saw("POST", "/alerts/a-1/"+action) {
+				t.Errorf("calls:\n%s", rec.all())
+			}
+			out := transcript(m)
+			if !strings.Contains(out, action+": Build failed") {
+				t.Errorf("expected status line:\n%s", out)
+			}
+			if !strings.Contains(out, "Build failed") {
+				t.Errorf("expected refreshed alerts:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestSkillsEnableAlways(t *testing.T) {
+	const skillsHTML = `<div data-skill-handle="deploy" data-skill-name="Deploy"
+		data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
+
+	t.Run("enable", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		m = runLine(t, m, "/skills enable deploy")
+		if !rec.saw("POST", "/skills/deploy/enabled") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "enable: deploy") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+		if !strings.Contains(out, "deploy") {
+			t.Errorf("expected refreshed skills:\n%s", out)
+		}
+	})
+
+	t.Run("always", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		m = runLine(t, m, "/skills always deploy")
+		if !rec.saw("POST", "/skills/deploy/always_use") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "always: deploy") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+		if !strings.Contains(out, "deploy") {
+			t.Errorf("expected refreshed skills:\n%s", out)
+		}
+	})
+}
+
+func TestAgentsGenerateDelete(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
+		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`
+
+	t.Run("generate", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, "/agents generate a reviewer agent")
+		if !rec.saw("POST", "/agents/generate") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "generated an agent from your description") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+		if !strings.Contains(out, "Reviewer") {
+			t.Errorf("expected refreshed agents:\n%s", out)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, "/agents delete Reviewer")
+		if !rec.saw("DELETE", "/agents/ag-1") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "deleted Reviewer") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+	})
+}
+
+// TestRefreshFailureAfterMutationIsSwallowedAcrossCommands exercises the
+// refresh-swallow policy for alerts, skills, agents, and models (in addition
+// to tasks, covered by TestRefreshFailureAfterMutationIsSwallowed) to confirm
+// it is applied consistently by the shared refreshAndRender helper.
+func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
+	failEndpointAfterFirstGET := func(path, okBody string) http.HandlerFunc {
+		var gets int
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "GET" && r.URL.Path == path {
+				gets++
+				if gets > 1 {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":"refresh failed"}`))
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = w.Write([]byte(okBody))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}
+
+	newModel := func(t *testing.T, handler http.HandlerFunc) Model {
+		t.Helper()
+		srv := httptest.NewServer(handler)
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		m = updated.(Model)
+		m.selectedID = "p1"
+		m.selectedName = "demo"
+		return m
+	}
+
+	t.Run("alerts", func(t *testing.T) {
+		const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
+		  data-search-text="build failed">
+		  <p class="font-semibold">Build failed</p>
+		</div>`
+		m := newModel(t, failEndpointAfterFirstGET("/alerts", alertsHTML))
+		m = runLine(t, m, "/alerts approve a-1")
+		out := transcript(m)
+		if !strings.Contains(out, "approve: Build failed") {
+			t.Errorf("expected status line despite refresh failure:\n%s", out)
+		}
+		if strings.Contains(out, "refresh failed") {
+			t.Errorf("refresh failure must be swallowed:\n%s", out)
+		}
+	})
+
+	t.Run("skills", func(t *testing.T) {
+		const skillsHTML = `<div data-skill-handle="deploy" data-skill-name="Deploy"
+			data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
+		m := newModel(t, failEndpointAfterFirstGET("/skills", skillsHTML))
+		m = runLine(t, m, "/skills disable deploy")
+		out := transcript(m)
+		if !strings.Contains(out, "disable: deploy") {
+			t.Errorf("expected status line despite refresh failure:\n%s", out)
+		}
+		if strings.Contains(out, "refresh failed") {
+			t.Errorf("refresh failure must be swallowed:\n%s", out)
+		}
+	})
+
+	t.Run("agents", func(t *testing.T) {
+		const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
+			data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`
+		m := newModel(t, failEndpointAfterFirstGET("/agents", agentsHTML))
+		m = runLine(t, m, "/agents generate a reviewer agent")
+		out := transcript(m)
+		if !strings.Contains(out, "generated an agent from your description") {
+			t.Errorf("expected status line despite refresh failure:\n%s", out)
+		}
+		if strings.Contains(out, "refresh failed") {
+			t.Errorf("refresh failure must be swallowed:\n%s", out)
+		}
+	})
+
+	t.Run("models", func(t *testing.T) {
+		const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+			data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+		m := newModel(t, failEndpointAfterFirstGET("/models", modelsHTML))
+		m = runLine(t, m, "/models default Sonnet")
+		out := transcript(m)
+		if !strings.Contains(out, "default: Sonnet") {
+			t.Errorf("expected status line despite refresh failure:\n%s", out)
+		}
+		if strings.Contains(out, "refresh failed") {
+			t.Errorf("refresh failure must be swallowed:\n%s", out)
+		}
+	})
+}
