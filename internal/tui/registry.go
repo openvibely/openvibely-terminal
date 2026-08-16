@@ -60,6 +60,20 @@ func page(name, desc string, fetch func(c *client.Client, ctx context.Context, p
 	}
 }
 
+// refreshAndRender consolidates the "act, then reload the list, then format a
+// status line followed by the refreshed render" sequence shared by the
+// task/alert/skill/agent/model mutation commands. If the refresh fails after
+// a successful mutation, the error is swallowed and only the status line is
+// returned — the mutation itself already succeeded, and this matches the
+// policy every call site used before consolidation.
+func refreshAndRender[T any](status string, list func() ([]T, error), render func([]T, string) string) (string, error) {
+	items, err := list()
+	if err != nil {
+		return status, nil
+	}
+	return status + "\n\n" + render(items, ""), nil
+}
+
 func titleFor(name string) string {
 	if name == "" {
 		return ""
@@ -166,11 +180,9 @@ func tasksCommand() command {
 					if err := c.CreateTask(ctx, pid, form); err != nil {
 						return "", err
 					}
-					tasks, err := c.ListTasks(ctx, pid)
-					if err != nil {
-						return "created " + title, nil
-					}
-					return "created " + title + "\n\n" + renderBoard(tasks, ""), nil
+					return refreshAndRender("created "+title,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 
 			case "edit":
@@ -191,8 +203,9 @@ func tasksCommand() command {
 					if err := c.UpdateTask(ctx, t.ID, form); err != nil {
 						return "", err
 					}
-					tasks, _ := c.ListTasks(ctx, pid)
-					return "updated " + title + "\n\n" + renderBoard(tasks, ""), nil
+					return refreshAndRender("updated "+title,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 
 			case "order":
@@ -212,8 +225,9 @@ func tasksCommand() command {
 					if err := c.ReorderTask(ctx, t.ID, pos); err != nil {
 						return "", err
 					}
-					tasks, _ := c.ListTasks(ctx, pid)
-					return fmt.Sprintf("moved %s to position %d\n\n%s", t.Title, pos, renderBoard(tasks, "")), nil
+					return refreshAndRender(fmt.Sprintf("moved %s to position %d", t.Title, pos),
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 
 			case "run", "stop", "delete":
@@ -233,12 +247,9 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
-					tasks, lerr := c.ListTasks(ctx, pid)
-					msg := action + ": " + t.Title
-					if lerr != nil {
-						return msg, nil
-					}
-					return msg + "\n\n" + renderBoard(tasks, ""), nil
+					return refreshAndRender(action+": "+t.Title,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 
 			case "move":
@@ -255,8 +266,9 @@ func tasksCommand() command {
 					if err := c.MoveTask(ctx, t.ID, category); err != nil {
 						return "", err
 					}
-					tasks, _ := c.ListTasks(ctx, pid)
-					return t.Title + " → " + category + "\n\n" + renderBoard(tasks, ""), nil
+					return refreshAndRender(t.Title+" → "+category,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 
 			case "goal":
@@ -308,8 +320,9 @@ func tasksCommand() command {
 					if err := c.ActivateBacklog(ctx, pid); err != nil {
 						return "", err
 					}
-					tasks, _ := c.ListTasks(ctx, pid)
-					return "activated the backlog\n\n" + renderBoard(tasks, ""), nil
+					return refreshAndRender("activated the backlog",
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 
 			case "sweep":
@@ -317,8 +330,9 @@ func tasksCommand() command {
 					if err := c.SweepCompletedTasks(ctx, pid); err != nil {
 						return "", err
 					}
-					tasks, _ := c.ListTasks(ctx, pid)
-					return "swept finished tasks\n\n" + renderBoard(tasks, ""), nil
+					return refreshAndRender("swept finished tasks",
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 
 			case "clear":
@@ -339,8 +353,9 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
-					tasks, _ := c.ListTasks(ctx, pid)
-					return "cleared " + column + "\n\n" + renderBoard(tasks, ""), nil
+					return refreshAndRender("cleared "+column,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
+						renderBoard)
 				})
 			}
 			return m, nil
@@ -498,8 +513,9 @@ func alertsCommand() command {
 					if err := c.MarkAllAlertsRead(ctx, pid); err != nil {
 						return "", err
 					}
-					alerts, _ := c.ListAlerts(ctx, pid)
-					return "marked all read\n\n" + renderAlerts(alerts, ""), nil
+					return refreshAndRender("marked all read",
+						func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
+						renderAlerts)
 				})
 			case "clear":
 				return m, run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -528,8 +544,9 @@ func alertsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					alerts, _ = c.ListAlerts(ctx, pid)
-					return action + ": " + a.Title + "\n\n" + renderAlerts(alerts, ""), nil
+					return refreshAndRender(action+": "+a.Title,
+						func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
+						renderAlerts)
 				})
 			}
 		},
@@ -600,8 +617,9 @@ func skillsCommand() command {
 					if err := c.CreateSkill(ctx, pid, name, desc, body); err != nil {
 						return "", err
 					}
-					skills, _ := c.ListSkills(ctx, pid)
-					return "created skill " + name + "\n\n" + renderSkills(skills, ""), nil
+					return refreshAndRender("created skill "+name,
+						func() ([]client.Skill, error) { return c.ListSkills(ctx, pid) },
+						renderSkills)
 				})
 			case "edit":
 				handle, body := splitPipe(ref)
@@ -639,8 +657,9 @@ func skillsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					skills, _ = c.ListSkills(ctx, pid)
-					return action + ": " + s.Handle + "\n\n" + renderSkills(skills, ""), nil
+					return refreshAndRender(action+": "+s.Handle,
+						func() ([]client.Skill, error) { return c.ListSkills(ctx, pid) },
+						renderSkills)
 				})
 			}
 		},
@@ -695,8 +714,9 @@ func agentsCommand() command {
 					if err := c.GenerateAgent(ctx, pid, ref); err != nil {
 						return "", err
 					}
-					agents, _ := c.ListAgents(ctx, pid)
-					return "generated an agent from your description\n\n" + renderAgents(agents, ""), nil
+					return refreshAndRender("generated an agent from your description",
+						func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
+						renderAgents)
 				})
 			case "delete":
 				return m, run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -713,8 +733,9 @@ func agentsCommand() command {
 					if err := c.DeleteAgent(ctx, a.ID); err != nil {
 						return "", err
 					}
-					agents, _ = c.ListAgents(ctx, pid)
-					return "deleted " + a.Name + "\n\n" + renderAgents(agents, ""), nil
+					return refreshAndRender("deleted "+a.Name,
+						func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
+						renderAgents)
 				})
 			}
 			return m, nil
@@ -780,8 +801,9 @@ func modelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					list, _ = c.ListModels(ctx, pid)
-					return action + ": " + mo.Name + "\n\n" + renderModels(list, ""), nil
+					return refreshAndRender(action+": "+mo.Name,
+						func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
+						renderModels)
 				})
 			}
 		},

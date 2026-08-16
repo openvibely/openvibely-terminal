@@ -391,6 +391,48 @@ func TestAlertsBulkActions(t *testing.T) {
 	}
 }
 
+// After a successful mutation, a failed list refresh must not surface as an
+// error — the mutation already succeeded, so the status line alone is shown.
+func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
+	var taskGETs int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/tasks":
+			taskGETs++
+			if taskGETs > 1 {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"refresh failed"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/tasks run Refactor")
+	out := transcript(m)
+	if !strings.Contains(out, "run: Refactor the API") {
+		t.Errorf("expected the status line despite the refresh failure:\n%s", out)
+	}
+	if strings.Contains(out, "error:") || strings.Contains(out, "refresh failed") {
+		t.Errorf("a post-mutation refresh failure must be swallowed, not surfaced:\n%s", out)
+	}
+}
+
 func TestModelsDefault(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
