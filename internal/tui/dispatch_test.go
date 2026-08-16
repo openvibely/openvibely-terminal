@@ -453,6 +453,154 @@ func TestModelsDelete(t *testing.T) {
 	}
 }
 
+// automationCardHTML mirrors the real automation card markup: the
+// delete-menu button carries data-automation-card-delete/data-automation-name,
+// and the card's own badges carry the lifecycle state.
+func automationCardHTML(id, name, state string) string {
+	return `<div class="card" data-automation-url="/automations/` + id + `?project_id=p1"
+	  data-search-card data-search-text="` + name + `">
+	  <div class="card-body relative">
+	    <span class="badge badge-outline badge-sm">` + state + `</span>
+	    <button type="button" class="text-error" data-automation-card-delete="` + id + `"
+	            data-automation-name="` + name + `"></button>
+	  </div>
+	</div>`
+}
+
+func TestAutomationsListIsUnchangedWithNoArguments(t *testing.T) {
+	const automationsHTML = `<div>Native SDLC automation</div>`
+	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+	m = runLine(t, m, "/automations")
+	if !rec.saw("GET", "/automations") {
+		t.Fatalf("expected an automations fetch:\n%s", rec.all())
+	}
+	if !strings.Contains(transcript(m), "Native SDLC automation") {
+		t.Errorf("automations content missing:\n%s", transcript(m))
+	}
+	if strings.Contains(transcript(m), "error:") {
+		t.Errorf("/automations should not error:\n%s", transcript(m))
+	}
+}
+
+func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+
+	t.Run("exact id match", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+		m = runLine(t, m, "/automations pause au-1")
+		if !rec.saw("POST", "/automations/au-1/pause") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("unique name prefix match", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+		m = runLine(t, m, "/automations run-now Native")
+		if !rec.saw("POST", "/automations/au-1/run-now") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("unique id prefix match", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+		m = runLine(t, m, "/automations resume au-2")
+		if !rec.saw("POST", "/automations/au-2/resume") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("unique substring match", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+		m = runLine(t, m, "/automations delete GitHub")
+		if !rec.saw("POST", "/automations/au-2/delete") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("ambiguous match rejected", func(t *testing.T) {
+		ambiguousHTML := "<div>" +
+			automationCardHTML("au-3", "SDLC A", "active") +
+			automationCardHTML("au-4", "SDLC B", "active") +
+			"</div>"
+		m, rec := dispatchModel(t, map[string]string{"/automations": ambiguousHTML})
+		m = runLine(t, m, "/automations pause SDLC")
+		if rec.saw("POST", "/automations/au-3/pause") || rec.saw("POST", "/automations/au-4/pause") {
+			t.Errorf("ambiguous reference must not dispatch a mutation:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "error:") {
+			t.Errorf("expected an ambiguous-match error:\n%s", out)
+		}
+	})
+
+	t.Run("unknown reference rejected", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+		m = runLine(t, m, "/automations delete nope")
+		if rec.saw("POST", "/automations/au-1/delete") || rec.saw("POST", "/automations/au-2/delete") {
+			t.Errorf("unknown reference must not dispatch a mutation:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "error:") {
+			t.Errorf("expected an error for an unknown reference:\n%s", transcript(m))
+		}
+	})
+}
+
+// TestAutomationsCommandBackendFailures confirms each new action surfaces a
+// non-2xx backend response as an error instead of a false success.
+func TestAutomationsCommandBackendFailures(t *testing.T) {
+	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
+
+	cases := []struct {
+		action string
+		path   string
+	}{
+		{"run-now", "/automations/au-1/run-now"},
+		{"pause", "/automations/au-1/pause"},
+		{"resume", "/automations/au-1/resume"},
+		{"delete", "/automations/au-1/delete"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == tc.path {
+					http.Error(w, "boom", http.StatusInternalServerError)
+					return
+				}
+				if r.URL.Path == "/automations" {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(automationsHTML))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+
+			m = runLine(t, m, "/automations "+tc.action+" au-1")
+			out := transcript(m)
+			if !strings.Contains(out, "error:") {
+				t.Errorf("expected a backend error for %s:\n%s", tc.action, out)
+			}
+		})
+	}
+}
+
 func TestTasksActivateSweepClear(t *testing.T) {
 	t.Run("activate", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})

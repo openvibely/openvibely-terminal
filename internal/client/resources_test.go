@@ -129,6 +129,44 @@ func TestListModelsAndAgents(t *testing.T) {
 	})
 }
 
+func TestListAutomationsReadsCardMarkup(t *testing.T) {
+	// Mirrors the delete-menu button markup on a real automation card, which
+	// carries the id/name the TUI resolves references against.
+	const page = `<div>
+	  <div class="card" data-automation-url="/automations/au1?project_id=p1"
+	       data-search-card data-search-text="native sdlc active">
+	    <div class="card-body relative">
+	      <span class="badge badge-outline badge-sm">active</span>
+	      <button type="button" class="text-error" data-automation-card-delete="au1"
+	              data-automation-name="Native SDLC"></button>
+	    </div>
+	  </div>
+	  <div class="card" data-automation-url="/automations/au2?project_id=p1"
+	       data-search-card data-search-text="github sdlc paused">
+	    <div class="card-body relative">
+	      <span class="badge badge-outline badge-sm">paused</span>
+	      <button type="button" class="text-error" data-automation-card-delete="au2"
+	              data-automation-name="GitHub SDLC"></button>
+	    </div>
+	  </div>
+	</div>`
+	c := htmlServer(t, page)
+
+	automations, err := c.ListAutomations(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(automations) != 2 {
+		t.Fatalf("got %d automations, want 2: %+v", len(automations), automations)
+	}
+	if automations[0].ID != "au1" || automations[0].Name != "Native SDLC" || automations[0].State != "active" {
+		t.Errorf("automation[0] = %+v", automations[0])
+	}
+	if automations[1].ID != "au2" || automations[1].Name != "GitHub SDLC" || automations[1].State != "paused" {
+		t.Errorf("automation[1] = %+v", automations[1])
+	}
+}
+
 func TestGetScheduleScrapesEntries(t *testing.T) {
 	const page = `<div id="schedule-content">
 	  <div data-task-id="t1" data-schedule-id="s1">Nightly build — daily 02:00</div>
@@ -202,6 +240,14 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "POST", path: "/upcoming/summary"},
 		{name: "insights analyze", fn: func() error { return c.RunInsightsAnalysis(ctx, "p1") },
 			method: "POST", path: "/insights/analyze"},
+		{name: "automation run-now", fn: func() error { return c.RunAutomationNow(ctx, "au1", "p1") },
+			method: "POST", path: "/automations/au1/run-now"},
+		{name: "automation pause", fn: func() error { return c.PauseAutomation(ctx, "au1", "p1") },
+			method: "POST", path: "/automations/au1/pause"},
+		{name: "automation resume", fn: func() error { return c.ResumeAutomation(ctx, "au1", "p1") },
+			method: "POST", path: "/automations/au1/resume"},
+		{name: "automation delete", fn: func() error { return c.DeleteAutomation(ctx, "au1", "p1") },
+			method: "POST", path: "/automations/au1/delete"},
 	}
 
 	for _, tc := range tests {

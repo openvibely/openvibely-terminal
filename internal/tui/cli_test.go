@@ -217,3 +217,59 @@ func TestCLIRunsTaskMutation(t *testing.T) {
 		t.Fatalf("no run call, calls:\n%s", rec.all())
 	}
 }
+
+// One-shot CLI mode works headlessly for the new automations actions,
+// exiting cleanly on success and nonzero on a backend failure.
+func TestCLIRunsAutomationsPause(t *testing.T) {
+	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p1">
+		<div class="card-body relative">
+			<span class="badge badge-outline badge-sm">active</span>
+			<button type="button" data-automation-card-delete="au-1" data-automation-name="Native SDLC"></button>
+		</div>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/automations":  automationsHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"automations", "pause", "Native"}); err != nil {
+		t.Fatalf("pause failed: %v", err)
+	}
+	if !rec.saw("POST", "/automations/au-1/pause") {
+		t.Fatalf("no pause call, calls:\n%s", rec.all())
+	}
+}
+
+func TestCLIAutomationsPauseFailsOnBackendError(t *testing.T) {
+	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p1">
+		<div class="card-body relative">
+			<span class="badge badge-outline badge-sm">active</span>
+			<button type="button" data-automation-card-delete="au-1" data-automation-name="Native SDLC"></button>
+		</div>
+	</div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.URL.Path == "/automations/au-1/pause":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		case r.URL.Path == "/automations":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(automationsHTML))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "pause", "Native"}); err == nil {
+		t.Fatal("expected a nonzero exit on backend failure")
+	}
+}

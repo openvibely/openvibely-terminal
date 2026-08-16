@@ -412,6 +412,72 @@ func (c *Client) GetAutomations(ctx context.Context, projectID string) (string, 
 	return c.pageText(ctx, "/automations"+query("project_id", projectID), "")
 }
 
+// Automation is one card on the Automations screen.
+type Automation struct {
+	ID    string
+	Name  string
+	State string
+}
+
+// ListAutomations scrapes the automations screen for a project. Each card
+// carries the automation id/name via its delete-menu button's
+// data-automation-card-delete/data-automation-name attributes; lifecycle
+// state comes from the card's own badge row.
+func (c *Client) ListAutomations(ctx context.Context, projectID string) ([]Automation, error) {
+	root, err := c.getHTML(ctx, "/automations"+query("project_id", projectID))
+	if err != nil {
+		return nil, err
+	}
+	cards := findAll(root, func(e *html.Node) bool { return attr(e, "data-automation-url") != "" })
+
+	out := make([]Automation, 0, len(cards))
+	for _, card := range cards {
+		btn := findNode(card, func(e *html.Node) bool { return attr(e, "data-automation-card-delete") != "" })
+		if btn == nil {
+			continue
+		}
+		a := Automation{
+			ID:   attr(btn, "data-automation-card-delete"),
+			Name: attr(btn, "data-automation-name"),
+		}
+		for _, state := range []string{"active", "paused", "draft", "archived"} {
+			for _, b := range cardBadges(card) {
+				if strings.EqualFold(b, state) {
+					a.State = state
+				}
+			}
+		}
+		if a.ID != "" {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+// RunAutomationNow triggers an immediate run of one automation.
+func (c *Client) RunAutomationNow(ctx context.Context, automationID, projectID string) error {
+	return c.doForm(ctx, http.MethodPost,
+		"/automations/"+url.PathEscape(automationID)+"/run-now"+query("project_id", projectID), nil)
+}
+
+// PauseAutomation pauses one automation.
+func (c *Client) PauseAutomation(ctx context.Context, automationID, projectID string) error {
+	return c.doForm(ctx, http.MethodPost,
+		"/automations/"+url.PathEscape(automationID)+"/pause"+query("project_id", projectID), nil)
+}
+
+// ResumeAutomation resumes one paused automation.
+func (c *Client) ResumeAutomation(ctx context.Context, automationID, projectID string) error {
+	return c.doForm(ctx, http.MethodPost,
+		"/automations/"+url.PathEscape(automationID)+"/resume"+query("project_id", projectID), nil)
+}
+
+// DeleteAutomation removes one automation.
+func (c *Client) DeleteAutomation(ctx context.Context, automationID, projectID string) error {
+	return c.doForm(ctx, http.MethodPost,
+		"/automations/"+url.PathEscape(automationID)+"/delete"+query("project_id", projectID), nil)
+}
+
 // pageText fetches a page and returns the text of elementID (or the whole
 // document when elementID is empty or missing).
 func (c *Client) pageText(ctx context.Context, path, elementID string) (string, error) {

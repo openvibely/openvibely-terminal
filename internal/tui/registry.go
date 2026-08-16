@@ -1003,10 +1003,68 @@ func insightsCommand() command {
 }
 
 func automationsCommand() command {
-	return page("automations", "recurring automations and workflow rules",
-		func(c *client.Client, ctx context.Context, pid string) (string, error) {
-			return c.GetAutomations(ctx, pid)
-		})
+	actions := []string{"list", "run-now", "pause", "resume", "delete"}
+	return command{
+		name:    "automations",
+		aliases: []string{"automation"},
+		args:    "[filter]",
+		actions: actions,
+		desc:    "recurring automations and workflow rules",
+		usage: []string{
+			"automations [filter]                       list automations",
+			"automations run-now <automation>           trigger an immediate run",
+			"automations pause <automation>              pause an active automation",
+			"automations resume <automation>             resume a paused automation",
+			"automations delete <automation>             remove an automation",
+		},
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			action, rest := splitAction(actions, args)
+			c, pid := m.client, m.selectedID
+			ref := strings.Join(rest, " ")
+
+			switch action {
+			case "", "list":
+				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+					return c.GetAutomations(ctx, pid)
+				})
+			default:
+				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+					if ref == "" {
+						return "", fmt.Errorf("usage: /automations %s <automation>", action)
+					}
+					automations, err := c.ListAutomations(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					a, err := matchRef(automations, ref,
+						func(a client.Automation) string { return a.ID },
+						func(a client.Automation) string { return a.Name })
+					if err != nil {
+						return "", err
+					}
+					switch action {
+					case "run-now":
+						err = c.RunAutomationNow(ctx, a.ID, pid)
+					case "pause":
+						err = c.PauseAutomation(ctx, a.ID, pid)
+					case "resume":
+						err = c.ResumeAutomation(ctx, a.ID, pid)
+					case "delete":
+						err = c.DeleteAutomation(ctx, a.ID, pid)
+					}
+					if err != nil {
+						return "", err
+					}
+					status := action + ": " + firstNonEmpty(a.Name, a.ID)
+					items, err := c.GetAutomations(ctx, pid)
+					if err != nil {
+						return status, nil
+					}
+					return status + "\n\n" + items, nil
+				})
+			}
+		},
+	}
 }
 
 // --- analytics ---
