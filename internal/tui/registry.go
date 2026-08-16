@@ -148,17 +148,19 @@ func tasksCommand() command {
 				}
 
 			case "show":
+				// "/tasks show <ref> <tab>" selects a detail tab; strip it before
+				// joining the remaining words into the task reference.
+				showRest := rest
+				tab := ""
+				if n := len(showRest); n > 1 && isDetailTab(showRest[n-1]) {
+					tab = showRest[n-1]
+					showRest = showRest[:n-1]
+				}
+				showRef := strings.Join(showRest, " ")
 				return m, run("Task", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, ref)
+					t, err := resolveTask(ctx, c, pid, showRef)
 					if err != nil {
 						return "", err
-					}
-					// "/tasks show <ref> <tab>" selects a detail tab.
-					tab := ""
-					if n := len(rest); n > 1 {
-						if isDetailTab(rest[n-1]) {
-							tab = rest[n-1]
-						}
 					}
 					d, err := c.GetTask(ctx, t.ID)
 					if err != nil {
