@@ -189,6 +189,9 @@ func tasksCommand() command {
 					return m, errCmd("usage: /tasks new <title> [| <prompt>]")
 				}
 				title, prompt := splitPipe(ref)
+				if title == "" {
+					return m, errCmd("usage: /tasks new <title> [| <prompt>]")
+				}
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					form := client.TaskForm{Title: title, Prompt: prompt, Category: "backlog"}
 					if form.Prompt == "" {
