@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -468,5 +469,119 @@ func TestViewShowsHeaderAndPrompt(t *testing.T) {
 	}
 	if !strings.Contains(view, "❯") {
 		t.Error("input prompt missing")
+	}
+}
+
+// loadProjects issues ListProjects and GetProjectCapacities concurrently, so
+// total latency should track the max of the two fetch times, not their sum.
+func TestLoadProjectsFetchesConcurrently(t *testing.T) {
+	const delay = 150 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects":
+			time.Sleep(delay)
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
+		case "/api/capacity/projects":
+			time.Sleep(delay)
+			_, _ = w.Write([]byte(`[{"id":"p1","name":"demo","has_capacity":true}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+
+	start := time.Now()
+	msg := m.loadProjects(false, "")()
+	elapsed := time.Since(start)
+
+	got, ok := msg.(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want projectsLoadedMsg", msg)
+	}
+	if got.err != nil {
+		t.Fatalf("err = %v", got.err)
+	}
+	if len(got.projects) != 1 || len(got.capacities) != 1 {
+		t.Fatalf("unexpected result: %+v", got)
+	}
+	if elapsed >= 2*delay {
+		t.Errorf("loadProjects took %v, want well under %v (fetches should run concurrently)", elapsed, 2*delay)
+	}
+}
+
+// If ListProjects fails, loadProjects must still report the error (matching
+// prior sequential behavior) even though GetProjectCapacities ran too.
+func TestLoadProjectsListFailsReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/capacity/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+
+	msg := m.loadProjects(false, "")()
+	got, ok := msg.(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want projectsLoadedMsg", msg)
+	}
+	if got.err == nil {
+		t.Fatal("expected error when ListProjects fails")
+	}
+}
+
+// If GetProjectCapacities fails while ListProjects succeeds, the failure is
+// silently ignored and capacities come back empty.
+func TestLoadProjectsCapacitiesFailIgnored(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
+		case "/api/capacity/projects":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+
+	msg := m.loadProjects(false, "")()
+	got, ok := msg.(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want projectsLoadedMsg", msg)
+	}
+	if got.err != nil {
+		t.Fatalf("err = %v, want nil", got.err)
+	}
+	if len(got.projects) != 1 {
+		t.Fatalf("projects = %+v, want 1 entry", got.projects)
+	}
+	if len(got.capacities) != 0 {
+		t.Fatalf("capacities = %+v, want empty", got.capacities)
 	}
 }

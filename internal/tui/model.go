@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -166,15 +167,29 @@ func (m Model) checkConnection() tea.Cmd {
 func (m Model) loadProjects(echo bool, selectName string) tea.Cmd {
 	c := m.client
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		projects, err := c.ListProjects(ctx)
-		if err != nil {
-			return projectsLoadedMsg{err: err, echo: echo}
-		}
-		caps, _ := c.GetProjectCapacities(ctx)
-		return projectsLoadedMsg{projects: projects, capacities: caps, echo: echo, selectName: selectName}
-	}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			var wg sync.WaitGroup
+			var projects []client.Project
+			var err error
+			var caps []client.ProjectCapacity
+
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				projects, err = c.ListProjects(ctx)
+			}()
+			go func() {
+				defer wg.Done()
+				caps, _ = c.GetProjectCapacities(ctx)
+			}()
+			wg.Wait()
+
+			if err != nil {
+				return projectsLoadedMsg{err: err, echo: echo}
+			}
+			return projectsLoadedMsg{projects: projects, capacities: caps, echo: echo, selectName: selectName}	}
 }
 
 func (m Model) sendChat(projectID, message string) tea.Cmd {
