@@ -118,18 +118,21 @@ func (c *Client) GetSuccessFailureRates(ctx context.Context, projectID string) (
 	return out, err
 }
 
+// avgExecTimes is the shared fetch/decode helper for avg-execution-time endpoints.
+func (c *Client) avgExecTimes(ctx context.Context, segment, projectID string) ([]AvgExecutionTime, error) {
+	var out []AvgExecutionTime
+	err := c.getJSON(ctx, "/api/analytics/"+segment+optProject(projectID), &out)
+	return out, err
+}
+
 // GetAvgExecutionTimeByTask fetches per-task average execution times.
 func (c *Client) GetAvgExecutionTimeByTask(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	var out []AvgExecutionTime
-	err := c.getJSON(ctx, "/api/analytics/avg-execution-time-by-task"+optProject(projectID), &out)
-	return out, err
+	return c.avgExecTimes(ctx, "avg-execution-time-by-task", projectID)
 }
 
 // GetAvgExecutionTimeByAgent fetches per-model average execution times.
 func (c *Client) GetAvgExecutionTimeByAgent(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	var out []AvgExecutionTime
-	err := c.getJSON(ctx, "/api/analytics/avg-execution-time-by-agent"+optProject(projectID), &out)
-	return out, err
+	return c.avgExecTimes(ctx, "avg-execution-time-by-agent", projectID)
 }
 
 // GetMostFrequentTasks fetches the most frequently executed tasks.

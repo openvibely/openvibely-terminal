@@ -147,3 +147,69 @@ func TestListTaskLifecycleExecutions(t *testing.T) {
 		t.Errorf("unexpected execs: %+v", execs)
 	}
 }
+
+func TestGetAvgExecutionTimeByTask(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/avg-execution-time-by-task" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q", got)
+		}
+		json.NewEncoder(w).Encode([]AvgExecutionTime{
+			{ID: "t1", Name: "Triage", AvgMs: 1234.5, Count: 10},
+		})
+	}))
+
+	items, err := c.GetAvgExecutionTimeByTask(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetAvgExecutionTimeByTask: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "Triage" {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetAvgExecutionTimeByTaskUnauthorized(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	_, err := c.GetAvgExecutionTimeByTask(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for unauthorized response")
+	}
+}
+
+func TestGetAvgExecutionTimeByAgent(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/avg-execution-time-by-agent" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p2" {
+			t.Errorf("project_id = %q", got)
+		}
+		json.NewEncoder(w).Encode([]AvgExecutionTime{
+			{ID: "a1", Name: "claude-sonnet", AvgMs: 800.0, Count: 5},
+		})
+	}))
+
+	items, err := c.GetAvgExecutionTimeByAgent(context.Background(), "p2")
+	if err != nil {
+		t.Fatalf("GetAvgExecutionTimeByAgent: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "claude-sonnet" {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetAvgExecutionTimeByAgentUnauthorized(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	_, err := c.GetAvgExecutionTimeByAgent(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for unauthorized response")
+	}
+}
