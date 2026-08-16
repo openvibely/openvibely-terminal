@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -395,7 +396,7 @@ func scheduleCommand() command {
 		desc:    "scheduled/recurring task runs",
 		usage: []string{
 			"schedule                                   list schedules",
-			"schedule add <task> <2006-01-02T15:04> [daily|weekly|monthly|once]",
+			"schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]",
 			"schedule delete <id>                       remove a schedule",
 			"schedule toggle <id>                       enable/disable a schedule",
 		},
@@ -418,11 +419,16 @@ func scheduleCommand() command {
 				})
 			case "add":
 				if len(rest) < 2 {
-					return m, errCmd("usage: /schedule add <task> <2006-01-02T15:04> [daily|weekly|monthly|once]")
+					return m, errCmd("usage: /schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]")
 				}
 				repeat := "once"
+				interval := 1
+				if n, err := strconv.Atoi(rest[len(rest)-1]); err == nil && len(rest) >= 3 && isRepeat(rest[len(rest)-2]) {
+					interval = n
+					rest = rest[:len(rest)-1]
+				}
 				if isRepeat(rest[len(rest)-1]) {
-					repeat = strings.ToLower(rest[len(rest)-1])
+					repeat = normalizeRepeat(rest[len(rest)-1])
 					rest = rest[:len(rest)-1]
 				}
 				when := rest[len(rest)-1]
@@ -432,7 +438,7 @@ func scheduleCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.CreateSchedule(ctx, t.ID, when, repeat, 1); err != nil {
+					if err := c.CreateSchedule(ctx, t.ID, when, repeat, interval); err != nil {
 						return "", err
 					}
 					entries, summary, _ := c.GetSchedule(ctx, pid)
@@ -473,10 +479,20 @@ func scheduleCommand() command {
 
 func isRepeat(s string) bool {
 	switch strings.ToLower(s) {
-	case "once", "daily", "weekly", "monthly", "hourly":
+	case "once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours":
 		return true
 	}
 	return false
+}
+
+// normalizeRepeat maps user-facing repeat keywords to backend repeat types,
+// keeping "hourly" as an accepted synonym for "hours".
+func normalizeRepeat(s string) string {
+	r := strings.ToLower(s)
+	if r == "hourly" {
+		return "hours"
+	}
+	return r
 }
 
 // --- alerts ---

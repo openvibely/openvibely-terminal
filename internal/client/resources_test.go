@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -307,6 +308,42 @@ func TestCreateScheduleTranslatesHourlyToHours(t *testing.T) {
 	}
 	if form.Get("repeat_interval") != "1" {
 		t.Errorf("repeat_interval = %q", form.Get("repeat_interval"))
+	}
+}
+
+func TestCreateScheduleSendsFastRepeatTypes(t *testing.T) {
+	cases := []struct {
+		repeat   string
+		interval int
+	}{
+		{"seconds", 30},
+		{"minutes", 15},
+		{"hours", 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.repeat, func(t *testing.T) {
+			var form url.Values
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				form = r.PostForm
+				if r.URL.Path != "/tasks/t1/schedule" {
+					t.Errorf("path = %s", r.URL.Path)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			c, _ := New(srv.URL)
+			if err := c.CreateSchedule(context.Background(), "t1", "2026-01-02T09:00", tc.repeat, tc.interval); err != nil {
+				t.Fatal(err)
+			}
+			if form.Get("repeat_type") != tc.repeat {
+				t.Errorf("repeat_type = %q, want %q", form.Get("repeat_type"), tc.repeat)
+			}
+			if form.Get("repeat_interval") != strconv.Itoa(tc.interval) {
+				t.Errorf("repeat_interval = %q, want %d", form.Get("repeat_interval"), tc.interval)
+			}
+		})
 	}
 }
 

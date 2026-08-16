@@ -451,14 +451,34 @@ func TestScheduleAddResolvesTask(t *testing.T) {
 	}
 }
 
-func TestScheduleAddHourlyTranslatesToHoursRepeatType(t *testing.T) {
-	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
-	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 hourly")
-	if !rec.saw("POST", "/tasks/t-1/schedule") {
-		t.Errorf("calls:\n%s", rec.all())
+func TestScheduleAddFastRepeatTypes(t *testing.T) {
+	cases := []struct {
+		line           string
+		wantRepeatType string
+		wantInterval   string
+	}{
+		{"/schedule add Refactor 2026-09-01T10:00 seconds", "repeat_type=seconds", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 seconds 30", "repeat_type=seconds", "repeat_interval=30"},
+		{"/schedule add Refactor 2026-09-01T10:00 minutes", "repeat_type=minutes", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 minutes 15", "repeat_type=minutes", "repeat_interval=15"},
+		{"/schedule add Refactor 2026-09-01T10:00 hours", "repeat_type=hours", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 hours 4", "repeat_type=hours", "repeat_interval=4"},
+		{"/schedule add Refactor 2026-09-01T10:00 hourly", "repeat_type=hours", "repeat_interval=1"},
 	}
-	if !rec.sawForm("repeat_type=hours") {
-		t.Errorf("expected repeat_type=hours in form data:\n%v", rec.forms)
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+			runLine(t, m, tc.line)
+			if !rec.saw("POST", "/tasks/t-1/schedule") {
+				t.Errorf("calls:\n%s", rec.all())
+			}
+			if !rec.sawForm(tc.wantRepeatType) {
+				t.Errorf("expected %q in form data:\n%v", tc.wantRepeatType, rec.forms)
+			}
+			if !rec.sawForm(tc.wantInterval) {
+				t.Errorf("expected %q in form data:\n%v", tc.wantInterval, rec.forms)
+			}
+		})
 	}
 }
 

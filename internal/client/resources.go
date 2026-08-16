@@ -296,9 +296,10 @@ func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleE
 	return out, summary, nil
 }
 
-// CreateSchedule schedules a task. repeat is once/daily/weekly/monthly/hourly.
-// The user-facing "hourly" keyword is translated to the backend's "hours"
-// repeat_type, since the backend has no "hourly" value.
+// CreateSchedule schedules a task. repeat is
+// once/daily/weekly/monthly/seconds/minutes/hours/hourly. The user-facing
+// "hourly" keyword is translated to the backend's "hours" repeat_type, since
+// the backend has no "hourly" value.
 func (c *Client) CreateSchedule(ctx context.Context, taskID, runAt, repeat string, interval int) error {
 	if repeat == "hourly" {
 		repeat = "hours"
