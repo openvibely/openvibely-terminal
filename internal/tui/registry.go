@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -817,12 +818,21 @@ func agentsCommand() command {
 				})
 			case "metrics":
 				return m, run("Agent metrics", cmdTimeout, func(ctx context.Context) (string, error) {
-					metrics, err := c.GetAllAgentMetrics(ctx)
-					if err != nil {
-						return "", err
+					var (
+						metrics    []client.AgentMetric
+						best       *client.AgentRecommendation
+						cheapest   *client.AgentRecommendation
+						metricsErr error
+					)
+					var wg sync.WaitGroup
+					wg.Add(3)
+					go func() { defer wg.Done(); metrics, metricsErr = c.GetAllAgentMetrics(ctx) }()
+					go func() { defer wg.Done(); best, _ = c.GetBestAgent(ctx, "") }()
+					go func() { defer wg.Done(); cheapest, _ = c.GetCheapestAgent(ctx, "") }()
+					wg.Wait()
+					if metricsErr != nil {
+						return "", metricsErr
 					}
-					best, _ := c.GetBestAgent(ctx, "")
-					cheapest, _ := c.GetCheapestAgent(ctx, "")
 					return renderAgentMetrics(metrics, best, cheapest), nil
 				})
 			case "generate":

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -1533,6 +1534,155 @@ func TestDestructiveCommandsRequireConfirmation(t *testing.T) {
 		view := m.View()
 		if !strings.Contains(view, "yes") {
 			t.Errorf("confirmation prompt should be visible in view:\n%s", view)
+		}
+	})
+}
+
+// TestAgentsMetricsFetchesConcurrently verifies that the "agents metrics" case
+// fires GetAllAgentMetrics, GetBestAgent, and GetCheapestAgent concurrently.
+func TestAgentsMetricsFetchesConcurrently(t *testing.T) {
+	const delay = 150 * time.Millisecond
+
+	const metricsJSON = `[{"id":"m1","agent_config_id":"ac-1","task_type":"coding","success_count":10,"failure_count":2,"avg_duration_ms":500,"avg_cost_cents":3,"avg_quality_score":0.85}]`
+	const recJSON = `{"agent":{"name":"GPT-4"}}`
+
+	// Timing subtest: all three sleep for delay; total should be < 2*delay.
+	t.Run("all three fetches run concurrently", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/workflows/metrics":
+				time.Sleep(delay)
+				_, _ = w.Write([]byte(metricsJSON))
+			case "/api/workflows/best-agent":
+				time.Sleep(delay)
+				_, _ = w.Write([]byte(recJSON))
+			case "/api/workflows/cheapest-agent":
+				time.Sleep(delay)
+				_, _ = w.Write([]byte(recJSON))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		m = updated.(Model)
+		m.selectedID = "p1"
+		m.selectedName = "demo"
+
+		start := time.Now()
+		m = runLine(t, m, "/agents metrics")
+		elapsed := time.Since(start)
+
+		if elapsed >= 2*delay {
+			t.Errorf("agents metrics took %v, want well under %v (fetches must run concurrently)", elapsed, 2*delay)
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	// Regression: all 3 healthy → full render with metrics table.
+	t.Run("all healthy produces full render", func(t *testing.T) {
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/workflows/metrics":
+				_, _ = w.Write([]byte(metricsJSON))
+			case "/api/workflows/best-agent":
+				_, _ = w.Write([]byte(recJSON))
+			case "/api/workflows/cheapest-agent":
+				_, _ = w.Write([]byte(recJSON))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		m = runLine(t, m, "/agents metrics")
+		out := transcript(m)
+		if strings.Contains(out, "error:") {
+			t.Errorf("unexpected error:\n%s", out)
+		}
+		// renderAgentMetrics produces an AGENT column header
+		if !strings.Contains(out, "AGENT") {
+			t.Errorf("expected metrics table; got:\n%s", out)
+		}
+	})
+
+	// Regression: /api/workflows/metrics failure → error returned, no render.
+	t.Run("metrics endpoint failure returns error", func(t *testing.T) {
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/workflows/metrics":
+				w.WriteHeader(http.StatusInternalServerError)
+			case "/api/workflows/best-agent":
+				_, _ = w.Write([]byte(recJSON))
+			case "/api/workflows/cheapest-agent":
+				_, _ = w.Write([]byte(recJSON))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		m = runLine(t, m, "/agents metrics")
+		out := transcript(m)
+		if !strings.Contains(out, "error:") {
+			t.Errorf("expected error when metrics endpoint fails; got:\n%s", out)
+		}
+	})
+
+	// Regression: best-agent fails → partial render (nil best recommendation).
+	t.Run("best-agent failure renders gracefully", func(t *testing.T) {
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/workflows/metrics":
+				_, _ = w.Write([]byte(metricsJSON))
+			case "/api/workflows/best-agent":
+				w.WriteHeader(http.StatusInternalServerError)
+			case "/api/workflows/cheapest-agent":
+				_, _ = w.Write([]byte(recJSON))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		m = runLine(t, m, "/agents metrics")
+		out := transcript(m)
+		if strings.Contains(out, "error:") {
+			t.Errorf("best-agent failure must not surface as an error; got:\n%s", out)
+		}
+		if !strings.Contains(out, "AGENT") {
+			t.Errorf("expected metrics table even with nil best; got:\n%s", out)
+		}
+	})
+
+	// Regression: cheapest-agent fails → partial render (nil cheapest recommendation).
+	t.Run("cheapest-agent failure renders gracefully", func(t *testing.T) {
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/workflows/metrics":
+				_, _ = w.Write([]byte(metricsJSON))
+			case "/api/workflows/best-agent":
+				_, _ = w.Write([]byte(recJSON))
+			case "/api/workflows/cheapest-agent":
+				w.WriteHeader(http.StatusInternalServerError)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		m = runLine(t, m, "/agents metrics")
+		out := transcript(m)
+		if strings.Contains(out, "error:") {
+			t.Errorf("cheapest-agent failure must not surface as an error; got:\n%s", out)
+		}
+		if !strings.Contains(out, "AGENT") {
+			t.Errorf("expected metrics table even with nil cheapest; got:\n%s", out)
 		}
 	})
 }
