@@ -167,7 +167,7 @@ func TestProjectCommandSelectsByName(t *testing.T) {
 	}
 
 	m, _ = typeLine(t, m, "/project nope")
-	if !strings.Contains(transcript(m), "no project matching") {
+	if !strings.Contains(transcript(m), "nothing matches") {
 		t.Errorf("expected a not-found message, got:\n%s", transcript(m))
 	}
 }
@@ -203,7 +203,7 @@ func TestProjectCommandRejectsAmbiguousName(t *testing.T) {
 		t.Fatalf("ambiguous ref selected %q, want no selection", m.selectedName)
 	}
 	out := transcript(m)
-	if !strings.Contains(out, "matches 2 projects") ||
+	if !strings.Contains(out, "is ambiguous") ||
 		!strings.Contains(out, "OpenVibely TUI") {
 		t.Errorf("expected candidates to be listed, got:\n%s", out)
 	}
@@ -249,7 +249,7 @@ func TestProjectCommandDeferredLoadDoesNotFallBack(t *testing.T) {
 	if m.selectedID != "" {
 		t.Fatalf("selected %q for an unknown name", m.selectedName)
 	}
-	if !strings.Contains(transcript(m), "no project matching") {
+	if !strings.Contains(transcript(m), "nothing matches") {
 		t.Errorf("expected a not-found message, got:\n%s", transcript(m))
 	}
 }

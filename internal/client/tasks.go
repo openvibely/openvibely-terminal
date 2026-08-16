@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/net/html"
 )
@@ -243,27 +244,53 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error
 
 	// Thread and changes load asynchronously in the browser, so their panels
 	// are empty placeholders in the initial page; fetch the real fragments.
-	for _, t := range []struct {
-		path string
-		dst  *string
-	}{
-		{"/tasks/" + url.PathEscape(taskID) + "/thread", &d.Thread},
-		{"/tasks/" + url.PathEscape(taskID) + "/changes", &d.Changes},
-	} {
-		if n, err := c.getHTML(ctx, t.path); err == nil {
-			if text := NodeText(n); text != "" {
-				*t.dst = text
-			}
+	// Lifecycle executions (when needed) are independent of both, so all three
+	// fetches run concurrently rather than sequentially.
+	var wg sync.WaitGroup
+	var threadNode, changesNode *html.Node
+	var threadErr, changesErr error
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		threadNode, threadErr = c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/thread")
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		changesNode, changesErr = c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/changes")
+	}()
+
+	needLife := d.Life == ""
+	var execs []LifecycleExecution
+	var lifeErr error
+	if needLife {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			execs, lifeErr = c.ListTaskLifecycleExecutions(ctx, taskID)
+		}()
+	}
+
+	wg.Wait()
+
+	if threadErr == nil {
+		if text := NodeText(threadNode); text != "" {
+			d.Thread = text
 		}
 	}
-	if d.Life == "" {
-		if execs, err := c.ListTaskLifecycleExecutions(ctx, taskID); err == nil && len(execs) > 0 {
-			var b strings.Builder
-			for _, e := range execs {
-				fmt.Fprintf(&b, "%s  %s  %s  %s\n", e.When, e.SkillKey, e.Status, e.StartedAt)
-			}
-			d.Life = b.String()
+	if changesErr == nil {
+		if text := NodeText(changesNode); text != "" {
+			d.Changes = text
 		}
+	}
+	if needLife && lifeErr == nil && len(execs) > 0 {
+		var b strings.Builder
+		for _, e := range execs {
+			fmt.Fprintf(&b, "%s  %s  %s  %s\n", e.When, e.SkillKey, e.Status, e.StartedAt)
+		}
+		d.Life = b.String()
 	}
 	return d, nil
 }
