@@ -451,6 +451,17 @@ func TestScheduleAddResolvesTask(t *testing.T) {
 	}
 }
 
+func TestScheduleAddHourlyTranslatesToHoursRepeatType(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 hourly")
+	if !rec.saw("POST", "/tasks/t-1/schedule") {
+		t.Errorf("calls:\n%s", rec.all())
+	}
+	if !rec.sawForm("repeat_type=hours") {
+		t.Errorf("expected repeat_type=hours in form data:\n%v", rec.forms)
+	}
+}
+
 func TestPersonalitySet(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	runLine(t, m, "/personality set concise")
