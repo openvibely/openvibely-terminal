@@ -224,6 +224,17 @@ func (m Model) pollChat(messageID string) tea.Cmd {
 	})
 }
 
+// fetchChatStatus issues an immediate (no-tick) GetChatStatus call.
+func (m Model) fetchChatStatus(messageID string) tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		status, err := c.GetChatStatus(ctx, messageID)
+		return chatStatusMsg{status: status, err: err}
+	}
+}
+
 // run executes fn against the backend and turns its output into a resultMsg.
 func run(title string, timeout time.Duration, fn func(ctx context.Context) (string, error)) tea.Cmd {
 	return func() tea.Msg {
@@ -410,6 +421,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sseEventMsg:
 		m.handleSSEEvent(msg.event)
+		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
+			// Fast path: if the backend populated CompletedOutput in the SSE
+			// payload, display it immediately without an extra HTTP round-trip.
+			var ce client.ChatEvent
+			if json.Unmarshal(msg.event.Data, &ce) == nil && ce.CompletedOutput != "" {
+				m.pendingMsgID = ""
+				m.busy = false
+				m.append(entry{role: "agent", text: ce.CompletedOutput})
+				return m, m.waitForSSE()
+			}
+			// Otherwise issue an immediate status fetch instead of waiting for
+			// the next 1500ms poll tick.
+			return m, tea.Batch(m.waitForSSE(), m.fetchChatStatus(m.pendingMsgID))
+		}
 		return m, m.waitForSSE()
 
 	case sseDisconnectedMsg:

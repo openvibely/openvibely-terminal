@@ -243,6 +243,36 @@ func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	})
 }
 
+func TestTasksNewEmptyTitleFromPipeInput(t *testing.T) {
+	t.Run("pipe_only_is_rejected", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/tasks new | Write tests for the login module")
+		out := transcript(m)
+		if !strings.Contains(strings.ToLower(out), "usage") {
+			t.Errorf("expected usage error, got:\n%s", out)
+		}
+		if rec.saw("POST", "/tasks") {
+			t.Errorf("CreateTask must NOT be called when title is empty, calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("title_with_pipe_succeeds", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		runLine(t, m, "/tasks new My task | some description")
+		if !rec.saw("POST", "/tasks") {
+			t.Errorf("expected CreateTask call, calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("title_without_pipe_succeeds", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		runLine(t, m, "/tasks new My task")
+		if !rec.saw("POST", "/tasks") {
+			t.Errorf("expected CreateTask call, calls:\n%s", rec.all())
+		}
+	})
+}
+
 func TestAlertsCommandChainsDelete(t *testing.T) {
 	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
 	  data-search-text="build failed">

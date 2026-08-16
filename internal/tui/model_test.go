@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -583,5 +584,138 @@ func TestLoadProjectsCapacitiesFailIgnored(t *testing.T) {
 	}
 	if len(got.capacities) != 0 {
 		t.Fatalf("capacities = %+v, want empty", got.capacities)
+	}
+}
+
+// TestSSEChatResponseDoneTriggersImmediateFetch verifies that receiving a
+// chat_response_done event while a message is pending triggers an immediate
+// GetChatStatus call rather than waiting for the next 1500ms poll tick.
+func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
+	fetchCalled := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/chat/message/") {
+			select {
+			case fetchCalled <- struct{}{}:
+			default:
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+
+	m.pendingMsgID = "msg-42"
+	m.busy = true
+
+	// Wire up closed SSE channels so waitForSSE() returns immediately in the test.
+	events := make(chan client.Event)
+	errs := make(chan error)
+	close(events)
+	close(errs)
+	m.sseEvents = events
+	m.sseErrs = errs
+
+	// Deliver a chat_response_done SSE event with no CompletedOutput.
+	ev := client.Event{
+		Name: "chat_response_done",
+		Data: json.RawMessage(`{}`),
+	}
+	_, cmd := m.Update(sseEventMsg{event: ev})
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil cmd from sseEventMsg with chat_response_done")
+	}
+
+	// tea.Batch returns a Cmd that, when called, yields a BatchMsg containing
+	// the sub-cmds rather than running them immediately. Unwrap the batch and
+	// run each sub-cmd in its own goroutine so we can observe the fetch.
+	result := cmd()
+	batch, ok := result.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg from sseEventMsg chat_response_done branch, got %T", result)
+	}
+	for _, subcmd := range batch {
+		if subcmd != nil {
+			go subcmd()
+		}
+	}
+
+	select {
+	case <-fetchCalled:
+		// immediate fetch confirmed
+	case <-time.After(2 * time.Second):
+		t.Error("expected an immediate GetChatStatus fetch, but none arrived within 2s")
+	}
+}
+
+// TestSSEChatResponseDoneCompletedOutputFastPath verifies that when the
+// chat_response_done event carries a non-empty CompletedOutput, the model
+// displays the reply immediately without an extra HTTP round-trip.
+func TestSSEChatResponseDoneCompletedOutputFastPath(t *testing.T) {
+	m := newTestModel(t)
+	m.pendingMsgID = "msg-99"
+	m.busy = true
+
+	payload, _ := json.Marshal(client.ChatEvent{
+		Type:            "chat_response_done",
+		ExecID:          "e1",
+		CompletedOutput: "hello from the agent",
+	})
+	ev := client.Event{
+		Name: "chat_response_done",
+		Data: json.RawMessage(payload),
+	}
+	next, _ := m.Update(sseEventMsg{event: ev})
+	m = next.(Model)
+
+	if m.pendingMsgID != "" {
+		t.Error("pendingMsgID should be cleared after CompletedOutput fast path")
+	}
+	if m.busy {
+		t.Error("busy should be false after CompletedOutput fast path")
+	}
+	if !strings.Contains(transcript(m), "agent::hello from the agent") {
+		t.Errorf("expected agent reply in transcript:\n%s", transcript(m))
+	}
+}
+
+// TestSSEChatResponseDoneWithNoPendingIsNoOp verifies that receiving
+// chat_response_done when no message is pending does not trigger a fetch.
+func TestSSEChatResponseDoneWithNoPendingIsNoOp(t *testing.T) {
+	m := newTestModel(t)
+	// pendingMsgID is empty — no pending chat
+
+	// Wire up closed SSE channels so waitForSSE() returns immediately.
+	events := make(chan client.Event)
+	errs := make(chan error)
+	close(events)
+	close(errs)
+	m.sseEvents = events
+	m.sseErrs = errs
+
+	ev := client.Event{
+		Name: "chat_response_done",
+		Data: json.RawMessage(`{}`),
+	}
+	next, cmd := m.Update(sseEventMsg{event: ev})
+	m = next.(Model)
+	_ = m
+
+	if cmd == nil {
+		t.Fatal("expected waitForSSE re-arm cmd")
+	}
+	// The cmd should just be waitForSSE, not a batch. Run it and confirm no
+	// extra fetch request arrives — only sseDisconnectedMsg from closed channels.
+	result := cmd()
+	if _, ok := result.(sseDisconnectedMsg); !ok {
+		t.Errorf("expected sseDisconnectedMsg from waitForSSE on closed channels, got %T", result)
 	}
 }
