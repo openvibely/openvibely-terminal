@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -696,58 +697,91 @@ func renderCommandHelp(c command) string {
 
 // loadAnalytics fetches and renders one analytics section (or all of them).
 func loadAnalytics(ctx context.Context, c *client.Client, projectID, section string) (string, error) {
-	var b strings.Builder
 	want := func(name string) bool { return section == "" || section == name }
 
-	if want("usage") {
-		if u, err := c.GetUsageAnalytics(ctx, projectID); err == nil {
-			b.WriteString(renderUsage(u) + "\n\n")
-		} else if section == "usage" {
-			return "", err
-		}
+	type slot struct {
+		name string
+		out  string
+		err  error
 	}
-	if want("rates") {
-		if r, err := c.GetSuccessFailureRates(ctx, projectID); err == nil {
-			b.WriteString(renderRates(r) + "\n\n")
-		} else if section == "rates" {
-			return "", err
-		}
+
+	names := []string{"usage", "rates", "agents", "trends", "frequent", "failures", "skills"}
+	slots := make([]slot, len(names))
+	for i, n := range names {
+		slots[i].name = n
 	}
-	if want("agents") {
-		if a, err := c.GetAvgExecutionTimeByAgent(ctx, projectID); err == nil {
-			b.WriteString(renderExecTimes("Avg execution time by agent", a) + "\n\n")
-		} else if section == "agents" {
-			return "", err
+
+	var wg sync.WaitGroup
+	for i, name := range names {
+		if !want(name) {
+			continue
 		}
+		i, name := i, name
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			switch name {
+			case "usage":
+				if u, err := c.GetUsageAnalytics(ctx, projectID); err == nil {
+					slots[i].out = renderUsage(u) + "\n\n"
+				} else {
+					slots[i].err = err
+				}
+			case "rates":
+				if r, err := c.GetSuccessFailureRates(ctx, projectID); err == nil {
+					slots[i].out = renderRates(r) + "\n\n"
+				} else {
+					slots[i].err = err
+				}
+			case "agents":
+				if a, err := c.GetAvgExecutionTimeByAgent(ctx, projectID); err == nil {
+					slots[i].out = renderExecTimes("Avg execution time by agent", a) + "\n\n"
+				} else {
+					slots[i].err = err
+				}
+			case "trends":
+				if t, err := c.GetAvgExecutionTimeByTask(ctx, projectID); err == nil {
+					slots[i].out = renderExecTimes("Avg execution time by task", t) + "\n\n"
+				} else {
+					slots[i].err = err
+				}
+			case "frequent":
+				if f, err := c.GetMostFrequentTasks(ctx, projectID); err == nil {
+					slots[i].out = renderFrequent(f) + "\n\n"
+				} else {
+					slots[i].err = err
+				}
+			case "failures":
+				if f, err := c.GetFailedTaskPatterns(ctx, projectID); err == nil {
+					slots[i].out = renderFailures(f) + "\n\n"
+				} else {
+					slots[i].err = err
+				}
+			case "skills":
+				if s, err := c.GetSkillAnalytics(ctx, projectID); err == nil {
+					slots[i].out = renderSkillAnalytics(s) + "\n\n"
+				} else {
+					slots[i].err = err
+				}
+			}
+		}()
 	}
-	if want("trends") {
-		if t, err := c.GetAvgExecutionTimeByTask(ctx, projectID); err == nil {
-			b.WriteString(renderExecTimes("Avg execution time by task", t) + "\n\n")
-		} else if section == "trends" {
-			return "", err
+	wg.Wait()
+
+	var b strings.Builder
+	for _, s := range slots {
+		if !want(s.name) {
+			continue
 		}
-	}
-	if want("frequent") {
-		if f, err := c.GetMostFrequentTasks(ctx, projectID); err == nil {
-			b.WriteString(renderFrequent(f) + "\n\n")
-		} else if section == "frequent" {
-			return "", err
+		if s.err != nil {
+			if section == s.name {
+				return "", s.err
+			}
+			continue
 		}
+		b.WriteString(s.out)
 	}
-	if want("failures") {
-		if f, err := c.GetFailedTaskPatterns(ctx, projectID); err == nil {
-			b.WriteString(renderFailures(f) + "\n\n")
-		} else if section == "failures" {
-			return "", err
-		}
-	}
-	if want("skills") {
-		if s, err := c.GetSkillAnalytics(ctx, projectID); err == nil {
-			b.WriteString(renderSkillAnalytics(s) + "\n\n")
-		} else if section == "skills" {
-			return "", err
-		}
-	}
+
 	out := strings.TrimRight(b.String(), "\n")
 	if out == "" {
 		return "", fmt.Errorf("no analytics available")
