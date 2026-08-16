@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // boardHTML mirrors the real kanban markup: every card opens with a kebab menu
@@ -330,5 +331,204 @@ func TestMutationSurfacesServerError(t *testing.T) {
 	err := c.RunTask(context.Background(), "t1")
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("err = %v, want to mention boom", err)
+	}
+}
+
+// GetTask's trailing thread/changes/lifecycle fetches are independent of one
+// another, so they must run concurrently: total latency should track the max
+// of the three fetch times, not their sum.
+func TestGetTaskFetchesTabsConcurrently(t *testing.T) {
+	const delay = 150 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+				<h2 class="text-2xl font-bold truncate">Slow task</h2>
+				<div id="tab-details"><div id="task-detail-view">prompt</div></div>
+				<div id="tab-chat" hx-get="/tasks/t-1/thread"></div>
+				<div id="tab-changes" hx-get="/tasks/t-1/changes"></div>
+				<div id="tab-lifecycle"></div>
+			</div>`))
+		case "/tasks/t-1/thread":
+			time.Sleep(delay)
+			_, _ = w.Write([]byte(`<div>agent: on it</div>`))
+		case "/tasks/t-1/changes":
+			time.Sleep(delay)
+			_, _ = w.Write([]byte(`<div>3 files changed</div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			time.Sleep(delay)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"skill_key":"pre_task","when":"before","status":"ok","started_at":"now"}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	start := time.Now()
+	d, err := c.GetTask(context.Background(), "t-1")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.Thread, "on it") || !strings.Contains(d.Changes, "3 files changed") ||
+		!strings.Contains(d.Life, "pre_task") {
+		t.Fatalf("tabs not populated: %+v", d)
+	}
+	// Sequential fetches would take ~3*delay; concurrent fetches should stay
+	// well under 2*delay even with scheduling overhead.
+	if elapsed >= 2*delay {
+		t.Errorf("GetTask took %v, want well under %v (fetches should run concurrently)", elapsed, 2*delay)
+	}
+}
+
+// If the thread fetch fails, the changes tab must still populate normally,
+// and the thread tab must fall back to whatever placeholder the initial page
+// fetch produced.
+func TestGetTaskThreadFailsChangesSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+				<h2 class="text-2xl font-bold truncate">Task</h2>
+				<div id="tab-chat" hx-get="/tasks/t-1/thread">loading thread...</div>
+				<div id="tab-changes" hx-get="/tasks/t-1/changes"></div>
+			</div>`))
+		case "/tasks/t-1/thread":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/tasks/t-1/changes":
+			_, _ = w.Write([]byte(`<div>3 files changed</div>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	d, err := c.GetTask(context.Background(), "t-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.Thread, "loading thread") {
+		t.Errorf("thread = %q, want placeholder fallback", d.Thread)
+	}
+	if !strings.Contains(d.Changes, "3 files changed") {
+		t.Errorf("changes = %q, want fetched content", d.Changes)
+	}
+}
+
+// Symmetric case: changes fetch fails, thread fetch succeeds.
+func TestGetTaskChangesFailsThreadSucceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+				<h2 class="text-2xl font-bold truncate">Task</h2>
+				<div id="tab-chat" hx-get="/tasks/t-1/thread"></div>
+				<div id="tab-changes" hx-get="/tasks/t-1/changes">loading changes...</div>
+			</div>`))
+		case "/tasks/t-1/thread":
+			_, _ = w.Write([]byte(`<div>agent: on it</div>`))
+		case "/tasks/t-1/changes":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	d, err := c.GetTask(context.Background(), "t-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.Thread, "on it") {
+		t.Errorf("thread = %q, want fetched content", d.Thread)
+	}
+	if !strings.Contains(d.Changes, "loading changes") {
+		t.Errorf("changes = %q, want placeholder fallback", d.Changes)
+	}
+}
+
+// When the initial page already populated the Lifecycle tab, the lifecycle
+// executions endpoint must not be hit at all.
+func TestGetTaskSkipsLifecycleFetchWhenTabHasContent(t *testing.T) {
+	lifecycleHit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+				<h2 class="text-2xl font-bold truncate">Task</h2>
+				<div id="tab-chat" hx-get="/tasks/t-1/thread"></div>
+				<div id="tab-changes" hx-get="/tasks/t-1/changes"></div>
+				<div id="tab-lifecycle">pre_task ok</div>
+			</div>`))
+		case "/tasks/t-1/thread":
+			_, _ = w.Write([]byte(`<div>agent: on it</div>`))
+		case "/tasks/t-1/changes":
+			_, _ = w.Write([]byte(`<div>3 files changed</div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			lifecycleHit = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	d, err := c.GetTask(context.Background(), "t-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lifecycleHit {
+		t.Error("lifecycle-executions endpoint was fetched despite tab-lifecycle already having content")
+	}
+	if !strings.Contains(d.Life, "pre_task ok") {
+		t.Errorf("life = %q, want existing tab content preserved", d.Life)
+	}
+}
+
+// A canceled context must not block GetTask's concurrent fetches; they should
+// fail fast rather than hang for the server's response time.
+func TestGetTaskConcurrentFetchesRespectCanceledContext(t *testing.T) {
+	unblock := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+				<h2 class="text-2xl font-bold truncate">Task</h2>
+				<div id="tab-chat" hx-get="/tasks/t-1/thread"></div>
+				<div id="tab-changes" hx-get="/tasks/t-1/changes"></div>
+			</div>`))
+		case "/tasks/t-1/thread", "/tasks/t-1/changes":
+			<-unblock // never sent in this test; only reached if ctx cancellation is ignored
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	defer close(unblock)
+
+	c, _ := New(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = c.GetTask(ctx, "t-1")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetTask did not return promptly for a canceled context")
 	}
 }
