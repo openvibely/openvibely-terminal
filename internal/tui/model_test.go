@@ -719,3 +719,125 @@ func TestSSEChatResponseDoneWithNoPendingIsNoOp(t *testing.T) {
 		t.Errorf("expected sseDisconnectedMsg from waitForSSE on closed channels, got %T", result)
 	}
 }
+
+// TestSSEChatResponseDoneFromOtherProjectIsIgnored verifies that a
+// chat_response_done event whose ProjectID does not match m.selectedID is
+// silently re-armed without calling fetchChatStatus or appending a reply.
+func TestSSEChatResponseDoneFromOtherProjectIsIgnored(t *testing.T) {
+	fetchCalled := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/chat/message/") {
+			select {
+			case fetchCalled <- struct{}{}:
+			default:
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+
+	m.selectedID = "project-A"
+	m.pendingMsgID = "msg-42"
+	m.busy = true
+
+	// Wire up closed SSE channels so waitForSSE() returns immediately.
+	events := make(chan client.Event)
+	errs := make(chan error)
+	close(events)
+	close(errs)
+	m.sseEvents = events
+	m.sseErrs = errs
+
+	// Deliver a chat_response_done from a different project.
+	payload, _ := json.Marshal(client.ChatEvent{
+		Type:      "chat_response_done",
+		ProjectID: "project-B",
+		ExecID:    "e99",
+	})
+	ev := client.Event{
+		Name: "chat_response_done",
+		Data: json.RawMessage(payload),
+	}
+	next, cmd := m.Update(sseEventMsg{event: ev})
+	m = next.(Model)
+
+	// pendingMsgID must remain set — the foreign event must not consume it.
+	if m.pendingMsgID == "" {
+		t.Error("pendingMsgID should NOT be cleared for a foreign-project event")
+	}
+	// No agent reply must appear in the transcript.
+	if strings.Contains(transcript(m), "agent::") {
+		t.Errorf("unexpected agent reply in transcript for foreign-project event:\n%s", transcript(m))
+	}
+
+	// The returned cmd must be a plain waitForSSE re-arm (not a batch with a fetch).
+	if cmd == nil {
+		t.Fatal("expected a re-arm cmd, got nil")
+	}
+	result := cmd()
+	if _, ok := result.(sseDisconnectedMsg); !ok {
+		t.Errorf("expected sseDisconnectedMsg from waitForSSE re-arm, got %T", result)
+	}
+
+	// Confirm no HTTP fetch was triggered.
+	select {
+	case <-fetchCalled:
+		t.Error("fetchChatStatus must NOT be called for a foreign-project chat_response_done")
+	case <-time.After(200 * time.Millisecond):
+		// expected: no fetch
+	}
+}
+
+// TestConnectSSEPassesSelectedProjectID verifies that connectSSE passes
+// m.selectedID to StreamEvents, resulting in ?project_id=<selectedID> on
+// the GET /events/live request.
+func TestConnectSSEPassesSelectedProjectID(t *testing.T) {
+	reqCh := make(chan *http.Request, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/events/live" {
+			// Record the request, then close the connection so the goroutine exits.
+			select {
+			case reqCh <- r.Clone(r.Context()):
+			default:
+			}
+			// Returning immediately closes the connection, ending the stream.
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+
+	m.selectedID = "proj-123"
+
+	// connectSSE is a pointer-receiver method; it starts the SSE goroutine
+	// immediately (inside StreamEvents) before returning the cmd.
+	_ = m.connectSSE()
+
+	select {
+	case req := <-reqCh:
+		got := req.URL.Query().Get("project_id")
+		if got != "proj-123" {
+			t.Errorf("project_id query param = %q, want %q", got, "proj-123")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no request to /events/live received within 2s")
+	}
+}

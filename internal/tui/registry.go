@@ -1592,6 +1592,11 @@ func (m Model) pickProject(name string) (Model, tea.Cmd) {
 	m.selectedID = p.ID
 	m.selectedName = p.Name
 	m.append(entry{role: "system", text: "active project: " + p.Name})
+	// If SSE is active, reconnect with the new project ID so the server
+	// delivers only this project's events.
+	if m.sseCancel != nil {
+		return m, m.connectSSE()
+	}
 	return m, nil
 }
 

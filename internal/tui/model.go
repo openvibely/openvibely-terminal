@@ -252,7 +252,7 @@ func (m *Model) connectSSE() tea.Cmd {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.sseCancel = cancel
-	events, errs := m.client.StreamEvents(ctx, "")
+	events, errs := m.client.StreamEvents(ctx, m.selectedID)
 	m.sseEvents = events
 	m.sseErrs = errs
 	m.sseGeneration++
@@ -422,14 +422,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case sseEventMsg:
 		m.handleSSEEvent(msg.event)
 		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
-			// Fast path: if the backend populated CompletedOutput in the SSE
-			// payload, display it immediately without an extra HTTP round-trip.
 			var ce client.ChatEvent
-			if json.Unmarshal(msg.event.Data, &ce) == nil && ce.CompletedOutput != "" {
-				m.pendingMsgID = ""
-				m.busy = false
-				m.append(entry{role: "agent", text: ce.CompletedOutput})
-				return m, m.waitForSSE()
+			if json.Unmarshal(msg.event.Data, &ce) == nil {
+				// Ignore events from a foreign project. Allow empty ProjectID
+				// for single-project servers that omit the field.
+				if ce.ProjectID != "" && ce.ProjectID != m.selectedID {
+					return m, m.waitForSSE()
+				}
+				// Fast path: if the backend populated CompletedOutput in the SSE
+				// payload, display it immediately without an extra HTTP round-trip.
+				if ce.CompletedOutput != "" {
+					m.pendingMsgID = ""
+					m.busy = false
+					m.append(entry{role: "agent", text: ce.CompletedOutput})
+					return m, m.waitForSSE()
+				}
 			}
 			// Otherwise issue an immediate status fetch instead of waiting for
 			// the next 1500ms poll tick.
