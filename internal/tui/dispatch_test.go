@@ -1571,6 +1571,92 @@ func TestDestructiveCommandsRequireConfirmation(t *testing.T) {
 	})
 }
 
+// TestWorkersShowFetchesConcurrently verifies that the default "workers" show path
+// launches GetWorkerSettings and GetGlobalCapacity concurrently instead of sequentially.
+func TestWorkersShowFetchesConcurrently(t *testing.T) {
+	const delay = 150 * time.Millisecond
+
+	const capacityJSON = `{"total_running":2,"max_workers":8,"queue_size":0,"available_slots":6}`
+
+	// Timing subtest: both handlers sleep delay; total should be < 2*delay.
+	t.Run("both fetches run concurrently", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/workers":
+				time.Sleep(delay)
+				_, _ = w.Write([]byte("<html><body>worker settings page</body></html>"))
+			case r.URL.Path == "/api/capacity/global":
+				w.Header().Set("Content-Type", "application/json")
+				time.Sleep(delay)
+				_, _ = w.Write([]byte(capacityJSON))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		m = updated.(Model)
+		m.selectedID = "p1"
+		m.selectedName = "demo"
+
+		start := time.Now()
+		m = runLine(t, m, "/workers")
+		elapsed := time.Since(start)
+
+		if elapsed >= 2*delay {
+			t.Errorf("workers show took %v, want well under %v (fetches must run concurrently)", elapsed, 2*delay)
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	// GetWorkerSettings failure propagates as an error.
+	t.Run("GetWorkerSettings failure propagates", func(t *testing.T) {
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/workers":
+				w.WriteHeader(http.StatusInternalServerError)
+			case r.URL.Path == "/api/capacity/global":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(capacityJSON))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		m = runLine(t, m, "/workers")
+		out := transcript(m)
+		if !strings.Contains(out, "error:") {
+			t.Errorf("expected error when GetWorkerSettings fails; got:\n%s", out)
+		}
+	})
+
+	// GetGlobalCapacity failure is silently ignored; nil capacity still renders.
+	t.Run("GetGlobalCapacity failure ignored", func(t *testing.T) {
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Path == "/workers":
+				_, _ = w.Write([]byte("<html><body>worker settings page</body></html>"))
+			case r.URL.Path == "/api/capacity/global":
+				w.WriteHeader(http.StatusInternalServerError)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		m = runLine(t, m, "/workers")
+		out := transcript(m)
+		if strings.Contains(out, "error:") {
+			t.Errorf("GetGlobalCapacity failure must not surface as an error; got:\n%s", out)
+		}
+	})
+}
+
 // TestAgentsMetricsFetchesConcurrently verifies that the "agents metrics" case
 // fires GetAllAgentMetrics, GetBestAgent, and GetCheapestAgent concurrently.
 func TestAgentsMetricsFetchesConcurrently(t *testing.T) {

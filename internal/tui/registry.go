@@ -1047,11 +1047,19 @@ func workersCommand() command {
 				})
 			}
 			return m, run("Workers", cmdTimeout, func(ctx context.Context) (string, error) {
-				text, err := c.GetWorkerSettings(ctx, pid)
-				if err != nil {
-					return "", err
+				var (
+					wg       sync.WaitGroup
+					text     string
+					textErr  error
+					capacity *client.GlobalCapacity
+				)
+				wg.Add(2)
+				go func() { defer wg.Done(); text, textErr = c.GetWorkerSettings(ctx, pid) }()
+				go func() { defer wg.Done(); capacity, _ = c.GetGlobalCapacity(ctx) }()
+				wg.Wait()
+				if textErr != nil {
+					return "", textErr
 				}
-				capacity, _ := c.GetGlobalCapacity(ctx)
 				return renderWorkers(capacity, text), nil
 			})
 		},
