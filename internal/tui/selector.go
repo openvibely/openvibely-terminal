@@ -62,7 +62,7 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 }
 
 // clearSelector resets all selector state.
-func (m *Model) clearSelector() {
+func (m Model) clearSelector() Model {
 	m.selectorActive = false
 	m.selectorTitle = ""
 	m.selectorItems = nil
@@ -70,6 +70,7 @@ func (m *Model) clearSelector() {
 	m.selectorCursor = 0
 	m.pendingCommand = ""
 	m.selectorPrefill = false
+	return m
 }
 
 // filteredSelectorItems returns the items matching the typed filter.
@@ -98,7 +99,7 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc":
-		m.clearSelector()
+		m = m.clearSelector()
 		m.append(entry{role: "system", text: "cancelled"})
 		return m, nil
 
@@ -133,7 +134,7 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		it := items[cur]
 		command, prefill := m.pendingCommand, m.selectorPrefill
-		m.clearSelector()
+		m = m.clearSelector()
 		return m.selectorDispatch(command, prefill, it)
 	}
 
@@ -167,8 +168,7 @@ func (m Model) selectorDispatch(command string, prefill bool, it selectorItem) (
 // items with the cursor highlighted.
 func (m Model) renderSelector() string {
 	var rows []string
-	rows = append(rows, sectionStyle.Render("▸ "+m.selectorTitle)+
-		dimStyle.Render("  (type to filter · ↑↓ choose · enter select · esc cancel)"))
+	rows = append(rows, sectionStyle.Render("▸ "+m.selectorTitle))
 	rows = append(rows, "> "+m.selectorFilter+"█")
 
 	items := m.filteredSelectorItems()

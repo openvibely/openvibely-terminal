@@ -1932,7 +1932,7 @@ func TestDestructiveEmptyRefEntersSelectorMode(t *testing.T) {
 		wantHint string
 	}{
 		{"tasks_delete", "/tasks delete", "no tasks yet"},
-		{"alerts_delete", "/alerts delete", "no alerts"},
+		{"alerts_delete", "/alerts delete", "no pending alerts"},
 		{"automations_delete", "/automations delete", "no automations"},
 		{"skills_delete", "/skills delete", "no skills yet"},
 		{"agents_delete", "/agents delete", "no agent definitions"},

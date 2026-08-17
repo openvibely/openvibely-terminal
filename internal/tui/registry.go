@@ -726,7 +726,7 @@ func alertsCommand() command {
 				if ref == "" {
 					return selectorOr(m, "usage: /alerts "+action+" <alert>",
 						selectorFor("Alerts", "alerts "+action,
-							"no alerts — /alerts approve|reject|dismiss <id> acts on pending ones", false,
+							"no pending alerts in the current project", false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								alerts, err := c.ListAlerts(ctx, pid)
 								if err != nil {

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -350,5 +352,64 @@ func TestSelectorViewRendersFilterAndCursor(t *testing.T) {
 	}
 	if strings.Contains(view, "Ship the docs") {
 		t.Errorf("non-matching item should be filtered out:\n%s", view)
+	}
+}
+
+// TestSelectorFetchErrorShowsError verifies that when the backend fetch fails
+// (e.g. HTTP 500), an error entry is appended and the selector stays closed.
+func TestSelectorFetchErrorShowsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tasks" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/tasks run")
+
+	if m.selectorActive {
+		t.Error("selector must not activate when the fetch fails")
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "500") && !strings.Contains(strings.ToLower(out), "error") {
+		t.Errorf("expected an error message in the transcript:\n%s", out)
+	}
+}
+
+// TestSelectorCursorBoundaries verifies that pressing ↑ at the top keeps the
+// cursor at 0, and pressing ↓ at the last item keeps it there.
+func TestSelectorCursorBoundaries(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/tasks open")
+	if !m.selectorActive {
+		t.Fatalf("selector not active:\n%s", transcript(m))
+	}
+	// Up at index 0 must stay at 0.
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyUp})
+	if m.selectorCursor != 0 {
+		t.Errorf("cursor at top after ↑ = %d, want 0", m.selectorCursor)
+	}
+	// Move to last item (index 1 for our two-item fixture).
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectorCursor != 1 {
+		t.Errorf("cursor after ↓ = %d, want 1", m.selectorCursor)
+	}
+	// Down at last must stay at last.
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.selectorCursor != 1 {
+		t.Errorf("cursor at bottom after ↓ = %d, want 1", m.selectorCursor)
 	}
 }
