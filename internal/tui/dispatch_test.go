@@ -544,6 +544,36 @@ func TestTasksGoalAndReplyRequirePipe(t *testing.T) {
 	})
 }
 
+func TestTasksEditEmptyTitleFromDoublePipe(t *testing.T) {
+	t.Run("double_pipe_empty_title_is_rejected", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		m = runLine(t, m, "/tasks edit Refactor | | new description")
+		out := transcript(m)
+		if !strings.Contains(out, "|") {
+			t.Errorf("expected usage error containing '|', got:\n%s", out)
+		}
+		if rec.saw("PUT", "/tasks/t-1") {
+			t.Errorf("UpdateTask must NOT be called when title is empty, calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("valid_title_and_prompt_succeeds", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		runLine(t, m, "/tasks edit Refactor | New Title | new prompt")
+		if !rec.saw("PUT", "/tasks/t-1") {
+			t.Errorf("expected UpdateTask call, calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("title_only_no_prompt_succeeds", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+		runLine(t, m, "/tasks edit Refactor | New Title")
+		if !rec.saw("PUT", "/tasks/t-1") {
+			t.Errorf("expected UpdateTask call, calls:\n%s", rec.all())
+		}
+	})
+}
+
 func TestWorkersProjectLimit(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	runLine(t, m, "/workers project 3")

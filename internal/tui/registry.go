@@ -256,6 +256,9 @@ func tasksCommand() command {
 					return m, errCmd("usage: /tasks edit <task> | <new title> [| <new prompt>]")
 				}
 				title, prompt := splitPipe(newTitle)
+				if title == "" {
+					return m, errCmd("usage: /tasks edit <task> | <new title> [| <new prompt>]")
+				}
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
