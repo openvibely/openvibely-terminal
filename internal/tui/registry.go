@@ -191,16 +191,17 @@ func tasksCommand() command {
 					defer cancel()
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
-						return threadOpenedMsg{err: err}
+						return threadOpenedMsg{projectID: pid, err: err}
 					}
 					d, err := c.GetTask(ctx, t.ID)
 					if err != nil {
-						return threadOpenedMsg{err: err}
+						return threadOpenedMsg{projectID: pid, err: err}
 					}
 					return threadOpenedMsg{
-						taskID: t.ID,
-						title:  firstNonEmpty(d.Task.Title, t.Title, shortID(t.ID)),
-						body:   renderThread(d),
+						projectID: pid,
+						taskID:    t.ID,
+						title:     firstNonEmpty(d.Task.Title, t.Title, shortID(t.ID)),
+						body:      renderThread(d),
 					}
 				}
 

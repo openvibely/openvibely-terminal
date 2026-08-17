@@ -153,6 +153,28 @@ func TestSwitchingProjectLeavesThread(t *testing.T) {
 	}
 }
 
+// A threadOpenedMsg from a previous project must be discarded after a project switch.
+func TestStaleThreadOpenedMsgDiscardedAfterProjectSwitch(t *testing.T) {
+	m, _ := threadModel(t)
+	// Simulate a project switch: select project B, clear thread state.
+	m.selectedID = "project-B"
+	m.threadID = ""
+	m.threadTitle = ""
+
+	// Deliver a stale threadOpenedMsg carrying the old project's ID.
+	updated, _ := m.Update(threadOpenedMsg{
+		projectID: "project-A-id",
+		taskID:    "task-from-A",
+		title:     "Old Task",
+		body:      "some content",
+	})
+	m = updated.(Model)
+
+	if m.threadID != "" {
+		t.Errorf("stale threadOpenedMsg set threadID = %q, want empty", m.threadID)
+	}
+}
+
 // A failure to open a task must not put the model into thread mode.
 func TestTasksOpenFailureDoesNotEnterThread(t *testing.T) {
 	m, _ := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})

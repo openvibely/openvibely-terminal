@@ -489,6 +489,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: msg.err.Error()})
 			return m, nil
 		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil // stale — project switched while fetch was in flight
+		}
 		m.threadID = msg.taskID
 		m.threadTitle = msg.title
 		m.append(entry{role: "result", head: "Thread · " + msg.title, text: msg.body})

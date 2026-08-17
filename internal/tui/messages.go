@@ -48,10 +48,11 @@ type resultMsg struct {
 // threadOpenedMsg enters task-thread mode: subsequent plain-text input is
 // posted as a follow-up on this task rather than to the project agent.
 type threadOpenedMsg struct {
-	taskID string
-	title  string
-	body   string // rendered thread to show on entry
-	err    error
+	projectID string
+	taskID    string
+	title     string
+	body      string // rendered thread to show on entry
+	err       error
 }
 
 // sseEventMsg delivers one live event from the SSE stream.
