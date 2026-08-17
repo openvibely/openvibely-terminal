@@ -106,6 +106,16 @@ type Model struct {
 	// confirmation ("yes" + Enter executes it; Esc or anything else cancels).
 	pendingConfirmation *pendingCmd
 
+	// inline ref selector (opened when a command needing a <ref> is run
+	// without one): key input is routed to the picker while active.
+	selectorActive  bool
+	selectorTitle   string
+	selectorItems   []selectorItem
+	selectorFilter  string
+	selectorCursor  int
+	pendingCommand  string // e.g. "tasks open"; re-dispatched with the chosen ref
+	selectorPrefill bool   // prime the input instead of dispatching (piped commands)
+
 	// live events
 	showEvents    bool // stream events into the transcript
 	sseConnected  bool
@@ -384,6 +394,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
+	case selectorActiveMsg:
+		return m.handleSelector(msg)
+
 	case connCheckedMsg:
 		if msg.err != nil {
 			if m.connected {
@@ -551,6 +564,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey routes keys; the input owns almost everything.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.selectorActive {
+		return m.handleSelectorKey(msg)
+	}
 	switch msg.String() {
 	case "ctrl+c", "ctrl+d":
 		m.quitting = true

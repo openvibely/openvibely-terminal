@@ -68,6 +68,29 @@ type sseDisconnectedMsg struct {
 // sseConnectedMsg indicates a new SSE stream was established.
 type sseConnectedMsg struct{}
 
+// selectorItem is one choice in the inline ref selector.
+type selectorItem struct {
+	ref    string // dispatched as the command argument (ID/handle/type)
+	label  string // primary display text (name/title)
+	detail string // dimmed secondary text (status, description…)
+}
+
+// selectorActiveMsg asks the model to open the inline ref selector for a
+// command that was invoked without its <ref> argument. The command handler
+// fetches the candidate list and the model decides what to do with it:
+// error, empty hint, auto-select a single item, or open the picker.
+type selectorActiveMsg struct {
+	title   string // transcript heading for notes/empty hints
+	command string // pending command verb, e.g. "tasks open"
+	// emptyHint is shown (dimmed) when there is nothing to select.
+	emptyHint string
+	// prefill, when set, puts "/<command> <ref> | " into the input instead of
+	// dispatching immediately — for commands that need more piped arguments.
+	prefill bool
+	items   []selectorItem
+	err     error
+}
+
 // tickMsg drives periodic refresh (status re-check).
 type tickMsg struct{}
 

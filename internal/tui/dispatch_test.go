@@ -1238,12 +1238,31 @@ func TestChannelsBackendFailureSurfaces(t *testing.T) {
 	}
 }
 
-// TestChannelsMissingArgError verifies that test/remove with no channel name
-// return a clear usage error without posting to the backend.
-func TestChannelsMissingArgError(t *testing.T) {
+// TestChannelsMissingArgOpensSelector verifies that test/remove with no
+// channel name open the inline channel selector without posting to the
+// backend, and that CLI mode keeps the usage error.
+func TestChannelsMissingArgOpensSelector(t *testing.T) {
 	for _, action := range []string{"test", "remove"} {
 		action := action
 		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, "/channels "+action)
+			if rec.saw("POST", "/channels") {
+				t.Errorf("must not POST when channel name is missing:\n%s", rec.all())
+			}
+			if !m.selectorActive {
+				t.Errorf("expected selector mode:\n%s", transcript(m))
+			}
+			if m.pendingCommand != "channels "+action {
+				t.Errorf("pendingCommand = %q, want %q", m.pendingCommand, "channels "+action)
+			}
+			if len(m.selectorItems) != len(client.KnownChannels) {
+				t.Errorf("selector items = %d, want %d", len(m.selectorItems), len(client.KnownChannels))
+			}
+		})
+		t.Run(action+"_cli", func(t *testing.T) {
+			cliMode = true
+			defer func() { cliMode = false }()
 			m, rec := dispatchModel(t, nil)
 			m = runLine(t, m, "/channels "+action)
 			if rec.saw("POST", "/channels") {
@@ -1902,22 +1921,23 @@ func TestAgentsMetricsFetchesConcurrently(t *testing.T) {
 	})
 }
 
-// TestDestructiveEmptyRefShowsUsageError verifies that every destructive
-// command immediately returns a usage error when called with no target
-// argument, without prompting the user or making any backend HTTP calls.
-func TestDestructiveEmptyRefShowsUsageError(t *testing.T) {
+// TestDestructiveEmptyRefEntersSelectorMode verifies that in the TUI a
+// destructive command with no target argument no longer errors: with an empty
+// backend list it shows the empty-state hint, and it never sets a
+// pendingConfirmation or performs the destructive call.
+func TestDestructiveEmptyRefEntersSelectorMode(t *testing.T) {
 	cases := []struct {
-		name    string
-		cmd     string
-		wantMsg string
+		name     string
+		cmd      string
+		wantHint string
 	}{
-		{"tasks_delete", "/tasks delete", "usage: /tasks delete"},
-		{"alerts_delete", "/alerts delete", "usage: /alerts delete"},
-		{"automations_delete", "/automations delete", "usage: /automations delete"},
-		{"skills_delete", "/skills delete", "usage: /skills delete"},
-		{"agents_delete", "/agents delete", "usage: /agents delete"},
-		{"models_delete", "/models delete", "usage: /models delete"},
-		{"schedule_delete", "/schedule delete", "usage: /schedule delete"},
+		{"tasks_delete", "/tasks delete", "no tasks yet"},
+		{"alerts_delete", "/alerts delete", "no alerts"},
+		{"automations_delete", "/automations delete", "no automations"},
+		{"skills_delete", "/skills delete", "no skills yet"},
+		{"agents_delete", "/agents delete", "no agent definitions"},
+		{"models_delete", "/models delete", "no models configured"},
+		{"schedule_delete", "/schedule delete", "nothing scheduled"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -1925,11 +1945,53 @@ func TestDestructiveEmptyRefShowsUsageError(t *testing.T) {
 			m, rec := dispatchModel(t, nil)
 			m = runLine(t, m, tc.cmd)
 			out := transcript(m)
-			if !strings.Contains(strings.ToLower(out), "usage") {
-				t.Errorf("expected usage error, got:\n%s", out)
+			if !strings.Contains(out, tc.wantHint) {
+				t.Errorf("expected empty-state hint %q, got:\n%s", tc.wantHint, out)
+			}
+			if strings.Contains(strings.ToLower(out), "usage") {
+				t.Errorf("must not show a usage error in TUI mode:\n%s", out)
 			}
 			if m.pendingConfirmation != nil {
 				t.Error("pendingConfirmation must NOT be set when ref is empty")
+			}
+			for _, method := range []string{"DELETE", "POST", "PUT", "PATCH"} {
+				rec.mu.Lock()
+				for _, c := range rec.calls {
+					if strings.HasPrefix(c, method+" ") {
+						t.Errorf("no mutating call expected, saw %s", c)
+					}
+				}
+				rec.mu.Unlock()
+			}
+		})
+	}
+}
+
+// TestDestructiveEmptyRefCLIStillShowsUsage verifies that headless (CLI) mode
+// keeps the original usage error when the ref is missing — there is no
+// interactive selector to fall back to.
+func TestDestructiveEmptyRefCLIStillShowsUsage(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{"tasks_delete", "/tasks delete"},
+		{"alerts_delete", "/alerts delete"},
+		{"automations_delete", "/automations delete"},
+		{"skills_delete", "/skills delete"},
+		{"agents_delete", "/agents delete"},
+		{"models_delete", "/models delete"},
+		{"schedule_delete", "/schedule delete"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cliMode = true
+			defer func() { cliMode = false }()
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.cmd)
+			if out := transcript(m); !strings.Contains(strings.ToLower(out), "usage") {
+				t.Errorf("expected usage error in CLI mode, got:\n%s", out)
 			}
 			rec.mu.Lock()
 			nCalls := len(rec.calls)

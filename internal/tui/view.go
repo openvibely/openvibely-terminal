@@ -27,6 +27,11 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader() + "\n")
 	b.WriteString(m.transcript.View() + "\n")
+	if m.selectorActive {
+		b.WriteString(m.renderSelector() + "\n")
+		b.WriteString(helpStyle.Render(m.hint()))
+		return b.String()
+	}
 	if menu := m.renderMenu(); menu != "" {
 		b.WriteString(menu + "\n")
 	}
@@ -112,6 +117,9 @@ func (m Model) renderMenu() string {
 }
 
 func (m Model) hint() string {
+	if m.selectorActive {
+		return "type to filter · ↑↓ choose · enter select · esc cancel"
+	}
 	if len(m.menu) > 0 {
 		return "tab complete · ↑↓ choose · enter run · esc close"
 	}

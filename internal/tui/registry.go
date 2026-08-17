@@ -129,7 +129,48 @@ func confirmOr(m Model, displayMsg, cliMsg string, cmd tea.Cmd) (Model, tea.Cmd)
 	return m, nil
 }
 
+// selectorOr routes a ref-less command invocation: in the TUI it opens the
+// inline interactive selector; in CLI mode (no interactivity) it keeps the
+// original usage error.
+func selectorOr(m Model, usage string, sel tea.Cmd) (Model, tea.Cmd) {
+	if cliMode {
+		return m, errCmd(usage)
+	}
+	return m, sel
+}
+
 // --- tasks ---
+
+// taskSelectorItems converts tasks into selector rows.
+func taskSelectorItems(tasks []client.Task) []selectorItem {
+	items := make([]selectorItem, 0, len(tasks))
+	for _, t := range tasks {
+		detail := t.Category
+		if t.Status != "" {
+			detail += " · " + t.Status
+		}
+		items = append(items, selectorItem{
+			ref:    t.ID,
+			label:  firstNonEmpty(t.Title, shortID(t.ID)),
+			detail: strings.Trim(detail, " ·"),
+		})
+	}
+	return items
+}
+
+// taskSelector opens the inline task picker for a ref-less tasks subcommand.
+func taskSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd) {
+	c, pid := m.client, m.selectedID
+	return selectorOr(m, usage, selectorFor("Tasks", command,
+		"no tasks yet — /tasks new <title> creates one", prefill,
+		func(ctx context.Context) ([]selectorItem, error) {
+			tasks, err := c.ListTasks(ctx, pid)
+			if err != nil {
+				return nil, err
+			}
+			return taskSelectorItems(tasks), nil
+		}))
+}
 
 func tasksCommand() command {
 	actions := []string{"list", "open", "show", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
@@ -142,6 +183,7 @@ func tasksCommand() command {
 		usage: []string{
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
+			"omit <task> on open/show/edit/run/stop/delete/goal/reply → interactive selector",
 			"tasks show <task> [tab]                    details, thread, changes, schedules, chaining, attachments, lifecycle",
 			"tasks new <title> [| <prompt>]             create a task",
 			"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
@@ -184,7 +226,7 @@ func tasksCommand() command {
 
 			case "open":
 				if ref == "" {
-					return m, errCmd("usage: /tasks open <id|title>")
+					return taskSelector(m, "usage: /tasks open <id|title>", "tasks open", false)
 				}
 				return m, func() tea.Msg {
 					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
@@ -215,6 +257,9 @@ func tasksCommand() command {
 					showRest = showRest[:n-1]
 				}
 				showRef := strings.Join(showRest, " ")
+				if showRef == "" {
+					return taskSelector(m, "usage: /tasks show <id|title> [tab]", "tasks show", false)
+				}
 				return m, run("Task", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, showRef)
 					if err != nil {
@@ -253,7 +298,10 @@ func tasksCommand() command {
 
 			case "edit":
 				ref, newTitle := splitPipe(ref)
-				if ref == "" || newTitle == "" {
+				if ref == "" {
+					return taskSelector(m, "usage: /tasks edit <task> | <new title> [| <new prompt>]", "tasks edit", true)
+				}
+				if newTitle == "" {
 					return m, errCmd("usage: /tasks edit <task> | <new title> [| <new prompt>]")
 				}
 				title, prompt := splitPipe(newTitle)
@@ -300,8 +348,8 @@ func tasksCommand() command {
 				})
 
 			case "run", "stop", "delete":
-				if action == "delete" && ref == "" {
-					return m, errCmd("usage: /tasks delete <task>")
+				if ref == "" {
+					return taskSelector(m, "usage: /tasks "+action+" <task>", "tasks "+action, false)
 				}
 				cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, ref)
@@ -352,7 +400,7 @@ func tasksCommand() command {
 
 			case "goal":
 				if len(rest) < 1 {
-					return m, errCmd("usage: /tasks goal <task> | <objective>  (objective \"clear\" removes it)")
+					return taskSelector(m, "usage: /tasks goal <task> | <objective>  (objective \"clear\" removes it)", "tasks goal", true)
 				}
 				target, objective := splitPipe(strings.Join(rest, " "))
 				if objective == "" {
@@ -377,7 +425,7 @@ func tasksCommand() command {
 
 			case "reply":
 				if len(rest) < 1 {
-					return m, errCmd("usage: /tasks reply <task> | <message>")
+					return taskSelector(m, "usage: /tasks reply <task> | <message>", "tasks reply", true)
 				}
 				target, message := splitPipe(strings.Join(rest, " "))
 				if message == "" {
@@ -480,6 +528,7 @@ func scheduleCommand() command {
 			"schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]",
 			"schedule delete <id>                       remove a schedule",
 			"schedule toggle <id>                       enable/disable a schedule",
+			"omit <id> on delete/toggle → interactive selector",
 		},
 		examples: []string{
 			`schedule add "Daily standup report" 2026-01-20T09:00 daily`,
@@ -535,8 +584,27 @@ func scheduleCommand() command {
 				})
 			case "delete", "toggle":
 				ref := strings.Join(rest, " ")
-				if action == "delete" && ref == "" {
-					return m, errCmd("usage: /schedule delete <id>")
+				if ref == "" {
+					return selectorOr(m, "usage: /schedule "+action+" <id>",
+						selectorFor("Schedule", "schedule "+action,
+							"nothing scheduled — /schedule add <task> <2006-01-02T15:04> daily", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								entries, _, err := c.GetSchedule(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(entries))
+								for _, e := range entries {
+									if e.ScheduleID == "" {
+										continue
+									}
+									items = append(items, selectorItem{
+										ref:   e.ScheduleID,
+										label: firstNonEmpty(e.Text, shortID(e.ScheduleID)),
+									})
+								}
+								return items, nil
+							}))
 				}
 				cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
 					entries, _, err := c.GetSchedule(ctx, pid)
@@ -608,6 +676,7 @@ func alertsCommand() command {
 			"alerts [filter]                            list alerts",
 			"alerts read|approve|reject|dismiss <alert>",
 			"alerts delete <alert>                      delete one alert",
+			"omit <alert> on read/approve/reject/dismiss/delete → interactive selector",
 			"alerts read-all                            mark every alert read",
 			"alerts clear                               delete every alert",
 		},
@@ -654,8 +723,25 @@ func alertsCommand() command {
 					"use --force to confirm deleting all alerts",
 					cmd)
 			default:
-				if action == "delete" && ref == "" {
-					return m, errCmd("usage: /alerts delete <alert>")
+				if ref == "" {
+					return selectorOr(m, "usage: /alerts "+action+" <alert>",
+						selectorFor("Alerts", "alerts "+action,
+							"no alerts — /alerts approve|reject|dismiss <id> acts on pending ones", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								alerts, err := c.ListAlerts(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(alerts))
+								for _, a := range alerts {
+									items = append(items, selectorItem{
+										ref:    a.ID,
+										label:  firstNonEmpty(a.Title, a.Message, a.Text, shortID(a.ID)),
+										detail: strings.Join(a.Badges, " "),
+									})
+								}
+								return items, nil
+							}))
 				}
 				cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
 					alerts, err := c.ListAlerts(ctx, pid)
@@ -694,6 +780,28 @@ func alertsCommand() command {
 
 // --- skills ---
 
+// skillSelector opens the inline skill picker for a ref-less skills subcommand.
+func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd) {
+	c, pid := m.client, m.selectedID
+	return selectorOr(m, usage, selectorFor("Skills", command,
+		"no skills yet — /skills add <name> creates one", prefill,
+		func(ctx context.Context) ([]selectorItem, error) {
+			skills, err := c.ListSkills(ctx, pid)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]selectorItem, 0, len(skills))
+			for _, s := range skills {
+				items = append(items, selectorItem{
+					ref:    s.Handle,
+					label:  firstNonEmpty(s.Name, s.Handle),
+					detail: truncate(s.Description, 40),
+				})
+			}
+			return items, nil
+		}))
+}
+
 func skillsCommand() command {
 	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always"}
 	return command{
@@ -710,6 +818,7 @@ func skillsCommand() command {
 			"skills delete <skill>                      remove a skill",
 			"skills enable|disable <skill>              toggle availability",
 			"skills always <skill>                      always load this skill",
+			"omit <skill> on show/edit/delete/enable/disable/always → interactive selector",
 		},
 		examples: []string{
 			`skills add retry-logic | Wrap HTTP calls in exponential backoff`,
@@ -734,6 +843,9 @@ func skillsCommand() command {
 					return renderSkills(skills, ref), nil
 				})
 			case "show":
+				if ref == "" {
+					return skillSelector(m, "usage: /skills show <skill>", "skills show", false)
+				}
 				return m, run("Skill", cmdTimeout, func(ctx context.Context) (string, error) {
 					skills, err := c.ListSkills(ctx, pid)
 					if err != nil {
@@ -773,7 +885,10 @@ func skillsCommand() command {
 				})
 			case "edit":
 				ref2, body := splitPipe(ref)
-				if ref2 == "" || body == "" {
+				if ref2 == "" {
+					return skillSelector(m, "usage: /skills edit <skill> | <new body>", "skills edit", true)
+				}
+				if body == "" {
 					return m, errCmd("usage: /skills edit <skill> | <new body>")
 				}
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -793,8 +908,8 @@ func skillsCommand() command {
 					return "updated skill " + s.Handle, nil
 				})
 			default:
-				if action == "delete" && ref == "" {
-					return m, errCmd("usage: /skills delete <skill>")
+				if ref == "" {
+					return skillSelector(m, "usage: /skills "+action+" <skill>", "skills "+action, false)
 				}
 				cmd := run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
 					skills, err := c.ListSkills(ctx, pid)
@@ -849,7 +964,7 @@ func agentsCommand() command {
 		usage: []string{
 			"agents [filter]                            list agent definitions",
 			"agents generate <description>              create an agent from a description",
-			"agents delete <agent>                      remove an agent definition",
+			"agents delete <agent>                      remove an agent definition (omit <agent> → interactive selector)",
 			"agents metrics                             per-agent workflow metrics",
 		},
 		examples: []string{
@@ -907,7 +1022,24 @@ func agentsCommand() command {
 				})
 			case "delete":
 				if ref == "" {
-					return m, errCmd("usage: /agents delete <agent>")
+					return selectorOr(m, "usage: /agents delete <agent>",
+						selectorFor("Agents", "agents delete",
+							"no agent definitions — /agents generate <description> creates one", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								agents, err := c.ListAgents(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(agents))
+								for _, a := range agents {
+									items = append(items, selectorItem{
+										ref:    a.ID,
+										label:  firstNonEmpty(a.Name, a.Key, shortID(a.ID)),
+										detail: truncate(a.Description, 40),
+									})
+								}
+								return items, nil
+							}))
 				}
 				cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
 					agents, err := c.ListAgents(ctx, pid)
@@ -951,6 +1083,7 @@ func modelsCommand() command {
 			"models [filter]                            list configured models",
 			"models default <model>                     set the default model",
 			"models delete <model>                      remove a model",
+			"omit <model> on default/delete → interactive selector",
 			"models capacity                            per-model capacity and usage",
 		},
 		examples: []string{
@@ -984,8 +1117,25 @@ func modelsCommand() command {
 					return renderModelCapacity(caps), nil
 				})
 			default:
-				if action == "delete" && ref == "" {
-					return m, errCmd("usage: /models delete <model>")
+				if ref == "" {
+					return selectorOr(m, "usage: /models "+action+" <model>",
+						selectorFor("Models", "models "+action,
+							"no models configured — add a model via the web UI or API", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								list, err := c.ListModels(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(list))
+								for _, mo := range list {
+									items = append(items, selectorItem{
+										ref:    mo.ID,
+										label:  firstNonEmpty(mo.Name, mo.Model, shortID(mo.ID)),
+										detail: strings.TrimSpace(mo.Provider + " " + mo.Model),
+									})
+								}
+								return items, nil
+							}))
 				}
 				cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
 					list, err := c.ListModels(ctx, pid)
@@ -1112,6 +1262,7 @@ func channelsCommand() command {
 			"channels                                   list configured integrations",
 			"channels test <channel>                    send a test message (telegram, slack, discord, email)",
 			"channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)",
+			"omit <channel> on test/remove → interactive selector",
 			"Note: GitHub and Slack OAuth connect/callback require a browser (known parity gap).",
 		},
 		examples: []string{
@@ -1130,10 +1281,18 @@ func channelsCommand() command {
 					return c.GetChannels(ctx, pid)
 				})
 			default:
+				if ref == "" {
+					return selectorOr(m, fmt.Sprintf("usage: /channels %s <channel>", action),
+						selectorFor("Channels", "channels "+action, "no channels available", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								items := make([]selectorItem, 0, len(client.KnownChannels))
+								for _, ch := range client.KnownChannels {
+									items = append(items, selectorItem{ref: ch.Type, label: ch.Name})
+								}
+								return items, nil
+							}))
+				}
 				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
-					if ref == "" {
-						return "", fmt.Errorf("usage: /channels %s <channel>", action)
-					}
 					ch, err := matchRef(client.KnownChannels, ref,
 						func(ch client.Channel) string { return ch.Type },
 						func(ch client.Channel) string { return ch.Name })
@@ -1312,6 +1471,7 @@ func automationsCommand() command {
 			"automations pause <automation>              pause an active automation",
 			"automations resume <automation>             resume a paused automation",
 			"automations delete <automation>             remove an automation",
+			"omit <automation> on run-now/pause/resume/delete → interactive selector",
 		},
 		examples: []string{
 			`automations run-now "Nightly sweep"`,
@@ -1336,13 +1496,27 @@ func automationsCommand() command {
 					return c.GetAutomations(ctx, pid)
 				})
 			default:
-				if action == "delete" && ref == "" {
-					return m, errCmd("usage: /automations delete <automation>")
+				if ref == "" {
+					return selectorOr(m, fmt.Sprintf("usage: /automations %s <automation>", action),
+						selectorFor("Automations", "automations "+action,
+							"no automations yet — create one via the web UI", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								automations, err := c.ListAutomations(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(automations))
+								for _, a := range automations {
+									items = append(items, selectorItem{
+										ref:    a.ID,
+										label:  firstNonEmpty(a.Name, shortID(a.ID)),
+										detail: a.State,
+									})
+								}
+								return items, nil
+							}))
 				}
 				cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
-					if ref == "" {
-						return "", fmt.Errorf("usage: /automations %s <automation>", action)
-					}
 					automations, err := c.ListAutomations(ctx, pid)
 					if err != nil {
 						return "", err
@@ -1420,6 +1594,21 @@ func projectCommand() command {
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
 			if len(args) == 0 {
+				if !cliMode && len(m.projects) > 1 {
+					projects := m.projects
+					return m, selectorFor("Projects", "project", "no projects", false,
+						func(context.Context) ([]selectorItem, error) {
+							items := make([]selectorItem, 0, len(projects))
+							for _, p := range projects {
+								items = append(items, selectorItem{
+									ref:    p.ID,
+									label:  p.Name,
+									detail: truncate(p.Path, 40),
+								})
+							}
+							return items, nil
+						})
+				}
 				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, nil, m.selectedID)})
 				return m, nil
 			}
