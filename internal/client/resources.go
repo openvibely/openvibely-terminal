@@ -410,7 +410,12 @@ func (c *Client) GenerateReflectionSummary(ctx context.Context, projectID string
 	return c.doForm(ctx, http.MethodPost, "/history/summary"+query("project_id", projectID), nil)
 }
 
-// GradeIdeas runs idea grading (the Grades view on the history screen).
+// GetGrades returns the current idea grades without triggering a new grading run.
+func (c *Client) GetGrades(ctx context.Context, projectID string) (string, error) {
+	return c.pageText(ctx, "/history"+query("project_id", projectID), "idea-grade-content")
+}
+
+// GradeIdeas triggers a fresh grading pass (the Grades view on the history screen).
 func (c *Client) GradeIdeas(ctx context.Context, projectID string) (string, error) {
 	if err := c.doForm(ctx, http.MethodPost, "/history/grade-ideas"+query("project_id", projectID), nil); err != nil {
 		return "", err

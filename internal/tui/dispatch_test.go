@@ -370,7 +370,7 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 		{"/reflection", "GET", "/history"},
 		{"/insights", "GET", "/insights"},
 		{"/automations", "GET", "/automations"},
-		{"/grades", "POST", "/history/grade-ideas"},
+		{"/grades", "GET", "/history"},
 		{"/build", "POST", "/api/autonomous/trigger"},
 		{"/models capacity", "GET", "/api/capacity/models"},
 		{"/agents metrics", "GET", "/api/workflows/metrics"},
@@ -1470,6 +1470,72 @@ func TestGenerateThenFetch(t *testing.T) {
 		m = runLine(t, m, "/insights analyze")
 		if fetchCalled {
 			t.Error("fetch (GET /insights) must not be called when generate fails")
+		}
+		if !strings.Contains(transcript(m), "error:") {
+			t.Errorf("expected error in transcript:\n%s", transcript(m))
+		}
+	})
+
+	// grades: bare command — only GET /history, no POST /history/grade-ideas
+	t.Run("grades show fetches without generate", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/history": `<div id="idea-grade-content">grades content</div>`})
+		m = runLine(t, m, "/grades")
+		if !rec.saw("GET", "/history") {
+			t.Errorf("expected GET /history; calls:\n%s", rec.all())
+		}
+		if rec.saw("POST", "/history/grade-ideas") {
+			t.Errorf("unexpected POST /history/grade-ideas for bare /grades; calls:\n%s", rec.all())
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	// grades run: POST /history/grade-ideas then GET /history; failure short-circuits
+	t.Run("grades run calls generate then fetch", func(t *testing.T) {
+		var generateCalled, fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			if r.Method == "POST" && r.URL.Path == "/history/grade-ideas" {
+				generateCalled = true
+				_, _ = w.Write([]byte("ok"))
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/history" {
+				fetchCalled = true
+				_, _ = w.Write([]byte(`<div id="idea-grade-content">grades content</div>`))
+				return
+			}
+			_, _ = w.Write([]byte("{}"))
+		})
+		m = runLine(t, m, "/grades run")
+		if !generateCalled {
+			t.Error("expected GradeIdeas (POST /history/grade-ideas) to be called")
+		}
+		if !fetchCalled {
+			t.Error("expected GetGrades (GET /history) to be called after generate")
+		}
+		if strings.Contains(transcript(m), "error:") {
+			t.Errorf("unexpected error:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("grades run generate failure short-circuits", func(t *testing.T) {
+		var fetchCalled bool
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && r.URL.Path == "/history/grade-ideas" {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			if r.Method == "GET" && r.URL.Path == "/history" {
+				fetchCalled = true
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div id="idea-grade-content">grades content</div>`))
+		})
+		m = runLine(t, m, "/grades run")
+		if fetchCalled {
+			t.Error("fetch (GET /history) must not be called when generate fails")
 		}
 		if !strings.Contains(transcript(m), "error:") {
 			t.Errorf("expected error in transcript:\n%s", transcript(m))

@@ -1248,13 +1248,23 @@ func reflectionCommand() command {
 }
 
 func gradesCommand() command {
+	actions := []string{"show", "run"}
 	return command{
-		name: "grades",
-		desc: "grade the project's ideas/backlog quality",
-		run: func(m Model, _ []string) (Model, tea.Cmd) {
+		name:    "grades",
+		actions: actions,
+		desc:    "grade the project's ideas/backlog quality",
+		usage: []string{
+			"grades                                     show the current idea grades",
+			"grades run                                 run a fresh grading pass",
+		},
+		examples: []string{`grades`, `grades run`},
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			return m, run("Grades", cmdTimeout, func(ctx context.Context) (string, error) {
-				return c.GradeIdeas(ctx, pid)
+				return generateThenFetch(ctx, "run", action,
+					func(ctx context.Context) error { _, err := c.GradeIdeas(ctx, pid); return err },
+					func(ctx context.Context) (string, error) { return c.GetGrades(ctx, pid) })
 			})
 		},
 	}
