@@ -142,6 +142,41 @@ func TestRenderThreadFallsBackToDetails(t *testing.T) {
 	}
 }
 
+// Empty-state messages must include actionable slash-command hints (VISION.md "Friendly By Default").
+func TestEmptyStateHints(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		hint string
+	}{
+		{
+			name: "alerts",
+			out:  stripANSI(renderAlerts(nil, "")),
+			hint: "/alerts",
+		},
+		{
+			name: "skills",
+			out:  stripANSI(renderSkills(nil, "")),
+			hint: "/skills",
+		},
+		{
+			name: "agents",
+			out:  stripANSI(renderAgents(nil, "")),
+			hint: "/agents",
+		},
+		{
+			name: "models",
+			out:  stripANSI(renderModels(nil, "")),
+			hint: "web UI",
+		},
+	}
+	for _, c := range cases {
+		if !strings.Contains(c.out, c.hint) {
+			t.Errorf("empty %s state missing hint %q: %q", c.name, c.hint, c.out)
+		}
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder

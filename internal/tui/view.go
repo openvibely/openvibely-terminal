@@ -464,7 +464,7 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 		if filter != "" {
 			return dimStyle.Render("no alerts match " + filter)
 		}
-		return dimStyle.Render("no alerts")
+		return dimStyle.Render("no alerts — /alerts approve|reject|dismiss <id> acts on pending ones")
 	}
 	out := table(rows)
 	if unread > 0 {
@@ -492,7 +492,7 @@ func renderSkills(skills []client.Skill, filter string) string {
 		rows = append(rows, []string{s.Handle, state, s.Scope, truncate(s.Description, 50)})
 	}
 	if len(rows) == 0 {
-		return dimStyle.Render("no skills")
+		return dimStyle.Render("no skills yet — /skills add <name> creates one")
 	}
 	return table(append([][]string{{"HANDLE", "STATE", "SCOPE", "DESCRIPTION"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/skills show <handle> · /skills enable|disable|always|delete <handle>")
@@ -523,7 +523,7 @@ func renderAgents(agents []client.AgentDef, filter string) string {
 		rows = append(rows, []string{truncate(a.Name, 24), a.Scope, truncate(a.Model, 22), truncate(a.Description, 40)})
 	}
 	if len(rows) == 0 {
-		return dimStyle.Render("no agent definitions")
+		return dimStyle.Render("no agent definitions — /agents generate <description> creates one")
 	}
 	return table(append([][]string{{"NAME", "SCOPE", "MODEL", "DESCRIPTION"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/agents metrics · /agents generate <description> · /agents delete <name>")
@@ -564,7 +564,7 @@ func renderModels(list []client.LLMModel, filter string) string {
 		rows = append(rows, []string{truncate(mo.Name, 26), mo.Provider, truncate(mo.Model, 30)})
 	}
 	if len(rows) == 0 {
-		return dimStyle.Render("no models configured")
+		return dimStyle.Render("no models configured — add a model via the web UI or API")
 	}
 	return table(append([][]string{{"NAME", "PROVIDER", "MODEL"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/models default <name> · /models delete <name> · /models capacity")
