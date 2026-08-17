@@ -196,8 +196,8 @@ func writeEntries(out io.Writer, entries []entry) {
 // This is used in --json mode so the caller receives the bare JSON payload.
 func writeJSONEntries(out io.Writer, entries []entry) {
 	for _, e := range entries {
-		if e.role == "error" {
-			continue // reported through the exit status instead
+		if e.role == "error" || e.role == "system" {
+			continue // errors via exit status; system messages are housekeeping noise
 		}
 		text := strings.TrimRight(e.text, "\n")
 		if text != "" {

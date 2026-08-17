@@ -1087,9 +1087,6 @@ func channelsCommand() command {
 			switch action {
 			case "", "list":
 				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
-					if jsonMode {
-						return marshalJSON(client.KnownChannels)
-					}
 					return c.GetChannels(ctx, pid)
 				})
 			default:

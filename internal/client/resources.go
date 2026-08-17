@@ -21,12 +21,12 @@ import (
 
 // Alert is one row on the Alerts screen.
 type Alert struct {
-	ID      string
-	Title   string
-	Message string
-	Text    string   // searchable text (type, state, body)
-	Badges  []string // type, decision state, processing state
-	Read    bool
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Message string   `json:"message"`
+	Text    string   `json:"text"`    // searchable text (type, state, body)
+	Badges  []string `json:"badges"`  // type, decision state, processing state
+	Read    bool     `json:"read"`
 }
 
 // ListAlerts scrapes the alerts screen for a project.
@@ -102,14 +102,14 @@ func (c *Client) DeleteAllAlerts(ctx context.Context, projectID string) error {
 
 // Skill is one card on the Skills screen.
 type Skill struct {
-	Handle      string
-	Name        string
-	Description string
-	Scope       string
-	Source      string
-	Content     string
-	Enabled     bool
-	AlwaysUse   bool
+	Handle      string `json:"handle"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Scope       string `json:"scope"`
+	Source      string `json:"source"`
+	Content     string `json:"content"`
+	Enabled     bool   `json:"enabled"`
+	AlwaysUse   bool   `json:"always_use"`
 }
 
 // ListSkills scrapes the skills screen.
@@ -177,11 +177,11 @@ func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle string
 
 // LLMModel is one card on the Models screen.
 type LLMModel struct {
-	ID       string
-	Name     string
-	Provider string
-	Model    string
-	Text     string
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+	Text     string `json:"text"`
 }
 
 // ListModels scrapes the models screen.
@@ -221,12 +221,12 @@ func (c *Client) DeleteModel(ctx context.Context, modelID string) error {
 
 // AgentDef is one card on the Agents screen.
 type AgentDef struct {
-	ID          string
-	Key         string
-	Name        string
-	Description string
-	Model       string
-	Scope       string
+	ID          string `json:"id"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Model       string `json:"model"`
+	Scope       string `json:"scope"`
 }
 
 // ListAgents scrapes the agents screen.
@@ -269,9 +269,9 @@ func (c *Client) GenerateAgent(ctx context.Context, projectID, description strin
 
 // ScheduleEntry is one scheduled task occurrence.
 type ScheduleEntry struct {
-	TaskID     string
-	ScheduleID string
-	Text       string
+	TaskID     string `json:"task_id"`
+	ScheduleID string `json:"schedule_id"`
+	Text       string `json:"text"`
 }
 
 // GetSchedule scrapes the Schedule screen for a project.
@@ -345,8 +345,8 @@ func (c *Client) SetProjectWorkerLimit(ctx context.Context, projectID string, li
 // GitHub and Slack OAuth connect/callback flows require a browser and are not
 // exposed here (known TUI parity gap).
 type Channel struct {
-	Type string // telegram, slack, discord, email
-	Name string // display name
+	Type string `json:"type"` // telegram, slack, discord, email
+	Name string `json:"name"` // display name
 }
 
 // KnownChannels is the fixed set of TUI-manageable channel integrations.
@@ -435,9 +435,9 @@ func (c *Client) GetAutomations(ctx context.Context, projectID string) (string, 
 
 // Automation is one card on the Automations screen.
 type Automation struct {
-	ID    string
-	Name  string
-	State string
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	State string `json:"state"`
 }
 
 // ListAutomations scrapes the automations screen for a project. Each card

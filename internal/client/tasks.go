@@ -21,14 +21,14 @@ import (
 
 // Task is one card on the kanban board.
 type Task struct {
-	ID           string
-	ProjectID    string
-	Title        string
-	Prompt       string
-	Category     string // backlog | active | completed | scheduled
-	Status       string // pending | queued | running | completed | failed | cancelled | blocked
-	DisplayOrder int
-	Badges       []string // model, agent, tag, priority, Goal, Chain, Swarm...
+	ID           string   `json:"id"`
+	ProjectID    string   `json:"project_id"`
+	Title        string   `json:"title"`
+	Prompt       string   `json:"prompt"`
+	Category     string   `json:"category"` // backlog | active | completed | scheduled
+	Status       string   `json:"status"`   // pending | queued | running | completed | failed | cancelled | blocked
+	DisplayOrder int      `json:"display_order"`
+	Badges       []string `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
 }
 
 // TaskDetail is the task detail page split into its tabs.
