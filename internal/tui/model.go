@@ -290,25 +290,22 @@ func (m Model) sendChat(projectID, message string) tea.Cmd {
 	}
 }
 
+func (m Model) doChatStatus(messageID string) tea.Msg {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	status, err := m.client.GetChatStatus(ctx, messageID)
+	return chatStatusMsg{status: status, err: err}
+}
+
 func (m Model) pollChat(messageID string) tea.Cmd {
-	c := m.client
 	return tea.Tick(chatPollInterval, func(time.Time) tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		status, err := c.GetChatStatus(ctx, messageID)
-		return chatStatusMsg{status: status, err: err}
+		return m.doChatStatus(messageID)
 	})
 }
 
 // fetchChatStatus issues an immediate (no-tick) GetChatStatus call.
 func (m Model) fetchChatStatus(messageID string) tea.Cmd {
-	c := m.client
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		status, err := c.GetChatStatus(ctx, messageID)
-		return chatStatusMsg{status: status, err: err}
-	}
+	return func() tea.Msg { return m.doChatStatus(messageID) }
 }
 
 // run executes fn against the backend and turns its output into a resultMsg.
