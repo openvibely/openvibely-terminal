@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -90,6 +91,16 @@ func refreshAndRender[T any](status string, list func() ([]T, error), render fun
 	return status + "\n\n" + render(items, ""), nil
 }
 
+// marshalJSON marshals v to a JSON string. When jsonMode is false it is never
+// called; callers should guard with `if jsonMode { ... }`.
+func marshalJSON(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("json: %w", err)
+	}
+	return string(b), nil
+}
+
 func titleFor(name string) string {
 	if name == "" {
 		return ""
@@ -165,6 +176,9 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
+					if jsonMode {
+						return marshalJSON(tasks)
+					}
 					return renderBoard(tasks, ref), nil
 				})
 
@@ -204,6 +218,9 @@ func tasksCommand() command {
 					t, err := resolveTask(ctx, c, pid, showRef)
 					if err != nil {
 						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(t)
 					}
 					d, err := c.GetTask(ctx, t.ID)
 					if err != nil {
@@ -477,6 +494,9 @@ func scheduleCommand() command {
 					if err != nil {
 						return "", err
 					}
+					if jsonMode {
+						return marshalJSON(entries)
+					}
 					return renderSchedule(entries, summary), nil
 				})
 			case "add":
@@ -598,6 +618,9 @@ func alertsCommand() command {
 					if err != nil {
 						return "", err
 					}
+					if jsonMode {
+						return marshalJSON(alerts)
+					}
 					return renderAlerts(alerts, ref), nil
 				})
 			case "read-all":
@@ -691,6 +714,9 @@ func skillsCommand() command {
 					skills, err := c.ListSkills(ctx, pid)
 					if err != nil {
 						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(skills)
 					}
 					return renderSkills(skills, ref), nil
 				})
@@ -817,6 +843,9 @@ func agentsCommand() command {
 					if err != nil {
 						return "", err
 					}
+					if jsonMode {
+						return marshalJSON(agents)
+					}
 					return renderAgents(agents, ref), nil
 				})
 			case "metrics":
@@ -911,6 +940,9 @@ func modelsCommand() command {
 					list, err := c.ListModels(ctx, pid)
 					if err != nil {
 						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(list)
 					}
 					return renderModels(list, ref), nil
 				})
@@ -1055,6 +1087,9 @@ func channelsCommand() command {
 			switch action {
 			case "", "list":
 				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+					if jsonMode {
+						return marshalJSON(client.KnownChannels)
+					}
 					return c.GetChannels(ctx, pid)
 				})
 			default:
@@ -1244,6 +1279,13 @@ func automationsCommand() command {
 			switch action {
 			case "", "list":
 				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+					if jsonMode {
+						automations, err := c.ListAutomations(ctx, pid)
+						if err != nil {
+							return "", err
+						}
+						return marshalJSON(automations)
+					}
 					return c.GetAutomations(ctx, pid)
 				})
 			default:
@@ -1346,6 +1388,16 @@ func projectsCommand() command {
 		desc: "list projects with running/queued counts",
 		run: func(m Model, _ []string) (Model, tea.Cmd) {
 			m.busy = false
+			if jsonMode {
+				c := m.client
+				return m, run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
+					projects, err := c.ListProjects(ctx)
+					if err != nil {
+						return "", err
+					}
+					return marshalJSON(projects)
+				})
+			}
 			return m, m.loadProjects(true, "")
 		},
 	}

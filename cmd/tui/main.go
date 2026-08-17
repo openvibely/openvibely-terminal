@@ -51,6 +51,7 @@ func run() error {
 	project := flag.String("project", os.Getenv("OPENVIBELY_PROJECT"), "project to select: name, ID or unique prefix")
 	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear)")
 	flag.BoolVar(force, "f", false, "shorthand for -force")
+	json := flag.Bool("json", false, "emit machine-readable JSON output for list and show commands")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -71,7 +72,7 @@ func run() error {
 
 	// Arguments after the flags mean "run this one command and exit".
 	if args := flag.Args(); len(args) > 0 {
-		return tui.RunCLI(c, os.Stdout, *project, args, *force)
+		return tui.RunCLI(c, os.Stdout, *project, args, *force, *json)
 	}
 
 	return runTUI(c, *project)

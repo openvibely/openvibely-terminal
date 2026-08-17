@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,7 +47,7 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "", []string{"help"}, false); err != nil {
+	if err := RunCLI(c, &out, "", []string{"help"}, false, false); err != nil {
 		t.Fatalf("help failed: %v", err)
 	}
 	// CLI help lists bare subcommands, since that is how they are invoked
@@ -76,7 +77,7 @@ func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"tasks"}, false); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"tasks"}, false, false); err != nil {
 		t.Fatalf("tasks failed: %v", err)
 	}
 	if !rec.saw("GET", "/tasks") {
@@ -95,7 +96,7 @@ func TestCLISelectsRequestedProject(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "other", []string{"tasks"}, false); err != nil {
+	if err := RunCLI(c, &out, "other", []string{"tasks"}, false, false); err != nil {
 		t.Fatalf("tasks failed: %v", err)
 	}
 	if !rec.sawQuery("project_id=p2") {
@@ -108,7 +109,7 @@ func TestCLIUnknownProjectFails(t *testing.T) {
 	c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects})
 
 	var out bytes.Buffer
-	err := RunCLI(c, &out, "nope", []string{"tasks"}, false)
+	err := RunCLI(c, &out, "nope", []string{"tasks"}, false, false)
 	if err == nil {
 		t.Fatal("expected an error for an unknown project")
 	}
@@ -121,7 +122,7 @@ func TestCLIUnknownCommandFails(t *testing.T) {
 	c, _ := cliServer(t, nil)
 
 	var out bytes.Buffer
-	err := RunCLI(c, &out, "", []string{"frobnicate"}, false)
+	err := RunCLI(c, &out, "", []string{"frobnicate"}, false, false)
 	if err == nil || !strings.Contains(err.Error(), "unknown command") {
 		t.Fatalf("err = %v, want unknown command", err)
 	}
@@ -129,7 +130,7 @@ func TestCLIUnknownCommandFails(t *testing.T) {
 
 func TestCLINoArgsFails(t *testing.T) {
 	c, _ := cliServer(t, nil)
-	if err := RunCLI(c, &bytes.Buffer{}, "", nil, false); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "", nil, false, false); err == nil {
 		t.Fatal("expected an error with no command")
 	}
 }
@@ -138,7 +139,7 @@ func TestCLINoArgsFails(t *testing.T) {
 func TestCLIAcceptsLeadingSlash(t *testing.T) {
 	c, _ := client.New("http://127.0.0.1:1")
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "", []string{"/help"}, false); err != nil {
+	if err := RunCLI(c, &out, "", []string{"/help"}, false, false); err != nil {
 		t.Fatalf("/help failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "tasks") {
@@ -161,7 +162,7 @@ func TestCLIReportsBackendErrors(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := client.New(srv.URL)
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks"}, false); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks"}, false, false); err == nil {
 		t.Fatal("expected a backend error")
 	}
 }
@@ -188,7 +189,7 @@ func TestCLIChatSendsAndPrintsReply(t *testing.T) {
 
 	c, _ := client.New(srv.URL)
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"chat", "ship the docs"}, false); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"chat", "ship the docs"}, false, false); err != nil {
 		t.Fatalf("chat failed: %v", err)
 	}
 	if !rec.saw("POST", "/api/chat/message") {
@@ -210,7 +211,7 @@ func TestCLIRunsTaskMutation(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"tasks", "run", "Refactor"}, false); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "run", "Refactor"}, false, false); err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
 	if !rec.saw("POST", "/tasks/t-1/run") {
@@ -233,7 +234,7 @@ func TestCLIRunsAutomationsPause(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"automations", "pause", "Native"}, false); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"automations", "pause", "Native"}, false, false); err != nil {
 		t.Fatalf("pause failed: %v", err)
 	}
 	if !rec.saw("POST", "/automations/au-1/pause") {
@@ -249,7 +250,7 @@ func TestCLIRunsChannelsTest(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"channels", "test", "email"}, false); err != nil {
+	if err := RunCLI(c, &out, "demo", []string{"channels", "test", "email"}, false, false); err != nil {
 		t.Fatalf("channels test failed: %v", err)
 	}
 	if !rec.saw("POST", "/channels/email/test") {
@@ -276,7 +277,7 @@ func TestCLIChannelsTestFailsOnBackendError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "test", "telegram"}, false); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "test", "telegram"}, false, false); err == nil {
 		t.Fatal("expected a nonzero exit on backend failure")
 	}
 }
@@ -309,7 +310,7 @@ func TestCLIAutomationsPauseFailsOnBackendError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "pause", "Native"}, false); err == nil {
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "pause", "Native"}, false, false); err == nil {
 		t.Fatal("expected a nonzero exit on backend failure")
 	}
 }
@@ -327,7 +328,7 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 			"/api/projects": cliProjects,
 			"/tasks":        taskBoard,
 		})
-		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "delete", "Refactor"}, false)
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "delete", "Refactor"}, false, false)
 		if err == nil {
 			t.Fatal("expected nonzero exit without --force")
 		}
@@ -344,7 +345,7 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 			"/api/projects": cliProjects,
 			"/tasks":        taskBoard,
 		})
-		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "delete", "Refactor"}, true); err != nil {
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "delete", "Refactor"}, true, false); err != nil {
 			t.Fatalf("expected zero exit with --force: %v", err)
 		}
 		if !rec.saw("DELETE", "/tasks/t-1") {
@@ -354,7 +355,7 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 
 	t.Run("tasks_clear/without_force_exits_nonzero", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
-		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "clear", "completed"}, false)
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "clear", "completed"}, false, false)
 		if err == nil {
 			t.Fatal("expected nonzero exit without --force")
 		}
@@ -368,7 +369,7 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 
 	t.Run("tasks_clear/with_force_calls_backend", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
-		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "clear", "completed"}, true); err != nil {
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "clear", "completed"}, true, false); err != nil {
 			t.Fatalf("expected zero exit with --force: %v", err)
 		}
 		if !rec.saw("DELETE", "/tasks/completed") {
@@ -378,7 +379,7 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 
 	t.Run("alerts_clear/without_force_exits_nonzero", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
-		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "clear"}, false)
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "clear"}, false, false)
 		if err == nil {
 			t.Fatal("expected nonzero exit without --force")
 		}
@@ -392,7 +393,7 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 
 	t.Run("alerts_clear/with_force_calls_backend", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
-		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "clear"}, true); err != nil {
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "clear"}, true, false); err != nil {
 			t.Fatalf("expected zero exit with --force: %v", err)
 		}
 		if !rec.saw("DELETE", "/alerts") {
@@ -408,7 +409,7 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 			"/api/projects": cliProjects,
 			"/agents":       agentsHTML,
 		})
-		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", "Reviewer"}, false)
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", "Reviewer"}, false, false)
 		if err == nil {
 			t.Fatal("expected nonzero exit without --force")
 		}
@@ -428,11 +429,133 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 			"/api/projects": cliProjects,
 			"/agents":       agentsHTML,
 		})
-		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", "Reviewer"}, true); err != nil {
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", "Reviewer"}, true, false); err != nil {
 			t.Fatalf("expected zero exit with --force: %v", err)
 		}
 		if !rec.saw("DELETE", "/agents/ag-1") {
 			t.Errorf("expected backend call with --force:\n%s", rec.all())
 		}
 	})
+}
+
+// --- JSON output mode tests ---
+
+func TestCLIJSONTasksList(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        board,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks"}, false, true); err != nil {
+		t.Fatalf("tasks --json failed: %v", err)
+	}
+	got := out.String()
+	var tasks []client.Task
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &tasks); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, got)
+	}
+	if len(tasks) != 1 {
+		t.Errorf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].ID != "t-1" {
+		t.Errorf("unexpected task ID: %s", tasks[0].ID)
+	}
+}
+
+func TestCLIJSONAlertsList(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="1" data-search-text="bug pending">
+		<p class="font-semibold">Login broken</p>
+		<p class="text-sm opacity-60">OAuth redirect failure</p>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/alerts":       alertsHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"alerts"}, false, true); err != nil {
+		t.Fatalf("alerts --json failed: %v", err)
+	}
+	got := out.String()
+	var alerts []client.Alert
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &alerts); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, got)
+	}
+	if len(alerts) != 1 {
+		t.Errorf("expected 1 alert, got %d", len(alerts))
+	}
+	if alerts[0].Title != "Login broken" {
+		t.Errorf("unexpected alert title: %s", alerts[0].Title)
+	}
+}
+
+func TestCLIJSONProjectsList(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"projects"}, false, true); err != nil {
+		t.Fatalf("projects --json failed: %v", err)
+	}
+	got := out.String()
+	var projects []client.Project
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &projects); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, got)
+	}
+	if len(projects) != 2 {
+		t.Errorf("expected 2 projects, got %d", len(projects))
+	}
+}
+
+func TestCLIJSONTasksShow(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        board,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "show", "t-1"}, false, true); err != nil {
+		t.Fatalf("tasks show --json failed: %v", err)
+	}
+	got := out.String()
+	var task client.Task
+	if err := json.Unmarshal([]byte(strings.TrimSpace(got)), &task); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, got)
+	}
+	if task.ID != "t-1" {
+		t.Errorf("unexpected task ID: %s", task.ID)
+	}
+}
+
+func TestCLIJSONNonJSONModeUnchanged(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        board,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks"}, false, false); err != nil {
+		t.Fatalf("tasks without --json failed: %v", err)
+	}
+	got := out.String()
+	// Without --json the output should contain the task title as styled text,
+	// not a JSON array.
+	if !strings.Contains(got, "Refactor the API") {
+		t.Errorf("expected task title in non-JSON output:\n%s", got)
+	}
+	// Non-JSON output should not be a JSON array (starts with "[")
+	if strings.HasPrefix(strings.TrimSpace(got), "[") {
+		t.Errorf("non-JSON mode should not produce JSON array:\n%s", got)
+	}
 }

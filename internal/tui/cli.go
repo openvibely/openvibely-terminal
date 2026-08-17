@@ -38,11 +38,17 @@ var cliMode bool
 // commands execute without a confirmation prompt only when this is set.
 var forceMode bool
 
+// jsonMode is true when the CLI --json flag was provided. List and show
+// commands emit machine-readable JSON to stdout instead of styled text.
+var jsonMode bool
+
 // RunCLI executes one command without starting the interactive UI and writes
 // its output to out. It returns an error when the command reported one.
 // force corresponds to the --force CLI flag: when true destructive commands
 // skip their guard and execute immediately.
-func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, force bool) error {
+// json corresponds to the --json CLI flag: when true list/show commands emit
+// raw JSON instead of styled text.
+func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, force bool, json bool) error {
 	if len(args) == 0 {
 		return errors.New("no command given")
 	}
@@ -50,9 +56,11 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	// of a TUI confirmation prompt.
 	cliMode = true
 	forceMode = force
+	jsonMode = json
 	defer func() {
 		cliMode = false
 		forceMode = false
+		jsonMode = false
 	}()
 	// In CLI mode commands are shell subcommands, so help should print them
 	// without the chat window's leading slash.
@@ -92,7 +100,11 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	m = next.(Model)
 	m = drain(m, cmd)
 
-	writeEntries(out, m.log[start:])
+	if jsonMode {
+		writeJSONEntries(out, m.log[start:])
+	} else {
+		writeEntries(out, m.log[start:])
+	}
 	return firstError(m)
 }
 
@@ -172,6 +184,20 @@ func writeEntries(out io.Writer, entries []entry) {
 			}
 		case "agent", "you":
 			// no prefix: the output is the answer
+		}
+		text := strings.TrimRight(e.text, "\n")
+		if text != "" {
+			fmt.Fprintln(out, text)
+		}
+	}
+}
+
+// writeJSONEntries prints result entries as raw text, omitting styled headers.
+// This is used in --json mode so the caller receives the bare JSON payload.
+func writeJSONEntries(out io.Writer, entries []entry) {
+	for _, e := range entries {
+		if e.role == "error" {
+			continue // reported through the exit status instead
 		}
 		text := strings.TrimRight(e.text, "\n")
 		if text != "" {
