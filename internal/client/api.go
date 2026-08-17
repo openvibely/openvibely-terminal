@@ -111,42 +111,37 @@ func (c *Client) GetUsageAnalytics(ctx context.Context, projectID string) (*Usag
 	return &out, nil
 }
 
-// GetSuccessFailureRates fetches execution success/failure rates.
-func (c *Client) GetSuccessFailureRates(ctx context.Context, projectID string) ([]SuccessFailureRate, error) {
-	var out []SuccessFailureRate
-	err := c.getJSON(ctx, "/api/analytics/success-failure-rates"+optProject(projectID), &out)
-	return out, err
-}
-
-// avgExecTimes is the shared fetch/decode helper for avg-execution-time endpoints.
-func (c *Client) avgExecTimes(ctx context.Context, segment, projectID string) ([]AvgExecutionTime, error) {
-	var out []AvgExecutionTime
+// analyticsSlice is the shared fetch/decode helper for analytics endpoints that
+// return a JSON array. segment is the URL path segment after /api/analytics/.
+func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID string) ([]T, error) {
+	var out []T
 	err := c.getJSON(ctx, "/api/analytics/"+segment+optProject(projectID), &out)
 	return out, err
 }
 
+// GetSuccessFailureRates fetches execution success/failure rates.
+func (c *Client) GetSuccessFailureRates(ctx context.Context, projectID string) ([]SuccessFailureRate, error) {
+	return analyticsSlice[SuccessFailureRate](ctx, c, "success-failure-rates", projectID)
+}
+
 // GetAvgExecutionTimeByTask fetches per-task average execution times.
 func (c *Client) GetAvgExecutionTimeByTask(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	return c.avgExecTimes(ctx, "avg-execution-time-by-task", projectID)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID)
 }
 
 // GetAvgExecutionTimeByAgent fetches per-model average execution times.
 func (c *Client) GetAvgExecutionTimeByAgent(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	return c.avgExecTimes(ctx, "avg-execution-time-by-agent", projectID)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID)
 }
 
 // GetMostFrequentTasks fetches the most frequently executed tasks.
 func (c *Client) GetMostFrequentTasks(ctx context.Context, projectID string) ([]TaskFrequency, error) {
-	var out []TaskFrequency
-	err := c.getJSON(ctx, "/api/analytics/most-frequent-tasks"+optProject(projectID), &out)
-	return out, err
+	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID)
 }
 
 // GetFailedTaskPatterns fetches recurring task failure patterns.
 func (c *Client) GetFailedTaskPatterns(ctx context.Context, projectID string) ([]FailedTaskPattern, error) {
-	var out []FailedTaskPattern
-	err := c.getJSON(ctx, "/api/analytics/failed-task-patterns"+optProject(projectID), &out)
-	return out, err
+	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID)
 }
 
 // --- Skill analytics (/api/analytics/skills) ---

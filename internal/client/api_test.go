@@ -213,3 +213,102 @@ func TestGetAvgExecutionTimeByAgentUnauthorized(t *testing.T) {
 		t.Fatal("expected error for unauthorized response")
 	}
 }
+
+func TestGetSuccessFailureRates(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/success-failure-rates" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q", got)
+		}
+		json.NewEncoder(w).Encode([]SuccessFailureRate{
+			{Period: "2024-01", SuccessCount: 8, FailureCount: 2, TotalCount: 10, SuccessRate: 0.8},
+		})
+	}))
+
+	items, err := c.GetSuccessFailureRates(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetSuccessFailureRates: %v", err)
+	}
+	if len(items) != 1 || items[0].Period != "2024-01" || items[0].SuccessRate != 0.8 {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetSuccessFailureRatesUnauthorized(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	_, err := c.GetSuccessFailureRates(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for unauthorized response")
+	}
+}
+
+func TestGetMostFrequentTasks(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/most-frequent-tasks" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p2" {
+			t.Errorf("project_id = %q", got)
+		}
+		json.NewEncoder(w).Encode([]TaskFrequency{
+			{TaskID: "t1", TaskTitle: "Triage", ExecutionCount: 42},
+		})
+	}))
+
+	items, err := c.GetMostFrequentTasks(context.Background(), "p2")
+	if err != nil {
+		t.Fatalf("GetMostFrequentTasks: %v", err)
+	}
+	if len(items) != 1 || items[0].TaskTitle != "Triage" || items[0].ExecutionCount != 42 {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetMostFrequentTasksUnauthorized(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	_, err := c.GetMostFrequentTasks(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for unauthorized response")
+	}
+}
+
+func TestGetFailedTaskPatterns(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/failed-task-patterns" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p3" {
+			t.Errorf("project_id = %q", got)
+		}
+		json.NewEncoder(w).Encode([]FailedTaskPattern{
+			{TaskID: "t2", TaskTitle: "Deploy", FailureCount: 3, LastError: "timeout"},
+		})
+	}))
+
+	items, err := c.GetFailedTaskPatterns(context.Background(), "p3")
+	if err != nil {
+		t.Fatalf("GetFailedTaskPatterns: %v", err)
+	}
+	if len(items) != 1 || items[0].TaskTitle != "Deploy" || items[0].LastError != "timeout" {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetFailedTaskPatternsUnauthorized(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	_, err := c.GetFailedTaskPatterns(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error for unauthorized response")
+	}
+}
