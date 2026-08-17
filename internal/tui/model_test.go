@@ -517,6 +517,50 @@ func TestLoadProjectsFetchesConcurrently(t *testing.T) {
 	}
 }
 
+// checkConnection issues GetGlobalCapacity and AuthMe concurrently, so total
+// latency should track the max of the two fetch times, not their sum.
+func TestCheckConnectionFetchesConcurrently(t *testing.T) {
+	const delay = 100 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/capacity/global":
+			time.Sleep(delay)
+			_, _ = w.Write([]byte(`{"has_capacity":true}`))
+		case "/auth/me":
+			time.Sleep(delay)
+			_, _ = w.Write([]byte(`{"authenticated":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+
+	start := time.Now()
+	msg := m.checkConnection()()
+	elapsed := time.Since(start)
+
+	got, ok := msg.(connCheckedMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want connCheckedMsg", msg)
+	}
+	if got.err != nil {
+		t.Fatalf("err = %v", got.err)
+	}
+	if got.capacity == nil {
+		t.Fatal("capacity should not be nil")
+	}
+	if elapsed >= 2*delay {
+		t.Errorf("checkConnection took %v, want well under %v (fetches should run concurrently)", elapsed, 2*delay)
+	}
+}
+
 // If ListProjects fails, loadProjects must still report the error (matching
 // prior sequential behavior) even though GetProjectCapacities ran too.
 func TestLoadProjectsListFailsReturnsError(t *testing.T) {

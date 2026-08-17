@@ -171,11 +171,20 @@ func (m Model) checkConnection() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		capacity, err := c.GetGlobalCapacity(ctx)
-		if err != nil {
-			return connCheckedMsg{err: err}
+
+		var capacity *client.GlobalCapacity
+		var capErr error
+		var auth *client.AuthStatus
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); capacity, capErr = c.GetGlobalCapacity(ctx) }()
+		go func() { defer wg.Done(); auth, _ = c.AuthMe(ctx) }()
+		wg.Wait()
+
+		if capErr != nil {
+			return connCheckedMsg{err: capErr}
 		}
-		auth, _ := c.AuthMe(ctx) // best-effort
 		return connCheckedMsg{capacity: capacity, auth: auth}
 	}
 }
