@@ -97,6 +97,11 @@ type Model struct {
 	pendingMsgID string
 	busy         bool
 
+	// operational counts cached by /status
+	pendingAlertCount int
+	activeTaskCount   int
+	queuedTaskCount   int
+
 	// pendingConfirmation holds a destructive command awaiting explicit
 	// confirmation ("yes" + Enter executes it; Esc or anything else cancels).
 	pendingConfirmation *pendingCmd
@@ -172,6 +177,68 @@ func (m Model) checkConnection() tea.Cmd {
 		}
 		auth, _ := c.AuthMe(ctx) // best-effort
 		return connCheckedMsg{capacity: capacity, auth: auth}
+	}
+}
+
+// fetchStatusCounts concurrently fetches the pending-alert count and
+// active/queued task counts for the selected project. It is a no-op when no
+// project is selected.
+func (m Model) fetchStatusCounts() tea.Cmd {
+	if m.selectedID == "" {
+		return nil
+	}
+	c, pid := m.client, m.selectedID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		var (
+			pendingAlerts int
+			activeTasks   int
+			queuedTasks   int
+		)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			alerts, err := c.ListAlerts(ctx, pid)
+			if err != nil {
+				return
+			}
+			for _, a := range alerts {
+				for _, b := range a.Badges {
+					if strings.Contains(strings.ToLower(b), "pending") {
+						pendingAlerts++
+						break
+					}
+				}
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			tasks, err := c.ListTasks(ctx, pid)
+			if err != nil {
+				return
+			}
+			for _, t := range tasks {
+				if t.Category == "active" {
+					activeTasks++
+				}
+				if t.Status == "queued" {
+					queuedTasks++
+				}
+			}
+		}()
+
+		wg.Wait()
+		return statusCountsMsg{
+			pendingAlerts: pendingAlerts,
+			activeTasks:   activeTasks,
+			queuedTasks:   queuedTasks,
+		}
 	}
 }
 
@@ -324,6 +391,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.capacity = msg.capacity
 			m.auth = msg.auth
 		}
+		return m, nil
+
+	case statusCountsMsg:
+		m.pendingAlertCount = msg.pendingAlerts
+		m.activeTaskCount = msg.activeTasks
+		m.queuedTaskCount = msg.queuedTasks
 		return m, nil
 
 	case projectsLoadedMsg:

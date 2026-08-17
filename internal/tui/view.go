@@ -156,6 +156,25 @@ func (m Model) renderStatus() string {
 		row("workers", fmt.Sprintf("%d running / %d max, %d queued, %d free",
 			c.TotalRunning, c.MaxWorkers, c.QueueSize, c.AvailableSlots))
 	}
+	if m.selectedID != "" {
+		if m.pendingAlertCount > 0 {
+			row("alerts", noticeStyle.Render(fmt.Sprintf("%d pending approvals", m.pendingAlertCount)))
+		} else {
+			row("alerts", dimStyle.Render("none pending"))
+		}
+		if m.activeTaskCount > 0 || m.queuedTaskCount > 0 {
+			var taskParts []string
+			if m.activeTaskCount > 0 {
+				taskParts = append(taskParts, fmt.Sprintf("%d active", m.activeTaskCount))
+			}
+			if m.queuedTaskCount > 0 {
+				taskParts = append(taskParts, fmt.Sprintf("%d queued", m.queuedTaskCount))
+			}
+			row("tasks", noticeStyle.Render(strings.Join(taskParts, ", ")))
+		} else {
+			row("tasks", dimStyle.Render("none active"))
+		}
+	}
 	if m.showEvents {
 		if m.sseConnected {
 			row("events", statusOKStyle.Render("streaming"))

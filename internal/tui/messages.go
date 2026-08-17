@@ -72,3 +72,10 @@ type tickMsg struct{}
 
 // reconnectTickMsg fires when the SSE backoff timer elapses.
 type reconnectTickMsg struct{}
+
+// statusCountsMsg carries the operational counts fetched for the /status command.
+type statusCountsMsg struct {
+	pendingAlerts int
+	activeTasks   int
+	queuedTasks   int
+}

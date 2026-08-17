@@ -1909,3 +1909,75 @@ func TestDestructiveNonEmptyRefStillConfirms(t *testing.T) {
 		}
 	})
 }
+
+func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
+	// An alert with a "pending" badge.
+	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1">
+	  <p class="font-semibold">Needs approval</p>
+	  <span class="badge">pending</span>
+	</div>`
+	// Two active tasks: one running, one queued.
+	const tasksHTML = `<div>
+	  <div class="card" data-task-id="t-1" data-task-status="running" data-task-category="active" data-display-order="0">
+	    <div class="card-body"><a href="/tasks/t-1" title="Task A">Task A</a></div>
+	  </div>
+	  <div class="card" data-task-id="t-2" data-task-status="queued" data-task-category="active" data-display-order="1">
+	    <div class="card-body"><a href="/tasks/t-2" title="Task B">Task B</a></div>
+	  </div>
+	</div>`
+
+	m, rec := dispatchModel(t, map[string]string{
+		"/alerts": alertsHTML,
+		"/tasks":  tasksHTML,
+	})
+
+	// First /status call triggers fetchStatusCounts and processes the result
+	// (runLine follows one level of chaining, so statusCountsMsg is applied).
+	m = runLine(t, m, "/status")
+
+	// Verify the backend was called for both resources.
+	if !rec.saw("GET", "/alerts") {
+		t.Errorf("expected GET /alerts during status counts fetch:\n%s", rec.all())
+	}
+	if !rec.saw("GET", "/tasks") {
+		t.Errorf("expected GET /tasks during status counts fetch:\n%s", rec.all())
+	}
+
+	// Verify model fields were populated.
+	if m.pendingAlertCount != 1 {
+		t.Errorf("pendingAlertCount = %d, want 1", m.pendingAlertCount)
+	}
+	if m.activeTaskCount != 2 {
+		t.Errorf("activeTaskCount = %d, want 2", m.activeTaskCount)
+	}
+	if m.queuedTaskCount != 1 {
+		t.Errorf("queuedTaskCount = %d, want 1", m.queuedTaskCount)
+	}
+
+	// Second /status call renders with the populated counts.
+	m = runLine(t, m, "/status")
+	tx := transcript(m)
+
+	if !strings.Contains(tx, "pending approvals") {
+		t.Errorf("status missing pending approvals row:\n%s", tx)
+	}
+	if !strings.Contains(tx, "active") {
+		t.Errorf("status missing active tasks row:\n%s", tx)
+	}
+}
+
+func TestStatusCommandSkipsCountFetchWithNoProject(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	m.selectedID = ""   // clear project selection
+	m.selectedName = ""
+
+	m = runLine(t, m, "/status")
+
+	// With no project selected, fetchStatusCounts must not hit alerts or tasks.
+	if rec.saw("GET", "/alerts") {
+		t.Error("should not fetch /alerts when no project is selected")
+	}
+	if rec.saw("GET", "/tasks") {
+		t.Error("should not fetch /tasks when no project is selected")
+	}
+}

@@ -1440,7 +1440,7 @@ func statusCommand() command {
 		run: func(m Model, _ []string) (Model, tea.Cmd) {
 			m.busy = false
 			m.append(entry{role: "result", head: "Status", text: m.renderStatus()})
-			return m, nil
+			return m, m.fetchStatusCounts()
 		},
 	}
 }
