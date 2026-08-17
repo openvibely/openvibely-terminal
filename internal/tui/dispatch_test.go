@@ -1875,6 +1875,59 @@ func TestDestructiveEmptyRefShowsUsageError(t *testing.T) {
 	}
 }
 
+// TestSkillsEditResolvesHandleViaMatchRef verifies that /skills edit resolves
+// the skill reference through matchRef (exact → prefix → substring) before
+// calling UpdateSkill with the canonical handle.
+func TestSkillsEditResolvesHandleViaMatchRef(t *testing.T) {
+	const skillsHTML = `
+<div data-skill-handle="retry-logic" data-skill-name="Retry Logic"
+     data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>
+<div data-skill-handle="rate-limiter" data-skill-name="Rate Limiter"
+     data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
+
+	t.Run("prefix_match", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		m = runLine(t, m, "/skills edit retry | Always retry on 429")
+		if !rec.saw("PUT", "/skills/retry-logic") {
+			t.Errorf("expected PUT /skills/retry-logic via prefix match; calls:\n%s", rec.all())
+		}
+		if out := transcript(m); !strings.Contains(out, "updated skill retry-logic") {
+			t.Errorf("expected confirmation message; transcript:\n%s", out)
+		}
+	})
+
+	t.Run("exact_match", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		m = runLine(t, m, "/skills edit retry-logic | new body")
+		if !rec.saw("PUT", "/skills/retry-logic") {
+			t.Errorf("expected PUT /skills/retry-logic via exact match; calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("ambiguous_rejection", func(t *testing.T) {
+		// "r" matches both retry-logic and rate-limiter — should produce an error.
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		m = runLine(t, m, "/skills edit r | new body")
+		if rec.saw("PUT", "/skills/retry-logic") || rec.saw("PUT", "/skills/rate-limiter") {
+			t.Errorf("ambiguous ref must not call UpdateSkill; calls:\n%s", rec.all())
+		}
+		if out := transcript(m); !strings.Contains(out, "ambiguous") {
+			t.Errorf("expected ambiguity error; transcript:\n%s", out)
+		}
+	})
+
+	t.Run("unknown_ref", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
+		m = runLine(t, m, "/skills edit nonexistent | new body")
+		if rec.saw("PUT", "/skills/nonexistent") {
+			t.Errorf("unknown ref must not call UpdateSkill; calls:\n%s", rec.all())
+		}
+		if out := transcript(m); !strings.Contains(out, "nothing matches") {
+			t.Errorf("expected nothing-matches error; transcript:\n%s", out)
+		}
+	})
+}
+
 // TestDestructiveNonEmptyRefStillConfirms verifies that supplying a non-empty
 // ref to a destructive command still sets pendingConfirmation (i.e. the
 // confirmation prompt is shown as before the fix).

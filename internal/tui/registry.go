@@ -771,15 +771,25 @@ func skillsCommand() command {
 						renderSkills)
 				})
 			case "edit":
-				handle, body := splitPipe(ref)
-				if handle == "" || body == "" {
-					return m, errCmd("usage: /skills edit <handle> | <new body>")
+				ref2, body := splitPipe(ref)
+				if ref2 == "" || body == "" {
+					return m, errCmd("usage: /skills edit <skill> | <new body>")
 				}
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
-					if err := c.UpdateSkill(ctx, pid, handle, body); err != nil {
+					skills, err := c.ListSkills(ctx, pid)
+					if err != nil {
 						return "", err
 					}
-					return "updated skill " + handle, nil
+					s, err := matchRef(skills, ref2,
+						func(s client.Skill) string { return s.Handle },
+						func(s client.Skill) string { return s.Name })
+					if err != nil {
+						return "", err
+					}
+					if err := c.UpdateSkill(ctx, pid, s.Handle, body); err != nil {
+						return "", err
+					}
+					return "updated skill " + s.Handle, nil
 				})
 			default:
 				if action == "delete" && ref == "" {
