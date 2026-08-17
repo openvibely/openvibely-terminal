@@ -15,7 +15,6 @@ package client
 // is the most reliable success signal available to a native client.
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -69,11 +68,7 @@ func (c *Client) getHTML(ctx context.Context, path string) (*html.Node, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, apiError(resp)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	return html.Parse(bytes.NewReader(body))
+	return html.Parse(io.LimitReader(resp.Body, 8<<20))
 }
 
 // doForm performs a form-encoded mutation. The backend answers HTMX requests
