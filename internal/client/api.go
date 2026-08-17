@@ -102,13 +102,19 @@ type FailedTaskPattern struct {
 	LastFailedAt string `json:"lastFailedAt"`
 }
 
-// GetUsageAnalytics fetches LLM usage/cost analytics.
-func (c *Client) GetUsageAnalytics(ctx context.Context, projectID string) (*UsageAnalytics, error) {
-	var out UsageAnalytics
-	if err := c.getJSON(ctx, "/api/analytics/usage"+optProject(projectID), &out); err != nil {
+// analyticsObject is the shared fetch/decode helper for analytics endpoints
+// that return a JSON object. segment is the URL path segment after /api/analytics/.
+func analyticsObject[T any](ctx context.Context, c *Client, segment, projectID string) (*T, error) {
+	var out T
+	if err := c.getJSON(ctx, "/api/analytics/"+segment+optProject(projectID), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetUsageAnalytics fetches LLM usage/cost analytics.
+func (c *Client) GetUsageAnalytics(ctx context.Context, projectID string) (*UsageAnalytics, error) {
+	return analyticsObject[UsageAnalytics](ctx, c, "usage", projectID)
 }
 
 // analyticsSlice is the shared fetch/decode helper for analytics endpoints that
@@ -176,11 +182,7 @@ type SkillAnalytics struct {
 
 // GetSkillAnalytics fetches the skill analytics dashboard.
 func (c *Client) GetSkillAnalytics(ctx context.Context, projectID string) (*SkillAnalytics, error) {
-	var out SkillAnalytics
-	if err := c.getJSON(ctx, "/api/analytics/skills"+optProject(projectID), &out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return analyticsObject[SkillAnalytics](ctx, c, "skills", projectID)
 }
 
 // --- Capacity by model (/api/capacity/models) ---

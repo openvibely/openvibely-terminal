@@ -49,6 +49,56 @@ func TestGetSkillAnalytics(t *testing.T) {
 	}
 }
 
+func TestGetUsageAnalyticsError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	u, err := c.GetUsageAnalytics(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if u != nil {
+		t.Errorf("expected nil pointer on error, got %+v", u)
+	}
+}
+
+func TestGetSkillAnalyticsWithProjectID(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/skills" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q", got)
+		}
+		json.NewEncoder(w).Encode(SkillAnalytics{
+			TopSkills: []SkillMetric{{SkillHandle: "openvibely_backend_client", ActivityCount: 3}},
+		})
+	}))
+
+	s, err := c.GetSkillAnalytics(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetSkillAnalytics: %v", err)
+	}
+	if len(s.TopSkills) != 1 || s.TopSkills[0].SkillHandle != "openvibely_backend_client" {
+		t.Errorf("unexpected skills: %+v", s)
+	}
+}
+
+func TestGetSkillAnalyticsError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	s, err := c.GetSkillAnalytics(context.Background(), "")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if s != nil {
+		t.Errorf("expected nil pointer on error, got %+v", s)
+	}
+}
+
 func TestGetModelCapacities(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/capacity/models" {
