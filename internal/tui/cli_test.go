@@ -17,6 +17,10 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.recordURL(r.Method, r.URL.RequestURI())
+		_ = r.ParseForm()
+		rec.mu.Lock()
+		rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
+		rec.mu.Unlock()
 		if body, ok := bodies[r.URL.Path]; ok {
 			if strings.HasPrefix(strings.TrimSpace(body), "{") ||
 				strings.HasPrefix(strings.TrimSpace(body), "[") {
@@ -557,5 +561,57 @@ func TestCLIJSONNonJSONModeUnchanged(t *testing.T) {
 	// Non-JSON output should not be a JSON array (starts with "[")
 	if strings.HasPrefix(strings.TrimSpace(got), "[") {
 		t.Errorf("non-JSON mode should not produce JSON array:\n%s", got)
+	}
+}
+
+func TestCLIJSONTaskReviewsList(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":      cliProjects,
+		"/tasks":             board,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "reviews", "t-1"}, false, true); err != nil {
+		t.Fatalf("tasks reviews --json failed: %v", err)
+	}
+	var reviews []client.ReviewComment
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &reviews); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+	if len(reviews) != 1 || reviews[0].FilePath != "internal/client/tasks.go" || reviews[0].LineNumber != 42 {
+		t.Fatalf("reviews = %+v", reviews)
+	}
+}
+
+func TestCLIJSONTaskReviewsAdd(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":      cliProjects,
+		"/tasks":             board,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "reviews", "add", "Refactor", "internal/client/tasks.go:42", "Needs", "error", "handling"}, false, true); err != nil {
+		t.Fatalf("tasks reviews add --json failed: %v", err)
+	}
+	if !rec.saw("POST", "/tasks/t-1/reviews") {
+		t.Fatalf("expected add review call, calls:\n%s", rec.all())
+	}
+	if !rec.sawForm("comment_text=Needs+error+handling") {
+		t.Fatalf("posted form missing comment text: %v", rec.forms)
+	}
+	var review client.ReviewComment
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &review); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+	if review.ID != "rc-1" || review.CommentText != "Needs error handling" {
+		t.Fatalf("review = %+v", review)
 	}
 }

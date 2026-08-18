@@ -196,8 +196,9 @@ func TestGetTaskCollectsTabs(t *testing.T) {
 				<h2 class="text-2xl font-bold truncate">Refactor the API</h2>
 				<div id="tab-details"><div id="task-detail-view">prompt goes here</div></div>
 				<div id="tab-chat" hx-get="/tasks/t-1/thread"></div>
-				<div id="tab-changes" hx-get="/tasks/t-1/changes"></div>
-				<div id="tab-schedules">daily at 09:00</div>
+					<div id="tab-changes" hx-get="/tasks/t-1/changes"></div>
+					<div id="tab-review">inline comments</div>
+					<div id="tab-schedules">daily at 09:00</div>
 				<div id="tab-chaining">chains into Deploy</div>
 				<div id="tab-attachments">spec.md</div>
 				<div id="tab-lifecycle">pre_task ok</div>
@@ -226,6 +227,7 @@ func TestGetTaskCollectsTabs(t *testing.T) {
 	for name, want := range map[string]string{
 		"thread":      "on it",
 		"changes":     "3 files changed",
+		"review":      "inline comments",
 		"schedules":   "daily at 09:00",
 		"chaining":    "Deploy",
 		"attachments": "spec.md",
@@ -530,5 +532,87 @@ func TestGetTaskConcurrentFetchesRespectCanceledContext(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("GetTask did not return promptly for a canceled context")
+	}
+}
+
+const reviewCommentsHTML = `<div id="review-comments-list" data-task-id="t-1" data-comment-count="2">
+	<div class="review-comment-item flex" data-comment-id="rc-1" data-file-path="internal/client/tasks.go" data-line-number="42" data-line-type="new" data-state="open">
+		<div><div><span>alice</span><span>·</span><span>internal/client/tasks.go:42</span></div><p>Needs error handling</p></div>
+	</div>
+	<div class="review-comment-item flex" data-comment-id="rc-2" data-file-path="internal/tui/view.go" data-line-number="17" data-line-type="old" data-resolved="true">
+		<div><div><span>bob</span><span>·</span><span>internal/tui/view.go:17</span></div><p>Resolved note</p></div>
+	</div>
+</div>`
+
+func TestListTaskReviewsParsesHTMLFragment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/tasks/t-1/reviews" {
+			t.Errorf("got %s %s, want GET /tasks/t-1/reviews", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("HX-Request") != "true" {
+			t.Error("expected HX-Request header")
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(reviewCommentsHTML))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	reviews, err := c.ListTaskReviews(context.Background(), "t-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reviews) != 2 {
+		t.Fatalf("got %d reviews, want 2: %+v", len(reviews), reviews)
+	}
+	first := reviews[0]
+	if first.ID != "rc-1" || first.TaskID != "t-1" || first.FilePath != "internal/client/tasks.go" || first.LineNumber != 42 {
+		t.Errorf("first review metadata = %+v", first)
+	}
+	if first.LineType != "new" || first.CommentText != "Needs error handling" || first.ReviewedBy != "alice" || first.State != "open" {
+		t.Errorf("first review fields = %+v", first)
+	}
+	if !reviews[1].Resolved {
+		t.Errorf("second review should be resolved: %+v", reviews[1])
+	}
+}
+
+func TestAddTaskReviewCommentPostsFormAndParsesHTMLFragment(t *testing.T) {
+	var method, path string
+	var form url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		_ = r.ParseForm()
+		form = r.PostForm
+		if r.Header.Get("HX-Request") != "true" {
+			t.Error("expected HX-Request header")
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(reviewCommentsHTML))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	reviews, err := c.AddTaskReviewComment(context.Background(), "t-1", ReviewCommentForm{
+		FilePath:    "internal/client/tasks.go",
+		LineNumber:  42,
+		LineType:    "new",
+		CommentText: "Needs error handling",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/tasks/t-1/reviews" {
+		t.Fatalf("got %s %s, want POST /tasks/t-1/reviews", method, path)
+	}
+	for k, want := range map[string]string{
+		"file_path": "internal/client/tasks.go", "line_number": "42", "line_type": "new", "comment_text": "Needs error handling",
+	} {
+		if got := form.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if len(reviews) != 2 || reviews[0].ID != "rc-1" {
+		t.Fatalf("reviews = %+v", reviews)
 	}
 }

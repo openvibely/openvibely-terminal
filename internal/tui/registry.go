@@ -173,7 +173,7 @@ func taskSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd)
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
+	actions := []string{"list", "open", "show", "reviews", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
 	return command{
 		name:    "tasks",
 		aliases: []string{"task", "t", "board"},
@@ -183,8 +183,10 @@ func tasksCommand() command {
 		usage: []string{
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
-			"omit <task> on open/show/edit/run/stop/delete/goal/reply → interactive selector",
-			"tasks show <task> [tab]                    details, thread, changes, schedules, chaining, attachments, lifecycle",
+			"omit <task> on open/show/reviews/edit/run/stop/delete/goal/reply → interactive selector",
+			"tasks show <task> [tab]                    details, thread, changes, review, schedules, chaining, attachments, lifecycle",
+			"tasks reviews [list] <task>                list inline review comments",
+			"tasks reviews add <task> <file>:<line> <comment>",
 			"tasks new <title> [| <prompt>]             create a task",
 			"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
 			"tasks run|stop|delete <task>               run, cancel or delete",
@@ -200,6 +202,8 @@ func tasksCommand() command {
 			`tasks new Fix login bug | Investigate and resolve the OAuth redirect failure`,
 			`tasks move "Fix login bug" active`,
 			`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
+			`tasks show "Fix login bug" review`,
+			`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
 			`tasks reply "Fix login bug" | PR is up — please review`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
@@ -265,6 +269,16 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
+					if isReviewTab(tab) {
+						reviews, err := c.ListTaskReviews(ctx, t.ID)
+						if err != nil {
+							return "", err
+						}
+						if jsonMode {
+							return marshalJSON(reviews)
+						}
+						return renderTaskReviews(t, reviews), nil
+					}
 					if jsonMode {
 						return marshalJSON(t)
 					}
@@ -274,6 +288,69 @@ func tasksCommand() command {
 					}
 					return renderTaskDetail(t, d, tab), nil
 				})
+
+			case "reviews":
+				if len(rest) == 0 {
+					return taskSelector(m, "usage: /tasks reviews <task>", "tasks reviews", false)
+				}
+				reviewAction := "list"
+				reviewRest := rest
+				if strings.EqualFold(reviewRest[0], "list") {
+					reviewRest = reviewRest[1:]
+				} else if strings.EqualFold(reviewRest[0], "add") {
+					reviewAction = "add"
+					reviewRest = reviewRest[1:]
+				}
+				switch reviewAction {
+				case "list":
+					reviewRef := strings.Join(reviewRest, " ")
+					if reviewRef == "" {
+						return taskSelector(m, "usage: /tasks reviews <task>", "tasks reviews", false)
+					}
+					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
+						t, err := resolveTask(ctx, c, pid, reviewRef)
+						if err != nil {
+							return "", err
+						}
+						reviews, err := c.ListTaskReviews(ctx, t.ID)
+						if err != nil {
+							return "", err
+						}
+						if jsonMode {
+							return marshalJSON(reviews)
+						}
+						return renderTaskReviews(t, reviews), nil
+					})
+				case "add":
+					if len(reviewRest) < 3 {
+						return m, errCmd("usage: /tasks reviews add <task> <file>:<line> <comment>")
+					}
+					locIdx, filePath, lineNumber := findReviewLocation(reviewRest)
+					if locIdx <= 0 || locIdx >= len(reviewRest)-1 {
+						return m, errCmd("usage: /tasks reviews add <task> <file>:<line> <comment>")
+					}
+					reviewRef := strings.Join(reviewRest[:locIdx], " ")
+					commentText := strings.TrimSpace(strings.Join(reviewRest[locIdx+1:], " "))
+					if reviewRef == "" || filePath == "" || lineNumber <= 0 || commentText == "" {
+						return m, errCmd("usage: /tasks reviews add <task> <file>:<line> <comment>")
+					}
+					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
+						t, err := resolveTask(ctx, c, pid, reviewRef)
+						if err != nil {
+							return "", err
+						}
+						form := client.ReviewCommentForm{FilePath: filePath, LineNumber: lineNumber, LineType: "new", CommentText: commentText}
+						reviews, err := c.AddTaskReviewComment(ctx, t.ID, form)
+						if err != nil {
+							return "", err
+						}
+						added := addedReviewComment(reviews, form)
+						if jsonMode {
+							return marshalJSON(added)
+						}
+						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", filePath, lineNumber, firstNonEmpty(t.Title, shortID(t.ID)), renderTaskReviews(t, reviews)), nil
+					})
+				}
 
 			case "new":
 				if ref == "" {
@@ -497,10 +574,54 @@ func tasksCommand() command {
 
 func isDetailTab(s string) bool {
 	switch strings.ToLower(s) {
-	case "details", "thread", "changes", "schedules", "chaining", "attachments", "lifecycle":
+	case "details", "thread", "changes", "review", "reviews", "schedules", "chaining", "attachments", "lifecycle":
 		return true
 	}
 	return false
+}
+
+func isReviewTab(s string) bool {
+	return strings.EqualFold(s, "review") || strings.EqualFold(s, "reviews")
+}
+
+func findReviewLocation(args []string) (int, string, int) {
+	for i, arg := range args {
+		filePath, lineNumber, ok := parseReviewLocation(arg)
+		if ok {
+			return i, filePath, lineNumber
+		}
+	}
+	return -1, "", 0
+}
+
+func parseReviewLocation(s string) (string, int, bool) {
+	idx := strings.LastIndex(s, ":")
+	if idx <= 0 || idx == len(s)-1 {
+		return "", 0, false
+	}
+	lineNumber, err := strconv.Atoi(s[idx+1:])
+	if err != nil || lineNumber <= 0 {
+		return "", 0, false
+	}
+	return strings.TrimSpace(s[:idx]), lineNumber, strings.TrimSpace(s[:idx]) != ""
+}
+
+func addedReviewComment(reviews []client.ReviewComment, form client.ReviewCommentForm) client.ReviewComment {
+	for i := len(reviews) - 1; i >= 0; i-- {
+		r := reviews[i]
+		if r.FilePath == form.FilePath && r.LineNumber == form.LineNumber && r.CommentText == form.CommentText {
+			return r
+		}
+	}
+	if len(reviews) > 0 {
+		return reviews[len(reviews)-1]
+	}
+	return client.ReviewComment{
+		FilePath:    form.FilePath,
+		LineNumber:  form.LineNumber,
+		LineType:    form.LineType,
+		CommentText: form.CommentText,
+	}
 }
 
 func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {

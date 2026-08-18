@@ -37,6 +37,7 @@ type TaskDetail struct {
 	Details  string // Details tab (prompt, goal, metrics, executions)
 	Thread   string // Thread tab (conversation)
 	Changes  string // Changes tab (diff summary)
+	Review   string // Review tab (inline code review comments)
 	Schedule string // Schedules tab
 	Chaining string // Chaining tab
 	Attach   string // Attachments tab
@@ -50,6 +51,8 @@ func (d TaskDetail) TabText(tab string) string {
 		return d.Thread
 	case "changes", "diff":
 		return d.Changes
+	case "review", "reviews":
+		return d.Review
 	case "schedules", "schedule":
 		return d.Schedule
 	case "chaining", "chain":
@@ -72,6 +75,27 @@ type TaskForm struct {
 	Tag      string // "", feature, bug
 }
 
+// ReviewComment is one inline code review comment attached to a task diff line.
+type ReviewComment struct {
+	ID          string `json:"id"`
+	TaskID      string `json:"task_id"`
+	FilePath    string `json:"file_path"`
+	LineNumber  int    `json:"line_number"`
+	LineType    string `json:"line_type,omitempty"`
+	CommentText string `json:"comment_text"`
+	ReviewedBy  string `json:"reviewed_by,omitempty"`
+	State       string `json:"state,omitempty"`
+	Resolved    bool   `json:"resolved,omitempty"`
+}
+
+// ReviewCommentForm carries fields for creating an inline review comment.
+type ReviewCommentForm struct {
+	FilePath    string
+	LineNumber  int
+	LineType    string
+	CommentText string
+}
+
 func (f TaskForm) values() url.Values {
 	v := url.Values{}
 	v.Set("title", f.Title)
@@ -81,6 +105,17 @@ func (f TaskForm) values() url.Values {
 	}
 	v.Set("priority", strconv.Itoa(f.Priority))
 	v.Set("tag", f.Tag)
+	return v
+}
+
+func (f ReviewCommentForm) values() url.Values {
+	v := url.Values{}
+	v.Set("file_path", f.FilePath)
+	v.Set("line_number", strconv.Itoa(f.LineNumber))
+	if f.LineType != "" {
+		v.Set("line_type", f.LineType)
+	}
+	v.Set("comment_text", f.CommentText)
 	return v
 }
 
@@ -197,6 +232,47 @@ func cardBadges(card *html.Node) []string {
 	return out
 }
 
+// parseReviewComments extracts review comments from the backend's HTMX fragment.
+func parseReviewComments(root *html.Node, taskID string) []ReviewComment {
+	nodes := findAll(root, func(e *html.Node) bool {
+		return strings.Contains(" "+attr(e, "class")+" ", " review-comment-item ")
+	})
+	comments := make([]ReviewComment, 0, len(nodes))
+	for _, n := range nodes {
+		lineNumber, _ := strconv.Atoi(attr(n, "data-line-number"))
+		text := ""
+		if p := findNode(n, func(e *html.Node) bool { return e.Data == "p" }); p != nil {
+			text = strings.TrimSpace(NodeText(p))
+		}
+		reviewedBy := attr(n, "data-reviewed-by")
+		if reviewedBy == "" {
+			if span := findNode(n, func(e *html.Node) bool { return e.Data == "span" }); span != nil {
+				reviewedBy = strings.TrimSpace(NodeText(span))
+			}
+		}
+		reviewTaskID := attr(n, "data-task-id")
+		if reviewTaskID == "" {
+			reviewTaskID = taskID
+		}
+		state := attr(n, "data-state")
+		if state == "" {
+			state = attr(n, "data-review-state")
+		}
+		comments = append(comments, ReviewComment{
+			ID:          attr(n, "data-comment-id"),
+			TaskID:      reviewTaskID,
+			FilePath:    attr(n, "data-file-path"),
+			LineNumber:  lineNumber,
+			LineType:    attr(n, "data-line-type"),
+			CommentText: text,
+			ReviewedBy:  reviewedBy,
+			State:       state,
+			Resolved:    attr(n, "data-resolved") == "true" || attr(n, "data-resolved") == "1",
+		})
+	}
+	return comments
+}
+
 // GetTask fetches the task detail page and extracts each tab's content.
 func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error) {
 	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID))
@@ -227,6 +303,8 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error
 		{"tab-details", &d.Details},
 		{"tab-chat", &d.Thread},
 		{"tab-changes", &d.Changes},
+		{"tab-review", &d.Review},
+		{"tab-reviews", &d.Review},
 		{"tab-schedules", &d.Schedule},
 		{"tab-chaining", &d.Chaining},
 		{"tab-attachments", &d.Attach},
@@ -293,6 +371,24 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error
 		d.Life = b.String()
 	}
 	return d, nil
+}
+
+// ListTaskReviews fetches inline review comments for a task.
+func (c *Client) ListTaskReviews(ctx context.Context, taskID string) ([]ReviewComment, error) {
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/reviews")
+	if err != nil {
+		return nil, err
+	}
+	return parseReviewComments(root, taskID), nil
+}
+
+// AddTaskReviewComment creates an inline review comment and returns the updated list.
+func (c *Client) AddTaskReviewComment(ctx context.Context, taskID string, form ReviewCommentForm) ([]ReviewComment, error) {
+	root, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/reviews", form.values())
+	if err != nil {
+		return nil, err
+	}
+	return parseReviewComments(root, taskID), nil
 }
 
 // CreateTask creates a task. Category "active" submits it immediately.

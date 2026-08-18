@@ -397,6 +397,7 @@ func renderTaskDetail(t client.Task, d *client.TaskDetail, tab string) string {
 		{"Details", d.Details},
 		{"Thread", d.Thread},
 		{"Changes", d.Changes},
+		{"Review", d.Review},
 		{"Schedules", d.Schedule},
 		{"Chaining", d.Chaining},
 		{"Attachments", d.Attach},
@@ -409,8 +410,51 @@ func renderTaskDetail(t client.Task, d *client.TaskDetail, tab string) string {
 		}
 		fmt.Fprintf(&b, "%s\n%s\n\n", sectionStyle.Render("▸ "+s.name), clamp(body, 40))
 	}
-	b.WriteString(dimStyle.Render("/tasks show <id> <details|thread|changes|schedules|chaining|attachments|lifecycle>"))
+	b.WriteString(dimStyle.Render("/tasks show <id> <details|thread|changes|review|schedules|chaining|attachments|lifecycle>"))
 	return b.String()
+}
+
+func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
+	var b strings.Builder
+	title := firstNonEmpty(t.Title, shortID(t.ID))
+	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(t.Status))
+	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · review", t.ID)))
+	if len(reviews) == 0 {
+		b.WriteString(dimStyle.Render("no review comments yet — /tasks reviews add <task> <file>:<line> <comment>"))
+		return b.String()
+	}
+
+	rows := [][]string{{"FILE", "LINE", "STATE", "COMMENT"}}
+	for _, r := range reviews {
+		line := "—"
+		if r.LineNumber > 0 {
+			line = fmt.Sprintf("%d", r.LineNumber)
+		}
+		if r.LineType != "" {
+			line += " " + r.LineType
+		}
+		state := reviewState(r)
+		comment := r.CommentText
+		if r.ReviewedBy != "" {
+			comment = r.ReviewedBy + ": " + comment
+		}
+		rows = append(rows, []string{truncate(r.FilePath, 32), line, state, truncate(comment, 72)})
+	}
+	b.WriteString(table(rows))
+	return b.String()
+}
+
+func reviewState(r client.ReviewComment) string {
+	if r.Resolved {
+		if r.State != "" {
+			return statusOKStyle.Render("resolved " + r.State)
+		}
+		return statusOKStyle.Render("resolved")
+	}
+	if r.State != "" {
+		return statusMark(r.State)
+	}
+	return dimStyle.Render("—")
 }
 
 // renderThread shows a task's conversation, falling back to the details tab

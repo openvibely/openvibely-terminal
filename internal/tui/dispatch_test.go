@@ -117,7 +117,7 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 // instead of executing immediately) and then types "yes" to confirm execution.
 func confirmDestructive(t *testing.T, m Model, line string) Model {
 	t.Helper()
-	m = runLine(t, m, line) // step 1: sets pendingConfirmation
+	m = runLine(t, m, line)     // step 1: sets pendingConfirmation
 	return runLine(t, m, "yes") // step 2: confirms and executes
 }
 
@@ -2149,7 +2149,7 @@ func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 
 func TestStatusCommandSkipsCountFetchWithNoProject(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
-	m.selectedID = ""   // clear project selection
+	m.selectedID = "" // clear project selection
 	m.selectedName = ""
 
 	m = runLine(t, m, "/status")
@@ -2160,5 +2160,65 @@ func TestStatusCommandSkipsCountFetchWithNoProject(t *testing.T) {
 	}
 	if rec.saw("GET", "/tasks") {
 		t.Error("should not fetch /tasks when no project is selected")
+	}
+}
+
+const taskReviewHTML = `<div id="review-comments-list" data-task-id="t-1" data-comment-count="1">
+	<div class="review-comment-item flex" data-comment-id="rc-1" data-file-path="internal/client/tasks.go" data-line-number="42" data-line-type="new" data-state="open">
+		<div><div><span>alice</span><span>·</span><span>internal/client/tasks.go:42</span></div><p>Needs error handling</p></div>
+	</div>
+</div>`
+
+func TestTasksShowReviewTabListsInlineComments(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             taskBoardHTML,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+	m = runLine(t, m, "/tasks show Refactor the API review")
+
+	if !rec.saw("GET", "/tasks/t-1/reviews") {
+		t.Fatalf("expected review fetch, calls:\n%s", rec.all())
+	}
+	out := transcript(m)
+	for _, want := range []string{"internal/client/tasks.go", "42 new", "Needs error handling", "open"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTasksReviewsListGracefullyHandlesEmptyComments(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             taskBoardHTML,
+		"/tasks/t-1/reviews": `<div id="review-comments-list" data-task-id="t-1" data-comment-count="0"></div>`,
+	})
+	m = runLine(t, m, "/tasks reviews t-1")
+
+	if !rec.saw("GET", "/tasks/t-1/reviews") {
+		t.Fatalf("expected review fetch, calls:\n%s", rec.all())
+	}
+	if out := transcript(m); !strings.Contains(out, "no review comments yet") {
+		t.Errorf("expected empty-state message, got:\n%s", out)
+	}
+}
+
+func TestTasksReviewsAddPostsInlineComment(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             taskBoardHTML,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+	m = runLine(t, m, "/tasks reviews add Refactor the API internal/client/tasks.go:42 Needs error handling")
+
+	if !rec.saw("POST", "/tasks/t-1/reviews") {
+		t.Fatalf("expected add review call, calls:\n%s", rec.all())
+	}
+	for _, want := range []string{"file_path=internal%2Fclient%2Ftasks.go", "line_number=42", "line_type=new", "comment_text=Needs+error+handling"} {
+		if !rec.sawForm(want) {
+			t.Errorf("posted form missing %q, forms: %v", want, rec.forms)
+		}
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "added review comment") || !strings.Contains(out, "Needs error handling") {
+		t.Errorf("expected success confirmation and rendered comments, got:\n%s", out)
 	}
 }

@@ -420,3 +420,16 @@ func TestCommandSummaryListsEveryCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestTasksHelpDocumentsReviewSupport(t *testing.T) {
+	cmd := lookupCommand("tasks")
+	if cmd == nil {
+		t.Fatal("tasks command missing")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{"tasks show <task> [tab]", "review", "tasks reviews add <task> <file>:<line> <comment>", "tasks reviews add \"Fix login bug\" internal/auth.go:42 Handle token refresh errors"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("tasks help missing %q:\n%s", want, help)
+		}
+	}
+}

@@ -74,13 +74,32 @@ func (c *Client) getHTML(ctx context.Context, path string) (*html.Node, error) {
 // doForm performs a form-encoded mutation. The backend answers HTMX requests
 // with a re-rendered fragment (200) or no content (204); both count as success.
 func (c *Client) doForm(ctx context.Context, method, path string, form url.Values) error {
+	resp, err := c.doFormResponse(ctx, method, path, form)
+	if err != nil {
+		return err
+	}
+	defer drainAndClose(resp.Body)
+	return nil
+}
+
+// doFormHTML performs a form mutation and parses the returned HTML fragment.
+func (c *Client) doFormHTML(ctx context.Context, method, path string, form url.Values) (*html.Node, error) {
+	resp, err := c.doFormResponse(ctx, method, path, form)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+	return html.Parse(io.LimitReader(resp.Body, 8<<20))
+}
+
+func (c *Client) doFormResponse(ctx context.Context, method, path string, form url.Values) (*http.Response, error) {
 	var body string
 	if form != nil {
 		body = form.Encode()
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, strings.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if form != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -90,17 +109,19 @@ func (c *Client) doForm(ctx context.Context, method, path string, form url.Value
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
+		defer drainAndClose(resp.Body)
+		return nil, fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		return nil
+		return resp, nil
 	}
-	return apiError(resp)
+	err = apiError(resp)
+	drainAndClose(resp.Body)
+	return nil, err
 }
 
 // scrapeCards collects every element carrying the given data-* marker
