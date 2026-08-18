@@ -91,6 +91,20 @@ func refreshAndRender[T any](status string, list func() ([]T, error), render fun
 	return status + "\n\n" + render(items, ""), nil
 }
 
+// actAndReloadText consolidates the "act, then reload a preformatted text
+// page" sequence. If the reload fails after a successful action, the error is
+// swallowed and only the status line is returned.
+func actAndReloadText(status string, act func() error, reload func() (string, error)) (string, error) {
+	if err := act(); err != nil {
+		return "", err
+	}
+	text, err := reload()
+	if err != nil {
+		return status, nil
+	}
+	return status + "\n\n" + text, nil
+}
+
 // marshalJSON marshals v to a JSON string. When jsonMode is false it is never
 // called; callers should guard with `if jsonMode { ... }`.
 func marshalJSON(v any) (string, error) {
@@ -1317,15 +1331,10 @@ func channelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.ChannelAction(ctx, ch.Type, action, pid); err != nil {
-						return "", err
-					}
 					status := action + ": " + ch.Name
-					text, err := c.GetChannels(ctx, pid)
-					if err != nil {
-						return status, nil
-					}
-					return status + "\n\n" + text, nil
+					return actAndReloadText(status,
+						func() error { return c.ChannelAction(ctx, ch.Type, action, pid) },
+						func() (string, error) { return c.GetChannels(ctx, pid) })
 				})
 			}
 		},
@@ -1545,16 +1554,10 @@ func automationsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					err = c.AutomationAction(ctx, a.ID, action, pid)
-					if err != nil {
-						return "", err
-					}
 					status := action + ": " + firstNonEmpty(a.Name, a.ID)
-					items, err := c.GetAutomations(ctx, pid)
-					if err != nil {
-						return status, nil
-					}
-					return status + "\n\n" + items, nil
+					return actAndReloadText(status,
+						func() error { return c.AutomationAction(ctx, a.ID, action, pid) },
+						func() (string, error) { return c.GetAutomations(ctx, pid) })
 				})
 				if action == "delete" {
 					return confirmOr(m,

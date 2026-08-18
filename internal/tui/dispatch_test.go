@@ -117,7 +117,7 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 // instead of executing immediately) and then types "yes" to confirm execution.
 func confirmDestructive(t *testing.T, m Model, line string) Model {
 	t.Helper()
-	m = runLine(t, m, line) // step 1: sets pendingConfirmation
+	m = runLine(t, m, line)     // step 1: sets pendingConfirmation
 	return runLine(t, m, "yes") // step 2: confirms and executes
 }
 
@@ -754,8 +754,15 @@ func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 		if !rec.saw("POST", "/automations/au-1/pause") {
 			t.Errorf("calls:\n%s", rec.all())
 		}
-		if strings.Contains(transcript(m), "error:") {
-			t.Errorf("unexpected error:\n%s", transcript(m))
+		out := transcript(m)
+		if strings.Contains(out, "error:") {
+			t.Errorf("unexpected error:\n%s", out)
+		}
+		if !strings.Contains(out, "pause: Native SDLC") {
+			t.Errorf("expected status line:\n%s", out)
+		}
+		if !strings.Contains(out, "paused") {
+			t.Errorf("expected refreshed automations page after action:\n%s", out)
 		}
 	})
 
@@ -815,6 +822,39 @@ func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 			t.Errorf("expected an error for an unknown reference:\n%s", transcript(m))
 		}
 	})
+}
+
+func TestAutomationsReloadFailureAfterActionIsSwallowed(t *testing.T) {
+	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
+	var gets int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/automations" {
+			gets++
+			if gets > 1 {
+				http.Error(w, "refresh failed", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(automationsHTML))
+			return
+		}
+		if r.Method == "POST" && r.URL.Path == "/automations/au-1/pause" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	m = runLine(t, m, "/automations pause au-1")
+	out := transcript(m)
+	if !strings.Contains(out, "pause: Native SDLC") {
+		t.Errorf("expected status line despite refresh failure:\n%s", out)
+	}
+	if strings.Contains(out, "error:") || strings.Contains(out, "refresh failed") {
+		t.Errorf("refresh failure must be swallowed:\n%s", out)
+	}
 }
 
 // TestAutomationsCommandBackendFailures confirms each new action surfaces a
@@ -1138,6 +1178,7 @@ func TestChannelsCommandListsPage(t *testing.T) {
 // TestChannelsTestAndRemove exercises the test and remove actions for all
 // manageable channel types. Slack remove must route to /disconnect, not /remove.
 func TestChannelsTestAndRemove(t *testing.T) {
+	const refreshedChannelsPage = `<html><body>refreshed channels page</body></html>`
 	cases := []struct {
 		action      string
 		channelName string
@@ -1155,7 +1196,7 @@ func TestChannelsTestAndRemove(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.action+" "+tc.channelName, func(t *testing.T) {
-			m, rec := dispatchModel(t, nil)
+			m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
 			m = runLine(t, m, "/channels "+tc.action+" "+tc.channelName)
 			if !rec.saw("POST", tc.wantPath) {
 				t.Errorf("expected POST %s, calls:\n%s", tc.wantPath, rec.all())
@@ -1168,6 +1209,9 @@ func TestChannelsTestAndRemove(t *testing.T) {
 			displayName := strings.ToUpper(tc.channelName[:1]) + tc.channelName[1:]
 			if !strings.Contains(out, tc.action+": "+displayName) {
 				t.Errorf("expected status line %q:\n%s", tc.action+": "+displayName, out)
+			}
+			if !strings.Contains(out, "refreshed channels page") {
+				t.Errorf("expected refreshed channels page after action:\n%s", out)
 			}
 		})
 	}
@@ -1201,6 +1245,31 @@ func TestChannelsMatchRefResolution(t *testing.T) {
 			t.Errorf("expected an error for unknown channel:\n%s", transcript(m))
 		}
 	})
+}
+
+func TestChannelsReloadFailureAfterActionIsSwallowed(t *testing.T) {
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/channels/telegram/test" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		if r.Method == "GET" && r.URL.Path == "/channels" {
+			http.Error(w, "refresh failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	m = runLine(t, m, "/channels test telegram")
+	out := transcript(m)
+	if !strings.Contains(out, "test: Telegram") {
+		t.Errorf("expected status line despite refresh failure:\n%s", out)
+	}
+	if strings.Contains(out, "error:") || strings.Contains(out, "refresh failed") {
+		t.Errorf("refresh failure must be swallowed:\n%s", out)
+	}
 }
 
 // TestChannelsBackendFailureSurfaces ensures a non-2xx backend response for a
@@ -2149,7 +2218,7 @@ func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 
 func TestStatusCommandSkipsCountFetchWithNoProject(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
-	m.selectedID = ""   // clear project selection
+	m.selectedID = "" // clear project selection
 	m.selectedName = ""
 
 	m = runLine(t, m, "/status")
