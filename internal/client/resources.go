@@ -24,8 +24,8 @@ type Alert struct {
 	ID      string   `json:"id"`
 	Title   string   `json:"title"`
 	Message string   `json:"message"`
-	Text    string   `json:"text"`    // searchable text (type, state, body)
-	Badges  []string `json:"badges"`  // type, decision state, processing state
+	Text    string   `json:"text"`   // searchable text (type, state, body)
+	Badges  []string `json:"badges"` // type, decision state, processing state
 	Read    bool     `json:"read"`
 }
 
@@ -118,7 +118,7 @@ func (c *Client) ListSkills(ctx context.Context, projectID string) ([]Skill, err
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupedCards(root, "data-skill-handle")
+	cards := dedupedCardsWithoutText(root, "data-skill-handle")
 	out := make([]Skill, 0, len(cards))
 	for _, card := range cards {
 		out = append(out, Skill{
@@ -235,7 +235,7 @@ func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, 
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupedCards(root, "data-agent-id")
+	cards := dedupedCardsWithoutText(root, "data-agent-id")
 	out := make([]AgentDef, 0, len(cards))
 	for _, card := range cards {
 		if card.Get("agent-name") == "" {

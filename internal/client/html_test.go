@@ -172,9 +172,9 @@ func TestDedupedCards(t *testing.T) {
 	// Two elements share the same marker value; a third has a unique value.
 	// The duplicate pair should be collapsed to one card (the one with more attrs).
 	const body = `<!DOCTYPE html><html><body>
-		<div data-skill-handle="alpha" data-skill-name="A"></div>
-		<div data-skill-handle="alpha" data-skill-name="A" data-skill-extra="yes"></div>
-		<div data-skill-handle="beta" data-skill-name="B"></div>
+		<div data-skill-handle="alpha" data-skill-name="A">discarded alpha</div>
+		<div data-skill-handle="alpha" data-skill-name="A" data-skill-extra="yes">kept alpha</div>
+		<div data-skill-handle="beta" data-skill-name="B">kept beta</div>
 	</body></html>`
 	root, err := html.Parse(strings.NewReader(body))
 	if err != nil {
@@ -191,8 +191,80 @@ func TestDedupedCards(t *testing.T) {
 	if cards[0].Attrs["data-skill-extra"] != "yes" {
 		t.Errorf("cards[0] missing data-skill-extra; got attrs %v", cards[0].Attrs)
 	}
+	if cards[0].Text != "kept alpha" {
+		t.Errorf("cards[0] text = %q, want %q", cards[0].Text, "kept alpha")
+	}
 	if cards[1].Attrs["data-skill-handle"] != "beta" {
 		t.Errorf("cards[1] handle = %q, want %q", cards[1].Attrs["data-skill-handle"], "beta")
+	}
+	if cards[1].Text != "kept beta" {
+		t.Errorf("cards[1] text = %q, want %q", cards[1].Text, "kept beta")
+	}
+}
+
+func TestDedupedCardsDefersTextUntilAfterDedup(t *testing.T) {
+	const body = `<!DOCTYPE html><html><body>
+		<div data-model-id="alpha" data-model-name="A">discarded alpha 1</div>
+		<div data-model-id="alpha" data-model-name="A" data-model-provider="p">kept alpha</div>
+		<button data-model-id="alpha">discarded alpha action</button>
+		<div data-model-id="beta" data-model-name="B">kept beta</div>
+		<button data-model-id="beta">discarded beta action</button>
+	</body></html>`
+	root, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+
+	old := cardNodeText
+	calls := 0
+	cardNodeText = func(n *html.Node) string {
+		calls++
+		return NodeText(n)
+	}
+	defer func() { cardNodeText = old }()
+
+	cards := dedupedCards(root, "data-model-id")
+	if got, want := len(cards), 2; got != want {
+		t.Fatalf("len(cards) = %d, want %d", got, want)
+	}
+	if calls != len(cards) {
+		t.Fatalf("NodeText calls = %d, want retained card count %d", calls, len(cards))
+	}
+	rawMatches := len(findAll(root, func(e *html.Node) bool { return attr(e, "data-model-id") != "" }))
+	if rawMatches < 2*calls {
+		t.Fatalf("raw matches %d did not demonstrate at least 2x fewer text extractions than %d retained cards", rawMatches, calls)
+	}
+	if cards[0].Text != "kept alpha" || cards[1].Text != "kept beta" {
+		t.Fatalf("texts = %q, %q; want kept card text", cards[0].Text, cards[1].Text)
+	}
+}
+
+func TestDedupedCardsWithoutTextSkipsNodeText(t *testing.T) {
+	const body = `<!DOCTYPE html><html><body>
+		<div data-agent-id="a1" data-agent-name="Reviewer">Reviewer text</div>
+		<button data-agent-id="a1">delete</button>
+	</body></html>`
+	root, err := html.Parse(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+
+	old := cardNodeText
+	cardNodeText = func(n *html.Node) string {
+		t.Fatalf("NodeText called for no-text dedupe path")
+		return ""
+	}
+	defer func() { cardNodeText = old }()
+
+	cards := dedupedCardsWithoutText(root, "data-agent-id")
+	if got, want := len(cards), 1; got != want {
+		t.Fatalf("len(cards) = %d, want %d", got, want)
+	}
+	if cards[0].Text != "" {
+		t.Errorf("card text = %q, want empty", cards[0].Text)
+	}
+	if cards[0].Get("agent-name") != "Reviewer" {
+		t.Errorf("agent name = %q, want Reviewer", cards[0].Get("agent-name"))
 	}
 }
 
