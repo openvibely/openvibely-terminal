@@ -19,17 +19,26 @@ import (
 // argument is missing: it fetches the candidate list and hands it to the
 // model as a selectorActiveMsg.
 func selectorFor(title, command, emptyHint string, prefill bool, fetch func(ctx context.Context) ([]selectorItem, error)) tea.Cmd {
+	prefillSuffix := ""
+	if prefill {
+		prefillSuffix = " | "
+	}
+	return selectorForWithSuffix(title, command, emptyHint, prefillSuffix, fetch)
+}
+
+func selectorForWithSuffix(title, command, emptyHint, prefillSuffix string, fetch func(ctx context.Context) ([]selectorItem, error)) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
 		items, err := fetch(ctx)
 		return selectorActiveMsg{
-			title:     title,
-			command:   command,
-			emptyHint: emptyHint,
-			prefill:   prefill,
-			items:     items,
-			err:       err,
+			title:         title,
+			command:       command,
+			emptyHint:     emptyHint,
+			prefill:       prefillSuffix != "",
+			prefillSuffix: prefillSuffix,
+			items:         items,
+			err:           err,
 		}
 	}
 }
@@ -49,7 +58,7 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	if len(msg.items) == 1 {
 		it := msg.items[0]
 		m.append(entry{role: "system", text: "only one match — selected " + it.label})
-		return m.selectorDispatch(msg.command, msg.prefill, it)
+		return m.selectorDispatch(msg.command, msg.prefill, msg.prefillSuffix, it)
 	}
 	m.selectorActive = true
 	m.selectorTitle = msg.title
@@ -58,12 +67,9 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.selectorCursor = 0
 	m.pendingCommand = msg.command
 	m.selectorPrefill = msg.prefill
-	// Shrink the transcript viewport so the selector is visible on screen.
-	// Normal layout reserves 5 rows (header + blank + input + hint + margin).
-	// The selector takes up to 12 rows (title + filter + 8 items + overflow +
-	// hint), so we reserve 14 rows to leave a small margin.
+	m.selectorPrefillSuffix = msg.prefillSuffix
 	if m.height > 0 {
-		m.transcript.Height = max(3, m.height-14)
+		m.transcript.Height = m.transcriptHeight()
 	}
 	return m, nil
 }
@@ -77,9 +83,9 @@ func (m Model) clearSelector() Model {
 	m.selectorCursor = 0
 	m.pendingCommand = ""
 	m.selectorPrefill = false
-	// Restore the normal transcript height (mirrors the formula in resize()).
+	m.selectorPrefillSuffix = ""
 	if m.height > 0 {
-		m.transcript.Height = max(3, m.height-5)
+		m.transcript.Height = m.transcriptHeight()
 	}
 	return m
 }
@@ -144,9 +150,9 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cur = len(items) - 1
 		}
 		it := items[cur]
-		command, prefill := m.pendingCommand, m.selectorPrefill
+		command, prefill, prefillSuffix := m.pendingCommand, m.selectorPrefill, m.selectorPrefillSuffix
 		m = m.clearSelector()
-		return m.selectorDispatch(command, prefill, it)
+		return m.selectorDispatch(command, prefill, prefillSuffix, it)
 	}
 
 	switch {
@@ -164,10 +170,13 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // selectorDispatch runs the pending command against the chosen item. For
 // prefill commands (those that need more piped arguments, like "tasks edit")
 // the input is primed with "/<command> <ref> | " instead of executing.
-func (m Model) selectorDispatch(command string, prefill bool, it selectorItem) (tea.Model, tea.Cmd) {
+func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix string, it selectorItem) (tea.Model, tea.Cmd) {
 	line := "/" + command + " " + it.ref
 	if prefill {
-		m.input.SetValue(line + " | ")
+		if prefillSuffix == "" {
+			prefillSuffix = " "
+		}
+		m.input.SetValue(line + prefillSuffix)
 		m.input.CursorEnd()
 		m.refreshMenu()
 		m.append(entry{role: "system", text: "selected " + it.label + " — finish the command and press enter"})

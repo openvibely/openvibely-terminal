@@ -84,11 +84,13 @@ type selectorActiveMsg struct {
 	command string // pending command verb, e.g. "tasks open"
 	// emptyHint is shown (dimmed) when there is nothing to select.
 	emptyHint string
-	// prefill, when set, puts "/<command> <ref> | " into the input instead of
-	// dispatching immediately — for commands that need more piped arguments.
-	prefill bool
-	items   []selectorItem
-	err     error
+	// prefill, when set, puts "/<command> <ref><prefillSuffix>" into the
+	// input instead of dispatching immediately — for commands that need more
+	// arguments after the selected ref.
+	prefill       bool
+	prefillSuffix string
+	items         []selectorItem
+	err           error
 }
 
 // tickMsg drives periodic refresh (status re-check).

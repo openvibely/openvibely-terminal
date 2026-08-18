@@ -160,9 +160,17 @@ func taskSelectorItems(tasks []client.Task) []selectorItem {
 
 // taskSelector opens the inline task picker for a ref-less tasks subcommand.
 func taskSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd) {
+	prefillSuffix := ""
+	if prefill {
+		prefillSuffix = " | "
+	}
+	return taskSelectorWithSuffix(m, usage, command, prefillSuffix)
+}
+
+func taskSelectorWithSuffix(m Model, usage, command, prefillSuffix string) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
-	return selectorOr(m, usage, selectorFor("Tasks", command,
-		"no tasks yet — /tasks new <title> creates one", prefill,
+	return selectorOr(m, usage, selectorForWithSuffix("Tasks", command,
+		"no tasks yet — /tasks new <title> creates one", prefillSuffix,
 		func(ctx context.Context) ([]selectorItem, error) {
 			tasks, err := c.ListTasks(ctx, pid)
 			if err != nil {
@@ -183,7 +191,7 @@ func tasksCommand() command {
 		usage: []string{
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
-			"omit <task> on open/show/edit/run/stop/delete/goal/reply → interactive selector",
+			"omit <task> on open/show/edit/run/stop/delete/move/order/goal/reply → interactive selector",
 			"tasks show <task> [tab]                    details, thread, changes, schedules, chaining, attachments, lifecycle",
 			"tasks new <title> [| <prompt>]             create a task",
 			"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
@@ -326,6 +334,9 @@ func tasksCommand() command {
 				})
 
 			case "order":
+				if len(rest) == 0 {
+					return taskSelectorWithSuffix(m, "usage: /tasks order <task> <position>", "tasks order", " ")
+				}
 				if len(rest) < 2 {
 					return m, errCmd("usage: /tasks order <task> <position>")
 				}
@@ -380,6 +391,9 @@ func tasksCommand() command {
 				return m, cmd
 
 			case "move":
+				if len(rest) == 0 {
+					return taskSelectorWithSuffix(m, "usage: /tasks move <task> <backlog|active|completed>", "tasks move", " ")
+				}
 				if len(rest) < 2 {
 					return m, errCmd("usage: /tasks move <task> <backlog|active|completed>")
 				}
@@ -526,6 +540,7 @@ func scheduleCommand() command {
 		usage: []string{
 			"schedule                                   list schedules",
 			"schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]",
+			"omit <task> on add → interactive selector",
 			"schedule delete <id>                       remove a schedule",
 			"schedule toggle <id>                       enable/disable a schedule",
 			"omit <id> on delete/toggle → interactive selector",
@@ -556,6 +571,9 @@ func scheduleCommand() command {
 					return renderSchedule(entries, summary), nil
 				})
 			case "add":
+				if len(rest) == 0 {
+					return taskSelectorWithSuffix(m, "usage: /schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]", "schedule add", " ")
+				}
 				if len(rest) < 2 {
 					return m, errCmd("usage: /schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]")
 				}
