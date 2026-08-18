@@ -803,7 +803,7 @@ func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd
 }
 
 func skillsCommand() command {
-	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always"}
+	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always", "load"}
 	return command{
 		name:    "skills",
 		aliases: []string{"skill"},
@@ -817,13 +817,13 @@ func skillsCommand() command {
 			"skills edit <skill> | <new body>           replace a skill's body",
 			"skills delete <skill>                      remove a skill",
 			"skills enable|disable <skill>              toggle availability",
-			"skills always <skill>                      always load this skill",
-			"omit <skill> on show/edit/delete/enable/disable/always → interactive selector",
+			"skills always|load <skill>                 always load this skill",
+			"omit <skill> on show/edit/delete/enable/disable/always/load → interactive selector",
 		},
 		examples: []string{
 			`skills add retry-logic | Wrap HTTP calls in exponential backoff`,
 			`skills edit retry-logic | Always retry on 429 and 503 with jitter up to 60s`,
-			`skills always retry-logic`,
+			`skills load retry-logic`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
@@ -929,7 +929,7 @@ func skillsCommand() command {
 						err = c.SetSkillEnabled(ctx, pid, s.Handle, true)
 					case "disable":
 						err = c.SetSkillEnabled(ctx, pid, s.Handle, false)
-					case "always":
+					case "always", "load":
 						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, !s.AlwaysUse)
 					}
 					if err != nil {

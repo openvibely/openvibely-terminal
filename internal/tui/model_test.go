@@ -34,12 +34,24 @@ func newTestModel(t *testing.T) Model {
 // typeLine types text into the input and presses enter.
 func typeLine(t *testing.T, m Model, text string) (Model, tea.Cmd) {
 	t.Helper()
+	m = typeInput(t, m, text)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next.(Model), cmd
+}
+
+func typeInput(t *testing.T, m Model, text string) Model {
+	t.Helper()
 	for _, r := range text {
 		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 		m = next.(Model)
 	}
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	return next.(Model), cmd
+	return m
+}
+
+func pressTab(t *testing.T, m Model) Model {
+	t.Helper()
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	return next.(Model)
 }
 
 func transcript(m Model) string {
@@ -77,11 +89,7 @@ func TestPlainTextSendsChatWhenProjectSelected(t *testing.T) {
 }
 
 func TestSlashCommandMenuAppearsAndCompletes(t *testing.T) {
-	m := newTestModel(t)
-	for _, r := range "/ta" {
-		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = next.(Model)
-	}
+	m := typeInput(t, newTestModel(t), "/ta")
 	if len(m.menu) == 0 {
 		t.Fatal("expected a command menu for /ta")
 	}
@@ -89,13 +97,69 @@ func TestSlashCommandMenuAppearsAndCompletes(t *testing.T) {
 		t.Errorf("first suggestion = %q, want tasks", m.menu[0].name)
 	}
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = next.(Model)
-	if got := m.input.Value(); !strings.HasPrefix(got, "/tasks") {
-		t.Errorf("after tab input = %q, want /tasks…", got)
+	m = pressTab(t, m)
+	if got := m.input.Value(); got != "/tasks " {
+		t.Errorf("after tab input = %q, want /tasks ", got)
 	}
 	if !strings.Contains(m.View(), "tasks") {
 		t.Error("menu should be visible in the view")
+	}
+}
+
+func TestSlashCommandSubcommandCompletesFromRegistry(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"tasks", "/tasks ru", "/tasks run "},
+		{"models", "/models cap model-x", "/models capacity model-x"},
+		{"automations", "/automations run- job", "/automations run-now job"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pressTab(t, typeInput(t, newTestModel(t), tc.input))
+			if got := m.input.Value(); got != tc.want {
+				t.Fatalf("input after tab = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSlashCommandSubcommandTabDoesNotErasePartialToken(t *testing.T) {
+	m := pressTab(t, typeInput(t, newTestModel(t), "/skills zz"))
+	if got := m.input.Value(); got != "/skills zz" {
+		t.Fatalf("input after tab = %q, want partial token preserved", got)
+	}
+}
+
+func TestSlashCommandSkillsLoadCompletionRegression(t *testing.T) {
+	m := pressTab(t, typeInput(t, newTestModel(t), "/skills lo"))
+	if got := m.input.Value(); got != "/skills load " {
+		t.Fatalf("input after tab = %q, want /skills load ", got)
+	}
+
+	m = pressTab(t, typeInput(t, newTestModel(t), "/skills lo "))
+	if got := m.input.Value(); got != "/skills load " {
+		t.Fatalf("trailing-space input after tab = %q, want /skills load ", got)
+	}
+}
+
+func TestSlashCommandSubcommandAmbiguousAndArgsArePreserved(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"ambiguous action prefix", "/tasks s"},
+		{"resource arg after action", "/tasks run sk"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pressTab(t, typeInput(t, newTestModel(t), tc.input))
+			if got := m.input.Value(); got != tc.input {
+				t.Fatalf("input after tab = %q, want %q", got, tc.input)
+			}
+		})
 	}
 }
 

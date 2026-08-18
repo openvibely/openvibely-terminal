@@ -34,7 +34,7 @@ type command struct {
 	// examples, not only syntax."
 	examples []string
 	desc     string
-	run   func(m Model, args []string) (Model, tea.Cmd)
+	run      func(m Model, args []string) (Model, tea.Cmd)
 }
 
 func (c command) matches(s string) bool {
@@ -154,6 +154,59 @@ func (m *Model) refreshMenu() {
 	if m.menuSel >= len(m.menu) {
 		m.menuSel = 0
 	}
+}
+
+func completeSlashInput(value string, selected command) string {
+	if !strings.HasPrefix(strings.TrimSpace(value), "/") {
+		return value
+	}
+
+	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(value), "/"))
+	if len(fields) == 0 {
+		return value
+	}
+
+	if len(fields) == 1 && !strings.Contains(strings.TrimSpace(value), " ") {
+		out := "/" + selected.name
+		if selected.args != "" || len(selected.actions) > 0 {
+			out += " "
+		}
+		return out
+	}
+
+	c := lookupCommand(fields[0])
+	if c == nil || len(c.actions) == 0 {
+		return value
+	}
+
+	trailingSpace := strings.HasSuffix(value, " ")
+	if len(fields) == 1 {
+		return value
+	}
+
+	prefix := strings.ToLower(fields[1])
+	matches := matchingActions(c.actions, prefix)
+	if len(matches) != 1 {
+		return value
+	}
+
+	fields[0] = c.name
+	fields[1] = matches[0]
+	out := "/" + strings.Join(fields, " ")
+	if trailingSpace || len(fields) == 2 {
+		out += " "
+	}
+	return out
+}
+
+func matchingActions(actions []string, prefix string) []string {
+	var matches []string
+	for _, action := range actions {
+		if strings.HasPrefix(strings.ToLower(action), prefix) {
+			matches = append(matches, action)
+		}
+	}
+	return matches
 }
 
 // --- argument helpers ---

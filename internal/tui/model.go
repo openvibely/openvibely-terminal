@@ -606,11 +606,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if len(m.menu) > 0 {
 			c := m.menu[m.menuSel]
-			value := "/" + c.name
-			if c.args != "" || len(c.actions) > 0 {
-				value += " "
-			}
-			m.input.SetValue(value)
+			m.input.SetValue(completeSlashInput(m.input.Value(), c))
 			m.input.CursorEnd()
 			m.refreshMenu()
 		}
