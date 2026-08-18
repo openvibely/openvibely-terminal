@@ -220,6 +220,36 @@ func TestSelectorFilterNarrowsItems(t *testing.T) {
 	}
 }
 
+// TestSelectorFilterSpaceTypesExactlyOneSpace verifies that pressing the spacebar
+// while typing a filter appends a single space, not two. Multi-word resource
+// names (e.g. "Refactor the API") must be findable when the user types a space
+// in their search term.
+func TestSelectorFilterSpaceTypesExactlyOneSpace(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/tasks run")
+	if !m.selectorActive {
+		t.Fatalf("selector not active:\n%s", transcript(m))
+	}
+
+	// Type "the" + space + "api" to match "Refactor the API" but not "Ship the docs".
+	m = typeSelectorRunes(t, m, "the")
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeySpace})
+	m = typeSelectorRunes(t, m, "api")
+
+	// The filter must be exactly "the api" (one space, not two).
+	if m.selectorFilter != "the api" {
+		t.Errorf("selectorFilter = %q, want %q", m.selectorFilter, "the api")
+	}
+
+	items := m.filteredSelectorItems()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 filtered item after 'the api', got %d: %+v", len(items), items)
+	}
+	if items[0].ref != "t-1" {
+		t.Errorf("filtered item ref = %q, want %q", items[0].ref, "t-1")
+	}
+}
+
 // TestSelectorEnterDispatchesPendingCommand verifies that choosing an item
 // re-dispatches "/<pendingCommand> <ref>" exactly as if typed.
 func TestSelectorEnterDispatchesPendingCommand(t *testing.T) {

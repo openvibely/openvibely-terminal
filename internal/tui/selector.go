@@ -138,11 +138,13 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.selectorDispatch(command, prefill, it)
 	}
 
-	if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+	switch {
+	case msg.Type == tea.KeySpace:
+		m.selectorFilter += " "
+	case msg.Type == tea.KeyRunes:
 		m.selectorFilter += string(msg.Runes)
-		if msg.Type == tea.KeySpace {
-			m.selectorFilter += " "
-		}
+	}
+	if msg.Type == tea.KeySpace || msg.Type == tea.KeyRunes {
 		m.selectorCursor = 0
 	}
 	return m, nil
