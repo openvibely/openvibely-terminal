@@ -88,6 +88,47 @@ func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	}
 }
 
+func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1">
+		<p class="font-semibold">Needs approval</p>
+		<span class="badge">pending</span>
+	</div>`
+	const tasksHTML = `<div>
+		<div class="card" data-task-id="t-1" data-task-status="running" data-task-category="active" data-display-order="0">
+			<div class="card-body"><a href="/tasks/t-1" title="Task A">Task A</a></div>
+		</div>
+		<div class="card" data-task-id="t-2" data-task-status="queued" data-task-category="active" data-display-order="1">
+			<div class="card-body"><a href="/tasks/t-2" title="Task B">Task B</a></div>
+		</div>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/alerts":       alertsHTML,
+		"/tasks":        tasksHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	got := out.String()
+	if !rec.saw("GET", "/alerts") {
+		t.Errorf("expected alerts fetch during CLI status:\n%s", rec.all())
+	}
+	if !rec.saw("GET", "/tasks") {
+		t.Errorf("expected tasks fetch during CLI status:\n%s", rec.all())
+	}
+	if !strings.Contains(got, "1 pending approvals") {
+		t.Errorf("status missing pending alert count:\n%s", got)
+	}
+	if !strings.Contains(got, "2 active, 1 queued") {
+		t.Errorf("status missing task counts:\n%s", got)
+	}
+	if strings.Contains(got, "none pending") || strings.Contains(got, "none active") {
+		t.Errorf("status rendered zero-count placeholders despite mocked counts:\n%s", got)
+	}
+}
+
 // A CLI command must run against the requested project, not the first one.
 func TestCLISelectsRequestedProject(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
