@@ -58,10 +58,17 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.selectorCursor = 0
 	m.pendingCommand = msg.command
 	m.selectorPrefill = msg.prefill
+	// Shrink the transcript viewport so the selector is visible on screen.
+	// Normal layout reserves 5 rows (header + blank + input + hint + margin).
+	// The selector takes up to 12 rows (title + filter + 8 items + overflow +
+	// hint), so we reserve 14 rows to leave a small margin.
+	if m.height > 0 {
+		m.transcript.Height = max(3, m.height-14)
+	}
 	return m, nil
 }
 
-// clearSelector resets all selector state.
+// clearSelector resets all selector state and restores the transcript height.
 func (m Model) clearSelector() Model {
 	m.selectorActive = false
 	m.selectorTitle = ""
@@ -70,6 +77,10 @@ func (m Model) clearSelector() Model {
 	m.selectorCursor = 0
 	m.pendingCommand = ""
 	m.selectorPrefill = false
+	// Restore the normal transcript height (mirrors the formula in resize()).
+	if m.height > 0 {
+		m.transcript.Height = max(3, m.height-5)
+	}
 	return m
 }
 

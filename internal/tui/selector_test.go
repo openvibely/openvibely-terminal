@@ -419,6 +419,33 @@ func TestSelectorFetchErrorShowsError(t *testing.T) {
 	}
 }
 
+// TestSelectorShrinksTranscriptViewport verifies that opening the selector
+// shrinks the transcript viewport so the picker is visible on screen, and that
+// closing the selector (Esc or Enter) restores the normal height.
+func TestSelectorShrinksTranscriptViewport(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	// dispatchModel sets Height=30 via WindowSizeMsg; normal height = 30-5 = 25.
+	normalHeight := m.transcript.Height
+
+	m = runLine(t, m, "/tasks open")
+	if !m.selectorActive {
+		t.Fatalf("selector not active:\n%s", transcript(m))
+	}
+	if m.transcript.Height >= normalHeight {
+		t.Errorf("transcript height should shrink while selector is open: got %d, normal %d",
+			m.transcript.Height, normalHeight)
+	}
+
+	// Esc should restore normal height.
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.selectorActive {
+		t.Error("selector should be closed after Esc")
+	}
+	if m.transcript.Height != normalHeight {
+		t.Errorf("transcript height after Esc = %d, want %d", m.transcript.Height, normalHeight)
+	}
+}
+
 // TestSelectorCursorBoundaries verifies that pressing ↑ at the top keeps the
 // cursor at 0, and pressing ↓ at the last item keeps it there.
 func TestSelectorCursorBoundaries(t *testing.T) {
