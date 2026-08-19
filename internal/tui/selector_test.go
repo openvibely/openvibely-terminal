@@ -92,6 +92,8 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"tasks_run", "/tasks run", "tasks run"},
 		{"tasks_stop", "/tasks stop", "tasks stop"},
 		{"tasks_delete", "/tasks delete", "tasks delete"},
+		{"tasks_move", "/tasks move", "tasks move"},
+		{"tasks_order", "/tasks order", "tasks order"},
 		{"tasks_goal", "/tasks goal", "tasks goal"},
 		{"tasks_reply", "/tasks reply", "tasks reply"},
 		// alerts
@@ -121,6 +123,7 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"channels_test", "/channels test", "channels test"},
 		{"channels_remove", "/channels remove", "channels remove"},
 		// schedule
+		{"schedule_add", "/schedule add", "schedule add"},
 		{"schedule_delete", "/schedule delete", "schedule delete"},
 		{"schedule_toggle", "/schedule toggle", "schedule toggle"},
 	}
@@ -365,6 +368,74 @@ func TestSelectorPrefillPrimesInput(t *testing.T) {
 	rec.mu.Unlock()
 }
 
+func TestSelectorSpacePrefillPrimesInput(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		want string
+	}{
+		{"tasks_move", "/tasks move", "/tasks move t-1 "},
+		{"tasks_order", "/tasks order", "/tasks order t-1 "},
+		{"schedule_add", "/schedule add", "/schedule add t-1 "},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, selFixtures())
+			m = runLine(t, m, tc.cmd)
+			if !m.selectorActive {
+				t.Fatalf("selector not active:\n%s", transcript(m))
+			}
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			if m.selectorActive {
+				t.Error("selector should close after Enter")
+			}
+			if got := m.input.Value(); got != tc.want {
+				t.Errorf("input = %q, want %q", got, tc.want)
+			}
+			rec.mu.Lock()
+			for _, c := range rec.calls {
+				if strings.HasPrefix(c, "PUT ") || strings.HasPrefix(c, "POST ") {
+					t.Errorf("prefill must not mutate, saw %s", c)
+				}
+			}
+			rec.mu.Unlock()
+		})
+	}
+}
+
+func TestMultiArgSelectorCLIKeepsUsageError(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+	}{
+		{"tasks_move", "/tasks move"},
+		{"tasks_order", "/tasks order"},
+		{"schedule_add", "/schedule add"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cliMode = true
+			defer func() { cliMode = false }()
+			m, rec := dispatchModel(t, selFixtures())
+			m = runLine(t, m, tc.cmd)
+			if m.selectorActive {
+				t.Error("selector must not activate in CLI mode")
+			}
+			if out := transcript(m); !strings.Contains(strings.ToLower(out), "usage") {
+				t.Errorf("expected usage error in CLI mode, got:\n%s", out)
+			}
+			rec.mu.Lock()
+			nCalls := len(rec.calls)
+			rec.mu.Unlock()
+			if nCalls != 0 {
+				t.Errorf("expected zero backend calls, got %d:\n%s", nCalls, rec.all())
+			}
+		})
+	}
+}
+
 // TestSelectorViewRendersFilterAndCursor verifies the inline rendering shows
 // the filter prompt and highlights the cursor row.
 func TestSelectorViewRendersFilterAndCursor(t *testing.T) {
@@ -436,6 +507,16 @@ func TestSelectorShrinksTranscriptViewport(t *testing.T) {
 		t.Errorf("transcript height should shrink while selector is open: got %d, normal %d",
 			m.transcript.Height, normalHeight)
 	}
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = updated.(Model)
+	if !m.selectorActive {
+		t.Fatal("selector should remain active after resize")
+	}
+	if got, want := m.transcript.Height, 26; got != want {
+		t.Errorf("transcript height after resize while selector active = %d, want %d", got, want)
+	}
+	normalHeight = 35
 
 	// Esc should restore normal height.
 	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})

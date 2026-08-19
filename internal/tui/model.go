@@ -108,13 +108,14 @@ type Model struct {
 
 	// inline ref selector (opened when a command needing a <ref> is run
 	// without one): key input is routed to the picker while active.
-	selectorActive  bool
-	selectorTitle   string
-	selectorItems   []selectorItem
-	selectorFilter  string
-	selectorCursor  int
-	pendingCommand  string // e.g. "tasks open"; re-dispatched with the chosen ref
-	selectorPrefill bool   // prime the input instead of dispatching (piped commands)
+	selectorActive        bool
+	selectorTitle         string
+	selectorItems         []selectorItem
+	selectorFilter        string
+	selectorCursor        int
+	pendingCommand        string // e.g. "tasks open"; re-dispatched with the chosen ref
+	selectorPrefill       bool   // prime the input instead of dispatching
+	selectorPrefillSuffix string // appended after the chosen ref when priming input
 
 	// live events
 	showEvents    bool // stream events into the transcript
@@ -606,11 +607,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if len(m.menu) > 0 {
 			c := m.menu[m.menuSel]
-			value := "/" + c.name
-			if c.args != "" || len(c.actions) > 0 {
-				value += " "
-			}
-			m.input.SetValue(value)
+			m.input.SetValue(completeSlashInput(m.input.Value(), c))
 			m.input.CursorEnd()
 			m.refreshMenu()
 		}
@@ -762,14 +759,24 @@ func (m *Model) append(e entry) {
 	m.refreshTranscript()
 }
 
-func (m *Model) resize() {
-	m.transcript.Width = m.width
-	// header (1) + blank (1) + menu/hint + input (1) + help (1)
-	h := m.height - 5
+func (m Model) transcriptHeight() int {
+	// Normal layout reserves 5 rows (header + blank + input/menu + help + margin).
+	reserve := 5
+	if m.selectorActive {
+		// The selector takes up to 12 rows (title + filter + 8 items + overflow +
+		// hint), so reserve 14 rows to leave a small margin.
+		reserve = 14
+	}
+	h := m.height - reserve
 	if h < 3 {
 		h = 3
 	}
-	m.transcript.Height = h
+	return h
+}
+
+func (m *Model) resize() {
+	m.transcript.Width = m.width
+	m.transcript.Height = m.transcriptHeight()
 	m.input.Width = m.width - 4
 	m.refreshTranscript()
 }

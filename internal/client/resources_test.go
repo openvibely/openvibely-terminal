@@ -106,13 +106,16 @@ func TestListSkillsReadsDataAttributes(t *testing.T) {
 func TestListModelsAndAgents(t *testing.T) {
 	t.Run("models", func(t *testing.T) {
 		c := htmlServer(t, `<div data-model-id="m1" data-model-name="Sonnet"
-			data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`)
+				data-model-provider="anthropic" data-model-model="claude-sonnet-4">Sonnet model details</div>`)
 		list, err := c.ListModels(context.Background(), "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(list) != 1 || list[0].Name != "Sonnet" || list[0].Provider != "anthropic" {
 			t.Fatalf("models = %+v", list)
+		}
+		if list[0].Text != "Sonnet model details" {
+			t.Fatalf("model text = %q, want %q", list[0].Text, "Sonnet model details")
 		}
 	})
 
@@ -184,6 +187,9 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	}
 	if entries[0].ScheduleID != "s1" || entries[0].TaskID != "t1" {
 		t.Errorf("entry = %+v", entries[0])
+	}
+	if entries[0].Text != "Nightly build — daily 02:00" {
+		t.Errorf("entry text = %q, want %q", entries[0].Text, "Nightly build — daily 02:00")
 	}
 	if summary == "" {
 		t.Error("expected summary text from #schedule-content")

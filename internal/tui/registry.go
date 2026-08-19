@@ -91,6 +91,20 @@ func refreshAndRender[T any](status string, list func() ([]T, error), render fun
 	return status + "\n\n" + render(items, ""), nil
 }
 
+// actAndReloadText consolidates the "act, then reload a preformatted text
+// page" sequence. If the reload fails after a successful action, the error is
+// swallowed and only the status line is returned.
+func actAndReloadText(status string, act func() error, reload func() (string, error)) (string, error) {
+	if err := act(); err != nil {
+		return "", err
+	}
+	text, err := reload()
+	if err != nil {
+		return status, nil
+	}
+	return status + "\n\n" + text, nil
+}
+
 // marshalJSON marshals v to a JSON string. When jsonMode is false it is never
 // called; callers should guard with `if jsonMode { ... }`.
 func marshalJSON(v any) (string, error) {
@@ -160,9 +174,17 @@ func taskSelectorItems(tasks []client.Task) []selectorItem {
 
 // taskSelector opens the inline task picker for a ref-less tasks subcommand.
 func taskSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd) {
+	prefillSuffix := ""
+	if prefill {
+		prefillSuffix = " | "
+	}
+	return taskSelectorWithSuffix(m, usage, command, prefillSuffix)
+}
+
+func taskSelectorWithSuffix(m Model, usage, command, prefillSuffix string) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
-	return selectorOr(m, usage, selectorFor("Tasks", command,
-		"no tasks yet — /tasks new <title> creates one", prefill,
+	return selectorOr(m, usage, selectorForWithSuffix("Tasks", command,
+		"no tasks yet — /tasks new <title> creates one", prefillSuffix,
 		func(ctx context.Context) ([]selectorItem, error) {
 			tasks, err := c.ListTasks(ctx, pid)
 			if err != nil {
@@ -183,7 +205,7 @@ func tasksCommand() command {
 		usage: []string{
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
-			"omit <task> on open/show/reviews/edit/run/stop/delete/goal/reply → interactive selector",
+			"omit <task> on open/show/reviews/edit/run/stop/delete/move/order/goal/reply → interactive selector",
 			"tasks show <task> [tab]                    details, thread, changes, review, schedules, chaining, attachments, lifecycle",
 			"tasks reviews [list] <task>                list inline review comments",
 			"tasks reviews add <task> <file>:<line> <comment>",
@@ -403,6 +425,9 @@ func tasksCommand() command {
 				})
 
 			case "order":
+				if len(rest) == 0 {
+					return taskSelectorWithSuffix(m, "usage: /tasks order <task> <position>", "tasks order", " ")
+				}
 				if len(rest) < 2 {
 					return m, errCmd("usage: /tasks order <task> <position>")
 				}
@@ -457,6 +482,9 @@ func tasksCommand() command {
 				return m, cmd
 
 			case "move":
+				if len(rest) == 0 {
+					return taskSelectorWithSuffix(m, "usage: /tasks move <task> <backlog|active|completed>", "tasks move", " ")
+				}
 				if len(rest) < 2 {
 					return m, errCmd("usage: /tasks move <task> <backlog|active|completed>")
 				}
@@ -647,6 +675,7 @@ func scheduleCommand() command {
 		usage: []string{
 			"schedule                                   list schedules",
 			"schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]",
+			"omit <task> on add → interactive selector",
 			"schedule delete <id>                       remove a schedule",
 			"schedule toggle <id>                       enable/disable a schedule",
 			"omit <id> on delete/toggle → interactive selector",
@@ -677,6 +706,9 @@ func scheduleCommand() command {
 					return renderSchedule(entries, summary), nil
 				})
 			case "add":
+				if len(rest) == 0 {
+					return taskSelectorWithSuffix(m, "usage: /schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]", "schedule add", " ")
+				}
 				if len(rest) < 2 {
 					return m, errCmd("usage: /schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]")
 				}
@@ -924,7 +956,7 @@ func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd
 }
 
 func skillsCommand() command {
-	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always"}
+	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always", "load"}
 	return command{
 		name:    "skills",
 		aliases: []string{"skill"},
@@ -938,13 +970,13 @@ func skillsCommand() command {
 			"skills edit <skill> | <new body>           replace a skill's body",
 			"skills delete <skill>                      remove a skill",
 			"skills enable|disable <skill>              toggle availability",
-			"skills always <skill>                      always load this skill",
-			"omit <skill> on show/edit/delete/enable/disable/always → interactive selector",
+			"skills always|load <skill>                 always load this skill",
+			"omit <skill> on show/edit/delete/enable/disable/always/load → interactive selector",
 		},
 		examples: []string{
 			`skills add retry-logic | Wrap HTTP calls in exponential backoff`,
 			`skills edit retry-logic | Always retry on 429 and 503 with jitter up to 60s`,
-			`skills always retry-logic`,
+			`skills load retry-logic`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
@@ -1050,7 +1082,7 @@ func skillsCommand() command {
 						err = c.SetSkillEnabled(ctx, pid, s.Handle, true)
 					case "disable":
 						err = c.SetSkillEnabled(ctx, pid, s.Handle, false)
-					case "always":
+					case "always", "load":
 						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, !s.AlwaysUse)
 					}
 					if err != nil {
@@ -1420,15 +1452,10 @@ func channelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.ChannelAction(ctx, ch.Type, action, pid); err != nil {
-						return "", err
-					}
 					status := action + ": " + ch.Name
-					text, err := c.GetChannels(ctx, pid)
-					if err != nil {
-						return status, nil
-					}
-					return status + "\n\n" + text, nil
+					return actAndReloadText(status,
+						func() error { return c.ChannelAction(ctx, ch.Type, action, pid) },
+						func() (string, error) { return c.GetChannels(ctx, pid) })
 				})
 			}
 		},
@@ -1648,16 +1675,10 @@ func automationsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					err = c.AutomationAction(ctx, a.ID, action, pid)
-					if err != nil {
-						return "", err
-					}
 					status := action + ": " + firstNonEmpty(a.Name, a.ID)
-					items, err := c.GetAutomations(ctx, pid)
-					if err != nil {
-						return status, nil
-					}
-					return status + "\n\n" + items, nil
+					return actAndReloadText(status,
+						func() error { return c.AutomationAction(ctx, a.ID, action, pid) },
+						func() (string, error) { return c.GetAutomations(ctx, pid) })
 				})
 				if action == "delete" {
 					return confirmOr(m,

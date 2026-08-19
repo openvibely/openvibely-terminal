@@ -93,6 +93,7 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	}
 	if cmdDef.needsStatus() {
 		m = drain(m, m.checkConnection())
+		m = drain(m, m.fetchStatusCounts())
 	}
 
 	start := len(m.log)

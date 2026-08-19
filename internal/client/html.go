@@ -124,11 +124,27 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 	return nil, err
 }
 
+var cardNodeText = NodeText
+
+type scrapedCard struct {
+	attrs map[string]string
+	node  *html.Node
+}
+
 // scrapeCards collects every element carrying the given data-* marker
 // attribute (e.g. "data-task-id") and returns its attributes and text.
 func scrapeCards(root *html.Node, marker string) []Card {
+	matches := scrapeCardNodes(root, marker)
+	out := make([]Card, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, Card{Attrs: m.attrs, Text: cardNodeText(m.node)})
+	}
+	return out
+}
+
+func scrapeCardNodes(root *html.Node, marker string) []scrapedCard {
 	nodes := findAll(root, func(e *html.Node) bool { return attr(e, marker) != "" })
-	out := make([]Card, 0, len(nodes))
+	out := make([]scrapedCard, 0, len(nodes))
 	for _, n := range nodes {
 		attrs := map[string]string{}
 		for _, a := range n.Attr {
@@ -136,7 +152,7 @@ func scrapeCards(root *html.Node, marker string) []Card {
 				attrs[a.Key] = a.Val
 			}
 		}
-		out = append(out, Card{Attrs: attrs, Text: NodeText(n)})
+		out = append(out, scrapedCard{attrs: attrs, node: n})
 	}
 	return out
 }
@@ -168,9 +184,51 @@ func dedupeCards(cards []Card, marker string) []Card {
 	return out
 }
 
+func dedupeScrapedCards(cards []scrapedCard, marker string) []scrapedCard {
+	best := map[string]int{}
+	var order []string
+	for i, c := range cards {
+		id := c.attrs[marker]
+		if id == "" {
+			continue
+		}
+		prev, seen := best[id]
+		if !seen {
+			best[id] = i
+			order = append(order, id)
+			continue
+		}
+		if len(c.attrs) > len(cards[prev].attrs) {
+			best[id] = i
+		}
+	}
+	out := make([]scrapedCard, 0, len(order))
+	for _, id := range order {
+		out = append(out, cards[best[id]])
+	}
+	return out
+}
+
+func scrapedToCards(cards []scrapedCard, includeText bool) []Card {
+	out := make([]Card, 0, len(cards))
+	for _, c := range cards {
+		card := Card{Attrs: c.attrs}
+		if includeText {
+			card.Text = cardNodeText(c.node)
+		}
+		out = append(out, card)
+	}
+	return out
+}
+
 // dedupedCards is a convenience wrapper that scrapes and deduplicates in one step.
 func dedupedCards(root *html.Node, marker string) []Card {
-	return dedupeCards(scrapeCards(root, marker), marker)
+	return scrapedToCards(dedupeScrapedCards(scrapeCardNodes(root, marker), marker), true)
+}
+
+// dedupedCardsWithoutText scrapes and deduplicates cards without populating Text.
+func dedupedCardsWithoutText(root *html.Node, marker string) []Card {
+	return scrapedToCards(dedupeScrapedCards(scrapeCardNodes(root, marker), marker), false)
 }
 
 // firstLine returns the first non-empty line of a card's text, which is how
