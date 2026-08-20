@@ -1586,7 +1586,7 @@ func gradesCommand() command {
 			c, pid := m.client, m.selectedID
 			return m, run("Grades", cmdTimeout, func(ctx context.Context) (string, error) {
 				return generateThenFetch(ctx, "run", action,
-					func(ctx context.Context) error { _, err := c.GradeIdeas(ctx, pid); return err },
+					func(ctx context.Context) error { return c.GradeIdeas(ctx, pid) },
 					func(ctx context.Context) (string, error) { return c.GetGrades(ctx, pid) })
 			})
 		},

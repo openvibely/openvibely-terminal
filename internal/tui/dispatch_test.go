@@ -1599,29 +1599,47 @@ func TestGenerateThenFetch(t *testing.T) {
 		}
 	})
 
-	// grades run: POST /history/grade-ideas then GET /history; failure short-circuits
-	t.Run("grades run calls generate then fetch", func(t *testing.T) {
-		var generateCalled, fetchCalled bool
+	// grades run: POST /history/grade-ideas then exactly one GET /history; failure short-circuits
+	t.Run("grades run posts then fetches history once", func(t *testing.T) {
+		var mu sync.Mutex
+		var calls []string
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			calls = append(calls, r.Method+" "+r.URL.Path)
+			mu.Unlock()
+
 			w.Header().Set("Content-Type", "text/html")
 			if r.Method == "POST" && r.URL.Path == "/history/grade-ideas" {
-				generateCalled = true
 				_, _ = w.Write([]byte("ok"))
 				return
 			}
 			if r.Method == "GET" && r.URL.Path == "/history" {
-				fetchCalled = true
 				_, _ = w.Write([]byte(`<div id="idea-grade-content">grades content</div>`))
 				return
 			}
 			_, _ = w.Write([]byte("{}"))
 		})
 		m = runLine(t, m, "/grades run")
-		if !generateCalled {
-			t.Error("expected GradeIdeas (POST /history/grade-ideas) to be called")
+
+		mu.Lock()
+		postIndex := -1
+		getHistoryAfterPost := 0
+		for i, call := range calls {
+			if call == "POST /history/grade-ideas" && postIndex == -1 {
+				postIndex = i
+			}
+			if postIndex != -1 && i > postIndex && call == "GET /history" {
+				getHistoryAfterPost++
+			}
 		}
-		if !fetchCalled {
-			t.Error("expected GetGrades (GET /history) to be called after generate")
+		gotCalls := strings.Join(calls, "\n")
+		mu.Unlock()
+
+		if postIndex == -1 {
+			t.Fatalf("expected GradeIdeas (POST /history/grade-ideas) to be called, calls:\n%s", gotCalls)
+		}
+		if getHistoryAfterPost != 1 {
+			t.Fatalf("expected exactly one GetGrades (GET /history) after grading post, got %d; calls:\n%s", getHistoryAfterPost, gotCalls)
 		}
 		if strings.Contains(transcript(m), "error:") {
 			t.Errorf("unexpected error:\n%s", transcript(m))

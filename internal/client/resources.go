@@ -416,11 +416,8 @@ func (c *Client) GetGrades(ctx context.Context, projectID string) (string, error
 }
 
 // GradeIdeas triggers a fresh grading pass (the Grades view on the history screen).
-func (c *Client) GradeIdeas(ctx context.Context, projectID string) (string, error) {
-	if err := c.doForm(ctx, http.MethodPost, "/history/grade-ideas"+query("project_id", projectID), nil); err != nil {
-		return "", err
-	}
-	return c.pageText(ctx, "/history"+query("project_id", projectID), "idea-grade-content")
+func (c *Client) GradeIdeas(ctx context.Context, projectID string) error {
+	return c.doForm(ctx, http.MethodPost, "/history/grade-ideas"+query("project_id", projectID), nil)
 }
 
 // GetInsights returns the proactive insights screen as text.
