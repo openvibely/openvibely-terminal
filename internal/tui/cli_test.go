@@ -481,6 +481,33 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 			t.Errorf("expected backend call with --force:\n%s", rec.all())
 		}
 	})
+
+	t.Run("channels_remove/without_force_exits_nonzero", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "remove", "email"}, false, false)
+		if err == nil {
+			t.Fatal("expected nonzero exit without --force")
+		}
+		if !strings.Contains(err.Error(), "--force") {
+			t.Errorf("error should mention --force, got: %v", err)
+		}
+		if rec.saw("POST", "/channels/email/remove") {
+			t.Error("must not call backend without --force")
+		}
+	})
+
+	t.Run("channels_remove/with_force_calls_backend", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/channels":     `<html><body>refreshed channels page</body></html>`,
+		})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "remove", "email"}, true, false); err != nil {
+			t.Fatalf("expected zero exit with --force: %v", err)
+		}
+		if !rec.saw("POST", "/channels/email/remove") {
+			t.Errorf("expected backend call with --force:\n%s", rec.all())
+		}
+	})
 }
 
 // --- JSON output mode tests ---

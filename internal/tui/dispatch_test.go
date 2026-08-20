@@ -1217,7 +1217,11 @@ func TestChannelsTestAndRemove(t *testing.T) {
 		tc := tc
 		t.Run(tc.action+" "+tc.channelName, func(t *testing.T) {
 			m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
-			m = runLine(t, m, "/channels "+tc.action+" "+tc.channelName)
+			if tc.action == "remove" {
+				m = confirmDestructive(t, m, "/channels "+tc.action+" "+tc.channelName)
+			} else {
+				m = runLine(t, m, "/channels "+tc.action+" "+tc.channelName)
+			}
 			if !rec.saw("POST", tc.wantPath) {
 				t.Errorf("expected POST %s, calls:\n%s", tc.wantPath, rec.all())
 			}
@@ -1263,6 +1267,61 @@ func TestChannelsMatchRefResolution(t *testing.T) {
 		}
 		if !strings.Contains(transcript(m), "error:") {
 			t.Errorf("expected an error for unknown channel:\n%s", transcript(m))
+		}
+	})
+}
+
+func TestChannelsRemoveRequiresConfirmation(t *testing.T) {
+	const refreshedChannelsPage = `<html><body>refreshed channels page</body></html>`
+
+	t.Run("slack_no_call_before_confirm", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
+		m = runLine(t, m, "/channels remove slack")
+		if rec.saw("POST", "/channels/slack/disconnect") {
+			t.Errorf("backend must not be called before confirmation:\n%s", rec.all())
+		}
+		if m.pendingConfirmation == nil {
+			t.Error("pendingConfirmation must be set")
+		}
+	})
+
+	t.Run("slack_called_after_yes_and_refreshes", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
+		m = confirmDestructive(t, m, "/channels remove slack")
+		if !rec.saw("POST", "/channels/slack/disconnect") {
+			t.Errorf("expected Slack disconnect after yes:\n%s", rec.all())
+		}
+		if !rec.saw("GET", "/channels") {
+			t.Errorf("expected channels refresh after remove:\n%s", rec.all())
+		}
+		out := transcript(m)
+		if !strings.Contains(out, "remove: Slack") || !strings.Contains(out, "refreshed channels page") {
+			t.Errorf("expected status and refreshed output:\n%s", out)
+		}
+	})
+
+	t.Run("email_cancelled_after_non_yes", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
+		m = runLine(t, m, "/channels remove email")
+		m = runLine(t, m, "no")
+		if rec.saw("POST", "/channels/email/remove") {
+			t.Errorf("backend must not be called after non-yes input:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "cancelled") {
+			t.Errorf("expected cancellation message:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("email_cancelled_after_esc", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
+		m = runLine(t, m, "/channels remove email")
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if rec.saw("POST", "/channels/email/remove") {
+			t.Errorf("backend must not be called after Esc:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "cancelled") {
+			t.Errorf("expected cancellation message:\n%s", transcript(m))
 		}
 	})
 }
@@ -1318,7 +1377,11 @@ func TestChannelsBackendFailureSurfaces(t *testing.T) {
 			m.selectedID = "p1"
 			m.selectedName = "demo"
 
-			m = runLine(t, m, "/channels "+action+" telegram")
+			if action == "remove" {
+				m = confirmDestructive(t, m, "/channels "+action+" telegram")
+			} else {
+				m = runLine(t, m, "/channels "+action+" telegram")
+			}
 			out := transcript(m)
 			if !strings.Contains(out, "error:") {
 				t.Errorf("expected a backend error for %s:\n%s", action, out)

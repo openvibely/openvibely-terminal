@@ -1460,7 +1460,7 @@ func channelsCommand() command {
 								return items, nil
 							}))
 				}
-				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
 					ch, err := matchRef(client.KnownChannels, ref,
 						func(ch client.Channel) string { return ch.Type },
 						func(ch client.Channel) string { return ch.Name })
@@ -1472,6 +1472,13 @@ func channelsCommand() command {
 						func() error { return c.ChannelAction(ctx, ch.Type, action, pid) },
 						func() (string, error) { return c.GetChannels(ctx, pid) })
 				})
+				if action == "remove" {
+					return confirmOr(m,
+						fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("use --force to confirm removal of channel %q", ref),
+						cmd)
+				}
+				return m, cmd
 			}
 		},
 	}
