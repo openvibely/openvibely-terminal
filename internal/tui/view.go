@@ -389,28 +389,24 @@ func renderTaskDetail(t client.Task, d *client.TaskDetail, tab string) string {
 	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · %s", t.ID, t.Category)))
 
 	if tab != "" {
-		fmt.Fprintf(&b, "%s\n%s\n", sectionStyle.Render(titleFor(tab)), textOrDash(d.TabText(tab)))
+		label := titleFor(tab)
+		body := d.TabText(tab)
+		if meta, ok := client.TaskDetailTabByName(tab); ok {
+			label = meta.Label
+			body = meta.Text(d)
+		}
+		fmt.Fprintf(&b, "%s\n%s\n", sectionStyle.Render(label), textOrDash(body))
 		return b.String()
 	}
 
-	sections := []struct{ name, body string }{
-		{"Details", d.Details},
-		{"Thread", d.Thread},
-		{"Changes", d.Changes},
-		{"Review", d.Review},
-		{"Schedules", d.Schedule},
-		{"Chaining", d.Chaining},
-		{"Attachments", d.Attach},
-		{"Lifecycle", d.Life},
-	}
-	for _, s := range sections {
-		body := strings.TrimSpace(s.body)
+	for _, meta := range client.TaskDetailTabs() {
+		body := strings.TrimSpace(meta.Text(d))
 		if body == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "%s\n%s\n\n", sectionStyle.Render("▸ "+s.name), clamp(body, 40))
+		fmt.Fprintf(&b, "%s\n%s\n\n", sectionStyle.Render("▸ "+meta.Label), clamp(body, 40))
 	}
-	b.WriteString(dimStyle.Render("/tasks show <id> <details|thread|changes|review|schedules|chaining|attachments|lifecycle>"))
+	b.WriteString(dimStyle.Render("/tasks show <id> <" + detailTabHintList() + ">"))
 	return b.String()
 }
 

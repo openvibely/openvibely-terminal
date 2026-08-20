@@ -245,6 +245,43 @@ func TestGetTaskCollectsTabs(t *testing.T) {
 	}
 }
 
+func TestTaskDetailTabMetadataAliasesMatchTabText(t *testing.T) {
+	d := TaskDetail{
+		Details:  "details body",
+		Thread:   "thread body",
+		Changes:  "changes body",
+		Review:   "review body",
+		Schedule: "schedule body",
+		Chaining: "chaining body",
+		Attach:   "attach body",
+		Life:     "life body",
+	}
+	aliases := map[string]string{
+		"chat":     "thread body",
+		"diff":     "changes body",
+		"reviews":  "review body",
+		"schedule": "schedule body",
+		"chain":    "chaining body",
+		"attach":   "attach body",
+	}
+	for alias, want := range aliases {
+		if got := d.TabText(alias); got != want {
+			t.Errorf("TabText(%q) = %q, want %q", alias, got, want)
+		}
+		if _, ok := TaskDetailTabByName(alias); !ok {
+			t.Errorf("TaskDetailTabByName(%q) did not resolve", alias)
+		}
+	}
+	for _, tab := range TaskDetailTabs() {
+		if tab.Name == "" || tab.Label == "" || len(tab.PanelIDs) == 0 {
+			t.Errorf("incomplete tab metadata: %#v", tab)
+		}
+		if got := tab.Text(&d); got == "" {
+			t.Errorf("tab %s did not read its TaskDetail field", tab.Name)
+		}
+	}
+}
+
 func TestTaskMutationsUseWebUIRoutes(t *testing.T) {
 	type call struct{ method, path, body string }
 	var got call

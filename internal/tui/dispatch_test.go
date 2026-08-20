@@ -242,6 +242,26 @@ func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 			t.Errorf("expected task to resolve, got error transcript:\n%s", out)
 		}
 	})
+	for alias, wantPath := range map[string]string{
+		"chat":     "/tasks/t-1",
+		"diff":     "/tasks/t-1",
+		"reviews":  "/tasks/t-1/reviews",
+		"schedule": "/tasks/t-1",
+		"chain":    "/tasks/t-1",
+		"attach":   "/tasks/t-1",
+	} {
+		t.Run("show accepts tab alias "+alias, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+			m = runLine(t, m, "/tasks show Refactor the API "+alias)
+			if !rec.saw("GET", wantPath) {
+				t.Errorf("calls:\n%s", rec.all())
+			}
+			out := transcript(m)
+			if strings.Contains(out, "nothing matches") {
+				t.Errorf("expected task to resolve, got error transcript:\n%s", out)
+			}
+		})
+	}
 }
 
 func TestTasksNewEmptyTitleFromPipeInput(t *testing.T) {

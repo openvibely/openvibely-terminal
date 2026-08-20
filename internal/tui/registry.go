@@ -206,7 +206,7 @@ func tasksCommand() command {
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
 			"omit <task> on open/show/reviews/edit/run/stop/delete/move/order/goal/reply → interactive selector",
-			"tasks show <task> [tab]                    details, thread, changes, review, schedules, chaining, attachments, lifecycle",
+			"tasks show <task> [tab]                    " + detailTabUsageList(),
 			"tasks reviews [list] <task>                list inline review comments",
 			"tasks reviews add <task> <file>:<line> <comment>",
 			"tasks new <title> [| <prompt>]             create a task",
@@ -600,16 +600,31 @@ func tasksCommand() command {
 	}
 }
 
-func isDetailTab(s string) bool {
-	switch strings.ToLower(s) {
-	case "details", "thread", "changes", "review", "reviews", "schedules", "chaining", "attachments", "lifecycle":
-		return true
+func detailTabNames() []string {
+	tabs := client.TaskDetailTabs()
+	names := make([]string, 0, len(tabs))
+	for _, tab := range tabs {
+		names = append(names, tab.Name)
 	}
-	return false
+	return names
+}
+
+func detailTabUsageList() string {
+	return strings.Join(detailTabNames(), ", ")
+}
+
+func detailTabHintList() string {
+	return strings.Join(detailTabNames(), "|")
+}
+
+func isDetailTab(s string) bool {
+	_, ok := client.TaskDetailTabByName(s)
+	return ok
 }
 
 func isReviewTab(s string) bool {
-	return strings.EqualFold(s, "review") || strings.EqualFold(s, "reviews")
+	tab, ok := client.TaskDetailTabByName(s)
+	return ok && tab.Name == "review"
 }
 
 func findReviewLocation(args []string) (int, string, int) {

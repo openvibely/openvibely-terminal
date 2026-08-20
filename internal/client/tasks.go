@@ -44,26 +44,77 @@ type TaskDetail struct {
 	Life     string // Lifecycle tab
 }
 
+// TaskDetailTab describes one task detail tab across command parsing, display,
+// backend panel extraction, aliases, and TaskDetail field access.
+type TaskDetailTab struct {
+	Name     string
+	Label    string
+	PanelIDs []string
+	Aliases  []string
+	field    func(*TaskDetail) *string
+}
+
+var taskDetailTabs = []TaskDetailTab{
+	{Name: "details", Label: "Details", PanelIDs: []string{"tab-details"}, field: func(d *TaskDetail) *string { return &d.Details }},
+	{Name: "thread", Label: "Thread", PanelIDs: []string{"tab-chat"}, Aliases: []string{"chat"}, field: func(d *TaskDetail) *string { return &d.Thread }},
+	{Name: "changes", Label: "Changes", PanelIDs: []string{"tab-changes"}, Aliases: []string{"diff"}, field: func(d *TaskDetail) *string { return &d.Changes }},
+	{Name: "review", Label: "Review", PanelIDs: []string{"tab-review", "tab-reviews"}, Aliases: []string{"reviews"}, field: func(d *TaskDetail) *string { return &d.Review }},
+	{Name: "schedules", Label: "Schedules", PanelIDs: []string{"tab-schedules"}, Aliases: []string{"schedule"}, field: func(d *TaskDetail) *string { return &d.Schedule }},
+	{Name: "chaining", Label: "Chaining", PanelIDs: []string{"tab-chaining"}, Aliases: []string{"chain"}, field: func(d *TaskDetail) *string { return &d.Chaining }},
+	{Name: "attachments", Label: "Attachments", PanelIDs: []string{"tab-attachments"}, Aliases: []string{"attach"}, field: func(d *TaskDetail) *string { return &d.Attach }},
+	{Name: "lifecycle", Label: "Lifecycle", PanelIDs: []string{"tab-lifecycle"}, field: func(d *TaskDetail) *string { return &d.Life }},
+}
+
+// TaskDetailTabs returns the supported task detail tabs in display order.
+func TaskDetailTabs() []TaskDetailTab {
+	return append([]TaskDetailTab(nil), taskDetailTabs...)
+}
+
+// TaskDetailTabByName resolves a canonical tab name or alias.
+func TaskDetailTabByName(name string) (TaskDetailTab, bool) {
+	for _, tab := range taskDetailTabs {
+		if tab.Matches(name) {
+			return tab, true
+		}
+	}
+	return TaskDetailTab{}, false
+}
+
+// Matches reports whether name is this tab's canonical name or an alias.
+func (tab TaskDetailTab) Matches(name string) bool {
+	name = strings.ToLower(name)
+	if name == tab.Name {
+		return true
+	}
+	for _, alias := range tab.Aliases {
+		if name == alias {
+			return true
+		}
+	}
+	return false
+}
+
+// Text returns this tab's TaskDetail field.
+func (tab TaskDetailTab) Text(d *TaskDetail) string {
+	if d == nil || tab.field == nil {
+		return ""
+	}
+	return *tab.field(d)
+}
+
+func (tab TaskDetailTab) setText(d *TaskDetail, text string) {
+	if d == nil || tab.field == nil {
+		return
+	}
+	*tab.field(d) = text
+}
+
 // TabText returns one detail tab's text by name.
 func (d TaskDetail) TabText(tab string) string {
-	switch strings.ToLower(tab) {
-	case "thread", "chat":
-		return d.Thread
-	case "changes", "diff":
-		return d.Changes
-	case "review", "reviews":
-		return d.Review
-	case "schedules", "schedule":
-		return d.Schedule
-	case "chaining", "chain":
-		return d.Chaining
-	case "attachments", "attach":
-		return d.Attach
-	case "lifecycle":
-		return d.Life
-	default:
-		return d.Details
+	if meta, ok := TaskDetailTabByName(tab); ok {
+		return meta.Text(&d)
 	}
+	return d.Details
 }
 
 // TaskForm carries create/update fields for a task.
@@ -296,22 +347,12 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error
 
 	// Tab panels are rendered into the page as #tab-<name> containers; the
 	// thread and changes panels defer their content to a lazy hx-get fragment.
-	for _, s := range []struct {
-		id  string
-		dst *string
-	}{
-		{"tab-details", &d.Details},
-		{"tab-chat", &d.Thread},
-		{"tab-changes", &d.Changes},
-		{"tab-review", &d.Review},
-		{"tab-reviews", &d.Review},
-		{"tab-schedules", &d.Schedule},
-		{"tab-chaining", &d.Chaining},
-		{"tab-attachments", &d.Attach},
-		{"tab-lifecycle", &d.Life},
-	} {
-		if n := findByID(root, s.id); n != nil {
-			*s.dst = NodeText(n)
+	for _, tab := range taskDetailTabs {
+		for _, panelID := range tab.PanelIDs {
+			if n := findByID(root, panelID); n != nil {
+				tab.setText(d, NodeText(n))
+				break
+			}
 		}
 	}
 	if d.Details == "" {

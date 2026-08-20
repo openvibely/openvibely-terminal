@@ -181,21 +181,25 @@ func TestRenderTaskDetailShowsTabs(t *testing.T) {
 		Details:  "the prompt",
 		Thread:   "agent: working",
 		Changes:  "2 files",
+		Review:   "inline comments",
 		Schedule: "daily",
 		Chaining: "then deploy",
 		Attach:   "spec.md",
 		Life:     "pre_task ok",
 	}
 	out := renderTaskDetail(task, detail, "")
-	for _, want := range []string{"Thread", "Changes", "Schedules", "Chaining", "Attachments", "Lifecycle"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("detail missing the %s section:\n%s", want, out)
+	for _, tab := range client.TaskDetailTabs() {
+		if !strings.Contains(out, tab.Label) {
+			t.Errorf("detail missing the %s section:\n%s", tab.Label, out)
 		}
 	}
+	if want := "/tasks show <id> <" + detailTabHintList() + ">"; !strings.Contains(out, want) {
+		t.Errorf("detail hint missing %q:\n%s", want, out)
+	}
 
-	only := renderTaskDetail(task, detail, "thread")
-	if !strings.Contains(only, "agent: working") {
-		t.Errorf("tab view missing its content:\n%s", only)
+	only := renderTaskDetail(task, detail, "chat")
+	if !strings.Contains(only, "Thread") || !strings.Contains(only, "agent: working") {
+		t.Errorf("alias tab view missing its label or content:\n%s", only)
 	}
 	if strings.Contains(only, "2 files") {
 		t.Errorf("tab view should show one tab only:\n%s", only)
@@ -427,7 +431,7 @@ func TestTasksHelpDocumentsReviewSupport(t *testing.T) {
 		t.Fatal("tasks command missing")
 	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"tasks show <task> [tab]", "review", "tasks reviews add <task> <file>:<line> <comment>", "tasks reviews add \"Fix login bug\" internal/auth.go:42 Handle token refresh errors"} {
+	for _, want := range []string{"tasks show <task> [tab]", detailTabUsageList(), "review", "tasks reviews add <task> <file>:<line> <comment>", "tasks reviews add \"Fix login bug\" internal/auth.go:42 Handle token refresh errors"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("tasks help missing %q:\n%s", want, help)
 		}
