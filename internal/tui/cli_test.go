@@ -71,6 +71,33 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 	}
 }
 
+func TestCLIBackendRequiredFailureIncludesRecoveryGuidance(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1") // nothing listening
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"tasks"}, false, false)
+	if err == nil {
+		t.Fatal("expected backend-required command to fail")
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"Unable to reach the OpenVibely backend",
+		"Start or check your local OpenVibely backend",
+		"-server <url>",
+		"OPENVIBELY_SERVER_URL",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.Contains(got, "Details:") || !strings.Contains(got, "GET /api/projects") {
+		t.Fatalf("error should keep concise transport details after guidance:\n%s", got)
+	}
+}
+
 func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>

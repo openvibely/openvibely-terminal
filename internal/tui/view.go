@@ -52,9 +52,11 @@ func (m Model) renderHeader() string {
 		project = m.selectedName
 	}
 
-	conn := statusErrStyle.Render("● offline")
+	conn := noticeStyle.Render("● connecting")
 	if m.connected {
 		conn = statusOKStyle.Render("● online")
+	} else if m.connChecked || m.connErr != "" {
+		conn = statusErrStyle.Render("● offline")
 	}
 	stream := ""
 	if m.showEvents {
@@ -124,7 +126,10 @@ func (m Model) hint() string {
 		return "tab complete · ↑↓ choose · enter run · esc close"
 	}
 	if !m.connected && m.connErr != "" {
-		return "offline: " + truncate(m.connErr, m.width-12)
+		return "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
+	}
+	if !m.connected && !m.connChecked {
+		return "connecting: /help works offline · check -server or OPENVIBELY_SERVER_URL if this stays here"
 	}
 	if m.threadID != "" {
 		return "in task thread · messages reply to this task · /chat to exit · / for commands"
@@ -139,11 +144,15 @@ func (m Model) renderStatus() string {
 
 	if m.connected {
 		row("server", statusOKStyle.Render("connected")+dimStyle.Render(" "+m.client.BaseURL()))
+	} else if !m.connChecked && m.connErr == "" {
+		row("server", noticeStyle.Render("connecting")+dimStyle.Render(" "+m.client.BaseURL()))
 	} else {
 		row("server", statusErrStyle.Render("offline")+dimStyle.Render(" "+m.client.BaseURL()))
 		if m.connErr != "" {
 			row("error", m.connErr)
 		}
+		row("try", "start/check your local backend, then run /status")
+		row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
 	}
 	switch {
 	case m.auth == nil:

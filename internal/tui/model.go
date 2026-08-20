@@ -80,10 +80,11 @@ type Model struct {
 	histPos int
 
 	// connection state
-	connected bool
-	connErr   string
-	capacity  *client.GlobalCapacity
-	auth      *client.AuthStatus
+	connected   bool
+	connChecked bool
+	connErr     string
+	capacity    *client.GlobalCapacity
+	auth        *client.AuthStatus
 
 	// projects
 	projects     []client.Project
@@ -159,7 +160,7 @@ func New(c *client.Client) Model {
 	}
 	m.log = []entry{{
 		role: "system",
-		text: "Connected to " + c.BaseURL() + "\nType a message to chat, or /help for commands.",
+		text: "Connecting to " + c.BaseURL() + "\nType /help for commands while connection checks run.",
 	}}
 	return m
 }
@@ -407,9 +408,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSelector(msg)
 
 	case connCheckedMsg:
+		wasConnected := m.connected
+		m.connChecked = true
 		if msg.err != nil {
-			if m.connected {
-				m.append(entry{role: "error", text: "lost connection: " + msg.err.Error()})
+			if wasConnected {
+				m.append(entry{role: "error", text: "lost connection: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			}
 			m.connected = false
 			m.connErr = msg.err.Error()
@@ -418,6 +421,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connErr = ""
 			m.capacity = msg.capacity
 			m.auth = msg.auth
+			if !wasConnected {
+				m.append(entry{role: "system", text: "Connected to " + m.client.BaseURL() + "."})
+			}
 		}
 		return m, nil
 
@@ -429,7 +435,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectsLoadedMsg:
 		if msg.err != nil {
-			m.append(entry{role: "error", text: "loading projects: " + msg.err.Error()})
+			m.connErr = msg.err.Error()
+			m.append(entry{role: "error", text: "loading projects: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
 		}
 		m.projects = msg.projects
@@ -919,4 +926,17 @@ func truncate(s string, n int) string {
 		width += w
 	}
 	return strings.TrimRight(string(runes[:cut]), " ") + "…"
+}
+
+func offlineRecoveryMessage(baseURL string, err error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Unable to reach the OpenVibely backend at %s.", baseURL)
+	b.WriteString("\nTry:\n")
+	b.WriteString("  - Start or check your local OpenVibely backend, then run /status.\n")
+	b.WriteString("  - Use -server <url> or OPENVIBELY_SERVER_URL to point at a running backend.")
+	if err != nil {
+		b.WriteString("\nDetails: ")
+		b.WriteString(err.Error())
+	}
+	return b.String()
 }

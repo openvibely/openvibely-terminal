@@ -63,6 +63,68 @@ func transcript(m Model) string {
 	return b.String()
 }
 
+func TestStartupUsesConnectingCopyUntilHealthPasses(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/capacity/global":
+			_, _ = w.Write([]byte(`{"has_capacity":true}`))
+		case "/auth/me":
+			_, _ = w.Write([]byte(`{"authenticated":false}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	initial := transcript(m)
+	if strings.Contains(initial, "Connected to") {
+		t.Fatalf("initial transcript should not claim a connection before health checks pass:\n%s", initial)
+	}
+	if !strings.Contains(initial, "Connecting to") {
+		t.Fatalf("initial transcript should use neutral connecting copy:\n%s", initial)
+	}
+
+	updated, _ := m.Update(m.checkConnection()())
+	m = updated.(Model)
+	if !m.connected {
+		t.Fatal("health check should mark the model connected")
+	}
+	if !strings.Contains(transcript(m), "Connected to "+srv.URL) {
+		t.Fatalf("successful health check should announce the connection:\n%s", transcript(m))
+	}
+}
+
+func TestOfflineProjectLoadShowsRecoveryGuidance(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(m.loadProjects(false, "")())
+	m = updated.(Model)
+
+	out := transcript(m)
+	for _, want := range []string{
+		"Unable to reach the OpenVibely backend",
+		"Start or check your local OpenVibely backend",
+		"-server <url>",
+		"OPENVIBELY_SERVER_URL",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("offline guidance missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Connected to") {
+		t.Fatalf("offline transcript should not claim a connection:\n%s", out)
+	}
+}
+
 func TestPlainTextRequiresProject(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = typeLine(t, m, "hello there")

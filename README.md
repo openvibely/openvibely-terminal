@@ -52,7 +52,7 @@ make build          # → bin/openvibely-tui
 make run
 ```
 
-Requires Go 1.21+ and a running OpenVibely server (default `http://localhost:3001`).
+Requires Go 1.21+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, start or check your local OpenVibely backend, or point the client at a running server with `-server <url>` or `OPENVIBELY_SERVER_URL`.
 
 ### Configuration
 
