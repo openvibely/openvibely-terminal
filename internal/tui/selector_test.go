@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -550,5 +551,94 @@ func TestSelectorCursorBoundaries(t *testing.T) {
 	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	if m.selectorCursor != 1 {
 		t.Errorf("cursor at bottom after ↓ = %d, want 1", m.selectorCursor)
+	}
+}
+
+func TestSelectorCacheClearsBetweenSelectors(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/tasks run")
+	if !m.selectorActive {
+		t.Fatalf("selector not active:\n%s", transcript(m))
+	}
+	m = typeSelectorRunes(t, m, "docs")
+	if items := m.filteredSelectorItems(); len(items) != 1 || items[0].ref != "t-2" {
+		t.Fatalf("filter 'docs' should cache only t-2, got %+v", items)
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.selectorSearch != nil || m.selectorFiltered != nil || m.selectorFilteredFor != "" {
+		t.Fatalf("selector cache should clear on close: search=%d filtered=%d for=%q",
+			len(m.selectorSearch), len(m.selectorFiltered), m.selectorFilteredFor)
+	}
+
+	m = runLine(t, m, "/skills show")
+	if !m.selectorActive {
+		t.Fatalf("skills selector not active:\n%s", transcript(m))
+	}
+	if m.selectorFilter != "" {
+		t.Fatalf("new selector reused old filter %q", m.selectorFilter)
+	}
+	items := m.filteredSelectorItems()
+	if len(items) != 2 {
+		t.Fatalf("new selector should show all skills, got %+v", items)
+	}
+	if items[0].ref != "retry-logic" || items[1].ref != "rate-limiter" {
+		t.Fatalf("new selector reused stale task results, got %+v", items)
+	}
+}
+
+var selectorBenchmarkSink string
+
+func benchmarkSelectorModel(n int) Model {
+	items := make([]selectorItem, n)
+	for i := range items {
+		items[i] = selectorItem{
+			ref:    fmt.Sprintf("task-%05d", i),
+			label:  fmt.Sprintf("Synthetic Task %05d", i),
+			detail: fmt.Sprintf("backlog detail group-%03d common", i%100),
+		}
+	}
+	m := Model{
+		width:  120,
+		height: 40,
+	}
+	updated, _ := m.handleSelector(selectorActiveMsg{
+		title:   "Synthetic Tasks",
+		command: "tasks open",
+		items:   items,
+	})
+	m = updated.(Model)
+	m = m.setSelectorFilter("common")
+	return m
+}
+
+func BenchmarkSelectorFilteredRender(b *testing.B) {
+	for _, n := range []int{1000, 10000} {
+		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
+			m := benchmarkSelectorModel(n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				selectorBenchmarkSink = m.renderSelector()
+			}
+		})
+	}
+}
+
+func BenchmarkSelectorDownArrow(b *testing.B) {
+	key := tea.KeyMsg{Type: tea.KeyDown}
+	for _, n := range []int{1000, 10000} {
+		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
+			m := benchmarkSelectorModel(n)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if m.selectorCursor >= len(m.filteredSelectorItems())-1 {
+					m.selectorCursor = 0
+				}
+				next, _ := m.handleSelectorKey(key)
+				m = next.(Model)
+			}
+		})
 	}
 }

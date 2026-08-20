@@ -47,6 +47,7 @@ func selectorForWithSuffix(title, command, emptyHint, prefillSuffix string, fetc
 // auto-select, or open the interactive picker.
 func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.busy = false
+	m = m.clearSelector()
 	if msg.err != nil {
 		m.append(entry{role: "error", text: msg.err.Error()})
 		return m, nil
@@ -63,7 +64,10 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.selectorActive = true
 	m.selectorTitle = msg.title
 	m.selectorItems = msg.items
+	m.selectorSearch = selectorSearchTexts(msg.items)
 	m.selectorFilter = ""
+	m.selectorFiltered = msg.items
+	m.selectorFilteredFor = ""
 	m.selectorCursor = 0
 	m.pendingCommand = msg.command
 	m.selectorPrefill = msg.prefill
@@ -79,7 +83,10 @@ func (m Model) clearSelector() Model {
 	m.selectorActive = false
 	m.selectorTitle = ""
 	m.selectorItems = nil
+	m.selectorSearch = nil
 	m.selectorFilter = ""
+	m.selectorFiltered = nil
+	m.selectorFilteredFor = ""
 	m.selectorCursor = 0
 	m.pendingCommand = ""
 	m.selectorPrefill = false
@@ -90,17 +97,58 @@ func (m Model) clearSelector() Model {
 	return m
 }
 
-// filteredSelectorItems returns the items matching the typed filter.
+func selectorSearchTexts(items []selectorItem) []string {
+	search := make([]string, len(items))
+	for i, it := range items {
+		search[i] = strings.ToLower(it.label) + "\x00" + strings.ToLower(it.detail) + "\x00" + strings.ToLower(it.ref)
+	}
+	return search
+}
+
+func (m Model) setSelectorFilter(filter string) Model {
+	if filter == m.selectorFilter && m.selectorFilteredFor == filter {
+		return m
+	}
+	m.selectorFilter = filter
+	m.selectorCursor = 0
+	return m.rebuildSelectorFilterCache()
+}
+
+func (m Model) rebuildSelectorFilterCache() Model {
+	m.selectorFilteredFor = m.selectorFilter
+	if m.selectorFilter == "" {
+		m.selectorFiltered = m.selectorItems
+		return m
+	}
+	if len(m.selectorSearch) != len(m.selectorItems) {
+		m.selectorSearch = selectorSearchTexts(m.selectorItems)
+	}
+	f := strings.ToLower(m.selectorFilter)
+	out := make([]selectorItem, 0, len(m.selectorItems))
+	for i, it := range m.selectorItems {
+		if strings.Contains(m.selectorSearch[i], f) {
+			out = append(out, it)
+		}
+	}
+	m.selectorFiltered = out
+	return m
+}
+
+// filteredSelectorItems returns the cached items matching the typed filter.
 func (m Model) filteredSelectorItems() []selectorItem {
 	if m.selectorFilter == "" {
 		return m.selectorItems
 	}
+	if m.selectorFilteredFor == m.selectorFilter && m.selectorFiltered != nil {
+		return m.selectorFiltered
+	}
+	if len(m.selectorSearch) != len(m.selectorItems) {
+		m.selectorSearch = selectorSearchTexts(m.selectorItems)
+	}
 	f := strings.ToLower(m.selectorFilter)
-	var out []selectorItem
-	for _, it := range m.selectorItems {
-		if strings.Contains(strings.ToLower(it.label), f) ||
-			strings.Contains(strings.ToLower(it.detail), f) ||
-			strings.Contains(strings.ToLower(it.ref), f) {
+	out := make([]selectorItem, 0, len(m.selectorItems))
+	for i, it := range m.selectorItems {
+		if strings.Contains(m.selectorSearch[i], f) {
 			out = append(out, it)
 		}
 	}
@@ -135,8 +183,7 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if m.selectorFilter != "" {
 			r := []rune(m.selectorFilter)
-			m.selectorFilter = string(r[:len(r)-1])
-			m.selectorCursor = 0
+			m = m.setSelectorFilter(string(r[:len(r)-1]))
 		}
 		return m, nil
 
@@ -157,12 +204,9 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch {
 	case msg.Type == tea.KeySpace:
-		m.selectorFilter += " "
+		m = m.setSelectorFilter(m.selectorFilter + " ")
 	case msg.Type == tea.KeyRunes:
-		m.selectorFilter += string(msg.Runes)
-	}
-	if msg.Type == tea.KeySpace || msg.Type == tea.KeyRunes {
-		m.selectorCursor = 0
+		m = m.setSelectorFilter(m.selectorFilter + string(msg.Runes))
 	}
 	return m, nil
 }
