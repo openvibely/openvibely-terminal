@@ -66,6 +66,11 @@ type Model struct {
 
 	log []entry
 
+	transcriptContent     string
+	transcriptBlocks      []string
+	transcriptRenderWidth int
+	transcriptReady       bool
+
 	// command menu (shown while the input starts with "/")
 	menu    []command
 	menuSel int
@@ -752,11 +757,40 @@ func (m Model) historyNext() Model {
 // --- transcript ---
 
 func (m *Model) append(e entry) {
-	m.log = append(m.log, e)
-	if len(m.log) > maxTranscript {
-		m.log = m.log[len(m.log)-maxTranscript:]
+	width := m.effectiveTranscriptWidth()
+	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log)
+	block := ""
+	if canAppend {
+		block = renderTranscriptEntry(e, transcriptWrap(width))
 	}
-	m.refreshTranscript()
+
+	m.log = append(m.log, e)
+	dropped := 0
+	if len(m.log) > maxTranscript {
+		dropped = len(m.log) - maxTranscript
+		m.log = m.log[dropped:]
+	}
+	if !canAppend || dropped > len(m.transcriptBlocks) {
+		m.refreshTranscript()
+		return
+	}
+
+	if dropped > 0 {
+		cut := 0
+		for _, old := range m.transcriptBlocks[:dropped] {
+			cut += len(old)
+		}
+		if cut > len(m.transcriptContent) {
+			m.refreshTranscript()
+			return
+		}
+		m.transcriptContent = m.transcriptContent[cut:]
+		m.transcriptBlocks = m.transcriptBlocks[dropped:]
+	}
+	m.transcriptBlocks = append(m.transcriptBlocks, block)
+	m.transcriptContent += block
+	m.transcript.SetContent(m.transcriptContent)
+	m.transcript.GotoBottom()
 }
 
 func (m Model) transcriptHeight() int {
@@ -782,36 +816,58 @@ func (m *Model) resize() {
 }
 
 func (m *Model) refreshTranscript() {
+	width := m.effectiveTranscriptWidth()
+	wrap := transcriptWrap(width)
+
+	var b strings.Builder
+	blocks := make([]string, 0, len(m.log))
+	for _, e := range m.log {
+		block := renderTranscriptEntry(e, wrap)
+		b.WriteString(block)
+		blocks = append(blocks, block)
+	}
+	m.transcriptContent = b.String()
+	m.transcriptBlocks = blocks
+	m.transcriptRenderWidth = width
+	m.transcriptReady = true
+	m.transcript.SetContent(m.transcriptContent)
+	m.transcript.GotoBottom()
+}
+
+func (m Model) effectiveTranscriptWidth() int {
 	width := m.transcript.Width
 	if width <= 0 {
 		width = 80
 	}
-	wrap := lipgloss.NewStyle().Width(width - 2)
+	return width
+}
 
+func transcriptWrap(width int) lipgloss.Style {
+	return lipgloss.NewStyle().Width(width - 2)
+}
+
+func renderTranscriptEntry(e entry, wrap lipgloss.Style) string {
 	var b strings.Builder
-	for _, e := range m.log {
-		switch e.role {
-		case "you":
-			b.WriteString(chatUserStyle.Render("❯ you") + "\n")
-			b.WriteString(wrap.Render(e.text) + "\n\n")
-		case "agent":
-			b.WriteString(chatAgentStyle.Render("● agent") + "\n")
-			b.WriteString(wrap.Render(e.text) + "\n\n")
-		case "result":
-			if e.head != "" {
-				b.WriteString(sectionStyle.Render("▸ "+e.head) + "\n")
-			}
-			b.WriteString(e.text + "\n\n")
-		case "error":
-			b.WriteString(statusErrStyle.Render("✗ "+e.text) + "\n\n")
-		case "event":
-			b.WriteString(dimStyle.Render(e.text) + "\n")
-		default:
-			b.WriteString(dimStyle.Render("· "+e.text) + "\n\n")
+	switch e.role {
+	case "you":
+		b.WriteString(chatUserStyle.Render("❯ you") + "\n")
+		b.WriteString(wrap.Render(e.text) + "\n\n")
+	case "agent":
+		b.WriteString(chatAgentStyle.Render("● agent") + "\n")
+		b.WriteString(wrap.Render(e.text) + "\n\n")
+	case "result":
+		if e.head != "" {
+			b.WriteString(sectionStyle.Render("▸ "+e.head) + "\n")
 		}
+		b.WriteString(e.text + "\n\n")
+	case "error":
+		b.WriteString(statusErrStyle.Render("✗ "+e.text) + "\n\n")
+	case "event":
+		b.WriteString(dimStyle.Render(e.text) + "\n")
+	default:
+		b.WriteString(dimStyle.Render("· "+e.text) + "\n\n")
 	}
-	m.transcript.SetContent(b.String())
-	m.transcript.GotoBottom()
+	return b.String()
 }
 
 // handleSSEEvent formats a live event; shown only when /events is on.

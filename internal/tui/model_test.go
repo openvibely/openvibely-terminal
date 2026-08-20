@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -508,6 +509,90 @@ func TestEventsOnlyLoggedWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestIncrementalTranscriptAppendMatchesFullRefresh(t *testing.T) {
+	entries := []entry{
+		{role: "you", text: "please summarize this fairly long request so wrapping is exercised"},
+		{role: "agent", text: "agent response with enough words to wrap at the configured terminal width"},
+		{role: "result", head: "Tasks", text: "task one\ntask two"},
+		{role: "error", text: "boom"},
+		{role: "event", text: "[12:34:56] task running demo"},
+		{role: "system", text: "system note"},
+		{role: "unknown", text: "default note"},
+	}
+
+	m := newTestModel(t)
+	m.log = nil
+	m.refreshTranscript()
+	for _, e := range entries {
+		m.append(e)
+	}
+	incremental := m.transcriptContent
+	incrementalView := m.transcript.View()
+
+	m.refreshTranscript()
+	if m.transcriptContent != incremental {
+		t.Fatalf("incremental transcript differs from full refresh\nincremental:\n%q\nfull:\n%q", incremental, m.transcriptContent)
+	}
+	if got := m.transcript.View(); got != incrementalView {
+		t.Fatalf("incremental viewport differs from full refresh\nincremental:\n%q\nfull:\n%q", incrementalView, got)
+	}
+}
+
+func TestTranscriptResizeRebuildsWrappedContent(t *testing.T) {
+	m := newTestModel(t)
+	m.log = nil
+	m.refreshTranscript()
+	m.append(entry{role: "agent", text: strings.Repeat("wrapped content ", 12)})
+	wide := m.transcriptContent
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
+	m = updated.(Model)
+	if m.transcriptRenderWidth != 40 {
+		t.Fatalf("transcript render width = %d, want 40", m.transcriptRenderWidth)
+	}
+	if m.transcriptContent == wide {
+		t.Fatal("resize should rebuild wrapped transcript content")
+	}
+
+	rebuilt := m.transcriptContent
+	m.refreshTranscript()
+	if m.transcriptContent != rebuilt {
+		t.Fatal("resized transcript should match a full refresh at the new width")
+	}
+}
+
+func TestTranscriptAppendPreservesTruncationOrderAndBottom(t *testing.T) {
+	m := newTestModel(t)
+	m.log = nil
+	m.refreshTranscript()
+	for i := 0; i < maxTranscript; i++ {
+		m.append(entry{role: "event", text: fmt.Sprintf("event-%03d", i)})
+	}
+	m.append(entry{role: "event", text: "event-new"})
+
+	if len(m.log) != maxTranscript {
+		t.Fatalf("log length = %d, want %d", len(m.log), maxTranscript)
+	}
+	if got := m.log[0].text; got != "event-001" {
+		t.Fatalf("first retained event = %q, want event-001", got)
+	}
+	if got := m.log[len(m.log)-1].text; got != "event-new" {
+		t.Fatalf("last retained event = %q, want event-new", got)
+	}
+	if strings.Contains(m.transcriptContent, "event-000") {
+		t.Fatal("truncated event still appears in transcript content")
+	}
+	if !m.transcript.AtBottom() {
+		t.Fatal("append should keep the transcript at the bottom")
+	}
+
+	incremental := m.transcriptContent
+	m.refreshTranscript()
+	if m.transcriptContent != incremental {
+		t.Fatal("truncated incremental transcript should match full refresh")
+	}
+}
+
 func TestCtrlCQuits(t *testing.T) {
 	m := newTestModel(t)
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -902,6 +987,43 @@ func TestSSEChatResponseDoneFromOtherProjectIsIgnored(t *testing.T) {
 		t.Error("fetchChatStatus must NOT be called for a foreign-project chat_response_done")
 	case <-time.After(200 * time.Millisecond):
 		// expected: no fetch
+	}
+}
+
+func benchmarkTranscriptModel(b *testing.B) Model {
+	b.Helper()
+	c, err := client.New("http://127.0.0.1")
+	if err != nil {
+		b.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.log = nil
+	for i := 0; i < maxTranscript; i++ {
+		m.log = append(m.log, entry{role: "event", text: fmt.Sprintf("[12:34:%02d] task running transcript entry %03d with enough detail to render", i%60, i)})
+	}
+	m.refreshTranscript()
+	return m
+}
+
+func BenchmarkAppendEventWith500EntryTranscript(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		m := benchmarkTranscriptModel(b)
+		b.StartTimer()
+		m.append(entry{role: "event", text: "[12:35:00] task completed benchmark event"})
+		b.StopTimer()
+	}
+}
+
+func BenchmarkAppend100EventBurstWith500EntryTranscript(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		m := benchmarkTranscriptModel(b)
+		b.StartTimer()
+		for j := 0; j < 100; j++ {
+			m.append(entry{role: "event", text: fmt.Sprintf("[12:35:%02d] task running burst event %03d", j%60, j)})
+		}
+		b.StopTimer()
 	}
 }
 
