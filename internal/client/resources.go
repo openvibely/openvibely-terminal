@@ -9,6 +9,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -301,15 +302,16 @@ func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleE
 // "hourly" keyword is translated to the backend's "hours" repeat_type, since
 // the backend has no "hourly" value.
 func (c *Client) CreateSchedule(ctx context.Context, taskID, runAt, repeat string, interval int) error {
+	if interval < 1 || interval > 365 {
+		return fmt.Errorf("repeat interval must be between 1 and 365")
+	}
 	if repeat == "hourly" {
 		repeat = "hours"
 	}
 	v := url.Values{}
 	v.Set("run_at", runAt)
 	v.Set("repeat_type", repeat)
-	if interval > 0 {
-		v.Set("repeat_interval", strconv.Itoa(interval))
-	}
+	v.Set("repeat_interval", strconv.Itoa(interval))
 	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/schedule", v)
 }
 

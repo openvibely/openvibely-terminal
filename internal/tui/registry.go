@@ -733,6 +733,9 @@ func scheduleCommand() command {
 					interval = n
 					rest = rest[:len(rest)-1]
 				}
+				if interval < 1 || interval > 365 {
+					return m, errCmd("repeat interval must be between 1 and 365")
+				}
 				if isRepeat(rest[len(rest)-1]) {
 					repeat = normalizeRepeat(rest[len(rest)-1])
 					rest = rest[:len(rest)-1]

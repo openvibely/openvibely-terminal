@@ -631,6 +631,7 @@ func TestScheduleAddFastRepeatTypes(t *testing.T) {
 		wantInterval   string
 	}{
 		{"/schedule add Refactor 2026-09-01T10:00 seconds", "repeat_type=seconds", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 seconds 1", "repeat_type=seconds", "repeat_interval=1"},
 		{"/schedule add Refactor 2026-09-01T10:00 seconds 30", "repeat_type=seconds", "repeat_interval=30"},
 		{"/schedule add Refactor 2026-09-01T10:00 minutes", "repeat_type=minutes", "repeat_interval=1"},
 		{"/schedule add Refactor 2026-09-01T10:00 minutes 15", "repeat_type=minutes", "repeat_interval=15"},
@@ -650,6 +651,27 @@ func TestScheduleAddFastRepeatTypes(t *testing.T) {
 			}
 			if !rec.sawForm(tc.wantInterval) {
 				t.Errorf("expected %q in form data:\n%v", tc.wantInterval, rec.forms)
+			}
+		})
+	}
+}
+
+func TestScheduleAddRejectsInvalidRepeatIntervals(t *testing.T) {
+	cases := []string{
+		"/schedule add Refactor 2026-09-01T10:00 seconds 0",
+		"/schedule add Refactor 2026-09-01T10:00 minutes -5",
+		"/schedule add Refactor 2026-09-01T10:00 hours 366",
+	}
+	for _, line := range cases {
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+			m = runLine(t, m, line)
+			if strings.Contains(rec.all(), "POST ") {
+				t.Fatalf("invalid interval should not mutate backend, calls:\n%s", rec.all())
+			}
+			out := transcript(m)
+			if !strings.Contains(out, "repeat interval must be between 1 and 365") {
+				t.Errorf("expected interval validation message:\n%s", out)
 			}
 		})
 	}

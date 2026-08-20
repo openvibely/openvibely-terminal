@@ -336,7 +336,7 @@ func TestCreateScheduleSendsFastRepeatTypes(t *testing.T) {
 		repeat   string
 		interval int
 	}{
-		{"seconds", 30},
+		{"seconds", 1},
 		{"minutes", 15},
 		{"hours", 4},
 	}
@@ -362,6 +362,29 @@ func TestCreateScheduleSendsFastRepeatTypes(t *testing.T) {
 			}
 			if form.Get("repeat_interval") != strconv.Itoa(tc.interval) {
 				t.Errorf("repeat_interval = %q, want %d", form.Get("repeat_interval"), tc.interval)
+			}
+		})
+	}
+}
+
+func TestCreateScheduleRejectsInvalidRepeatIntervalsBeforeRequest(t *testing.T) {
+	cases := []int{0, -5, 366}
+	for _, interval := range cases {
+		t.Run(strconv.Itoa(interval), func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			c, _ := New(srv.URL)
+			err := c.CreateSchedule(context.Background(), "t1", "2026-01-02T09:00", "minutes", interval)
+			if err == nil || !strings.Contains(err.Error(), "repeat interval must be between 1 and 365") {
+				t.Fatalf("expected interval validation error, got %v", err)
+			}
+			if requests != 0 {
+				t.Fatalf("expected no request for invalid interval, got %d", requests)
 			}
 		})
 	}
