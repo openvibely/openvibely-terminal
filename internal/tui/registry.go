@@ -710,7 +710,7 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 			return resultMsg{title: "Task Lifecycle", err: err}
 		}
 
-		execs, err := c.ListTaskLifecycleExecutions(ctx, task.ID)
+		execs, err := c.ListTaskLifecycleExecutionsForProject(ctx, task.ID, projectID)
 		if err != nil {
 			return resultMsg{title: "Task Lifecycle", err: err}
 		}
@@ -720,7 +720,7 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 			if err != nil {
 				return resultMsg{title: "Task Lifecycle", err: err}
 			}
-			return lifecycleEventsMessage(ctx, c, task, execution)
+			return lifecycleEventsMessage(ctx, c, projectID, task, execution)
 		}
 
 		switch len(execs) {
@@ -731,7 +731,7 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 			}
 			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
 		case 1:
-			return lifecycleEventsMessage(ctx, c, task, execs[0])
+			return lifecycleEventsMessage(ctx, c, projectID, task, execs[0])
 		}
 
 		if cliMode {
@@ -760,8 +760,8 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 	}
 }
 
-func lifecycleEventsMessage(ctx context.Context, c *client.Client, task client.Task, execution client.LifecycleExecution) tea.Msg {
-	events, err := c.GetLifecycleExecutionEvents(ctx, execution.ID)
+func lifecycleEventsMessage(ctx context.Context, c *client.Client, projectID string, task client.Task, execution client.LifecycleExecution) tea.Msg {
+	events, err := c.GetLifecycleExecutionEventsForProject(ctx, execution.ID, projectID)
 	if err != nil {
 		return resultMsg{title: "Task Lifecycle", err: err}
 	}

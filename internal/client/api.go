@@ -324,17 +324,40 @@ type LifecycleEvent struct {
 	CreatedAt string         `json:"created_at"`
 }
 
-// ListTaskLifecycleExecutions fetches lifecycle executions for a task.
+// ListTaskLifecycleExecutions fetches lifecycle executions for a task using
+// the backend's default project scope. Task-detail rendering uses this legacy
+// form to preserve its existing fallback behavior.
 func (c *Client) ListTaskLifecycleExecutions(ctx context.Context, taskID string) ([]LifecycleExecution, error) {
+	return c.listTaskLifecycleExecutions(ctx, taskID, "")
+}
+
+// ListTaskLifecycleExecutionsForProject fetches lifecycle executions for a task
+// within the explicitly selected project.
+func (c *Client) ListTaskLifecycleExecutionsForProject(ctx context.Context, taskID, projectID string) ([]LifecycleExecution, error) {
+	return c.listTaskLifecycleExecutions(ctx, taskID, projectID)
+}
+
+func (c *Client) listTaskLifecycleExecutions(ctx context.Context, taskID, projectID string) ([]LifecycleExecution, error) {
 	var out []LifecycleExecution
-	err := c.getJSON(ctx, "/api/tasks/"+url.PathEscape(taskID)+"/lifecycle-executions", &out)
+	err := c.getJSON(ctx, "/api/tasks/"+url.PathEscape(taskID)+"/lifecycle-executions"+optProject(projectID), &out)
 	return out, err
 }
 
-// GetLifecycleExecutionEvents fetches the trace events of one execution.
+// GetLifecycleExecutionEvents fetches the trace events of one execution using
+// the backend's default project scope.
 func (c *Client) GetLifecycleExecutionEvents(ctx context.Context, execID string) ([]LifecycleEvent, error) {
+	return c.getLifecycleExecutionEvents(ctx, execID, "")
+}
+
+// GetLifecycleExecutionEventsForProject fetches trace events within the
+// explicitly selected project.
+func (c *Client) GetLifecycleExecutionEventsForProject(ctx context.Context, execID, projectID string) ([]LifecycleEvent, error) {
+	return c.getLifecycleExecutionEvents(ctx, execID, projectID)
+}
+
+func (c *Client) getLifecycleExecutionEvents(ctx context.Context, execID, projectID string) ([]LifecycleEvent, error) {
 	var out []LifecycleEvent
-	err := c.getJSON(ctx, "/api/lifecycle-executions/"+url.PathEscape(execID)+"/events", &out)
+	err := c.getJSON(ctx, "/api/lifecycle-executions/"+url.PathEscape(execID)+"/events"+optProject(projectID), &out)
 	return out, err
 }
 

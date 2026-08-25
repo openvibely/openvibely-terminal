@@ -849,6 +849,39 @@ func TestCLILifecycleListsMultipleExecutionsPlainText(t *testing.T) {
 	}
 }
 
+func TestCLILifecycleUsesRequestedProjectScope(t *testing.T) {
+	const executions = `[{"id":"exec-1","skill_key":"router","status":"completed"}]`
+	const events = `[{"id":"event-1","seq":1,"event_type":"completed","payload":{"ok":true},"created_at":"2026-01-20T10:00:00Z"}]`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":                           cliProjects,
+		"/tasks":                                  `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions":     executions,
+		"/api/lifecycle-executions/exec-1/events": events,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "other", []string{"tasks", "lifecycle", "t-1", "exec-1"}, false, true); err != nil {
+		t.Fatalf("tasks lifecycle for selected project failed: %v", err)
+	}
+	for _, want := range []string{
+		"GET /tasks?project_id=p2",
+		"GET /api/tasks/t-1/lifecycle-executions?project_id=p2",
+		"GET /api/lifecycle-executions/exec-1/events?project_id=p2",
+	} {
+		if !rec.sawQuery(want) {
+			t.Errorf("missing selected-project request %q; calls:\n%s", want, rec.all())
+		}
+	}
+
+	var decoded []client.LifecycleEvent
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &decoded); err != nil {
+		t.Fatalf("output is not lifecycle event JSON: %v\noutput: %s", err, out.String())
+	}
+	if len(decoded) != 1 || decoded[0].EventType != "completed" {
+		t.Fatalf("decoded events = %+v", decoded)
+	}
+}
+
 func TestCLILifecycleJSONEventsUseSnakeCase(t *testing.T) {
 	const executions = `[{"id":"exec-1","skill_key":"router","status":"completed"}]`
 	const events = `[{"id":"event-1","seq":1,"event_type":"started","payload":{"message":"ok"},"created_at":"2026-01-20T10:00:00Z"}]`

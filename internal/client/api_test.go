@@ -198,6 +198,26 @@ func TestListTaskLifecycleExecutions(t *testing.T) {
 	}
 }
 
+func TestListTaskLifecycleExecutionsForProject(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks/t1/lifecycle-executions" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p2" {
+			t.Errorf("project_id = %q, want p2", got)
+		}
+		json.NewEncoder(w).Encode([]LifecycleExecution{{ID: "le2", SkillKey: "reviewer", Status: "running"}})
+	}))
+
+	execs, err := c.ListTaskLifecycleExecutionsForProject(context.Background(), "t1", "p2")
+	if err != nil {
+		t.Fatalf("ListTaskLifecycleExecutionsForProject: %v", err)
+	}
+	if len(execs) != 1 || execs[0].ID != "le2" {
+		t.Errorf("unexpected execs: %+v", execs)
+	}
+}
+
 func TestGetLifecycleExecutionEvents(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/lifecycle-executions/exec-1/events" {
@@ -217,6 +237,31 @@ func TestGetLifecycleExecutionEvents(t *testing.T) {
 		t.Fatalf("GetLifecycleExecutionEvents: %v", err)
 	}
 	if len(events) != 1 || events[0].EventType != "started" || events[0].Payload["message"] != "ok" {
+		t.Errorf("unexpected events: %+v", events)
+	}
+}
+
+func TestGetLifecycleExecutionEventsForProject(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/lifecycle-executions/exec-2/events" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p2" {
+			t.Errorf("project_id = %q, want p2", got)
+		}
+		json.NewEncoder(w).Encode([]LifecycleEvent{{
+			ID:        "event-2",
+			Seq:       1,
+			EventType: "completed",
+			Payload:   map[string]any{"ok": true},
+		}})
+	}))
+
+	events, err := c.GetLifecycleExecutionEventsForProject(context.Background(), "exec-2", "p2")
+	if err != nil {
+		t.Fatalf("GetLifecycleExecutionEventsForProject: %v", err)
+	}
+	if len(events) != 1 || events[0].ID != "event-2" {
 		t.Errorf("unexpected events: %+v", events)
 	}
 }
