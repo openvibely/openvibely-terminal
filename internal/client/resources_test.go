@@ -437,11 +437,13 @@ func TestSkillMutationsSendBackendJSONContract(t *testing.T) {
 			},
 		},
 		{
-			name:     "edit",
-			fn:       func() error { return c.UpdateSkill(ctx, "p1", "retry-logic", "new body") },
+			name: "edit",
+			fn: func() error {
+				return c.UpdateSkill(ctx, "p1", "retry-logic", "Retry Logic", "wrap retries", "new body")
+			},
 			method:   http.MethodPut,
 			path:     "/skills/retry-logic",
-			wantBody: map[string]any{"handle": "retry-logic", "scope": "project", "body": "new body"},
+			wantBody: map[string]any{"handle": "retry-logic", "name": "Retry Logic", "description": "wrap retries", "scope": "project", "body": "new body"},
 		},
 		{
 			name:     "enable",

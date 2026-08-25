@@ -1473,7 +1473,7 @@ func TestSkillsEnableAlways(t *testing.T) {
 // payload and preserve the selected project query.
 func TestSkillsMutationsUseBackendJSONContract(t *testing.T) {
 	const skillsHTML = `<div data-skill-handle="deploy" data-skill-name="Deploy"
-		data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
+		data-skill-description="ship to prod" data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
 
 	tests := []struct {
 		name     string
@@ -1500,7 +1500,7 @@ func TestSkillsMutationsUseBackendJSONContract(t *testing.T) {
 			line:     "/skills edit deploy | new body",
 			method:   http.MethodPut,
 			path:     "/skills/deploy",
-			wantBody: map[string]any{"handle": "deploy", "scope": "project", "body": "new body"},
+			wantBody: map[string]any{"handle": "deploy", "name": "Deploy", "description": "ship to prod", "scope": "project", "body": "new body"},
 		},
 		{
 			name:     "enable",
