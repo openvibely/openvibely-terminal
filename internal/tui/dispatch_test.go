@@ -74,6 +74,19 @@ func (r *recorder) saw(method, path string) bool {
 	return false
 }
 
+func (r *recorder) count(method, path string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := method + " " + path
+	count := 0
+	for _, c := range r.calls {
+		if c == want {
+			count++
+		}
+	}
+	return count
+}
+
 func (r *recorder) all() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
