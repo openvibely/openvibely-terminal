@@ -138,19 +138,34 @@ func (c *Client) ListSkills(ctx context.Context, projectID string) ([]Skill, err
 
 // CreateSkill adds a skill. body is the skill markdown/front-matter document.
 func (c *Client) CreateSkill(ctx context.Context, projectID, name, description, body string) error {
-	v := url.Values{}
-	v.Set("name", name)
-	v.Set("description", description)
-	v.Set("content", body)
-	v.Set("scope", "project")
-	return c.doForm(ctx, http.MethodPost, "/skills"+query("project_id", projectID), v)
+	payload := struct {
+		Handle      string `json:"handle"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Scope       string `json:"scope"`
+		Body        string `json:"body"`
+	}{
+		Handle:      name,
+		Name:        name,
+		Description: description,
+		Scope:       "project",
+		Body:        body,
+	}
+	return c.doJSON(ctx, http.MethodPost, "/skills"+query("project_id", projectID), payload)
 }
 
 // UpdateSkill replaces a skill's body.
 func (c *Client) UpdateSkill(ctx context.Context, projectID, handle, body string) error {
-	v := url.Values{}
-	v.Set("content", body)
-	return c.doForm(ctx, http.MethodPut, "/skills/"+url.PathEscape(handle)+query("project_id", projectID), v)
+	payload := struct {
+		Handle string `json:"handle"`
+		Scope  string `json:"scope"`
+		Body   string `json:"body"`
+	}{
+		Handle: handle,
+		Scope:  "project",
+		Body:   body,
+	}
+	return c.doJSON(ctx, http.MethodPut, "/skills/"+url.PathEscape(handle)+query("project_id", projectID), payload)
 }
 
 // DeleteSkill removes a skill.
@@ -160,18 +175,28 @@ func (c *Client) DeleteSkill(ctx context.Context, projectID, handle string) erro
 
 // SetSkillEnabled enables or disables a skill.
 func (c *Client) SetSkillEnabled(ctx context.Context, projectID, handle string, enabled bool) error {
-	v := url.Values{}
-	v.Set("enabled", boolStr(enabled))
-	return c.doForm(ctx, http.MethodPost,
-		"/skills/"+url.PathEscape(handle)+"/enabled"+query("project_id", projectID), v)
+	payload := struct {
+		Enabled bool   `json:"enabled"`
+		Scope   string `json:"scope"`
+	}{
+		Enabled: enabled,
+		Scope:   "project",
+	}
+	return c.doJSON(ctx, http.MethodPost,
+		"/skills/"+url.PathEscape(handle)+"/enabled"+query("project_id", projectID), payload)
 }
 
 // SetSkillAlwaysUse toggles a skill's always-use flag.
 func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle string, always bool) error {
-	v := url.Values{}
-	v.Set("always_use", boolStr(always))
-	return c.doForm(ctx, http.MethodPost,
-		"/skills/"+url.PathEscape(handle)+"/always_use"+query("project_id", projectID), v)
+	payload := struct {
+		AlwaysUse bool   `json:"always_use"`
+		Scope     string `json:"scope"`
+	}{
+		AlwaysUse: always,
+		Scope:     "project",
+	}
+	return c.doJSON(ctx, http.MethodPost,
+		"/skills/"+url.PathEscape(handle)+"/always_use"+query("project_id", projectID), payload)
 }
 
 // --- models ---

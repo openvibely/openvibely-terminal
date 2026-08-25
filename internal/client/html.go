@@ -15,7 +15,9 @@ package client
 // is the most reliable success signal available to a native client.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -126,6 +128,39 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 	err = apiError(resp)
 	drainAndClose(resp.Body)
 	return nil, err
+}
+
+// doJSON performs a JSON mutation against an HTMX-rendered route. The backend
+// still answers with HTML, so the request keeps the same HTMX and Accept headers
+// as form mutations while using the JSON request contract.
+func (c *Client) doJSON(ctx context.Context, method, path string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("Accept", "text/html, application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		defer drainAndClose(resp.Body)
+		return fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		drainAndClose(resp.Body)
+		return nil
+	}
+	err = apiError(resp)
+	drainAndClose(resp.Body)
+	return err
 }
 
 var cardNodeText = NodeText

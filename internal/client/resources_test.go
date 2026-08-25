@@ -2,10 +2,13 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -317,12 +320,6 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "DELETE", path: "/alerts/a1"},
 		{name: "alerts read all", fn: func() error { return c.MarkAllAlertsRead(ctx, "p1") },
 			method: "POST", path: "/alerts/read-all"},
-		{name: "skill enable", fn: func() error { return c.SetSkillEnabled(ctx, "p1", "deploy", true) },
-			method: "POST", path: "/skills/deploy/enabled",
-			formKey: "enabled", formValue: "true", checkForm: true},
-		{name: "skill always", fn: func() error { return c.SetSkillAlwaysUse(ctx, "p1", "deploy", false) },
-			method: "POST", path: "/skills/deploy/always_use",
-			formKey: "always_use", formValue: "false", checkForm: true},
 		{name: "skill delete", fn: func() error { return c.DeleteSkill(ctx, "p1", "deploy") },
 			method: "DELETE", path: "/skills/deploy"},
 		{name: "model default", fn: func() error { return c.SetDefaultModel(ctx, "m1") },
@@ -375,6 +372,126 @@ func TestResourceMutationRoutes(t *testing.T) {
 			}
 			if tc.checkForm && gotForm.Get(tc.formKey) != tc.formValue {
 				t.Errorf("%s = %q, want %q", tc.formKey, gotForm.Get(tc.formKey), tc.formValue)
+			}
+		})
+	}
+}
+
+func TestSkillMutationsSendBackendJSONContract(t *testing.T) {
+	type capturedRequest struct {
+		method      string
+		path        string
+		projectID   string
+		contentType string
+		accept      string
+		hxRequest   string
+		body        map[string]any
+	}
+	var got capturedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("decode JSON request body %q: %v", raw, err)
+		}
+		got = capturedRequest{
+			method:      r.Method,
+			path:        r.URL.Path,
+			projectID:   r.URL.Query().Get("project_id"),
+			contentType: r.Header.Get("Content-Type"),
+			accept:      r.Header.Get("Accept"),
+			hxRequest:   r.Header.Get("HX-Request"),
+			body:        body,
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name     string
+		fn       func() error
+		method   string
+		path     string
+		wantBody map[string]any
+	}{
+		{
+			name:   "create",
+			fn:     func() error { return c.CreateSkill(ctx, "p1", "retry-logic", "wrap retries", "# Retry") },
+			method: http.MethodPost,
+			path:   "/skills",
+			wantBody: map[string]any{
+				"handle":      "retry-logic",
+				"name":        "retry-logic",
+				"description": "wrap retries",
+				"scope":       "project",
+				"body":        "# Retry",
+			},
+		},
+		{
+			name:     "edit",
+			fn:       func() error { return c.UpdateSkill(ctx, "p1", "retry-logic", "new body") },
+			method:   http.MethodPut,
+			path:     "/skills/retry-logic",
+			wantBody: map[string]any{"handle": "retry-logic", "scope": "project", "body": "new body"},
+		},
+		{
+			name:     "enable",
+			fn:       func() error { return c.SetSkillEnabled(ctx, "p1", "retry-logic", true) },
+			method:   http.MethodPost,
+			path:     "/skills/retry-logic/enabled",
+			wantBody: map[string]any{"enabled": true, "scope": "project"},
+		},
+		{
+			name:     "disable",
+			fn:       func() error { return c.SetSkillEnabled(ctx, "p1", "retry-logic", false) },
+			method:   http.MethodPost,
+			path:     "/skills/retry-logic/enabled",
+			wantBody: map[string]any{"enabled": false, "scope": "project"},
+		},
+		{
+			name:     "always use",
+			fn:       func() error { return c.SetSkillAlwaysUse(ctx, "p1", "retry-logic", true) },
+			method:   http.MethodPost,
+			path:     "/skills/retry-logic/always_use",
+			wantBody: map[string]any{"always_use": true, "scope": "project"},
+		},
+		{
+			name:     "remove always use",
+			fn:       func() error { return c.SetSkillAlwaysUse(ctx, "p1", "retry-logic", false) },
+			method:   http.MethodPost,
+			path:     "/skills/retry-logic/always_use",
+			wantBody: map[string]any{"always_use": false, "scope": "project"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.fn(); err != nil {
+				t.Fatal(err)
+			}
+			if got.method != tc.method || got.path != tc.path || got.projectID != "p1" {
+				t.Fatalf("request = %s %s?project_id=%s, want %s %s?project_id=p1", got.method, got.path, got.projectID, tc.method, tc.path)
+			}
+			if got.contentType != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", got.contentType)
+			}
+			if got.accept != "text/html, application/json" {
+				t.Errorf("Accept = %q, want text/html, application/json", got.accept)
+			}
+			if got.hxRequest != "true" {
+				t.Errorf("HX-Request = %q, want true", got.hxRequest)
+			}
+			if !reflect.DeepEqual(got.body, tc.wantBody) {
+				t.Errorf("JSON body = %#v, want %#v", got.body, tc.wantBody)
 			}
 		})
 	}

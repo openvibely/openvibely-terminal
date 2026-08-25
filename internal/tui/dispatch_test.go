@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1462,6 +1465,144 @@ func TestSkillsEnableAlways(t *testing.T) {
 			t.Errorf("expected refreshed skills:\n%s", out)
 		}
 	})
+}
+
+// TestSkillsMutationsUseBackendJSONContract runs the TUI skill commands against
+// a contract server that rejects form-encoded skill mutations. Reads continue to
+// use the rendered HTML route, while every mutation must carry the backend JSON
+// payload and preserve the selected project query.
+func TestSkillsMutationsUseBackendJSONContract(t *testing.T) {
+	const skillsHTML = `<div data-skill-handle="deploy" data-skill-name="Deploy"
+		data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="project"></div>`
+
+	tests := []struct {
+		name     string
+		line     string
+		method   string
+		path     string
+		wantBody map[string]any
+	}{
+		{
+			name:   "add",
+			line:   "/skills add retry-logic | wrap retries | # Retry",
+			method: http.MethodPost,
+			path:   "/skills",
+			wantBody: map[string]any{
+				"handle":      "retry-logic",
+				"name":        "retry-logic",
+				"description": "wrap retries",
+				"scope":       "project",
+				"body":        "# Retry",
+			},
+		},
+		{
+			name:     "edit",
+			line:     "/skills edit deploy | new body",
+			method:   http.MethodPut,
+			path:     "/skills/deploy",
+			wantBody: map[string]any{"handle": "deploy", "scope": "project", "body": "new body"},
+		},
+		{
+			name:     "enable",
+			line:     "/skills enable deploy",
+			method:   http.MethodPost,
+			path:     "/skills/deploy/enabled",
+			wantBody: map[string]any{"enabled": true, "scope": "project"},
+		},
+		{
+			name:     "disable",
+			line:     "/skills disable deploy",
+			method:   http.MethodPost,
+			path:     "/skills/deploy/enabled",
+			wantBody: map[string]any{"enabled": false, "scope": "project"},
+		},
+		{
+			name:     "always",
+			line:     "/skills always deploy",
+			method:   http.MethodPost,
+			path:     "/skills/deploy/always_use",
+			wantBody: map[string]any{"always_use": true, "scope": "project"},
+		},
+		{
+			name:     "load alias",
+			line:     "/skills load deploy",
+			method:   http.MethodPost,
+			path:     "/skills/deploy/always_use",
+			wantBody: map[string]any{"always_use": true, "scope": "project"},
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var gotMethod, gotPath, gotProject, gotContentType, gotHX string
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				isSkillMutation :=
+					(r.Method == http.MethodPost && r.URL.Path == "/skills") ||
+						(r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/skills/")) ||
+						(r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/enabled")) ||
+						(r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/always_use"))
+				if isSkillMutation {
+					if r.Header.Get("Content-Type") != "application/json" {
+						w.WriteHeader(http.StatusUnsupportedMediaType)
+						_, _ = w.Write([]byte(`{"error":"skill mutations require JSON"}`))
+						return
+					}
+					raw, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read mutation body: %v", err)
+					}
+					if err := json.Unmarshal(raw, &gotBody); err != nil {
+						t.Errorf("decode mutation JSON %q: %v", raw, err)
+					}
+					gotMethod = r.Method
+					gotPath = r.URL.Path
+					gotProject = r.URL.Query().Get("project_id")
+					gotContentType = r.Header.Get("Content-Type")
+					gotHX = r.Header.Get("HX-Request")
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(skillsHTML))
+					return
+				}
+				if r.Method == http.MethodGet && r.URL.Path == "/skills" {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(skillsHTML))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+			m = runLine(t, m, tc.line)
+
+			if out := transcript(m); strings.Contains(out, "error:") {
+				t.Fatalf("skill mutation was rejected by JSON contract:\n%s", out)
+			}
+			if gotMethod != tc.method || gotPath != tc.path || gotProject != "p1" {
+				t.Fatalf("request = %s %s?project_id=%s, want %s %s?project_id=p1", gotMethod, gotPath, gotProject, tc.method, tc.path)
+			}
+			if gotContentType != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", gotContentType)
+			}
+			if gotHX != "true" {
+				t.Errorf("HX-Request = %q, want true", gotHX)
+			}
+			if !reflect.DeepEqual(gotBody, tc.wantBody) {
+				t.Errorf("JSON body = %#v, want %#v", gotBody, tc.wantBody)
+			}
+		})
+	}
 }
 
 func TestAgentsGenerateDelete(t *testing.T) {
