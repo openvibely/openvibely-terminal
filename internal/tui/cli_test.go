@@ -823,6 +823,63 @@ func TestCLIJSONTasksShow(t *testing.T) {
 	}
 }
 
+func TestCLILifecycleListsMultipleExecutionsPlainText(t *testing.T) {
+	const executions = `[
+		{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"},
+		{"id":"exec-2","skill_key":"reviewer","when":"post_task","status":"failed","started_at":"2026-01-20T11:00:00Z"}
+	]`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":                       cliProjects,
+		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions": executions,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1"}, false, false); err != nil {
+		t.Fatalf("tasks lifecycle failed: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"exec-1", "exec-2", "router", "reviewer", "completed", "failed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("plain lifecycle output missing %q:\n%s", want, got)
+		}
+	}
+	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") || rec.saw("GET", "/api/lifecycle-executions/exec-2/events") {
+		t.Error("CLI execution listing must not fetch event traces for multiple executions")
+	}
+}
+
+func TestCLILifecycleJSONEventsUseSnakeCase(t *testing.T) {
+	const executions = `[{"id":"exec-1","skill_key":"router","status":"completed"}]`
+	const events = `[{"id":"event-1","seq":1,"event_type":"started","payload":{"message":"ok"},"created_at":"2026-01-20T10:00:00Z"}]`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":                           cliProjects,
+		"/tasks":                                  `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions":     executions,
+		"/api/lifecycle-executions/exec-1/events": events,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1", "exec-1"}, false, true); err != nil {
+		t.Fatalf("tasks lifecycle --json failed: %v", err)
+	}
+	got := strings.TrimSpace(out.String())
+	var decoded []client.LifecycleEvent
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("output is not lifecycle event JSON: %v\noutput: %s", err, got)
+	}
+	if len(decoded) != 1 || decoded[0].Seq != 1 || decoded[0].EventType != "started" {
+		t.Fatalf("decoded events = %+v", decoded)
+	}
+	for _, want := range []string{`"event_type"`, `"created_at"`, `"payload"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("JSON output missing %s: %s", want, got)
+		}
+	}
+	if strings.Contains(got, `"EventType"`) || strings.Contains(got, `"CreatedAt"`) {
+		t.Errorf("JSON output used Go field names: %s", got)
+	}
+}
 func TestCLIJSONNonJSONModeUnchanged(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>

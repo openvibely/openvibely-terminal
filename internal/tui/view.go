@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -472,6 +473,82 @@ func reviewState(r client.ReviewComment) string {
 		return statusMark(r.State)
 	}
 	return dimStyle.Render("—")
+}
+
+func renderLifecycleExecutions(task client.Task, executions []client.LifecycleExecution) string {
+	var b strings.Builder
+	title := firstNonEmpty(task.Title, shortID(task.ID))
+	fmt.Fprintf(&b, "%s  (id %s)\n", sectionStyle.Render(title), task.ID)
+	if len(executions) == 0 {
+		b.WriteString(dimStyle.Render("no executions for this task"))
+		return b.String()
+	}
+
+	rows := [][]string{{"ID", "SKILL", "WHEN", "STATUS", "STARTED"}}
+	for _, execution := range executions {
+		rows = append(rows, []string{
+			firstNonEmpty(execution.ID, "—"),
+			firstNonEmpty(execution.SkillKey, "—"),
+			firstNonEmpty(execution.When, "—"),
+			firstNonEmpty(execution.Status, "—"),
+			firstNonEmpty(execution.StartedAt, "—"),
+		})
+	}
+	b.WriteString(table(rows))
+	return b.String()
+}
+
+func renderLifecycleEvents(task client.Task, execution client.LifecycleExecution, events []client.LifecycleEvent) string {
+	var b strings.Builder
+	taskTitle := firstNonEmpty(task.Title, shortID(task.ID))
+	fmt.Fprintf(&b, "%s  (id %s)\n", sectionStyle.Render(taskTitle), task.ID)
+	fmt.Fprintf(&b, "execution %s", firstNonEmpty(execution.ID, "(unnamed)"))
+	if execution.SkillKey != "" {
+		b.WriteString(" · " + execution.SkillKey)
+	}
+	if execution.Status != "" {
+		b.WriteString(" · " + execution.Status)
+	}
+	b.WriteString("\n\n")
+
+	if len(events) == 0 {
+		b.WriteString(dimStyle.Render("no events for this execution"))
+		return b.String()
+	}
+
+	ordered := append([]client.LifecycleEvent(nil), events...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].Seq != ordered[j].Seq {
+			return ordered[i].Seq < ordered[j].Seq
+		}
+		if ordered[i].CreatedAt != ordered[j].CreatedAt {
+			return ordered[i].CreatedAt < ordered[j].CreatedAt
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+
+	rows := [][]string{{"SEQ", "TIMESTAMP", "EVENT TYPE", "PAYLOAD"}}
+	for _, event := range ordered {
+		rows = append(rows, []string{
+			fmt.Sprintf("%d", event.Seq),
+			firstNonEmpty(event.CreatedAt, "—"),
+			firstNonEmpty(event.EventType, "—"),
+			lifecyclePayloadSummary(event.Payload),
+		})
+	}
+	b.WriteString(table(rows))
+	return b.String()
+}
+
+func lifecyclePayloadSummary(payload map[string]any) string {
+	if len(payload) == 0 {
+		return "—"
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "<unavailable>"
+	}
+	return truncate(string(encoded), 96)
 }
 
 // renderThread shows a task's conversation, falling back to the details tab

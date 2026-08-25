@@ -365,6 +365,145 @@ func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	}
 }
 
+func TestTasksLifecycleRendersOrderedEvents(t *testing.T) {
+	const executions = `[{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"}]`
+	const events = `[
+		{"id":"event-2","seq":2,"event_type":"completed","payload":{"message":"second"},"created_at":"2026-01-20T10:00:02Z"},
+		{"id":"event-1","seq":1,"event_type":"started","payload":{"message":"first"},"created_at":"2026-01-20T10:00:01Z"}
+	]`
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                                  taskBoardHTML,
+		"/api/tasks/t-1/lifecycle-executions":     executions,
+		"/api/lifecycle-executions/exec-1/events": events,
+	})
+	m = runLine(t, m, "/tasks lifecycle Refactor the API")
+
+	if !rec.saw("GET", "/api/tasks/t-1/lifecycle-executions") {
+		t.Fatalf("expected lifecycle execution list, calls:\n%s", rec.all())
+	}
+	if !rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Fatalf("expected lifecycle event fetch, calls:\n%s", rec.all())
+	}
+	out := transcript(m)
+	for _, want := range []string{"SEQ", "TIMESTAMP", "EVENT TYPE", "router", "started", "completed", `{"message":"first"}`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("lifecycle output missing %q:\n%s", want, out)
+		}
+	}
+	if first, second := strings.Index(out, `{"message":"first"}`), strings.Index(out, `{"message":"second"}`); first < 0 || second < 0 || first > second {
+		t.Errorf("events were not rendered in sequence order:\n%s", out)
+	}
+}
+
+func TestTasksLifecycleAliasResolvesExplicitExecution(t *testing.T) {
+	const executions = `[{"id":"exec-1","skill_key":"router","status":"running"}]`
+	const events = `[{"id":"event-1","seq":1,"event_type":"started","payload":{},"created_at":"2026-01-20T10:00:01Z"}]`
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                                  taskBoardHTML,
+		"/api/tasks/t-1/lifecycle-executions":     executions,
+		"/api/lifecycle-executions/exec-1/events": events,
+	})
+	m = runLine(t, m, "/tasks logs Refactor the API exec-1")
+	if !rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Fatalf("logs alias did not fetch the explicit execution:\n%s", rec.all())
+	}
+	if strings.Contains(transcript(m), "nothing matches") {
+		t.Fatalf("unexpected resolution error:\n%s", transcript(m))
+	}
+}
+
+func TestTasksLifecycleNoExecutionsDoesNotFetchEvents(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                              taskBoardHTML,
+		"/api/tasks/t-1/lifecycle-executions": "[]",
+	})
+	m = runLine(t, m, "/tasks lifecycle Refactor")
+	if rec.saw("GET", "/api/lifecycle-executions/e-1/events") {
+		t.Error("event endpoint must not be fetched when there are no executions")
+	}
+	if !strings.Contains(transcript(m), "no executions") {
+		t.Fatalf("expected empty execution state:\n%s", transcript(m))
+	}
+}
+
+func TestTasksLifecycleMultipleExecutionsOpenSelector(t *testing.T) {
+	const executions = `[
+		{"id":"exec-1","skill_key":"router","status":"completed","started_at":"2026-01-20T10:00:00Z"},
+		{"id":"exec-2","skill_key":"reviewer","status":"failed","started_at":"2026-01-20T11:00:00Z"}
+	]`
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                              taskBoardHTML,
+		"/api/tasks/t-1/lifecycle-executions": executions,
+	})
+	m = runLine(t, m, "/tasks lifecycle Refactor")
+	if !m.selectorActive {
+		t.Fatalf("expected execution selector:\n%s", transcript(m))
+	}
+	if m.pendingCommand != "tasks lifecycle t-1" {
+		t.Errorf("pending command = %q, want %q", m.pendingCommand, "tasks lifecycle t-1")
+	}
+	if len(m.selectorItems) != 2 {
+		t.Fatalf("selector items = %d, want 2", len(m.selectorItems))
+	}
+	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") || rec.saw("GET", "/api/lifecycle-executions/exec-2/events") {
+		t.Error("multiple executions must wait for selector choice")
+	}
+}
+
+func TestTasksLifecycleRejectsAmbiguousTaskAndExecutionRefs(t *testing.T) {
+	const ambiguousTasks = `<div>
+		<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-1" title="Deploy API">Deploy API</a></div>
+		<div data-task-id="t-2" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-2" title="Deploy Web">Deploy Web</a></div>
+	</div>`
+	t.Run("task", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/tasks": ambiguousTasks})
+		m = runLine(t, m, "/tasks lifecycle Deploy")
+		if !strings.Contains(transcript(m), "ambiguous") {
+			t.Fatalf("expected ambiguous task error:\n%s", transcript(m))
+		}
+		if rec.saw("GET", "/api/tasks/t-1/lifecycle-executions") || rec.saw("GET", "/api/tasks/t-2/lifecycle-executions") {
+			t.Error("ambiguous task must not fetch lifecycle executions")
+		}
+	})
+
+	t.Run("execution", func(t *testing.T) {
+		const executions = `[{"id":"exec-api","skill_key":"router"},{"id":"exec-agent","skill_key":"reviewer"}]`
+		m, rec := dispatchModel(t, map[string]string{
+			"/tasks":                              taskBoardHTML,
+			"/api/tasks/t-1/lifecycle-executions": executions,
+		})
+		m = runLine(t, m, "/tasks lifecycle t-1 exec")
+		if !strings.Contains(transcript(m), "ambiguous") {
+			t.Fatalf("expected ambiguous execution error:\n%s", transcript(m))
+		}
+		if rec.saw("GET", "/api/lifecycle-executions/exec-api/events") || rec.saw("GET", "/api/lifecycle-executions/exec-agent/events") {
+			t.Error("ambiguous execution must not fetch events")
+		}
+	})
+}
+
+func TestTasksLifecycleEventBackendError(t *testing.T) {
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		case "/api/tasks/t-1/lifecycle-executions":
+			_, _ = w.Write([]byte(`[{"id":"exec-1","skill_key":"router"}]`))
+		case "/api/lifecycle-executions/exec-1/events":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"event trace unavailable"}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	})
+	m = runLine(t, m, "/tasks lifecycle t-1 exec-1")
+	if !strings.Contains(transcript(m), "event trace unavailable") {
+		t.Fatalf("expected backend event error:\n%s", transcript(m))
+	}
+}
+
 func TestTasksNewEmptyTitleFromPipeInput(t *testing.T) {
 	t.Run("pipe_only_is_rejected", func(t *testing.T) {
 		m, rec := dispatchModel(t, nil)

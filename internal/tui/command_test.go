@@ -522,7 +522,7 @@ func TestTasksHelpDocumentsReviewSupport(t *testing.T) {
 		t.Fatal("tasks command missing")
 	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"tasks show <task> [tab]", detailTabUsageList(), "review", "tasks reviews add <task> <file>:<line> <comment>", "tasks reviews add \"Fix login bug\" internal/auth.go:42 Handle token refresh errors"} {
+	for _, want := range []string{"tasks show <task> [tab]", detailTabUsageList(), "review", "tasks reviews add <task> <file>:<line> <comment>", "tasks lifecycle <task> [execution]", "tasks logs <task> [execution]", "tasks lifecycle \"Fix login bug\"", "tasks reviews add \"Fix login bug\" internal/auth.go:42 Handle token refresh errors"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("tasks help missing %q:\n%s", want, help)
 		}

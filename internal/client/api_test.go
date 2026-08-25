@@ -198,6 +198,50 @@ func TestListTaskLifecycleExecutions(t *testing.T) {
 	}
 }
 
+func TestGetLifecycleExecutionEvents(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/lifecycle-executions/exec-1/events" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		json.NewEncoder(w).Encode([]LifecycleEvent{{
+			ID:        "event-1",
+			Seq:       1,
+			EventType: "started",
+			Payload:   map[string]any{"message": "ok"},
+			CreatedAt: "2026-01-20T10:00:00Z",
+		}})
+	}))
+
+	events, err := c.GetLifecycleExecutionEvents(context.Background(), "exec-1")
+	if err != nil {
+		t.Fatalf("GetLifecycleExecutionEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].EventType != "started" || events[0].Payload["message"] != "ok" {
+		t.Errorf("unexpected events: %+v", events)
+	}
+}
+
+func TestLifecycleEventJSONUsesSnakeCaseTags(t *testing.T) {
+	encoded, err := json.Marshal(LifecycleEvent{
+		ID:        "event-1",
+		Seq:       2,
+		EventType: "completed",
+		Payload:   map[string]any{"ok": true},
+		CreatedAt: "2026-01-20T10:00:01Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal lifecycle event: %v", err)
+	}
+	got := string(encoded)
+	for _, want := range []string{`"event_type"`, `"created_at"`, `"payload"`} {
+		if !contains(got, want) {
+			t.Errorf("JSON missing %s: %s", want, got)
+		}
+	}
+	if contains(got, `"EventType"`) || contains(got, `"CreatedAt"`) {
+		t.Errorf("JSON used Go field names: %s", got)
+	}
+}
 func TestGetAvgExecutionTimeByTask(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/analytics/avg-execution-time-by-task" {

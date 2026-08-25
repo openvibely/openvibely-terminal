@@ -110,7 +110,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 
 | Command | Aliases | Actions |
 |---|---|---|
-| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
+| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
@@ -178,6 +178,21 @@ one:
 Tabs: `details`, `thread`, `changes`, `schedules`, `chaining`, `attachments`,
 `lifecycle`.
 
+### Lifecycle event logs
+
+Use the task lifecycle command to inspect execution traces. With no execution
+reference, the TUI auto-opens a sole execution or prompts for one when several
+exist; CLI mode lists several executions so the output is stable. Add `--json`
+to CLI event queries for machine-readable snake_case fields:
+
+```
+/tasks lifecycle refactor
+/tasks lifecycle refactor exec-123
+openvibely-tui -project demo --json tasks lifecycle refactor exec-123
+```
+
+`tasks logs` is an alias for `tasks lifecycle`.
+
 ### Analytics
 
 `/analytics` renders everything; a section name narrows it. Charts are drawn as
@@ -231,6 +246,8 @@ $ openvibely-tui help tasks
   tasks [filter]                             list the board, optionally filtered
   tasks open <task>                          enter the task's thread
   tasks show <task> [tab]                    details, thread, changes, schedules, …
+  tasks lifecycle <task> [execution]         list executions or show ordered events
+  tasks logs <task> [execution]              alias for lifecycle event logs
   tasks new <title> [| <prompt>]             create a task
   tasks edit <task> | <title> [| <prompt>]   edit title/prompt
   tasks run|stop|delete <task>               run, cancel or delete

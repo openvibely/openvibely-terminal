@@ -52,7 +52,7 @@ func run() error {
 	project := flag.String("project", os.Getenv("OPENVIBELY_PROJECT"), "project to select: name, ID or unique prefix")
 	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear)")
 	flag.BoolVar(force, "f", false, "shorthand for -force")
-	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, and project creation commands")
+	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, lifecycle, and project creation commands")
 	flag.Usage = usage
 	flag.Parse()
 

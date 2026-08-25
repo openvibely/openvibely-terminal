@@ -195,7 +195,7 @@ func taskSelectorWithSuffix(m Model, usage, command, prefillSuffix string) (Mode
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
+	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
 	return command{
 		name:    "tasks",
 		aliases: []string{"task", "t", "board"},
@@ -205,9 +205,14 @@ func tasksCommand() command {
 		usage: []string{
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
-			"omit <task> on open/show/reviews/edit/run/stop/delete/move/order/goal/reply → interactive selector",
+			"omit <task> on open/show/reviews/edit/run/stop/delete/move/order/goal/reply/lifecycle/logs → interactive selector",
 			"tasks show <task> [tab]                    " + detailTabUsageList(),
 			"tasks reviews [list] <task>                list inline review comments",
+			"tasks reviews add <task> <file>:<line> <comment>",
+			"tasks lifecycle <task> [execution]         list executions or show ordered events",
+			"tasks logs <task> [execution]              alias for lifecycle event logs",
+			"tasks new <title> [| <prompt>]             create a task",
+			"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
 			"tasks run|stop|delete <task>               run, cancel or delete",
 			"tasks move <task> <backlog|active|completed>",
 			"tasks order <task> <position>              reorder within its column",
@@ -228,6 +233,8 @@ func tasksCommand() command {
 			`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
 			`tasks show "Fix login bug" review`,
 			`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
+			`tasks lifecycle "Fix login bug"`,
+			`tasks logs "Fix login bug" execution-id`,
 			`tasks reply "Fix login bug" | PR is up — please review`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
@@ -375,6 +382,12 @@ func tasksCommand() command {
 						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", filePath, lineNumber, firstNonEmpty(t.Title, shortID(t.ID)), renderTaskReviews(t, reviews)), nil
 					})
 				}
+
+			case "lifecycle", "logs":
+				if len(rest) == 0 {
+					return taskSelector(m, "usage: /tasks "+action+" <task> [execution]", "tasks "+action, false)
+				}
+				return m, lifecycleCommand(c, pid, action, rest)
 
 			case "new":
 				if ref == "" {
@@ -677,6 +690,141 @@ func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (
 	return matchRef(tasks, ref,
 		func(t client.Task) string { return t.ID },
 		func(t client.Task) string { return t.Title })
+}
+
+// lifecycleCommand resolves a task and its optional execution, then either
+// renders the execution list or the ordered event trace. A missing execution
+// uses the TUI selector when several executions exist; CLI mode lists them so
+// its output remains deterministic and non-interactive.
+func lifecycleCommand(c *client.Client, projectID, action string, args []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+
+		tasks, err := c.ListTasks(ctx, projectID)
+		if err != nil {
+			return resultMsg{title: "Task Lifecycle", err: err}
+		}
+		task, executionRef, err := resolveLifecycleRefs(tasks, args)
+		if err != nil {
+			return resultMsg{title: "Task Lifecycle", err: err}
+		}
+
+		execs, err := c.ListTaskLifecycleExecutions(ctx, task.ID)
+		if err != nil {
+			return resultMsg{title: "Task Lifecycle", err: err}
+		}
+
+		if executionRef != "" {
+			execution, err := matchLifecycleExecution(execs, executionRef)
+			if err != nil {
+				return resultMsg{title: "Task Lifecycle", err: err}
+			}
+			return lifecycleEventsMessage(ctx, c, task, execution)
+		}
+
+		switch len(execs) {
+		case 0:
+			if jsonMode {
+				body, err := marshalJSON(nonNilLifecycleExecutions(execs))
+				return resultMsg{title: "Task Lifecycle", body: body, err: err}
+			}
+			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
+		case 1:
+			return lifecycleEventsMessage(ctx, c, task, execs[0])
+		}
+
+		if cliMode {
+			if jsonMode {
+				body, err := marshalJSON(execs)
+				return resultMsg{title: "Task Lifecycle", body: body, err: err}
+			}
+			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
+		}
+
+		items := make([]selectorItem, 0, len(execs))
+		for _, execution := range execs {
+			label := firstNonEmpty(execution.SkillKey, execution.ID, "(unnamed execution)")
+			detail := execution.Status
+			if execution.StartedAt != "" {
+				detail = strings.TrimSpace(detail + " · " + execution.StartedAt)
+			}
+			items = append(items, selectorItem{ref: execution.ID, label: label, detail: detail})
+		}
+		return selectorActiveMsg{
+			title:     "Lifecycle Executions",
+			command:   "tasks " + action + " " + task.ID,
+			emptyHint: "no lifecycle executions for " + firstNonEmpty(task.Title, task.ID),
+			items:     items,
+		}
+	}
+}
+
+func lifecycleEventsMessage(ctx context.Context, c *client.Client, task client.Task, execution client.LifecycleExecution) tea.Msg {
+	events, err := c.GetLifecycleExecutionEvents(ctx, execution.ID)
+	if err != nil {
+		return resultMsg{title: "Task Lifecycle", err: err}
+	}
+	if jsonMode {
+		body, err := marshalJSON(nonNilLifecycleEvents(events))
+		return resultMsg{title: "Task Lifecycle", body: body, err: err}
+	}
+	return resultMsg{title: "Task Lifecycle", body: renderLifecycleEvents(task, execution, events)}
+}
+
+func resolveLifecycleRefs(tasks []client.Task, args []string) (client.Task, string, error) {
+	if len(args) == 0 {
+		return client.Task{}, "", fmt.Errorf("usage: /tasks lifecycle <task> [execution]")
+	}
+
+	fullRef := strings.Join(args, " ")
+	task, fullErr := matchRef(tasks, fullRef,
+		func(t client.Task) string { return t.ID },
+		func(t client.Task) string { return t.Title })
+	if fullErr == nil {
+		return task, "", nil
+	}
+	if strings.Contains(fullErr.Error(), "ambiguous") {
+		return client.Task{}, "", fullErr
+	}
+
+	var ambiguous error
+	for i := len(args) - 1; i > 0; i-- {
+		taskRef := strings.Join(args[:i], " ")
+		task, err := matchRef(tasks, taskRef,
+			func(t client.Task) string { return t.ID },
+			func(t client.Task) string { return t.Title })
+		if err == nil {
+			return task, strings.Join(args[i:], " "), nil
+		}
+		if ambiguous == nil && strings.Contains(err.Error(), "ambiguous") {
+			ambiguous = err
+		}
+	}
+	if ambiguous != nil {
+		return client.Task{}, "", ambiguous
+	}
+	return client.Task{}, "", fullErr
+}
+
+func matchLifecycleExecution(execs []client.LifecycleExecution, ref string) (client.LifecycleExecution, error) {
+	return matchRef(execs, ref,
+		func(e client.LifecycleExecution) string { return e.ID },
+		func(e client.LifecycleExecution) string { return e.SkillKey })
+}
+
+func nonNilLifecycleExecutions(execs []client.LifecycleExecution) []client.LifecycleExecution {
+	if execs == nil {
+		return []client.LifecycleExecution{}
+	}
+	return execs
+}
+
+func nonNilLifecycleEvents(events []client.LifecycleEvent) []client.LifecycleEvent {
+	if events == nil {
+		return []client.LifecycleEvent{}
+	}
+	return events
 }
 
 // --- schedule ---
