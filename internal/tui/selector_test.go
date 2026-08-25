@@ -149,6 +149,42 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 	}
 }
 
+// TestAutomationsWithoutProjectSkipsSelector verifies that the automation
+// command guard runs before selector resolution when no project is selected.
+func TestAutomationsWithoutProjectSkipsSelector(t *testing.T) {
+	cases := []string{
+		"/automations",
+		"/automations run-now au-1",
+		"/automations pause au-1",
+		"/automations resume au-1",
+		"/automations delete au-1",
+		"/automations delete",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, selFixtures())
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := transcript(m)
+			if !strings.Contains(out, "no project selected") {
+				t.Fatalf("expected no-project error for %s:\n%s", line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s must not make backend requests:\n%s", line, calls)
+			}
+			if m.selectorActive {
+				t.Errorf("%s must not open the selector", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Errorf("%s must not set pending confirmation", line)
+			}
+		})
+	}
+}
+
 // TestProjectNoArgOpensSelector verifies /project with no argument opens a
 // project picker when more than one project is known, and that choosing one
 // switches the active project.

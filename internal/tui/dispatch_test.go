@@ -465,6 +465,40 @@ func TestCommandsRequiringProjectReportMissingSelection(t *testing.T) {
 	}
 }
 
+func TestAutomationsCommandsRequireSelectedProject(t *testing.T) {
+	cases := []string{
+		"/automations",
+		"/automations run-now au-1",
+		"/automations pause au-1",
+		"/automations resume au-1",
+		"/automations delete au-1",
+		"/automations delete",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := transcript(m)
+			if !strings.Contains(out, "no project selected") {
+				t.Fatalf("expected no-project error for %s:\n%s", line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s must not make backend requests:\n%s", line, calls)
+			}
+			if m.selectorActive {
+				t.Errorf("%s must not open the selector", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Errorf("%s must not set pending confirmation", line)
+			}
+		})
+	}
+}
+
 func TestUsageErrorsSurfaceInTranscript(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
