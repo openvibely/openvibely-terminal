@@ -858,9 +858,12 @@ func renderCommandHelp(c command) string {
 
 	// Concrete per-action syntax when we have it; the action list alone isn't
 	// enough to actually use a command like "/tasks move".
-	if len(c.usage) > 0 {
+	if len(c.usage) > 0 || len(c.actionUsages) > 0 {
 		for _, u := range c.usage {
 			fmt.Fprintf(&b, "  %s%s\n", cmdPrefix, u)
+		}
+		for _, u := range c.actionUsages {
+			fmt.Fprintf(&b, "  %s%s\n", cmdPrefix, u.helpLine(c.name))
 		}
 	} else {
 		fmt.Fprintf(&b, "  %s\n", c.label())
