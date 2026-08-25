@@ -1282,7 +1282,7 @@ func skillsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.UpdateSkill(ctx, pid, s.Handle, s.Name, s.Description, body); err != nil {
+					if err := c.UpdateSkill(ctx, pid, s.Handle, s.Name, s.Description, s.Enabled, body); err != nil {
 						return "", err
 					}
 					return "updated skill " + s.Handle, nil

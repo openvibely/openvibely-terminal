@@ -1500,7 +1500,7 @@ func TestSkillsMutationsUseBackendJSONContract(t *testing.T) {
 			line:     "/skills edit deploy | new body",
 			method:   http.MethodPut,
 			path:     "/skills/deploy",
-			wantBody: map[string]any{"handle": "deploy", "name": "Deploy", "description": "ship to prod", "scope": "project", "body": "new body"},
+			wantBody: map[string]any{"handle": "deploy", "name": "Deploy", "description": "ship to prod", "scope": "project", "body": "new body", "enabled": true},
 		},
 		{
 			name:     "enable",
@@ -1602,6 +1602,78 @@ func TestSkillsMutationsUseBackendJSONContract(t *testing.T) {
 				t.Errorf("JSON body = %#v, want %#v", gotBody, tc.wantBody)
 			}
 		})
+	}
+}
+
+// TestSkillsEditPreservesDisabledState verifies that a body-only edit carries the
+// existing disabled state back to the backend instead of implicitly re-enabling it.
+func TestSkillsEditPreservesDisabledState(t *testing.T) {
+	const skillsHTML = `<div data-skill-handle="deploy" data-skill-name="Deploy"
+		data-skill-description="ship to prod" data-skill-enabled="false" data-skill-always-use="false" data-skill-scope="project"></div>`
+
+	var gotBody map[string]any
+	var gotContentType string
+	var gotMethod, gotPath, gotProject string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(skillsHTML))
+		case r.Method == http.MethodPut && r.URL.Path == "/skills/deploy":
+			if r.Header.Get("Content-Type") != "application/json" {
+				w.WriteHeader(http.StatusUnsupportedMediaType)
+				_, _ = w.Write([]byte(`{"error":"skill edits require JSON"}`))
+				return
+			}
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read edit body: %v", err)
+			}
+			if err := json.Unmarshal(raw, &gotBody); err != nil {
+				t.Errorf("decode edit JSON %q: %v", raw, err)
+			}
+			gotContentType = r.Header.Get("Content-Type")
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			gotProject = r.URL.Query().Get("project_id")
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(skillsHTML))
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	m = runLine(t, m, "/skills edit deploy | new body")
+
+	if out := transcript(m); strings.Contains(out, "error:") {
+		t.Fatalf("disabled skill edit was rejected by JSON contract:\n%s", out)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/skills/deploy" || gotProject != "p1" {
+		t.Fatalf("request = %s %s?project_id=%s, want PUT /skills/deploy?project_id=p1", gotMethod, gotPath, gotProject)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotContentType)
+	}
+	wantBody := map[string]any{
+		"handle":      "deploy",
+		"name":        "Deploy",
+		"description": "ship to prod",
+		"scope":       "project",
+		"body":        "new body",
+		"enabled":     false,
+	}
+	if !reflect.DeepEqual(gotBody, wantBody) {
+		t.Errorf("JSON body = %#v, want %#v", gotBody, wantBody)
 	}
 }
 

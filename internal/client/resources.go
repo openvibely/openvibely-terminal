@@ -154,20 +154,22 @@ func (c *Client) CreateSkill(ctx context.Context, projectID, name, description, 
 	return c.doJSON(ctx, http.MethodPost, "/skills"+query("project_id", projectID), payload)
 }
 
-// UpdateSkill replaces a skill's body while preserving its display metadata.
-func (c *Client) UpdateSkill(ctx context.Context, projectID, handle, name, description, body string) error {
+// UpdateSkill replaces a skill's body while preserving its display metadata and enabled state.
+func (c *Client) UpdateSkill(ctx context.Context, projectID, handle, name, description string, enabled bool, body string) error {
 	payload := struct {
 		Handle      string `json:"handle"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
 		Scope       string `json:"scope"`
 		Body        string `json:"body"`
+		Enabled     bool   `json:"enabled"`
 	}{
 		Handle:      handle,
 		Name:        name,
 		Description: description,
 		Scope:       "project",
 		Body:        body,
+		Enabled:     enabled,
 	}
 	return c.doJSON(ctx, http.MethodPut, "/skills/"+url.PathEscape(handle)+query("project_id", projectID), payload)
 }
