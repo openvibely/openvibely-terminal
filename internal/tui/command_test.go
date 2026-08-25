@@ -425,6 +425,19 @@ func TestCommandSummaryListsEveryCommand(t *testing.T) {
 	}
 }
 
+func TestModelsHelpDocumentsProviderLimitHealth(t *testing.T) {
+	cmd := lookupCommand("models")
+	if cmd == nil {
+		t.Fatal("models command missing")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{"provider/account-limit health", "analytics usage"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("models help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestTasksHelpDocumentsReviewSupport(t *testing.T) {
 	cmd := lookupCommand("tasks")
 	if cmd == nil {

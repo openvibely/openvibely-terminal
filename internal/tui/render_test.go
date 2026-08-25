@@ -293,6 +293,63 @@ func TestEmptyStateHints(t *testing.T) {
 	}
 }
 
+func TestRenderModelCapacityWithoutProviderLimits(t *testing.T) {
+	caps := []client.ModelCapacity{{Name: "Sonnet", Running: 1, MaxWorkers: 4, AvailableSlots: 3}}
+	base := stripANSI(renderModelCapacity(caps))
+
+	for _, usage := range []*client.UsageAnalytics{nil, {}} {
+		out := stripANSI(renderModelCapacityWithUsage(caps, usage))
+		if !strings.HasPrefix(out, base) {
+			t.Errorf("capacity table changed when provider limits are unavailable:\n%s", out)
+		}
+		if !strings.Contains(out, "provider limits unavailable") || !strings.Contains(out, "/analytics usage") {
+			t.Errorf("missing provider-limit hint:\n%s", out)
+		}
+	}
+}
+
+func TestRenderModelCapacityProviderLimits(t *testing.T) {
+	secret := "sk-provider-secret"
+	out := stripANSI(renderModelCapacityWithUsage(
+		[]client.ModelCapacity{{Model: "gpt-4o", Running: 2, MaxWorkers: 4, AvailableSlots: 2}},
+		&client.UsageAnalytics{AccountLimits: []client.AccountUsage{
+			{
+				Provider:      "OpenAI",
+				PlanType:      "team",
+				StatusLabel:   "healthy",
+				AccountDetail: secret,
+				Limits: []client.AccountLimit{{
+					Label:       "requests",
+					UsedPercent: 72.5,
+					ResetsAt:    "2026-08-24T00:00:00Z",
+				}},
+			},
+			{
+				Provider:    "Anthropic",
+				StatusLabel: "blocked",
+				PrimaryLimit: &client.AccountLimit{
+					Label:       "tokens",
+					UsedPercent: 100,
+					ResetsAt:    "tomorrow",
+				},
+				Error: "quota service unavailable",
+			},
+		}},
+	))
+
+	for _, want := range []string{
+		"Provider limits", "OpenAI", "team", "healthy", "72.5%", "2026-08-24T00:00:00Z",
+		"Anthropic", "blocked", "100.0%", "tomorrow", "error: quota service unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("provider limits missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, secret) {
+		t.Errorf("provider/account detail leaked into capacity output:\n%s", out)
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder

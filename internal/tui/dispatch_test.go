@@ -424,6 +424,64 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 	}
 }
 
+func TestModelsCapacityRendersCapacityOnlyResponse(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/capacity/models": `[{"name":"Sonnet","running":1,"max_workers":4,"available_slots":3}]`,
+		"/api/analytics/usage": `{"totals":{"call_count":1}}`,
+	})
+	m = runLine(t, m, "/models capacity")
+
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Sonnet", "1", "4", "3", "provider limits unavailable", "/analytics usage"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("capacity-only response missing %q:\n%s", want, out)
+		}
+	}
+	if !rec.saw("GET", "/api/capacity/models") || !rec.saw("GET", "/api/analytics/usage") {
+		t.Errorf("expected capacity and best-effort usage requests:\n%s", rec.all())
+	}
+}
+
+func TestModelsCapacityAccountFetchFailureDoesNotHideCapacity(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r.Method, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/capacity/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"Haiku","running":0,"max_workers":2,"available_slots":2}]`))
+		case "/api/analytics/usage":
+			http.Error(w, "provider quota service is down", http.StatusServiceUnavailable)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/models capacity")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "Haiku") || !strings.Contains(out, "provider limits unavailable") {
+		t.Errorf("capacity should survive account-fetch failure:\n%s", out)
+	}
+	if strings.Contains(out, "provider quota service is down") {
+		t.Errorf("account-fetch diagnostic should not replace the helpful hint:\n%s", out)
+	}
+	if !rec.saw("GET", "/api/capacity/models") || !rec.saw("GET", "/api/analytics/usage") {
+		t.Errorf("expected both requests:\n%s", rec.all())
+	}
+}
+
 func TestWorkersLimitValidatesArgument(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	m = runLine(t, m, "/workers limit abc")

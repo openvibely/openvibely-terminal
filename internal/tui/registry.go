@@ -1253,13 +1253,13 @@ func modelsCommand() command {
 		aliases: []string{"model"},
 		args:    "[name]",
 		actions: actions,
-		desc:    "configured LLM models and capacity",
+		desc:    "configured LLM models, worker capacity and provider health",
 		usage: []string{
 			"models [filter]                            list configured models",
 			"models default <model>                     set the default model",
 			"models delete <model>                      remove a model",
 			"omit <model> on default/delete → interactive selector",
-			"models capacity                            per-model capacity and usage",
+			"models capacity                            worker capacity plus provider/account-limit health (see analytics usage)",
 		},
 		examples: []string{
 			`models default gpt-4o`,
@@ -1289,7 +1289,8 @@ func modelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					return renderModelCapacity(caps), nil
+					usage, _ := c.GetUsageAnalytics(ctx, pid)
+					return renderModelCapacityWithUsage(caps, usage), nil
 				})
 			default:
 				if ref == "" {

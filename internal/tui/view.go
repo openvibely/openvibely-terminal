@@ -676,6 +676,92 @@ func renderModelCapacity(caps []client.ModelCapacity) string {
 	return table(rows)
 }
 
+// renderModelCapacityWithUsage keeps the worker-capacity table independent from
+// provider health. Analytics is best-effort here: a provider/account failure
+// must not hide the capacity data that the command was asked to show.
+func renderModelCapacityWithUsage(caps []client.ModelCapacity, usage *client.UsageAnalytics) string {
+	capacity := renderModelCapacity(caps)
+	if usage == nil || len(usage.AccountLimits) == 0 {
+		return capacity + "\n\n" + dimStyle.Render("provider limits unavailable — run /analytics usage for details")
+	}
+	return capacity + "\n\n" + renderProviderLimits(usage.AccountLimits)
+}
+
+func renderProviderLimits(accounts []client.AccountUsage) string {
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("Provider limits"))
+	for _, account := range accounts {
+		provider := compactProviderText(firstNonEmpty(account.Provider, "unknown provider"))
+		status := compactProviderText(account.StatusLabel)
+		if status == "" && account.PrimaryLimit != nil {
+			status = compactProviderText(account.PrimaryLimit.Status)
+		}
+		if status == "" {
+			for _, limit := range account.Limits {
+				status = compactProviderText(limit.Status)
+				if status != "" {
+					break
+				}
+			}
+		}
+		if status == "" {
+			status = "status unavailable"
+		}
+		if plan := compactProviderText(account.PlanType); plan != "" {
+			status += " · " + plan
+		}
+		fmt.Fprintf(&b, "\n  %-26s %s", truncate(provider, 26), dimStyle.Render(truncate(status, 40)))
+
+		limits := providerLimitRows(account)
+		if len(limits) == 0 {
+			fmt.Fprintf(&b, "\n    %s", dimStyle.Render("quota unavailable"))
+		}
+		for _, limit := range limits {
+			label := compactProviderText(firstNonEmpty(limit.Label, "quota"))
+			reset := compactProviderText(limit.ResetsAt)
+			if reset == "" {
+				reset = "reset time unavailable"
+			}
+			fmt.Fprintf(&b, "\n    %-22s %5.1f%% used · reset %s",
+				truncate(label, 22), limit.UsedPercent, dimStyle.Render(truncate(reset, 40)))
+		}
+		if errText := compactProviderText(account.Error); errText != "" {
+			fmt.Fprintf(&b, "\n    %s", statusErrStyle.Render("error: "+truncate(errText, 100)))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func providerLimitRows(account client.AccountUsage) []client.AccountLimit {
+	limits := make([]client.AccountLimit, 0, len(account.Limits)+1)
+	if account.PrimaryLimit != nil {
+		limits = append(limits, *account.PrimaryLimit)
+	}
+	for _, limit := range account.Limits {
+		if account.PrimaryLimit != nil && limit == *account.PrimaryLimit {
+			continue
+		}
+		limits = append(limits, limit)
+	}
+	return limits
+}
+
+// compactProviderText keeps provider diagnostics on one terminal-safe line.
+// AccountDetail is intentionally not rendered: it may contain identifying or
+// credential-adjacent data that is not needed for capacity troubleshooting.
+func compactProviderText(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
+		}
+	}, strings.TrimSpace(s))
+}
+
 // --- workers ---
 
 func renderWorkers(capacity *client.GlobalCapacity, page string) string {
