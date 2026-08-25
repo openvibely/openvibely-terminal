@@ -77,9 +77,10 @@ type sseConnectedMsg struct{}
 
 // selectorItem is one choice in the inline ref selector.
 type selectorItem struct {
-	ref    string // dispatched as the command argument (ID/handle/type)
-	label  string // primary display text (name/title)
-	detail string // dimmed secondary text (status, description…)
+	ref      string               // dispatched as the command argument (ID/handle/type)
+	label    string               // primary display text (name/title)
+	detail   string               // dimmed secondary text (status, description…)
+	dispatch selectorItemDispatch // optional direct action for an already-resolved item
 }
 
 // selectorActiveMsg asks the model to open the inline ref selector for a

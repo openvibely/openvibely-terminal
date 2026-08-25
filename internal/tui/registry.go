@@ -208,9 +208,6 @@ func tasksCommand() command {
 			"omit <task> on open/show/reviews/edit/run/stop/delete/move/order/goal/reply → interactive selector",
 			"tasks show <task> [tab]                    " + detailTabUsageList(),
 			"tasks reviews [list] <task>                list inline review comments",
-			"tasks reviews add <task> <file>:<line> <comment>",
-			"tasks new <title> [| <prompt>]             create a task",
-			"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
 			"tasks run|stop|delete <task>               run, cancel or delete",
 			"tasks move <task> <backlog|active|completed>",
 			"tasks order <task> <position>              reorder within its column",
@@ -219,6 +216,11 @@ func tasksCommand() command {
 			"tasks activate                             activate the whole backlog",
 			"tasks sweep                                sweep finished tasks",
 			"tasks clear <backlog|completed>            clear a column",
+		},
+		actionUsages: []commandActionUsage{
+			{action: "reviews add", args: "<task> <file>:<line> <comment>"},
+			{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
+			{action: "edit", args: "<task> | <title> [| <prompt>]", description: "edit title/prompt"},
 		},
 		examples: []string{
 			`tasks new Fix login bug | Investigate and resolve the OAuth redirect failure`,
@@ -345,16 +347,16 @@ func tasksCommand() command {
 					})
 				case "add":
 					if len(reviewRest) < 3 {
-						return m, errCmd("usage: /tasks reviews add <task> <file>:<line> <comment>")
+						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
 					locIdx, filePath, lineNumber := findReviewLocation(reviewRest)
 					if locIdx <= 0 || locIdx >= len(reviewRest)-1 {
-						return m, errCmd("usage: /tasks reviews add <task> <file>:<line> <comment>")
+						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
 					reviewRef := strings.Join(reviewRest[:locIdx], " ")
 					commentText := strings.TrimSpace(strings.Join(reviewRest[locIdx+1:], " "))
 					if reviewRef == "" || filePath == "" || lineNumber <= 0 || commentText == "" {
-						return m, errCmd("usage: /tasks reviews add <task> <file>:<line> <comment>")
+						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
 					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
 						t, err := resolveTask(ctx, c, pid, reviewRef)
@@ -376,11 +378,11 @@ func tasksCommand() command {
 
 			case "new":
 				if ref == "" {
-					return m, errCmd("usage: /tasks new <title> [| <prompt>]")
+					return m, errCmd(commandUsage("tasks", "new"))
 				}
 				title, prompt := splitPipe(ref)
 				if title == "" {
-					return m, errCmd("usage: /tasks new <title> [| <prompt>]")
+					return m, errCmd(commandUsage("tasks", "new"))
 				}
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					form := client.TaskForm{Title: title, Prompt: prompt, Category: "backlog"}
@@ -398,14 +400,14 @@ func tasksCommand() command {
 			case "edit":
 				ref, newTitle := splitPipe(ref)
 				if ref == "" {
-					return taskSelector(m, "usage: /tasks edit <task> | <new title> [| <new prompt>]", "tasks edit", true)
+					return taskSelector(m, commandUsage("tasks", "edit"), "tasks edit", true)
 				}
 				if newTitle == "" {
-					return m, errCmd("usage: /tasks edit <task> | <new title> [| <new prompt>]")
+					return m, errCmd(commandUsage("tasks", "edit"))
 				}
 				title, prompt := splitPipe(newTitle)
 				if title == "" {
-					return m, errCmd("usage: /tasks edit <task> | <new title> [| <new prompt>]")
+					return m, errCmd(commandUsage("tasks", "edit"))
 				}
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, ref)
@@ -689,11 +691,13 @@ func scheduleCommand() command {
 		desc:    "scheduled/recurring task runs",
 		usage: []string{
 			"schedule                                   list schedules",
-			"schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]",
 			"omit <task> on add → interactive selector",
 			"schedule delete <id>                       remove a schedule",
 			"schedule toggle <id>                       enable/disable a schedule",
 			"omit <id> on delete/toggle → interactive selector",
+		},
+		actionUsages: []commandActionUsage{
+			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]"},
 		},
 		examples: []string{
 			`schedule add "Daily standup report" 2026-01-20T09:00 daily`,
@@ -722,10 +726,10 @@ func scheduleCommand() command {
 				})
 			case "add":
 				if len(rest) == 0 {
-					return taskSelectorWithSuffix(m, "usage: /schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]", "schedule add", " ")
+					return taskSelectorWithSuffix(m, commandUsage("schedule", "add"), "schedule add", " ")
 				}
 				if len(rest) < 2 {
-					return m, errCmd("usage: /schedule add <task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]")
+					return m, errCmd(commandUsage("schedule", "add"))
 				}
 				repeat := "once"
 				interval := 1
@@ -769,10 +773,35 @@ func scheduleCommand() command {
 									if e.ScheduleID == "" {
 										continue
 									}
-									items = append(items, selectorItem{
+									e := e
+									item := selectorItem{
 										ref:   e.ScheduleID,
 										label: firstNonEmpty(e.Text, shortID(e.ScheduleID)),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+											var err error
+											if action == "delete" {
+												err = c.DeleteSchedule(ctx, e.ScheduleID)
+											} else {
+												_, err = c.ToggleSchedule(ctx, e.ScheduleID)
+											}
+											if err != nil {
+												return "", err
+											}
+											entries, summary, _ := c.GetSchedule(ctx, pid)
+											return action + "d schedule\n\n" + renderSchedule(entries, summary), nil
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete schedule %q? Type 'yes' to confirm or Esc to cancel.", e.ScheduleID),
+												fmt.Sprintf("use --force to confirm deletion of schedule %q", e.ScheduleID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -857,6 +886,10 @@ func alertsCommand() command {
 			`alerts read-all`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
@@ -905,11 +938,37 @@ func alertsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(alerts))
 								for _, a := range alerts {
-									items = append(items, selectorItem{
+									a := a
+									item := selectorItem{
 										ref:    a.ID,
 										label:  firstNonEmpty(a.Title, a.Message, a.Text, shortID(a.ID)),
 										detail: strings.Join(a.Badges, " "),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
+											var err error
+											if action == "delete" {
+												err = c.DeleteAlert(ctx, a.ID, pid)
+											} else {
+												err = c.AlertAction(ctx, a.ID, action, pid)
+											}
+											if err != nil {
+												return "", err
+											}
+											return refreshAndRender(action+": "+a.Title,
+												func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
+												renderAlerts)
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
+												fmt.Sprintf("use --force to confirm deletion of alert %q", a.ID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -984,12 +1043,14 @@ func skillsCommand() command {
 		usage: []string{
 			"skills [filter]                            list skills",
 			"skills show <skill>                        show one skill's body",
-			"skills add <name> [| <description>] [| <body>]",
-			"skills edit <skill> | <new body>           replace a skill's body",
 			"skills delete <skill>                      remove a skill",
 			"skills enable|disable <skill>              toggle availability",
 			"skills always|load <skill>                 always load this skill",
 			"omit <skill> on show/edit/delete/enable/disable/always/load → interactive selector",
+		},
+		actionUsages: []commandActionUsage{
+			{action: "add", args: "<name> [| <description>] [| <body>]"},
+			{action: "edit", args: "<skill> | <new body>", description: "replace a skill's body"},
 		},
 		examples: []string{
 			`skills add retry-logic | Wrap HTTP calls in exponential backoff`,
@@ -1032,12 +1093,12 @@ func skillsCommand() command {
 				})
 			case "add":
 				if ref == "" {
-					return m, errCmd("usage: /skills add <name> [| <description>] [| <body>]")
+					return m, errCmd(commandUsage("skills", "add"))
 				}
 				parts := strings.SplitN(ref, "|", 3)
 				name := strings.TrimSpace(parts[0])
 				if name == "" {
-					return m, errCmd("usage: /skills add <name> [| <description>] [| <body>]")
+					return m, errCmd(commandUsage("skills", "add"))
 				}
 				desc, body := "", ""
 				if len(parts) > 1 {
@@ -1057,10 +1118,10 @@ func skillsCommand() command {
 			case "edit":
 				ref2, body := splitPipe(ref)
 				if ref2 == "" {
-					return skillSelector(m, "usage: /skills edit <skill> | <new body>", "skills edit", true)
+					return skillSelector(m, commandUsage("skills", "edit"), "skills edit", true)
 				}
 				if body == "" {
-					return m, errCmd("usage: /skills edit <skill> | <new body>")
+					return m, errCmd(commandUsage("skills", "edit"))
 				}
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
 					skills, err := c.ListSkills(ctx, pid)
@@ -1203,11 +1264,27 @@ func agentsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(agents))
 								for _, a := range agents {
-									items = append(items, selectorItem{
+									a := a
+									item := selectorItem{
 										ref:    a.ID,
 										label:  firstNonEmpty(a.Name, a.Key, shortID(a.ID)),
 										detail: truncate(a.Description, 40),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
+											if err := c.DeleteAgent(ctx, a.ID); err != nil {
+												return "", err
+											}
+											return refreshAndRender("deleted "+a.Name,
+												func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
+												renderAgents)
+										})
+										return confirmOr(m,
+											fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
+											fmt.Sprintf("use --force to confirm deletion of agent %q", a.ID),
+											cmd)
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -1249,13 +1326,13 @@ func modelsCommand() command {
 		aliases: []string{"model"},
 		args:    "[name]",
 		actions: actions,
-		desc:    "configured LLM models and capacity",
+		desc:    "configured LLM models, worker capacity and provider health",
 		usage: []string{
 			"models [filter]                            list configured models",
 			"models default <model>                     set the default model",
 			"models delete <model>                      remove a model",
 			"omit <model> on default/delete → interactive selector",
-			"models capacity                            per-model capacity and usage",
+			"models capacity                            worker capacity plus provider/account-limit health (see analytics usage)",
 		},
 		examples: []string{
 			`models default gpt-4o`,
@@ -1285,7 +1362,8 @@ func modelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					return renderModelCapacity(caps), nil
+					usage, _ := c.GetUsageAnalytics(ctx, pid)
+					return renderModelCapacityWithUsage(caps, usage), nil
 				})
 			default:
 				if ref == "" {
@@ -1299,11 +1377,37 @@ func modelsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(list))
 								for _, mo := range list {
-									items = append(items, selectorItem{
+									mo := mo
+									item := selectorItem{
 										ref:    mo.ID,
 										label:  firstNonEmpty(mo.Name, mo.Model, shortID(mo.ID)),
 										detail: strings.TrimSpace(mo.Provider + " " + mo.Model),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
+											var err error
+											if action == "default" {
+												err = c.SetDefaultModel(ctx, mo.ID)
+											} else {
+												err = c.DeleteModel(ctx, mo.ID)
+											}
+											if err != nil {
+												return "", err
+											}
+											return refreshAndRender(action+": "+mo.Name,
+												func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
+												renderModels)
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete model %q? Type 'yes' to confirm or Esc to cancel.", mo.ID),
+												fmt.Sprintf("use --force to confirm deletion of model %q", mo.ID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -1652,6 +1756,10 @@ func automationsCommand() command {
 			`automations resume "Nightly sweep"`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
@@ -1659,14 +1767,14 @@ func automationsCommand() command {
 			switch action {
 			case "", "list":
 				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+					automations, err := c.ListAutomations(ctx, pid)
+					if err != nil {
+						return "", err
+					}
 					if jsonMode {
-						automations, err := c.ListAutomations(ctx, pid)
-						if err != nil {
-							return "", err
-						}
 						return marshalJSON(automations)
 					}
-					return c.GetAutomations(ctx, pid)
+					return renderAutomations(automations, ref), nil
 				})
 			default:
 				if ref == "" {
@@ -1680,11 +1788,29 @@ func automationsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(automations))
 								for _, a := range automations {
-									items = append(items, selectorItem{
+									a := a
+									item := selectorItem{
 										ref:    a.ID,
 										label:  firstNonEmpty(a.Name, shortID(a.ID)),
 										detail: a.State,
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+											status := action + ": " + firstNonEmpty(a.Name, a.ID)
+											return actAndReloadText(status,
+												func() error { return c.AutomationAction(ctx, a.ID, action, pid) },
+												func() (string, error) { return c.GetAutomations(ctx, pid) })
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
+												fmt.Sprintf("use --force to confirm deletion of automation %q", a.ID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -1701,9 +1827,14 @@ func automationsCommand() command {
 						return "", err
 					}
 					status := action + ": " + firstNonEmpty(a.Name, a.ID)
-					return actAndReloadText(status,
-						func() error { return c.AutomationAction(ctx, a.ID, action, pid) },
-						func() (string, error) { return c.GetAutomations(ctx, pid) })
+					if err := c.AutomationAction(ctx, a.ID, action, pid); err != nil {
+						return "", err
+					}
+					return refreshAndRender(status,
+						func() ([]client.Automation, error) { return c.ListAutomations(ctx, pid) },
+						func(automations []client.Automation, _ string) string {
+							return renderAutomations(automations, "")
+						})
 				})
 				if action == "delete" {
 					return confirmOr(m,
@@ -1902,6 +2033,12 @@ func statusCommand() command {
 		run: func(m Model, _ []string) (Model, tea.Cmd) {
 			m.busy = false
 			m.append(entry{role: "result", head: "Status", text: m.renderStatus()})
+			// RunCLI prefetches counts before rendering and drains returned
+			// commands after dispatch. The one-shot output is already rendered,
+			// so only interactive mode needs the follow-up refresh.
+			if cliMode {
+				return m, nil
+			}
 			return m, m.fetchStatusCounts()
 		},
 	}

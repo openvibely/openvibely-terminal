@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -35,6 +36,121 @@ func TestTableAlignsStyledCells(t *testing.T) {
 			t.Errorf("row %d last column starts at %d, want %d (columns misaligned)\n%s",
 				i, s, starts[0], out)
 		}
+	}
+}
+
+func TestTablePreservesStyledAndWideCellOutput(t *testing.T) {
+	rows := [][]string{
+		{"ID", "STATE", "TITLE", "DETAIL"},
+		{"task-1", "\x1b[31m失败\x1b[0m", "宽内容：日本語", "first"},
+		{"task-2", statusMark("completed"), "café résumé", "second"},
+	}
+
+	got := table(rows)
+	want := tableWithoutWidthCache(rows)
+	if got != want {
+		t.Fatalf("cached table output changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestTableHandlesEmptyAndRaggedRows(t *testing.T) {
+	if got := table(nil); got != "" {
+		t.Errorf("table(nil) = %q, want empty output", got)
+	}
+	if got := table([][]string{}); got != "" {
+		t.Errorf("table(empty) = %q, want empty output", got)
+	}
+
+	rows := [][]string{
+		{"HEADER", "VALUE", "TAIL"},
+		{"one"},
+		{},
+		{"two", "columns"},
+	}
+	got := table(rows)
+	want := tableWithoutWidthCache(rows)
+	if got != want {
+		t.Fatalf("cached ragged table output changed\n got: %q\nwant: %q", got, want)
+	}
+	if !strings.Contains(stripANSI(got), "HEADER") {
+		t.Fatalf("first-row header content missing: %q", got)
+	}
+}
+
+// tableWithoutWidthCache mirrors the pre-optimization implementation for exact
+// output regression tests and before/after benchmarks. It intentionally measures
+// every non-final cell again while rendering its padding.
+func tableWithoutWidthCache(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	cols := 0
+	for _, r := range rows {
+		if len(r) > cols {
+			cols = len(r)
+		}
+	}
+	widths := make([]int, cols)
+	for _, r := range rows {
+		for i, cell := range r {
+			if w := lipgloss.Width(cell); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	var b strings.Builder
+	for ri, r := range rows {
+		var line strings.Builder
+		for i, cell := range r {
+			if i == len(r)-1 {
+				line.WriteString(cell)
+				break
+			}
+			line.WriteString(cell)
+			line.WriteString(strings.Repeat(" ", widths[i]-lipgloss.Width(cell)+2))
+		}
+		text := strings.TrimRight(line.String(), " ")
+		if ri == 0 {
+			b.WriteString(headerStyle.Render(text) + "\n")
+		} else {
+			b.WriteString(text + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func benchmarkTableRows(rowCount int) [][]string {
+	rows := make([][]string, rowCount+1)
+	rows[0] = []string{"ID", "STATE", "TITLE", "DETAIL"}
+	for i := 1; i <= rowCount; i++ {
+		id := "task-" + strconv.Itoa(i)
+		state := statusMark("running")
+		if i%3 == 0 {
+			state = statusMark("completed")
+		}
+		rows[i] = []string{id, state, "任务 " + id, "wide detail " + id}
+	}
+	return rows
+}
+
+var tableBenchmarkSink string
+
+func BenchmarkTable10KRows4Columns(b *testing.B) {
+	rows := benchmarkTableRows(10_000)
+	for _, benchmark := range []struct {
+		name  string
+		table func([][]string) string
+	}{
+		{name: "cached_widths", table: table},
+		{name: "uncached_widths", table: tableWithoutWidthCache},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				tableBenchmarkSink = benchmark.table(rows)
+			}
+		})
 	}
 }
 
@@ -142,6 +258,30 @@ func TestRenderThreadFallsBackToDetails(t *testing.T) {
 	}
 }
 
+func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
+	automations := []client.Automation{
+		{ID: "automation-active-001", Name: "Native SDLC", State: "active"},
+		{ID: "automation-paused-002", Name: "GitHub SDLC", State: "paused"},
+	}
+	out := stripANSI(renderAutomations(automations, ""))
+	for _, want := range []string{"automation-active-001", "Native SDLC", "active", "automation-paused-002", "GitHub SDLC", "paused"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("automations output missing %q:\n%s", want, out)
+		}
+	}
+
+	filtered := stripANSI(renderAutomations(automations, "github"))
+	if strings.Contains(filtered, "Native SDLC") || !strings.Contains(filtered, "GitHub SDLC") {
+		t.Errorf("automation filter output = %q", filtered)
+	}
+	if got := stripANSI(renderAutomations(automations, "missing")); !strings.Contains(got, "no automations match missing") {
+		t.Errorf("filtered empty state = %q", got)
+	}
+	if got := stripANSI(renderAutomations(nil, "")); !strings.Contains(got, "create one via the web UI") {
+		t.Errorf("empty state = %q", got)
+	}
+}
+
 // Empty-state messages must include actionable slash-command hints (VISION.md "Friendly By Default").
 func TestEmptyStateHints(t *testing.T) {
 	cases := []struct {
@@ -174,6 +314,63 @@ func TestEmptyStateHints(t *testing.T) {
 		if !strings.Contains(c.out, c.hint) {
 			t.Errorf("empty %s state missing hint %q: %q", c.name, c.hint, c.out)
 		}
+	}
+}
+
+func TestRenderModelCapacityWithoutProviderLimits(t *testing.T) {
+	caps := []client.ModelCapacity{{Name: "Sonnet", Running: 1, MaxWorkers: 4, AvailableSlots: 3}}
+	base := stripANSI(renderModelCapacity(caps))
+
+	for _, usage := range []*client.UsageAnalytics{nil, {}} {
+		out := stripANSI(renderModelCapacityWithUsage(caps, usage))
+		if !strings.HasPrefix(out, base) {
+			t.Errorf("capacity table changed when provider limits are unavailable:\n%s", out)
+		}
+		if !strings.Contains(out, "provider limits unavailable") || !strings.Contains(out, "/analytics usage") {
+			t.Errorf("missing provider-limit hint:\n%s", out)
+		}
+	}
+}
+
+func TestRenderModelCapacityProviderLimits(t *testing.T) {
+	secret := "sk-provider-secret"
+	out := stripANSI(renderModelCapacityWithUsage(
+		[]client.ModelCapacity{{Model: "gpt-4o", Running: 2, MaxWorkers: 4, AvailableSlots: 2}},
+		&client.UsageAnalytics{AccountLimits: []client.AccountUsage{
+			{
+				Provider:      "OpenAI",
+				PlanType:      "team",
+				StatusLabel:   "healthy",
+				AccountDetail: secret,
+				Limits: []client.AccountLimit{{
+					Label:       "requests",
+					UsedPercent: 72.5,
+					ResetsAt:    "2026-08-24T00:00:00Z",
+				}},
+			},
+			{
+				Provider:    "Anthropic",
+				StatusLabel: "blocked",
+				PrimaryLimit: &client.AccountLimit{
+					Label:       "tokens",
+					UsedPercent: 100,
+					ResetsAt:    "tomorrow",
+				},
+				Error: "quota service unavailable",
+			},
+		}},
+	))
+
+	for _, want := range []string{
+		"Provider limits", "OpenAI", "team", "healthy", "72.5%", "2026-08-24T00:00:00Z",
+		"Anthropic", "blocked", "100.0%", "tomorrow", "error: quota service unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("provider limits missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, secret) {
+		t.Errorf("provider/account detail leaked into capacity output:\n%s", out)
 	}
 }
 

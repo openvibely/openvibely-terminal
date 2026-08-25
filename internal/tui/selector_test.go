@@ -149,6 +149,42 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 	}
 }
 
+// TestAutomationsWithoutProjectSkipsSelector verifies that the automation
+// command guard runs before selector resolution when no project is selected.
+func TestAutomationsWithoutProjectSkipsSelector(t *testing.T) {
+	cases := []string{
+		"/automations",
+		"/automations run-now au-1",
+		"/automations pause au-1",
+		"/automations resume au-1",
+		"/automations delete au-1",
+		"/automations delete",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, selFixtures())
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := transcript(m)
+			if !strings.Contains(out, "no project selected") {
+				t.Fatalf("expected no-project error for %s:\n%s", line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s must not make backend requests:\n%s", line, calls)
+			}
+			if m.selectorActive {
+				t.Errorf("%s must not open the selector", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Errorf("%s must not set pending confirmation", line)
+			}
+		})
+	}
+}
+
 // TestProjectNoArgOpensSelector verifies /project with no argument opens a
 // project picker when more than one project is known, and that choosing one
 // switches the active project.
@@ -299,6 +335,160 @@ func TestSelectorEscCancels(t *testing.T) {
 		}
 	}
 	rec.mu.Unlock()
+}
+
+// TestPickerActionsUseSelectedResourceWithoutResolutionFetch verifies that
+// picker selections execute against the resource parsed for the selected row.
+// The initial list fetch and post-action refresh remain, but the old second
+// resolution list fetch must not occur.
+func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
+	cases := []struct {
+		name        string
+		command     string
+		method      string
+		path        string
+		listPath    string
+		destructive bool
+		wantOutput  string
+	}{
+		{
+			name:       "alerts approve",
+			command:    "/alerts approve",
+			method:     "POST",
+			path:       "/alerts/a-1/approve",
+			listPath:   "/alerts",
+			wantOutput: "approve: Add retry logic",
+		},
+		{
+			name:        "alerts delete",
+			command:     "/alerts delete",
+			method:      "DELETE",
+			path:        "/alerts/a-1",
+			listPath:    "/alerts",
+			destructive: true,
+			wantOutput:  "delete: Add retry logic",
+		},
+		{
+			name:       "schedule toggle",
+			command:    "/schedule toggle",
+			method:     "POST",
+			path:       "/api/schedules/s-1/toggle",
+			listPath:   "/schedule",
+			wantOutput: "toggled schedule",
+		},
+		{
+			name:        "schedule delete",
+			command:     "/schedule delete",
+			method:      "DELETE",
+			path:        "/schedules/s-1",
+			listPath:    "/schedule",
+			destructive: true,
+			wantOutput:  "deleted schedule",
+		},
+		{
+			name:        "agents delete",
+			command:     "/agents delete",
+			method:      "DELETE",
+			path:        "/agents/ag-1",
+			listPath:    "/agents",
+			destructive: true,
+			wantOutput:  "deleted Reviewer",
+		},
+		{
+			name:       "models default",
+			command:    "/models default",
+			method:     "POST",
+			path:       "/models/mo-1/set-default",
+			listPath:   "/models",
+			wantOutput: "default: GPT-4o",
+		},
+		{
+			name:        "models delete",
+			command:     "/models delete",
+			method:      "DELETE",
+			path:        "/models/mo-1",
+			listPath:    "/models",
+			destructive: true,
+			wantOutput:  "delete: GPT-4o",
+		},
+		{
+			name:       "automations run-now",
+			command:    "/automations run-now",
+			method:     "POST",
+			path:       "/automations/au-1/run-now",
+			listPath:   "/automations",
+			wantOutput: "run-now: Nightly sweep",
+		},
+		{
+			name:       "automations pause",
+			command:    "/automations pause",
+			method:     "POST",
+			path:       "/automations/au-1/pause",
+			listPath:   "/automations",
+			wantOutput: "pause: Nightly sweep",
+		},
+		{
+			name:       "automations resume",
+			command:    "/automations resume",
+			method:     "POST",
+			path:       "/automations/au-1/resume",
+			listPath:   "/automations",
+			wantOutput: "resume: Nightly sweep",
+		},
+		{
+			name:        "automations delete",
+			command:     "/automations delete",
+			method:      "POST",
+			path:        "/automations/au-1/delete",
+			listPath:    "/automations",
+			destructive: true,
+			wantOutput:  "delete: Nightly sweep",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, selFixtures())
+			m = runLine(t, m, tc.command)
+			if !m.selectorActive {
+				t.Fatalf("expected selector for %s, transcript:\n%s", tc.command, transcript(m))
+			}
+
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			if tc.destructive {
+				if m.pendingConfirmation == nil {
+					t.Fatalf("expected confirmation for %s, transcript:\n%s", tc.command, transcript(m))
+				}
+				m = runLine(t, m, "yes")
+			}
+
+			if !rec.saw(tc.method, tc.path) {
+				t.Errorf("expected selected resource action %s %s, calls:\n%s", tc.method, tc.path, rec.all())
+			}
+			if got := selectorCallCount(rec, "GET", tc.listPath); got != 2 {
+				t.Errorf("%s list calls = %d, want 2 (picker load + refresh); calls:\n%s", tc.command, got, rec.all())
+			}
+			if out := transcript(m); strings.Contains(out, "error:") {
+				t.Fatalf("unexpected error after %s:\n%s", tc.command, out)
+			} else if !strings.Contains(out, tc.wantOutput) {
+				t.Errorf("output after %s missing %q:\n%s", tc.command, tc.wantOutput, out)
+			}
+		})
+	}
+}
+
+func selectorCallCount(rec *recorder, method, path string) int {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	want := method + " " + path
+	count := 0
+	for _, call := range rec.calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
 }
 
 // TestSelectorSingleItemAutoSelects verifies a one-item list skips the picker

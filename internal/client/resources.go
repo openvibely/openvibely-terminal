@@ -453,30 +453,88 @@ func (c *Client) ListAutomations(ctx context.Context, projectID string) ([]Autom
 	if err != nil {
 		return nil, err
 	}
-	cards := findAll(root, func(e *html.Node) bool { return attr(e, "data-automation-url") != "" })
+	return parseAutomations(root), nil
+}
 
-	out := make([]Automation, 0, len(cards))
-	for _, card := range cards {
-		btn := findNode(card, func(e *html.Node) bool { return attr(e, "data-automation-card-delete") != "" })
-		if btn == nil {
-			continue
-		}
-		a := Automation{
-			ID:   attr(btn, "data-automation-card-delete"),
-			Name: attr(btn, "data-automation-name"),
-		}
-		for _, state := range []string{"active", "paused", "draft", "archived"} {
-			for _, b := range cardBadges(card) {
-				if strings.EqualFold(b, state) {
-					a.State = state
-				}
+func parseAutomations(root *html.Node) []Automation {
+	out := make([]Automation, 0)
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode && attr(n, "data-automation-url") != "" {
+			if a := parseAutomationCard(n); a.ID != "" {
+				out = append(out, a)
 			}
+			return
 		}
-		if a.ID != "" {
-			out = append(out, a)
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
 		}
 	}
-	return out, nil
+	walk(root)
+	return out
+}
+
+func parseAutomationCard(card *html.Node) Automation {
+	var a Automation
+	stateRank := -1
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			if id := attr(n, "data-automation-card-delete"); id != "" && a.ID == "" {
+				a.ID = id
+				a.Name = attr(n, "data-automation-name")
+			}
+			if n.Data == "span" && strings.Contains(attr(n, "class"), "badge") {
+				state := strings.ToLower(automationBadgeText(n))
+				rank := automationStateRank(state)
+				if rank > stateRank {
+					a.State = state
+					stateRank = rank
+				}
+				return
+			}
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(card)
+	return a
+}
+
+func automationStateRank(state string) int {
+	switch state {
+	case "active":
+		return 0
+	case "paused":
+		return 1
+	case "draft":
+		return 2
+	case "archived":
+		return 3
+	default:
+		return -1
+	}
+}
+
+func automationBadgeText(n *html.Node) string {
+	var state string
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			text := strings.ToLower(strings.TrimSpace(node.Data))
+			switch text {
+			case "active", "paused", "draft", "archived":
+				state = text
+			}
+			return
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(n)
+	return state
 }
 
 // AutomationAction runs run-now/pause/resume/delete on one automation.

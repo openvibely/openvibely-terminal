@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
@@ -149,6 +150,12 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	if !rec.saw("GET", "/tasks") {
 		t.Errorf("expected tasks fetch during CLI status:\n%s", rec.all())
 	}
+	if got := rec.count("GET", "/alerts"); got != 1 {
+		t.Errorf("CLI status made %d /alerts requests, want exactly 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks"); got != 1 {
+		t.Errorf("CLI status made %d /tasks requests, want exactly 1:\n%s", got, rec.all())
+	}
 	if !strings.Contains(got, "1 pending approvals") {
 		t.Errorf("status missing pending alert count:\n%s", got)
 	}
@@ -157,6 +164,54 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	}
 	if strings.Contains(got, "none pending") || strings.Contains(got, "none active") {
 		t.Errorf("status rendered zero-count placeholders despite mocked counts:\n%s", got)
+	}
+}
+
+func TestCLIStatusUsesOneDelayedCountWave(t *testing.T) {
+	const countDelay = 100 * time.Millisecond
+	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><span class="badge">pending</span></div>`
+	const tasksHTML = `<div><div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Task A">Task A</a></div></div>`
+
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case "/alerts":
+			time.Sleep(countDelay)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(alertsHTML))
+		case "/tasks":
+			time.Sleep(countDelay)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(tasksHTML))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if got := rec.count("GET", "/alerts"); got != 1 {
+		t.Fatalf("delayed CLI status made %d /alerts requests, want 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks"); got != 1 {
+		t.Fatalf("delayed CLI status made %d /tasks requests, want 1:\n%s", got, rec.all())
+	}
+	if elapsed >= 2*countDelay {
+		t.Fatalf("CLI status took %s; expected one delayed count-refresh wave, not two", elapsed)
 	}
 }
 
@@ -676,6 +731,50 @@ func TestCLIJSONAlertsList(t *testing.T) {
 	}
 	if alerts[0].Title != "Login broken" {
 		t.Errorf("unexpected alert title: %s", alerts[0].Title)
+	}
+}
+
+func TestCLIJSONAutomationsList(t *testing.T) {
+	const automationsHTML = `<div>
+		<div class="card" data-automation-url="/automations/au-1?project_id=p1">
+			<span class="badge badge-outline">active</span>
+			<button data-automation-card-delete="au-1" data-automation-name="Native SDLC"></button>
+		</div>
+		<div class="card" data-automation-url="/automations/au-2?project_id=p1">
+			<span class="badge badge-outline">paused</span>
+			<button data-automation-card-delete="au-2" data-automation-name="GitHub SDLC"></button>
+		</div>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/automations":  automationsHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"automations"}, false, true); err != nil {
+		t.Fatalf("automations --json failed: %v", err)
+	}
+	var automations []client.Automation
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &automations); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+	if len(automations) != 2 || automations[0].ID != "au-1" || automations[0].Name != "Native SDLC" || automations[0].State != "active" {
+		t.Fatalf("automations = %+v", automations)
+	}
+}
+
+func TestCLIJSONAutomationsEmptyListIsArray(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/automations":  `<div></div>`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"automations"}, false, true); err != nil {
+		t.Fatalf("empty automations --json failed: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "[]" {
+		t.Fatalf("empty automations JSON = %q, want []", got)
 	}
 }
 

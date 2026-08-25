@@ -217,20 +217,30 @@ func table(rows [][]string) string {
 		return ""
 	}
 	cols := 0
+	nonFinalCells := 0
 	for _, r := range rows {
 		if len(r) > cols {
 			cols = len(r)
 		}
+		if len(r) > 1 {
+			nonFinalCells += len(r) - 1
+		}
 	}
 	widths := make([]int, cols)
+	cachedWidths := make([]int, 0, nonFinalCells)
 	for _, r := range rows {
 		for i, cell := range r {
-			if w := lipgloss.Width(cell); w > widths[i] {
+			w := lipgloss.Width(cell)
+			if i < len(r)-1 {
+				cachedWidths = append(cachedWidths, w)
+			}
+			if w > widths[i] {
 				widths[i] = w
 			}
 		}
 	}
 	var b strings.Builder
+	cachedWidth := 0
 	for ri, r := range rows {
 		var line strings.Builder
 		for i, cell := range r {
@@ -238,8 +248,10 @@ func table(rows [][]string) string {
 				line.WriteString(cell)
 				break
 			}
+			cellWidth := cachedWidths[cachedWidth]
+			cachedWidth++
 			line.WriteString(cell)
-			line.WriteString(strings.Repeat(" ", widths[i]-lipgloss.Width(cell)+2))
+			line.WriteString(strings.Repeat(" ", widths[i]-cellWidth+2))
 		}
 		text := strings.TrimRight(line.String(), " ")
 		if ri == 0 {
@@ -515,6 +527,28 @@ func renderSchedule(entries []client.ScheduleEntry, summary string) string {
 	return table(rows)
 }
 
+// --- automations ---
+
+func renderAutomations(automations []client.Automation, filter string) string {
+	rows := [][]string{{"ID", "NAME", "STATE"}}
+	for _, a := range automations {
+		if !filterMatch(filter, a.ID, a.Name, a.State) {
+			continue
+		}
+		name := firstNonEmpty(a.Name, "(unnamed)")
+		state := firstNonEmpty(a.State, "unknown")
+		rows = append(rows, []string{a.ID, truncate(name, 52), state})
+	}
+	if len(rows) == 1 {
+		if filter != "" {
+			return dimStyle.Render("no automations match " + filter)
+		}
+		return dimStyle.Render("no automations yet — create one via the web UI")
+	}
+	return table(rows) + "\n\n" +
+		dimStyle.Render("/automations run-now|pause|resume|delete <id|name>")
+}
+
 // --- alerts ---
 
 func renderAlerts(alerts []client.Alert, filter string) string {
@@ -664,6 +698,92 @@ func renderModelCapacity(caps []client.ModelCapacity) string {
 	return table(rows)
 }
 
+// renderModelCapacityWithUsage keeps the worker-capacity table independent from
+// provider health. Analytics is best-effort here: a provider/account failure
+// must not hide the capacity data that the command was asked to show.
+func renderModelCapacityWithUsage(caps []client.ModelCapacity, usage *client.UsageAnalytics) string {
+	capacity := renderModelCapacity(caps)
+	if usage == nil || len(usage.AccountLimits) == 0 {
+		return capacity + "\n\n" + dimStyle.Render("provider limits unavailable — run /analytics usage for details")
+	}
+	return capacity + "\n\n" + renderProviderLimits(usage.AccountLimits)
+}
+
+func renderProviderLimits(accounts []client.AccountUsage) string {
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("Provider limits"))
+	for _, account := range accounts {
+		provider := compactProviderText(firstNonEmpty(account.Provider, "unknown provider"))
+		status := compactProviderText(account.StatusLabel)
+		if status == "" && account.PrimaryLimit != nil {
+			status = compactProviderText(account.PrimaryLimit.Status)
+		}
+		if status == "" {
+			for _, limit := range account.Limits {
+				status = compactProviderText(limit.Status)
+				if status != "" {
+					break
+				}
+			}
+		}
+		if status == "" {
+			status = "status unavailable"
+		}
+		if plan := compactProviderText(account.PlanType); plan != "" {
+			status += " · " + plan
+		}
+		fmt.Fprintf(&b, "\n  %-26s %s", truncate(provider, 26), dimStyle.Render(truncate(status, 40)))
+
+		limits := providerLimitRows(account)
+		if len(limits) == 0 {
+			fmt.Fprintf(&b, "\n    %s", dimStyle.Render("quota unavailable"))
+		}
+		for _, limit := range limits {
+			label := compactProviderText(firstNonEmpty(limit.Label, "quota"))
+			reset := compactProviderText(limit.ResetsAt)
+			if reset == "" {
+				reset = "reset time unavailable"
+			}
+			fmt.Fprintf(&b, "\n    %-22s %5.1f%% used · reset %s",
+				truncate(label, 22), limit.UsedPercent, dimStyle.Render(truncate(reset, 40)))
+		}
+		if errText := compactProviderText(account.Error); errText != "" {
+			fmt.Fprintf(&b, "\n    %s", statusErrStyle.Render("error: "+truncate(errText, 100)))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func providerLimitRows(account client.AccountUsage) []client.AccountLimit {
+	limits := make([]client.AccountLimit, 0, len(account.Limits)+1)
+	if account.PrimaryLimit != nil {
+		limits = append(limits, *account.PrimaryLimit)
+	}
+	for _, limit := range account.Limits {
+		if account.PrimaryLimit != nil && limit == *account.PrimaryLimit {
+			continue
+		}
+		limits = append(limits, limit)
+	}
+	return limits
+}
+
+// compactProviderText keeps provider diagnostics on one terminal-safe line.
+// AccountDetail is intentionally not rendered: it may contain identifying or
+// credential-adjacent data that is not needed for capacity troubleshooting.
+func compactProviderText(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			return ' '
+		case r < 0x20 || r == 0x7f:
+			return -1
+		default:
+			return r
+		}
+	}, strings.TrimSpace(s))
+}
+
 // --- workers ---
 
 func renderWorkers(capacity *client.GlobalCapacity, page string) string {
@@ -760,9 +880,12 @@ func renderCommandHelp(c command) string {
 
 	// Concrete per-action syntax when we have it; the action list alone isn't
 	// enough to actually use a command like "/tasks move".
-	if len(c.usage) > 0 {
+	if len(c.usage) > 0 || len(c.actionUsages) > 0 {
 		for _, u := range c.usage {
 			fmt.Fprintf(&b, "  %s%s\n", cmdPrefix, u)
+		}
+		for _, u := range c.actionUsages {
+			fmt.Fprintf(&b, "  %s%s\n", cmdPrefix, u.helpLine(c.name))
 		}
 	} else {
 		fmt.Fprintf(&b, "  %s\n", c.label())

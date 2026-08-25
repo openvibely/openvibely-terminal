@@ -460,12 +460,58 @@ func TestHelpPrefixFollowsMode(t *testing.T) {
 	}
 }
 
+func TestRuntimeUsageMatchesCanonicalHelpSyntax(t *testing.T) {
+	defer func() { cmdPrefix = "/" }()
+	cmdPrefix = "/"
+
+	c := lookupCommand("tasks")
+	if c == nil {
+		t.Fatal("tasks command missing")
+	}
+	m := newTestModel(t)
+	m.selectedID = "p1"
+	_, cmd := c.run(m, []string{"new", "|", "prompt"})
+	if cmd == nil {
+		t.Fatal("expected a runtime validation command")
+	}
+	msg, ok := cmd().(resultMsg)
+	if !ok || msg.err == nil {
+		t.Fatalf("expected a usage result, got %#v", msg)
+	}
+
+	got := msg.err.Error()
+	if want := c.usageMessage("new"); got != want {
+		t.Fatalf("runtime usage = %q, want canonical usage %q", got, want)
+	}
+	if help := renderCommandHelp(*c); !strings.Contains(help, strings.TrimPrefix(got, "usage: ")) {
+		t.Fatalf("runtime usage %q is missing from /help tasks:\n%s", got, help)
+	}
+
+	cmdPrefix = ""
+	if got := c.usageMessage("new"); got != "usage: tasks new <title> [| <prompt>]" {
+		t.Fatalf("CLI usage = %q, want a bare command", got)
+	}
+}
+
 // The -h/--help output must list the commands, not just the flags.
 func TestCommandSummaryListsEveryCommand(t *testing.T) {
 	s := CommandSummary()
 	for _, c := range commands {
 		if !strings.Contains(s, c.name) {
 			t.Errorf("%s missing from the CLI command summary", c.name)
+		}
+	}
+}
+
+func TestModelsHelpDocumentsProviderLimitHealth(t *testing.T) {
+	cmd := lookupCommand("models")
+	if cmd == nil {
+		t.Fatal("models command missing")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{"provider/account-limit health", "analytics usage"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("models help missing %q:\n%s", want, help)
 		}
 	}
 }

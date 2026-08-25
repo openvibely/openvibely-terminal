@@ -19,22 +19,80 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// commandActionUsage is the canonical syntax for one action. The command name
+// and action are kept separate from args so runtime usage messages and help
+// lines cannot drift apart when an argument hint changes.
+type commandActionUsage struct {
+	action      string
+	args        string
+	description string
+}
+
+func (u commandActionUsage) syntax(commandName string) string {
+	parts := []string{commandName, u.action}
+	if u.args != "" {
+		parts = append(parts, u.args)
+	}
+	return strings.Join(parts, " ")
+}
+
+func (u commandActionUsage) helpLine(commandName string) string {
+	syntax := u.syntax(commandName)
+	if u.description == "" {
+		return syntax
+	}
+	const descriptionColumn = 43
+	if len(syntax) >= descriptionColumn {
+		return syntax + " " + u.description
+	}
+	return fmt.Sprintf("%-*s%s", descriptionColumn, syntax, u.description)
+}
+
 // command is one entry in the registry.
 type command struct {
 	name    string
 	aliases []string
 	args    string   // argument hint, e.g. "<name>"
 	actions []string // sub-actions for completion/help
-	// usage lists the concrete syntax of each action, e.g.
-	// "move <task> <backlog|active|completed>". Listing the action names alone
-	// isn't enough to actually use a command, so /help <command> prints these.
+	// usage holds static usage/help lines. Action-specific syntax shared with
+	// runtime validation lives in actionUsages below.
 	usage []string
+	// actionUsages is the canonical syntax for runtime validation messages and
+	// the corresponding help lines for high-churn action arguments.
+	actionUsages []commandActionUsage
 	// examples holds concrete runnable invocations shown after the usage block
 	// in /help <command> output, satisfying VISION.md "Help should include
 	// examples, not only syntax."
 	examples []string
 	desc     string
 	run      func(m Model, args []string) (Model, tea.Cmd)
+}
+
+func (c command) actionSyntax(action string) string {
+	for _, usage := range c.actionUsages {
+		if usage.action == action {
+			return usage.syntax(c.name)
+		}
+	}
+	return ""
+}
+
+// usageMessage formats a canonical action usage for the current output mode.
+func (c command) usageMessage(action string) string {
+	syntax := c.actionSyntax(action)
+	if syntax == "" {
+		syntax = strings.TrimSpace(c.name + " " + action)
+	}
+	return "usage: " + cmdPrefix + syntax
+}
+
+// commandUsage resolves registry metadata so callers in command handlers use
+// the same action syntax that renderCommandHelp displays.
+func commandUsage(commandName, action string) string {
+	if c := lookupCommand(commandName); c != nil {
+		return c.usageMessage(action)
+	}
+	return "usage: " + cmdPrefix + strings.TrimSpace(commandName+" "+action)
 }
 
 func (c command) matches(s string) bool {

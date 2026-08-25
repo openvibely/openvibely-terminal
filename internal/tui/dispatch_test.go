@@ -74,6 +74,19 @@ func (r *recorder) saw(method, path string) bool {
 	return false
 }
 
+func (r *recorder) count(method, path string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := method + " " + path
+	count := 0
+	for _, c := range r.calls {
+		if c == want {
+			count++
+		}
+	}
+	return count
+}
+
 func (r *recorder) all() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -499,6 +512,64 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 	}
 }
 
+func TestModelsCapacityRendersCapacityOnlyResponse(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/capacity/models": `[{"name":"Sonnet","running":1,"max_workers":4,"available_slots":3}]`,
+		"/api/analytics/usage": `{"totals":{"call_count":1}}`,
+	})
+	m = runLine(t, m, "/models capacity")
+
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Sonnet", "1", "4", "3", "provider limits unavailable", "/analytics usage"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("capacity-only response missing %q:\n%s", want, out)
+		}
+	}
+	if !rec.saw("GET", "/api/capacity/models") || !rec.saw("GET", "/api/analytics/usage") {
+		t.Errorf("expected capacity and best-effort usage requests:\n%s", rec.all())
+	}
+}
+
+func TestModelsCapacityAccountFetchFailureDoesNotHideCapacity(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r.Method, r.URL.Path)
+		switch r.URL.Path {
+		case "/api/capacity/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"Haiku","running":0,"max_workers":2,"available_slots":2}]`))
+		case "/api/analytics/usage":
+			http.Error(w, "provider quota service is down", http.StatusServiceUnavailable)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/models capacity")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "Haiku") || !strings.Contains(out, "provider limits unavailable") {
+		t.Errorf("capacity should survive account-fetch failure:\n%s", out)
+	}
+	if strings.Contains(out, "provider quota service is down") {
+		t.Errorf("account-fetch diagnostic should not replace the helpful hint:\n%s", out)
+	}
+	if !rec.saw("GET", "/api/capacity/models") || !rec.saw("GET", "/api/analytics/usage") {
+		t.Errorf("expected both requests:\n%s", rec.all())
+	}
+}
+
 func TestWorkersLimitValidatesArgument(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	m = runLine(t, m, "/workers limit abc")
@@ -550,6 +621,40 @@ func TestCommandsRequiringProjectReportMissingSelection(t *testing.T) {
 	}
 	if rec.saw("GET", "/tasks") {
 		t.Error("no request should be made without a project")
+	}
+}
+
+func TestAutomationsCommandsRequireSelectedProject(t *testing.T) {
+	cases := []string{
+		"/automations",
+		"/automations run-now au-1",
+		"/automations pause au-1",
+		"/automations resume au-1",
+		"/automations delete au-1",
+		"/automations delete",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := transcript(m)
+			if !strings.Contains(out, "no project selected") {
+				t.Fatalf("expected no-project error for %s:\n%s", line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s must not make backend requests:\n%s", line, calls)
+			}
+			if m.selectorActive {
+				t.Errorf("%s must not open the selector", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Errorf("%s must not set pending confirmation", line)
+			}
+		})
 	}
 }
 
@@ -781,6 +886,48 @@ func TestAlertsBulkActions(t *testing.T) {
 	}
 }
 
+func TestAlertsCommandsRequireProject(t *testing.T) {
+	cases := []struct {
+		name              string
+		line              string
+		checkConfirmation bool
+		checkSelector     bool
+	}{
+		{name: "list", line: "/alerts"},
+		{name: "read_all", line: "/alerts read-all"},
+		{name: "clear", line: "/alerts clear", checkConfirmation: true},
+		{name: "approve", line: "/alerts approve a-1"},
+		{name: "reject", line: "/alerts reject a-1"},
+		{name: "dismiss", line: "/alerts dismiss a-1"},
+		{name: "read", line: "/alerts read a-1"},
+		{name: "delete", line: "/alerts delete a-1", checkConfirmation: true},
+		{name: "delete_without_ref", line: "/alerts delete", checkConfirmation: true, checkSelector: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, tc.line)
+
+			if !strings.Contains(transcript(m), "no project selected") {
+				t.Errorf("expected no-project error for %s:\n%s", tc.line, transcript(m))
+			}
+			if calls := rec.all(); calls != "" {
+				t.Errorf("%s must not make a backend request without a project:\n%s", tc.line, calls)
+			}
+			if tc.checkConfirmation && m.pendingConfirmation != nil {
+				t.Errorf("%s must not set pendingConfirmation without a project", tc.line)
+			}
+			if tc.checkSelector && m.selectorActive {
+				t.Errorf("%s must not open a selector without a project", tc.line)
+			}
+		})
+	}
+}
+
 // After a successful mutation, a failed list refresh must not surface as an
 // error — the mutation already succeeded, so the status line alone is shown.
 func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
@@ -857,21 +1004,39 @@ func automationCardHTML(id, name, state string) string {
 	</div>`
 }
 
-func TestAutomationsListIsUnchangedWithNoArguments(t *testing.T) {
-	const automationsHTML = `<div>Native SDLC automation</div>`
+func TestAutomationsListUsesStructuredRowsWithNoArguments(t *testing.T) {
+	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
 	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
 	m = runLine(t, m, "/automations")
-	if !rec.saw("GET", "/automations") {
-		t.Fatalf("expected an automations fetch:\n%s", rec.all())
+	if got := strings.Count(rec.all(), "GET /automations"); got != 1 {
+		t.Fatalf("expected one automations fetch, got %d:\n%s", got, rec.all())
 	}
-	if !strings.Contains(transcript(m), "Native SDLC automation") {
-		t.Errorf("automations content missing:\n%s", transcript(m))
+	out := transcript(m)
+	for _, want := range []string{"au-1", "Native SDLC", "active"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("automations output missing %q:\n%s", want, out)
+		}
 	}
-	if strings.Contains(transcript(m), "error:") {
-		t.Errorf("/automations should not error:\n%s", transcript(m))
+	if strings.Contains(out, "error:") {
+		t.Errorf("/automations should not error:\n%s", out)
 	}
 }
 
+func TestAutomationsListFiltersStructuredRows(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+	m = runLine(t, m, "/automations GitHub")
+	if got := strings.Count(rec.all(), "GET /automations"); got != 1 {
+		t.Fatalf("expected one automations fetch, got %d:\n%s", got, rec.all())
+	}
+	out := transcript(m)
+	if strings.Contains(out, "Native SDLC") || !strings.Contains(out, "GitHub SDLC") {
+		t.Errorf("filtered automations output:\n%s", out)
+	}
+}
 func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +
