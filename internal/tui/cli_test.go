@@ -676,6 +676,21 @@ func TestCLIJSONAutomationsList(t *testing.T) {
 	}
 }
 
+func TestCLIJSONAutomationsEmptyListIsArray(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/automations":  `<div></div>`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"automations"}, false, true); err != nil {
+		t.Fatalf("empty automations --json failed: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "[]" {
+		t.Fatalf("empty automations JSON = %q, want []", got)
+	}
+}
+
 func TestCLIJSONProjectsList(t *testing.T) {
 	c, _ := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

@@ -457,7 +457,7 @@ func (c *Client) ListAutomations(ctx context.Context, projectID string) ([]Autom
 }
 
 func parseAutomations(root *html.Node) []Automation {
-	var out []Automation
+	out := make([]Automation, 0)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && attr(n, "data-automation-url") != "" {
