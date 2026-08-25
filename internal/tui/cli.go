@@ -38,8 +38,9 @@ var cliMode bool
 // commands execute without a confirmation prompt only when this is set.
 var forceMode bool
 
-// jsonMode is true when the CLI --json flag was provided. List and show
-// commands emit machine-readable JSON to stdout instead of styled text.
+// jsonMode is true when the CLI --json flag was provided. List, show, and
+// supported mutation commands emit machine-readable JSON to stdout instead of
+// styled text.
 var jsonMode bool
 
 // RunCLI executes one command without starting the interactive UI and writes
@@ -83,7 +84,7 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 
 	// Only commands that talk to the backend need a project or connection
 	// state; /help and friends should stay instant and work offline.
-	if cmdDef.needsBackend() {
+	if cmdDef.needsProjectLoad(args) {
 		m = drain(m, m.loadProjects(false, projectRef))
 		// An unknown or ambiguous project must fail loudly rather than run the
 		// command against whichever project happened to be selected.
@@ -139,6 +140,17 @@ func (c command) needsBackend() bool {
 		return false
 	}
 	return true
+}
+
+// needsProjectLoad reports whether CLI startup should resolve a selected
+// project before running the command. Project creation is intentionally
+// independent of the existing project list, so first-run creation works even
+// when the backend has no projects yet.
+func (c command) needsProjectLoad(args []string) bool {
+	if c.name == "projects" && len(args) > 1 && strings.EqualFold(args[1], "create") {
+		return false
+	}
+	return c.needsBackend()
 }
 
 // needsStatus reports whether the command renders connection state.

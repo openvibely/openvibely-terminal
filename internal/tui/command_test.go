@@ -39,6 +39,51 @@ func TestSplitPipe(t *testing.T) {
 	}
 }
 
+func TestParseProjectCreateArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		wantName string
+		wantPath string
+		ok       bool
+	}{
+		{name: "simple", args: []string{"demo", "/tmp/demo"}, wantName: "demo", wantPath: "/tmp/demo", ok: true},
+		{name: "space-delimited-name", args: []string{"My", "Project", "/tmp/my-project"}, wantName: "My Project", wantPath: "/tmp/my-project", ok: true},
+		{name: "pipe-delimited", args: []string{"My", "Project", "|", `C:\Users\me\my project`}, wantName: "My Project", wantPath: `C:\Users\me\my project`, ok: true},
+		{name: "missing-name", args: []string{"", "/tmp/demo"}, ok: false},
+		{name: "missing-path", args: []string{"demo"}, ok: false},
+		{name: "empty-pipe-path", args: []string{"demo", "|"}, ok: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, path, ok := parseProjectCreateArgs(tc.args)
+			if name != tc.wantName || path != tc.wantPath || ok != tc.ok {
+				t.Fatalf("parseProjectCreateArgs(%v) = %q, %q, %v; want %q, %q, %v", tc.args, name, path, ok, tc.wantName, tc.wantPath, tc.ok)
+			}
+		})
+	}
+}
+
+func TestProjectsCreateCompletionAndHelp(t *testing.T) {
+	cmd := lookupCommand("projects")
+	if cmd == nil {
+		t.Fatal("projects command missing")
+	}
+	if got := completeSlashInput("/projects cr", *cmd); got != "/projects create " {
+		t.Errorf("completion = %q, want %q", got, "/projects create ")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"projects create <name> <path>",
+		"projects create My Project",
+		`C:\Users\me\src\my-project`,
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("projects help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestMatchRefByIDPrefixAndName(t *testing.T) {
 	tasks := []client.Task{
 		{ID: "abc123", Title: "Refactor the API"},

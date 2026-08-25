@@ -14,6 +14,7 @@
 //	openvibely-tui tasks
 //	openvibely-tui tasks run "api refactor"
 //	openvibely-tui -project demo chat "ship the docs"
+//	openvibely-tui projects create demo /Users/me/src/demo
 //	openvibely-tui help
 //
 // Configuration (flags override environment variables):
@@ -51,7 +52,7 @@ func run() error {
 	project := flag.String("project", os.Getenv("OPENVIBELY_PROJECT"), "project to select: name, ID or unique prefix")
 	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear)")
 	flag.BoolVar(force, "f", false, "shorthand for -force")
-	json := flag.Bool("json", false, "emit machine-readable JSON output for list and show commands")
+	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, and project creation commands")
 	flag.Usage = usage
 	flag.Parse()
 

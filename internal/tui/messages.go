@@ -25,6 +25,13 @@ type projectsLoadedMsg struct {
 	err        error
 }
 
+// projectCreatedMsg carries the backend-created project so the TUI can select
+// it without maintaining a separate local project store.
+type projectCreatedMsg struct {
+	project client.Project
+	err     error
+}
+
 // chatSentMsg reports the accepted async chat message.
 type chatSentMsg struct {
 	accepted *client.ChatAccepted

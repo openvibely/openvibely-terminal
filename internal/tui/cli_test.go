@@ -539,6 +539,93 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 
 // --- JSON output mode tests ---
 
+func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if r.FormValue("repo_source") != "local" {
+			t.Errorf("repo_source = %q", r.FormValue("repo_source"))
+		}
+		if r.FormValue("name") == "My Project" && r.FormValue("repo_path") != `C:\Users\me\repo` {
+			t.Errorf("unexpected platform path: %q", r.FormValue("repo_path"))
+		}
+		id := "created-project"
+		if r.FormValue("name") == "JSON Project" {
+			id = "json-project"
+		}
+		w.Header().Set("HX-Redirect", "/tasks?project_id="+id)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "My", "Project", "|", `C:\Users\me\repo`}, false, false); err != nil {
+		t.Fatalf("projects create failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "My Project") || !strings.Contains(out.String(), "active project selected") {
+		t.Fatalf("plain creation output missing selection guidance:\n%s", out.String())
+	}
+	if rec.saw("GET", "/api/projects") {
+		t.Fatalf("creation should not require a project-list preflight:\n%s", rec.all())
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "JSON", "Project", "/tmp/json-project"}, false, true); err != nil {
+		t.Fatalf("projects create --json failed: %v", err)
+	}
+	var project client.Project
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &project); err != nil {
+		t.Fatalf("JSON output is invalid: %v\noutput: %s", err, out.String())
+	}
+	if project.ID != "json-project" || project.Name != "JSON Project" || project.Path != "/tmp/json-project" {
+		t.Fatalf("unexpected JSON project: %+v", project)
+	}
+}
+
+func TestCLICreateProjectValidationAndBackendFailure(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r.Method, r.URL.Path)
+		if r.Method == http.MethodPost && r.URL.Path == "/projects" {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"backend rejected project"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create"}, false, false); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("missing-name validation error = %v", err)
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create", "demo"}, false, false); err == nil || !strings.Contains(err.Error(), "usage") {
+		t.Fatalf("missing-path validation error = %v", err)
+	}
+	if rec.saw("POST", "/projects") {
+		t.Fatal("validation should not call the backend")
+	}
+
+	if err := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create", "demo", "/tmp/demo"}, false, false); err == nil || !strings.Contains(err.Error(), "backend rejected project") {
+		t.Fatalf("backend failure error = %v", err)
+	}
+}
+
 func TestCLIJSONTasksList(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>

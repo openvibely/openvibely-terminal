@@ -455,6 +455,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case projectCreatedMsg:
+		m.busy = false
+		if msg.err != nil {
+			m.append(entry{role: "error", text: msg.err.Error()})
+			return m, nil
+		}
+		if m.selectedID != msg.project.ID {
+			// A task thread belongs to the old project; leave it when creation
+			// switches the active project.
+			m.threadID, m.threadTitle = "", ""
+			m.input.Placeholder = defaultPlaceholder
+		}
+		m.selectedID = msg.project.ID
+		m.selectedName = msg.project.Name
+		m.projects = append(m.projects, msg.project)
+
+		if jsonMode {
+			body, err := marshalJSON(msg.project)
+			if err != nil {
+				m.append(entry{role: "error", text: err.Error()})
+				return m, nil
+			}
+			m.append(entry{role: "result", head: "Project", text: body})
+		} else {
+			m.append(entry{
+				role: "result",
+				head: "Project",
+				text: fmt.Sprintf("created project %q at %q — active project selected\nnext: send a message or run %sprojects to inspect it", msg.project.Name, msg.project.Path, cmdPrefix),
+			})
+		}
+		if m.sseCancel != nil {
+			return m, m.connectSSE()
+		}
+		return m, nil
+
 	case resultMsg:
 		m.busy = false
 		if msg.err != nil {

@@ -178,6 +178,73 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 	return out.Projects, nil
 }
 
+// CreateProject creates a local-path project through the backend's public
+// project form route. The HTMX redirect contains the backend-assigned project
+// ID, so project state remains owned by the backend rather than this client.
+func (c *Client) CreateProject(ctx context.Context, name, path string) (*Project, error) {
+	name = strings.TrimSpace(name)
+	path = strings.TrimSpace(path)
+	if name == "" {
+		return nil, fmt.Errorf("project name is required")
+	}
+	if path == "" {
+		return nil, fmt.Errorf("project path is required")
+	}
+
+	form := url.Values{}
+	form.Set("name", name)
+	form.Set("repo_source", "local")
+	form.Set("repo_path", path)
+
+	resp, err := c.doFormResponse(ctx, http.MethodPost, "/projects", form)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+
+	redirect := resp.Header.Get("HX-Redirect")
+	if redirect == "" {
+		if message := projectToastMessage(resp.Header.Get("HX-Trigger")); message != "" {
+			return nil, fmt.Errorf("create project: %s", message)
+		}
+		// The backend's HTMX response uses HX-Redirect. Accept Location too so
+		// the client remains compatible with the same form route without HTMX.
+		redirect = resp.Header.Get("Location")
+	}
+	projectID, err := projectIDFromRedirect(redirect)
+	if err != nil {
+		return nil, err
+	}
+	return &Project{ID: projectID, Name: name, Path: path}, nil
+}
+
+func projectIDFromRedirect(redirect string) (string, error) {
+	if strings.TrimSpace(redirect) == "" {
+		return "", fmt.Errorf("create project: backend response did not include a project ID")
+	}
+	u, err := url.Parse(redirect)
+	if err != nil {
+		return "", fmt.Errorf("create project: invalid backend redirect: %w", err)
+	}
+	projectID := strings.TrimSpace(u.Query().Get("project_id"))
+	if projectID == "" {
+		return "", fmt.Errorf("create project: backend response did not include a project ID")
+	}
+	return projectID, nil
+}
+
+func projectToastMessage(trigger string) string {
+	var payload struct {
+		Toast struct {
+			Message string `json:"message"`
+		} `json:"openvibelyToast"`
+	}
+	if json.Unmarshal([]byte(trigger), &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Toast.Message)
+}
+
 // GetGlobalCapacity fetches worker pool capacity; also used as a health check.
 func (c *Client) GetGlobalCapacity(ctx context.Context) (*GlobalCapacity, error) {
 	var out GlobalCapacity

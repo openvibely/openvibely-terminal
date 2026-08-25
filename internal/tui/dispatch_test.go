@@ -152,6 +152,94 @@ func runLine(t *testing.T, m Model, line string) Model {
 	return m
 }
 
+func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.record(r.Method, r.URL.Path)
+		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if got, want := r.FormValue("name"), "My Project"; got != want {
+			t.Errorf("name = %q, want %q", got, want)
+		}
+		if got, want := r.FormValue("repo_path"), `C:\Users\me\repo`; got != want {
+			t.Errorf("repo_path = %q, want %q", got, want)
+		}
+		w.Header().Set("HX-Redirect", "/tasks?project_id=created-project")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "old-project"
+	m.selectedName = "Old Project"
+	m.projects = []client.Project{{ID: "old-project", Name: "Old Project"}}
+
+	m = runLine(t, m, `/projects create My Project | C:\Users\me\repo`)
+	if !rec.saw("POST", "/projects") {
+		t.Fatalf("expected project creation request, calls:\n%s", rec.all())
+	}
+	if m.selectedID != "created-project" || m.selectedName != "My Project" {
+		t.Fatalf("created project was not selected: id=%q name=%q", m.selectedID, m.selectedName)
+	}
+	if !strings.Contains(transcript(m), "active project selected") || !strings.Contains(transcript(m), "My Project") {
+		t.Fatalf("creation output did not explain selection:\n%s", transcript(m))
+	}
+}
+
+func TestProjectsCreateUsageErrorsDoNotCallBackend(t *testing.T) {
+	for _, line := range []string{"/projects create", "/projects create demo"} {
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, line)
+			if rec.saw("POST", "/projects") {
+				t.Fatalf("usage error made a backend request:\n%s", rec.all())
+			}
+			if !strings.Contains(strings.ToLower(transcript(m)), "usage") {
+				t.Fatalf("expected usage error:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
+func TestProjectsCreateReportsBackendFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/projects" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"project creation rejected"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m = runLine(t, m, "/projects create demo /tmp/demo")
+	if !strings.Contains(transcript(m), "project creation rejected") {
+		t.Fatalf("backend error missing from transcript:\n%s", transcript(m))
+	}
+	if m.selectedID != "" {
+		t.Fatalf("failed creation selected project %q", m.selectedID)
+	}
+}
+
 // Mirrors real card markup: kebab menu first, title in the card's task link.
 const taskBoardHTML = `<div>
   <div class="card" data-task-id="t-1" data-task-status="pending" data-task-category="backlog" data-display-order="0">

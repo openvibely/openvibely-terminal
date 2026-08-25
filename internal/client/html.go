@@ -116,6 +116,10 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 		defer drainAndClose(resp.Body)
 		return nil, fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
 	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 && strings.HasPrefix(resp.Header.Get("Location"), "/login") {
+		defer drainAndClose(resp.Body)
+		return nil, fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		return resp, nil
 	}

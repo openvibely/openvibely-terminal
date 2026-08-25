@@ -55,6 +55,176 @@ func TestListProjects(t *testing.T) {
 	}
 }
 
+func TestCreateProject(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("HX-Request") != "true" {
+			t.Errorf("missing HX-Request header")
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if got, want := r.FormValue("name"), "Terminal Project"; got != want {
+			t.Errorf("name = %q, want %q", got, want)
+		}
+		if got, want := r.FormValue("repo_source"), "local"; got != want {
+			t.Errorf("repo_source = %q, want %q", got, want)
+		}
+		if got, want := r.FormValue("repo_path"), `/Users/dev/terminal project`; got != want {
+			t.Errorf("repo_path = %q, want %q", got, want)
+		}
+		w.Header().Set("HX-Redirect", "/tasks?project_id=created-1")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	project, err := c.CreateProject(context.Background(), "  Terminal Project  ", "  /Users/dev/terminal project  ")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if project.ID != "created-1" || project.Name != "Terminal Project" || project.Path != "/Users/dev/terminal project" {
+		t.Fatalf("unexpected project: %+v", project)
+	}
+}
+
+func TestCreateProjectValidatesNameAndPathBeforeHTTP(t *testing.T) {
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{name: "", path: "/tmp/repo", want: "project name is required"},
+		{name: "Project", path: "", want: "project path is required"},
+		{name: "   ", path: " /tmp/repo ", want: "project name is required"},
+		{name: "Project", path: "   ", want: "project path is required"},
+	} {
+		if _, err := c.CreateProject(context.Background(), tc.name, tc.path); err == nil || err.Error() != tc.want {
+			t.Errorf("CreateProject(%q, %q) error = %v, want %q", tc.name, tc.path, err, tc.want)
+		}
+	}
+	if requests != 0 {
+		t.Errorf("validation made %d HTTP requests", requests)
+	}
+}
+
+func TestCreateProjectBackendError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/projects" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"project already exists"}`))
+	}))
+
+	_, err := c.CreateProject(context.Background(), "Project", "/tmp/repo")
+	if err == nil || !strings.Contains(err.Error(), "project already exists") {
+		t.Fatalf("CreateProject error = %v", err)
+	}
+}
+
+func TestCreateProjectHTMXBackendError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/projects" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"Local repository paths are disabled in this environment","status":"failed"}}`)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	_, err := c.CreateProject(context.Background(), "Project", "/tmp/repo")
+	if err == nil || !strings.Contains(err.Error(), "Local repository paths are disabled in this environment") {
+		t.Fatalf("CreateProject error = %v", err)
+	}
+}
+
+func TestCreateProjectReusesAuthenticatedSession(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if r.FormValue("username") != "admin" || r.FormValue("password") != "secret" {
+				t.Fatalf("unexpected login form: %v", r.Form)
+			}
+			http.SetCookie(w, &http.Cookie{Name: "ov_session", Value: "session-token"})
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+		case "/projects":
+			cookie, err := r.Cookie("ov_session")
+			if err != nil || cookie.Value != "session-token" {
+				t.Errorf("project request did not reuse login cookie: %v %v", cookie, err)
+				w.Header().Set("Location", "/login")
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+			w.Header().Set("HX-Redirect", "/tasks?project_id=authenticated-project")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+
+	if err := c.Login(context.Background(), "admin", "secret"); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	project, err := c.CreateProject(context.Background(), "Authenticated Project", "C:\\Users\\dev\\repo")
+	if err != nil {
+		t.Fatalf("CreateProject after Login: %v", err)
+	}
+	if project.ID != "authenticated-project" {
+		t.Errorf("project ID = %q", project.ID)
+	}
+}
+
+func TestCreateProjectRejectsUnauthorizedRedirect(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/projects" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Location", "/login?next=%2Fprojects")
+		w.WriteHeader(http.StatusFound)
+	}))
+
+	_, err := c.CreateProject(context.Background(), "Project", "/tmp/repo")
+	if err == nil || !strings.Contains(err.Error(), "unauthorized") {
+		t.Fatalf("CreateProject error = %v, want unauthorized", err)
+	}
+}
+
+func TestCreateProjectPreservesPlatformRepositoryPaths(t *testing.T) {
+	for _, path := range []string{
+		`/Users/dev/work tree`,
+		`C:\Users\dev\work tree`,
+		`\\server\share\work tree`,
+	} {
+		t.Run(path, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Fatalf("ParseForm: %v", err)
+				}
+				if got := r.FormValue("repo_path"); got != path {
+					t.Errorf("repo_path = %q, want %q", got, path)
+				}
+				w.Header().Set("HX-Redirect", "/tasks?project_id=path-project")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			project, err := c.CreateProject(context.Background(), "Path Project", path)
+			if err != nil {
+				t.Fatalf("CreateProject: %v", err)
+			}
+			if project.Path != path {
+				t.Errorf("project path = %q, want %q", project.Path, path)
+			}
+		})
+	}
+}
+
 func TestGetGlobalCapacity(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/capacity/global" {

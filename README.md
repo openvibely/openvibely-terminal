@@ -40,6 +40,7 @@ result and exits — no UI, no alt-screen.
 openvibely-tui tasks
 openvibely-tui -project demo tasks run "release notes"
 openvibely-tui -project demo chat "why is that task taking so long?"
+openvibely-tui projects create demo /Users/me/src/demo
 ```
 
 ## Install and run
@@ -124,7 +125,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/insights` | `suggestions` | `show`, `analyze` |
 | `/automations` | | — |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
-| `/projects` | | — |
+| `/projects` | | `list`, `create <name> <path>` |
 | `/project <name>` | | select the active project |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
 | `/build` | | trigger an autonomous build |
@@ -133,6 +134,19 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/help` | `?`, `commands` | `/help <command>` details one |
 | `/chat` | `back`, `leave` | return to project chat; `/chat <message>` also sends it |
 | `/quit` | `q`, `exit` | |
+
+Create a project from the terminal without opening the browser. The backend owns
+and persists the project; after a successful creation it becomes the active
+project immediately:
+
+```
+/projects create demo /Users/me/src/demo
+/projects create My Project | C:\Users\me\src\my-project
+```
+
+The pipe form separates the name from the repository path when either contains
+spaces. The same syntax works in one-shot mode (`openvibely-tui projects create
+...`); add `--json` for a machine-readable created-project record.
 
 ### Task threads
 
@@ -182,6 +196,8 @@ openvibely-tui -project demo tasks run refactor   # run it
 openvibely-tui -project demo alerts               # list alerts
 openvibely-tui -project demo analytics usage      # one analytics section
 openvibely-tui -project demo chat "ship the docs" # ask the agent, print the reply
+openvibely-tui projects create demo /Users/me/src/demo # create and select a project
+openvibely-tui --json projects create demo /Users/me/src/demo # JSON project record
 openvibely-tui help                               # list every command
 openvibely-tui help tasks                         # full syntax of one command
 openvibely-tui --help                             # commands + flags
@@ -202,6 +218,11 @@ The leading `/` is optional, so a line copied from the TUI works as-is
 you the argument order:
 
 ```
+$ openvibely-tui help projects
+  projects [list]                              list projects with running/queued counts
+  projects create <name> <path>                create and select a local-path project
+  projects create <name> | <path>              use | when the name or path contains spaces
+
 $ openvibely-tui help tasks
   tasks [filter]                             list the board, optionally filtered
   tasks open <task>                          enter the task's thread
@@ -240,7 +261,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Area | Endpoints |
 |---|---|
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
-| Projects | `GET /api/projects` |
+| Projects | `GET /api/projects`, `POST /projects` (HTMX form) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks`, `failed-task-patterns`, `skills` |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent` |

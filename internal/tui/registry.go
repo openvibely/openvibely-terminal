@@ -1789,11 +1789,40 @@ func projectCommand() command {
 }
 
 func projectsCommand() command {
+	actions := []string{"list", "create"}
 	return command{
-		name: "projects",
-		desc: "list projects with running/queued counts",
-		run: func(m Model, _ []string) (Model, tea.Cmd) {
+		name:    "projects",
+		actions: actions,
+		desc:    "list or create backend-owned projects",
+		usage: []string{
+			"projects [list]                              list projects with running/queued counts",
+			"projects create <name> <path>                create and select a local-path project",
+			"projects create <name> | <path>              use | when the name or path contains spaces",
+		},
+		examples: []string{
+			`projects create demo /Users/me/src/demo`,
+			`projects create My Project | C:\Users\me\src\my-project`,
+		},
+		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
+			action, rest := splitAction(actions, args)
+			if action == "create" {
+				name, path, ok := parseProjectCreateArgs(rest)
+				if !ok {
+					return m, errCmd(projectCreateUsage())
+				}
+				m.busy = true
+				c := m.client
+				return m, func() tea.Msg {
+					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+					defer cancel()
+					project, err := c.CreateProject(ctx, name, path)
+					if err != nil {
+						return projectCreatedMsg{err: err}
+					}
+					return projectCreatedMsg{project: *project}
+				}
+			}
 			if jsonMode {
 				c := m.client
 				return m, run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -1807,6 +1836,62 @@ func projectsCommand() command {
 			return m, m.loadProjects(true, "")
 		},
 	}
+}
+
+func projectCreateUsage() string {
+	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> | <path> when either contains spaces)", cmdPrefix)
+}
+
+func parseProjectCreateArgs(args []string) (string, string, bool) {
+	if len(args) == 0 {
+		return "", "", false
+	}
+	joined := strings.TrimSpace(strings.Join(args, " "))
+	if strings.Contains(joined, "|") {
+		name, path := splitPipe(joined)
+		if name == "" || path == "" {
+			return "", "", false
+		}
+		return name, path, true
+	}
+	if len(args) < 2 {
+		return "", "", false
+	}
+
+	// Find an absolute-looking path first so names such as "My Project" can
+	// still be entered without a pipe. This deliberately avoids filepath.IsAbs:
+	// the command must preserve Windows paths even when running on Unix.
+	for i := 1; i < len(args); i++ {
+		if looksLikeProjectPath(args[i]) {
+			name := strings.TrimSpace(strings.Join(args[:i], " "))
+			path := strings.TrimSpace(strings.Join(args[i:], " "))
+			if name == "" || path == "" {
+				return "", "", false
+			}
+			return name, path, true
+		}
+	}
+
+	name := strings.TrimSpace(args[0])
+	path := strings.TrimSpace(strings.Join(args[1:], " "))
+	if name == "" || path == "" {
+		return "", "", false
+	}
+	return name, path, true
+}
+
+func looksLikeProjectPath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, `\\`) ||
+		strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+		return true
+	}
+	return len(value) >= 3 &&
+		((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) &&
+		value[1] == ':' && (value[2] == '/' || value[2] == '\\')
 }
 
 func statusCommand() command {
