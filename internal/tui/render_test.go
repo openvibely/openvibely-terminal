@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -35,6 +36,121 @@ func TestTableAlignsStyledCells(t *testing.T) {
 			t.Errorf("row %d last column starts at %d, want %d (columns misaligned)\n%s",
 				i, s, starts[0], out)
 		}
+	}
+}
+
+func TestTablePreservesStyledAndWideCellOutput(t *testing.T) {
+	rows := [][]string{
+		{"ID", "STATE", "TITLE", "DETAIL"},
+		{"task-1", "\x1b[31m失败\x1b[0m", "宽内容：日本語", "first"},
+		{"task-2", statusMark("completed"), "café résumé", "second"},
+	}
+
+	got := table(rows)
+	want := tableWithoutWidthCache(rows)
+	if got != want {
+		t.Fatalf("cached table output changed\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestTableHandlesEmptyAndRaggedRows(t *testing.T) {
+	if got := table(nil); got != "" {
+		t.Errorf("table(nil) = %q, want empty output", got)
+	}
+	if got := table([][]string{}); got != "" {
+		t.Errorf("table(empty) = %q, want empty output", got)
+	}
+
+	rows := [][]string{
+		{"HEADER", "VALUE", "TAIL"},
+		{"one"},
+		{},
+		{"two", "columns"},
+	}
+	got := table(rows)
+	want := tableWithoutWidthCache(rows)
+	if got != want {
+		t.Fatalf("cached ragged table output changed\n got: %q\nwant: %q", got, want)
+	}
+	if !strings.Contains(stripANSI(got), "HEADER") {
+		t.Fatalf("first-row header content missing: %q", got)
+	}
+}
+
+// tableWithoutWidthCache mirrors the pre-optimization implementation for exact
+// output regression tests and before/after benchmarks. It intentionally measures
+// every non-final cell again while rendering its padding.
+func tableWithoutWidthCache(rows [][]string) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	cols := 0
+	for _, r := range rows {
+		if len(r) > cols {
+			cols = len(r)
+		}
+	}
+	widths := make([]int, cols)
+	for _, r := range rows {
+		for i, cell := range r {
+			if w := lipgloss.Width(cell); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	var b strings.Builder
+	for ri, r := range rows {
+		var line strings.Builder
+		for i, cell := range r {
+			if i == len(r)-1 {
+				line.WriteString(cell)
+				break
+			}
+			line.WriteString(cell)
+			line.WriteString(strings.Repeat(" ", widths[i]-lipgloss.Width(cell)+2))
+		}
+		text := strings.TrimRight(line.String(), " ")
+		if ri == 0 {
+			b.WriteString(headerStyle.Render(text) + "\n")
+		} else {
+			b.WriteString(text + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func benchmarkTableRows(rowCount int) [][]string {
+	rows := make([][]string, rowCount+1)
+	rows[0] = []string{"ID", "STATE", "TITLE", "DETAIL"}
+	for i := 1; i <= rowCount; i++ {
+		id := "task-" + strconv.Itoa(i)
+		state := statusMark("running")
+		if i%3 == 0 {
+			state = statusMark("completed")
+		}
+		rows[i] = []string{id, state, "任务 " + id, "wide detail " + id}
+	}
+	return rows
+}
+
+var tableBenchmarkSink string
+
+func BenchmarkTable10KRows4Columns(b *testing.B) {
+	rows := benchmarkTableRows(10_000)
+	for _, benchmark := range []struct {
+		name  string
+		table func([][]string) string
+	}{
+		{name: "cached_widths", table: table},
+		{name: "uncached_widths", table: tableWithoutWidthCache},
+	} {
+		b.Run(benchmark.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				tableBenchmarkSink = benchmark.table(rows)
+			}
+		})
 	}
 }
 

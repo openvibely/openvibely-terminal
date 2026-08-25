@@ -217,20 +217,30 @@ func table(rows [][]string) string {
 		return ""
 	}
 	cols := 0
+	nonFinalCells := 0
 	for _, r := range rows {
 		if len(r) > cols {
 			cols = len(r)
 		}
+		if len(r) > 1 {
+			nonFinalCells += len(r) - 1
+		}
 	}
 	widths := make([]int, cols)
+	cachedWidths := make([]int, 0, nonFinalCells)
 	for _, r := range rows {
 		for i, cell := range r {
-			if w := lipgloss.Width(cell); w > widths[i] {
+			w := lipgloss.Width(cell)
+			if i < len(r)-1 {
+				cachedWidths = append(cachedWidths, w)
+			}
+			if w > widths[i] {
 				widths[i] = w
 			}
 		}
 	}
 	var b strings.Builder
+	cachedWidth := 0
 	for ri, r := range rows {
 		var line strings.Builder
 		for i, cell := range r {
@@ -238,8 +248,10 @@ func table(rows [][]string) string {
 				line.WriteString(cell)
 				break
 			}
+			cellWidth := cachedWidths[cachedWidth]
+			cachedWidth++
 			line.WriteString(cell)
-			line.WriteString(strings.Repeat(" ", widths[i]-lipgloss.Width(cell)+2))
+			line.WriteString(strings.Repeat(" ", widths[i]-cellWidth+2))
 		}
 		text := strings.TrimRight(line.String(), " ")
 		if ri == 0 {
