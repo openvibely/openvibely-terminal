@@ -727,6 +727,48 @@ func TestAlertsBulkActions(t *testing.T) {
 	}
 }
 
+func TestAlertsCommandsRequireProject(t *testing.T) {
+	cases := []struct {
+		name              string
+		line              string
+		checkConfirmation bool
+		checkSelector     bool
+	}{
+		{name: "list", line: "/alerts"},
+		{name: "read_all", line: "/alerts read-all"},
+		{name: "clear", line: "/alerts clear", checkConfirmation: true},
+		{name: "approve", line: "/alerts approve a-1"},
+		{name: "reject", line: "/alerts reject a-1"},
+		{name: "dismiss", line: "/alerts dismiss a-1"},
+		{name: "read", line: "/alerts read a-1"},
+		{name: "delete", line: "/alerts delete a-1", checkConfirmation: true},
+		{name: "delete_without_ref", line: "/alerts delete", checkConfirmation: true, checkSelector: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, tc.line)
+
+			if !strings.Contains(transcript(m), "no project selected") {
+				t.Errorf("expected no-project error for %s:\n%s", tc.line, transcript(m))
+			}
+			if calls := rec.all(); calls != "" {
+				t.Errorf("%s must not make a backend request without a project:\n%s", tc.line, calls)
+			}
+			if tc.checkConfirmation && m.pendingConfirmation != nil {
+				t.Errorf("%s must not set pendingConfirmation without a project", tc.line)
+			}
+			if tc.checkSelector && m.selectorActive {
+				t.Errorf("%s must not open a selector without a project", tc.line)
+			}
+		})
+	}
+}
+
 // After a successful mutation, a failed list refresh must not surface as an
 // error — the mutation already succeeded, so the status line alone is shown.
 func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
