@@ -426,6 +426,21 @@ func TestTasksLifecycleNoExecutionsDoesNotFetchEvents(t *testing.T) {
 	}
 }
 
+func TestTasksLifecycleNoEventsRendersEmptyState(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                                  taskBoardHTML,
+		"/api/tasks/t-1/lifecycle-executions":     `[{"id":"exec-1","skill_key":"router","status":"completed"}]`,
+		"/api/lifecycle-executions/exec-1/events": "[]",
+	})
+	m = runLine(t, m, "/tasks lifecycle Refactor exec-1")
+	if !rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Fatalf("expected lifecycle event fetch, calls:\n%s", rec.all())
+	}
+	if !strings.Contains(transcript(m), "no events for this execution") {
+		t.Fatalf("expected empty event state:\n%s", transcript(m))
+	}
+}
+
 func TestTasksLifecycleMultipleExecutionsOpenSelector(t *testing.T) {
 	const executions = `[
 		{"id":"exec-1","skill_key":"router","status":"completed","started_at":"2026-01-20T10:00:00Z"},
