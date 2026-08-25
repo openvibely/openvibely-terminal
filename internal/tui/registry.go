@@ -773,10 +773,35 @@ func scheduleCommand() command {
 									if e.ScheduleID == "" {
 										continue
 									}
-									items = append(items, selectorItem{
+									e := e
+									item := selectorItem{
 										ref:   e.ScheduleID,
 										label: firstNonEmpty(e.Text, shortID(e.ScheduleID)),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+											var err error
+											if action == "delete" {
+												err = c.DeleteSchedule(ctx, e.ScheduleID)
+											} else {
+												_, err = c.ToggleSchedule(ctx, e.ScheduleID)
+											}
+											if err != nil {
+												return "", err
+											}
+											entries, summary, _ := c.GetSchedule(ctx, pid)
+											return action + "d schedule\n\n" + renderSchedule(entries, summary), nil
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete schedule %q? Type 'yes' to confirm or Esc to cancel.", e.ScheduleID),
+												fmt.Sprintf("use --force to confirm deletion of schedule %q", e.ScheduleID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -913,11 +938,37 @@ func alertsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(alerts))
 								for _, a := range alerts {
-									items = append(items, selectorItem{
+									a := a
+									item := selectorItem{
 										ref:    a.ID,
 										label:  firstNonEmpty(a.Title, a.Message, a.Text, shortID(a.ID)),
 										detail: strings.Join(a.Badges, " "),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
+											var err error
+											if action == "delete" {
+												err = c.DeleteAlert(ctx, a.ID, pid)
+											} else {
+												err = c.AlertAction(ctx, a.ID, action, pid)
+											}
+											if err != nil {
+												return "", err
+											}
+											return refreshAndRender(action+": "+a.Title,
+												func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
+												renderAlerts)
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
+												fmt.Sprintf("use --force to confirm deletion of alert %q", a.ID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -1213,11 +1264,27 @@ func agentsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(agents))
 								for _, a := range agents {
-									items = append(items, selectorItem{
+									a := a
+									item := selectorItem{
 										ref:    a.ID,
 										label:  firstNonEmpty(a.Name, a.Key, shortID(a.ID)),
 										detail: truncate(a.Description, 40),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
+											if err := c.DeleteAgent(ctx, a.ID); err != nil {
+												return "", err
+											}
+											return refreshAndRender("deleted "+a.Name,
+												func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
+												renderAgents)
+										})
+										return confirmOr(m,
+											fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
+											fmt.Sprintf("use --force to confirm deletion of agent %q", a.ID),
+											cmd)
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -1310,11 +1377,37 @@ func modelsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(list))
 								for _, mo := range list {
-									items = append(items, selectorItem{
+									mo := mo
+									item := selectorItem{
 										ref:    mo.ID,
 										label:  firstNonEmpty(mo.Name, mo.Model, shortID(mo.ID)),
 										detail: strings.TrimSpace(mo.Provider + " " + mo.Model),
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
+											var err error
+											if action == "default" {
+												err = c.SetDefaultModel(ctx, mo.ID)
+											} else {
+												err = c.DeleteModel(ctx, mo.ID)
+											}
+											if err != nil {
+												return "", err
+											}
+											return refreshAndRender(action+": "+mo.Name,
+												func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
+												renderModels)
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete model %q? Type 'yes' to confirm or Esc to cancel.", mo.ID),
+												fmt.Sprintf("use --force to confirm deletion of model %q", mo.ID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -1695,11 +1788,29 @@ func automationsCommand() command {
 								}
 								items := make([]selectorItem, 0, len(automations))
 								for _, a := range automations {
-									items = append(items, selectorItem{
+									a := a
+									item := selectorItem{
 										ref:    a.ID,
 										label:  firstNonEmpty(a.Name, shortID(a.ID)),
 										detail: a.State,
-									})
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+											status := action + ": " + firstNonEmpty(a.Name, a.ID)
+											return actAndReloadText(status,
+												func() error { return c.AutomationAction(ctx, a.ID, action, pid) },
+												func() (string, error) { return c.GetAutomations(ctx, pid) })
+										})
+										if action == "delete" {
+											return confirmOr(m,
+												fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
+												fmt.Sprintf("use --force to confirm deletion of automation %q", a.ID),
+												cmd)
+										}
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))

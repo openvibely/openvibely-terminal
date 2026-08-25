@@ -4,8 +4,9 @@ package tui
 // invoked without one, the command fetches the candidate list and emits a
 // selectorActiveMsg. The model then renders an interactive picker inline in
 // the conversation view: ↑/↓ move, Enter confirms, Esc cancels, and typing
-// filters the list incrementally. Choosing an item re-dispatches the pending
-// command as if the user had typed "/<command> <ref>" directly.
+// filters the list incrementally. Choosing an item invokes its direct action
+// when one is available; otherwise it re-dispatches the pending command as if
+// the user had typed "/<command> <ref>" directly.
 
 import (
 	"context"
@@ -14,6 +15,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 )
+
+// selectorItemDispatch runs an action against the resource already loaded for
+// a selector item. Items without one retain the text re-dispatch path.
+type selectorItemDispatch func(Model) (Model, tea.Cmd)
 
 // selectorFor builds the tea.Cmd a command handler returns when its ref
 // argument is missing: it fetches the candidate list and hands it to the
@@ -213,7 +218,8 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // selectorDispatch runs the pending command against the chosen item. For
 // prefill commands (those that need more piped arguments, like "tasks edit")
-// the input is primed with "/<command> <ref> | " instead of executing.
+// the input is primed with "/<command> <ref> | " instead of executing. For
+// direct-action items, the already-resolved resource is passed to its callback.
 func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix string, it selectorItem) (tea.Model, tea.Cmd) {
 	line := "/" + command + " " + it.ref
 	if prefill {
@@ -227,6 +233,9 @@ func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix stri
 		return m, nil
 	}
 	m.append(entry{role: "you", text: line})
+	if it.dispatch != nil {
+		return it.dispatch(m)
+	}
 	return m.runCommand(line)
 }
 
