@@ -1206,6 +1206,10 @@ func skillsCommand() command {
 			`skills load retry-logic`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
@@ -1282,7 +1286,7 @@ func skillsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.UpdateSkill(ctx, pid, s.Handle, s.Name, s.Description, s.Enabled, body); err != nil {
+					if err := c.UpdateSkill(ctx, pid, s.Handle, s.Scope, s.Name, s.Description, s.Enabled, body); err != nil {
 						return "", err
 					}
 					return "updated skill " + s.Handle, nil
@@ -1304,13 +1308,13 @@ func skillsCommand() command {
 					}
 					switch action {
 					case "delete":
-						err = c.DeleteSkill(ctx, pid, s.Handle)
+						err = c.DeleteSkill(ctx, pid, s.Handle, s.Scope)
 					case "enable":
-						err = c.SetSkillEnabled(ctx, pid, s.Handle, true)
+						err = c.SetSkillEnabled(ctx, pid, s.Handle, s.Scope, true)
 					case "disable":
-						err = c.SetSkillEnabled(ctx, pid, s.Handle, false)
+						err = c.SetSkillEnabled(ctx, pid, s.Handle, s.Scope, false)
 					case "always", "load":
-						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, !s.AlwaysUse)
+						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, s.Scope, !s.AlwaysUse)
 					}
 					if err != nil {
 						return "", err

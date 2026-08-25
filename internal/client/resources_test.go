@@ -320,7 +320,7 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "DELETE", path: "/alerts/a1"},
 		{name: "alerts read all", fn: func() error { return c.MarkAllAlertsRead(ctx, "p1") },
 			method: "POST", path: "/alerts/read-all"},
-		{name: "skill delete", fn: func() error { return c.DeleteSkill(ctx, "p1", "deploy") },
+		{name: "skill delete", fn: func() error { return c.DeleteSkill(ctx, "p1", "deploy", "project") },
 			method: "DELETE", path: "/skills/deploy"},
 		{name: "model default", fn: func() error { return c.SetDefaultModel(ctx, "m1") },
 			method: "POST", path: "/models/m1/set-default"},
@@ -439,7 +439,7 @@ func TestSkillMutationsSendBackendJSONContract(t *testing.T) {
 		{
 			name: "edit",
 			fn: func() error {
-				return c.UpdateSkill(ctx, "p1", "retry-logic", "Retry Logic", "wrap retries", false, "new body")
+				return c.UpdateSkill(ctx, "p1", "retry-logic", "project", "Retry Logic", "wrap retries", false, "new body")
 			},
 			method:   http.MethodPut,
 			path:     "/skills/retry-logic",
@@ -447,28 +447,28 @@ func TestSkillMutationsSendBackendJSONContract(t *testing.T) {
 		},
 		{
 			name:     "enable",
-			fn:       func() error { return c.SetSkillEnabled(ctx, "p1", "retry-logic", true) },
+			fn:       func() error { return c.SetSkillEnabled(ctx, "p1", "retry-logic", "project", true) },
 			method:   http.MethodPost,
 			path:     "/skills/retry-logic/enabled",
 			wantBody: map[string]any{"enabled": true, "scope": "project"},
 		},
 		{
 			name:     "disable",
-			fn:       func() error { return c.SetSkillEnabled(ctx, "p1", "retry-logic", false) },
+			fn:       func() error { return c.SetSkillEnabled(ctx, "p1", "retry-logic", "project", false) },
 			method:   http.MethodPost,
 			path:     "/skills/retry-logic/enabled",
 			wantBody: map[string]any{"enabled": false, "scope": "project"},
 		},
 		{
 			name:     "always use",
-			fn:       func() error { return c.SetSkillAlwaysUse(ctx, "p1", "retry-logic", true) },
+			fn:       func() error { return c.SetSkillAlwaysUse(ctx, "p1", "retry-logic", "project", true) },
 			method:   http.MethodPost,
 			path:     "/skills/retry-logic/always_use",
 			wantBody: map[string]any{"always_use": true, "scope": "project"},
 		},
 		{
 			name:     "remove always use",
-			fn:       func() error { return c.SetSkillAlwaysUse(ctx, "p1", "retry-logic", false) },
+			fn:       func() error { return c.SetSkillAlwaysUse(ctx, "p1", "retry-logic", "project", false) },
 			method:   http.MethodPost,
 			path:     "/skills/retry-logic/always_use",
 			wantBody: map[string]any{"always_use": false, "scope": "project"},
@@ -499,6 +499,109 @@ func TestSkillMutationsSendBackendJSONContract(t *testing.T) {
 	}
 }
 
+func TestGlobalSkillMutationsSendGlobalScope(t *testing.T) {
+	type capturedRequest struct {
+		method      string
+		path        string
+		projectID   string
+		scope       string
+		contentType string
+		body        map[string]any
+	}
+	var got capturedRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = capturedRequest{
+			method:      r.Method,
+			path:        r.URL.Path,
+			projectID:   r.URL.Query().Get("project_id"),
+			scope:       r.URL.Query().Get("scope"),
+			contentType: r.Header.Get("Content-Type"),
+		}
+		if r.Method != http.MethodDelete {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read request body: %v", err)
+			}
+			if err := json.Unmarshal(raw, &got.body); err != nil {
+				t.Errorf("decode JSON request body %q: %v", raw, err)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		fn   func() error
+		path string
+		body map[string]any
+	}{
+		{
+			name: "edit",
+			fn: func() error {
+				return c.UpdateSkill(ctx, "p1", "global-skill", "global", "Global Skill", "global description", false, "new body")
+			},
+			path: "/skills/global-skill",
+			body: map[string]any{
+				"handle": "global-skill", "name": "Global Skill", "description": "global description",
+				"scope": "global", "body": "new body", "enabled": false,
+			},
+		},
+		{
+			name: "disable",
+			fn:   func() error { return c.SetSkillEnabled(ctx, "p1", "global-skill", "global", false) },
+			path: "/skills/global-skill/enabled",
+			body: map[string]any{"enabled": false, "scope": "global"},
+		},
+		{
+			name: "always use",
+			fn:   func() error { return c.SetSkillAlwaysUse(ctx, "p1", "global-skill", "global", true) },
+			path: "/skills/global-skill/always_use",
+			body: map[string]any{"always_use": true, "scope": "global"},
+		},
+		{
+			name: "delete",
+			fn:   func() error { return c.DeleteSkill(ctx, "p1", "global-skill", "global") },
+			path: "/skills/global-skill",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got = capturedRequest{}
+			if err := tc.fn(); err != nil {
+				t.Fatal(err)
+			}
+			if got.projectID != "p1" {
+				t.Fatalf("project_id = %q, want p1", got.projectID)
+			}
+			if got.path != tc.path {
+				t.Fatalf("path = %q, want %q", got.path, tc.path)
+			}
+			if tc.body == nil {
+				if got.method != http.MethodDelete {
+					t.Fatalf("method = %q, want DELETE", got.method)
+				}
+				if got.scope != "global" {
+					t.Fatalf("scope query = %q, want global", got.scope)
+				}
+				return
+			}
+			if got.contentType != "application/json" {
+				t.Fatalf("Content-Type = %q, want application/json", got.contentType)
+			}
+			if !reflect.DeepEqual(got.body, tc.body) {
+				t.Errorf("JSON body = %#v, want %#v", got.body, tc.body)
+			}
+		})
+	}
+}
 func TestCreateScheduleSendsRepeat(t *testing.T) {
 	var form url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

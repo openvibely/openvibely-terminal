@@ -1677,6 +1677,194 @@ func TestSkillsEditPreservesDisabledState(t *testing.T) {
 	}
 }
 
+// TestGlobalSkillMutationsUseResolvedScope verifies that TUI mutations target a
+// global skill's root instead of silently sending the project scope.
+func TestGlobalSkillMutationsUseResolvedScope(t *testing.T) {
+	const skillsHTML = `<div data-skill-handle="global-skill" data-skill-name="Global Skill"
+		data-skill-description="global description" data-skill-enabled="true" data-skill-always-use="false" data-skill-scope="global"></div>`
+
+	tests := []struct {
+		name     string
+		line     string
+		method   string
+		path     string
+		wantBody map[string]any
+		confirm  bool
+	}{
+		{
+			name:   "edit",
+			line:   "/skills edit global-skill | new body",
+			method: http.MethodPut,
+			path:   "/skills/global-skill",
+			wantBody: map[string]any{
+				"handle": "global-skill", "name": "Global Skill", "description": "global description",
+				"scope": "global", "body": "new body", "enabled": true,
+			},
+		},
+		{
+			name:     "enable",
+			line:     "/skills enable global-skill",
+			method:   http.MethodPost,
+			path:     "/skills/global-skill/enabled",
+			wantBody: map[string]any{"enabled": true, "scope": "global"},
+		},
+		{
+			name:     "disable",
+			line:     "/skills disable global-skill",
+			method:   http.MethodPost,
+			path:     "/skills/global-skill/enabled",
+			wantBody: map[string]any{"enabled": false, "scope": "global"},
+		},
+		{
+			name:     "always",
+			line:     "/skills always global-skill",
+			method:   http.MethodPost,
+			path:     "/skills/global-skill/always_use",
+			wantBody: map[string]any{"always_use": true, "scope": "global"},
+		},
+		{
+			name:     "load alias",
+			line:     "/skills load global-skill",
+			method:   http.MethodPost,
+			path:     "/skills/global-skill/always_use",
+			wantBody: map[string]any{"always_use": true, "scope": "global"},
+		},
+		{
+			name:    "delete",
+			line:    "/skills delete global-skill",
+			method:  http.MethodDelete,
+			path:    "/skills/global-skill",
+			confirm: true,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var gotMethod, gotPath, gotProject, gotScope, gotContentType string
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				isSkillsRead := r.Method == http.MethodGet && r.URL.Path == "/skills"
+				if !isSkillsRead {
+					gotMethod = r.Method
+					gotPath = r.URL.Path
+					gotProject = r.URL.Query().Get("project_id")
+					gotScope = r.URL.Query().Get("scope")
+					gotContentType = r.Header.Get("Content-Type")
+				}
+				switch {
+				case isSkillsRead:
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(skillsHTML))
+				case r.Method == http.MethodDelete && r.URL.Path == "/skills/global-skill":
+					if gotScope != "global" {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = w.Write([]byte(`{"error":"global scope required"}`))
+						return
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(skillsHTML))
+				default:
+					if gotContentType != "application/json" {
+						w.WriteHeader(http.StatusUnsupportedMediaType)
+						_, _ = w.Write([]byte(`{"error":"skill mutations require JSON"}`))
+						return
+					}
+					raw, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read mutation body: %v", err)
+					}
+					if err := json.Unmarshal(raw, &gotBody); err != nil {
+						t.Errorf("decode mutation JSON %q: %v", raw, err)
+					}
+					if gotBody["scope"] != "global" {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = w.Write([]byte(`{"error":"global JSON scope required"}`))
+						return
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(skillsHTML))
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+			m = runLine(t, m, tc.line)
+			if tc.confirm {
+				m = runLine(t, m, "yes")
+			}
+
+			if out := transcript(m); strings.Contains(out, "error:") {
+				t.Fatalf("global skill mutation was rejected:\n%s", out)
+			}
+			if gotMethod != tc.method || gotPath != tc.path || gotProject != "p1" {
+				t.Fatalf("request = %s %s?project_id=%s&scope=%s, want %s %s?project_id=p1", gotMethod, gotPath, gotProject, gotScope, tc.method, tc.path)
+			}
+			if tc.wantBody == nil {
+				if gotScope != "global" {
+					t.Fatalf("scope query = %q, want global", gotScope)
+				}
+			} else if gotScope != "" {
+				t.Errorf("JSON mutation unexpectedly sent scope query %q", gotScope)
+			}
+			if tc.wantBody != nil {
+				if gotContentType != "application/json" {
+					t.Errorf("Content-Type = %q, want application/json", gotContentType)
+				}
+				if !reflect.DeepEqual(gotBody, tc.wantBody) {
+					t.Errorf("JSON body = %#v, want %#v", gotBody, tc.wantBody)
+				}
+			}
+		})
+	}
+}
+
+// TestSkillsCommandsRequireSelectedProject verifies that skill commands fail
+// locally before parsing, selectors, confirmations, or backend fallback scope.
+func TestSkillsCommandsRequireSelectedProject(t *testing.T) {
+	cases := []string{
+		"/skills",
+		"/skills add new-skill | description | body",
+		"/skills show deploy",
+		"/skills edit deploy | new body",
+		"/skills delete deploy",
+		"/skills enable deploy",
+		"/skills disable deploy",
+		"/skills always deploy",
+		"/skills load deploy",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := transcript(m)
+			if !strings.Contains(out, "no project selected") {
+				t.Fatalf("expected no-project error for %s:\n%s", line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s must not make backend requests:\n%s", line, calls)
+			}
+			if m.selectorActive {
+				t.Errorf("%s must not open the selector", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Errorf("%s must not set pending confirmation", line)
+			}
+		})
+	}
+}
 func TestAgentsGenerateDelete(t *testing.T) {
 	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
 		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`

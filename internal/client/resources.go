@@ -155,7 +155,7 @@ func (c *Client) CreateSkill(ctx context.Context, projectID, name, description, 
 }
 
 // UpdateSkill replaces a skill's body while preserving its display metadata and enabled state.
-func (c *Client) UpdateSkill(ctx context.Context, projectID, handle, name, description string, enabled bool, body string) error {
+func (c *Client) UpdateSkill(ctx context.Context, projectID, handle, scope, name, description string, enabled bool, body string) error {
 	payload := struct {
 		Handle      string `json:"handle"`
 		Name        string `json:"name"`
@@ -167,7 +167,7 @@ func (c *Client) UpdateSkill(ctx context.Context, projectID, handle, name, descr
 		Handle:      handle,
 		Name:        name,
 		Description: description,
-		Scope:       "project",
+		Scope:       scope,
 		Body:        body,
 		Enabled:     enabled,
 	}
@@ -175,31 +175,32 @@ func (c *Client) UpdateSkill(ctx context.Context, projectID, handle, name, descr
 }
 
 // DeleteSkill removes a skill.
-func (c *Client) DeleteSkill(ctx context.Context, projectID, handle string) error {
-	return c.doForm(ctx, http.MethodDelete, "/skills/"+url.PathEscape(handle)+query("project_id", projectID), nil)
+func (c *Client) DeleteSkill(ctx context.Context, projectID, handle, scope string) error {
+	return c.doForm(ctx, http.MethodDelete,
+		"/skills/"+url.PathEscape(handle)+query("project_id", projectID, "scope", scope), nil)
 }
 
 // SetSkillEnabled enables or disables a skill.
-func (c *Client) SetSkillEnabled(ctx context.Context, projectID, handle string, enabled bool) error {
+func (c *Client) SetSkillEnabled(ctx context.Context, projectID, handle, scope string, enabled bool) error {
 	payload := struct {
 		Enabled bool   `json:"enabled"`
 		Scope   string `json:"scope"`
 	}{
 		Enabled: enabled,
-		Scope:   "project",
+		Scope:   scope,
 	}
 	return c.doJSON(ctx, http.MethodPost,
 		"/skills/"+url.PathEscape(handle)+"/enabled"+query("project_id", projectID), payload)
 }
 
 // SetSkillAlwaysUse toggles a skill's always-use flag.
-func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle string, always bool) error {
+func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle, scope string, always bool) error {
 	payload := struct {
 		AlwaysUse bool   `json:"always_use"`
 		Scope     string `json:"scope"`
 	}{
 		AlwaysUse: always,
-		Scope:     "project",
+		Scope:     scope,
 	}
 	return c.doJSON(ctx, http.MethodPost,
 		"/skills/"+url.PathEscape(handle)+"/always_use"+query("project_id", projectID), payload)
