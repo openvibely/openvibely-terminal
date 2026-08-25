@@ -141,6 +141,47 @@ func TestGetHTMLUnauthorized(t *testing.T) {
 	}
 }
 
+func TestDoJSONAuthenticationAndRedirectStatuses(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		location    string
+		wantErr     bool
+		wantAuthErr bool
+	}{
+		{name: "login redirect", status: http.StatusFound, location: "/login?next=%2Fskills", wantErr: true, wantAuthErr: true},
+		{name: "unauthorized", status: http.StatusUnauthorized, wantErr: true, wantAuthErr: true},
+		{name: "other redirect", status: http.StatusTemporaryRedirect, location: "/skills", wantErr: false},
+		{name: "no content", status: http.StatusNoContent, wantErr: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/skills" {
+					t.Errorf("request = %s %s, want POST /skills", r.Method, r.URL.Path)
+				}
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(tc.status)
+			}))
+
+			err := c.CreateSkill(context.Background(), "p1", "demo", "", "body")
+			if tc.wantErr && err == nil {
+				t.Fatalf("status %d: expected error", tc.status)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("status %d: unexpected error: %v", tc.status, err)
+			}
+			if tc.wantAuthErr && (err == nil || !strings.Contains(err.Error(), "unauthorized")) {
+				t.Fatalf("status %d: error = %v, want unauthorized", tc.status, err)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Benchmarks
 //

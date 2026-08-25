@@ -154,6 +154,10 @@ func (c *Client) doJSON(ctx context.Context, method, path string, payload any) e
 		defer drainAndClose(resp.Body)
 		return fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
 	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 && strings.HasPrefix(resp.Header.Get("Location"), "/login") {
+		defer drainAndClose(resp.Body)
+		return fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		drainAndClose(resp.Body)
 		return nil
