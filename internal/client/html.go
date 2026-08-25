@@ -157,33 +157,6 @@ func scrapeCardNodes(root *html.Node, marker string) []scrapedCard {
 	return out
 }
 
-// dedupeCards keeps the first card for each marker value, preferring the one
-// with the most data-* attributes (nested buttons repeat the id attribute).
-func dedupeCards(cards []Card, marker string) []Card {
-	best := map[string]int{}
-	var order []string
-	for i, c := range cards {
-		id := c.Attrs[marker]
-		if id == "" {
-			continue
-		}
-		prev, seen := best[id]
-		if !seen {
-			best[id] = i
-			order = append(order, id)
-			continue
-		}
-		if len(c.Attrs) > len(cards[prev].Attrs) {
-			best[id] = i
-		}
-	}
-	out := make([]Card, 0, len(order))
-	for _, id := range order {
-		out = append(out, cards[best[id]])
-	}
-	return out
-}
-
 func dedupeScrapedCards(cards []scrapedCard, marker string) []scrapedCard {
 	best := map[string]int{}
 	var order []string
