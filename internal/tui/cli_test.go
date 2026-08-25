@@ -647,6 +647,35 @@ func TestCLIJSONAlertsList(t *testing.T) {
 	}
 }
 
+func TestCLIJSONAutomationsList(t *testing.T) {
+	const automationsHTML = `<div>
+		<div class="card" data-automation-url="/automations/au-1?project_id=p1">
+			<span class="badge badge-outline">active</span>
+			<button data-automation-card-delete="au-1" data-automation-name="Native SDLC"></button>
+		</div>
+		<div class="card" data-automation-url="/automations/au-2?project_id=p1">
+			<span class="badge badge-outline">paused</span>
+			<button data-automation-card-delete="au-2" data-automation-name="GitHub SDLC"></button>
+		</div>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/automations":  automationsHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"automations"}, false, true); err != nil {
+		t.Fatalf("automations --json failed: %v", err)
+	}
+	var automations []client.Automation
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &automations); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+	if len(automations) != 2 || automations[0].ID != "au-1" || automations[0].Name != "Native SDLC" || automations[0].State != "active" {
+		t.Fatalf("automations = %+v", automations)
+	}
+}
+
 func TestCLIJSONProjectsList(t *testing.T) {
 	c, _ := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

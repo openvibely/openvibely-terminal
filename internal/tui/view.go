@@ -527,6 +527,28 @@ func renderSchedule(entries []client.ScheduleEntry, summary string) string {
 	return table(rows)
 }
 
+// --- automations ---
+
+func renderAutomations(automations []client.Automation, filter string) string {
+	rows := [][]string{{"ID", "NAME", "STATE"}}
+	for _, a := range automations {
+		if !filterMatch(filter, a.ID, a.Name, a.State) {
+			continue
+		}
+		name := firstNonEmpty(a.Name, "(unnamed)")
+		state := firstNonEmpty(a.State, "unknown")
+		rows = append(rows, []string{a.ID, truncate(name, 52), state})
+	}
+	if len(rows) == 1 {
+		if filter != "" {
+			return dimStyle.Render("no automations match " + filter)
+		}
+		return dimStyle.Render("no automations yet — create one via the web UI")
+	}
+	return table(rows) + "\n\n" +
+		dimStyle.Render("/automations run-now|pause|resume|delete <id|name>")
+}
+
 // --- alerts ---
 
 func renderAlerts(alerts []client.Alert, filter string) string {

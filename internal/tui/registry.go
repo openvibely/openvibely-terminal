@@ -1767,14 +1767,14 @@ func automationsCommand() command {
 			switch action {
 			case "", "list":
 				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+					automations, err := c.ListAutomations(ctx, pid)
+					if err != nil {
+						return "", err
+					}
 					if jsonMode {
-						automations, err := c.ListAutomations(ctx, pid)
-						if err != nil {
-							return "", err
-						}
 						return marshalJSON(automations)
 					}
-					return c.GetAutomations(ctx, pid)
+					return renderAutomations(automations, ref), nil
 				})
 			default:
 				if ref == "" {
@@ -1827,9 +1827,14 @@ func automationsCommand() command {
 						return "", err
 					}
 					status := action + ": " + firstNonEmpty(a.Name, a.ID)
-					return actAndReloadText(status,
-						func() error { return c.AutomationAction(ctx, a.ID, action, pid) },
-						func() (string, error) { return c.GetAutomations(ctx, pid) })
+					if err := c.AutomationAction(ctx, a.ID, action, pid); err != nil {
+						return "", err
+					}
+					return refreshAndRender(status,
+						func() ([]client.Automation, error) { return c.ListAutomations(ctx, pid) },
+						func(automations []client.Automation, _ string) string {
+							return renderAutomations(automations, "")
+						})
 				})
 				if action == "delete" {
 					return confirmOr(m,

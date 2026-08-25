@@ -258,6 +258,30 @@ func TestRenderThreadFallsBackToDetails(t *testing.T) {
 	}
 }
 
+func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
+	automations := []client.Automation{
+		{ID: "automation-active-001", Name: "Native SDLC", State: "active"},
+		{ID: "automation-paused-002", Name: "GitHub SDLC", State: "paused"},
+	}
+	out := stripANSI(renderAutomations(automations, ""))
+	for _, want := range []string{"automation-active-001", "Native SDLC", "active", "automation-paused-002", "GitHub SDLC", "paused"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("automations output missing %q:\n%s", want, out)
+		}
+	}
+
+	filtered := stripANSI(renderAutomations(automations, "github"))
+	if strings.Contains(filtered, "Native SDLC") || !strings.Contains(filtered, "GitHub SDLC") {
+		t.Errorf("automation filter output = %q", filtered)
+	}
+	if got := stripANSI(renderAutomations(automations, "missing")); !strings.Contains(got, "no automations match missing") {
+		t.Errorf("filtered empty state = %q", got)
+	}
+	if got := stripANSI(renderAutomations(nil, "")); !strings.Contains(got, "create one via the web UI") {
+		t.Errorf("empty state = %q", got)
+	}
+}
+
 // Empty-state messages must include actionable slash-command hints (VISION.md "Friendly By Default").
 func TestEmptyStateHints(t *testing.T) {
 	cases := []struct {

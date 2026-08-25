@@ -916,21 +916,39 @@ func automationCardHTML(id, name, state string) string {
 	</div>`
 }
 
-func TestAutomationsListIsUnchangedWithNoArguments(t *testing.T) {
-	const automationsHTML = `<div>Native SDLC automation</div>`
+func TestAutomationsListUsesStructuredRowsWithNoArguments(t *testing.T) {
+	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
 	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
 	m = runLine(t, m, "/automations")
-	if !rec.saw("GET", "/automations") {
-		t.Fatalf("expected an automations fetch:\n%s", rec.all())
+	if got := strings.Count(rec.all(), "GET /automations"); got != 1 {
+		t.Fatalf("expected one automations fetch, got %d:\n%s", got, rec.all())
 	}
-	if !strings.Contains(transcript(m), "Native SDLC automation") {
-		t.Errorf("automations content missing:\n%s", transcript(m))
+	out := transcript(m)
+	for _, want := range []string{"au-1", "Native SDLC", "active"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("automations output missing %q:\n%s", want, out)
+		}
 	}
-	if strings.Contains(transcript(m), "error:") {
-		t.Errorf("/automations should not error:\n%s", transcript(m))
+	if strings.Contains(out, "error:") {
+		t.Errorf("/automations should not error:\n%s", out)
 	}
 }
 
+func TestAutomationsListFiltersStructuredRows(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+	m = runLine(t, m, "/automations GitHub")
+	if got := strings.Count(rec.all(), "GET /automations"); got != 1 {
+		t.Fatalf("expected one automations fetch, got %d:\n%s", got, rec.all())
+	}
+	out := transcript(m)
+	if strings.Contains(out, "Native SDLC") || !strings.Contains(out, "GitHub SDLC") {
+		t.Errorf("filtered automations output:\n%s", out)
+	}
+}
 func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +

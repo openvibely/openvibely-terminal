@@ -2,12 +2,15 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 // htmlServer serves a fixed HTML body and returns a client pointed at it.
@@ -168,6 +171,97 @@ func TestListAutomationsReadsCardMarkup(t *testing.T) {
 	}
 	if automations[1].ID != "au2" || automations[1].Name != "GitHub SDLC" || automations[1].State != "paused" {
 		t.Errorf("automation[1] = %+v", automations[1])
+	}
+}
+
+// benchmarkAutomationsPage builds representative cards with nested action markup.
+// The nested controls are intentionally noisy because that is the DOM work the
+// old whole-page NodeText path normalized even though the list only needs the
+// card's ID, name, and lifecycle state.
+func benchmarkAutomationsPage(count int) string {
+	var b strings.Builder
+	b.Grow(count * 700)
+	b.WriteString("<!doctype html><html><body><main>")
+	for i := 0; i < count; i++ {
+		state := "active"
+		if i%2 == 1 {
+			state = "paused"
+		}
+		fmt.Fprintf(&b, `<article class="card" data-automation-url="/automations/au-%d?project_id=p1" data-search-card data-search-text="automation-%d %s">`, i, i, state)
+		b.WriteString(`<div class="dropdown"><ul>`)
+		for action := 0; action < 4; action++ {
+			fmt.Fprintf(&b, `<li><button type="button"><span class="icon">action</span><span>control %d</span></button></li>`, action)
+		}
+		b.WriteString(`</ul></div><div class="card-body relative">`)
+		fmt.Fprintf(&b, `<span class="badge badge-outline badge-sm">%s</span>`, state)
+		fmt.Fprintf(&b, `<button type="button" class="text-error" data-automation-card-delete="au-%d" data-automation-name="Automation %d"><span>delete</span></button>`, i, i)
+		b.WriteString(`<div class="description"><p>long nested action metadata and display prose</p><div><span>not a lifecycle badge</span></div></div></div></article>`)
+	}
+	b.WriteString("</main></body></html>")
+	return b.String()
+}
+
+// BenchmarkAutomationsDisplayPath compares the old GetAutomations work
+// (parse plus whole-document NodeText) with the structured ListAutomations
+// work (the same parse plus only card fields and badge state). The 100- and
+// 1,000-card cases model normal and large automation pages; run with
+// `go test -bench BenchmarkAutomationsDisplayPath -benchmem ./internal/client`
+// to compare ns/op, B/op, and allocs/op.
+func BenchmarkAutomationsDisplayPath(b *testing.B) {
+	for _, count := range []int{100, 1000} {
+		page := benchmarkAutomationsPage(count)
+		b.Run(fmt.Sprintf("old_full_text/%d", count), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(page)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				root, err := html.Parse(strings.NewReader(page))
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = NodeText(root)
+			}
+		})
+		b.Run(fmt.Sprintf("new_structured/%d", count), func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(page)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				root, err := html.Parse(strings.NewReader(page))
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = parseAutomations(root)
+			}
+		})
+	}
+}
+
+// BenchmarkAutomationsDOMWork isolates the changed post-parse operation. HTML
+// parsing is deliberately outside the timer because it is identical in both
+// production paths; this measures whole-document normalization versus the
+// structured card extraction that replaced it.
+func BenchmarkAutomationsDOMWork(b *testing.B) {
+	for _, count := range []int{100, 1000} {
+		page := benchmarkAutomationsPage(count)
+		root, err := html.Parse(strings.NewReader(page))
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fmt.Sprintf("old_node_text/%d", count), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = NodeText(root)
+			}
+		})
+		b.Run(fmt.Sprintf("new_structured/%d", count), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = parseAutomations(root)
+			}
+		})
 	}
 }
 
