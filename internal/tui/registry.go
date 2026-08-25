@@ -1912,7 +1912,9 @@ func projectCommand() command {
 			}
 			name := strings.Join(args, " ")
 			if len(m.projects) == 0 {
-				return m, m.loadProjects(false, name)
+				var cmd tea.Cmd
+				m, cmd = m.beginProjectLoad(false, name)
+				return m, cmd
 			}
 			return m.pickProject(name)
 		},
@@ -1943,15 +1945,17 @@ func projectsCommand() command {
 					return m, errCmd(projectCreateUsage())
 				}
 				m.busy = true
+				requestID := nextProjectRequestID()
+				m.projectRequestID = requestID
 				c := m.client
 				return m, func() tea.Msg {
 					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 					defer cancel()
 					project, err := c.CreateProject(ctx, name, path)
 					if err != nil {
-						return projectCreatedMsg{err: err}
+						return projectCreatedMsg{requestID: requestID, err: err}
 					}
-					return projectCreatedMsg{project: *project}
+					return projectCreatedMsg{requestID: requestID, project: *project}
 				}
 			}
 			if jsonMode {
@@ -1964,7 +1968,9 @@ func projectsCommand() command {
 					return marshalJSON(projects)
 				})
 			}
-			return m, m.loadProjects(true, "")
+			var cmd tea.Cmd
+			m, cmd = m.beginProjectLoad(true, "")
+			return m, cmd
 		},
 	}
 }
@@ -1972,7 +1978,6 @@ func projectsCommand() command {
 func projectCreateUsage() string {
 	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> | <path> when either contains spaces)", cmdPrefix)
 }
-
 func parseProjectCreateArgs(args []string) (string, string, bool) {
 	if len(args) == 0 {
 		return "", "", false
@@ -2183,6 +2188,9 @@ func (m Model) pickProject(name string) (Model, tea.Cmd) {
 		m.append(entry{role: "error", text: err.Error()})
 		return m, nil
 	}
+	// A successful explicit selection supersedes every older project request,
+	// including a creation or list response that is still in flight.
+	m.projectRequestID = nextProjectRequestID()
 	if m.selectedID != p.ID {
 		// A task thread belongs to the old project; leave it.
 		m.threadID, m.threadTitle = "", ""

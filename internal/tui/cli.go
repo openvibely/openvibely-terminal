@@ -85,9 +85,10 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	// Only commands that talk to the backend need a project or connection
 	// state; /help and friends should stay instant and work offline.
 	if cmdDef.needsProjectLoad(args) {
-		m = drain(m, m.loadProjects(false, projectRef))
-		// An unknown or ambiguous project must fail loudly rather than run the
-		// command against whichever project happened to be selected.
+		var projectLoad tea.Cmd
+		m, projectLoad = m.beginProjectLoad(false, projectRef)
+		m = drain(m, projectLoad)
+		// An unknown or ambiguous project must fail loudly rather than run the		// command against whichever project happened to be selected.
 		if err := firstError(m); err != nil {
 			if m.connErr != "" {
 				return errors.New(offlineRecoveryMessage(c.BaseURL(), errors.New(m.connErr)))

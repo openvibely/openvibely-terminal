@@ -15,6 +15,7 @@ type connCheckedMsg struct {
 
 // projectsLoadedMsg carries the project list (with capacities when available).
 type projectsLoadedMsg struct {
+	requestID  uint64
 	projects   []client.Project
 	capacities []client.ProjectCapacity
 	// echo, when set, renders the project list into the transcript (i.e. the
@@ -28,8 +29,9 @@ type projectsLoadedMsg struct {
 // projectCreatedMsg carries the backend-created project so the TUI can select
 // it without maintaining a separate local project store.
 type projectCreatedMsg struct {
-	project client.Project
-	err     error
+	requestID uint64
+	project   client.Project
+	err       error
 }
 
 // chatSentMsg reports the accepted async chat message.

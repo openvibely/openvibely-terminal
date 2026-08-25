@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -39,6 +40,12 @@ const (
 
 	defaultPlaceholder = "Message the agent, or / for a command"
 )
+
+var projectRequestSequence uint64
+
+func nextProjectRequestID() uint64 {
+	return atomic.AddUint64(&projectRequestSequence, 1)
+}
 
 // entry is one block in the conversation transcript.
 type entry struct {
@@ -93,6 +100,11 @@ type Model struct {
 	// wantProject is a project requested up front (-project flag) and resolved
 	// once the project list arrives.
 	wantProject string
+
+	// projectRequestID identifies the newest in-flight project load or creation.
+	// Async project messages with an older token are stale and must not replace
+	// newer selection/list state.
+	projectRequestID uint64
 
 	// task thread focus: when set, typed messages go to this task's thread
 	// instead of the project agent ("/tasks open <ref>" enters, "/chat" exits).
@@ -174,9 +186,10 @@ func (m Model) WithProject(ref string) Model {
 
 // Init kicks off the initial connection check, project load, and SSE stream.
 func (m Model) Init() tea.Cmd {
+	_, projectLoad := m.beginProjectLoad(false, m.wantProject)
 	return tea.Batch(
 		m.checkConnection(),
-		m.loadProjects(false, m.wantProject),
+		projectLoad,
 		func() tea.Msg { return reconnectTickMsg{} },
 		m.tick(),
 		m.spin.Tick,
@@ -271,7 +284,21 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 	}
 }
 
+func (m Model) beginProjectLoad(echo bool, selectName string) (Model, tea.Cmd) {
+	requestID := nextProjectRequestID()
+	m.projectRequestID = requestID
+	return m, m.loadProjectsWithID(requestID, echo, selectName)
+}
+
+// loadProjects is retained as a direct command helper for tests and callers
+// that do not need to update the model before receiving the response. Runtime
+// command paths use beginProjectLoad so a newer request immediately invalidates
+// older responses.
 func (m Model) loadProjects(echo bool, selectName string) tea.Cmd {
+	return m.loadProjectsWithID(nextProjectRequestID(), echo, selectName)
+}
+
+func (m Model) loadProjectsWithID(requestID uint64, echo bool, selectName string) tea.Cmd {
 	c := m.client
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -294,10 +321,23 @@ func (m Model) loadProjects(echo bool, selectName string) tea.Cmd {
 		wg.Wait()
 
 		if err != nil {
-			return projectsLoadedMsg{err: err, echo: echo}
+			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo}
 		}
-		return projectsLoadedMsg{projects: projects, capacities: caps, echo: echo, selectName: selectName}
+		return projectsLoadedMsg{requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName}
 	}
+}
+
+func (m *Model) acceptsProjectResponse(requestID uint64) bool {
+	// Zero is reserved for hand-built messages in tests and older callers. All
+	// runtime project requests carry a non-zero token.
+	if requestID == 0 {
+		return true
+	}
+	if m.projectRequestID != 0 && m.projectRequestID != requestID {
+		return false
+	}
+	m.projectRequestID = requestID
+	return true
 }
 
 func (m Model) sendChat(projectID, message string) tea.Cmd {
@@ -434,6 +474,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case projectsLoadedMsg:
+		if !m.acceptsProjectResponse(msg.requestID) {
+			return m, nil // stale list from an older project request
+		}
 		if msg.err != nil {
 			m.connErr = msg.err.Error()
 			m.append(entry{role: "error", text: "loading projects: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
@@ -456,6 +499,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case projectCreatedMsg:
+		if !m.acceptsProjectResponse(msg.requestID) {
+			return m, nil // stale creation after a newer selection or list request
+		}
 		m.busy = false
 		if msg.err != nil {
 			m.append(entry{role: "error", text: msg.err.Error()})
@@ -478,6 +524,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.append(entry{role: "result", head: "Project", text: body})
+		} else if cliMode {
+			m.append(entry{
+				role: "result",
+				head: "Project",
+				text: fmt.Sprintf("created project %q at %q\nproject ID: %s\nnext: select it on the next CLI command with -project %s, for example: openvibely-tui -project %s tasks", msg.project.Name, msg.project.Path, msg.project.ID, msg.project.ID, msg.project.ID),
+			})
 		} else {
 			m.append(entry{
 				role: "result",

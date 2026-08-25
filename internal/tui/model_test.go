@@ -411,6 +411,61 @@ func TestProjectCommandAcceptsUniqueSubstring(t *testing.T) {
 	}
 }
 
+func TestStaleProjectCreationIsIgnoredAfterSelection(t *testing.T) {
+	m := newTestModel(t)
+	m.projects = []client.Project{
+		{ID: "old-project", Name: "Old Project"},
+		{ID: "selected-project", Name: "Selected Project"},
+	}
+	m.selectedID = "old-project"
+	m.selectedName = "Old Project"
+
+	staleRequestID := nextProjectRequestID()
+	m.projectRequestID = staleRequestID
+	m, _ = m.pickProject("selected-project")
+
+	updated, _ := m.Update(projectCreatedMsg{
+		requestID: staleRequestID,
+		project:   client.Project{ID: "created-project", Name: "Created Project", Path: "/tmp/created"},
+	})
+	m = updated.(Model)
+
+	if m.selectedID != "selected-project" || m.selectedName != "Selected Project" {
+		t.Fatalf("stale creation changed selection: %q (%q)", m.selectedID, m.selectedName)
+	}
+	if len(m.projects) != 2 {
+		t.Fatalf("stale creation changed project list: %+v", m.projects)
+	}
+	if strings.Contains(transcript(m), "Created Project") {
+		t.Fatalf("stale creation rendered success output:\n%s", transcript(m))
+	}
+}
+
+func TestStaleProjectListCannotOverwriteCreatedProject(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "created-project"
+	m.selectedName = "Created Project"
+	m.projects = []client.Project{{ID: "created-project", Name: "Created Project", Path: "/tmp/created"}}
+
+	staleRequestID := nextProjectRequestID()
+	currentRequestID := nextProjectRequestID()
+	m.projectRequestID = currentRequestID
+
+	updated, _ := m.Update(projectsLoadedMsg{
+		requestID: staleRequestID,
+		echo:      true,
+		projects:  []client.Project{{ID: "old-project", Name: "Old Project", Path: "/tmp/old"}},
+	})
+	m = updated.(Model)
+
+	if m.selectedID != "created-project" || m.selectedName != "Created Project" {
+		t.Fatalf("stale project list changed selection: %q (%q)", m.selectedID, m.selectedName)
+	}
+	if len(m.projects) != 1 || m.projects[0].ID != "created-project" {
+		t.Fatalf("stale project list overwrote created project: %+v", m.projects)
+	}
+}
+
 func TestEventsCommandToggles(t *testing.T) {
 	m := newTestModel(t)
 	if m.showEvents {

@@ -628,8 +628,11 @@ func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
 	if err := RunCLI(c, &out, "", []string{"projects", "create", "My", "Project", "|", `C:\Users\me\repo`}, false, false); err != nil {
 		t.Fatalf("projects create failed: %v", err)
 	}
-	if !strings.Contains(out.String(), "My Project") || !strings.Contains(out.String(), "active project selected") {
-		t.Fatalf("plain creation output missing selection guidance:\n%s", out.String())
+	plain := out.String()
+	for _, want := range []string{"My Project", "project ID: created-project", "-project created-project", "openvibely-tui -project created-project tasks"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("plain creation output missing %q:\n%s", want, plain)
+		}
 	}
 	if rec.saw("GET", "/api/projects") {
 		t.Fatalf("creation should not require a project-list preflight:\n%s", rec.all())

@@ -196,7 +196,7 @@ openvibely-tui -project demo tasks run refactor   # run it
 openvibely-tui -project demo alerts               # list alerts
 openvibely-tui -project demo analytics usage      # one analytics section
 openvibely-tui -project demo chat "ship the docs" # ask the agent, print the reply
-openvibely-tui projects create demo /Users/me/src/demo # create and select a project
+openvibely-tui projects create demo /Users/me/src/demo # create; output includes its backend ID
 openvibely-tui --json projects create demo /Users/me/src/demo # JSON project record
 openvibely-tui help                               # list every command
 openvibely-tui help tasks                         # full syntax of one command
@@ -205,6 +205,10 @@ openvibely-tui --help                             # commands + flags
 
 The leading `/` is optional, so a line copied from the TUI works as-is
 (`openvibely-tui /tasks`). Output is plain text suitable for piping.
+Interactive `projects create` selects the new project immediately. In one-shot CLI
+mode, the process ends after creation; the plain result prints the backend project
+ID and a copyable next step such as `openvibely-tui -project <ID> tasks`. Use that
+ID (or the project name/unique prefix) with `-project` for later commands.
 
 ### Discovering commands
 
