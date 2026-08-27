@@ -99,6 +99,40 @@ func TestCLIBackendRequiredFailureIncludesRecoveryGuidance(t *testing.T) {
 	}
 }
 
+func TestCLIReachableUnauthorizedBackendUsesSignInGuidance(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/projects" {
+			w.Header().Set("Location", "/login")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"tasks"}, false, false)
+	if err == nil {
+		t.Fatal("expected protected CLI command to fail without a session")
+	}
+	got := err.Error()
+	if strings.Contains(strings.ToLower(got), "offline") {
+		t.Fatalf("reachable unauthorized backend was classified offline: %v", err)
+	}
+	for _, want := range []string{"requires sign-in", "/login", "OPENVIBELY_AUTH_USERNAME"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("auth guidance missing %q: %v", want, err)
+		}
+	}
+	if out.Len() != 0 {
+		t.Fatalf("auth preflight should not print a partial result: %q", out.String())
+	}
+}
+
 func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>

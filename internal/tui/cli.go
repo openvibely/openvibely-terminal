@@ -137,7 +137,7 @@ func CommandSummary() string {
 // needsBackend reports whether the command requires a selected project.
 func (c command) needsBackend() bool {
 	switch c.name {
-	case "help", "quit", "clear":
+	case "help", "quit", "clear", "login":
 		return false
 	}
 	return true

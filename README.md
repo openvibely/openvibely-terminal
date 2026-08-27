@@ -53,7 +53,7 @@ make build          # → bin/openvibely-tui
 make run
 ```
 
-Requires Go 1.21+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, start or check your local OpenVibely backend, or point the client at a running server with `-server <url>` or `OPENVIBELY_SERVER_URL`.
+Requires Go 1.21+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, start or check your local OpenVibely backend, or point the client at a running server with `-server <url>` or `OPENVIBELY_SERVER_URL`. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
 
 ### Configuration
 
@@ -67,11 +67,27 @@ Flags override environment variables.
 | `-project` | `OPENVIBELY_PROJECT` | first project | Project to select: name, ID or unique prefix |
 
 ```bash
-./bin/openvibely-tui -server http://192.168.1.20:3001 -user dubee -pass secret
+# Interactive and safest for avoiding shell-history/process-list exposure:
+./bin/openvibely-tui
+# Then enter /login and type the username and masked password.
+
+# For headless CLI runs, prefer environment variables supplied by your secret manager:
+OPENVIBELY_AUTH_USERNAME=dubee OPENVIBELY_AUTH_PASSWORD="$OPENVIBELY_PASSWORD" \
+  ./bin/openvibely-tui -server http://192.168.1.20:3001 tasks
 ```
 
+`-user` and `-pass` remain supported for existing scripts, but command-line
+arguments can be visible in shell history or process listings. Do not put a
+literal password in a command copied into documentation or shared logs.
+
 When credentials are supplied the client performs a form login against `/login`
-and reuses the `ov_session` cookie for every subsequent request.
+and reuses the `ov_session` cookie for every subsequent request. In interactive
+mode, a reachable server that returns `302` to `/login` or `401` is shown as
+**sign-in required**, not offline; use `/login`, enter the username, then enter
+the masked password. A failed attempt returns to the password prompt, and `Esc`
+cancels without adding credentials to history or the transcript. After a
+successful login, health, project data, the selected project, and the SSE stream
+are retried without restarting the TUI.
 
 ## Using the chat
 
@@ -128,6 +144,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/projects` | | `list`, `create <name> <path>` |
 | `/project <name>` | | select the active project |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
+| `/login` | `signin`, `auth` | enter username and masked password; retry the session without restarting |
 | `/build` | | trigger an autonomous build |
 | `/events` | `stream`, `log` | `on` / `off` — live SSE feed inline |
 | `/clear` | | clear the transcript |
@@ -316,19 +333,19 @@ removes a `data-*` attribute will show up as an empty list rather than a crash.
 
 - **Live events** stream from `/events/live` with automatic reconnect and
   exponential backoff (1s → 30s cap); the header shows the stream state.
-- **Connection health** is re-checked every 30s; the header switches to
-  `● offline` and `/status` explains why.
+- **Connection health** is re-checked every 30s; the header switches to `● offline` for transport failures and to `● sign-in required` for a reachable protected backend. `/status` explains the recovery action.
+- **Interactive auth** uses `/login` with a masked password field, reuses the cookie session, and retries health, projects and SSE after success.
 - **Chat** is asynchronous end to end: the send is accepted with a message ID,
   then polled; server-side queueing behind an active turn is reported inline.
 - **Errors** from any command are printed in the transcript rather than
-  discarded, including auth failures ("server auth enabled; provide
-  credentials") and server error payloads.
+  discarded; auth failures point to `/login` (or the CLI environment/flags) and
+  never print passwords or response bodies.
 - **Shutdown** cancels the SSE context and restores the terminal.
 
 ## Layout
 
 ```
-cmd/tui/main.go              entry point: flags/env, optional login, program lifecycle
+cmd/tui/main.go              entry point: flags/env, optional or interactive login, program lifecycle
 internal/client/
   client.go                  base client, auth, projects, chat, capacity
   api.go                     remaining JSON endpoints (analytics, workflows, lifecycle…)

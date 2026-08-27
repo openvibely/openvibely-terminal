@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
@@ -122,6 +125,29 @@ func TestOfflineProjectLoadShowsRecoveryGuidance(t *testing.T) {
 	}
 	if strings.Contains(out, "Connected to") {
 		t.Fatalf("offline transcript should not claim a connection:\n%s", out)
+	}
+}
+
+func TestTransportFailureRemainsOfflineNotSignInRequired(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1") // nothing listening
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(m.checkConnection()())
+	m = updated.(Model)
+
+	if m.authRequired || m.connected || m.connErr == "" {
+		t.Fatalf("transport state = authRequired=%t connected=%t connErr=%q", m.authRequired, m.connected, m.connErr)
+	}
+	rendered := strings.ToLower(transcript(m) + "\n" + m.renderStatus() + "\n" + m.View())
+	if !strings.Contains(rendered, "offline") {
+		t.Fatalf("connection-refused recovery lost offline guidance:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "sign-in required") {
+		t.Fatalf("connection-refused backend was classified as auth-required:\n%s", rendered)
 	}
 }
 
@@ -1104,6 +1130,280 @@ func TestSSEChatResponseDoneFromOtherProjectIsIgnored(t *testing.T) {
 		t.Error("fetchChatStatus must NOT be called for a foreign-project chat_response_done")
 	case <-time.After(200 * time.Millisecond):
 		// expected: no fetch
+	}
+}
+
+func TestUnauthorizedHealthAndProjectLoadRequireSignIn(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusUnauthorized} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if status == http.StatusFound {
+					w.Header().Set("Location", "/login")
+				}
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+
+			updated, _ = m.Update(m.checkConnection()())
+			m = updated.(Model)
+			if !m.authRequired || m.connected || m.connErr != "" {
+				t.Fatalf("health state = authRequired=%t connected=%t connErr=%q", m.authRequired, m.connected, m.connErr)
+			}
+
+			updated, _ = m.Update(m.loadProjects(false, "")())
+			m = updated.(Model)
+			if !m.authRequired || m.connErr != "" {
+				t.Fatalf("project state = authRequired=%t connErr=%q", m.authRequired, m.connErr)
+			}
+			rendered := strings.ToLower(transcript(m) + "\n" + m.renderStatus() + "\n" + m.View())
+			if strings.Contains(rendered, "offline") {
+				t.Fatalf("reachable unauthorized backend was presented as offline:\n%s", rendered)
+			}
+			for _, want := range []string{"requires sign-in", "/login", "sign-in required"} {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("auth guidance missing %q:\n%s", want, rendered)
+				}
+			}
+		})
+	}
+}
+
+func applyImmediateAuthRetryBatch(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected retry command")
+	}
+	outer, ok := cmd().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("retry command returned %T, want tea.BatchMsg", cmd())
+	}
+
+	var apply func(tea.Msg)
+	apply = func(msg tea.Msg) {
+		if msg == nil {
+			return
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, sub := range batch {
+				if sub == nil {
+					continue
+				}
+				apply(sub())
+			}
+			return
+		}
+		next, follow := m.Update(msg)
+		m = next.(Model)
+		// Project refresh starts a correctly scoped SSE stream when the login
+		// retry began before a project had been selected. Do not execute timers
+		// or long-lived wait commands in this synchronous test helper.
+		if _, ok := msg.(projectsLoadedMsg); ok && follow != nil {
+			apply(follow())
+		}
+	}
+	for _, sub := range outer {
+		if sub != nil {
+			apply(sub())
+		}
+	}
+	return m
+}
+
+func TestInteractiveLoginRetriesHealthProjectsAndSSE(t *testing.T) {
+	const (
+		username = "admin"
+		password = "correct-password"
+	)
+	var mu sync.Mutex
+	var requests []string
+	var validSession atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
+
+		cookie, cookieErr := r.Cookie("ov_session")
+		authed := cookieErr == nil && cookie.Value == "session-token"
+		switch r.URL.Path {
+		case "/login":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+			}
+			if r.FormValue("username") != username || r.FormValue("password") != password {
+				t.Errorf("unexpected login form")
+				w.Header().Set("Location", "/login")
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+			validSession.Store(true)
+			http.SetCookie(w, &http.Cookie{Name: "ov_session", Value: "session-token"})
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+		case "/auth/me":
+			w.Header().Set("Content-Type", "application/json")
+			if validSession.Load() && authed {
+				_, _ = w.Write([]byte(`{"authenticated":true,"username":"admin"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"authenticated":false}`))
+		case "/api/capacity/global":
+			if !validSession.Load() || !authed {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"has_capacity":true,"max_workers":4}`))
+		case "/api/projects":
+			if !validSession.Load() || !authed {
+				w.Header().Set("Location", "/login")
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
+		case "/api/capacity/projects":
+			if !validSession.Load() || !authed {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case "/events/live":
+			if !validSession.Load() || !authed {
+				w.Header().Set("Location", "/login")
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.authRequired = true
+	m.connChecked = true
+
+	m, cmd := typeLine(t, m, "/login")
+	if cmd != nil || !m.loginActive || m.loginPassword {
+		t.Fatalf("login did not start username stage: active=%t password=%t cmd=%v", m.loginActive, m.loginPassword, cmd)
+	}
+	m = typeInput(t, m, username)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if !m.loginPassword || m.input.EchoMode != textinput.EchoPassword {
+		t.Fatalf("login did not enter masked password stage: password=%t echo=%v", m.loginPassword, m.input.EchoMode)
+	}
+	m = typeInput(t, m, password)
+	if strings.Contains(m.View(), password) {
+		t.Fatal("password appeared in the masked login view")
+	}
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil || !m.loginSubmitting || m.input.Value() != "" {
+		t.Fatalf("login submission state = active=%t submitting=%t input=%q", m.loginActive, m.loginSubmitting, m.input.Value())
+	}
+	loginResult := cmd()
+	updated, retry := m.Update(loginResult)
+	m = updated.(Model)
+	m = applyImmediateAuthRetryBatch(t, m, retry)
+	m.Cleanup()
+
+	if m.loginActive || m.authRequired || !m.connected || m.selectedID != "p1" {
+		t.Fatalf("post-login state = login=%t authRequired=%t connected=%t project=%q", m.loginActive, m.authRequired, m.connected, m.selectedID)
+	}
+	mu.Lock()
+	gotRequests := append([]string(nil), requests...)
+	mu.Unlock()
+	joined := strings.Join(gotRequests, "\n")
+	if !strings.Contains(joined, "POST /login") || !strings.Contains(joined, "GET /api/projects") {
+		t.Fatalf("login retry requests missing:\n%s", joined)
+	}
+	if !strings.Contains(joined, "GET /events/live?project_id=p1") {
+		t.Fatalf("SSE was not refreshed with the selected project:\n%s", joined)
+	}
+	if strings.Contains(strings.ToLower(m.renderStatus()), "offline") {
+		t.Fatalf("successful login left offline status:\n%s", m.renderStatus())
+	}
+}
+
+func TestInteractiveLoginFailureIsRetryableCancelableAndRedacted(t *testing.T) {
+	const password = "wrong-password-that-must-not-appear"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/login" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Location", "/login?error=invalid")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m, _ = typeLine(t, m, "/login")
+	m = typeInput(t, m, "admin")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	m = typeInput(t, m, password)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected login request command")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	if !m.loginActive || !m.loginPassword || m.loginSubmitting {
+		t.Fatalf("failed login should return to password stage: active=%t password=%t submitting=%t", m.loginActive, m.loginPassword, m.loginSubmitting)
+	}
+	if m.input.EchoMode != textinput.EchoPassword || m.input.Value() != "" {
+		t.Fatalf("failed login input = echo=%v value=%q", m.input.EchoMode, m.input.Value())
+	}
+	visible := transcript(m) + "\n" + m.View()
+	if strings.Contains(visible, password) {
+		t.Fatalf("failed login exposed password:\n%s", visible)
+	}
+	if !strings.Contains(visible, "invalid credentials") {
+		t.Fatalf("failed login did not provide retry guidance:\n%s", visible)
+	}
+	for _, item := range m.history {
+		if strings.Contains(item, password) {
+			t.Fatalf("password entered input history: %q", item)
+		}
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if m.loginActive || m.input.EchoMode != textinput.EchoNormal {
+		t.Fatalf("Esc did not cancel login: active=%t echo=%v", m.loginActive, m.input.EchoMode)
+	}
+	if strings.Contains(transcript(m), password) {
+		t.Fatal("cancelled login retained password in transcript")
 	}
 }
 

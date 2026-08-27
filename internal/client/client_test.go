@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -419,6 +420,91 @@ func TestStreamEventsCancellation(t *testing.T) {
 		if events == nil {
 			return
 		}
+	}
+}
+
+func TestReadRequestsClassifyUnauthorizedHealthAndProjects(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusUnauthorized} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if status == http.StatusFound {
+					w.Header().Set("Location", "/login?next="+r.URL.Path)
+				}
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("password=do-not-render-this"))
+			}))
+
+			for name, call := range map[string]func() error{
+				"health":   func() error { _, err := c.GetGlobalCapacity(context.Background()); return err },
+				"projects": func() error { _, err := c.ListProjects(context.Background()); return err },
+			} {
+				t.Run(name, func(t *testing.T) {
+					err := call()
+					if err == nil {
+						t.Fatal("expected authentication error")
+					}
+					if !IsAuthRequired(err) || !errors.Is(err, ErrAuthRequired) {
+						t.Fatalf("error = %T %v, want auth-required", err, err)
+					}
+					var authErr *AuthRequiredError
+					if !errors.As(err, &authErr) || authErr.StatusCode != status {
+						t.Fatalf("error = %T %+v, want status %d", err, authErr, status)
+					}
+					if strings.Contains(err.Error(), "do-not-render-this") {
+						t.Fatalf("auth error exposed response body: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLoginFailureDoesNotExposeResponseBody(t *testing.T) {
+	const secret = "not-a-login-secret"
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("password=" + secret))
+	}))
+
+	err := c.Login(context.Background(), "admin", secret)
+	if err == nil || !strings.Contains(err.Error(), "invalid credentials") {
+		t.Fatalf("Login error = %v, want generic invalid-credentials error", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Login error exposed password: %v", err)
+	}
+}
+
+func TestStreamEventsClassifiesUnauthorizedResponses(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusUnauthorized} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if status == http.StatusFound {
+					w.Header().Set("Location", "/login")
+				}
+				w.WriteHeader(status)
+			}))
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			events, errs := c.StreamEvents(ctx, "p1")
+
+			select {
+			case err := <-errs:
+				if err == nil || !IsAuthRequired(err) {
+					t.Fatalf("stream error = %v, want auth-required", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for unauthorized stream response")
+			}
+			select {
+			case _, ok := <-events:
+				if ok {
+					t.Fatal("unauthorized stream emitted an event")
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for stream close")
+			}
+		})
 	}
 }
 

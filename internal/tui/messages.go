@@ -34,6 +34,12 @@ type projectCreatedMsg struct {
 	err       error
 }
 
+// loginResultMsg reports the outcome of an interactive cookie-session login.
+// Credentials are intentionally not carried in this message.
+type loginResultMsg struct {
+	err error
+}
+
 // chatSentMsg reports the accepted async chat message.
 type chatSentMsg struct {
 	accepted *client.ChatAccepted

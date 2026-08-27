@@ -39,6 +39,7 @@ func init() {
 		projectCommand(),
 		projectsCommand(),
 		statusCommand(),
+		loginCommand(),
 		buildCommand(),
 		eventsCommand(),
 		chatCommand(),
@@ -2182,6 +2183,26 @@ func looksLikeProjectPath(value string) bool {
 		value[1] == ':' && (value[2] == '/' || value[2] == '\\')
 }
 
+func loginCommand() command {
+	return command{
+		name:    "login",
+		aliases: []string{"signin", "auth"},
+		desc:    "sign in to a backend that requires authentication",
+		usage: []string{
+			"login                                      enter username and masked password",
+		},
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			if cliMode {
+				return m, errCmd("interactive sign-in is available in the TUI; use -user/-pass or OPENVIBELY_AUTH_USERNAME/OPENVIBELY_AUTH_PASSWORD for CLI runs")
+			}
+			if len(args) > 0 {
+				return m, errCmd("usage: /login")
+			}
+			return m.beginLogin()
+		},
+	}
+}
+
 func statusCommand() command {
 	return command{
 		name:    "status",
@@ -2353,7 +2374,8 @@ func (m Model) pickProject(name string) (Model, tea.Cmd) {
 	m.append(entry{role: "system", text: "active project: " + p.Name})
 	// If SSE is active, reconnect with the new project ID so the server
 	// delivers only this project's events.
-	if m.sseCancel != nil {
+	if m.sseCancel != nil || m.sseRetryAfterProject {
+		m.sseRetryAfterProject = false
 		return m, m.connectSSE()
 	}
 	return m, nil

@@ -79,8 +79,10 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 			Transport: &http.Transport{
 				ResponseHeaderTimeout: 15 * time.Second,
 			},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		}
-
 		resp, err := sseClient.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -91,11 +93,14 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 		}
 		defer resp.Body.Close()
 
+		if isReadAuthResponse(resp) {
+			errCh <- newAuthRequiredError(http.MethodGet, "/events/live", resp)
+			return
+		}
 		if resp.StatusCode != http.StatusOK {
 			errCh <- fmt.Errorf("event stream returned status %d", resp.StatusCode)
 			return
 		}
-
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 

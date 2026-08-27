@@ -54,14 +54,18 @@ func (m Model) renderHeader() string {
 	}
 
 	conn := noticeStyle.Render("● connecting")
-	if m.connected {
+	if m.authRequired {
+		conn = noticeStyle.Render("● sign-in required")
+	} else if m.connected {
 		conn = statusOKStyle.Render("● online")
 	} else if m.connChecked || m.connErr != "" {
 		conn = statusErrStyle.Render("● offline")
 	}
 	stream := ""
 	if m.showEvents {
-		if m.sseConnected {
+		if m.authRequired {
+			stream = noticeStyle.Render(" ⚡sign-in")
+		} else if m.sseConnected {
 			stream = statusOKStyle.Render(" ⚡live")
 		} else {
 			stream = noticeStyle.Render(" ⚡reconnecting")
@@ -120,11 +124,23 @@ func (m Model) renderMenu() string {
 }
 
 func (m Model) hint() string {
+	if m.loginActive {
+		if m.loginSubmitting {
+			return "signing in…"
+		}
+		if m.loginPassword {
+			return "enter password · Enter sign in · Esc cancel"
+		}
+		return "enter username · Enter continue · Esc cancel"
+	}
 	if m.selectorActive {
 		return "type to filter · ↑↓ choose · enter select · esc cancel"
 	}
 	if len(m.menu) > 0 {
 		return "tab complete · ↑↓ choose · enter run · esc close"
+	}
+	if !m.connected && m.authRequired {
+		return "sign-in required: /login · help works without backend"
 	}
 	if !m.connected && m.connErr != "" {
 		return "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
@@ -143,7 +159,11 @@ func (m Model) renderStatus() string {
 	var b strings.Builder
 	row := func(k, v string) { fmt.Fprintf(&b, "  %-16s %s\n", k, v) }
 
-	if m.connected {
+	if m.authRequired {
+		row("server", noticeStyle.Render("sign-in required")+dimStyle.Render(" "+m.client.BaseURL()))
+		row("try", "use /login to enter credentials")
+		row("try", "help remains available without a backend")
+	} else if m.connected {
 		row("server", statusOKStyle.Render("connected")+dimStyle.Render(" "+m.client.BaseURL()))
 	} else if !m.connChecked && m.connErr == "" {
 		row("server", noticeStyle.Render("connecting")+dimStyle.Render(" "+m.client.BaseURL()))
@@ -156,6 +176,8 @@ func (m Model) renderStatus() string {
 		row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
 	}
 	switch {
+	case m.authRequired:
+		row("auth", noticeStyle.Render("sign-in required · /login"))
 	case m.auth == nil:
 		row("auth", dimStyle.Render("unknown"))
 	case m.auth.Authenticated:
@@ -194,7 +216,9 @@ func (m Model) renderStatus() string {
 		}
 	}
 	if m.showEvents {
-		if m.sseConnected {
+		if m.authRequired {
+			row("events", noticeStyle.Render("sign-in required · /login"))
+		} else if m.sseConnected {
 			row("events", statusOKStyle.Render("streaming"))
 		} else {
 			row("events", noticeStyle.Render("reconnecting…"))

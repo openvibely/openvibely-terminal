@@ -64,8 +64,8 @@ func (c *Client) getHTML(ctx context.Context, path string) (*html.Node, error) {
 	}
 	defer drainAndClose(resp.Body)
 
-	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("GET %s: unauthorized (server auth enabled; provide credentials)", path)
+	if isReadAuthResponse(resp) {
+		return nil, newAuthRequiredError(http.MethodGet, path, resp)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, apiError(resp)
@@ -114,13 +114,9 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 
-	if resp.StatusCode == http.StatusUnauthorized {
+	if isAuthResponse(resp) {
 		defer drainAndClose(resp.Body)
-		return nil, fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
-	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 && strings.HasPrefix(resp.Header.Get("Location"), "/login") {
-		defer drainAndClose(resp.Body)
-		return nil, fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
+		return nil, newAuthRequiredError(method, path, resp)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		return resp, nil
@@ -150,13 +146,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, payload any) e
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	if resp.StatusCode == http.StatusUnauthorized {
+	if isAuthResponse(resp) {
 		defer drainAndClose(resp.Body)
-		return fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
-	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 && strings.HasPrefix(resp.Header.Get("Location"), "/login") {
-		defer drainAndClose(resp.Body)
-		return fmt.Errorf("%s %s: unauthorized (server auth enabled; provide credentials)", method, path)
+		return newAuthRequiredError(method, path, resp)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		drainAndClose(resp.Body)

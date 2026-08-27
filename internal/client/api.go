@@ -421,8 +421,8 @@ func (c *Client) postJSON(ctx context.Context, path string, body, out any) error
 	}
 	defer drainAndClose(resp.Body)
 
-	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("POST %s: unauthorized (server auth enabled; provide credentials)", path)
+	if isReadAuthResponse(resp) {
+		return newAuthRequiredError(http.MethodPost, path, resp)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return apiError(resp)

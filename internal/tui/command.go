@@ -287,6 +287,11 @@ func splitAction(actions []string, args []string) (string, []string) {
 
 // needProject returns an error command when no project is selected.
 func (m Model) needProject() (Model, tea.Cmd, bool) {
+	if m.authRequired {
+		m.busy = false
+		m.markAuthRequired()
+		return m, nil, false
+	}
 	if m.selectedID == "" {
 		m.busy = false
 		m.append(entry{role: "error", text: "no project selected — use /project <name>"})

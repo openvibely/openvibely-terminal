@@ -87,11 +87,22 @@ type Model struct {
 	histPos int
 
 	// connection state
-	connected   bool
-	connChecked bool
-	connErr     string
-	capacity    *client.GlobalCapacity
-	auth        *client.AuthStatus
+	connected    bool
+	connChecked  bool
+	authRequired bool
+	connErr      string
+	capacity     *client.GlobalCapacity
+	auth         *client.AuthStatus
+
+	// interactive cookie-session sign-in. Password text is held only while the
+	// form is active and is cleared from the input before the request starts.
+	loginActive             bool
+	loginPassword           bool
+	loginSubmitting         bool
+	loginUsername           string
+	loginRestorePrompt      string
+	loginRestorePlaceholder string
+	loginRestoreEchoMode    textinput.EchoMode
 
 	// projects
 	projects     []client.Project
@@ -139,13 +150,14 @@ type Model struct {
 	selectorPrefillSuffix string // appended after the chosen ref when priming input
 
 	// live events
-	showEvents    bool // stream events into the transcript
-	sseConnected  bool
-	sseBackoff    time.Duration
-	sseCancel     context.CancelFunc
-	sseEvents     <-chan client.Event
-	sseErrs       <-chan error
-	sseGeneration int
+	showEvents           bool // stream events into the transcript
+	sseConnected         bool
+	sseBackoff           time.Duration
+	sseCancel            context.CancelFunc
+	sseEvents            <-chan client.Event
+	sseErrs              <-chan error
+	sseGeneration        int
+	sseRetryAfterProject bool
 
 	quitting bool
 }
@@ -208,16 +220,28 @@ func (m Model) checkConnection() tea.Cmd {
 		var capacity *client.GlobalCapacity
 		var capErr error
 		var auth *client.AuthStatus
+		var authErr error
 
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); capacity, capErr = c.GetGlobalCapacity(ctx) }()
-		go func() { defer wg.Done(); auth, _ = c.AuthMe(ctx) }()
+		go func() { defer wg.Done(); auth, authErr = c.AuthMe(ctx) }()
 		wg.Wait()
 
-		if capErr != nil {
-			return connCheckedMsg{err: capErr}
+		// A single unauthorized response is enough to prove the backend is
+		// reachable. Prefer it over a concurrent transport error so the TUI
+		// offers sign-in instead of incorrectly reporting the server offline.
+		if client.IsAuthRequired(capErr) {
+			return connCheckedMsg{capacity: capacity, auth: auth, err: capErr}
 		}
+		if client.IsAuthRequired(authErr) {
+			return connCheckedMsg{capacity: capacity, auth: auth, err: authErr}
+		}
+		if capErr != nil {
+			return connCheckedMsg{capacity: capacity, auth: auth, err: capErr}
+		}
+		// AuthMe is supplementary when the health endpoint is healthy. Preserve
+		// the prior behavior of treating a non-auth AuthMe failure as non-fatal.
 		return connCheckedMsg{capacity: capacity, auth: auth}
 	}
 }
@@ -308,6 +332,7 @@ func (m Model) loadProjectsWithID(requestID uint64, echo bool, selectName string
 		var projects []client.Project
 		var err error
 		var caps []client.ProjectCapacity
+		var capsErr error
 
 		wg.Add(2)
 		go func() {
@@ -316,10 +341,16 @@ func (m Model) loadProjectsWithID(requestID uint64, echo bool, selectName string
 		}()
 		go func() {
 			defer wg.Done()
-			caps, _ = c.GetProjectCapacities(ctx)
+			caps, capsErr = c.GetProjectCapacities(ctx)
 		}()
 		wg.Wait()
 
+		if client.IsAuthRequired(err) {
+			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo}
+		}
+		if client.IsAuthRequired(capsErr) {
+			return projectsLoadedMsg{requestID: requestID, err: capsErr, echo: echo}
+		}
 		if err != nil {
 			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo}
 		}
@@ -338,6 +369,17 @@ func (m *Model) acceptsProjectResponse(requestID uint64) bool {
 	}
 	m.projectRequestID = requestID
 	return true
+}
+
+func (m Model) login(username, password string) tea.Cmd {
+	c := m.client
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		// Do not include either credential in the returned message or any error
+		// text. Client.Login also avoids decoding the login response body.
+		return loginResultMsg{err: c.Login(ctx, username, password)}
+	}
 }
 
 func (m Model) sendChat(projectID, message string) tea.Cmd {
@@ -449,24 +491,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case connCheckedMsg:
 		wasConnected := m.connected
+		wasAuthRequired := m.authRequired
 		m.connChecked = true
+		m.capacity = msg.capacity
+		m.auth = msg.auth
+		if client.IsAuthRequired(msg.err) {
+			m.markAuthRequired()
+			return m, nil
+		}
 		if msg.err != nil {
 			if wasConnected {
 				m.append(entry{role: "error", text: "lost connection: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			}
 			m.connected = false
+			m.authRequired = false
 			m.connErr = msg.err.Error()
 		} else {
 			m.connected = true
+			m.authRequired = false
 			m.connErr = ""
-			m.capacity = msg.capacity
-			m.auth = msg.auth
 			if !wasConnected {
 				m.append(entry{role: "system", text: "Connected to " + m.client.BaseURL() + "."})
 			}
+			if wasAuthRequired && m.sseCancel != nil {
+				return m, m.connectSSE()
+			}
 		}
 		return m, nil
-
 	case statusCountsMsg:
 		m.pendingAlertCount = msg.pendingAlerts
 		m.activeTaskCount = msg.activeTasks
@@ -478,6 +529,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale list from an older project request
 		}
 		if msg.err != nil {
+			if client.IsAuthRequired(msg.err) {
+				m.markAuthRequired()
+				return m, nil
+			}
 			m.connErr = msg.err.Error()
 			m.append(entry{role: "error", text: "loading projects: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
@@ -493,10 +548,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedID = m.projects[0].ID
 			m.selectedName = m.projects[0].Name
 		}
+		var reconnect tea.Cmd
+		if m.sseCancel != nil || m.sseRetryAfterProject {
+			m.sseRetryAfterProject = false
+			reconnect = m.connectSSE()
+		}
 		if msg.echo {
 			m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
 		}
-		return m, nil
+		return m, reconnect
 
 	case projectCreatedMsg:
 		if !m.acceptsProjectResponse(msg.requestID) {
@@ -504,6 +564,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		if msg.err != nil {
+			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
 			m.append(entry{role: "error", text: msg.err.Error()})
 			return m, nil
 		}
@@ -545,6 +608,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resultMsg:
 		m.busy = false
 		if msg.err != nil {
+			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
 			m.append(entry{role: "error", text: msg.err.Error()})
 			return m, nil
 		}
@@ -558,6 +624,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatSentMsg:
 		if msg.err != nil {
 			m.busy = false
+			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
 			m.append(entry{role: "error", text: "send failed: " + msg.err.Error()})
 			return m, nil
 		}
@@ -572,6 +641,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.err != nil {
+			if m.handleAuthError(msg.err) {
+				m.busy = false
+				return m, nil
+			}
 			return m, m.pollChat(m.pendingMsgID) // transient; keep polling
 		}
 		switch msg.status.Status {
@@ -599,6 +672,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case threadOpenedMsg:
 		m.busy = false
 		if msg.err != nil {
+			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
 			m.append(entry{role: "error", text: msg.err.Error()})
 			return m, nil
 		}
@@ -611,6 +687,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.append(entry{role: "system", text: "in task thread — messages go to this task. /chat returns to project chat."})
 		m.input.Placeholder = "Reply to " + truncate(msg.title, 40) + " (/chat to exit)"
 		return m, nil
+
+	case loginResultMsg:
+		m.loginSubmitting = false
+		if msg.err != nil {
+			m.busy = false
+			m.input.SetValue("")
+			m.loginPassword = true
+			m.input.EchoMode = textinput.EchoPassword
+			m.input.Prompt = "password: "
+			m.input.Placeholder = "password"
+			m.input.Focus()
+			m.append(entry{role: "error", text: loginFailureText(m.client.BaseURL(), msg.err)})
+			return m, nil
+		}
+
+		m.finishLogin()
+		m.busy = false
+		m.authRequired = false
+		m.connected = false
+		m.connChecked = false
+		m.connErr = ""
+		m.auth = nil
+		m.sseConnected = false
+		m.sseRetryAfterProject = true
+		m.append(entry{role: "system", text: "signed in; retrying connection and project loading"})
+		var projectLoad tea.Cmd
+		m, projectLoad = m.beginProjectLoad(false, m.wantProject)
+		cmds := []tea.Cmd{m.checkConnection(), projectLoad}
+		if m.pendingMsgID != "" {
+			cmds = append(cmds, m.fetchChatStatus(m.pendingMsgID))
+		}
+		return m, tea.Batch(cmds...)
 
 	case sseConnectedMsg:
 		m.sseConnected = true
@@ -644,6 +752,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case sseDisconnectedMsg:
 		m.sseConnected = false
+		if client.IsAuthRequired(msg.err) {
+			m.markAuthRequired()
+			return m, nil
+		}
+		if m.authRequired {
+			return m, nil
+		}
 		cmd := m.scheduleReconnect()
 		if m.sseBackoff < 30*time.Second {
 			m.sseBackoff *= 2
@@ -651,8 +766,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case reconnectTickMsg:
+		if m.authRequired || m.loginActive {
+			return m, nil
+		}
 		return m, m.connectSSE()
-
 	case tickMsg:
 		return m, tea.Batch(m.checkConnection(), m.tick())
 
@@ -665,8 +782,119 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) beginLogin() (Model, tea.Cmd) {
+	if m.loginActive {
+		return m, nil
+	}
+	m.loginRestorePrompt = m.input.Prompt
+	m.loginRestorePlaceholder = m.input.Placeholder
+	m.loginRestoreEchoMode = m.input.EchoMode
+	m.loginActive = true
+	m.loginPassword = false
+	m.loginSubmitting = false
+	m.loginUsername = ""
+	m.busy = false
+	m.menu = nil
+	m.input.SetValue("")
+	m.input.EchoMode = textinput.EchoNormal
+	m.input.Prompt = "username: "
+	m.input.Placeholder = "username"
+	m.input.Focus()
+	m.append(entry{role: "system", text: "sign-in: enter username, then password. Esc cancels."})
+	return m, nil
+}
+
+func (m *Model) finishLogin() {
+	m.loginActive = false
+	m.loginPassword = false
+	m.loginSubmitting = false
+	m.loginUsername = ""
+	m.input.SetValue("")
+	m.input.Prompt = m.loginRestorePrompt
+	m.input.Placeholder = m.loginRestorePlaceholder
+	m.input.EchoMode = m.loginRestoreEchoMode
+	m.input.Focus()
+	m.menu = nil
+}
+
+func (m *Model) cancelLogin() {
+	m.loginActive = false
+	m.loginPassword = false
+	m.loginSubmitting = false
+	m.loginUsername = ""
+	m.busy = false
+	m.input.SetValue("")
+	m.input.Prompt = m.loginRestorePrompt
+	m.input.Placeholder = m.loginRestorePlaceholder
+	m.input.EchoMode = m.loginRestoreEchoMode
+	m.input.Focus()
+	m.menu = nil
+	m.append(entry{role: "system", text: "sign-in cancelled"})
+}
+
+func (m Model) handleLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "ctrl+d":
+		m.quitting = true
+		m.Cleanup()
+		return m, tea.Quit
+	case "esc":
+		if !m.loginSubmitting {
+			m.cancelLogin()
+		}
+		return m, nil
+	case "enter":
+		if m.loginSubmitting {
+			return m, nil
+		}
+		if !m.loginPassword {
+			username := strings.TrimSpace(m.input.Value())
+			if username == "" {
+				m.append(entry{role: "error", text: "username is required"})
+				return m, nil
+			}
+			m.loginUsername = username
+			m.loginPassword = true
+			m.input.SetValue("")
+			m.input.EchoMode = textinput.EchoPassword
+			m.input.Prompt = "password: "
+			m.input.Placeholder = "password"
+			return m, nil
+		}
+
+		password := m.input.Value()
+		if password == "" {
+			m.append(entry{role: "error", text: "password is required"})
+			return m, nil
+		}
+		username := m.loginUsername
+		m.input.SetValue("")
+		m.input.Blur()
+		m.loginSubmitting = true
+		m.busy = true
+		return m, m.login(username, password)
+	}
+
+	if m.loginSubmitting {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func loginFailureText(baseURL string, err error) string {
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "invalid credentials") {
+		return "sign-in failed: invalid credentials; try again or press Esc to cancel."
+	}
+	return "sign-in failed for " + baseURL + "; check the credentials and backend, then try again or press Esc to cancel."
+}
+
 // handleKey routes keys; the input owns almost everything.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.loginActive {
+		return m.handleLoginKey(msg)
+	}
 	if m.selectorActive {
 		return m.handleSelectorKey(msg)
 	}
@@ -1013,6 +1241,29 @@ func truncate(s string, n int) string {
 		width += w
 	}
 	return strings.TrimRight(string(runes[:cut]), " ") + "…"
+}
+
+func (m *Model) markAuthRequired() {
+	wasRequired := m.authRequired
+	m.authRequired = true
+	m.connected = false
+	m.connChecked = true
+	m.connErr = ""
+	if !wasRequired {
+		m.append(entry{role: "error", text: authRecoveryMessage(m.client.BaseURL())})
+	}
+}
+
+func (m *Model) handleAuthError(err error) bool {
+	if !client.IsAuthRequired(err) {
+		return false
+	}
+	m.markAuthRequired()
+	return true
+}
+
+func authRecoveryMessage(baseURL string) string {
+	return fmt.Sprintf("OpenVibely backend at %s requires sign-in.\nUse /login to enter credentials in the TUI. For CLI runs, use OPENVIBELY_AUTH_USERNAME and OPENVIBELY_AUTH_PASSWORD (or the existing -user/-pass flags). Credentials are not displayed or saved.", baseURL)
 }
 
 func offlineRecoveryMessage(baseURL string, err error) string {

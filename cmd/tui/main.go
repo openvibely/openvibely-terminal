@@ -23,6 +23,10 @@
 //	-user    / OPENVIBELY_AUTH_USERNAME   username when server auth is enabled
 //	-pass    / OPENVIBELY_AUTH_PASSWORD   password when server auth is enabled
 //	-project / OPENVIBELY_PROJECT         project to select (name, ID or unique prefix)
+//
+// When an interactive server requires authentication and no credentials were
+// configured, use /login in the TUI. Login credentials are kept in the
+// in-terminal form and the resulting cookie session is reused for retries.
 package main
 
 import (
@@ -61,14 +65,10 @@ func run() error {
 		return err
 	}
 
-	// If credentials were provided, establish a cookie session up front.
-	if *username != "" || *password != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		err := c.Login(ctx, *username, *password)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("authenticating with %s: %w", c.BaseURL(), err)
-		}
+	// If credentials were provided, establish a cookie session up front. An
+	// interactive run without them can use /login after a reachable auth failure.
+	if err := loginWithConfiguredCredentials(c, *username, *password); err != nil {
+		return err
 	}
 
 	// Arguments after the flags mean "run this one command and exit".
@@ -77,6 +77,18 @@ func run() error {
 	}
 
 	return runTUI(c, *project)
+}
+
+func loginWithConfiguredCredentials(c *client.Client, username, password string) error {
+	if username == "" && password == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := c.Login(ctx, username, password); err != nil {
+		return fmt.Errorf("authenticating with %s: %w", c.BaseURL(), err)
+	}
+	return nil
 }
 
 func runTUI(c *client.Client, project string) error {

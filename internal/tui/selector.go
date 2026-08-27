@@ -54,6 +54,9 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.busy = false
 	m = m.clearSelector()
 	if msg.err != nil {
+		if m.handleAuthError(msg.err) {
+			return m, nil
+		}
 		m.append(entry{role: "error", text: msg.err.Error()})
 		return m, nil
 	}

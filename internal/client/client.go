@@ -15,6 +15,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,56 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrAuthRequired identifies a reachable backend that needs a cookie-session
+// login before the requested resource can be used.
+var ErrAuthRequired = errors.New("authentication required")
+
+// AuthRequiredError is returned when the backend responds with an
+// authentication redirect or HTTP 401. It deliberately contains only the
+// request location and status, never request credentials or response bodies.
+type AuthRequiredError struct {
+	Method     string
+	Path       string
+	StatusCode int
+}
+
+func (e *AuthRequiredError) Error() string {
+	return fmt.Sprintf("%s %s: unauthorized (authentication required)", e.Method, e.Path)
+}
+
+func (e *AuthRequiredError) Unwrap() error { return ErrAuthRequired }
+
+// IsAuthRequired reports whether err, including a wrapped error, means the
+// server was reachable but the current session is not authorized.
+func IsAuthRequired(err error) bool {
+	return errors.Is(err, ErrAuthRequired)
+}
+
+func newAuthRequiredError(method, path string, resp *http.Response) error {
+	return &AuthRequiredError{
+		Method:     method,
+		Path:       path,
+		StatusCode: resp.StatusCode,
+	}
+}
+
+// isAuthResponse recognizes a 401 or a redirect explicitly targeting the
+// backend login page. Non-login redirects remain valid for mutation routes
+// that intentionally use them.
+func isAuthResponse(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusUnauthorized {
+		return true
+	}
+	return resp.StatusCode >= 300 && resp.StatusCode < 400 &&
+		strings.HasPrefix(resp.Header.Get("Location"), "/login")
+}
+
+// isReadAuthResponse also preserves the existing read-route behavior where a
+// bare 302 is the backend's authentication redirect.
+func isReadAuthResponse(resp *http.Response) bool {
+	return isAuthResponse(resp) || resp.StatusCode == http.StatusFound
+}
 
 // Client talks to an OpenVibely backend over HTTP.
 type Client struct {
@@ -147,12 +198,12 @@ func (c *Client) Login(ctx context.Context, username, password string) error {
 	defer drainAndClose(resp.Body)
 
 	// Success redirects to the next path ("/"); failure redirects back to /login.
-	if resp.StatusCode == http.StatusFound {
-		loc := resp.Header.Get("Location")
-		if strings.HasPrefix(loc, "/login") {
-			return fmt.Errorf("login failed: invalid credentials")
-		}
-		return nil
+	// Keep the failure text deliberately generic so credentials can never appear
+	// in a login error, even if a server returns an unexpected response body.
+	loc := resp.Header.Get("Location")
+	if resp.StatusCode == http.StatusUnauthorized ||
+		(resp.StatusCode >= 300 && resp.StatusCode < 400 && strings.HasPrefix(loc, "/login")) {
+		return fmt.Errorf("login failed: invalid credentials")
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 		return nil
@@ -283,6 +334,9 @@ func (c *Client) SendChatMessage(ctx context.Context, projectID, message string)
 	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusCreated {
+		if isReadAuthResponse(resp) {
+			return nil, newAuthRequiredError(http.MethodPost, "/api/chat/message", resp)
+		}
 		return nil, apiError(resp)
 	}
 	var out ChatAccepted
@@ -316,8 +370,8 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	}
 	defer drainAndClose(resp.Body)
 
-	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusUnauthorized {
-		return fmt.Errorf("GET %s: unauthorized (server auth enabled; provide credentials)", path)
+	if isReadAuthResponse(resp) {
+		return newAuthRequiredError(http.MethodGet, path, resp)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return apiError(resp)
