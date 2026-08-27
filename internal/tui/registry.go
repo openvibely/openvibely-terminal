@@ -2103,15 +2103,16 @@ func projectsCommand() command {
 				m.busy = true
 				requestID := nextProjectRequestID()
 				m.projectRequestID = requestID
+				startSSE := !cliMode
 				c := m.client
 				return m, func() tea.Msg {
 					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 					defer cancel()
 					project, err := c.CreateProject(ctx, name, path)
 					if err != nil {
-						return projectCreatedMsg{requestID: requestID, err: err}
+						return projectCreatedMsg{requestID: requestID, startSSE: startSSE, err: err}
 					}
-					return projectCreatedMsg{requestID: requestID, project: *project}
+					return projectCreatedMsg{requestID: requestID, startSSE: startSSE, project: *project}
 				}
 			}
 			if jsonMode {

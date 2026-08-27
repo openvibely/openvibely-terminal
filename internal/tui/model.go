@@ -919,7 +919,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: msg.err.Error()})
 			return m, nil
 		}
-		shouldReconnect := m.sseCancel != nil || m.sseRetryAfterProject
+		shouldReconnect := msg.startSSE || m.sseCancel != nil || m.sseRetryAfterProject
+		if msg.startSSE {
+			m.sseRetryAfterProject = true
+		}
 		m.setActiveProject(msg.project)
 		m.projects = append(m.projects, msg.project)
 
@@ -1237,7 +1240,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
-	m.loginResumeSSE = m.sseCancel != nil && m.connected && !m.authRequired && m.selectedID != ""
+	m.loginResumeSSE = m.sseCancel != nil && !m.authRequired && m.selectedID != ""
 	m.invalidateSSE()
 	m.loginRestorePrompt = m.input.Prompt
 	m.loginRestorePlaceholder = m.input.Placeholder

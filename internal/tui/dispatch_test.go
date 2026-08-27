@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -170,23 +171,35 @@ func runLine(t *testing.T, m Model, line string) Model {
 
 func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	rec := &recorder{}
+	requestURI := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.record(r.Method, r.URL.Path)
-		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/projects":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got, want := r.FormValue("name"), "My Project"; got != want {
+				t.Errorf("name = %q, want %q", got, want)
+			}
+			if got, want := r.FormValue("repo_path"), `C:\Users\me\repo`; got != want {
+				t.Errorf("repo_path = %q, want %q", got, want)
+			}
+			w.Header().Set("HX-Redirect", "/tasks?project_id=created-project")
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/events/live":
+			select {
+			case requestURI <- r.URL.RequestURI():
+			default:
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-			return
 		}
-		if err := r.ParseForm(); err != nil {
-			t.Fatalf("ParseForm: %v", err)
-		}
-		if got, want := r.FormValue("name"), "My Project"; got != want {
-			t.Errorf("name = %q, want %q", got, want)
-		}
-		if got, want := r.FormValue("repo_path"), `C:\Users\me\repo`; got != want {
-			t.Errorf("repo_path = %q, want %q", got, want)
-		}
-		w.Header().Set("HX-Redirect", "/tasks?project_id=created-project")
-		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
 
@@ -202,6 +215,7 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	m.projects = []client.Project{{ID: "old-project", Name: "Old Project"}}
 
 	m = runLine(t, m, `/projects create My Project | C:\Users\me\repo`)
+	defer m.Cleanup()
 	if !rec.saw("POST", "/projects") {
 		t.Fatalf("expected project creation request, calls:\n%s", rec.all())
 	}
@@ -210,6 +224,14 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	}
 	if !strings.Contains(transcript(m), "active project selected") || !strings.Contains(transcript(m), "My Project") {
 		t.Fatalf("creation output did not explain selection:\n%s", transcript(m))
+	}
+	select {
+	case got := <-requestURI:
+		if got != "/events/live?project_id=created-project" {
+			t.Fatalf("creation SSE request URI = %q, want scoped created project", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scoped SSE request after project creation")
 	}
 }
 

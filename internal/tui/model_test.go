@@ -1500,6 +1500,30 @@ func TestCancelLoginAfterTransportFailureRestoresPreviousSSE(t *testing.T) {
 	}
 }
 
+func TestCancelLoginWithOfflineHealthStateRestoresPreviousSSE(t *testing.T) {
+	m := newTestModel(t)
+	m.connected = false
+	m.connChecked = true
+	m.connErr = "connection refused"
+	m.authRequired = false
+	m.selectedID = "project-a"
+	m.sseGeneration = 4
+	canceled := false
+	m.sseCancel = func() { canceled = true }
+
+	m, _ = m.beginLogin()
+	if !m.loginResumeSSE {
+		t.Fatal("login should remember the active SSE stream even when health state is transiently offline")
+	}
+
+	next, resume := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	defer m.Cleanup()
+	if resume == nil || m.loginActive || m.loginResumeSSE || m.sseCancel == nil || !canceled {
+		t.Fatalf("cancel did not restore the previous SSE stream: resume=%v active=%t resumeSSE=%t cancel-nil=%t old-canceled=%t", resume, m.loginActive, m.loginResumeSSE, m.sseCancel == nil, canceled)
+	}
+}
+
 func TestInteractiveLoginTransportFailureUsesOfflineRecovery(t *testing.T) {
 	const password = "transport-password-that-must-not-appear"
 	c, err := client.New("http://127.0.0.1:1")

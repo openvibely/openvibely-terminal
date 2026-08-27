@@ -40,7 +40,10 @@ type projectCreatedMsg struct {
 	projectGeneration uint64
 	requestID         uint64
 	project           client.Project
-	err               error
+	// startSSE requests that the selected project receive a scoped stream even
+	// when project creation was the first successful backend operation.
+	startSSE bool
+	err      error
 }
 
 // loginResultMsg reports the outcome of an interactive cookie-session login.

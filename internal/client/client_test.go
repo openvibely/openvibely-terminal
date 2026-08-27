@@ -267,6 +267,24 @@ func TestSendChatMessage(t *testing.T) {
 	}
 }
 
+func TestSendChatMessageNonLoginRedirectIsNotAuthentication(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/chat/message" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Location", "/after-mutation")
+		w.WriteHeader(http.StatusFound)
+	}))
+
+	_, err := c.SendChatMessage(context.Background(), "p1", "hello")
+	if err == nil {
+		t.Fatal("expected non-login redirect error")
+	}
+	if IsAuthRequired(err) {
+		t.Fatalf("ordinary non-login redirect was classified as authentication: %v", err)
+	}
+}
+
 func TestSendChatMessageServerError(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)

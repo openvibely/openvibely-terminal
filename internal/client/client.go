@@ -378,7 +378,7 @@ func (c *Client) SendChatMessage(ctx context.Context, projectID, message string)
 	defer drainAndClose(resp.Body)
 
 	if resp.StatusCode != http.StatusCreated {
-		if isReadAuthResponse(resp) {
+		if isAuthResponse(resp) {
 			return nil, newAuthRequiredError(http.MethodPost, "/api/chat/message", resp)
 		}
 		return nil, apiError(resp)
