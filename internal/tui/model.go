@@ -401,22 +401,26 @@ func (m Model) loadProjectsWithIDAndSSE(requestID uint64, echo bool, selectName 
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		var wg sync.WaitGroup
 		var projects []client.Project
 		var err error
 		var caps []client.ProjectCapacity
 		var capsErr error
 
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		if !echo {
 			projects, err = c.ListProjects(ctx)
-		}()
-		go func() {
-			defer wg.Done()
-			caps, capsErr = c.GetProjectCapacities(ctx)
-		}()
-		wg.Wait()
+		} else {
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				projects, err = c.ListProjects(ctx)
+			}()
+			go func() {
+				defer wg.Done()
+				caps, capsErr = c.GetProjectCapacities(ctx)
+			}()
+			wg.Wait()
+		}
 
 		if client.IsAuthRequired(err) {
 			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: err, echo: echo, startSSE: startSSE}

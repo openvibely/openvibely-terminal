@@ -264,10 +264,13 @@ func TestCLISelectsRequestedProject(t *testing.T) {
 		t.Fatalf("command was not scoped to the requested project:\n%s",
 			strings.Join(rec.urls, "\n"))
 	}
+	if got := rec.count("GET", "/api/capacity/projects"); got != 0 {
+		t.Fatalf("CLI project setup made %d per-project capacity requests, want 0:\n%s", got, rec.all())
+	}
 }
 
 func TestCLIUnknownProjectFails(t *testing.T) {
-	c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects})
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
 
 	var out bytes.Buffer
 	err := RunCLI(c, &out, "nope", []string{"tasks"}, false, false)
@@ -276,6 +279,27 @@ func TestCLIUnknownProjectFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nope") {
 		t.Errorf("err = %v", err)
+	}
+	if got := rec.count("GET", "/api/capacity/projects"); got != 0 {
+		t.Fatalf("unknown project lookup made %d per-project capacity requests, want 0:\n%s", got, rec.all())
+	}
+}
+
+func TestCLINoProjectDoesNotFetchCapacityOrRunCommand(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": `{"projects":[]}`,
+	})
+
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "", []string{"tasks"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "no project selected") {
+		t.Fatalf("err = %v, want no-project error", err)
+	}
+	if got := rec.count("GET", "/api/capacity/projects"); got != 0 {
+		t.Fatalf("no-project startup made %d per-project capacity requests, want 0:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("no-project command made %d task requests, want 0:\n%s", got, rec.all())
 	}
 }
 

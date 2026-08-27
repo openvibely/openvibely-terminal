@@ -454,6 +454,46 @@ func TestDeferredProjectSelectionStartsScopedSSE(t *testing.T) {
 	}
 }
 
+func TestProjectCommandDeferredLoadSkipsCapacity(t *testing.T) {
+	var capacityRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects":
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"OpenVibely Chrome Plugin"},{"id":"p2","name":"docs site"}]}`))
+		case "/api/capacity/projects":
+			capacityRequests.Add(1)
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m, cmd := typeLine(t, m, "/project docs")
+	if m.selectedID != "" {
+		t.Fatalf("selected %q before deferred project load", m.selectedID)
+	}
+
+	loaded, ok := cmd().(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("load command returned %T, want projectsLoadedMsg", cmd())
+	}
+	updated, _ := m.Update(loaded)
+	m = updated.(Model)
+	if m.selectedID != "p2" || m.selectedName != "docs site" {
+		t.Fatalf("selected = %q (%q), want p2 (docs site)", m.selectedID, m.selectedName)
+	}
+	if got := capacityRequests.Load(); got != 0 {
+		t.Fatalf("deferred project selection made %d per-project capacity requests, want 0", got)
+	}
+}
+
 // An unknown name during a deferred load must select nothing at all, not the
 // first project in the list.
 func TestProjectCommandDeferredLoadDoesNotFallBack(t *testing.T) {
@@ -1914,8 +1954,9 @@ func TestViewShowsHeaderAndPrompt(t *testing.T) {
 	}
 }
 
-// loadProjects issues ListProjects and GetProjectCapacities concurrently, so
-// total latency should track the max of the two fetch times, not their sum.
+// loadProjects fetches ListProjects and GetProjectCapacities concurrently for
+// capacity-aware output, so total latency should track the max of the two
+// fetch times, not their sum.
 func TestLoadProjectsFetchesConcurrently(t *testing.T) {
 	const delay = 150 * time.Millisecond
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1926,7 +1967,7 @@ func TestLoadProjectsFetchesConcurrently(t *testing.T) {
 			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
 		case "/api/capacity/projects":
 			time.Sleep(delay)
-			_, _ = w.Write([]byte(`[{"id":"p1","name":"demo","has_capacity":true}]`))
+			_, _ = w.Write([]byte(`[{"id":"p1","name":"demo","running":2,"queue_size":3,"has_capacity":true}]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1940,7 +1981,7 @@ func TestLoadProjectsFetchesConcurrently(t *testing.T) {
 	m := New(c)
 
 	start := time.Now()
-	msg := m.loadProjects(false, "")()
+	msg := m.loadProjects(true, "")()
 	elapsed := time.Since(start)
 
 	got, ok := msg.(projectsLoadedMsg)
@@ -1953,8 +1994,81 @@ func TestLoadProjectsFetchesConcurrently(t *testing.T) {
 	if len(got.projects) != 1 || len(got.capacities) != 1 {
 		t.Fatalf("unexpected result: %+v", got)
 	}
+	updated, _ := m.Update(got)
+	rendered := stripANSI(transcript(updated.(Model)))
+	for _, want := range []string{"Projects", "RUNNING", "QUEUED", "2", "3"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("capacity-aware project output missing %q:\n%s", want, rendered)
+		}
+	}
 	if elapsed >= 2*delay {
 		t.Errorf("loadProjects took %v, want well under %v (fetches should run concurrently)", elapsed, 2*delay)
+	}
+}
+
+// List-only project loads must not wait for or request the optional capacity
+// endpoint. The delayed capacity response makes the latency difference
+// observable while the request count pins the transport contract.
+func TestLoadProjectsListOnlySkipsCapacityAndIsFaster(t *testing.T) {
+	const capacityDelay = 200 * time.Millisecond
+	var capacityRequests atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects":
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
+		case "/api/capacity/projects":
+			capacityRequests.Add(1)
+			time.Sleep(capacityDelay)
+			_, _ = w.Write([]byte(`[{"id":"p1","name":"demo","running":2,"queue_size":1}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+
+	listStart := time.Now()
+	listMsg := m.loadProjects(false, "")()
+	listElapsed := time.Since(listStart)
+	listResult, ok := listMsg.(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("list-only message = %T, want projectsLoadedMsg", listMsg)
+	}
+	if listResult.err != nil {
+		t.Fatalf("list-only err = %v", listResult.err)
+	}
+	if len(listResult.projects) != 1 || len(listResult.capacities) != 0 {
+		t.Fatalf("list-only result = %+v, want project without capacities", listResult)
+	}
+	if got := capacityRequests.Load(); got != 0 {
+		t.Fatalf("list-only load made %d capacity requests, want 0", got)
+	}
+
+	capacityStart := time.Now()
+	capacityMsg := m.loadProjects(true, "")()
+	capacityElapsed := time.Since(capacityStart)
+	capacityResult, ok := capacityMsg.(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("capacity-aware message = %T, want projectsLoadedMsg", capacityMsg)
+	}
+	if capacityResult.err != nil {
+		t.Fatalf("capacity-aware err = %v", capacityResult.err)
+	}
+	if len(capacityResult.projects) != 1 || len(capacityResult.capacities) != 1 {
+		t.Fatalf("capacity-aware result = %+v, want project and capacity", capacityResult)
+	}
+	if got := capacityRequests.Load(); got != 1 {
+		t.Fatalf("capacity-aware load made %d capacity requests, want 1", got)
+	}
+	if listElapsed >= capacityElapsed {
+		t.Fatalf("list-only load took %v, capacity-aware load took %v; list-only should be faster", listElapsed, capacityElapsed)
 	}
 }
 
@@ -2002,8 +2116,9 @@ func TestCheckConnectionFetchesConcurrently(t *testing.T) {
 	}
 }
 
-// If ListProjects fails, loadProjects must still report the error (matching
-// prior sequential behavior) even though GetProjectCapacities ran too.
+// If ListProjects fails, loadProjects must still report the error. The
+// capacity-aware path may fetch both endpoints concurrently, but the list
+// failure remains the returned error.
 func TestLoadProjectsListFailsReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -2024,7 +2139,7 @@ func TestLoadProjectsListFailsReturnsError(t *testing.T) {
 	}
 	m := New(c)
 
-	msg := m.loadProjects(false, "")()
+	msg := m.loadProjects(true, "")()
 	got, ok := msg.(projectsLoadedMsg)
 	if !ok {
 		t.Fatalf("msg = %T, want projectsLoadedMsg", msg)
@@ -2056,7 +2171,7 @@ func TestLoadProjectsCapacitiesFailIgnored(t *testing.T) {
 	}
 	m := New(c)
 
-	msg := m.loadProjects(false, "")()
+	msg := m.loadProjects(true, "")()
 	got, ok := msg.(projectsLoadedMsg)
 	if !ok {
 		t.Fatalf("msg = %T, want projectsLoadedMsg", msg)
