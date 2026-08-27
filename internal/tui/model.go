@@ -860,7 +860,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.connected = false
-			m.authRequired = false
 			m.connChecked = true
 			m.connErr = msg.err.Error()
 			m.append(entry{role: "error", text: "loading projects: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
@@ -901,6 +900,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
+			if m.handleTransportError(msg.err) {
 				return m, nil
 			}
 			m.append(entry{role: "error", text: msg.err.Error()})
@@ -945,6 +947,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.handleAuthError(msg.err) {
 				return m, nil
 			}
+			if m.handleTransportError(msg.err) {
+				return m, nil
+			}
 			m.append(entry{role: "error", text: msg.err.Error()})
 			return m, nil
 		}
@@ -965,6 +970,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.busy = false
 			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
+			if m.handleTransportError(msg.err) {
 				return m, nil
 			}
 			m.append(entry{role: "error", text: "send failed: " + msg.err.Error()})
@@ -1002,6 +1010,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.busy = false
 				return m, nil
 			}
+			if m.handleTransportError(msg.err) {
+				m.busy = false
+				return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+			}
 			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration) // transient; keep polling
 		}
 		switch msg.status.Status {
@@ -1037,6 +1049,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
+			if m.handleTransportError(msg.err) {
 				return m, nil
 			}
 			m.append(entry{role: "error", text: msg.err.Error()})
@@ -1116,29 +1131,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleSSEEvent(msg.event)
 		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
 			var ce client.ChatEvent
-			if json.Unmarshal(msg.event.Data, &ce) == nil {
-				// Ignore events from a foreign project. Allow empty ProjectID
-				// for single-project servers that omit the field.
-				if ce.ProjectID != "" && ce.ProjectID != m.selectedID {
-					return m, m.waitForCurrentSSE(msg.generation)
-				}
-				// Fast path: if the backend populated CompletedOutput in the SSE
-				// payload, display it immediately without an extra HTTP round-trip.
-				if ce.CompletedOutput != "" {
-					m.pendingMsgID = ""
-					m.pendingMsgProjectID = ""
-					m.pendingMsgProjectGeneration = 0
-					m.busy = false
-					m.append(entry{role: "agent", text: ce.CompletedOutput})
-					return m, m.waitForCurrentSSE(msg.generation)
-				}
+			if err := json.Unmarshal(msg.event.Data, &ce); err != nil || ce.ExecID == "" || ce.ExecID != m.pendingMsgID {
+				// A project stream carries completions for multiple chats. An
+				// event without the pending execution ID must not settle this
+				// chat or trigger a status fetch for the wrong execution.
+				return m, m.waitForCurrentSSE(msg.generation)
+			}
+			// Ignore events from a foreign project. Allow empty ProjectID
+			// for single-project servers that omit the field.
+			if ce.ProjectID != "" && ce.ProjectID != m.selectedID {
+				return m, m.waitForCurrentSSE(msg.generation)
+			}
+			// Fast path: if the backend populated CompletedOutput in the SSE
+			// payload, display it immediately without an extra HTTP round-trip.
+			if ce.CompletedOutput != "" {
+				m.pendingMsgID = ""
+				m.pendingMsgProjectID = ""
+				m.pendingMsgProjectGeneration = 0
+				m.busy = false
+				m.append(entry{role: "agent", text: ce.CompletedOutput})
+				return m, m.waitForCurrentSSE(msg.generation)
 			}
 			// Otherwise issue an immediate status fetch instead of waiting for
 			// the next 1500ms poll tick.
 			return m, tea.Batch(m.waitForCurrentSSE(msg.generation), m.fetchChatStatus(m.pendingMsgID))
 		}
 		return m, m.waitForCurrentSSE(msg.generation)
-
 	case sseDisconnectedMsg:
 		if !m.acceptsSSEGeneration(msg.generation) {
 			return m, nil // stale disconnect from a canceled stream
@@ -1680,6 +1698,22 @@ func (m *Model) markAuthRequired() {
 	if !wasRequired {
 		m.append(entry{role: "error", text: authRecoveryMessage(m.client.BaseURL())})
 	}
+}
+
+func (m *Model) handleTransportError(err error) bool {
+	if !client.IsTransportError(err) {
+		return false
+	}
+	wasOffline := !m.connected && m.connErr != ""
+	m.connected = false
+	m.connChecked = true
+	m.connErr = err.Error()
+	// Preserve known auth-required precedence while also retaining the network
+	// details needed to explain a temporary offline condition.
+	if !wasOffline {
+		m.append(entry{role: "error", text: offlineRecoveryMessage(m.client.BaseURL(), err)})
+	}
+	return true
 }
 
 func (m *Model) handleAuthError(err error) bool {

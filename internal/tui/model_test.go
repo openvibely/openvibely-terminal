@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -891,6 +892,112 @@ func TestProjectLoadTransportFailureClearsConnectedState(t *testing.T) {
 	}
 }
 
+func TestProjectLoadTransportFailurePreservesAuthRequired(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.connected = true
+	m.authRequired = true
+	m.connChecked = true
+
+	updated, _ = m.Update(m.loadProjects(false, "")())
+	m = updated.(Model)
+
+	if m.connected || !m.authRequired || m.connErr == "" {
+		t.Fatalf("project transport failure lost known auth state: connected=%t authRequired=%t connErr=%q", m.connected, m.authRequired, m.connErr)
+	}
+	if !strings.Contains(strings.ToLower(m.renderHeader()), "sign-in required") {
+		t.Fatalf("project transport failure lost sign-in precedence:\n%s", m.renderHeader())
+	}
+	status := strings.ToLower(m.renderStatus())
+	if !strings.Contains(status, "offline") || !strings.Contains(status, "sign-in required") {
+		t.Fatalf("project transport failure omitted combined recovery state:\n%s", m.renderStatus())
+	}
+}
+
+func refusedTransportError(t *testing.T) error {
+	t.Helper()
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.ListTasks(context.Background(), "p1")
+	if err == nil {
+		t.Fatal("expected connection-refused transport error")
+	}
+	return err
+}
+
+func TestNonHealthTransportFailuresEnterOfflineRecovery(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  func(error) tea.Msg
+	}{
+		{
+			name: "command result",
+			msg: func(err error) tea.Msg {
+				return resultMsg{err: err}
+			},
+		},
+		{
+			name: "chat send",
+			msg: func(err error) tea.Msg {
+				return chatSentMsg{projectID: "p1", err: err}
+			},
+		},
+		{
+			name: "chat status",
+			msg: func(err error) tea.Msg {
+				return chatStatusMsg{messageID: "msg-1", projectID: "p1", err: err}
+			},
+		},
+		{
+			name: "thread",
+			msg: func(err error) tea.Msg {
+				return threadOpenedMsg{projectID: "p1", err: err}
+			},
+		},
+		{
+			name: "selector",
+			msg: func(err error) tea.Msg {
+				return selectorActiveMsg{title: "Tasks", err: err}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(t)
+			m.selectedID = "p1"
+			m.connected = true
+			m.connChecked = true
+			m.busy = true
+			if tc.name == "chat status" {
+				m.pendingMsgID = "msg-1"
+			}
+
+			next, _ := m.Update(tc.msg(refusedTransportError(t)))
+			m = next.(Model)
+
+			if m.connected || !m.connChecked || m.connErr == "" {
+				t.Fatalf("transport state = connected=%t connChecked=%t connErr=%q", m.connected, m.connChecked, m.connErr)
+			}
+			if strings.Contains(strings.ToLower(m.renderHeader()), "online") {
+				t.Fatalf("transport failure left online header:\n%s", m.renderHeader())
+			}
+			if !strings.Contains(strings.ToLower(transcript(m)), "unable to reach the openvibely backend") {
+				t.Fatalf("transport failure omitted offline recovery transcript:\n%s", transcript(m))
+			}
+			if !strings.Contains(strings.ToLower(m.renderStatus()), "offline") {
+				t.Fatalf("transport failure omitted offline status:\n%s", m.renderStatus())
+			}
+		})
+	}
+}
 func TestEventsCommandToggles(t *testing.T) {
 	m := newTestModel(t)
 	if m.showEvents {
@@ -1834,10 +1941,10 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 	m.sseEvents = events
 	m.sseErrs = errs
 
-	// Deliver a chat_response_done SSE event with no CompletedOutput.
+	// Deliver a chat_response_done SSE event for the pending execution with no CompletedOutput.
 	ev := client.Event{
 		Name: "chat_response_done",
-		Data: json.RawMessage(`{}`),
+		Data: json.RawMessage(`{"exec_id":"msg-42"}`),
 	}
 	_, cmd := m.Update(sseEventMsg{event: ev})
 
@@ -1877,7 +1984,7 @@ func TestSSEChatResponseDoneCompletedOutputFastPath(t *testing.T) {
 
 	payload, _ := json.Marshal(client.ChatEvent{
 		Type:            "chat_response_done",
-		ExecID:          "e1",
+		ExecID:          "msg-99",
 		CompletedOutput: "hello from the agent",
 	})
 	ev := client.Event{
@@ -1898,7 +2005,43 @@ func TestSSEChatResponseDoneCompletedOutputFastPath(t *testing.T) {
 	}
 }
 
-// TestSSEChatResponseDoneWithNoPendingIsNoOp verifies that receiving
+func TestSSEChatResponseDoneSameProjectDifferentExecutionIsIgnored(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "project-A"
+	m.pendingMsgID = "msg-99"
+	m.busy = true
+
+	// Wire up closed SSE channels so waitForSSE() returns immediately.
+	events := make(chan client.Event)
+	errs := make(chan error)
+	close(events)
+	close(errs)
+	m.sseEvents = events
+	m.sseErrs = errs
+	before := transcript(m)
+
+	payload, _ := json.Marshal(client.ChatEvent{
+		Type:            "chat_response_done",
+		ProjectID:       "project-A",
+		ExecID:          "other-execution",
+		CompletedOutput: "unrelated reply",
+	})
+	next, cmd := m.Update(sseEventMsg{
+		event: client.Event{Name: "chat_response_done", Data: json.RawMessage(payload)},
+	})
+	m = next.(Model)
+
+	if m.pendingMsgID != "msg-99" || !m.busy || transcript(m) != before {
+		t.Fatalf("unrelated same-project completion settled pending chat: pending=%q busy=%t transcript=%q", m.pendingMsgID, m.busy, transcript(m))
+	}
+	if cmd == nil {
+		t.Fatal("expected SSE wait command after unrelated completion")
+	}
+	if _, ok := cmd().(sseDisconnectedMsg); !ok {
+		t.Fatalf("wait command returned %T, want sseDisconnectedMsg", cmd())
+	}
+}
+
 // chat_response_done when no message is pending does not trigger a fetch.
 func TestSSEChatResponseDoneWithNoPendingIsNoOp(t *testing.T) {
 	m := newTestModel(t)

@@ -60,6 +60,9 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 		if m.handleAuthError(msg.err) {
 			return m, nil
 		}
+		if m.handleTransportError(msg.err) {
+			return m, nil
+		}
 		m.append(entry{role: "error", text: msg.err.Error()})
 		return m, nil
 	}

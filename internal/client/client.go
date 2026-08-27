@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -76,6 +77,21 @@ func (e *LoginTransportError) Unwrap() error {
 func IsLoginTransportError(err error) bool {
 	var transportErr *LoginTransportError
 	return errors.As(err, &transportErr)
+}
+
+// IsTransportError reports whether an error came from request construction,
+// dialing, timeout, or another network transport rather than an HTTP response.
+// HTTP response errors are deliberately not included so callers can distinguish
+// offline state from server-side failures and authentication responses.
+func IsTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 func newAuthRequiredError(method, path string, resp *http.Response) error {
