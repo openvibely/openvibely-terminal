@@ -1154,6 +1154,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.connectSSE()
 	case tickMsg:
+		if m.loginActive {
+			// Keep the periodic timer alive, but do not start a health check while
+			// a login attempt owns the form. A current auth result would otherwise
+			// advance the session epoch and invalidate the in-flight login result.
+			return m, m.tick()
+		}
 		return m, tea.Batch(m.beginConnectionCheck(), m.tick())
 
 	case spinner.TickMsg:
@@ -1171,7 +1177,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
-	m.loginResumeSSE = m.sseCancel != nil
+	m.loginResumeSSE = m.sseCancel != nil && m.connected && !m.authRequired && m.selectedID != ""
 	m.invalidateSSE()
 	m.loginRestorePrompt = m.input.Prompt
 	m.loginRestorePlaceholder = m.input.Placeholder
@@ -1206,7 +1212,7 @@ func (m *Model) finishLogin() {
 }
 
 func (m *Model) cancelLogin() tea.Cmd {
-	resumeSSE := m.loginResumeSSE && m.connected && !m.authRequired && m.selectedID != ""
+	resumeSSE := m.loginResumeSSE
 	m.loginActive = false
 	m.loginPassword = false
 	m.loginSubmitting = false

@@ -1248,6 +1248,63 @@ func TestBeginLoginInvalidatesActiveSSEBeforeLoginResult(t *testing.T) {
 	}
 }
 
+func TestTickDoesNotStartHealthCheckWhileLoginActive(t *testing.T) {
+	m := newTestModel(t)
+	m.connectionGeneration = 7
+	m.loginActive = true
+	m.loginPassword = true
+	m.loginSubmitting = true
+
+	next, cmd := m.Update(tickMsg{})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("active login should keep the periodic tick scheduled")
+	}
+	if m.connectionGeneration != 7 {
+		t.Fatalf("tick advanced connection generation during login: got %d, want 7", m.connectionGeneration)
+	}
+	if !m.loginActive || !m.loginSubmitting {
+		t.Fatalf("tick changed login state: active=%t submitting=%t", m.loginActive, m.loginSubmitting)
+	}
+}
+
+func TestCancelLoginAfterTransportFailureRestoresPreviousSSE(t *testing.T) {
+	m := newTestModel(t)
+	m.connected = true
+	m.connChecked = true
+	m.selectedID = "project-a"
+	m.sseGeneration = 4
+	canceled := false
+	m.sseCancel = func() { canceled = true }
+
+	m, _ = m.beginLogin()
+	if !m.loginResumeSSE {
+		t.Fatal("online login should remember the active SSE stream")
+	}
+	m.loginPassword = true
+	m.loginSubmitting = true
+	loginGeneration := m.sessionGeneration
+
+	next, cmd := m.Update(loginResultMsg{
+		sessionGeneration: loginGeneration,
+		err:               &client.LoginTransportError{},
+	})
+	m = next.(Model)
+	if cmd != nil || !m.loginActive || m.loginSubmitting {
+		t.Fatalf("transport failure changed retry state unexpectedly: active=%t submitting=%t cmd=%v", m.loginActive, m.loginSubmitting, cmd)
+	}
+	if m.connected || m.authRequired {
+		t.Fatalf("transport failure state = connected=%t authRequired=%t", m.connected, m.authRequired)
+	}
+
+	next, resume := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	defer m.Cleanup()
+	if resume == nil || m.loginActive || m.loginResumeSSE || m.sseCancel == nil || !canceled {
+		t.Fatalf("cancel did not restore the previous SSE stream: resume=%v active=%t resumeSSE=%t cancel-nil=%t old-canceled=%t", resume, m.loginActive, m.loginResumeSSE, m.sseCancel == nil, canceled)
+	}
+}
+
 func TestInteractiveLoginTransportFailureUsesOfflineRecovery(t *testing.T) {
 	const password = "transport-password-that-must-not-appear"
 	c, err := client.New("http://127.0.0.1:1")
