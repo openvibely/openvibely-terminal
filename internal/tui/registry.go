@@ -2069,7 +2069,7 @@ func projectCommand() command {
 			name := strings.Join(args, " ")
 			if len(m.projects) == 0 {
 				var cmd tea.Cmd
-				m, cmd = m.beginProjectLoad(false, name)
+				m, cmd = m.beginProjectLoadWithSSE(false, name, true)
 				return m, cmd
 			}
 			return m.pickProject(name)

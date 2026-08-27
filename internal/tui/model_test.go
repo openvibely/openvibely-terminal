@@ -389,6 +389,70 @@ func TestProjectCommandResolvesAfterDeferredLoad(t *testing.T) {
 	}
 }
 
+func TestDeferredProjectSelectionStartsScopedSSE(t *testing.T) {
+	requestURI := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p2","name":"docs site"}]}`))
+		case "/api/capacity/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case "/events/live":
+			select {
+			case requestURI <- r.URL.RequestURI():
+			default:
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+
+	m, loadCmd := typeLine(t, m, "/project docs")
+	if loadCmd == nil {
+		t.Fatal("deferred project selection did not start a project load")
+	}
+	loaded, ok := loadCmd().(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("load command returned %T, want projectsLoadedMsg", loadCmd())
+	}
+
+	updated, streamCmd := m.Update(loaded)
+	m = updated.(Model)
+	defer m.Cleanup()
+	if m.selectedID != "p2" {
+		t.Fatalf("selected = %q, want p2", m.selectedID)
+	}
+	if streamCmd == nil {
+		t.Fatal("deferred project selection did not start an SSE command")
+	}
+
+	select {
+	case got := <-requestURI:
+		if got != "/events/live?project_id=p2" {
+			t.Fatalf("SSE request URI = %q, want scoped project p2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scoped SSE request")
+	}
+}
+
 // An unknown name during a deferred load must select nothing at all, not the
 // first project in the list.
 func TestProjectCommandDeferredLoadDoesNotFallBack(t *testing.T) {
@@ -554,12 +618,54 @@ func TestCurrentSessionProjectLoadCannotClearAuthRequiredState(t *testing.T) {
 	updated, cmd = m.Update(connCheckedMsg{
 		generation: m.connectionGeneration,
 		capacity:   &client.GlobalCapacity{HasCapacity: true},
+		auth:       &client.AuthStatus{Authenticated: true},
 	})
 	m = updated.(Model)
 	if cmd == nil || m.authRequired || !m.connected || m.sseRetryAfterProject {
 		t.Fatalf("current health confirmation did not establish the session/retry SSE: authRequired=%t connected=%t retry=%t cmd=%v", m.authRequired, m.connected, m.sseRetryAfterProject, cmd)
 	}
 	m.Cleanup()
+}
+
+func TestCapacityOnlyHealthSuccessCannotClearAuthRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		code int
+	}{
+		{name: "anonymous auth response", body: `{"authenticated":false}`, code: http.StatusOK},
+		{name: "auth response unavailable", body: `auth backend unavailable`, code: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/capacity/global":
+					_, _ = w.Write([]byte(`{"has_capacity":true}`))
+				case "/auth/me":
+					w.WriteHeader(tc.code)
+					_, _ = w.Write([]byte(tc.body))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.authRequired = true
+			m.connChecked = true
+
+			updated, cmd := m.Update(m.checkConnection()())
+			m = updated.(Model)
+			if cmd != nil || !m.authRequired || m.connected || m.connErr != "" {
+				t.Fatalf("capacity-only health cleared auth state: authRequired=%t connected=%t connErr=%q cmd=%v", m.authRequired, m.connected, m.connErr, cmd)
+			}
+		})
+	}
 }
 
 func TestProjectScopedAsyncResultsAreIgnoredAfterProjectSwitch(t *testing.T) {
@@ -1100,6 +1206,45 @@ func TestSuccessfulLoginInvalidatesPreviousSSEStream(t *testing.T) {
 	m = next.(Model)
 	if cmd == nil || !canceled || m.sseCancel != nil || m.sseGeneration != 5 {
 		t.Fatalf("successful login did not invalidate prior stream: canceled=%t cancel-nil=%t generation=%d cmd=%v", canceled, m.sseCancel == nil, m.sseGeneration, cmd)
+	}
+}
+
+func TestBeginLoginInvalidatesActiveSSEBeforeLoginResult(t *testing.T) {
+	m := newTestModel(t)
+	m.sseGeneration = 4
+	canceled := false
+	m.sseCancel = func() { canceled = true }
+
+	var cmd tea.Cmd
+	m, cmd = m.beginLogin()
+	if cmd != nil || !canceled || m.sseCancel != nil || m.sseGeneration != 5 {
+		t.Fatalf("beginLogin did not invalidate active stream: canceled=%t cancel-nil=%t generation=%d cmd=%v", canceled, m.sseCancel == nil, m.sseGeneration, cmd)
+	}
+	m.loginPassword = true
+	m.loginSubmitting = true
+	loginSessionGeneration := m.sessionGeneration
+
+	// This message belongs to the stream that was active before /login. It must
+	// not advance the login session generation or invalidate the in-flight form.
+	next, follow := m.Update(sseDisconnectedMsg{
+		generation: 4,
+		err:        &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/live", StatusCode: http.StatusUnauthorized},
+	})
+	m = next.(Model)
+	if follow != nil || m.sessionGeneration != loginSessionGeneration || !m.loginSubmitting || m.authRequired {
+		t.Fatalf("stale SSE auth failure changed login state: session=%d submitting=%t authRequired=%t follow=%v", m.sessionGeneration, m.loginSubmitting, m.authRequired, follow)
+	}
+
+	// The login result from the current attempt must remain deliverable after
+	// the stale stream message was ignored, including a retryable credential
+	// failure that clears submitting state.
+	next, follow = m.Update(loginResultMsg{
+		sessionGeneration: loginSessionGeneration,
+		err:               fmt.Errorf("login failed: invalid credentials"),
+	})
+	m = next.(Model)
+	if follow != nil || !m.loginActive || !m.loginPassword || m.loginSubmitting || m.input.Value() != "" {
+		t.Fatalf("login result was rejected after stale SSE failure: active=%t password=%t submitting=%t input=%q follow=%v", m.loginActive, m.loginPassword, m.loginSubmitting, m.input.Value(), follow)
 	}
 }
 

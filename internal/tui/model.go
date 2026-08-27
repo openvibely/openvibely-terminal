@@ -106,6 +106,7 @@ type Model struct {
 	loginRestorePrompt      string
 	loginRestorePlaceholder string
 	loginRestoreEchoMode    textinput.EchoMode
+	loginResumeSSE          bool
 
 	// projects
 	projects     []client.Project
@@ -797,6 +798,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.authRequired = false
 			m.connErr = msg.err.Error()
 		} else {
+			// Capacity proves that the backend is reachable, but it does not
+			// establish that the current cookie session is authenticated. Once the
+			// model is sign-in-required, retain that state until AuthMe confirms the
+			// current session or Login succeeds.
+			if wasAuthRequired && (msg.auth == nil || !msg.auth.Authenticated) {
+				m.connected = false
+				m.authRequired = true
+				m.connErr = ""
+				return m, nil
+			}
 			m.connected = true
 			m.authRequired = false
 			m.connErr = ""
@@ -1160,6 +1171,8 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
+	m.loginResumeSSE = m.sseCancel != nil
+	m.invalidateSSE()
 	m.loginRestorePrompt = m.input.Prompt
 	m.loginRestorePlaceholder = m.input.Placeholder
 	m.loginRestoreEchoMode = m.input.EchoMode
@@ -1183,6 +1196,7 @@ func (m *Model) finishLogin() {
 	m.loginPassword = false
 	m.loginSubmitting = false
 	m.loginUsername = ""
+	m.loginResumeSSE = false
 	m.input.SetValue("")
 	m.input.Prompt = m.loginRestorePrompt
 	m.input.Placeholder = m.loginRestorePlaceholder
@@ -1191,11 +1205,13 @@ func (m *Model) finishLogin() {
 	m.menu = nil
 }
 
-func (m *Model) cancelLogin() {
+func (m *Model) cancelLogin() tea.Cmd {
+	resumeSSE := m.loginResumeSSE && m.connected && !m.authRequired && m.selectedID != ""
 	m.loginActive = false
 	m.loginPassword = false
 	m.loginSubmitting = false
 	m.loginUsername = ""
+	m.loginResumeSSE = false
 	m.busy = false
 	m.input.SetValue("")
 	m.input.Prompt = m.loginRestorePrompt
@@ -1204,6 +1220,10 @@ func (m *Model) cancelLogin() {
 	m.input.Focus()
 	m.menu = nil
 	m.append(entry{role: "system", text: "sign-in cancelled"})
+	if resumeSSE {
+		return m.connectSSE()
+	}
+	return nil
 }
 
 func (m Model) handleLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1214,7 +1234,7 @@ func (m Model) handleLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc":
 		if !m.loginSubmitting {
-			m.cancelLogin()
+			return m, m.cancelLogin()
 		}
 		return m, nil
 	case "enter":
