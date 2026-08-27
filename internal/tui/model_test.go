@@ -1353,6 +1353,159 @@ func TestStaleSSEMessagesAreIgnoredAfterReconnect(t *testing.T) {
 	}
 }
 
+func TestQueuedSSETaskEventFromPreviousProjectIsIgnoredAfterSwitch(t *testing.T) {
+	m := newTestModel(t)
+	m.showEvents = true
+	m.projects = []client.Project{
+		{ID: "project-A", Name: "Project A"},
+		{ID: "project-B", Name: "Project B"},
+	}
+	m.selectedID = "project-A"
+	m.selectedName = "Project A"
+	m.sseGeneration = 1
+
+	// Dequeue an event from the old stream before switching projects. The
+	// resulting message remains queued for Update until after the switch.
+	oldEvents := make(chan client.Event, 1)
+	oldErrs := make(chan error)
+	oldEvents <- client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","task_id":"task-a","task_name":"old Project A task","project_id":"project-A","status":"running"}`),
+	}
+	oldMessage, ok := m.waitForSSE(1, oldEvents, oldErrs)().(sseEventMsg)
+	if !ok {
+		t.Fatal("old stream command did not return sseEventMsg")
+	}
+
+	m, cmd := m.pickProject("project-B")
+	if cmd != nil {
+		t.Fatal("project switch without an active stream should not start a command")
+	}
+	if m.selectedID != "project-B" {
+		t.Fatalf("selected project = %q, want project-B", m.selectedID)
+	}
+	currentGeneration := m.sseGeneration
+	if currentGeneration == oldMessage.generation {
+		t.Fatalf("project switch did not invalidate SSE generation %d", currentGeneration)
+	}
+
+	// Install deterministic replacement-stream channels, then deliver the old
+	// queued event followed by a valid event from Project B.
+	currentEvents := make(chan client.Event)
+	currentErrs := make(chan error)
+	m.sseEvents = currentEvents
+	m.sseErrs = currentErrs
+	before := transcript(m)
+
+	updated, cmd := m.Update(oldMessage)
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatal("stale queued event should be discarded without re-arming the old stream")
+	}
+	if transcript(m) != before {
+		t.Fatalf("stale Project A event changed the transcript:\n%s", transcript(m))
+	}
+
+	updated, cmd = m.Update(sseEventMsg{
+		generation: currentGeneration,
+		event: client.Event{
+			Name: "task_status_changed",
+			Data: json.RawMessage(`{"type":"task_status_changed","task_id":"task-b","task_name":"current Project B task","project_id":"project-B","status":"completed"}`),
+		},
+	})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("current Project B event should re-arm the replacement stream")
+	}
+	out := transcript(m)
+	if strings.Contains(out, "old Project A task") {
+		t.Fatalf("queued Project A event appeared after the switch:\n%s", out)
+	}
+	if !strings.Contains(out, "current Project B task") {
+		t.Fatalf("current Project B event was not rendered:\n%s", out)
+	}
+}
+
+func TestStaleSSEChatResponseDoneIsIgnoredWithAndWithoutProjectMetadata(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "project metadata present",
+			data: `{"type":"chat_response_done","project_id":"project-A","exec_id":"exec-A","completed_output":"stale Project A reply"}`,
+		},
+		{
+			name: "project metadata missing",
+			data: `{"type":"chat_response_done","exec_id":"exec-A"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fetchCalled := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/api/chat/message/") {
+					select {
+					case fetchCalled <- struct{}{}:
+					default:
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"status":"pending"}`))
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.showEvents = true
+			m.selectedID = "project-B"
+			m.pendingMsgID = "exec-A"
+			m.pendingMsgProjectID = "project-B"
+			m.pendingMsgProjectGeneration = 2
+			m.busy = true
+			m.sseGeneration = 2
+
+			// Closed replacement-stream channels make any incorrectly returned
+			// re-arm command deterministic, while the stale generation must be
+			// rejected before it can reach the status-fetch branch.
+			events := make(chan client.Event)
+			errs := make(chan error)
+			close(events)
+			close(errs)
+			m.sseEvents = events
+			m.sseErrs = errs
+			before := transcript(m)
+
+			updated, cmd := m.Update(sseEventMsg{
+				generation: 1,
+				event:      client.Event{Name: "chat_response_done", Data: json.RawMessage(tc.data)},
+			})
+			m = updated.(Model)
+
+			if cmd != nil {
+				t.Fatal("stale completion should be discarded without re-arming or fetching status")
+			}
+			if m.pendingMsgID != "exec-A" || !m.busy {
+				t.Fatalf("stale completion changed pending state: pending=%q busy=%t", m.pendingMsgID, m.busy)
+			}
+			if transcript(m) != before {
+				t.Fatalf("stale completion changed the transcript:\n%s", transcript(m))
+			}
+			select {
+			case <-fetchCalled:
+				t.Fatal("stale completion triggered a chat status fetch")
+			default:
+			}
+		})
+	}
+}
+
 func TestStaleConnectionCheckIsIgnoredAfterLoginRetryStarts(t *testing.T) {
 	m := newTestModel(t)
 	m.connectionGeneration = 2
