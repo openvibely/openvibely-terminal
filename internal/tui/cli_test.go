@@ -279,6 +279,40 @@ func TestCLIUnknownProjectFails(t *testing.T) {
 	}
 }
 
+func TestCLIBriefingCommandsRequireProjectWhenProjectListIsEmpty(t *testing.T) {
+	cases := []struct {
+		name        string
+		args        []string
+		fetchPath   string
+		triggerPath string
+	}{
+		{name: "pulse", args: []string{"pulse"}, fetchPath: "/upcoming"},
+		{name: "pulse summary", args: []string{"pulse", "summary"}, fetchPath: "/upcoming", triggerPath: "/upcoming/summary"},
+		{name: "reflection", args: []string{"reflection"}, fetchPath: "/history"},
+		{name: "reflection summary", args: []string{"reflection", "summary"}, fetchPath: "/history", triggerPath: "/history/summary"},
+		{name: "grades", args: []string{"grades"}, fetchPath: "/history"},
+		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/history", triggerPath: "/history/grade-ideas"},
+		{name: "insights", args: []string{"insights"}, fetchPath: "/insights"},
+		{name: "insights analyze", args: []string{"insights", "analyze"}, fetchPath: "/insights", triggerPath: "/insights/analyze"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": `{"projects":[]}`,
+			})
+			err := RunCLI(c, &bytes.Buffer{}, "", tc.args, false, false)
+			if err == nil || !strings.Contains(err.Error(), "no project selected — use /project <name>") {
+				t.Fatalf("%v: err = %v, want actionable no-project guidance", tc.args, err)
+			}
+			if rec.saw("GET", tc.fetchPath) || (tc.triggerPath != "" && rec.saw("POST", tc.triggerPath)) {
+				t.Fatalf("%v made an unscoped briefing/analysis request:\n%s", tc.args, rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIUnknownCommandFails(t *testing.T) {
 	c, _ := cliServer(t, nil)
 

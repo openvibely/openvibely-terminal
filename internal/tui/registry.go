@@ -1802,6 +1802,10 @@ func pulseCommand() command {
 			`pulse summary`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			return m, run("Pulse", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -1829,6 +1833,10 @@ func reflectionCommand() command {
 			`reflection summary`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			return m, run("Reflection", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -1852,6 +1860,10 @@ func gradesCommand() command {
 		},
 		examples: []string{`grades`, `grades run`},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			return m, run("Grades", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -1879,6 +1891,10 @@ func insightsCommand() command {
 			`insights analyze`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			return m, run("Insights", cmdTimeout, func(ctx context.Context) (string, error) {

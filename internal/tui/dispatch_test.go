@@ -102,7 +102,7 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 	t.Helper()
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec.record(r.Method, r.URL.Path)
+		rec.recordURL(r.Method, r.URL.RequestURI())
 		_ = r.ParseForm()
 		rec.mu.Lock()
 		rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
@@ -2582,6 +2582,88 @@ func TestGenerateThenFetch(t *testing.T) {
 			t.Errorf("expected error in transcript:\n%s", transcript(m))
 		}
 	})
+}
+
+func TestProjectScopedBriefingCommandsRequireSelectionAndPreserveScope(t *testing.T) {
+	type testCase struct {
+		name        string
+		line        string
+		fetchPath   string
+		fetchOutput string
+		triggerPath string
+	}
+
+	cases := []testCase{
+		{name: "pulse", line: "/pulse", fetchPath: "/upcoming", fetchOutput: "pulse output"},
+		{name: "pulse summary", line: "/pulse summary", fetchPath: "/upcoming", fetchOutput: "pulse output", triggerPath: "/upcoming/summary"},
+		{name: "reflection", line: "/reflection", fetchPath: "/history", fetchOutput: "reflection output"},
+		{name: "reflection summary", line: "/reflection summary", fetchPath: "/history", fetchOutput: "reflection output", triggerPath: "/history/summary"},
+		{name: "grades", line: "/grades", fetchPath: "/history", fetchOutput: "grades output"},
+		{name: "grades run", line: "/grades run", fetchPath: "/history", fetchOutput: "grades output", triggerPath: "/history/grade-ideas"},
+		{name: "insights", line: "/insights", fetchPath: "/insights", fetchOutput: "insights output"},
+		{name: "insights analyze", line: "/insights analyze", fetchPath: "/insights", fetchOutput: "insights output", triggerPath: "/insights/analyze"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run("no project/"+tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				tc.fetchPath: "<div>" + tc.fetchOutput + "</div>",
+			})
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, tc.line)
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s made backend requests without a selected project:\n%s", tc.line, calls)
+			}
+			out := transcript(m)
+			if !strings.Contains(out, "no project selected — use /project <name>") {
+				t.Fatalf("%s missing actionable no-project guidance:\n%s", tc.line, out)
+			}
+			if m.busy {
+				t.Fatalf("%s left the model busy", tc.line)
+			}
+			if m.selectorActive {
+				t.Fatalf("%s opened a selector without a selected project", tc.line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Fatalf("%s opened a confirmation without a selected project", tc.line)
+			}
+		})
+
+		t.Run("selected project/"+tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				tc.fetchPath: "<div>" + tc.fetchOutput + "</div>",
+			})
+			m = runLine(t, m, tc.line)
+
+			if !rec.saw("GET", tc.fetchPath) {
+				t.Fatalf("%s did not fetch %s:\n%s", tc.line, tc.fetchPath, rec.all())
+			}
+			if tc.triggerPath != "" && !rec.saw("POST", tc.triggerPath) {
+				t.Fatalf("%s did not trigger %s:\n%s", tc.line, tc.triggerPath, rec.all())
+			}
+			if tc.triggerPath == "" && strings.Contains(rec.all(), "POST") {
+				t.Fatalf("%s unexpectedly triggered a regeneration:\n%s", tc.line, rec.all())
+			}
+			if !strings.Contains(transcript(m), tc.fetchOutput) {
+				t.Fatalf("%s did not preserve fetched output:\n%s", tc.line, transcript(m))
+			}
+			if m.busy {
+				t.Fatalf("%s left the model busy", tc.line)
+			}
+
+			rec.mu.Lock()
+			urls := append([]string(nil), rec.urls...)
+			rec.mu.Unlock()
+			for _, url := range urls {
+				if !strings.Contains(url, "project_id=p1") {
+					t.Errorf("%s sent an unscoped request: %s", tc.line, url)
+				}
+			}
+		})
+	}
 }
 
 // TestDestructiveCommandsRequireConfirmation verifies VISION.md §"Operator Trust
