@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -569,6 +570,109 @@ func BenchmarkRenderExecTimesLargeInput(b *testing.B) {
 				renderExecTimesBenchmarkSink = renderExecTimes("Execution time", fixture.times)
 			}
 		})
+	}
+}
+
+func TestConnectionPresentationAcrossHealthTransitions(t *testing.T) {
+	m := newTestModel(t)
+	cases := []struct {
+		name             string
+		check            *connCheckedMsg
+		header           string
+		statusContains   []string
+		statusNotContain []string
+		hint             string
+	}{
+		{
+			name:             "initial connecting",
+			header:           "● connecting",
+			statusContains:   []string{"server", "connecting"},
+			statusNotContain: []string{"offline", "health check failed"},
+			hint:             "connecting: /help works offline · check -server or OPENVIBELY_SERVER_URL if this stays here",
+		},
+		{
+			name:           "healthy",
+			check:          &connCheckedMsg{},
+			header:         "● online",
+			statusContains: []string{"server", "connected"},
+			statusNotContain: []string{
+				"connecting", "offline", "health check failed", "start/check your local backend",
+			},
+			hint: "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit",
+		},
+		{
+			name:           "failed",
+			check:          &connCheckedMsg{err: errors.New("health check failed")},
+			header:         "● offline",
+			statusContains: []string{"server", "offline", "health check failed", "start/check your local backend", "set -server <url> or OPENVIBELY_SERVER_URL"},
+			hint:           "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status",
+		},
+		{
+			name:           "healthy again",
+			check:          &connCheckedMsg{},
+			header:         "● online",
+			statusContains: []string{"server", "connected"},
+			statusNotContain: []string{
+				"connecting", "offline", "health check failed", "start/check your local backend",
+			},
+			hint: "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit",
+		},
+		{
+			name:           "failed again",
+			check:          &connCheckedMsg{err: errors.New("health check failed again")},
+			header:         "● offline",
+			statusContains: []string{"server", "offline", "health check failed again", "start/check your local backend", "set -server <url> or OPENVIBELY_SERVER_URL"},
+			hint:           "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.check != nil {
+				next, _ := m.Update(*tc.check)
+				m = next.(Model)
+			}
+
+			header := stripANSI(m.renderHeader())
+			if !strings.Contains(header, tc.header) {
+				t.Errorf("header missing %q:\n%s", tc.header, header)
+			}
+
+			status := stripANSI(m.renderStatus())
+			for _, want := range tc.statusContains {
+				if !strings.Contains(status, want) {
+					t.Errorf("status missing %q:\n%s", want, status)
+				}
+			}
+			for _, unwanted := range tc.statusNotContain {
+				if strings.Contains(status, unwanted) {
+					t.Errorf("status unexpectedly contains %q:\n%s", unwanted, status)
+				}
+			}
+			if got := m.hint(); got != tc.hint {
+				t.Errorf("hint = %q, want %q", got, tc.hint)
+			}
+		})
+	}
+}
+
+func TestConnectionHintPreservesTaskThreadPriority(t *testing.T) {
+	m := newTestModel(t)
+	m.threadID = "task-1"
+	if got, want := m.hint(), "connecting: /help works offline · check -server or OPENVIBELY_SERVER_URL if this stays here"; got != want {
+		t.Errorf("initial thread hint = %q, want %q", got, want)
+	}
+
+	next, _ := m.Update(connCheckedMsg{})
+	m = next.(Model)
+	if got, want := m.hint(), "in task thread · messages reply to this task · /chat to exit · / for commands"; got != want {
+		t.Errorf("healthy thread hint = %q, want %q", got, want)
+	}
+
+	next, _ = m.Update(connCheckedMsg{err: errors.New("health check failed")})
+	m = next.(Model)
+	if got, want := m.hint(), "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"; got != want {
+		t.Errorf("offline thread hint = %q, want %q", got, want)
 	}
 }
 

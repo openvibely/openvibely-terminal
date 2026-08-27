@@ -45,6 +45,25 @@ func (m Model) View() string {
 	return b.String()
 }
 
+type connectionPhase uint8
+
+const (
+	connectionPhaseConnecting connectionPhase = iota
+	connectionPhaseOnline
+	connectionPhaseOffline
+)
+
+func (m Model) connectionPhase() connectionPhase {
+	switch {
+	case m.connected:
+		return connectionPhaseOnline
+	case m.connChecked || m.connErr != "":
+		return connectionPhaseOffline
+	default:
+		return connectionPhaseConnecting
+	}
+}
+
 func (m Model) renderHeader() string {
 	left := titleStyle.Render("OpenVibely")
 
@@ -53,13 +72,17 @@ func (m Model) renderHeader() string {
 		project = m.selectedName
 	}
 
+	phase := m.connectionPhase()
 	conn := noticeStyle.Render("● connecting")
 	if m.authRequired {
 		conn = noticeStyle.Render("● sign-in required")
-	} else if m.connected {
-		conn = statusOKStyle.Render("● online")
-	} else if m.connChecked || m.connErr != "" {
-		conn = statusErrStyle.Render("● offline")
+	} else {
+		switch phase {
+		case connectionPhaseOnline:
+			conn = statusOKStyle.Render("● online")
+		case connectionPhaseOffline:
+			conn = statusErrStyle.Render("● offline")
+		}
 	}
 	stream := ""
 	if m.showEvents {
@@ -139,13 +162,16 @@ func (m Model) hint() string {
 	if len(m.menu) > 0 {
 		return "tab complete · ↑↓ choose · enter run · esc close"
 	}
-	if !m.connected && m.authRequired {
+	phase := m.connectionPhase()
+	if m.authRequired && phase != connectionPhaseOnline {
 		return "sign-in required: /login · help works without backend"
 	}
-	if !m.connected && m.connErr != "" {
-		return "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
-	}
-	if !m.connected && !m.connChecked {
+	switch phase {
+	case connectionPhaseOffline:
+		if m.connErr != "" {
+			return "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
+		}
+	case connectionPhaseConnecting:
 		return "connecting: /help works offline · check -server or OPENVIBELY_SERVER_URL if this stays here"
 	}
 	if m.threadID != "" {
@@ -159,6 +185,7 @@ func (m Model) renderStatus() string {
 	var b strings.Builder
 	row := func(k, v string) { fmt.Fprintf(&b, "  %-16s %s\n", k, v) }
 
+	phase := m.connectionPhase()
 	if m.authRequired {
 		row("server", noticeStyle.Render("sign-in required")+dimStyle.Render(" "+m.client.BaseURL()))
 		if m.connErr != "" {
@@ -168,17 +195,20 @@ func (m Model) renderStatus() string {
 		}
 		row("try", "use /login to enter credentials")
 		row("try", "help remains available without a backend")
-	} else if m.connected {
-		row("server", statusOKStyle.Render("connected")+dimStyle.Render(" "+m.client.BaseURL()))
-	} else if !m.connChecked && m.connErr == "" {
-		row("server", noticeStyle.Render("connecting")+dimStyle.Render(" "+m.client.BaseURL()))
 	} else {
-		row("server", statusErrStyle.Render("offline")+dimStyle.Render(" "+m.client.BaseURL()))
-		if m.connErr != "" {
-			row("error", m.connErr)
+		switch phase {
+		case connectionPhaseOnline:
+			row("server", statusOKStyle.Render("connected")+dimStyle.Render(" "+m.client.BaseURL()))
+		case connectionPhaseConnecting:
+			row("server", noticeStyle.Render("connecting")+dimStyle.Render(" "+m.client.BaseURL()))
+		case connectionPhaseOffline:
+			row("server", statusErrStyle.Render("offline")+dimStyle.Render(" "+m.client.BaseURL()))
+			if m.connErr != "" {
+				row("error", m.connErr)
+			}
+			row("try", "start/check your local backend, then run /status")
+			row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
 		}
-		row("try", "start/check your local backend, then run /status")
-		row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
 	}
 	switch {
 	case m.authRequired:
