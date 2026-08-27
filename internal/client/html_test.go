@@ -216,6 +216,230 @@ func TestDoFormMutationRedirectClassification(t *testing.T) {
 	}
 }
 
+func TestDoFormAuthenticationAndRedirectStatuses(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{
+			name: "form",
+			call: func(c *Client) error {
+				return c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			},
+		},
+		{
+			name: "form_html",
+			call: func(c *Client) error {
+				_, err := c.doFormHTML(context.Background(), http.MethodPost, "/mutate", nil)
+				return err
+			},
+		},
+	}
+
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		for _, operation := range operations {
+			status, operation := status, operation
+			t.Run(fmt.Sprintf("login_redirect_%s_%d", operation.name, status), func(t *testing.T) {
+				c, body := newTrackedFormResponseClient(status, "/login?next=%2Fmutate", "session expired")
+				err := operation.call(c)
+				if err == nil {
+					t.Fatalf("status %d: expected error", status)
+				}
+				if !strings.Contains(err.Error(), "unauthorized") {
+					t.Errorf("status %d: error %q does not mention unauthorized", status, err)
+				}
+				if !body.closed {
+					t.Errorf("status %d: response body was not closed", status)
+				}
+			})
+		}
+	}
+}
+
+func TestDoFormRejectsUnexpectedRedirects(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{
+			name: "form",
+			call: func(c *Client) error {
+				return c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			},
+		},
+		{
+			name: "form_html",
+			call: func(c *Client) error {
+				_, err := c.doFormHTML(context.Background(), http.MethodPost, "/mutate", nil)
+				return err
+			},
+		},
+	}
+
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		for _, operation := range operations {
+			status, operation := status, operation
+			t.Run(fmt.Sprintf("unexpected_redirect_%s_%d", operation.name, status), func(t *testing.T) {
+				c, body := newTrackedFormResponseClient(status, "/mutate/next", "unexpected redirect")
+				err := operation.call(c)
+				if err == nil {
+					t.Fatalf("status %d: expected error", status)
+				}
+				if strings.Contains(err.Error(), "unauthorized") {
+					t.Errorf("status %d: non-login redirect was reported as unauthorized: %v", status, err)
+				}
+				if !body.closed {
+					t.Errorf("status %d: response body was not closed", status)
+				}
+			})
+		}
+	}
+}
+
+func TestDoFormAcceptsSuccessfulResponsesAndCleansBodies(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{
+			name: "form",
+			call: func(c *Client) error {
+				return c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			},
+		},
+		{
+			name: "form_html",
+			call: func(c *Client) error {
+				node, err := c.doFormHTML(context.Background(), http.MethodPost, "/mutate", nil)
+				if err == nil && node == nil {
+					return fmt.Errorf("expected parsed HTML document")
+				}
+				return err
+			},
+		},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "fragment", status: http.StatusOK, body: `<div data-result="ok">updated</div>`},
+		{name: "no_content", status: http.StatusNoContent},
+	} {
+		for _, operation := range operations {
+			tc, operation := tc, operation
+			t.Run(tc.name+"_"+operation.name, func(t *testing.T) {
+				c, body := newTrackedFormResponseClient(tc.status, "", tc.body)
+				if err := operation.call(c); err != nil {
+					t.Fatalf("status %d: unexpected error: %v", tc.status, err)
+				}
+				if !body.closed {
+					t.Errorf("status %d: response body was not closed", tc.status)
+				}
+			})
+		}
+	}
+}
+
+type trackedResponseBody struct {
+	*strings.Reader
+	closed bool
+}
+
+func (b *trackedResponseBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type htmlTestRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f htmlTestRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func newTrackedFormResponseClient(status int, location, bodyText string) (*Client, *trackedResponseBody) {
+	body := &trackedResponseBody{Reader: strings.NewReader(bodyText)}
+	transport := htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		if location != "" {
+			header.Set("Location", location)
+		}
+		return &http.Response{
+			StatusCode: status,
+			Status:     fmt.Sprintf("%d test response", status),
+			Header:     header,
+			Body:       body,
+			Request:    r,
+		}, nil
+	})
+	return &Client{
+		baseURL: "http://backend.test",
+		http: &http.Client{
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}, body
+}
+
+func TestDoFormLoginRedirectIsNotFollowed(t *testing.T) {
+	for _, status := range []int{
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		status := status
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			var mutationRequests, loginRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/mutate":
+					mutationRequests++
+					w.Header().Set("Location", "/login")
+					w.WriteHeader(status)
+				case "/login":
+					loginRequests++
+					w.WriteHeader(http.StatusOK)
+				default:
+					t.Errorf("unexpected request path %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			if err == nil || !strings.Contains(err.Error(), "unauthorized") {
+				t.Fatalf("status %d: error = %v, want unauthorized", status, err)
+			}
+			if mutationRequests != 1 {
+				t.Errorf("mutation requests = %d, want 1", mutationRequests)
+			}
+			if loginRequests != 0 {
+				t.Errorf("login requests = %d, want 0; redirect was followed", loginRequests)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Benchmarks
 //
