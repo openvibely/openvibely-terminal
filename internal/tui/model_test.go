@@ -1333,7 +1333,7 @@ func TestInteractiveLoginTransportFailureUsesOfflineRecovery(t *testing.T) {
 	if !m.loginActive || !m.loginPassword || m.loginSubmitting {
 		t.Fatalf("transport failure should remain retryable: active=%t password=%t submitting=%t", m.loginActive, m.loginPassword, m.loginSubmitting)
 	}
-	if m.connected || m.authRequired || !m.connChecked || m.connErr == "" {
+	if m.connected || !m.authRequired || !m.connChecked || m.connErr == "" {
 		t.Fatalf("transport failure state = connected=%t authRequired=%t checked=%t connErr=%q", m.connected, m.authRequired, m.connChecked, m.connErr)
 	}
 	visible := strings.ToLower(transcript(m) + "\n" + m.renderStatus() + "\n" + m.View())
@@ -1344,6 +1344,154 @@ func TestInteractiveLoginTransportFailureUsesOfflineRecovery(t *testing.T) {
 	}
 	if strings.Contains(visible, password) {
 		t.Fatalf("transport login exposed password:\n%s", visible)
+	}
+}
+
+func TestLoginTransportFailurePreservesAuthUntilHealthConfirmsSession(t *testing.T) {
+	m := newTestModel(t)
+	m.authRequired = true
+	m.connected = false
+	m.connChecked = true
+	m.loginActive = true
+	m.loginPassword = true
+	m.loginSubmitting = true
+	loginGeneration := m.sessionGeneration
+
+	next, cmd := m.Update(loginResultMsg{
+		sessionGeneration: loginGeneration,
+		err:               &client.LoginTransportError{},
+	})
+	m = next.(Model)
+	if cmd != nil || !m.loginActive || m.loginSubmitting || !m.authRequired {
+		t.Fatalf("login transport failure lost retry/auth state: active=%t submitting=%t authRequired=%t cmd=%v", m.loginActive, m.loginSubmitting, m.authRequired, cmd)
+	}
+
+	for _, auth := range []*client.AuthStatus{nil, {Authenticated: false}} {
+		next, cmd = m.Update(connCheckedMsg{
+			generation: m.connectionGeneration,
+			capacity:   &client.GlobalCapacity{HasCapacity: true},
+			auth:       auth,
+		})
+		m = next.(Model)
+		if cmd != nil || !m.authRequired || m.connected {
+			t.Fatalf("partial health result cleared known auth state: auth=%+v authRequired=%t connected=%t cmd=%v", auth, m.authRequired, m.connected, cmd)
+		}
+	}
+
+	next, cmd = m.Update(connCheckedMsg{
+		generation: m.connectionGeneration,
+		capacity:   &client.GlobalCapacity{HasCapacity: true},
+		auth:       &client.AuthStatus{Authenticated: true},
+	})
+	m = next.(Model)
+	if cmd != nil || m.authRequired || !m.connected {
+		t.Fatalf("authenticated health result did not clear auth state: authRequired=%t connected=%t cmd=%v", m.authRequired, m.connected, cmd)
+	}
+}
+
+func TestOfflineProjectRecoveryStartsScopedSSEWithoutPriorStream(t *testing.T) {
+	requestURI := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projects":[{"id":"recovered-project","name":"Recovered"}]}`))
+		case "/api/capacity/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case "/events/live":
+			select {
+			case requestURI <- r.URL.RequestURI():
+			default:
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.connected = false
+	m.connChecked = true
+	m.connErr = "connection refused"
+	if m.sseCancel != nil || m.sseRetryAfterProject {
+		t.Fatal("test must start without an existing stream or retry flag")
+	}
+
+	m, loadCmd := typeLine(t, m, "/projects")
+	if loadCmd == nil {
+		t.Fatal("offline recovery did not start a project load")
+	}
+	loaded, ok := loadCmd().(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("project load returned %T, want projectsLoadedMsg", loadCmd())
+	}
+
+	updated, streamCmd := m.Update(loaded)
+	m = updated.(Model)
+	defer m.Cleanup()
+	if m.selectedID != "recovered-project" {
+		t.Fatalf("recovered project was not selected: %q", m.selectedID)
+	}
+	if streamCmd == nil {
+		t.Fatal("offline recovery did not start an SSE command")
+	}
+
+	select {
+	case got := <-requestURI:
+		if got != "/events/live?project_id=recovered-project" {
+			t.Fatalf("recovery SSE request URI = %q, want scoped project", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recovery SSE request")
+	}
+}
+
+func TestStatusCountsAuthFailureEntersSignInRequired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "project-1"
+	m.connected = true
+	m.connChecked = true
+	m.pendingAlertCount = 4
+	m.activeTaskCount = 3
+	m.queuedTaskCount = 2
+
+	msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+	if !ok {
+		t.Fatalf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+	}
+	if !client.IsAuthRequired(msg.err) {
+		t.Fatalf("status count error = %v, want authentication-required", msg.err)
+	}
+
+	next, cmd := m.Update(msg)
+	m = next.(Model)
+	if cmd != nil || !m.authRequired || m.connected {
+		t.Fatalf("status count auth failure did not enter recovery: authRequired=%t connected=%t cmd=%v", m.authRequired, m.connected, cmd)
+	}
+	if m.pendingAlertCount != 4 || m.activeTaskCount != 3 || m.queuedTaskCount != 2 {
+		t.Fatalf("auth failure overwrote cached counts: alerts=%d active=%d queued=%d", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount)
 	}
 }
 

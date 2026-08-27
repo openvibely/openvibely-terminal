@@ -310,6 +310,8 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 			pendingAlerts int
 			activeTasks   int
 			queuedTasks   int
+			alertsErr     error
+			tasksErr      error
 		)
 
 		var wg sync.WaitGroup
@@ -319,6 +321,7 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 			defer wg.Done()
 			alerts, err := c.ListAlerts(ctx, pid)
 			if err != nil {
+				alertsErr = err
 				return
 			}
 			for _, a := range alerts {
@@ -335,6 +338,7 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 			defer wg.Done()
 			tasks, err := c.ListTasks(ctx, pid)
 			if err != nil {
+				tasksErr = err
 				return
 			}
 			for _, t := range tasks {
@@ -348,13 +352,21 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 		}()
 
 		wg.Wait()
-		return statusCountsMsg{
+		counts := statusCountsMsg{
 			sessionGeneration: sessionGeneration,
 			projectGeneration: projectGeneration,
 			pendingAlerts:     pendingAlerts,
 			activeTasks:       activeTasks,
 			queuedTasks:       queuedTasks,
 		}
+		// Counts are best-effort, but an auth failure proves the session is no
+		// longer usable and must enter sign-in recovery instead of being hidden.
+		if client.IsAuthRequired(alertsErr) {
+			counts.err = alertsErr
+		} else if client.IsAuthRequired(tasksErr) {
+			counts.err = tasksErr
+		}
+		return counts
 	}
 }
 
@@ -795,7 +807,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.append(entry{role: "error", text: "lost connection: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			}
 			m.connected = false
-			m.authRequired = false
+			if !wasAuthRequired {
+				m.authRequired = false
+			}
 			m.connErr = msg.err.Error()
 		} else {
 			// Capacity proves that the backend is reachable, but it does not
@@ -823,6 +837,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusCountsMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale status counts from an older session or project
+		}
+		if client.IsAuthRequired(msg.err) {
+			m.markAuthRequired()
+			return m, nil
 		}
 		m.pendingAlertCount = msg.pendingAlerts
 		m.activeTaskCount = msg.activeTasks
@@ -1049,7 +1067,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Focus()
 			if client.IsLoginTransportError(msg.err) {
 				m.connected = false
-				m.authRequired = false
 				m.connChecked = true
 				m.connErr = msg.err.Error()
 				m.auth = nil

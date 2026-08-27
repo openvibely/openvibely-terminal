@@ -2125,7 +2125,7 @@ func projectsCommand() command {
 				})
 			}
 			var cmd tea.Cmd
-			m, cmd = m.beginProjectLoad(true, "")
+			m, cmd = m.beginProjectLoadWithSSE(true, "", !cliMode)
 			return m, cmd
 		},
 	}

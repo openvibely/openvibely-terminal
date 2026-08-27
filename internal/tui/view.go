@@ -161,6 +161,11 @@ func (m Model) renderStatus() string {
 
 	if m.authRequired {
 		row("server", noticeStyle.Render("sign-in required")+dimStyle.Render(" "+m.client.BaseURL()))
+		if m.connErr != "" {
+			row("network", statusErrStyle.Render("offline"))
+			row("error", m.connErr)
+			row("try", "start/check your local backend, then run /status")
+		}
 		row("try", "use /login to enter credentials")
 		row("try", "help remains available without a backend")
 	} else if m.connected {
