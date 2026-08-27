@@ -359,18 +359,21 @@ func (c *Client) GetWorkerSettings(ctx context.Context, projectID string) (strin
 	return c.pageText(ctx, "/workers"+query("project_id", projectID), "")
 }
 
-// SetGlobalWorkerLimit updates the global max worker count.
-func (c *Client) SetGlobalWorkerLimit(ctx context.Context, limit int) error {
+// setWorkerLimit posts a max_workers value to a worker-limit endpoint.
+func (c *Client) setWorkerLimit(ctx context.Context, path string, limit int) error {
 	v := url.Values{}
 	v.Set("max_workers", strconv.Itoa(limit))
-	return c.doForm(ctx, http.MethodPost, "/workers", v)
+	return c.doForm(ctx, http.MethodPost, path, v)
+}
+
+// SetGlobalWorkerLimit updates the global max worker count.
+func (c *Client) SetGlobalWorkerLimit(ctx context.Context, limit int) error {
+	return c.setWorkerLimit(ctx, "/workers", limit)
 }
 
 // SetProjectWorkerLimit updates one project's worker limit.
 func (c *Client) SetProjectWorkerLimit(ctx context.Context, projectID string, limit int) error {
-	v := url.Values{}
-	v.Set("max_workers", strconv.Itoa(limit))
-	return c.doForm(ctx, http.MethodPost, "/workers/projects/"+url.PathEscape(projectID)+"/limit", v)
+	return c.setWorkerLimit(ctx, "/workers/projects/"+url.PathEscape(projectID)+"/limit", limit)
 }
 
 // --- channels & personality ---

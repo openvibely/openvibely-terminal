@@ -1280,6 +1280,21 @@ func TestWorkersProjectLimitZeroMeansNoLimit(t *testing.T) {
 	}
 }
 
+func TestWorkersProjectLimitValidatesArgument(t *testing.T) {
+	for _, value := range []string{"abc", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, "/workers project "+value)
+			if rec.saw("POST", "/workers/projects/p1/limit") {
+				t.Errorf("invalid project limit %q must not be sent:\n%s", value, rec.all())
+			}
+			if !strings.Contains(transcript(m), "positive number") {
+				t.Errorf("expected a validation message:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
 func TestScheduleAddResolvesTask(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 daily")

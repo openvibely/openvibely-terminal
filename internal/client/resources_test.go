@@ -377,6 +377,109 @@ func TestResourceMutationRoutes(t *testing.T) {
 	}
 }
 
+func TestWorkerLimitMutationsUseExpectedRoutesAndForms(t *testing.T) {
+	var gotMethod, gotPath string
+	var gotForm url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.EscapedPath()
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+			return
+		}
+		gotForm = r.PostForm
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const projectID = "project/with spaces"
+	projectPath := "/workers/projects/project%2Fwith%20spaces/limit"
+	tests := []struct {
+		name      string
+		fn        func() error
+		path      string
+		formValue string
+	}{
+		{
+			name:      "global positive",
+			fn:        func() error { return c.SetGlobalWorkerLimit(ctx, 7) },
+			path:      "/workers",
+			formValue: "7",
+		},
+		{
+			name:      "project escapes ID",
+			fn:        func() error { return c.SetProjectWorkerLimit(ctx, projectID, 12) },
+			path:      projectPath,
+			formValue: "12",
+		},
+		{
+			name:      "global zero",
+			fn:        func() error { return c.SetGlobalWorkerLimit(ctx, 0) },
+			path:      "/workers",
+			formValue: "0",
+		},
+		{
+			name:      "project zero",
+			fn:        func() error { return c.SetProjectWorkerLimit(ctx, projectID, 0) },
+			path:      projectPath,
+			formValue: "0",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotMethod, gotPath, gotForm = "", "", nil
+			if err := tc.fn(); err != nil {
+				t.Fatal(err)
+			}
+			if gotMethod != http.MethodPost || gotPath != tc.path {
+				t.Errorf("request = %s %s, want %s %s", gotMethod, gotPath, http.MethodPost, tc.path)
+			}
+			wantForm := url.Values{"max_workers": []string{tc.formValue}}
+			if !reflect.DeepEqual(gotForm, wantForm) {
+				t.Errorf("form = %v, want %v", gotForm, wantForm)
+			}
+		})
+	}
+}
+
+func TestWorkerLimitMutationsPropagateServerErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"error":"worker limit rejected"}`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{name: "global", fn: func() error { return c.SetGlobalWorkerLimit(ctx, 7) }},
+		{name: "project", fn: func() error { return c.SetProjectWorkerLimit(ctx, "p1", 7) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.fn()
+			if err == nil {
+				t.Fatal("expected worker limit error")
+			}
+			if got := err.Error(); got != "server error (422): worker limit rejected" {
+				t.Errorf("error = %q, want server error propagation", got)
+			}
+		})
+	}
+}
+
 func TestSkillMutationsSendBackendJSONContract(t *testing.T) {
 	type capturedRequest struct {
 		method      string
