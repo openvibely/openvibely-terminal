@@ -186,7 +186,7 @@ func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
 	}
 	m.busy = true
 	newModel, cmd := c.run(m, fields[1:])
-	return newModel, cmd
+	return newModel, withSessionGeneration(cmd, sessionGenerationOf(newModel))
 }
 
 // refreshMenu recomputes the inline command menu from the current input.

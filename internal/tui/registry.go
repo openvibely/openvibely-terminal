@@ -140,7 +140,10 @@ func confirmOr(m Model, displayMsg, cliMsg string, cmd tea.Cmd) (Model, tea.Cmd)
 	}
 	// TUI mode: park the command until the user confirms.
 	m.busy = false
-	m.pendingConfirmation = &pendingCmd{message: displayMsg, cmd: cmd}
+	m.pendingConfirmation = &pendingCmd{
+		message: displayMsg,
+		cmd:     withSessionGeneration(cmd, sessionGenerationOf(m)),
+	}
 	return m, nil
 }
 

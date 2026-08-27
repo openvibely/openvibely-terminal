@@ -492,6 +492,137 @@ func TestStaleProjectListCannotOverwriteCreatedProject(t *testing.T) {
 	}
 }
 
+func TestStaleProjectLoadCannotClearAuthRequiredState(t *testing.T) {
+	m := newTestModel(t)
+	m.projectRequestID = 17
+
+	updated, _ := m.Update(resultMsg{
+		sessionGeneration: m.sessionGeneration,
+		err: &client.AuthRequiredError{
+			Method:     http.MethodGet,
+			Path:       "/api/capacity/global",
+			StatusCode: http.StatusUnauthorized,
+		},
+	})
+	m = updated.(Model)
+	if !m.authRequired {
+		t.Fatal("auth failure did not enter sign-in-required state")
+	}
+	before := transcript(m)
+
+	updated, cmd := m.Update(projectsLoadedMsg{
+		sessionGeneration: 1,
+		requestID:         17,
+		projects:          []client.Project{{ID: "p1", Name: "stale"}},
+	})
+	m = updated.(Model)
+
+	if cmd != nil || !m.authRequired || m.connected || len(m.projects) != 0 || transcript(m) != before {
+		t.Fatalf("stale project load changed auth/project state: authRequired=%t connected=%t projects=%+v cmd=%v transcript=%q", m.authRequired, m.connected, m.projects, cmd, transcript(m))
+	}
+}
+
+func TestStaleNonHealthAuthResultCannotReenterSignIn(t *testing.T) {
+	m := newTestModel(t)
+	m.sessionGeneration = 2
+	m.connected = true
+	m.connChecked = true
+	before := transcript(m)
+
+	next, cmd := m.Update(resultMsg{
+		sessionGeneration: 1,
+		err: &client.AuthRequiredError{
+			Method:     http.MethodGet,
+			Path:       "/tasks",
+			StatusCode: http.StatusUnauthorized,
+		},
+	})
+	m = next.(Model)
+
+	if cmd != nil || !m.connected || m.authRequired || m.connErr != "" || transcript(m) != before {
+		t.Fatalf("stale command auth result changed state: connected=%t authRequired=%t connErr=%q cmd=%v transcript=%q", m.connected, m.authRequired, m.connErr, cmd, transcript(m))
+	}
+}
+
+func TestStaleNonHealthAuthMessagesAreIgnored(t *testing.T) {
+	authErr := &client.AuthRequiredError{
+		Method:     http.MethodGet,
+		Path:       "/protected",
+		StatusCode: http.StatusUnauthorized,
+	}
+	cases := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{name: "project creation", msg: projectCreatedMsg{sessionGeneration: 1, requestID: 1, err: authErr}},
+		{name: "chat acknowledgement", msg: chatSentMsg{sessionGeneration: 1, err: authErr}},
+		{name: "chat status", msg: chatStatusMsg{sessionGeneration: 1, err: authErr}},
+		{name: "thread", msg: threadOpenedMsg{sessionGeneration: 1, err: authErr}},
+		{name: "selector", msg: selectorActiveMsg{sessionGeneration: 1, err: authErr}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(t)
+			m.sessionGeneration = 2
+			m.connected = true
+			m.connChecked = true
+			m.busy = true
+			m.pendingMsgID = "current-message"
+			before := transcript(m)
+
+			next, cmd := m.Update(tc.msg)
+			m = next.(Model)
+			if cmd != nil || !m.connected || m.authRequired || !m.busy || m.connErr != "" || transcript(m) != before {
+				t.Fatalf("stale %s auth result changed state: connected=%t authRequired=%t busy=%t connErr=%q cmd=%v transcript=%q", tc.name, m.connected, m.authRequired, m.busy, m.connErr, cmd, transcript(m))
+			}
+		})
+	}
+}
+
+func TestCommandResultCarriesSessionGeneration(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "p1"
+
+	next, cmd := m.runCommand("/tasks")
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("expected command result")
+	}
+	msg, ok := cmd().(resultMsg)
+	if !ok {
+		t.Fatalf("command message = %T, want resultMsg", cmd())
+	}
+	if msg.sessionGeneration != m.sessionGeneration {
+		t.Fatalf("result session generation = %d, want %d", msg.sessionGeneration, m.sessionGeneration)
+	}
+}
+
+func TestProjectLoadTransportFailureClearsConnectedState(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.connected = true
+	m.connChecked = true
+
+	updated, _ = m.Update(m.loadProjects(false, "")())
+	m = updated.(Model)
+
+	if m.connected || m.authRequired || m.connErr == "" {
+		t.Fatalf("project transport failure state = connected=%t authRequired=%t connErr=%q", m.connected, m.authRequired, m.connErr)
+	}
+	if strings.Contains(strings.ToLower(m.renderHeader()), "online") {
+		t.Fatalf("project transport failure left online header:\n%s", m.renderHeader())
+	}
+	if !strings.Contains(strings.ToLower(m.renderStatus()), "offline") {
+		t.Fatalf("project transport failure omitted offline status:\n%s", m.renderStatus())
+	}
+}
+
 func TestEventsCommandToggles(t *testing.T) {
 	m := newTestModel(t)
 	if m.showEvents {

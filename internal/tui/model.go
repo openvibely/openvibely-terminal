@@ -91,6 +91,7 @@ type Model struct {
 	connChecked          bool
 	authRequired         bool
 	connectionGeneration int
+	sessionGeneration    uint64
 	connErr              string
 	capacity             *client.GlobalCapacity
 	auth                 *client.AuthStatus
@@ -182,6 +183,10 @@ func New(c *client.Client) Model {
 		transcript: viewport.New(0, 0),
 		sseBackoff: time.Second,
 		histPos:    -1,
+		// Generation one is the initial cookie/session epoch. Login and accepted
+		// auth transitions advance it so older asynchronous command results cannot
+		// mutate the new session's state.
+		sessionGeneration: 1,
 		// Generation one belongs to the initial health check created by Init.
 		// Later checks advance it before their commands are launched.
 		connectionGeneration: 1,
@@ -366,6 +371,7 @@ func (m Model) loadProjectsWithID(requestID uint64, echo bool, selectName string
 
 func (m Model) loadProjectsWithIDAndSSE(requestID uint64, echo bool, selectName string, startSSE bool) tea.Cmd {
 	c := m.client
+	sessionGeneration := sessionGenerationOf(m)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -388,15 +394,15 @@ func (m Model) loadProjectsWithIDAndSSE(requestID uint64, echo bool, selectName 
 		wg.Wait()
 
 		if client.IsAuthRequired(err) {
-			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo, startSSE: startSSE}
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, err: err, echo: echo, startSSE: startSSE}
 		}
 		if client.IsAuthRequired(capsErr) {
-			return projectsLoadedMsg{requestID: requestID, err: capsErr, echo: echo, startSSE: startSSE}
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, err: capsErr, echo: echo, startSSE: startSSE}
 		}
 		if err != nil {
-			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo, startSSE: startSSE}
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, err: err, echo: echo, startSSE: startSSE}
 		}
-		return projectsLoadedMsg{requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName, startSSE: startSSE}
+		return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName, startSSE: startSSE}
 	}
 }
 
@@ -411,6 +417,35 @@ func (m *Model) acceptsProjectResponse(requestID uint64) bool {
 	}
 	m.projectRequestID = requestID
 	return true
+}
+
+func (m *Model) acceptsSessionGeneration(generation uint64) bool {
+	// Zero is reserved for hand-built messages in older tests. Every runtime
+	// non-health command message carries a non-zero session generation.
+	if generation == 0 {
+		return true
+	}
+	if m.sessionGeneration == 0 {
+		m.sessionGeneration = generation
+		return true
+	}
+	return m.sessionGeneration == generation
+}
+
+func sessionGenerationOf(m Model) uint64 {
+	if m.sessionGeneration == 0 {
+		return 1
+	}
+	return m.sessionGeneration
+}
+
+func (m *Model) advanceSessionGeneration() uint64 {
+	if m.sessionGeneration == 0 {
+		m.sessionGeneration = 1
+	} else {
+		m.sessionGeneration++
+	}
+	return m.sessionGeneration
 }
 
 func (m *Model) acceptsConnectionResponse(generation int) bool {
@@ -459,22 +494,24 @@ func sseEventProjectID(ev client.Event) string {
 
 func (m Model) login(username, password string) tea.Cmd {
 	c := m.client
+	sessionGeneration := sessionGenerationOf(m)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		// Do not include either credential in the returned message or any error
 		// text. Client.Login also avoids decoding the login response body.
-		return loginResultMsg{err: c.Login(ctx, username, password)}
+		return loginResultMsg{sessionGeneration: sessionGeneration, err: c.Login(ctx, username, password)}
 	}
 }
 
 func (m Model) sendChat(projectID, message string) tea.Cmd {
 	c := m.client
+	sessionGeneration := sessionGenerationOf(m)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		accepted, err := c.SendChatMessage(ctx, projectID, message)
-		return chatSentMsg{accepted: accepted, err: err}
+		return chatSentMsg{sessionGeneration: sessionGeneration, accepted: accepted, err: err}
 	}
 }
 
@@ -482,7 +519,7 @@ func (m Model) doChatStatus(messageID string) tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	status, err := m.client.GetChatStatus(ctx, messageID)
-	return chatStatusMsg{status: status, err: err}
+	return chatStatusMsg{sessionGeneration: sessionGenerationOf(m), status: status, err: err}
 }
 
 func (m Model) pollChat(messageID string) tea.Cmd {
@@ -494,6 +531,57 @@ func (m Model) pollChat(messageID string) tea.Cmd {
 // fetchChatStatus issues an immediate (no-tick) GetChatStatus call.
 func (m Model) fetchChatStatus(messageID string) tea.Cmd {
 	return func() tea.Msg { return m.doChatStatus(messageID) }
+}
+
+// withSessionGeneration tags asynchronous messages produced by a command. The
+// wrapper also handles batches so each child keeps the same session epoch.
+func withSessionGeneration(cmd tea.Cmd, generation uint64) tea.Cmd {
+	if cmd == nil {
+		return nil
+	}
+	if generation == 0 {
+		generation = 1
+	}
+	return func() tea.Msg {
+		return tagSessionMessage(cmd(), generation)
+	}
+}
+
+func tagSessionMessage(msg tea.Msg, generation uint64) tea.Msg {
+	switch typed := msg.(type) {
+	case tea.BatchMsg:
+		batch := make(tea.BatchMsg, len(typed))
+		for i, child := range typed {
+			batch[i] = withSessionGeneration(child, generation)
+		}
+		return batch
+	case projectsLoadedMsg:
+		typed.sessionGeneration = generation
+		return typed
+	case projectCreatedMsg:
+		typed.sessionGeneration = generation
+		return typed
+	case loginResultMsg:
+		typed.sessionGeneration = generation
+		return typed
+	case chatSentMsg:
+		typed.sessionGeneration = generation
+		return typed
+	case chatStatusMsg:
+		typed.sessionGeneration = generation
+		return typed
+	case resultMsg:
+		typed.sessionGeneration = generation
+		return typed
+	case threadOpenedMsg:
+		typed.sessionGeneration = generation
+		return typed
+	case selectorActiveMsg:
+		typed.sessionGeneration = generation
+		return typed
+	default:
+		return msg
+	}
 }
 
 // run executes fn against the backend and turns its output into a resultMsg.
@@ -633,6 +721,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case projectsLoadedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
+			return m, nil // stale project response from an older session epoch
+		}
 		if !m.acceptsProjectResponse(msg.requestID) {
 			return m, nil // stale list from an older project request
 		}
@@ -641,6 +732,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.markAuthRequired()
 				return m, nil
 			}
+			m.connected = false
+			m.authRequired = false
+			m.connChecked = true
 			m.connErr = msg.err.Error()
 			m.append(entry{role: "error", text: "loading projects: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
@@ -671,6 +765,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, reconnect
 
 	case projectCreatedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
+			return m, nil // stale creation response from an older session epoch
+		}
 		if !m.acceptsProjectResponse(msg.requestID) {
 			return m, nil // stale creation after a newer selection or list request
 		}
@@ -719,6 +816,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case resultMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
+			return m, nil // stale command response from an older session epoch
+		}
 		m.busy = false
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
@@ -735,6 +835,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatSentMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
+			return m, nil // stale chat acknowledgement from an older session epoch
+		}
 		if msg.err != nil {
 			m.busy = false
 			if m.handleAuthError(msg.err) {
@@ -750,6 +853,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.pollChat(m.pendingMsgID)
 
 	case chatStatusMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
+			return m, nil // stale chat status from an older session epoch
+		}
 		if m.pendingMsgID == "" {
 			return m, nil
 		}
@@ -783,6 +889,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case threadOpenedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
+			return m, nil // stale thread response from an older session epoch
+		}
 		m.busy = false
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
@@ -826,6 +935,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.invalidateSSE()
+		m.advanceSessionGeneration()
 		m.finishLogin()
 		m.busy = false
 		m.authRequired = false
@@ -930,6 +1040,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	if m.loginActive {
 		return m, nil
 	}
+	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
 	m.loginRestorePrompt = m.input.Prompt
 	m.loginRestorePlaceholder = m.input.Placeholder
@@ -1171,7 +1282,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 // refreshed thread back into the transcript.
 func (m Model) sendThreadMessage(taskID, title, text string) tea.Cmd {
 	c := m.client
-	return run("Thread · "+title, cmdTimeout, func(ctx context.Context) (string, error) {
+	return withSessionGeneration(run("Thread · "+title, cmdTimeout, func(ctx context.Context) (string, error) {
 		if err := c.SendTaskThreadMessage(ctx, taskID, text); err != nil {
 			return "", err
 		}
@@ -1180,7 +1291,7 @@ func (m Model) sendThreadMessage(taskID, title, text string) tea.Cmd {
 			return "sent", nil
 		}
 		return renderThread(d), nil
-	})
+	}), sessionGenerationOf(m))
 }
 
 // --- history ---
@@ -1394,6 +1505,13 @@ func (m *Model) markAuthRequired() {
 	m.connected = false
 	m.connChecked = true
 	m.connErr = ""
+	// An accepted auth failure starts a new session epoch. This invalidates
+	// project, command, chat, selector, and thread results launched before the
+	// backend reported that the session was unauthorized.
+	if !wasRequired {
+		m.advanceSessionGeneration()
+		m.invalidateSSE()
+	}
 	// An auth failure can arrive from project/SSE work while a health check is
 	// still running. Invalidate every in-flight check before it can clear the
 	// sign-in-required state.

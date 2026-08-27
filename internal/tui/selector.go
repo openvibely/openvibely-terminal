@@ -51,6 +51,9 @@ func selectorForWithSuffix(title, command, emptyHint, prefillSuffix string, fetc
 // handleSelector applies a selectorActiveMsg: error, empty hint, single-item
 // auto-select, or open the interactive picker.
 func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
+	if !m.acceptsSessionGeneration(msg.sessionGeneration) {
+		return m, nil // stale selector response from an older session epoch
+	}
 	m.busy = false
 	m = m.clearSelector()
 	if msg.err != nil {
@@ -237,7 +240,8 @@ func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix stri
 	}
 	m.append(entry{role: "you", text: line})
 	if it.dispatch != nil {
-		return it.dispatch(m)
+		next, cmd := it.dispatch(m)
+		return next, withSessionGeneration(cmd, sessionGenerationOf(next))
 	}
 	return m.runCommand(line)
 }

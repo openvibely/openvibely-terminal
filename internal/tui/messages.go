@@ -16,9 +16,10 @@ type connCheckedMsg struct {
 
 // projectsLoadedMsg carries the project list (with capacities when available).
 type projectsLoadedMsg struct {
-	requestID  uint64
-	projects   []client.Project
-	capacities []client.ProjectCapacity
+	sessionGeneration uint64
+	requestID         uint64
+	projects          []client.Project
+	capacities        []client.ProjectCapacity
 	// echo, when set, renders the project list into the transcript (i.e. the
 	// load was triggered by /projects rather than by startup).
 	echo bool
@@ -34,45 +35,51 @@ type projectsLoadedMsg struct {
 // projectCreatedMsg carries the backend-created project so the TUI can select
 // it without maintaining a separate local project store.
 type projectCreatedMsg struct {
-	requestID uint64
-	project   client.Project
-	err       error
+	sessionGeneration uint64
+	requestID         uint64
+	project           client.Project
+	err               error
 }
 
 // loginResultMsg reports the outcome of an interactive cookie-session login.
 // Credentials are intentionally not carried in this message.
 type loginResultMsg struct {
-	err error
+	sessionGeneration uint64
+	err               error
 }
 
 // chatSentMsg reports the accepted async chat message.
 type chatSentMsg struct {
-	accepted *client.ChatAccepted
-	err      error
+	sessionGeneration uint64
+	accepted          *client.ChatAccepted
+	err               error
 }
 
 // chatStatusMsg carries the polled status of an in-flight chat message.
 type chatStatusMsg struct {
-	status *client.ChatStatus
-	err    error
+	sessionGeneration uint64
+	status            *client.ChatStatus
+	err               error
 }
 
 // resultMsg is the generic outcome of a slash command: a rendered block to
 // append to the transcript, or an error.
 type resultMsg struct {
-	title string // optional heading
-	body  string
-	err   error
+	sessionGeneration uint64
+	title             string // optional heading
+	body              string
+	err               error
 }
 
 // threadOpenedMsg enters task-thread mode: subsequent plain-text input is
 // posted as a follow-up on this task rather than to the project agent.
 type threadOpenedMsg struct {
-	projectID string
-	taskID    string
-	title     string
-	body      string // rendered thread to show on entry
-	err       error
+	sessionGeneration uint64
+	projectID         string
+	taskID            string
+	title             string
+	body              string // rendered thread to show on entry
+	err               error
 }
 
 // sseEventMsg delivers one live event from the SSE stream.
@@ -105,8 +112,9 @@ type selectorItem struct {
 // fetches the candidate list and the model decides what to do with it:
 // error, empty hint, auto-select a single item, or open the picker.
 type selectorActiveMsg struct {
-	title   string // transcript heading for notes/empty hints
-	command string // pending command verb, e.g. "tasks open"
+	sessionGeneration uint64
+	title             string // transcript heading for notes/empty hints
+	command           string // pending command verb, e.g. "tasks open"
 	// emptyHint is shown (dimmed) when there is nothing to select.
 	emptyHint string
 	// prefill, when set, puts "/<command> <ref><prefillSuffix>" into the
