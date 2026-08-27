@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -113,6 +114,39 @@ func TestConfiguredCredentialsDoNotBlockStaticHelp(t *testing.T) {
 
 	if err := run(); err != nil {
 		t.Fatalf("help with configured credentials failed: %v", err)
+	}
+}
+
+func TestFlagHelpDoesNotPrintConfiguredPasswordOrContactBackend(t *testing.T) {
+	const secret = "flag-help-secret-that-must-not-appear"
+	t.Setenv("OPENVIBELY_SERVER_URL", "http://127.0.0.1:1")
+	t.Setenv("OPENVIBELY_AUTH_USERNAME", "configured-user")
+	t.Setenv("OPENVIBELY_AUTH_PASSWORD", secret)
+
+	oldArgs := os.Args
+	oldCommandLine := flag.CommandLine
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldCommandLine
+	}()
+
+	for _, helpArg := range []string{"-h", "--help"} {
+		t.Run(helpArg, func(t *testing.T) {
+			var out bytes.Buffer
+			flag.CommandLine = flag.NewFlagSet("openvibely-tui", flag.ContinueOnError)
+			flag.CommandLine.SetOutput(&out)
+			os.Args = []string{"openvibely-tui", helpArg}
+
+			if err := run(); err != nil {
+				t.Fatalf("%s with configured credentials failed: %v\noutput:\n%s", helpArg, err, out.String())
+			}
+			if strings.Contains(out.String(), secret) {
+				t.Fatalf("%s printed configured password:\n%s", helpArg, out.String())
+			}
+			if !strings.Contains(out.String(), "openvibely-tui") {
+				t.Fatalf("%s did not print flag help:\n%s", helpArg, out.String())
+			}
+		})
 	}
 }
 

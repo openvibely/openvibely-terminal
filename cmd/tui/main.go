@@ -53,13 +53,29 @@ func main() {
 func run() error {
 	serverURL := flag.String("server", envOr("OPENVIBELY_SERVER_URL", "http://localhost:3001"), "OpenVibely server base URL")
 	username := flag.String("user", os.Getenv("OPENVIBELY_AUTH_USERNAME"), "username (only needed when server auth is enabled)")
-	password := flag.String("pass", os.Getenv("OPENVIBELY_AUTH_PASSWORD"), "password (only needed when server auth is enabled)")
+	password := flag.String("pass", "", "password (only needed when server auth is enabled)")
 	project := flag.String("project", os.Getenv("OPENVIBELY_PROJECT"), "project to select: name, ID or unique prefix")
 	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear)")
 	flag.BoolVar(force, "f", false, "shorthand for -force")
 	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, lifecycle, and project creation commands")
 	flag.Usage = usage
-	flag.Parse()
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+
+	configuredPassword := *password
+	passwordFlagSet := false
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		if f.Name == "pass" {
+			passwordFlagSet = true
+		}
+	})
+	if !passwordFlagSet {
+		configuredPassword = os.Getenv("OPENVIBELY_AUTH_PASSWORD")
+	}
 
 	c, err := client.New(*serverURL)
 	if err != nil {
@@ -75,7 +91,7 @@ func run() error {
 
 	// If credentials were provided, establish a cookie session up front. An
 	// interactive run without them can use /login after a reachable auth failure.
-	if err := loginWithConfiguredCredentials(c, *username, *password); err != nil {
+	if err := loginWithConfiguredCredentials(c, *username, configuredPassword); err != nil {
 		return err
 	}
 
