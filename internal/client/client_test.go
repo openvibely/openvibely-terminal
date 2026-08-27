@@ -198,6 +198,63 @@ func TestCreateProjectRejectsUnauthorizedRedirect(t *testing.T) {
 	}
 }
 
+func TestCreateProjectNearLoginRedirectsAreNotAuthentication(t *testing.T) {
+	for _, location := range []string{"/login-help", "/login2", "/after-mutation"} {
+		location := location
+		t.Run(location, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				w.Header().Set("Location", location)
+				w.WriteHeader(http.StatusFound)
+			}))
+
+			_, err := c.CreateProject(context.Background(), "Project", "/tmp/repo")
+			if err == nil || IsAuthRequired(err) {
+				t.Fatalf("redirect %q error = %v, want ordinary mutation error", location, err)
+			}
+		})
+	}
+}
+
+func TestSendChatMessageNearLoginRedirectsAreNotAuthentication(t *testing.T) {
+	for _, location := range []string{"/login-help", "/login2"} {
+		location := location
+		t.Run(location, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", location)
+				w.WriteHeader(http.StatusFound)
+			}))
+
+			_, err := c.SendChatMessage(context.Background(), "p1", "hello")
+			if err == nil || IsAuthRequired(err) {
+				t.Fatalf("redirect %q error = %v, want ordinary mutation error", location, err)
+			}
+		})
+	}
+}
+
+func TestLoginNearLoginRedirectIsNotCredentialFailure(t *testing.T) {
+	for _, location := range []string{"/login-help", "/login2"} {
+		location := location
+		t.Run(location, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", location)
+				w.WriteHeader(http.StatusFound)
+			}))
+
+			err := c.Login(context.Background(), "admin", "secret")
+			if err == nil || strings.Contains(err.Error(), "invalid credentials") {
+				t.Fatalf("redirect %q was not reported as an ordinary login error: %v", location, err)
+			}
+			if IsAuthRequired(err) {
+				t.Fatalf("redirect %q was classified as authentication: %v", location, err)
+			}
+		})
+	}
+}
+
 func TestCreateProjectPreservesPlatformRepositoryPaths(t *testing.T) {
 	for _, path := range []string{
 		`/Users/dev/work tree`,

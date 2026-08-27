@@ -224,6 +224,23 @@ func TestPostJSONLoginResponsesAreAuthentication(t *testing.T) {
 	}
 }
 
+func TestPostJSONNearLoginRedirectsAreNotAuthentication(t *testing.T) {
+	for _, location := range []string{"/login-help", "/login2", "/after-mutation"} {
+		location := location
+		t.Run(location, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", location)
+				w.WriteHeader(http.StatusFound)
+			}))
+
+			err := c.TriggerAutonomousBuild(context.Background(), "p1")
+			if err == nil || IsAuthRequired(err) {
+				t.Fatalf("redirect %q error = %v, want ordinary mutation error", location, err)
+			}
+		})
+	}
+}
+
 func TestListTaskLifecycleExecutions(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tasks/t1/lifecycle-executions" {

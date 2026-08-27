@@ -151,10 +151,11 @@ func TestDoJSONAuthenticationAndRedirectStatuses(t *testing.T) {
 	}{
 		{name: "login redirect", status: http.StatusFound, location: "/login?next=%2Fskills", wantErr: true, wantAuthErr: true},
 		{name: "unauthorized", status: http.StatusUnauthorized, wantErr: true, wantAuthErr: true},
-		{name: "other redirect", status: http.StatusTemporaryRedirect, location: "/skills", wantErr: false},
+		{name: "near login help", status: http.StatusFound, location: "/login-help", wantErr: true},
+		{name: "near login numeric", status: http.StatusFound, location: "/login2", wantErr: true},
+		{name: "other redirect", status: http.StatusTemporaryRedirect, location: "/skills", wantErr: true},
 		{name: "no content", status: http.StatusNoContent, wantErr: false},
 	}
-
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -177,6 +178,39 @@ func TestDoJSONAuthenticationAndRedirectStatuses(t *testing.T) {
 			}
 			if tc.wantAuthErr && (err == nil || !strings.Contains(err.Error(), "unauthorized")) {
 				t.Fatalf("status %d: error = %v, want unauthorized", tc.status, err)
+			}
+			if !tc.wantAuthErr && err != nil && strings.Contains(err.Error(), "unauthorized") {
+				t.Fatalf("status %d: non-login redirect was reported as unauthorized: %v", tc.status, err)
+			}
+		})
+	}
+}
+
+func TestDoFormMutationRedirectClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		location string
+		wantAuth bool
+	}{
+		{name: "login", location: "/login?next=%2Fmutate", wantAuth: true},
+		{name: "login help", location: "/login-help"},
+		{name: "login numeric", location: "/login2"},
+		{name: "other", location: "/after-mutation"},
+		{name: "absolute login", location: "https://backend.example/login?next=%2Fmutate", wantAuth: true},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", tc.location)
+				w.WriteHeader(http.StatusFound)
+			}))
+
+			err := c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			if err == nil {
+				t.Fatalf("redirect %q returned nil error", tc.location)
+			}
+			if gotAuth := IsAuthRequired(err); gotAuth != tc.wantAuth {
+				t.Fatalf("redirect %q auth = %t, want %t: %v", tc.location, gotAuth, tc.wantAuth, err)
 			}
 		})
 	}

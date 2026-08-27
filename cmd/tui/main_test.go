@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -62,6 +65,54 @@ func TestLoginWithConfiguredCredentialsReusesCookieSession(t *testing.T) {
 		t.Fatal("expected the test server to reject the second login")
 	} else if strings.Contains(err.Error(), password) {
 		t.Fatalf("CLI authentication error exposed password: %v", err)
+	}
+}
+
+func TestConfiguredCredentialTransportFailureIncludesOfflineRecovery(t *testing.T) {
+	const secret = "configured-secret-that-must-not-appear"
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = loginWithConfiguredCredentials(c, "configured-user", secret)
+	if err == nil {
+		t.Fatal("expected configured credential transport failure")
+	}
+	for _, want := range []string{
+		"Unable to reach the OpenVibely backend",
+		"Start or check your local OpenVibely backend",
+		"-server <url>",
+		"OPENVIBELY_SERVER_URL",
+		"Details:",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("configured credential transport error exposed password: %v", err)
+	}
+}
+
+func TestConfiguredCredentialsDoNotBlockStaticHelp(t *testing.T) {
+	const secret = "help-secret-that-must-not-appear"
+	t.Setenv("OPENVIBELY_SERVER_URL", "http://127.0.0.1:1")
+	t.Setenv("OPENVIBELY_AUTH_USERNAME", "configured-user")
+	t.Setenv("OPENVIBELY_AUTH_PASSWORD", secret)
+
+	oldArgs := os.Args
+	oldCommandLine := flag.CommandLine
+	defer func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldCommandLine
+	}()
+	flag.CommandLine = flag.NewFlagSet("openvibely-tui", flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	os.Args = []string{"openvibely-tui", "help"}
+
+	if err := run(); err != nil {
+		t.Fatalf("help with configured credentials failed: %v", err)
 	}
 }
 

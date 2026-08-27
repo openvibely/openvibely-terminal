@@ -34,6 +34,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -65,6 +66,13 @@ func run() error {
 		return err
 	}
 
+	args := flag.Args()
+	// Static help must remain available even when configured credentials are
+	// present and the backend is unreachable.
+	if isStaticHelpCommand(args) {
+		return tui.RunCLI(c, os.Stdout, *project, args, *force, *json)
+	}
+
 	// If credentials were provided, establish a cookie session up front. An
 	// interactive run without them can use /login after a reachable auth failure.
 	if err := loginWithConfiguredCredentials(c, *username, *password); err != nil {
@@ -72,11 +80,24 @@ func run() error {
 	}
 
 	// Arguments after the flags mean "run this one command and exit".
-	if args := flag.Args(); len(args) > 0 {
+	if len(args) > 0 {
 		return tui.RunCLI(c, os.Stdout, *project, args, *force, *json)
 	}
 
 	return runTUI(c, *project)
+}
+
+func isStaticHelpCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	name := strings.TrimPrefix(strings.TrimSpace(args[0]), "/")
+	switch strings.ToLower(name) {
+	case "help", "?", "commands":
+		return true
+	default:
+		return false
+	}
 }
 
 func loginWithConfiguredCredentials(c *client.Client, username, password string) error {
@@ -86,6 +107,9 @@ func loginWithConfiguredCredentials(c *client.Client, username, password string)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := c.Login(ctx, username, password); err != nil {
+		if client.IsLoginTransportError(err) {
+			return fmt.Errorf("Unable to reach the OpenVibely backend at %s.\nTry:\n  - Start or check your local OpenVibely backend, then run /status.\n  - Use -server <url> or OPENVIBELY_SERVER_URL to point at a running backend.\nDetails: %w", c.BaseURL(), err)
+		}
 		return fmt.Errorf("authenticating with %s: %w", c.BaseURL(), err)
 	}
 	return nil

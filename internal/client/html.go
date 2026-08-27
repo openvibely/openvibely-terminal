@@ -118,7 +118,7 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 		defer drainAndClose(resp.Body)
 		return nil, newAuthRequiredError(method, path, resp)
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp, nil
 	}
 	err = apiError(resp)
@@ -150,7 +150,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, payload any) e
 		defer drainAndClose(resp.Body)
 		return newAuthRequiredError(method, path, resp)
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		drainAndClose(resp.Body)
 		return nil
 	}

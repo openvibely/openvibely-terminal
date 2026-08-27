@@ -102,15 +102,26 @@ func newAuthRequiredError(method, path string, resp *http.Response) error {
 	}
 }
 
+// isLoginRedirect reports whether a redirect's parsed path is exactly the
+// backend login route. Query strings and absolute URLs are allowed, while
+// similarly named paths such as /login-help are ordinary redirects.
+func isLoginRedirect(resp *http.Response) bool {
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return false
+	}
+	location := strings.TrimSpace(resp.Header.Get("Location"))
+	if location == "" {
+		return false
+	}
+	u, err := url.Parse(location)
+	return err == nil && u.Path == "/login"
+}
+
 // isAuthResponse recognizes a 401 or a redirect explicitly targeting the
 // backend login page. Non-login redirects remain valid for mutation routes
 // that intentionally use them.
 func isAuthResponse(resp *http.Response) bool {
-	if resp.StatusCode == http.StatusUnauthorized {
-		return true
-	}
-	return resp.StatusCode >= 300 && resp.StatusCode < 400 &&
-		strings.HasPrefix(resp.Header.Get("Location"), "/login")
+	return resp.StatusCode == http.StatusUnauthorized || isLoginRedirect(resp)
 }
 
 // isReadAuthResponse also preserves the existing read-route behavior where a
@@ -244,13 +255,17 @@ func (c *Client) Login(ctx context.Context, username, password string) error {
 	// Success redirects to the next path ("/"); failure redirects back to /login.
 	// Keep the failure text deliberately generic so credentials can never appear
 	// in a login error, even if a server returns an unexpected response body.
-	loc := resp.Header.Get("Location")
-	if resp.StatusCode == http.StatusUnauthorized ||
-		(resp.StatusCode >= 300 && resp.StatusCode < 400 && strings.HasPrefix(loc, "/login")) {
+	if isAuthResponse(resp) {
 		return fmt.Errorf("login failed: invalid credentials")
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return nil
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		location := strings.TrimSpace(resp.Header.Get("Location"))
+		if u, err := url.Parse(location); err == nil && u.Path == "/" {
+			return nil
+		}
 	}
 	return fmt.Errorf("login failed: unexpected status %d", resp.StatusCode)
 }
