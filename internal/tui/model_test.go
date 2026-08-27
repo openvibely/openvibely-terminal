@@ -1088,6 +1088,94 @@ type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
 
+func TestQueuedChatPromotionCorrelatesSSECompletion(t *testing.T) {
+	var statusRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/chat/message":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(client.ChatAccepted{
+				MessageID: "queued-input",
+				Status:    "queued",
+				Queued:    true,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/chat/message/queued-input":
+			statusRequests.Add(1)
+			_ = json.NewEncoder(w).Encode(client.ChatStatus{
+				MessageID: "promoted-execution",
+				Status:    "processing",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "project-A"
+	m.busy = true
+
+	sent, ok := m.sendChat("project-A", "hello")().(chatSentMsg)
+	if !ok {
+		t.Fatalf("sendChat message = %T, want chatSentMsg", m.sendChat("project-A", "hello")())
+	}
+	updated, _ = m.Update(sent)
+	m = updated.(Model)
+	if m.pendingMsgID != "queued-input" {
+		t.Fatalf("pending message ID = %q, want queued input ID", m.pendingMsgID)
+	}
+
+	// The status endpoint promotes the queued input to a distinct execution ID.
+	// The original queue ID remains the polling key, while the promoted ID must
+	// become a valid completion identity for the project-scoped SSE stream.
+	statusMsg := m.doChatStatus(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+	updated, _ = m.Update(statusMsg)
+	m = updated.(Model)
+	if statusRequests.Load() != 1 {
+		t.Fatalf("status requests = %d, want 1", statusRequests.Load())
+	}
+	if m.pendingMsgID != "queued-input" || !m.busy {
+		t.Fatalf("promoted processing status changed pending state: pending=%q busy=%t", m.pendingMsgID, m.busy)
+	}
+
+	// Make the re-arm command harmless; this test is checking the completion
+	// correlation, not stream shutdown behavior.
+	events := make(chan client.Event)
+	errs := make(chan error)
+	close(events)
+	close(errs)
+	m.sseEvents = events
+	m.sseErrs = errs
+
+	payload, _ := json.Marshal(client.ChatEvent{
+		Type:            "chat_response_done",
+		ProjectID:       "project-A",
+		ExecID:          "promoted-execution",
+		CompletedOutput: "queued reply",
+	})
+	updated, _ = m.Update(sseEventMsg{
+		generation: m.sseGeneration,
+		event: client.Event{
+			Name: "chat_response_done",
+			Data: json.RawMessage(payload),
+		},
+	})
+	m = updated.(Model)
+
+	if m.pendingMsgID != "" || m.busy {
+		t.Fatalf("promoted completion did not settle queued chat: pending=%q busy=%t", m.pendingMsgID, m.busy)
+	}
+	if !strings.Contains(transcript(m), "agent::queued reply") {
+		t.Fatalf("promoted completion missing from transcript:\n%s", transcript(m))
+	}
+}
 func TestChatCompletionAppendsAgentReply(t *testing.T) {
 	m := newTestModel(t)
 	m.pendingMsgID = "msg-1"

@@ -421,7 +421,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body, out any) error
 	}
 	defer drainAndClose(resp.Body)
 
-	if isReadAuthResponse(resp) {
+	if isAuthResponse(resp) {
 		return newAuthRequiredError(http.MethodPost, path, resp)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

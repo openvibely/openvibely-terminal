@@ -64,6 +64,10 @@ type chatStatusMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
 	messageID         string
+	// resolvedMessageID is the authoritative execution ID returned by the
+	// status endpoint. Queued inputs keep messageID as their polling key while
+	// this field records a promoted execution for SSE correlation.
+	resolvedMessageID string
 	projectID         string
 	status            *client.ChatStatus
 	err               error

@@ -181,6 +181,49 @@ func TestPostJSONServerError(t *testing.T) {
 	}
 }
 
+func TestPostJSONNonLoginRedirectIsNotAuthentication(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/autonomous/trigger" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Location", "/after-mutation")
+		w.WriteHeader(http.StatusFound)
+	}))
+
+	err := c.TriggerAutonomousBuild(context.Background(), "p1")
+	if err == nil {
+		t.Fatal("expected non-login redirect error")
+	}
+	if IsAuthRequired(err) {
+		t.Fatalf("ordinary non-login redirect was classified as authentication: %v", err)
+	}
+}
+
+func TestPostJSONLoginResponsesAreAuthentication(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		status        int
+		loginRedirect bool
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized},
+		{name: "login redirect", status: http.StatusFound, loginRedirect: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.loginRedirect {
+					w.Header().Set("Location", "/login?next=%2Fapi%2Fautonomous%2Ftrigger")
+				}
+				w.WriteHeader(tc.status)
+			}))
+
+			err := c.TriggerAutonomousBuild(context.Background(), "p1")
+			if err == nil || !IsAuthRequired(err) {
+				t.Fatalf("error = %v, want authentication-required", err)
+			}
+		})
+	}
+}
+
 func TestListTaskLifecycleExecutions(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tasks/t1/lifecycle-executions" {

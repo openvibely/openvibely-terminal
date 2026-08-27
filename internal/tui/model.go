@@ -128,6 +128,7 @@ type Model struct {
 
 	// in-flight chat
 	pendingMsgID                string
+	pendingMsgExecutionID       string // promoted execution ID, when a queued input is applied
 	pendingMsgProjectID         string
 	pendingMsgProjectGeneration uint64
 	busy                        bool
@@ -508,6 +509,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 	if changed {
 		m.advanceProjectGeneration()
 		m.pendingMsgID = ""
+		m.pendingMsgExecutionID = ""
 		m.pendingMsgProjectID = ""
 		m.pendingMsgProjectGeneration = 0
 		m.busy = false
@@ -568,6 +570,10 @@ func sseEventProjectID(ev client.Event) string {
 	return strings.TrimSpace(payload.ProjectID)
 }
 
+func (m Model) matchesPendingChatExecution(id string) bool {
+	return id != "" && (id == m.pendingMsgID || id == m.pendingMsgExecutionID)
+}
+
 func (m Model) login(username, password string) tea.Cmd {
 	c := m.client
 	sessionGeneration := sessionGenerationOf(m)
@@ -596,10 +602,15 @@ func (m Model) doChatStatus(messageID, projectID string, projectGeneration uint6
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	status, err := m.client.GetChatStatus(ctx, messageID)
+	resolvedMessageID := ""
+	if status != nil {
+		resolvedMessageID = status.MessageID
+	}
 	return chatStatusMsg{
 		sessionGeneration: sessionGenerationOf(m),
 		projectGeneration: projectGeneration,
 		messageID:         messageID,
+		resolvedMessageID: resolvedMessageID,
 		projectID:         projectID,
 		status:            status,
 		err:               err,
@@ -979,6 +990,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pendingMsgID = msg.accepted.MessageID
+		m.pendingMsgExecutionID = ""
 		m.pendingMsgProjectID = msg.projectID
 		if m.pendingMsgProjectID == "" {
 			m.pendingMsgProjectID = m.selectedID
@@ -1005,6 +1017,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.messageID != "" && msg.messageID != m.pendingMsgID {
 			return m, nil // status for a different message cannot settle this chat
 		}
+		if msg.resolvedMessageID != "" && msg.resolvedMessageID != m.pendingMsgID {
+			if m.pendingMsgExecutionID != "" && msg.resolvedMessageID != m.pendingMsgExecutionID {
+				return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+			}
+			// A queued input is polled by its stable input ID, but the status
+			// response switches to the execution ID once the input is applied.
+			// Record that authoritative alias so the promoted SSE completion can
+			// settle the same chat without weakening epoch/project guards above.
+			m.pendingMsgExecutionID = msg.resolvedMessageID
+		}
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
 				m.busy = false
@@ -1019,6 +1041,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.status.Status {
 		case "completed":
 			m.pendingMsgID = ""
+			m.pendingMsgExecutionID = ""
 			m.pendingMsgProjectID = ""
 			m.pendingMsgProjectGeneration = 0
 			m.busy = false
@@ -1029,6 +1052,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "failed", "cancelled":
 			m.pendingMsgID = ""
+			m.pendingMsgExecutionID = ""
 			m.pendingMsgProjectID = ""
 			m.pendingMsgProjectGeneration = 0
 			m.busy = false
@@ -1131,7 +1155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleSSEEvent(msg.event)
 		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
 			var ce client.ChatEvent
-			if err := json.Unmarshal(msg.event.Data, &ce); err != nil || ce.ExecID == "" || ce.ExecID != m.pendingMsgID {
+			if err := json.Unmarshal(msg.event.Data, &ce); err != nil || !m.matchesPendingChatExecution(ce.ExecID) {
 				// A project stream carries completions for multiple chats. An
 				// event without the pending execution ID must not settle this
 				// chat or trigger a status fetch for the wrong execution.
@@ -1146,6 +1170,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// payload, display it immediately without an extra HTTP round-trip.
 			if ce.CompletedOutput != "" {
 				m.pendingMsgID = ""
+				m.pendingMsgExecutionID = ""
 				m.pendingMsgProjectID = ""
 				m.pendingMsgProjectGeneration = 0
 				m.busy = false
