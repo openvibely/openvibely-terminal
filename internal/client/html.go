@@ -118,6 +118,10 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 		defer drainAndClose(resp.Body)
 		return nil, newAuthRequiredError(method, path, resp)
 	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		defer drainAndClose(resp.Body)
+		return nil, fmt.Errorf("%s %s: unexpected redirect status %d", method, path, resp.StatusCode)
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp, nil
 	}

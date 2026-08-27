@@ -1510,6 +1510,58 @@ func TestModelsDelete(t *testing.T) {
 	}
 }
 
+func TestModelsDeleteUnauthorizedSkipsSuccessAndReload(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+	var modelGets, loginRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/models":
+			modelGets++
+			if modelGets > 1 {
+				http.Error(w, "reload failed", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(modelsHTML))
+		case r.Method == http.MethodDelete && r.URL.Path == "/models/m-1":
+			w.Header().Set("Location", "/login")
+			w.WriteHeader(http.StatusTemporaryRedirect)
+		case r.URL.Path == "/login":
+			loginRequests++
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = confirmDestructive(t, m, "/models delete Sonnet")
+	out := transcript(m)
+	if !strings.Contains(out, "error::") || !strings.Contains(out, "requires sign-in") {
+		t.Fatalf("expected sign-in error:\n%s", out)
+	}
+	if strings.Contains(out, "delete: Sonnet") {
+		t.Fatalf("unauthorized delete reported success:\n%s", out)
+	}
+	if modelGets != 1 {
+		t.Errorf("models GETs = %d, want only the reference lookup; reload should not run after failed action", modelGets)
+	}
+	if loginRequests != 0 {
+		t.Errorf("login requests = %d, want 0; redirect was followed", loginRequests)
+	}
+}
+
 // automationCardHTML mirrors the real automation card markup: the
 // delete-menu button carries data-automation-card-delete/data-automation-name,
 // and the card's own badges carry the lifecycle state.
