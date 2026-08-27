@@ -214,6 +214,9 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	m.selectedID = "old-project"
 	m.selectedName = "Old Project"
 	m.projects = []client.Project{{ID: "old-project", Name: "Old Project"}}
+	m.threadID = "old-task"
+	m.threadTitle = "Old Task"
+	m.input.Placeholder = "Reply to Old Task (/chat to exit)"
 
 	m = runLine(t, m, `/projects create My Project | C:\Users\me\repo`)
 	defer m.Cleanup()
@@ -222,6 +225,12 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	}
 	if m.selectedID != "created-project" || m.selectedName != "My Project" {
 		t.Fatalf("created project was not selected: id=%q name=%q", m.selectedID, m.selectedName)
+	}
+	if m.threadID != "" || m.threadTitle != "" {
+		t.Fatalf("old thread survived project creation: id=%q title=%q", m.threadID, m.threadTitle)
+	}
+	if m.input.Placeholder != defaultPlaceholder {
+		t.Fatalf("placeholder = %q, want default", m.input.Placeholder)
 	}
 	if !strings.Contains(transcript(m), "active project selected") || !strings.Contains(transcript(m), "My Project") {
 		t.Fatalf("creation output did not explain selection:\n%s", transcript(m))
@@ -233,6 +242,31 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for scoped SSE request after project creation")
+	}
+}
+
+func TestProjectsCreateSameIDPreservesThreadState(t *testing.T) {
+	m, _ := dispatchModel(t, nil)
+	m.threadID = "old-task"
+	m.threadTitle = "Old Task"
+	m.input.Placeholder = "Reply to Old Task (/chat to exit)"
+
+	updated, _ := m.Update(projectCreatedMsg{
+		project: client.Project{ID: "p1", Name: "Recreated Project", Path: "/tmp/recreated"},
+	})
+	m = updated.(Model)
+
+	if m.selectedID != "p1" || m.selectedName != "Recreated Project" {
+		t.Fatalf("created project was not selected: id=%q name=%q", m.selectedID, m.selectedName)
+	}
+	if m.threadID != "old-task" || m.threadTitle != "Old Task" {
+		t.Fatalf("same-ID creation changed thread: id=%q title=%q", m.threadID, m.threadTitle)
+	}
+	if got, want := m.input.Placeholder, "Reply to Old Task (/chat to exit)"; got != want {
+		t.Fatalf("same-ID creation changed placeholder: %q, want %q", got, want)
+	}
+	if len(m.projects) != 1 || m.projects[0].ID != "p1" {
+		t.Fatalf("created project was not appended: %+v", m.projects)
 	}
 }
 

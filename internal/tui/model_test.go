@@ -502,6 +502,61 @@ func TestProjectCommandAcceptsUniqueSubstring(t *testing.T) {
 	}
 }
 
+func TestProjectSelectionReconnectsSSEForNewProject(t *testing.T) {
+	projectIDs := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/events/live" {
+			projectIDs <- r.URL.Query().Get("project_id")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "alpha"
+	m.projects = []client.Project{
+		{ID: "p1", Name: "alpha"},
+		{ID: "p2", Name: "beta"},
+	}
+
+	_ = m.connectSSE()
+	select {
+	case got := <-projectIDs:
+		if got != "p1" {
+			t.Fatalf("initial SSE project_id = %q, want p1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial SSE request not received within 2s")
+	}
+
+	m, cmd := m.pickProject("beta")
+	if cmd == nil {
+		t.Fatal("project selection should reconnect an active SSE stream")
+	}
+	select {
+	case got := <-projectIDs:
+		if got != "p2" {
+			t.Fatalf("reconnected SSE project_id = %q, want p2", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconnected SSE request not received within 2s")
+	}
+	m.Cleanup()
+
+	if !strings.Contains(transcript(m), "active project: beta") {
+		t.Fatalf("selection output missing:\n%s", transcript(m))
+	}
+}
+
 func TestStaleProjectCreationIsIgnoredAfterSelection(t *testing.T) {
 	m := newTestModel(t)
 	m.projects = []client.Project{

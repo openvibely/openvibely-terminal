@@ -148,8 +148,37 @@ func TestSwitchingProjectLeavesThread(t *testing.T) {
 	m.projects = []client.Project{{ID: "p2", Name: "other"}}
 	m, _ = m.pickProject("other")
 
-	if m.threadID != "" {
-		t.Errorf("thread %q survived a project switch", m.threadID)
+	if m.selectedID != "p2" || m.selectedName != "other" {
+		t.Fatalf("selected project = %q/%q, want p2/other", m.selectedID, m.selectedName)
+	}
+	if m.threadID != "" || m.threadTitle != "" {
+		t.Errorf("thread survived a project switch: id=%q title=%q", m.threadID, m.threadTitle)
+	}
+	if m.input.Placeholder != defaultPlaceholder {
+		t.Errorf("placeholder = %q, want default", m.input.Placeholder)
+	}
+}
+
+// Selecting the already-active project must not leave the current task thread.
+func TestSelectingSameProjectPreservesThread(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	if m.threadID == "" {
+		t.Fatal("failed to enter thread")
+	}
+	wantID, wantTitle, wantPlaceholder := m.threadID, m.threadTitle, m.input.Placeholder
+
+	m.projects = []client.Project{{ID: "p1", Name: "demo"}}
+	m, _ = m.pickProject("demo")
+
+	if m.selectedID != "p1" || m.selectedName != "demo" {
+		t.Fatalf("selected project = %q/%q, want p1/demo", m.selectedID, m.selectedName)
+	}
+	if m.threadID != wantID || m.threadTitle != wantTitle {
+		t.Errorf("same-project selection changed thread: id=%q title=%q, want %q/%q", m.threadID, m.threadTitle, wantID, wantTitle)
+	}
+	if m.input.Placeholder != wantPlaceholder {
+		t.Errorf("same-project selection changed placeholder: %q, want %q", m.input.Placeholder, wantPlaceholder)
 	}
 }
 
