@@ -475,6 +475,22 @@ func TestLoginFailureDoesNotExposeResponseBody(t *testing.T) {
 	}
 }
 
+func TestLoginTransportFailureIsClassifiedWithoutCredentials(t *testing.T) {
+	const secret = "transport-secret-that-must-not-appear"
+	c, err := New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = c.Login(context.Background(), "admin", secret)
+	if err == nil || !IsLoginTransportError(err) {
+		t.Fatalf("Login error = %v, want login transport error", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("Login transport error exposed password: %v", err)
+	}
+}
+
 func TestStreamEventsClassifiesUnauthorizedResponses(t *testing.T) {
 	for _, status := range []int{http.StatusFound, http.StatusUnauthorized} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {

@@ -87,12 +87,13 @@ type Model struct {
 	histPos int
 
 	// connection state
-	connected    bool
-	connChecked  bool
-	authRequired bool
-	connErr      string
-	capacity     *client.GlobalCapacity
-	auth         *client.AuthStatus
+	connected            bool
+	connChecked          bool
+	authRequired         bool
+	connectionGeneration int
+	connErr              string
+	capacity             *client.GlobalCapacity
+	auth                 *client.AuthStatus
 
 	// interactive cookie-session sign-in. Password text is held only while the
 	// form is active and is cleared from the input before the request starts.
@@ -181,6 +182,9 @@ func New(c *client.Client) Model {
 		transcript: viewport.New(0, 0),
 		sseBackoff: time.Second,
 		histPos:    -1,
+		// Generation one belongs to the initial health check created by Init.
+		// Later checks advance it before their commands are launched.
+		connectionGeneration: 1,
 	}
 	m.log = []entry{{
 		role: "system",
@@ -196,13 +200,14 @@ func (m Model) WithProject(ref string) Model {
 	return m
 }
 
-// Init kicks off the initial connection check, project load, and SSE stream.
+// Init kicks off the initial connection check and project load. The first SSE
+// stream is opened by the project-load response after it installs a selected
+// project, rather than racing that response with an unscoped stream.
 func (m Model) Init() tea.Cmd {
-	_, projectLoad := m.beginProjectLoad(false, m.wantProject)
+	_, projectLoad := m.beginProjectLoadWithSSE(false, m.wantProject, true)
 	return tea.Batch(
 		m.checkConnection(),
 		projectLoad,
-		func() tea.Msg { return reconnectTickMsg{} },
 		m.tick(),
 		m.spin.Tick,
 		textinput.Blink,
@@ -212,6 +217,35 @@ func (m Model) Init() tea.Cmd {
 // --- async commands ---
 
 func (m Model) checkConnection() tea.Cmd {
+	generation := m.connectionGeneration
+	if generation == 0 {
+		generation = 1
+	}
+	return m.checkConnectionWithGeneration(generation)
+}
+
+// beginConnectionCheck invalidates every older health result before launching
+// a new check. The initial check uses generation one from New; subsequent
+// retries and periodic checks advance this value on the model instance that
+// will receive their result.
+func (m *Model) beginConnectionCheck() tea.Cmd {
+	return m.checkConnectionWithGeneration(m.advanceConnectionGeneration())
+}
+
+func (m *Model) invalidateConnectionChecks() {
+	m.advanceConnectionGeneration()
+}
+
+func (m *Model) advanceConnectionGeneration() int {
+	if m.connectionGeneration == 0 {
+		m.connectionGeneration = 1
+	} else {
+		m.connectionGeneration++
+	}
+	return m.connectionGeneration
+}
+
+func (m Model) checkConnectionWithGeneration(generation int) tea.Cmd {
 	c := m.client
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -232,17 +266,17 @@ func (m Model) checkConnection() tea.Cmd {
 		// reachable. Prefer it over a concurrent transport error so the TUI
 		// offers sign-in instead of incorrectly reporting the server offline.
 		if client.IsAuthRequired(capErr) {
-			return connCheckedMsg{capacity: capacity, auth: auth, err: capErr}
+			return connCheckedMsg{generation: generation, capacity: capacity, auth: auth, err: capErr}
 		}
 		if client.IsAuthRequired(authErr) {
-			return connCheckedMsg{capacity: capacity, auth: auth, err: authErr}
+			return connCheckedMsg{generation: generation, capacity: capacity, auth: auth, err: authErr}
 		}
 		if capErr != nil {
-			return connCheckedMsg{capacity: capacity, auth: auth, err: capErr}
+			return connCheckedMsg{generation: generation, capacity: capacity, auth: auth, err: capErr}
 		}
 		// AuthMe is supplementary when the health endpoint is healthy. Preserve
 		// the prior behavior of treating a non-auth AuthMe failure as non-fatal.
-		return connCheckedMsg{capacity: capacity, auth: auth}
+		return connCheckedMsg{generation: generation, capacity: capacity, auth: auth}
 	}
 }
 
@@ -309,9 +343,13 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 }
 
 func (m Model) beginProjectLoad(echo bool, selectName string) (Model, tea.Cmd) {
+	return m.beginProjectLoadWithSSE(echo, selectName, m.sseRetryAfterProject)
+}
+
+func (m Model) beginProjectLoadWithSSE(echo bool, selectName string, startSSE bool) (Model, tea.Cmd) {
 	requestID := nextProjectRequestID()
 	m.projectRequestID = requestID
-	return m, m.loadProjectsWithID(requestID, echo, selectName)
+	return m, m.loadProjectsWithIDAndSSE(requestID, echo, selectName, startSSE)
 }
 
 // loadProjects is retained as a direct command helper for tests and callers
@@ -319,10 +357,14 @@ func (m Model) beginProjectLoad(echo bool, selectName string) (Model, tea.Cmd) {
 // command paths use beginProjectLoad so a newer request immediately invalidates
 // older responses.
 func (m Model) loadProjects(echo bool, selectName string) tea.Cmd {
-	return m.loadProjectsWithID(nextProjectRequestID(), echo, selectName)
+	return m.loadProjectsWithIDAndSSE(nextProjectRequestID(), echo, selectName, false)
 }
 
 func (m Model) loadProjectsWithID(requestID uint64, echo bool, selectName string) tea.Cmd {
+	return m.loadProjectsWithIDAndSSE(requestID, echo, selectName, false)
+}
+
+func (m Model) loadProjectsWithIDAndSSE(requestID uint64, echo bool, selectName string, startSSE bool) tea.Cmd {
 	c := m.client
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -346,15 +388,15 @@ func (m Model) loadProjectsWithID(requestID uint64, echo bool, selectName string
 		wg.Wait()
 
 		if client.IsAuthRequired(err) {
-			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo}
+			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo, startSSE: startSSE}
 		}
 		if client.IsAuthRequired(capsErr) {
-			return projectsLoadedMsg{requestID: requestID, err: capsErr, echo: echo}
+			return projectsLoadedMsg{requestID: requestID, err: capsErr, echo: echo, startSSE: startSSE}
 		}
 		if err != nil {
-			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo}
+			return projectsLoadedMsg{requestID: requestID, err: err, echo: echo, startSSE: startSSE}
 		}
-		return projectsLoadedMsg{requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName}
+		return projectsLoadedMsg{requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName, startSSE: startSSE}
 	}
 }
 
@@ -369,6 +411,50 @@ func (m *Model) acceptsProjectResponse(requestID uint64) bool {
 	}
 	m.projectRequestID = requestID
 	return true
+}
+
+func (m *Model) acceptsConnectionResponse(generation int) bool {
+	// Zero is reserved for hand-built messages in older tests. Every runtime
+	// health command carries a non-zero generation.
+	if generation == 0 {
+		return true
+	}
+	if m.connectionGeneration == 0 {
+		m.connectionGeneration = generation
+		return true
+	}
+	return m.connectionGeneration == generation
+}
+
+func (m *Model) acceptsSSEGeneration(generation int) bool {
+	// Zero is reserved for hand-built messages in older tests. Every runtime
+	// stream message carries a non-zero generation.
+	if generation == 0 {
+		return true
+	}
+	if m.sseGeneration == 0 {
+		m.sseGeneration = generation
+		return true
+	}
+	return m.sseGeneration == generation
+}
+
+func (m Model) acceptsSSEEvent(ev client.Event) bool {
+	projectID := sseEventProjectID(ev)
+	if projectID == "" {
+		return true // older/single-project event payloads may omit their scope
+	}
+	return m.selectedID != "" && projectID == m.selectedID
+}
+
+func sseEventProjectID(ev client.Event) string {
+	var payload struct {
+		ProjectID string `json:"project_id"`
+	}
+	if json.Unmarshal(ev.Data, &payload) != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.ProjectID)
 }
 
 func (m Model) login(username, password string) tea.Cmd {
@@ -427,42 +513,48 @@ func (m *Model) connectSSE() tea.Cmd {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.sseCancel = cancel
+	m.sseGeneration++
+	generation := m.sseGeneration
 	events, errs := m.client.StreamEvents(ctx, m.selectedID)
 	m.sseEvents = events
 	m.sseErrs = errs
-	m.sseGeneration++
 	return tea.Batch(
-		func() tea.Msg { return sseConnectedMsg{} },
-		m.waitForSSE(),
+		func() tea.Msg { return sseConnectedMsg{generation: generation} },
+		m.waitForSSE(generation, events, errs),
 	)
 }
 
-// waitForSSE blocks on the current stream's channels and forwards one message.
-func (m Model) waitForSSE() tea.Cmd {
-	events, errs := m.sseEvents, m.sseErrs
+// waitForSSE blocks on one specific stream and forwards one tagged message.
+// Capturing the channels and generation here prevents a later reconnect from
+// making a delayed result look like it came from the current stream.
+func (m Model) waitForSSE(generation int, events <-chan client.Event, errs <-chan error) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case ev, ok := <-events:
 			if !ok {
 				if err, ok := <-errs; ok && err != nil {
-					return sseDisconnectedMsg{err: err}
+					return sseDisconnectedMsg{generation: generation, err: err}
 				}
-				return sseDisconnectedMsg{}
+				return sseDisconnectedMsg{generation: generation}
 			}
-			return sseEventMsg{event: ev}
+			return sseEventMsg{generation: generation, event: ev}
 		case err := <-errs:
-			return sseDisconnectedMsg{err: err}
+			return sseDisconnectedMsg{generation: generation, err: err}
 		}
 	}
+}
+
+func (m Model) waitForCurrentSSE(generation int) tea.Cmd {
+	return m.waitForSSE(generation, m.sseEvents, m.sseErrs)
 }
 
 func (m Model) tick() tea.Cmd {
 	return tea.Tick(refreshInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
 
-func (m Model) scheduleReconnect() tea.Cmd {
+func (m Model) scheduleReconnect(generation int) tea.Cmd {
 	backoff := m.sseBackoff
-	return tea.Tick(backoff, func(time.Time) tea.Msg { return reconnectTickMsg{} })
+	return tea.Tick(backoff, func(time.Time) tea.Msg { return reconnectTickMsg{generation: generation} })
 }
 
 // Cleanup releases the SSE stream; called on shutdown.
@@ -470,6 +562,19 @@ func (m *Model) Cleanup() {
 	if m.sseCancel != nil {
 		m.sseCancel()
 	}
+}
+
+// invalidateSSE cancels the current stream and advances ownership so all
+// messages already queued from it become stale before a replacement starts.
+func (m *Model) invalidateSSE() {
+	if m.sseCancel != nil {
+		m.sseCancel()
+	}
+	m.sseCancel = nil
+	m.sseEvents = nil
+	m.sseErrs = nil
+	m.sseConnected = false
+	m.sseGeneration++
 }
 
 // --- update ---
@@ -490,6 +595,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSelector(msg)
 
 	case connCheckedMsg:
+		if !m.acceptsConnectionResponse(msg.generation) {
+			return m, nil // stale health result from an older check
+		}
 		wasConnected := m.connected
 		wasAuthRequired := m.authRequired
 		m.connChecked = true
@@ -537,6 +645,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: "loading projects: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
 		}
+		if msg.startSSE {
+			m.sseRetryAfterProject = true
+		}
+		m.authRequired = false
 		m.projects = msg.projects
 		// An explicit request resolves on its own; defaulting to the first
 		// project first would leave a wrong project selected when the name is
@@ -549,7 +661,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedName = m.projects[0].Name
 		}
 		var reconnect tea.Cmd
-		if m.sseCancel != nil || m.sseRetryAfterProject {
+		if m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
 			m.sseRetryAfterProject = false
 			reconnect = m.connectSSE()
 		}
@@ -600,7 +712,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text: fmt.Sprintf("created project %q at %q — active project selected\nnext: send a message or run %sprojects to inspect it", msg.project.Name, msg.project.Path, cmdPrefix),
 			})
 		}
-		if m.sseCancel != nil {
+		if m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
+			m.sseRetryAfterProject = false
 			return m, m.connectSSE()
 		}
 		return m, nil
@@ -698,10 +811,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Prompt = "password: "
 			m.input.Placeholder = "password"
 			m.input.Focus()
-			m.append(entry{role: "error", text: loginFailureText(m.client.BaseURL(), msg.err)})
+			if client.IsLoginTransportError(msg.err) {
+				m.connected = false
+				m.authRequired = false
+				m.connChecked = true
+				m.connErr = msg.err.Error()
+				m.auth = nil
+				m.sseConnected = false
+				m.append(entry{role: "error", text: offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
+			} else {
+				m.append(entry{role: "error", text: loginFailureText(m.client.BaseURL(), msg.err)})
+			}
 			return m, nil
 		}
 
+		m.invalidateSSE()
 		m.finishLogin()
 		m.busy = false
 		m.authRequired = false
@@ -714,18 +838,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.append(entry{role: "system", text: "signed in; retrying connection and project loading"})
 		var projectLoad tea.Cmd
 		m, projectLoad = m.beginProjectLoad(false, m.wantProject)
-		cmds := []tea.Cmd{m.checkConnection(), projectLoad}
+		cmds := []tea.Cmd{m.beginConnectionCheck(), projectLoad}
 		if m.pendingMsgID != "" {
 			cmds = append(cmds, m.fetchChatStatus(m.pendingMsgID))
 		}
 		return m, tea.Batch(cmds...)
 
 	case sseConnectedMsg:
+		if !m.acceptsSSEGeneration(msg.generation) {
+			return m, nil // stale lifecycle message from a canceled stream
+		}
 		m.sseConnected = true
 		m.sseBackoff = time.Second
 		return m, nil
 
 	case sseEventMsg:
+		if !m.acceptsSSEGeneration(msg.generation) {
+			return m, nil // stale event from a canceled stream
+		}
+		if !m.acceptsSSEEvent(msg.event) {
+			return m, m.waitForCurrentSSE(msg.generation)
+		}
 		m.handleSSEEvent(msg.event)
 		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
 			var ce client.ChatEvent
@@ -733,7 +866,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Ignore events from a foreign project. Allow empty ProjectID
 				// for single-project servers that omit the field.
 				if ce.ProjectID != "" && ce.ProjectID != m.selectedID {
-					return m, m.waitForSSE()
+					return m, m.waitForCurrentSSE(msg.generation)
 				}
 				// Fast path: if the backend populated CompletedOutput in the SSE
 				// payload, display it immediately without an extra HTTP round-trip.
@@ -741,16 +874,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.pendingMsgID = ""
 					m.busy = false
 					m.append(entry{role: "agent", text: ce.CompletedOutput})
-					return m, m.waitForSSE()
+					return m, m.waitForCurrentSSE(msg.generation)
 				}
 			}
 			// Otherwise issue an immediate status fetch instead of waiting for
 			// the next 1500ms poll tick.
-			return m, tea.Batch(m.waitForSSE(), m.fetchChatStatus(m.pendingMsgID))
+			return m, tea.Batch(m.waitForCurrentSSE(msg.generation), m.fetchChatStatus(m.pendingMsgID))
 		}
-		return m, m.waitForSSE()
+		return m, m.waitForCurrentSSE(msg.generation)
 
 	case sseDisconnectedMsg:
+		if !m.acceptsSSEGeneration(msg.generation) {
+			return m, nil // stale disconnect from a canceled stream
+		}
+		// The stream is terminal now. Advance ownership before scheduling the
+		// retry so an optimistic connected message from the same attempt cannot
+		// arrive afterward and mark the dead stream live again.
+		m.sseGeneration++
+		reconnectGeneration := m.sseGeneration
 		m.sseConnected = false
 		if client.IsAuthRequired(msg.err) {
 			m.markAuthRequired()
@@ -759,19 +900,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.authRequired {
 			return m, nil
 		}
-		cmd := m.scheduleReconnect()
+		cmd := m.scheduleReconnect(reconnectGeneration)
 		if m.sseBackoff < 30*time.Second {
 			m.sseBackoff *= 2
 		}
 		return m, cmd
 
 	case reconnectTickMsg:
+		if !m.acceptsSSEGeneration(msg.generation) {
+			return m, nil // stale retry from a canceled stream
+		}
 		if m.authRequired || m.loginActive {
 			return m, nil
 		}
 		return m, m.connectSSE()
 	case tickMsg:
-		return m, tea.Batch(m.checkConnection(), m.tick())
+		return m, tea.Batch(m.beginConnectionCheck(), m.tick())
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -786,6 +930,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	if m.loginActive {
 		return m, nil
 	}
+	m.invalidateConnectionChecks()
 	m.loginRestorePrompt = m.input.Prompt
 	m.loginRestorePlaceholder = m.input.Placeholder
 	m.loginRestoreEchoMode = m.input.EchoMode
@@ -1197,7 +1342,7 @@ func renderTranscriptEntry(e entry, wrap lipgloss.Style) string {
 
 // handleSSEEvent formats a live event; shown only when /events is on.
 func (m *Model) handleSSEEvent(ev client.Event) {
-	if !m.showEvents {
+	if !m.acceptsSSEEvent(ev) || !m.showEvents {
 		return
 	}
 	ts := time.Now().Format("15:04:05")
@@ -1249,6 +1394,10 @@ func (m *Model) markAuthRequired() {
 	m.connected = false
 	m.connChecked = true
 	m.connErr = ""
+	// An auth failure can arrive from project/SSE work while a health check is
+	// still running. Invalidate every in-flight check before it can clear the
+	// sign-in-required state.
+	m.invalidateConnectionChecks()
 	if !wasRequired {
 		m.append(entry{role: "error", text: authRecoveryMessage(m.client.BaseURL())})
 	}

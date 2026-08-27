@@ -8,9 +8,10 @@ import (
 
 // connCheckedMsg reports the result of a server health/auth check.
 type connCheckedMsg struct {
-	capacity *client.GlobalCapacity
-	auth     *client.AuthStatus
-	err      error
+	generation int
+	capacity   *client.GlobalCapacity
+	auth       *client.AuthStatus
+	err        error
 }
 
 // projectsLoadedMsg carries the project list (with capacities when available).
@@ -23,7 +24,11 @@ type projectsLoadedMsg struct {
 	echo bool
 	// selectName, when set, selects the matching project after loading.
 	selectName string
-	err        error
+	// startSSE requests that the model open a stream only after a project has
+	// been installed. Startup and post-login loads use this to avoid an
+	// unscoped stream racing project selection.
+	startSSE bool
+	err      error
 }
 
 // projectCreatedMsg carries the backend-created project so the TUI can select
@@ -72,16 +77,20 @@ type threadOpenedMsg struct {
 
 // sseEventMsg delivers one live event from the SSE stream.
 type sseEventMsg struct {
-	event client.Event
+	generation int
+	event      client.Event
 }
 
 // sseDisconnectedMsg indicates the SSE stream ended and reconnection is needed.
 type sseDisconnectedMsg struct {
-	err error
+	generation int
+	err        error
 }
 
 // sseConnectedMsg indicates a new SSE stream was established.
-type sseConnectedMsg struct{}
+type sseConnectedMsg struct {
+	generation int
+}
 
 // selectorItem is one choice in the inline ref selector.
 type selectorItem struct {
@@ -112,8 +121,13 @@ type selectorActiveMsg struct {
 // tickMsg drives periodic refresh (status re-check).
 type tickMsg struct{}
 
-// reconnectTickMsg fires when the SSE backoff timer elapses.
-type reconnectTickMsg struct{}
+// reconnectTickMsg fires when the SSE backoff timer elapses. The generation
+// identifies the stream whose disconnect scheduled this retry, so a queued
+// retry from a canceled stream cannot reopen it after a project switch or
+// successful login.
+type reconnectTickMsg struct {
+	generation int
+}
 
 // statusCountsMsg carries the operational counts fetched for the /status command.
 type statusCountsMsg struct {

@@ -50,6 +50,34 @@ func IsAuthRequired(err error) bool {
 	return errors.Is(err, ErrAuthRequired)
 }
 
+// LoginTransportError identifies a failure to reach or issue the login
+// request. It is separate from invalid credentials so callers can retain
+// offline recovery state without exposing the submitted form or response body.
+type LoginTransportError struct {
+	err error
+}
+
+func (e *LoginTransportError) Error() string {
+	if e == nil || e.err == nil {
+		return "login request failed"
+	}
+	return fmt.Sprintf("login request: %v", e.err)
+}
+
+func (e *LoginTransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+// IsLoginTransportError reports whether err, including a wrapped error, means
+// the login request could not be issued or completed because of transport.
+func IsLoginTransportError(err error) bool {
+	var transportErr *LoginTransportError
+	return errors.As(err, &transportErr)
+}
+
 func newAuthRequiredError(method, path string, resp *http.Response) error {
 	return &AuthRequiredError{
 		Method:     method,
@@ -187,13 +215,13 @@ func (c *Client) Login(ctx context.Context, username, password string) error {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/login", strings.NewReader(form.Encode()))
 	if err != nil {
-		return err
+		return &LoginTransportError{err: err}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("login request: %w", err)
+		return &LoginTransportError{err: err}
 	}
 	defer drainAndClose(resp.Body)
 

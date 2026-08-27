@@ -638,6 +638,238 @@ func TestSSEBackoffGrowsAndResets(t *testing.T) {
 	}
 }
 
+func TestSSEWaitMessagesCarryGeneration(t *testing.T) {
+	m := newTestModel(t)
+	events := make(chan client.Event, 1)
+	errs := make(chan error)
+	events <- client.Event{Name: "task_update", Data: json.RawMessage(`{"type":"task_status_changed"}`)}
+
+	msg := m.waitForSSE(7, events, errs)()
+	eventMsg, ok := msg.(sseEventMsg)
+	if !ok {
+		t.Fatalf("message = %T, want sseEventMsg", msg)
+	}
+	if eventMsg.generation != 7 {
+		t.Fatalf("event generation = %d, want 7", eventMsg.generation)
+	}
+	close(events)
+	close(errs)
+
+	msg = m.waitForSSE(7, events, errs)()
+	disconnected, ok := msg.(sseDisconnectedMsg)
+	if !ok {
+		t.Fatalf("message = %T, want sseDisconnectedMsg", msg)
+	}
+	if disconnected.generation != 7 {
+		t.Fatalf("disconnected generation = %d, want 7", disconnected.generation)
+	}
+}
+
+func TestStaleSSEMessagesAreIgnoredAfterReconnect(t *testing.T) {
+	m := newTestModel(t)
+	m.sseGeneration = 2
+	m.selectedID = "project-b"
+	m.showEvents = true
+	before := transcript(m)
+
+	next, cmd := m.Update(sseConnectedMsg{generation: 1})
+	m = next.(Model)
+	if cmd != nil || m.sseConnected {
+		t.Fatalf("stale connected message changed state: connected=%t cmd=%v", m.sseConnected, cmd)
+	}
+
+	staleEvent := client.Event{
+		Name: "task_update",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-a","status":"running","task_name":"old"}`),
+	}
+	next, cmd = m.Update(sseEventMsg{generation: 1, event: staleEvent})
+	m = next.(Model)
+	if cmd != nil || transcript(m) != before {
+		t.Fatalf("stale event leaked into current transcript or returned a command: cmd=%v transcript=%q", cmd, transcript(m))
+	}
+
+	next, cmd = m.Update(sseDisconnectedMsg{
+		generation: 1,
+		err:        &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/live", StatusCode: http.StatusUnauthorized},
+	})
+	m = next.(Model)
+	if cmd != nil || m.authRequired || m.sseConnected {
+		t.Fatalf("stale disconnected message changed state: authRequired=%t connected=%t cmd=%v", m.authRequired, m.sseConnected, cmd)
+	}
+
+	next, cmd = m.Update(reconnectTickMsg{generation: 1})
+	m = next.(Model)
+	if cmd != nil || m.sseGeneration != 2 {
+		t.Fatalf("stale reconnect tick started a stream: generation=%d cmd=%v", m.sseGeneration, cmd)
+	}
+}
+
+func TestStaleConnectionCheckIsIgnoredAfterLoginRetryStarts(t *testing.T) {
+	m := newTestModel(t)
+	m.connectionGeneration = 2
+	m.connected = true
+	m.connChecked = true
+	before := transcript(m)
+
+	next, cmd := m.Update(connCheckedMsg{
+		generation: 1,
+		err:        &client.AuthRequiredError{Method: http.MethodGet, Path: "/api/capacity/global", StatusCode: http.StatusUnauthorized},
+	})
+	m = next.(Model)
+	if cmd != nil || !m.connected || m.authRequired || m.connErr != "" || transcript(m) != before {
+		t.Fatalf("stale connection result changed state: connected=%t authRequired=%t connErr=%q cmd=%v transcript=%q", m.connected, m.authRequired, m.connErr, cmd, transcript(m))
+	}
+}
+
+func TestConnectionCheckCarriesCurrentGeneration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/capacity/global":
+			_, _ = w.Write([]byte(`{"has_capacity":true}`))
+		case "/auth/me":
+			_, _ = w.Write([]byte(`{"authenticated":false}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.connectionGeneration = 9
+	msg, ok := m.checkConnection()().(connCheckedMsg)
+	if !ok {
+		t.Fatalf("checkConnection message = %T, want connCheckedMsg", m.checkConnection()())
+	}
+	if msg.generation != 9 {
+		t.Fatalf("connection generation = %d, want 9", msg.generation)
+	}
+}
+
+func TestAuthRequiredInvalidatesInFlightConnectionChecks(t *testing.T) {
+	m := newTestModel(t)
+	m.connectionGeneration = 4
+	m.markAuthRequired()
+	if m.connectionGeneration != 5 {
+		t.Fatalf("auth transition generation = %d, want 5", m.connectionGeneration)
+	}
+
+	next, cmd := m.Update(connCheckedMsg{
+		generation: 4,
+		capacity:   &client.GlobalCapacity{MaxWorkers: 99},
+	})
+	m = next.(Model)
+	if cmd != nil || !m.authRequired || m.connected || m.capacity != nil {
+		t.Fatalf("in-flight health result changed auth state: authRequired=%t connected=%t capacity=%+v cmd=%v", m.authRequired, m.connected, m.capacity, cmd)
+	}
+}
+
+func TestCurrentForeignSSEEventIsIgnored(t *testing.T) {
+	m := newTestModel(t)
+	m.sseGeneration = 2
+	m.selectedID = "project-b"
+	m.showEvents = true
+	events := make(chan client.Event)
+	errs := make(chan error)
+	close(events)
+	close(errs)
+	m.sseEvents = events
+	m.sseErrs = errs
+	before := transcript(m)
+
+	next, cmd := m.Update(sseEventMsg{
+		generation: 2,
+		event: client.Event{
+			Name: "task_update",
+			Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-a","status":"running","task_name":"foreign"}`),
+		},
+	})
+	m = next.(Model)
+	if cmd == nil || transcript(m) != before {
+		t.Fatalf("foreign current-generation event was displayed or not re-armed: cmd=%v transcript=%q", cmd, transcript(m))
+	}
+}
+
+func TestSuccessfulLoginInvalidatesPreviousSSEStream(t *testing.T) {
+	m := newTestModel(t)
+	m.loginActive = true
+	m.loginPassword = true
+	m.loginUsername = "admin"
+	m.sseGeneration = 4
+	canceled := false
+	m.sseCancel = func() { canceled = true }
+
+	next, cmd := m.Update(loginResultMsg{})
+	m = next.(Model)
+	if cmd == nil || !canceled || m.sseCancel != nil || m.sseGeneration != 5 {
+		t.Fatalf("successful login did not invalidate prior stream: canceled=%t cancel-nil=%t generation=%d cmd=%v", canceled, m.sseCancel == nil, m.sseGeneration, cmd)
+	}
+}
+
+func TestInteractiveLoginTransportFailureUsesOfflineRecovery(t *testing.T) {
+	const password = "transport-password-that-must-not-appear"
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.authRequired = true
+	m.connChecked = true
+
+	m, _ = typeLine(t, m, "/login")
+	m = typeInput(t, m, "admin")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	m = typeInput(t, m, password)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected login request command")
+	}
+
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	if !m.loginActive || !m.loginPassword || m.loginSubmitting {
+		t.Fatalf("transport failure should remain retryable: active=%t password=%t submitting=%t", m.loginActive, m.loginPassword, m.loginSubmitting)
+	}
+	if m.connected || m.authRequired || !m.connChecked || m.connErr == "" {
+		t.Fatalf("transport failure state = connected=%t authRequired=%t checked=%t connErr=%q", m.connected, m.authRequired, m.connChecked, m.connErr)
+	}
+	visible := strings.ToLower(transcript(m) + "\n" + m.renderStatus() + "\n" + m.View())
+	for _, want := range []string{"offline", "unable to reach the openvibely backend", "start or check"} {
+		if !strings.Contains(visible, want) {
+			t.Fatalf("offline login guidance missing %q:\n%s", want, visible)
+		}
+	}
+	if strings.Contains(visible, password) {
+		t.Fatalf("transport login exposed password:\n%s", visible)
+	}
+}
+
+func TestInitDoesNotScheduleUnscopedSSE(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	batch, ok := m.Init()().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("Init command = %T, want tea.BatchMsg", m.Init()())
+	}
+	// Init contains the health check, project load, periodic refresh, spinner,
+	// and input blink commands. A separate immediate reconnect command would
+	// make this count six and would open an unscoped stream before selection.
+	if got, want := len(batch), 5; got != want {
+		t.Fatalf("Init command count = %d, want %d without an unscoped SSE retry", got, want)
+	}
+}
+
 func TestEventsOnlyLoggedWhenEnabled(t *testing.T) {
 	m := newTestModel(t)
 	m.handleSSEEvent(client.Event{Name: "task_update", Data: []byte(`{"type":"task","status":"running"}`)})
