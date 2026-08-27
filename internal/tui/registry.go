@@ -142,7 +142,7 @@ func confirmOr(m Model, displayMsg, cliMsg string, cmd tea.Cmd) (Model, tea.Cmd)
 	m.busy = false
 	m.pendingConfirmation = &pendingCmd{
 		message: displayMsg,
-		cmd:     withSessionGeneration(cmd, sessionGenerationOf(m)),
+		cmd:     withMessageGeneration(cmd, sessionGenerationOf(m), projectGenerationOf(m)),
 	}
 	return m, nil
 }
@@ -2367,17 +2367,12 @@ func (m Model) pickProject(name string) (Model, tea.Cmd) {
 	// A successful explicit selection supersedes every older project request,
 	// including a creation or list response that is still in flight.
 	m.projectRequestID = nextProjectRequestID()
-	if m.selectedID != p.ID {
-		// A task thread belongs to the old project; leave it.
-		m.threadID, m.threadTitle = "", ""
-		m.input.Placeholder = defaultPlaceholder
-	}
-	m.selectedID = p.ID
-	m.selectedName = p.Name
+	shouldReconnect := m.sseCancel != nil || m.sseRetryAfterProject
+	m.setActiveProject(p)
 	m.append(entry{role: "system", text: "active project: " + p.Name})
 	// If SSE is active, reconnect with the new project ID so the server
 	// delivers only this project's events.
-	if m.sseCancel != nil || m.sseRetryAfterProject {
+	if !m.authRequired && shouldReconnect {
 		m.sseRetryAfterProject = false
 		return m, m.connectSSE()
 	}

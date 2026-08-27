@@ -17,6 +17,7 @@ type connCheckedMsg struct {
 // projectsLoadedMsg carries the project list (with capacities when available).
 type projectsLoadedMsg struct {
 	sessionGeneration uint64
+	projectGeneration uint64
 	requestID         uint64
 	projects          []client.Project
 	capacities        []client.ProjectCapacity
@@ -36,6 +37,7 @@ type projectsLoadedMsg struct {
 // it without maintaining a separate local project store.
 type projectCreatedMsg struct {
 	sessionGeneration uint64
+	projectGeneration uint64
 	requestID         uint64
 	project           client.Project
 	err               error
@@ -51,6 +53,8 @@ type loginResultMsg struct {
 // chatSentMsg reports the accepted async chat message.
 type chatSentMsg struct {
 	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
 	accepted          *client.ChatAccepted
 	err               error
 }
@@ -58,6 +62,9 @@ type chatSentMsg struct {
 // chatStatusMsg carries the polled status of an in-flight chat message.
 type chatStatusMsg struct {
 	sessionGeneration uint64
+	projectGeneration uint64
+	messageID         string
+	projectID         string
 	status            *client.ChatStatus
 	err               error
 }
@@ -66,6 +73,7 @@ type chatStatusMsg struct {
 // append to the transcript, or an error.
 type resultMsg struct {
 	sessionGeneration uint64
+	projectGeneration uint64
 	title             string // optional heading
 	body              string
 	err               error
@@ -75,6 +83,7 @@ type resultMsg struct {
 // posted as a follow-up on this task rather than to the project agent.
 type threadOpenedMsg struct {
 	sessionGeneration uint64
+	projectGeneration uint64
 	projectID         string
 	taskID            string
 	title             string
@@ -113,6 +122,7 @@ type selectorItem struct {
 // error, empty hint, auto-select a single item, or open the picker.
 type selectorActiveMsg struct {
 	sessionGeneration uint64
+	projectGeneration uint64
 	title             string // transcript heading for notes/empty hints
 	command           string // pending command verb, e.g. "tasks open"
 	// emptyHint is shown (dimmed) when there is nothing to select.
@@ -139,7 +149,9 @@ type reconnectTickMsg struct {
 
 // statusCountsMsg carries the operational counts fetched for the /status command.
 type statusCountsMsg struct {
-	pendingAlerts int
-	activeTasks   int
-	queuedTasks   int
+	sessionGeneration uint64
+	projectGeneration uint64
+	pendingAlerts     int
+	activeTasks       int
+	queuedTasks       int
 }

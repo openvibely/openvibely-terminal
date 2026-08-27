@@ -522,6 +522,165 @@ func TestStaleProjectLoadCannotClearAuthRequiredState(t *testing.T) {
 	}
 }
 
+func TestCurrentSessionProjectLoadCannotClearAuthRequiredState(t *testing.T) {
+	m := newTestModel(t)
+	m.projectRequestID = 17
+	m.markAuthRequired()
+	sessionGeneration := m.sessionGeneration
+	projectGeneration := m.projectGeneration
+	before := transcript(m)
+
+	updated, cmd := m.Update(projectsLoadedMsg{
+		sessionGeneration: sessionGeneration,
+		projectGeneration: projectGeneration,
+		requestID:         17,
+		projects:          []client.Project{{ID: "p1", Name: "still protected"}},
+		startSSE:          true,
+	})
+	m = updated.(Model)
+
+	if cmd != nil || !m.authRequired || m.connected || transcript(m) != before {
+		t.Fatalf("current-session project success cleared auth state: authRequired=%t connected=%t cmd=%v transcript=%q", m.authRequired, m.connected, cmd, transcript(m))
+	}
+	if !m.sseRetryAfterProject {
+		t.Fatal("project refresh should defer SSE until health confirms authentication")
+	}
+	if len(m.projects) != 1 || m.projects[0].ID != "p1" {
+		t.Fatalf("current-session project data was not retained: %+v", m.projects)
+	}
+
+	// A current health confirmation, rather than project data alone, is allowed
+	// to establish the session and clear sign-in-required state.
+	updated, cmd = m.Update(connCheckedMsg{
+		generation: m.connectionGeneration,
+		capacity:   &client.GlobalCapacity{HasCapacity: true},
+	})
+	m = updated.(Model)
+	if cmd == nil || m.authRequired || !m.connected || m.sseRetryAfterProject {
+		t.Fatalf("current health confirmation did not establish the session/retry SSE: authRequired=%t connected=%t retry=%t cmd=%v", m.authRequired, m.connected, m.sseRetryAfterProject, cmd)
+	}
+	m.Cleanup()
+}
+
+func TestProjectScopedAsyncResultsAreIgnoredAfterProjectSwitch(t *testing.T) {
+	authErr := &client.AuthRequiredError{
+		Method:     http.MethodGet,
+		Path:       "/api/projects",
+		StatusCode: http.StatusUnauthorized,
+	}
+	cases := []struct {
+		name  string
+		msg   func(projectGeneration uint64) tea.Msg
+		check func(t *testing.T, m Model, before string)
+	}{
+		{
+			name: "command result",
+			msg: func(projectGeneration uint64) tea.Msg {
+				return resultMsg{
+					sessionGeneration: 1,
+					projectGeneration: projectGeneration,
+					title:             "Old project",
+					body:              "project A result",
+				}
+			},
+			check: func(t *testing.T, m Model, before string) {
+				if transcript(m) != before {
+					t.Fatalf("stale command result was rendered: %q", transcript(m))
+				}
+			},
+		},
+		{
+			name: "chat acknowledgement",
+			msg: func(projectGeneration uint64) tea.Msg {
+				return chatSentMsg{
+					sessionGeneration: 1,
+					projectGeneration: projectGeneration,
+					accepted:          &client.ChatAccepted{MessageID: "old-message"},
+				}
+			},
+			check: func(t *testing.T, m Model, _ string) {
+				if m.pendingMsgID != "current-message" {
+					t.Fatalf("stale chat acknowledgement replaced current pending message: %q", m.pendingMsgID)
+				}
+			},
+		},
+		{
+			name: "chat status",
+			msg: func(projectGeneration uint64) tea.Msg {
+				return chatStatusMsg{
+					sessionGeneration: 1,
+					projectGeneration: projectGeneration,
+					messageID:         "old-message",
+					projectID:         "project-a",
+					status:            &client.ChatStatus{MessageID: "old-message", Status: "completed", Response: "project A reply"},
+				}
+			},
+			check: func(t *testing.T, m Model, before string) {
+				if m.pendingMsgID != "current-message" || transcript(m) != before {
+					t.Fatalf("stale chat status changed project B state: pending=%q transcript=%q", m.pendingMsgID, transcript(m))
+				}
+			},
+		},
+		{
+			name: "selector result",
+			msg: func(projectGeneration uint64) tea.Msg {
+				return selectorActiveMsg{
+					sessionGeneration: 1,
+					projectGeneration: projectGeneration,
+					title:             "Old project tasks",
+					items:             []selectorItem{{ref: "old-task", label: "old task"}},
+				}
+			},
+			check: func(t *testing.T, m Model, before string) {
+				if m.selectorActive || transcript(m) != before {
+					t.Fatalf("stale selector result changed project B state: active=%t transcript=%q", m.selectorActive, transcript(m))
+				}
+			},
+		},
+		{
+			name: "command auth error",
+			msg: func(projectGeneration uint64) tea.Msg {
+				return resultMsg{
+					sessionGeneration: 1,
+					projectGeneration: projectGeneration,
+					err:               authErr,
+				}
+			},
+			check: func(t *testing.T, m Model, before string) {
+				if m.authRequired || m.connected || transcript(m) != before {
+					t.Fatalf("stale command auth error changed state: authRequired=%t connected=%t transcript=%q", m.authRequired, m.connected, transcript(m))
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(t)
+			m.projects = []client.Project{
+				{ID: "project-a", Name: "Project A"},
+				{ID: "project-b", Name: "Project B"},
+			}
+			m.selectedID = "project-a"
+			m.selectedName = "Project A"
+			oldProjectGeneration := m.projectGeneration
+			m, _ = m.pickProject("project-b")
+			if m.projectGeneration == oldProjectGeneration {
+				t.Fatal("project switch did not advance project generation")
+			}
+			m.busy = true
+			m.pendingMsgID = "current-message"
+			before := transcript(m)
+
+			updated, cmd := m.Update(tc.msg(oldProjectGeneration))
+			m = updated.(Model)
+			if cmd != nil || !m.busy {
+				t.Fatalf("stale %s result changed busy state: busy=%t cmd=%v", tc.name, m.busy, cmd)
+			}
+			tc.check(t, m, before)
+		})
+	}
+}
 func TestStaleNonHealthAuthResultCannotReenterSignIn(t *testing.T) {
 	m := newTestModel(t)
 	m.sessionGeneration = 2
@@ -595,6 +754,9 @@ func TestCommandResultCarriesSessionGeneration(t *testing.T) {
 	}
 	if msg.sessionGeneration != m.sessionGeneration {
 		t.Fatalf("result session generation = %d, want %d", msg.sessionGeneration, m.sessionGeneration)
+	}
+	if msg.projectGeneration != m.projectGeneration {
+		t.Fatalf("result project generation = %d, want %d", msg.projectGeneration, m.projectGeneration)
 	}
 }
 

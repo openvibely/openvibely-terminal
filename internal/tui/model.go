@@ -92,6 +92,7 @@ type Model struct {
 	authRequired         bool
 	connectionGeneration int
 	sessionGeneration    uint64
+	projectGeneration    uint64
 	connErr              string
 	capacity             *client.GlobalCapacity
 	auth                 *client.AuthStatus
@@ -125,8 +126,10 @@ type Model struct {
 	threadTitle string
 
 	// in-flight chat
-	pendingMsgID string
-	busy         bool
+	pendingMsgID                string
+	pendingMsgProjectID         string
+	pendingMsgProjectGeneration uint64
+	busy                        bool
 
 	// operational counts cached by /status
 	pendingAlertCount int
@@ -190,6 +193,9 @@ func New(c *client.Client) Model {
 		// Generation one belongs to the initial health check created by Init.
 		// Later checks advance it before their commands are launched.
 		connectionGeneration: 1,
+		// Generation one identifies the initial project context. Explicit project
+		// transitions advance it before replacement work is launched.
+		projectGeneration: 1,
 	}
 	m.log = []entry{{
 		role: "system",
@@ -293,6 +299,8 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 		return nil
 	}
 	c, pid := m.client, m.selectedID
+	sessionGeneration := sessionGenerationOf(m)
+	projectGeneration := projectGenerationOf(m)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -340,9 +348,11 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 
 		wg.Wait()
 		return statusCountsMsg{
-			pendingAlerts: pendingAlerts,
-			activeTasks:   activeTasks,
-			queuedTasks:   queuedTasks,
+			sessionGeneration: sessionGeneration,
+			projectGeneration: projectGeneration,
+			pendingAlerts:     pendingAlerts,
+			activeTasks:       activeTasks,
+			queuedTasks:       queuedTasks,
 		}
 	}
 }
@@ -372,6 +382,7 @@ func (m Model) loadProjectsWithID(requestID uint64, echo bool, selectName string
 func (m Model) loadProjectsWithIDAndSSE(requestID uint64, echo bool, selectName string, startSSE bool) tea.Cmd {
 	c := m.client
 	sessionGeneration := sessionGenerationOf(m)
+	projectGeneration := projectGenerationOf(m)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -394,15 +405,15 @@ func (m Model) loadProjectsWithIDAndSSE(requestID uint64, echo bool, selectName 
 		wg.Wait()
 
 		if client.IsAuthRequired(err) {
-			return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, err: err, echo: echo, startSSE: startSSE}
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: err, echo: echo, startSSE: startSSE}
 		}
 		if client.IsAuthRequired(capsErr) {
-			return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, err: capsErr, echo: echo, startSSE: startSSE}
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: capsErr, echo: echo, startSSE: startSSE}
 		}
 		if err != nil {
-			return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, err: err, echo: echo, startSSE: startSSE}
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: err, echo: echo, startSSE: startSSE}
 		}
-		return projectsLoadedMsg{sessionGeneration: sessionGeneration, requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName, startSSE: startSSE}
+		return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName, startSSE: startSSE}
 	}
 }
 
@@ -446,6 +457,58 @@ func (m *Model) advanceSessionGeneration() uint64 {
 		m.sessionGeneration++
 	}
 	return m.sessionGeneration
+}
+
+func (m *Model) acceptsProjectGeneration(generation uint64) bool {
+	// Zero is reserved for hand-built messages in older tests. Every runtime
+	// project-sensitive command message carries a non-zero project generation.
+	if generation == 0 {
+		return true
+	}
+	if m.projectGeneration == 0 {
+		m.projectGeneration = generation
+		return true
+	}
+	return m.projectGeneration == generation
+}
+
+func projectGenerationOf(m Model) uint64 {
+	if m.projectGeneration == 0 {
+		return 1
+	}
+	return m.projectGeneration
+}
+
+func (m *Model) advanceProjectGeneration() uint64 {
+	if m.projectGeneration == 0 {
+		m.projectGeneration = 1
+	} else {
+		m.projectGeneration++
+	}
+	return m.projectGeneration
+}
+
+// setActiveProject installs the selected project and invalidates all work tied
+// to the previous project before any replacement stream or command is started.
+func (m *Model) setActiveProject(project client.Project) bool {
+	changed := m.selectedID != project.ID
+	if changed {
+		m.advanceProjectGeneration()
+		m.pendingMsgID = ""
+		m.pendingMsgProjectID = ""
+		m.pendingMsgProjectGeneration = 0
+		m.busy = false
+		m.pendingConfirmation = nil
+		if m.selectorActive {
+			*m = m.clearSelector()
+		}
+		m.threadID, m.threadTitle = "", ""
+		m.input.Placeholder = defaultPlaceholder
+		m.invalidateSSE()
+	}
+	m.selectedID = project.ID
+	m.selectedName = project.Name
+	return changed
 }
 
 func (m *Model) acceptsConnectionResponse(generation int) bool {
@@ -507,77 +570,108 @@ func (m Model) login(username, password string) tea.Cmd {
 func (m Model) sendChat(projectID, message string) tea.Cmd {
 	c := m.client
 	sessionGeneration := sessionGenerationOf(m)
+	projectGeneration := projectGenerationOf(m)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		accepted, err := c.SendChatMessage(ctx, projectID, message)
-		return chatSentMsg{sessionGeneration: sessionGeneration, accepted: accepted, err: err}
+		return chatSentMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: projectID, accepted: accepted, err: err}
 	}
 }
 
-func (m Model) doChatStatus(messageID string) tea.Msg {
+func (m Model) doChatStatus(messageID, projectID string, projectGeneration uint64) tea.Msg {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	status, err := m.client.GetChatStatus(ctx, messageID)
-	return chatStatusMsg{sessionGeneration: sessionGenerationOf(m), status: status, err: err}
+	return chatStatusMsg{
+		sessionGeneration: sessionGenerationOf(m),
+		projectGeneration: projectGeneration,
+		messageID:         messageID,
+		projectID:         projectID,
+		status:            status,
+		err:               err,
+	}
 }
 
-func (m Model) pollChat(messageID string) tea.Cmd {
+func (m Model) pollChat(messageID, projectID string, projectGeneration uint64) tea.Cmd {
 	return tea.Tick(chatPollInterval, func(time.Time) tea.Msg {
-		return m.doChatStatus(messageID)
+		return m.doChatStatus(messageID, projectID, projectGeneration)
 	})
 }
 
 // fetchChatStatus issues an immediate (no-tick) GetChatStatus call.
 func (m Model) fetchChatStatus(messageID string) tea.Cmd {
-	return func() tea.Msg { return m.doChatStatus(messageID) }
+	projectID := m.pendingMsgProjectID
+	if projectID == "" {
+		projectID = m.selectedID
+	}
+	projectGeneration := m.pendingMsgProjectGeneration
+	if projectGeneration == 0 {
+		projectGeneration = projectGenerationOf(m)
+	}
+	return func() tea.Msg { return m.doChatStatus(messageID, projectID, projectGeneration) }
 }
 
-// withSessionGeneration tags asynchronous messages produced by a command. The
-// wrapper also handles batches so each child keeps the same session epoch.
-func withSessionGeneration(cmd tea.Cmd, generation uint64) tea.Cmd {
+// withMessageGeneration tags asynchronous messages produced by a command. The
+// wrapper also handles batches so each child keeps the same session and
+// project epochs.
+func withMessageGeneration(cmd tea.Cmd, sessionGeneration, projectGeneration uint64) tea.Cmd {
 	if cmd == nil {
 		return nil
 	}
-	if generation == 0 {
-		generation = 1
+	if sessionGeneration == 0 {
+		sessionGeneration = 1
+	}
+	if projectGeneration == 0 {
+		projectGeneration = 1
 	}
 	return func() tea.Msg {
-		return tagSessionMessage(cmd(), generation)
+		return tagMessage(cmd(), sessionGeneration, projectGeneration)
 	}
 }
 
-func tagSessionMessage(msg tea.Msg, generation uint64) tea.Msg {
+func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Msg {
 	switch typed := msg.(type) {
 	case tea.BatchMsg:
 		batch := make(tea.BatchMsg, len(typed))
 		for i, child := range typed {
-			batch[i] = withSessionGeneration(child, generation)
+			batch[i] = withMessageGeneration(child, sessionGeneration, projectGeneration)
 		}
 		return batch
 	case projectsLoadedMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
 		return typed
 	case projectCreatedMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
 		return typed
 	case loginResultMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
 		return typed
 	case chatSentMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
 		return typed
 	case chatStatusMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
 		return typed
 	case resultMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
 		return typed
 	case threadOpenedMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
 		return typed
 	case selectorActiveMsg:
-		typed.sessionGeneration = generation
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case statusCountsMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
 		return typed
 	default:
 		return msg
@@ -709,20 +803,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !wasConnected {
 				m.append(entry{role: "system", text: "Connected to " + m.client.BaseURL() + "."})
 			}
-			if wasAuthRequired && m.sseCancel != nil {
+			if wasAuthRequired && m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
+				m.sseRetryAfterProject = false
 				return m, m.connectSSE()
 			}
 		}
 		return m, nil
 	case statusCountsMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale status counts from an older session or project
+		}
 		m.pendingAlertCount = msg.pendingAlerts
 		m.activeTaskCount = msg.activeTasks
 		m.queuedTaskCount = msg.queuedTasks
 		return m, nil
 
 	case projectsLoadedMsg:
-		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
-			return m, nil // stale project response from an older session epoch
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale project response from an older session or project
 		}
 		if !m.acceptsProjectResponse(msg.requestID) {
 			return m, nil // stale list from an older project request
@@ -742,7 +840,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.startSSE {
 			m.sseRetryAfterProject = true
 		}
-		m.authRequired = false
+		// Project data alone cannot establish an authenticated session. Keep
+		// authRequired set until a current health check or login succeeds.
 		m.projects = msg.projects
 		// An explicit request resolves on its own; defaulting to the first
 		// project first would leave a wrong project selected when the name is
@@ -751,11 +850,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.pickProject(msg.selectName)
 		}
 		if m.selectedID == "" && len(m.projects) > 0 {
-			m.selectedID = m.projects[0].ID
-			m.selectedName = m.projects[0].Name
+			m.setActiveProject(m.projects[0])
 		}
 		var reconnect tea.Cmd
-		if m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
+		if !m.authRequired && m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
 			m.sseRetryAfterProject = false
 			reconnect = m.connectSSE()
 		}
@@ -765,8 +863,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, reconnect
 
 	case projectCreatedMsg:
-		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
-			return m, nil // stale creation response from an older session epoch
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale creation response from an older session or project
 		}
 		if !m.acceptsProjectResponse(msg.requestID) {
 			return m, nil // stale creation after a newer selection or list request
@@ -779,14 +877,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: msg.err.Error()})
 			return m, nil
 		}
-		if m.selectedID != msg.project.ID {
-			// A task thread belongs to the old project; leave it when creation
-			// switches the active project.
-			m.threadID, m.threadTitle = "", ""
-			m.input.Placeholder = defaultPlaceholder
-		}
-		m.selectedID = msg.project.ID
-		m.selectedName = msg.project.Name
+		shouldReconnect := m.sseCancel != nil || m.sseRetryAfterProject
+		m.setActiveProject(msg.project)
 		m.projects = append(m.projects, msg.project)
 
 		if jsonMode {
@@ -809,15 +901,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text: fmt.Sprintf("created project %q at %q — active project selected\nnext: send a message or run %sprojects to inspect it", msg.project.Name, msg.project.Path, cmdPrefix),
 			})
 		}
-		if m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
+		if !m.authRequired && m.selectedID != "" && shouldReconnect {
 			m.sseRetryAfterProject = false
 			return m, m.connectSSE()
 		}
 		return m, nil
 
 	case resultMsg:
-		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
-			return m, nil // stale command response from an older session epoch
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale command response from an older session or project
 		}
 		m.busy = false
 		if msg.err != nil {
@@ -835,8 +927,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case chatSentMsg:
-		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
-			return m, nil // stale chat acknowledgement from an older session epoch
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale chat acknowledgement from an older session or project
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil // stale acknowledgement from a different project
 		}
 		if msg.err != nil {
 			m.busy = false
@@ -847,28 +942,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pendingMsgID = msg.accepted.MessageID
+		m.pendingMsgProjectID = msg.projectID
+		if m.pendingMsgProjectID == "" {
+			m.pendingMsgProjectID = m.selectedID
+		}
+		m.pendingMsgProjectGeneration = msg.projectGeneration
+		if m.pendingMsgProjectGeneration == 0 {
+			m.pendingMsgProjectGeneration = projectGenerationOf(m)
+		}
 		if msg.accepted.Queued {
 			m.append(entry{role: "system", text: "queued behind an active chat turn…"})
 		}
-		return m, m.pollChat(m.pendingMsgID)
+		return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
 
 	case chatStatusMsg:
-		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
-			return m, nil // stale chat status from an older session epoch
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale chat status from an older session or project
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil // stale status from a different project
 		}
 		if m.pendingMsgID == "" {
 			return m, nil
+		}
+		if msg.messageID != "" && msg.messageID != m.pendingMsgID {
+			return m, nil // status for a different message cannot settle this chat
 		}
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
 				m.busy = false
 				return m, nil
 			}
-			return m, m.pollChat(m.pendingMsgID) // transient; keep polling
+			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration) // transient; keep polling
 		}
 		switch msg.status.Status {
 		case "completed":
 			m.pendingMsgID = ""
+			m.pendingMsgProjectID = ""
+			m.pendingMsgProjectGeneration = 0
 			m.busy = false
 			m.append(entry{role: "agent", text: msg.status.Response})
 			if len(msg.status.TaskIDs) > 0 {
@@ -877,6 +988,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "failed", "cancelled":
 			m.pendingMsgID = ""
+			m.pendingMsgProjectID = ""
+			m.pendingMsgProjectGeneration = 0
 			m.busy = false
 			text := msg.status.Status
 			if msg.status.Error != "" {
@@ -885,12 +998,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: text})
 			return m, nil
 		default:
-			return m, m.pollChat(m.pendingMsgID)
+			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
 		}
 
 	case threadOpenedMsg:
-		if !m.acceptsSessionGeneration(msg.sessionGeneration) {
-			return m, nil // stale thread response from an older session epoch
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale thread response from an older session or project
 		}
 		m.busy = false
 		if msg.err != nil {
@@ -911,6 +1024,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case loginResultMsg:
+		if !m.loginActive || !m.acceptsSessionGeneration(msg.sessionGeneration) {
+			return m, nil // stale or canceled login attempt
+		}
 		m.loginSubmitting = false
 		if msg.err != nil {
 			m.busy = false
@@ -982,6 +1098,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// payload, display it immediately without an extra HTTP round-trip.
 				if ce.CompletedOutput != "" {
 					m.pendingMsgID = ""
+					m.pendingMsgProjectID = ""
+					m.pendingMsgProjectGeneration = 0
 					m.busy = false
 					m.append(entry{role: "agent", text: ce.CompletedOutput})
 					return m, m.waitForCurrentSSE(msg.generation)
@@ -1282,7 +1400,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 // refreshed thread back into the transcript.
 func (m Model) sendThreadMessage(taskID, title, text string) tea.Cmd {
 	c := m.client
-	return withSessionGeneration(run("Thread · "+title, cmdTimeout, func(ctx context.Context) (string, error) {
+	return withMessageGeneration(run("Thread · "+title, cmdTimeout, func(ctx context.Context) (string, error) {
 		if err := c.SendTaskThreadMessage(ctx, taskID, text); err != nil {
 			return "", err
 		}
@@ -1291,7 +1409,7 @@ func (m Model) sendThreadMessage(taskID, title, text string) tea.Cmd {
 			return "sent", nil
 		}
 		return renderThread(d), nil
-	}), sessionGenerationOf(m))
+	}), sessionGenerationOf(m), projectGenerationOf(m))
 }
 
 // --- history ---
