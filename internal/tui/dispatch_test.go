@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -746,6 +747,297 @@ func TestModelsCapacityAccountFetchFailureDoesNotHideCapacity(t *testing.T) {
 	}
 	if !rec.saw("GET", "/api/capacity/models") || !rec.saw("GET", "/api/analytics/usage") {
 		t.Errorf("expected both requests:\n%s", rec.all())
+	}
+}
+
+func TestModelsCapacityRequestsOverlap(t *testing.T) {
+	const delay = 150 * time.Millisecond
+	var mu sync.Mutex
+	active, maxActive := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			active--
+			mu.Unlock()
+		}()
+
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/capacity/models":
+			_, _ = w.Write([]byte(`[{"name":"Sonnet","running":1,"max_workers":4,"available_slots":3}]`))
+		case "/api/analytics/usage":
+			_, _ = w.Write([]byte(`{"account_limits":[]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+
+	start := time.Now()
+	m = runLine(t, m, "/models capacity")
+	elapsed := time.Since(start)
+
+	mu.Lock()
+	gotMaxActive := maxActive
+	mu.Unlock()
+	if gotMaxActive < 2 {
+		t.Errorf("capacity and usage requests did not overlap; max active handlers = %d", gotMaxActive)
+	}
+	if elapsed >= 275*time.Millisecond {
+		t.Errorf("capacity command took %v; expected roughly one %v delay rather than sequential %v", elapsed, delay, 2*delay)
+	}
+}
+
+func TestModelsCapacityBothSuccessPreservesOutputAndScope(t *testing.T) {
+	var mu sync.Mutex
+	counts := map[string]int{}
+	var usageProjects []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		counts[r.URL.Path]++
+		if r.URL.Path == "/api/analytics/usage" {
+			usageProjects = append(usageProjects, r.URL.Query().Get("project_id"))
+		}
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/capacity/models":
+			_, _ = w.Write([]byte(`[
+				{"id":"m1","name":"First","model":"first-model","running":1,"max_workers":4,"available_slots":3},
+				{"id":"m2","name":"Second","model":"second-model","running":3,"max_workers":4,"available_slots":1}
+			]`))
+		case "/api/analytics/usage":
+			_, _ = w.Write([]byte(`{
+				"account_limits":[{
+					"provider":"OpenAI",
+					"plan_type":"team",
+					"status_label":"healthy",
+					"account_detail":"sk-private-test-value",
+					"primary_limit":{"label":"requests","status":"healthy","used_percent":42.5,"resets_at":"tomorrow"}
+				}]
+			}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "selected-project"
+
+	m = runLine(t, m, "/models capacity")
+	out := stripANSI(transcript(m))
+
+	mu.Lock()
+	capCount := counts["/api/capacity/models"]
+	usageCount := counts["/api/analytics/usage"]
+	gotUsageProjects := append([]string(nil), usageProjects...)
+	mu.Unlock()
+	if capCount != 1 || usageCount != 1 {
+		t.Errorf("expected exactly one request per endpoint, got capacity=%d usage=%d", capCount, usageCount)
+	}
+	if len(gotUsageProjects) != 1 || gotUsageProjects[0] != "selected-project" {
+		t.Errorf("usage project scope = %v, want [selected-project]", gotUsageProjects)
+	}
+
+	for _, want := range []string{"First", "Second", "Provider limits", "OpenAI", "team", "healthy", "42.5%", "tomorrow"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("successful capacity output missing %q:\n%s", want, out)
+		}
+	}
+	first := strings.Index(out, "First")
+	second := strings.Index(out, "Second")
+	provider := strings.Index(out, "Provider limits")
+	if first < 0 || second < 0 || provider < 0 || first >= second || second >= provider {
+		t.Errorf("capacity/provider output order changed:\n%s", out)
+	}
+	if strings.Contains(out, "sk-private-test-value") {
+		t.Errorf("provider/account detail leaked into capacity output:\n%s", out)
+	}
+}
+
+func TestModelsCapacityUsageFailureKeepsCapacityAndFallback(t *testing.T) {
+	var mu sync.Mutex
+	counts := map[string]int{}
+	var usageProjects []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		counts[r.URL.Path]++
+		if r.URL.Path == "/api/analytics/usage" {
+			usageProjects = append(usageProjects, r.URL.Query().Get("project_id"))
+		}
+		mu.Unlock()
+
+		switch r.URL.Path {
+		case "/api/capacity/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"Haiku","running":0,"max_workers":2,"available_slots":2}]`))
+		case "/api/analytics/usage":
+			http.Error(w, "provider quota service is down", http.StatusServiceUnavailable)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "selected-project"
+
+	m = runLine(t, m, "/models capacity")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "Haiku") || !strings.Contains(out, "provider limits unavailable") {
+		t.Fatalf("capacity should survive usage failure with fallback:\n%s", out)
+	}
+	if strings.Contains(out, "error:") {
+		t.Errorf("usage failure should not become a command error:\n%s", out)
+	}
+
+	mu.Lock()
+	capCount := counts["/api/capacity/models"]
+	usageCount := counts["/api/analytics/usage"]
+	gotUsageProjects := append([]string(nil), usageProjects...)
+	mu.Unlock()
+	if capCount != 1 || usageCount != 1 {
+		t.Errorf("expected exactly one request per endpoint, got capacity=%d usage=%d", capCount, usageCount)
+	}
+	if len(gotUsageProjects) != 1 || gotUsageProjects[0] != "selected-project" {
+		t.Errorf("usage project scope = %v, want [selected-project]", gotUsageProjects)
+	}
+}
+
+func TestModelsCapacityFailureRemainsFatal(t *testing.T) {
+	var mu sync.Mutex
+	counts := map[string]int{}
+	var usageProjects []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		counts[r.URL.Path]++
+		if r.URL.Path == "/api/analytics/usage" {
+			usageProjects = append(usageProjects, r.URL.Query().Get("project_id"))
+		}
+		mu.Unlock()
+
+		switch r.URL.Path {
+		case "/api/capacity/models":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"capacity service is down"}`))
+		case "/api/analytics/usage":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"account_limits":[{"provider":"OpenAI","status_label":"healthy"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "selected-project"
+
+	m = runLine(t, m, "/models capacity")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "capacity service is down") {
+		t.Fatalf("capacity failure should be returned as a command error:\n%s", out)
+	}
+	if strings.Contains(out, "Provider limits") {
+		t.Errorf("capacity failure should not render a partial capacity result:\n%s", out)
+	}
+
+	mu.Lock()
+	capCount := counts["/api/capacity/models"]
+	usageCount := counts["/api/analytics/usage"]
+	gotUsageProjects := append([]string(nil), usageProjects...)
+	mu.Unlock()
+	if capCount != 1 || usageCount != 1 {
+		t.Errorf("expected exactly one request per endpoint, got capacity=%d usage=%d", capCount, usageCount)
+	}
+	if len(gotUsageProjects) != 1 || gotUsageProjects[0] != "selected-project" {
+		t.Errorf("usage project scope = %v, want [selected-project]", gotUsageProjects)
+	}
+}
+
+func TestFetchModelCapacityWithUsageRespectsCanceledContext(t *testing.T) {
+	started := make(chan string, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/capacity/models", "/api/analytics/usage":
+			started <- r.URL.Path
+			<-r.Context().Done()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := fetchModelCapacityWithUsage(ctx, c, "selected-project")
+		done <- err
+	}()
+
+	seen := map[string]int{}
+	for i := 0; i < 2; i++ {
+		select {
+		case path := <-started:
+			seen[path]++
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for both capacity and usage requests")
+		}
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("canceled capacity request should remain fatal")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled capacity and usage requests did not return promptly")
+	}
+	if seen["/api/capacity/models"] != 1 || seen["/api/analytics/usage"] != 1 {
+		t.Errorf("started requests = %v, want one request per endpoint", seen)
 	}
 }
 

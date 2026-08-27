@@ -1475,6 +1475,34 @@ func agentsCommand() command {
 
 // --- models ---
 
+// fetchModelCapacityWithUsage fetches model capacity and optional provider
+// usage independently. Capacity is the primary result; usage failures leave
+// the usage value nil so the renderer can show its existing fallback.
+func fetchModelCapacityWithUsage(ctx context.Context, c *client.Client, projectID string) ([]client.ModelCapacity, *client.UsageAnalytics, error) {
+	var (
+		caps   []client.ModelCapacity
+		capErr error
+		usage  *client.UsageAnalytics
+	)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		caps, capErr = c.GetModelCapacities(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		usage, _ = c.GetUsageAnalytics(ctx, projectID)
+	}()
+	wg.Wait()
+
+	if capErr != nil {
+		return nil, nil, capErr
+	}
+	return caps, usage, nil
+}
+
 func modelsCommand() command {
 	actions := []string{"list", "default", "delete", "capacity"}
 	return command{
@@ -1514,11 +1542,10 @@ func modelsCommand() command {
 				})
 			case "capacity":
 				return m, run("Model capacity", cmdTimeout, func(ctx context.Context) (string, error) {
-					caps, err := c.GetModelCapacities(ctx)
+					caps, usage, err := fetchModelCapacityWithUsage(ctx, c, pid)
 					if err != nil {
 						return "", err
 					}
-					usage, _ := c.GetUsageAnalytics(ctx, pid)
 					return renderModelCapacityWithUsage(caps, usage), nil
 				})
 			default:
