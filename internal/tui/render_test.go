@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"fmt"
+	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -371,6 +374,201 @@ func TestRenderModelCapacityProviderLimits(t *testing.T) {
 	}
 	if strings.Contains(out, secret) {
 		t.Errorf("provider/account detail leaked into capacity output:\n%s", out)
+	}
+}
+
+func TestRenderExecTimesEmptyAndSmallInputs(t *testing.T) {
+	if out := stripANSI(renderExecTimes("Execution time", nil)); !strings.Contains(out, "no data") {
+		t.Fatalf("empty execution times = %q, want no-data message", out)
+	}
+
+	for n := 1; n <= 12; n++ {
+		times := make([]client.AvgExecutionTime, n)
+		for i := range times {
+			times[i] = client.AvgExecutionTime{
+				ID:    "row-" + strconv.Itoa(i),
+				AvgMs: float64(n - i),
+			}
+		}
+		before := append([]client.AvgExecutionTime(nil), times...)
+		out := stripANSI(renderExecTimes("Execution time", times))
+		lines := strings.Split(out, "\n")
+		if len(lines) != n+1 {
+			t.Fatalf("%d execution times rendered %d lines, want %d:\n%s", n, len(lines), n+1, out)
+		}
+		for i := range times {
+			if !strings.Contains(out, "row-"+strconv.Itoa(i)) {
+				t.Errorf("%d execution times missing row-%d:\n%s", n, i, out)
+			}
+		}
+		if !reflect.DeepEqual(times, before) {
+			t.Errorf("renderExecTimes mutated %d-record input: got %+v, want %+v", n, times, before)
+		}
+	}
+}
+
+func TestRenderExecTimesRendersZeroAndNegativeValues(t *testing.T) {
+	out := stripANSI(renderExecTimes("Execution time", []client.AvgExecutionTime{
+		{ID: "zero", AvgMs: 0},
+		{ID: "negative", AvgMs: -125},
+	}))
+	for _, want := range []string{"zero", "negative", "0ms", "-125ms"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("non-positive execution time output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderExecTimesSelectsTopRowsWithStableTies(t *testing.T) {
+	times := []client.AvgExecutionTime{
+		{ID: "drop-low-early", AvgMs: 0},
+		{ID: "drop-low-late", AvgMs: 0},
+		{ID: "tie-early", AvgMs: 500},
+		{ID: "top-1", AvgMs: 1000},
+		{ID: "tie-middle", AvgMs: 500},
+		{ID: "negative-early", AvgMs: -10},
+		{ID: "top-2", AvgMs: 900},
+		{ID: "tie-late", AvgMs: 500},
+		{ID: "top-3", AvgMs: 800},
+		{ID: "negative-late", AvgMs: -20},
+		{ID: "top-4", AvgMs: 700},
+		{ID: "top-5", AvgMs: 600},
+		{ID: "top-6", AvgMs: 550},
+		{ID: "top-7", AvgMs: 400},
+		{ID: "top-8", AvgMs: 300},
+	}
+	before := append([]client.AvgExecutionTime(nil), times...)
+	out := stripANSI(renderExecTimes("Execution time", times))
+
+	wantOrder := []string{
+		"top-1", "top-2", "top-3", "top-4", "top-5", "top-6",
+		"tie-early", "tie-middle", "tie-late", "top-7", "top-8", "drop-low-early",
+	}
+	previous := -1
+	for _, want := range wantOrder {
+		index := strings.Index(out, want)
+		if index < 0 {
+			t.Fatalf("missing selected row %q:\n%s", want, out)
+		}
+		if index <= previous {
+			t.Fatalf("row %q is out of descending/stable order:\n%s", want, out)
+		}
+		previous = index
+	}
+	for _, omitted := range []string{"drop-low-late", "negative-early", "negative-late"} {
+		if strings.Contains(out, omitted) {
+			t.Errorf("row %q exceeded the top-12 limit:\n%s", omitted, out)
+		}
+	}
+	if !reflect.DeepEqual(times, before) {
+		t.Errorf("renderExecTimes mutated input: got %+v, want %+v", times, before)
+	}
+}
+
+func TestRenderExecTimesUsesLongNamesAndIDsWithoutChangingSelection(t *testing.T) {
+	longName := strings.Repeat("long-name-", 8)
+	longID := strings.Repeat("long-id-", 8)
+	out := stripANSI(renderExecTimes("Execution time", []client.AvgExecutionTime{
+		{Name: longName, ID: "named-id", AvgMs: 200},
+		{ID: longID, AvgMs: 100},
+	}))
+
+	if !strings.Contains(out, "long-name-") || !strings.Contains(out, "long-id-") {
+		t.Fatalf("long name/ID prefixes missing:\n%s", out)
+	}
+	if strings.Count(out, "…") != 2 {
+		t.Fatalf("expected both long values to be display-truncated:\n%s", out)
+	}
+	if strings.Contains(out, longName) || strings.Contains(out, longID) {
+		t.Fatalf("long name or ID was rendered in full:\n%s", out)
+	}
+}
+
+func TestRenderExecTimesMatchesFullSortBaseline(t *testing.T) {
+	times := []client.AvgExecutionTime{
+		{ID: "value-4", AvgMs: 4},
+		{ID: "value-negative", AvgMs: -1},
+		{ID: "value-9", AvgMs: 9},
+		{ID: "value-zero", AvgMs: 0},
+		{ID: "value-2", AvgMs: 2},
+		{ID: "value-11", AvgMs: 11},
+		{ID: "value-1", AvgMs: 1},
+		{ID: "value-8", AvgMs: 8},
+		{ID: "value-3", AvgMs: 3},
+		{ID: "value-10", AvgMs: 10},
+		{ID: "value-5", AvgMs: 5},
+		{ID: "value-7", AvgMs: 7},
+		{ID: "value-6", AvgMs: 6},
+	}
+	got := renderExecTimes("Execution time", times)
+	want := renderExecTimesFullSort("Execution time", times)
+	if got != want {
+		t.Fatalf("bounded renderer changed baseline output\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// renderExecTimesFullSort is the pre-optimization implementation used only for
+// output regression and paired benchmark comparisons.
+func renderExecTimesFullSort(title string, times []client.AvgExecutionTime) string {
+	if len(times) == 0 {
+		return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
+	}
+	sorted := append([]client.AvgExecutionTime(nil), times...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].AvgMs > sorted[j].AvgMs })
+	if len(sorted) > 12 {
+		sorted = sorted[:12]
+	}
+	maxMs := sorted[0].AvgMs
+
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render(title) + "\n")
+	for _, t := range sorted {
+		fmt.Fprintf(&b, "  %-26s %s %8s %s\n",
+			truncate(firstNonEmpty(t.Name, t.ID), 26), bar(t.AvgMs, maxMs, 18),
+			humanMs(t.AvgMs), dimStyle.Render(fmt.Sprintf("n=%d", t.Count)))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+var renderExecTimesBenchmarkSink string
+
+func benchmarkExecTimesFixture(size int) []client.AvgExecutionTime {
+	times := make([]client.AvgExecutionTime, size)
+	for i := range times {
+		times[i] = client.AvgExecutionTime{
+			ID:    "execution-" + strconv.Itoa(i),
+			AvgMs: float64((i * 7919) % 1_000_000),
+			Count: i % 100,
+		}
+	}
+	return times
+}
+
+func BenchmarkRenderExecTimesLargeInput(b *testing.B) {
+	fixtures := []struct {
+		name  string
+		times []client.AvgExecutionTime
+	}{
+		{name: "10K", times: benchmarkExecTimesFixture(10_000)},
+		{name: "100K", times: benchmarkExecTimesFixture(100_000)},
+	}
+
+	for _, fixture := range fixtures {
+		fixture := fixture
+		b.Run(fixture.name+"/full_copy_sort", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				renderExecTimesBenchmarkSink = renderExecTimesFullSort("Execution time", fixture.times)
+			}
+		})
+		b.Run(fixture.name+"/bounded_top_12", func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				renderExecTimesBenchmarkSink = renderExecTimes("Execution time", fixture.times)
+			}
+		})
 	}
 }
 

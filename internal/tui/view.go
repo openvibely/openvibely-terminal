@@ -1167,20 +1167,71 @@ func renderRates(rates []client.SuccessFailureRate) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+const maxExecTimeRows = 12
+
+type execTimeCandidate struct {
+	value client.AvgExecutionTime
+	index int
+}
+
+func execTimeBefore(a, b execTimeCandidate) bool {
+	if a.value.AvgMs != b.value.AvgMs {
+		return a.value.AvgMs > b.value.AvgMs
+	}
+	return a.index < b.index
+}
+
+func execTimeWorse(a, b execTimeCandidate) bool {
+	if a.value.AvgMs != b.value.AvgMs {
+		return a.value.AvgMs < b.value.AvgMs
+	}
+	return a.index > b.index
+}
+
+// selectTopExecTimes keeps the highest-valued execution times in a bounded
+// candidate slice. Earlier input records win equal-value ties so selection and
+// rendering remain deterministic without mutating the caller's slice.
+func selectTopExecTimes(times []client.AvgExecutionTime) []execTimeCandidate {
+	limit := len(times)
+	if limit > maxExecTimeRows {
+		limit = maxExecTimeRows
+	}
+	selected := make([]execTimeCandidate, 0, limit)
+	for index, value := range times {
+		candidate := execTimeCandidate{value: value, index: index}
+		if len(selected) < limit {
+			selected = append(selected, candidate)
+			continue
+		}
+
+		worst := 0
+		for i := 1; i < len(selected); i++ {
+			if execTimeWorse(selected[i], selected[worst]) {
+				worst = i
+			}
+		}
+		if execTimeBefore(candidate, selected[worst]) {
+			selected[worst] = candidate
+		}
+	}
+
+	sort.Slice(selected, func(i, j int) bool {
+		return execTimeBefore(selected[i], selected[j])
+	})
+	return selected
+}
+
 func renderExecTimes(title string, times []client.AvgExecutionTime) string {
 	if len(times) == 0 {
 		return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
 	}
-	sorted := append([]client.AvgExecutionTime(nil), times...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].AvgMs > sorted[j].AvgMs })
-	if len(sorted) > 12 {
-		sorted = sorted[:12]
-	}
-	maxMs := sorted[0].AvgMs
+	selected := selectTopExecTimes(times)
+	maxMs := selected[0].value.AvgMs
 
 	var b strings.Builder
 	b.WriteString(sectionStyle.Render(title) + "\n")
-	for _, t := range sorted {
+	for _, candidate := range selected {
+		t := candidate.value
 		fmt.Fprintf(&b, "  %-26s %s %8s %s\n",
 			truncate(firstNonEmpty(t.Name, t.ID), 26), bar(t.AvgMs, maxMs, 18),
 			humanMs(t.AvgMs), dimStyle.Render(fmt.Sprintf("n=%d", t.Count)))
