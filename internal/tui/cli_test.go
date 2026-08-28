@@ -142,11 +142,12 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"personality", "add", "Release Coach", "|", "safe releases", "|", "Keep releases safe in production deployments."}, false, false); err != nil {
+	addPrompt := "Keep releases safe | preserve this literal marker in production deployments."
+	if err := RunCLI(c, &out, "demo", []string{"personality", "add", "Release Coach", "|", addPrompt}, false, false); err != nil {
 		t.Fatalf("CLI personality add failed: %v", err)
 	}
-	if addBody["name"] != "Release Coach" || addBody["description"] != "safe releases" || addBody["system_prompt"] == "" {
-		t.Errorf("CLI add body = %#v", addBody)
+	if addBody["name"] != "Release Coach" || addBody["description"] != "" || addBody["system_prompt"] != addPrompt {
+		t.Errorf("CLI add body = %#v, want prompt %q and empty description", addBody, addPrompt)
 	}
 	if !strings.Contains(out.String(), "key: release_coach") || !strings.Contains(out.String(), "ID: cp1") {
 		t.Errorf("CLI add did not report key/ID:\n%s", out.String())
@@ -178,6 +179,126 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 		t.Fatalf("delete result = %#v, requests=%d", deleted, deleteRequests)
 	}
 }
+func TestCLIPersonalityFailuresAndReferenceSafety(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="known" data-personality-name="Known" data-personality-description="known"
+			data-personality-preview="known" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="review_one" data-personality-name="Review One" data-personality-description="one"
+			data-personality-preview="one" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="review_two" data-personality-name="Review Two" data-personality-description="two"
+			data-personality-preview="two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var posts, puts, saves, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			posts++
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = fmt.Fprint(w, `{"error":"System prompt must be at least 20 characters"}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/known":
+			puts++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `{"error":"personality update failed"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/save":
+			saves++
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = fmt.Fprint(w, `{"error":"personality activation failed"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/known":
+			deletes++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `{"error":"personality deletion failed"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"personality", "add", "Known", "|", "short"}, false, false); err == nil || !strings.Contains(err.Error(), "System prompt must be at least 20 characters") {
+		t.Fatalf("CLI validation error = %v", err)
+	}
+	if posts != 1 || out.Len() != 0 || strings.Contains(out.String(), "created personality") {
+		t.Fatalf("validation failure output/mutation: posts=%d output=%q", posts, out.String())
+	}
+
+	if err := RunCLI(c, &out, "demo", []string{"personality", "set", "missing"}, false, false); err == nil || !strings.Contains(err.Error(), "nothing matches") {
+		t.Fatalf("CLI unknown-reference error = %v", err)
+	}
+	if saves != 0 {
+		t.Fatal("unknown set mutated the active personality")
+	}
+
+	if err := RunCLI(c, &out, "demo", []string{"personality", "set", "Review"}, false, false); err == nil || !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "Review One") || !strings.Contains(err.Error(), "Review Two") {
+		t.Fatalf("CLI ambiguous-reference error = %v", err)
+	}
+	if saves != 0 {
+		t.Fatal("ambiguous set mutated the active personality")
+	}
+
+	if err := RunCLI(c, &out, "demo", []string{"personality", "edit", "known", "|", "Updated", "|", "updated", "|", "A valid prompt that is long enough"}, false, false); err == nil || !strings.Contains(err.Error(), "personality update failed") {
+		t.Fatalf("CLI backend edit error = %v", err)
+	}
+	if puts != 1 || strings.Contains(out.String(), "updated personality") {
+		t.Fatalf("edit failure output/mutation: puts=%d output=%q", puts, out.String())
+	}
+
+	beforeDelete := deletes
+	if err := RunCLI(c, &out, "demo", []string{"personality", "delete", "known"}, false, false); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("CLI delete safeguard error = %v", err)
+	}
+	if deletes != beforeDelete {
+		t.Fatal("CLI delete mutated without --force")
+	}
+
+	if err := RunCLI(c, &out, "demo", []string{"personality", "delete", "known"}, true, false); err == nil || !strings.Contains(err.Error(), "personality deletion failed") {
+		t.Fatalf("CLI backend delete error = %v", err)
+	}
+	if deletes != beforeDelete+1 || strings.Contains(out.String(), "deleted personality") {
+		t.Fatalf("delete failure output/mutation: deletes=%d output=%q", deletes, out.String())
+	}
+}
+
+func TestCLIUnknownPersonalityActionDoesNotReadOrMutate(t *testing.T) {
+	var personalityGets, mutations int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case "/personality":
+			personalityGets++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div id="personality-section"></div>`))
+		default:
+			mutations++
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"personality", "unsupported"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "unknown personality action") {
+		t.Fatalf("unknown personality action error = %v", err)
+	}
+	if personalityGets != 0 || mutations != 0 {
+		t.Fatalf("unknown action made requests: personality GETs=%d mutations=%d", personalityGets, mutations)
+	}
+}
+
 func TestCLIAnalyticsUsageMatchesInteractiveQuotaOutput(t *testing.T) {
 	const usage = `{
 		"totals":{"call_count":2,"total_tokens":700},

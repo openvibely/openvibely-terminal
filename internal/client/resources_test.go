@@ -930,6 +930,88 @@ func TestPersonalityJSONMutationsUseScopedRoutesAndPayloads(t *testing.T) {
 	}
 }
 
+func TestPersonalityMutationErrorsPropagateValidationDuplicateAndNotFound(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = fmt.Fprint(w, `{"error":"System prompt must be at least 20 characters"}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/release_coach":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = fmt.Fprint(w, `{"error":"A custom personality with this key already exists"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/release_coach":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprint(w, `{"error":"Custom personality not found"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if _, err := c.CreateCustomPersonality(ctx, "p1", "Release Coach", "", "too short"); err == nil || err.Error() != "server error (422): System prompt must be at least 20 characters" {
+		t.Fatalf("create validation error = %v", err)
+	}
+	if _, err := c.UpdateCustomPersonality(ctx, "p1", "release_coach", "Release Coach", "", "valid prompt that is long enough"); err == nil || err.Error() != "server error (409): A custom personality with this key already exists" {
+		t.Fatalf("update duplicate error = %v", err)
+	}
+	if err := c.DeleteCustomPersonality(ctx, "p1", "release_coach"); err == nil || err.Error() != "server error (404): Custom personality not found" {
+		t.Fatalf("delete not-found error = %v", err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestPersonalityMutationsRejectBlankKeysBeforeRequest(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := c.GetCustomPersonality(ctx, "p1", " "); err == nil || err.Error() != "personality key is required" {
+		t.Fatalf("detail blank-key error = %v", err)
+	}
+	if _, err := c.UpdateCustomPersonality(ctx, "p1", " ", "Name", "", "valid prompt that is long enough"); err == nil || err.Error() != "personality key is required" {
+		t.Fatalf("update blank-key error = %v", err)
+	}
+	if err := c.DeleteCustomPersonality(ctx, "p1", " "); err == nil || err.Error() != "personality key is required" {
+		t.Fatalf("delete blank-key error = %v", err)
+	}
+	if requests != 0 {
+		t.Fatalf("blank-key methods made %d requests", requests)
+	}
+}
+
+func TestListPersonalitiesReturnsEmptyCollectionForEmptyPage(t *testing.T) {
+	c := htmlServer(t, `<div id="personality-section" data-selected-personality=""><p>No personalities</p></div>`)
+	personalities, err := c.ListPersonalities(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if personalities == nil {
+		t.Fatal("empty personality list must be non-nil")
+	}
+	if len(personalities) != 0 {
+		t.Fatalf("personalities = %+v, want empty", personalities)
+	}
+}
+
 func TestPersonalityJSONUsesStableSnakeCaseFields(t *testing.T) {
 	payload, err := json.Marshal(Personality{
 		ID: "cp1", Key: "release_coach", Name: "Release Coach",

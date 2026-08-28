@@ -228,16 +228,12 @@ fetch a complete system prompt:
 /personality list
 /personality show release_coach
 /personality add "Release Coach" | Keep release advice practical and safe.
-/personality add "Release Coach" | safe releases | Keep release advice practical and safe for production.
 /personality edit release_coach | Release Coach | updated description | Keep every release reversible and observable.
 /personality set release_coach
 /personality delete release_coach
 ```
 
-The two-field `add` form leaves the description empty; the three-field form uses
-`name | description | system prompt`. Editing a built-in creates or updates its
-backend override. Deleting that built-in resets it to the built-in default, while
-deleting a custom entry removes it; both operations require the normal TUI
+The add form leaves the optional description empty; use `edit` to set or change it. The prompt is free-form, so literal `|` characters after the first separator are preserved. Editing a built-in creates or updates its backend override. Deleting that built-in resets it to the built-in default, while deleting a custom entry removes it; both operations require the normal TUI
 confirmation or `--force` in CLI mode. Add `--json` to list/show and supported
 mutation commands for machine-readable records.
 

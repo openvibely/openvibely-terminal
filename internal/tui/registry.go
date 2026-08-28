@@ -2158,7 +2158,6 @@ func personalityCommand() command {
 			"personality list                           list built-in and custom personalities",
 			"personality show <key|name>                 show the full system prompt",
 			"personality add <name> | <system prompt>   create a custom personality",
-			"personality add <name> | <description> | <system prompt>",
 			"personality edit <key|name> | <name> | <description> | <system prompt>",
 			"personality set <key|name>                  activate a personality",
 			"personality delete <key|name>               delete a custom or reset an override",
@@ -2229,22 +2228,12 @@ func personalityCommand() command {
 				if ref == "" {
 					return m, errCmd(commandUsage("personality", "add"))
 				}
-				parts := strings.Split(ref, "|")
-				if len(parts) != 2 && len(parts) != 3 {
-					return m, errCmd(commandUsage("personality", "add"))
-				}
-				name := strings.TrimSpace(parts[0])
-				description := ""
-				prompt := strings.TrimSpace(parts[1])
-				if len(parts) == 3 {
-					description = strings.TrimSpace(parts[1])
-					prompt = strings.TrimSpace(parts[2])
-				}
+				name, prompt := splitPipe(ref)
 				if name == "" || prompt == "" {
 					return m, errCmd(commandUsage("personality", "add"))
 				}
 				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					created, err := c.CreateCustomPersonality(ctx, pid, name, description, prompt)
+					created, err := c.CreateCustomPersonality(ctx, pid, name, "", prompt)
 					if err != nil {
 						return "", err
 					}
@@ -2260,11 +2249,8 @@ func personalityCommand() command {
 				if strings.TrimSpace(ref) == "" {
 					return personalitySelector(m, commandUsage("personality", "edit"), "personality edit", "edit", true)
 				}
-				parts := strings.Split(ref, "|")
-				if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
-					return m, errCmd(commandUsage("personality", "edit"))
-				}
-				if len(parts) != 4 || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[3]) == "" {
+				parts := strings.SplitN(ref, "|", 4)
+				if len(parts) != 4 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[3]) == "" {
 					return m, errCmd(commandUsage("personality", "edit"))
 				}
 				ref2 := strings.TrimSpace(parts[0])

@@ -1625,8 +1625,11 @@ func TestPersonalityAddEditAndDeleteUseBackendContracts(t *testing.T) {
 	m.selectedID = "p1"
 	m.selectedName = "demo"
 
-	m = runLine(t, m, "/personality add Release Coach | safe releases | Keep releases safe in production deployments.")
-	if addBody["name"] != "Release Coach" || addBody["description"] != "safe releases" || addBody["system_prompt"] == "" {
+	m = runLine(t, m, "/personality add Release Coach | Keep releases safe in production deployments.")
+	if addBody["description"] != "" {
+		t.Errorf("two-field add description = %q, want empty", addBody["description"])
+	}
+	if addBody["name"] != "Release Coach" || addBody["description"] != "" || addBody["system_prompt"] != "Keep releases safe in production deployments." {
 		t.Errorf("add payload = %#v", addBody)
 	}
 	if !strings.Contains(stripANSI(transcript(m)), "key: release_coach") || !strings.Contains(stripANSI(transcript(m)), "ID: cp-new") {
@@ -1655,6 +1658,176 @@ func TestPersonalityAddEditAndDeleteUseBackendContracts(t *testing.T) {
 		t.Errorf("personality mutation lost project scope:\n%s", rec.all())
 	}
 }
+func TestPersonalityPipeCharactersArePreservedInAddAndEditPrompts(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="pipe_personality">
+		<div data-personality-key="pipe_personality" data-personality-name="Pipe Personality" data-personality-description="test"
+			data-personality-preview="prompt" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	addPrompt := "You are precise | preserve this literal marker while helping users."
+	editPrompt := "Use calm guidance | keep this marker exactly in the saved prompt."
+	var addBody, editBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			if err := json.NewDecoder(r.Body).Decode(&addBody); err != nil {
+				t.Errorf("decode add body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"pipe_personality","name":"Pipe Personality","system_prompt":"created prompt that is long enough"}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/pipe_personality":
+			if err := json.NewDecoder(r.Body).Decode(&editBody); err != nil {
+				t.Errorf("decode edit body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"pipe_personality","name":"Pipe Personality","system_prompt":"updated prompt that is long enough"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/personality add Pipe Personality | "+addPrompt)
+	if got := addBody["system_prompt"]; got != addPrompt {
+		t.Fatalf("add prompt = %q, want %q; body=%#v", got, addPrompt, addBody)
+	}
+	if addBody["description"] != "" {
+		t.Fatalf("two-field add description = %q, want empty", addBody["description"])
+	}
+
+	m = runLine(t, m, "/personality edit pipe_personality | Pipe Personality | test | "+editPrompt)
+	if got := editBody["system_prompt"]; got != editPrompt {
+		t.Fatalf("edit prompt = %q, want %q; body=%#v", got, editPrompt, editBody)
+	}
+}
+
+func TestPersonalityMalformedAndUnknownReferencesDoNotMutate(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="known" data-personality-name="Known" data-personality-description="known"
+			data-personality-preview="known" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var posts, puts, saves, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			posts++
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = fmt.Fprint(w, `{"error":"System prompt must be at least 20 characters"}`)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/personality/custom/"):
+			puts++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `{"error":"personality update failed"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/save":
+			saves++
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = fmt.Fprint(w, `{"error":"personality activation failed"}`)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/personality/custom/"):
+			deletes++
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = fmt.Fprint(w, `{"error":"personality deletion failed"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/personality add Known | short")
+	if posts != 1 || strings.Contains(transcript(m), "created personality") {
+		t.Fatalf("validation failure reported success or wrong POST count: posts=%d transcript=%s", posts, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "System prompt must be at least 20 characters") {
+		t.Fatalf("validation error missing from transcript: %s", transcript(m))
+	}
+
+	m = runLine(t, m, "/personality edit missing | New Name | desc | A valid prompt that is long enough")
+	if puts != 0 || !strings.Contains(transcript(m), "nothing matches") {
+		t.Fatalf("unknown edit mutated or lacked error: puts=%d transcript=%s", puts, transcript(m))
+	}
+
+	m = runLine(t, m, "/personality set missing")
+	if saves != 0 || !strings.Contains(transcript(m), "nothing matches") {
+		t.Fatalf("unknown set mutated or lacked error: saves=%d transcript=%s", saves, transcript(m))
+	}
+
+	m = runLine(t, m, "/personality set known")
+	if saves != 1 || strings.Contains(transcript(m), "personality set to known") {
+		t.Fatalf("activation failure reported success or wrong POST count: saves=%d transcript=%s", saves, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "personality activation failed") {
+		t.Fatalf("activation error missing from transcript: %s", transcript(m))
+	}
+
+	m = runLine(t, m, "/personality delete known")
+	if m.pendingConfirmation == nil || deletes != 0 {
+		t.Fatalf("delete should wait for confirmation: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
+	}
+	m = runLine(t, m, "yes")
+	if deletes != 1 || strings.Contains(transcript(m), "deleted personality") {
+		t.Fatalf("deletion failure reported success or wrong DELETE count: deletes=%d transcript=%s", deletes, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "personality deletion failed") {
+		t.Fatalf("deletion error missing from transcript: %s", transcript(m))
+	}
+}
+
+func TestPersonalityDeleteConfirmationCancellationDoesNotMutate(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="known" data-personality-name="Known" data-personality-description="known"
+			data-personality-preview="known" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/personality" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+			return
+		}
+		if r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/known" {
+			deletes++
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/personality delete known")
+	if m.pendingConfirmation == nil || deletes != 0 {
+		t.Fatalf("delete should be parked before confirmation: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
+	}
+	m = runLine(t, m, "no")
+	if m.pendingConfirmation != nil || deletes != 0 {
+		t.Fatalf("cancelled delete mutated or left confirmation: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
+	}
+}
+
 func TestAlertsBulkActions(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	runLine(t, m, "/alerts read-all")
