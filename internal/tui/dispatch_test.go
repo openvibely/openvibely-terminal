@@ -353,6 +353,26 @@ func TestTasksRunResolvesTaskByTitle(t *testing.T) {
 	}
 }
 
+func TestTasksRunRejectsCaseInsensitiveDuplicateExactTitles(t *testing.T) {
+	const duplicateTitlesHTML = `<div>
+	  <div class="card" data-task-id="t-1" data-task-status="pending" data-task-category="backlog">
+	    <a href="/tasks/t-1" title="Deploy">Deploy</a>
+	  </div>
+	  <div class="card" data-task-id="t-2" data-task-status="pending" data-task-category="backlog">
+	    <a href="/tasks/t-2" title="deploy">deploy</a>
+	  </div>
+	</div>`
+	m, rec := dispatchModel(t, map[string]string{"/tasks": duplicateTitlesHTML})
+	m = runLine(t, m, "/tasks run DEPLOY")
+
+	if rec.saw("POST", "/tasks/t-1/run") || rec.saw("POST", "/tasks/t-2/run") {
+		t.Fatalf("ambiguous exact task title dispatched a run:\n%s", rec.all())
+	}
+	if !strings.Contains(strings.ToLower(transcript(m)), "ambiguous") {
+		t.Fatalf("expected an ambiguous task-title error:\n%s", transcript(m))
+	}
+}
+
 func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
@@ -1654,6 +1674,21 @@ func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 		confirmDestructive(t, m, "/automations delete GitHub")
 		if !rec.saw("POST", "/automations/au-2/delete") {
 			t.Errorf("calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("ambiguous exact name rejected", func(t *testing.T) {
+		ambiguousHTML := "<div>" +
+			automationCardHTML("au-3", "Deploy", "active") +
+			automationCardHTML("au-4", "deploy", "active") +
+			"</div>"
+		m, rec := dispatchModel(t, map[string]string{"/automations": ambiguousHTML})
+		m = runLine(t, m, "/automations pause DEPLOY")
+		if rec.saw("POST", "/automations/au-3/pause") || rec.saw("POST", "/automations/au-4/pause") {
+			t.Errorf("ambiguous exact automation name dispatched a pause:\n%s", rec.all())
+		}
+		if !strings.Contains(strings.ToLower(transcript(m)), "ambiguous") {
+			t.Fatalf("expected an ambiguous automation-name error:\n%s", transcript(m))
 		}
 	})
 

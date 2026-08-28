@@ -301,10 +301,11 @@ func (m Model) needProject() (Model, tea.Cmd, bool) {
 }
 
 // matchRef finds an item by reference, preferring the most specific match:
-// an exact ID or name, then an ID/name prefix, then a name substring. Each
-// tier is only consulted when the previous one found nothing, and a tier that
-// matches several items reports them rather than guessing — so an exact name
-// is never shadowed by a longer one that merely contains it.
+// a unique exact ID, then a unique exact name, then an ID/name prefix, then a
+// name substring. Each tier is only consulted when the previous one found
+// nothing, and a tier that matches several items reports them rather than
+// guessing — so an exact name is never shadowed by a longer one that merely
+// contains it.
 func matchRef[T any](items []T, ref string, id func(T) string, name func(T) string) (T, error) {
 	var zero T
 	ref = strings.TrimSpace(ref)
@@ -313,11 +314,46 @@ func matchRef[T any](items []T, ref string, id func(T) string, name func(T) stri
 	}
 	lower := strings.ToLower(ref)
 
+	ambiguous := func(hits []T) error {
+		var names []string
+		for _, h := range hits {
+			names = append(names, name(h))
+		}
+		return fmt.Errorf("%q is ambiguous: %s — use the full name or ID",
+			ref, strings.Join(names, ", "))
+	}
+
+	// IDs are canonical references, so a unique exact ID takes precedence over
+	// every name tier. Do not return from this loop: duplicate exact IDs must
+	// not be resolved by listing order either.
+	var exactIDs []T
 	for _, it := range items {
-		if strings.EqualFold(id(it), ref) || strings.EqualFold(name(it), ref) {
-			return it, nil
+		if strings.EqualFold(id(it), ref) {
+			exactIDs = append(exactIDs, it)
 		}
 	}
+	if len(exactIDs) == 1 {
+		return exactIDs[0], nil
+	}
+	if len(exactIDs) > 1 {
+		return zero, ambiguous(exactIDs)
+	}
+
+	// Exact names are a separate tier so duplicate case-insensitive names are
+	// reported as ambiguous instead of selecting the first list item.
+	var exactNames []T
+	for _, it := range items {
+		if strings.EqualFold(name(it), ref) {
+			exactNames = append(exactNames, it)
+		}
+	}
+	if len(exactNames) == 1 {
+		return exactNames[0], nil
+	}
+	if len(exactNames) > 1 {
+		return zero, ambiguous(exactNames)
+	}
+
 	for _, tier := range []func(T) bool{
 		func(it T) bool {
 			return strings.HasPrefix(strings.ToLower(id(it)), lower) ||
@@ -335,12 +371,7 @@ func matchRef[T any](items []T, ref string, id func(T) string, name func(T) stri
 			return hits[0], nil
 		}
 		if len(hits) > 1 {
-			var names []string
-			for _, h := range hits {
-				names = append(names, name(h))
-			}
-			return zero, fmt.Errorf("%q is ambiguous: %s — use the full name or ID",
-				ref, strings.Join(names, ", "))
+			return zero, ambiguous(hits)
 		}
 	}
 	return zero, fmt.Errorf("nothing matches %q", ref)

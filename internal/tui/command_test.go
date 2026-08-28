@@ -130,6 +130,45 @@ func TestMatchRefPrefersExactName(t *testing.T) {
 	}
 }
 
+func TestMatchRefRejectsDuplicateExactNamesCaseInsensitively(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "1", Title: "Deploy"},
+		{ID: "2", Title: "deploy"},
+	}
+
+	got, err := matchRef(tasks, "DEPLOY",
+		func(t client.Task) string { return t.ID },
+		func(t client.Task) string { return t.Title })
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("matchRef error = %v, want an ambiguity error", err)
+	}
+	if got.ID != "" {
+		t.Fatalf("ambiguous exact name selected task %q", got.ID)
+	}
+	for _, want := range []string{"Deploy", "deploy"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ambiguity error %q missing candidate %q", err, want)
+		}
+	}
+}
+
+func TestMatchRefExactIDPrecedesExactName(t *testing.T) {
+	items := []client.Task{
+		{ID: "task-1", Title: "Unrelated"},
+		{ID: "task-2", Title: "TASK-1"},
+	}
+
+	got, err := matchRef(items, "TaSk-1",
+		func(t client.Task) string { return t.ID },
+		func(t client.Task) string { return t.Title })
+	if err != nil {
+		t.Fatalf("matchRef returned error: %v", err)
+	}
+	if got.ID != "task-1" {
+		t.Fatalf("matchRef selected %q, want the unique exact ID task-1", got.ID)
+	}
+}
+
 // A name prefix outranks a mid-string substring match.
 func TestMatchRefPrefersPrefixOverSubstring(t *testing.T) {
 	tasks := []client.Task{
