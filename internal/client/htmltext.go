@@ -131,7 +131,20 @@ func attr(n *html.Node, name string) string {
 	return ""
 }
 
-// extractIDs scans all attributes in the subtree for paths matching
+// hasHTMLAttr reports whether an element contains an attribute, including an
+// explicitly empty attribute value such as data-personality-key="".
+func hasHTMLAttr(n *html.Node, name string) bool {
+	if n == nil {
+		return false
+	}
+	for _, a := range n.Attr {
+		if a.Key == name {
+			return true
+		}
+	}
+	return false
+}
+
 // prefix + "/<id>" (e.g. "/schedules/abc-123") and returns the unique ids
 // in document order. Used to discover entity ids embedded in hx-* routes.
 func extractIDs(n *html.Node, prefix string) []string {

@@ -809,6 +809,144 @@ func TestCreateScheduleRejectsInvalidRepeatIntervalsBeforeRequest(t *testing.T) 
 	}
 }
 
+func TestListPersonalitiesScrapesBuiltinsCustomsAndActiveState(t *testing.T) {
+	const page = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard professional assistant tone"
+			data-personality-preview="" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+		<div data-personality-key="pirate_captain" data-personality-name="Pirate Captain (Edited)"
+			data-personality-description="custom pirate style" data-personality-preview="Speak like a pirate..."
+			data-personality-is-preset="true" data-personality-has-custom="true"></div>
+		<div data-personality-key="release_coach" data-personality-name="Release Coach"
+			data-personality-description="safe releases" data-personality-preview="Keep releases safe..."
+			data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	c := htmlServer(t, page)
+
+	personalities, err := c.ListPersonalities(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(personalities) != 3 {
+		t.Fatalf("got %d personalities, want 3: %+v", len(personalities), personalities)
+	}
+	if personalities[0].Key != "" || personalities[0].Name != "Base" || !personalities[0].IsPreset {
+		t.Errorf("base personality = %+v", personalities[0])
+	}
+	if !personalities[1].IsPreset || !personalities[1].HasCustom || personalities[1].Name != "Pirate Captain (Edited)" {
+		t.Errorf("preset override = %+v", personalities[1])
+	}
+	if personalities[2].IsPreset || !personalities[2].Active || personalities[2].SystemPromptPreview != "Keep releases safe..." {
+		t.Errorf("custom personality = %+v", personalities[2])
+	}
+	if personalities[1].Active {
+		t.Error("inactive override marked active")
+	}
+}
+
+func TestPersonalityJSONMutationsUseScopedRoutesAndPayloads(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			if got := r.Header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("create Content-Type = %q", got)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode create body: %v", err)
+			}
+			if body["name"] != "Release Coach" || body["description"] != "safe releases" || body["system_prompt"] != "Keep releases safe in production deployments." {
+				t.Errorf("create body = %#v", body)
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"Keep releases safe in production deployments."}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/personality/custom/release_coach":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"Keep releases safe in production deployments."}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/release_coach":
+			if got := r.Header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("update Content-Type = %q", got)
+			}
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode update body: %v", err)
+			}
+			if body["name"] != "Release Coach 2" || body["description"] != "updated" || body["system_prompt"] != "Keep every release reversible and observable." {
+				t.Errorf("update body = %#v", body)
+			}
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach 2","description":"updated","system_prompt":"Keep every release reversible and observable."}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/release_coach":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := c.CreateCustomPersonality(ctx, "p1", "Release Coach", "safe releases", "Keep releases safe in production deployments.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ID != "cp1" || created.Key != "release_coach" {
+		t.Fatalf("created = %+v", created)
+	}
+	got, err := c.GetCustomPersonality(ctx, "p1", "release_coach")
+	if err != nil || got.SystemPrompt == "" {
+		t.Fatalf("detail = %+v, err=%v", got, err)
+	}
+	updated, err := c.UpdateCustomPersonality(ctx, "p1", "release_coach", "Release Coach 2", "updated", "Keep every release reversible and observable.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != "Release Coach 2" {
+		t.Fatalf("updated = %+v", updated)
+	}
+	if err := c.DeleteCustomPersonality(ctx, "p1", "release_coach"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, want := range []string{
+		"POST /personality/custom?project_id=p1",
+		"GET /personality/custom/release_coach?project_id=p1",
+		"PUT /personality/custom/release_coach?project_id=p1",
+		"DELETE /personality/custom/release_coach?project_id=p1",
+	} {
+		found := false
+		for _, request := range requests {
+			if request == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("requests missing %q: %v", want, requests)
+		}
+	}
+}
+
+func TestPersonalityJSONUsesStableSnakeCaseFields(t *testing.T) {
+	payload, err := json.Marshal(Personality{
+		ID: "cp1", Key: "release_coach", Name: "Release Coach",
+		Description: "safe releases", SystemPromptPreview: "Keep releases safe...",
+		IsPreset: false, HasCustom: true, Active: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(payload)
+	for _, key := range []string{"\"id\"", "\"key\"", "\"name\"", "\"description\"", "\"system_prompt_preview\"", "\"is_preset\"", "\"has_custom\"", "\"active\""} {
+		if !strings.Contains(text, key) {
+			t.Errorf("JSON missing %s: %s", key, text)
+		}
+	}
+}
+
 func TestPageTextPrefersNamedElement(t *testing.T) {
 	c := htmlServer(t, `<html><body><nav>skip me</nav>
 		<div id="personality-container">friendly and concise</div></body></html>`)

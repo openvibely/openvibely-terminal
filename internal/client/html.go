@@ -134,13 +134,25 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 // still answers with HTML, so the request keeps the same HTMX and Accept headers
 // as form mutations while using the JSON request contract.
 func (c *Client) doJSON(ctx context.Context, method, path string, payload any) error {
-	body, err := json.Marshal(payload)
+	resp, err := c.doJSONResponse(ctx, method, path, payload)
 	if err != nil {
 		return err
 	}
+	drainAndClose(resp.Body)
+	return nil
+}
+
+// doJSONResponse performs a JSON mutation and retains a successful response
+// body for callers whose endpoint returns a JSON resource. Non-2xx responses
+// use the same authentication and API-error classification as doJSON.
+func (c *Client) doJSONResponse(ctx context.Context, method, path string, payload any) (*http.Response, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("HX-Request", "true")
@@ -148,19 +160,18 @@ func (c *Client) doJSON(ctx context.Context, method, path string, payload any) e
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	if isAuthResponse(resp) {
 		defer drainAndClose(resp.Body)
-		return newAuthRequiredError(method, path, resp)
+		return nil, newAuthRequiredError(method, path, resp)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		drainAndClose(resp.Body)
-		return nil
+		return resp, nil
 	}
 	err = apiError(resp)
 	drainAndClose(resp.Body)
-	return err
+	return nil, err
 }
 
 var cardNodeText = NodeText

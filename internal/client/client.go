@@ -227,7 +227,8 @@ type AuthStatus struct {
 }
 
 type errorResponse struct {
-	Error string `json:"error"`
+	Error   string `json:"error"`
+	Message string `json:"message"`
 }
 
 // --- API methods ---
@@ -444,8 +445,14 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 func apiError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	var er errorResponse
-	if json.Unmarshal(body, &er) == nil && er.Error != "" {
-		return fmt.Errorf("server error (%d): %s", resp.StatusCode, er.Error)
+	if json.Unmarshal(body, &er) == nil {
+		message := er.Error
+		if message == "" {
+			message = er.Message
+		}
+		if message != "" {
+			return fmt.Errorf("server error (%d): %s", resp.StatusCode, message)
+		}
 	}
 	return fmt.Errorf("server error (%d)", resp.StatusCode)
 }

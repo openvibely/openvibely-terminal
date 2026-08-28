@@ -1465,13 +1465,196 @@ func TestScheduleAddRejectsInvalidRepeatIntervals(t *testing.T) {
 }
 
 func TestPersonalitySet(t *testing.T) {
-	m, rec := dispatchModel(t, nil)
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="concise" data-personality-name="Concise" data-personality-description="short answers"
+			data-personality-preview="Keep answers short." data-personality-is-preset="true" data-personality-has-custom="false"></div>
+	</div>`
+	m, rec := dispatchModel(t, map[string]string{"/personality": personalitiesHTML})
 	runLine(t, m, "/personality set concise")
 	if !rec.saw("POST", "/personality/save") {
 		t.Errorf("calls:\n%s", rec.all())
 	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Errorf("set lost project scope:\n%s", rec.all())
+	}
 }
 
+func TestPersonalityListShowSetAndUnknownAction(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard tone"
+			data-personality-preview="" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+		<div data-personality-key="pirate_captain" data-personality-name="Pirate Captain" data-personality-description="pirate style"
+			data-personality-preview="Speak like a pirate..." data-personality-is-preset="true" data-personality-has-custom="true"></div>
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description="safe releases"
+			data-personality-preview="Keep releases safe..." data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	const fullPrompt = "This is the complete release coach system prompt for production work."
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality/custom/release_coach":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":%q}`, fullPrompt)
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/save":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/personality list")
+	listOutput := stripANSI(transcript(m))
+	for _, want := range []string{"release_coach", "Pirate Captain", "safe releases", "Keep releases safe...", "TYPE", "PROMPT PREVIEW"} {
+		if !strings.Contains(listOutput, want) {
+			t.Errorf("personality list missing %q:\n%s", want, listOutput)
+		}
+	}
+
+	m = runLine(t, m, "/personality show Release Coach")
+	if !strings.Contains(stripANSI(transcript(m)), fullPrompt) {
+		t.Errorf("personality show did not render the full prompt:\n%s", stripANSI(transcript(m)))
+	}
+	if got := rec.count(http.MethodGet, "/personality/custom/release_coach"); got != 1 {
+		t.Errorf("show made %d detail requests, want 1:\n%s", got, rec.all())
+	}
+
+	m = runLine(t, m, "/personality set release_coach")
+	if !rec.saw(http.MethodPost, "/personality/save") || !rec.sawQuery("project_id=p1") {
+		t.Errorf("set did not use the scoped save route:\n%s", rec.all())
+	}
+
+	personalityGets := rec.count(http.MethodGet, "/personality")
+	m = runLine(t, m, "/personality unsupported")
+	if rec.count(http.MethodGet, "/personality") != personalityGets {
+		t.Errorf("unsupported action fell through to a read:\n%s", rec.all())
+	}
+	if !strings.Contains(stripANSI(transcript(m)), "unknown personality action") {
+		t.Errorf("unsupported action error missing:\n%s", stripANSI(transcript(m)))
+	}
+}
+
+func TestPersonalityAmbiguousReferenceDoesNotMutate(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="review_one" data-personality-name="Review One" data-personality-description="one"
+			data-personality-preview="one" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="review_two" data-personality-name="Review Two" data-personality-description="two"
+			data-personality-preview="two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		if r.Method == http.MethodGet && r.URL.Path == "/personality" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+			return
+		}
+		t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	m = runLine(t, m, "/personality set Review")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "ambiguous") || !strings.Contains(out, "Review One") || !strings.Contains(out, "Review Two") {
+		t.Errorf("ambiguous personality error missing candidates:\n%s", out)
+	}
+	if rec.count(http.MethodPost, "/personality/save") != 0 {
+		t.Error("ambiguous personality reference mutated the active setting")
+	}
+}
+
+func TestPersonalityAddEditAndDeleteUseBackendContracts(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard tone"
+			data-personality-preview="" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description="safe releases"
+			data-personality-preview="Keep releases safe..." data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var addBody, editBody map[string]string
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			if err := json.NewDecoder(r.Body).Decode(&addBody); err != nil {
+				t.Errorf("decode add body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"cp-new","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"Keep releases safe in production deployments."}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/release_coach":
+			if err := json.NewDecoder(r.Body).Decode(&editBody); err != nil {
+				t.Errorf("decode edit body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"cp-new","key":"release_coach","name":"Updated Coach","description":"updated","system_prompt":"Keep every release reversible and observable."}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/release_coach":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/personality add Release Coach | safe releases | Keep releases safe in production deployments.")
+	if addBody["name"] != "Release Coach" || addBody["description"] != "safe releases" || addBody["system_prompt"] == "" {
+		t.Errorf("add payload = %#v", addBody)
+	}
+	if !strings.Contains(stripANSI(transcript(m)), "key: release_coach") || !strings.Contains(stripANSI(transcript(m)), "ID: cp-new") {
+		t.Errorf("add output did not report key and ID:\n%s", stripANSI(transcript(m)))
+	}
+
+	m = runLine(t, m, "/personality edit release_coach | Updated Coach | updated | Keep every release reversible and observable.")
+	if editBody["name"] != "Updated Coach" || editBody["description"] != "updated" || editBody["system_prompt"] == "" {
+		t.Errorf("edit payload = %#v", editBody)
+	}
+
+	beforeDelete := rec.count(http.MethodDelete, "/personality/custom/release_coach")
+	m = runLine(t, m, "/personality delete release_coach")
+	if rec.count(http.MethodDelete, "/personality/custom/release_coach") != beforeDelete {
+		t.Error("delete ran before TUI confirmation")
+	}
+	m = runLine(t, m, "no")
+	if rec.count(http.MethodDelete, "/personality/custom/release_coach") != beforeDelete {
+		t.Error("cancelled delete mutated the backend")
+	}
+	m = confirmDestructive(t, m, "/personality delete release_coach")
+	if rec.count(http.MethodDelete, "/personality/custom/release_coach") != beforeDelete+1 {
+		t.Errorf("confirmed delete count = %d, want %d:\n%s", rec.count(http.MethodDelete, "/personality/custom/release_coach"), beforeDelete+1, rec.all())
+	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Errorf("personality mutation lost project scope:\n%s", rec.all())
+	}
+}
 func TestAlertsBulkActions(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	runLine(t, m, "/alerts read-all")
@@ -2369,6 +2552,42 @@ func TestSkillsCommandsRequireSelectedProject(t *testing.T) {
 		})
 	}
 }
+func TestPersonalityCommandsRequireSelectedProject(t *testing.T) {
+	cases := []string{
+		"/personality",
+		"/personality list",
+		"/personality show release_coach",
+		"/personality add Release Coach | Keep releases safe in production deployments.",
+		"/personality edit release_coach | Updated | description | Keep releases safe in production deployments.",
+		"/personality set release_coach",
+		"/personality delete release_coach",
+		"/personality show",
+		"/personality delete",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			if !strings.Contains(transcript(m), "no project selected") {
+				t.Fatalf("expected no-project error for %s:\n%s", line, transcript(m))
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s made backend requests without a project:\n%s", line, calls)
+			}
+			if m.selectorActive {
+				t.Errorf("%s opened a selector without a project", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Errorf("%s opened confirmation without a project", line)
+			}
+		})
+	}
+}
+
 func TestAgentsGenerateDelete(t *testing.T) {
 	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
 		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`

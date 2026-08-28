@@ -136,7 +136,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations` | — |
-| `/personality` | | `show`, `set <preset>` |
+| `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
 | `/grades` | | — |
@@ -218,10 +218,29 @@ to run unless `--force` is supplied. A task-only delete invocation opens the
 interactive attachment selector, where the selected file is still confirmed
 before deletion. `attach` and `attachment` are aliases for `attachments`.
 
-Use the task lifecycle command to inspect execution traces. With no execution
-reference, the TUI auto-opens a sole execution or prompts for one when several
-exist; CLI mode lists several executions so the output is stable. Add `--json`
-to CLI event queries for machine-readable snake_case fields:
+### Personalities
+
+`/personality` without an action keeps the original rendered settings view. Use
+`list` to inspect the backend-backed built-in and custom entries, and `show` to
+fetch a complete system prompt:
+
+```
+/personality list
+/personality show release_coach
+/personality add "Release Coach" | Keep release advice practical and safe.
+/personality add "Release Coach" | safe releases | Keep release advice practical and safe for production.
+/personality edit release_coach | Release Coach | updated description | Keep every release reversible and observable.
+/personality set release_coach
+/personality delete release_coach
+```
+
+The two-field `add` form leaves the description empty; the three-field form uses
+`name | description | system prompt`. Editing a built-in creates or updates its
+backend override. Deleting that built-in resets it to the built-in default, while
+deleting a custom entry removes it; both operations require the normal TUI
+confirmation or `--force` in CLI mode. Add `--json` to list/show and supported
+mutation commands for machine-readable records.
+
 
 ```
 /tasks lifecycle refactor
@@ -331,13 +350,15 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Autonomous | `POST /api/autonomous/trigger` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |
+| Personality | `POST /personality/custom`, `GET/PUT/DELETE /personality/custom/:key` (JSON custom CRUD); `/personality` remains the scoped HTML list |
 | Auth | `POST /login`, `GET /auth/me` |
 | Events | `GET /events/live` (SSE) |
 
 **HTML/HTMX** — the task board, alerts, skills, models, agents, schedule,
-workers, channels, personality, pulse, reflection, grades, insights and
-automations screens are served as templ-rendered fragments with no JSON
-equivalent. For these the client:
+workers, channels, personality list, pulse, reflection, grades, insights and
+automations screens are served as templ-rendered fragments with no JSON list
+equivalent. Personality custom detail and CRUD mutations use the JSON routes
+listed above. For the HTML screens the client:
 
 - sends `HX-Request: true`, so the server returns a fragment and a 2xx status
   instead of a browser redirect;

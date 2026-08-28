@@ -61,6 +61,15 @@ const (
   <div data-task-id="t-1" data-schedule-id="s-1">Nightly build — daily 02:00</div>
   <div data-task-id="t-2" data-schedule-id="s-2">Weekly report — weekly mon</div>
 </div>`
+
+	selPersonalitiesHTML = `<div id="personality-section" data-selected-personality="reviewer">
+  <div data-personality-key="reviewer" data-personality-name="Reviewer"
+       data-personality-description="reviews code" data-personality-preview="You review code."
+       data-personality-is-preset="false" data-personality-has-custom="false"></div>
+  <div data-personality-key="builder" data-personality-name="Builder"
+       data-personality-description="builds things" data-personality-preview="You build things."
+       data-personality-is-preset="false" data-personality-has-custom="false"></div>
+</div>`
 )
 
 // selFixtures maps backend paths to two-item list fixtures for every area.
@@ -73,6 +82,7 @@ func selFixtures() map[string]string {
 		"/models":      selModelsHTML,
 		"/automations": selAutomationsHTML,
 		"/schedule":    selScheduleHTML,
+		"/personality": selPersonalitiesHTML,
 	}
 }
 
@@ -129,6 +139,11 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"schedule_add", "/schedule add", "schedule add"},
 		{"schedule_delete", "/schedule delete", "schedule delete"},
 		{"schedule_toggle", "/schedule toggle", "schedule toggle"},
+		// personality
+		{"personality_show", "/personality show", "personality show"},
+		{"personality_edit", "/personality edit", "personality edit"},
+		{"personality_set", "/personality set", "personality set"},
+		{"personality_delete", "/personality delete", "personality delete"},
 	}
 	for _, tc := range cases {
 		tc := tc

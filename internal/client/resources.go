@@ -9,6 +9,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -413,12 +414,153 @@ func (c *Client) ChannelAction(ctx context.Context, channelType, action, project
 		"/channels/"+url.PathEscape(channelType)+"/"+verb+query("project_id", projectID), nil)
 }
 
+// Personality is one built-in or custom entry on the Personality screen. The
+// list endpoint returns a bounded prompt preview; GetCustomPersonality returns
+// the complete system prompt for a selected key.
+type Personality struct {
+	ID                  string `json:"id,omitempty"`
+	Name                string `json:"name"`
+	Key                 string `json:"key"`
+	Description         string `json:"description"`
+	SystemPrompt        string `json:"system_prompt,omitempty"`
+	SystemPromptPreview string `json:"system_prompt_preview"`
+	IsPreset            bool   `json:"is_preset"`
+	HasCustom           bool   `json:"has_custom"`
+	Active              bool   `json:"active"`
+}
+
+// CustomPersonality is retained as a descriptive alias for detail responses;
+// list entries can represent either a built-in preset or a custom personality.
+type CustomPersonality = Personality
+
+// ListPersonalities scrapes the scoped Personality screen. The backend renders
+// built-in presets and non-preset custom entries as structured cards, including
+// effective metadata for built-in overrides.
+func (c *Client) ListPersonalities(ctx context.Context, projectID string) ([]Personality, error) {
+	root, err := c.getHTML(ctx, "/personality"+query("project_id", projectID))
+	if err != nil {
+		return nil, err
+	}
+
+	selectedKey := ""
+	sectionFound := false
+	if section := findByID(root, "personality-section"); section != nil {
+		sectionFound = true
+		selectedKey = attr(section, "data-selected-personality")
+	}
+
+	cards := findAll(root, func(n *html.Node) bool {
+		// data-personality-key is intentionally checked for presence because the
+		// Base card carries the empty key as an explicit attribute.
+		return hasHTMLAttr(n, "data-personality-key") &&
+			attr(n, "data-personality-is-preset") != ""
+	})
+	out := make([]Personality, 0, len(cards))
+	for _, card := range cards {
+		p := Personality{
+			ID:                  attr(card, "data-personality-id"),
+			Name:                strings.TrimSpace(attr(card, "data-personality-name")),
+			Key:                 attr(card, "data-personality-key"),
+			Description:         strings.TrimSpace(attr(card, "data-personality-description")),
+			SystemPromptPreview: strings.TrimSpace(attr(card, "data-personality-preview")),
+			IsPreset:            attr(card, "data-personality-is-preset") == "true",
+			HasCustom:           attr(card, "data-personality-has-custom") == "true",
+		}
+		if p.Name == "" {
+			if p.Key != "" {
+				p.Name = p.Key
+			} else {
+				p.Name = "Base"
+			}
+		}
+		p.Active = sectionFound && p.Key == selectedKey
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// GetCustomPersonality returns the complete detail for a custom key or a
+// built-in preset. The backend uses the same route for both and returns an
+// effective custom override when one exists.
+func (c *Client) GetCustomPersonality(ctx context.Context, projectID, key string) (*Personality, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, fmt.Errorf("personality key is required")
+	}
+	var out Personality
+	if err := c.getJSON(ctx, "/personality/custom/"+url.PathEscape(key)+query("project_id", projectID), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+type customPersonalityPayload struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	SystemPrompt string `json:"system_prompt"`
+}
+
+func (c *Client) decodePersonalityMutation(ctx context.Context, method, path string, payload customPersonalityPayload, expectedStatus int) (*Personality, error) {
+	resp, err := c.doJSONResponse(ctx, method, path, payload)
+	if err != nil {
+		return nil, err
+	}
+	defer drainAndClose(resp.Body)
+	if resp.StatusCode != expectedStatus {
+		return nil, fmt.Errorf("%s %s: unexpected status %d", method, path, resp.StatusCode)
+	}
+	var out Personality
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	return &out, nil
+}
+
+// CreateCustomPersonality persists a custom personality. The backend derives
+// the stable key from the name and returns the created record, including ID.
+func (c *Client) CreateCustomPersonality(ctx context.Context, projectID, name, description, systemPrompt string) (*Personality, error) {
+	return c.decodePersonalityMutation(ctx, http.MethodPost,
+		"/personality/custom"+query("project_id", projectID),
+		customPersonalityPayload{
+			Name:         name,
+			Description:  description,
+			SystemPrompt: systemPrompt,
+		}, http.StatusCreated)
+}
+
+// UpdateCustomPersonality updates a custom personality or creates a built-in
+// override when key names a preset without an existing custom row.
+func (c *Client) UpdateCustomPersonality(ctx context.Context, projectID, key, name, description, systemPrompt string) (*Personality, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, fmt.Errorf("personality key is required")
+	}
+	return c.decodePersonalityMutation(ctx, http.MethodPut,
+		"/personality/custom/"+url.PathEscape(key)+query("project_id", projectID),
+		customPersonalityPayload{
+			Name:         name,
+			Description:  description,
+			SystemPrompt: systemPrompt,
+		}, http.StatusOK)
+}
+
+// DeleteCustomPersonality removes a custom personality or resets a built-in
+// override. The backend also clears the active setting when this key is active.
+func (c *Client) DeleteCustomPersonality(ctx context.Context, projectID, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("personality key is required")
+	}
+	return c.doForm(ctx, http.MethodDelete,
+		"/personality/custom/"+url.PathEscape(key)+query("project_id", projectID), nil)
+}
+
 // GetPersonality returns the Personality screen as text.
 func (c *Client) GetPersonality(ctx context.Context, projectID string) (string, error) {
 	return c.pageText(ctx, "/personality"+query("project_id", projectID), "personality-container")
 }
 
-// SavePersonality sets the active personality preset.
+// SavePersonality sets the active personality preset or custom key.
 func (c *Client) SavePersonality(ctx context.Context, projectID, personality string) error {
 	v := url.Values{}
 	v.Set("personality", personality)

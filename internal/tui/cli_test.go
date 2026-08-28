@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,6 +49,135 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 
 const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
 
+func TestCLIPersonalityListShowAndJSON(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard tone"
+			data-personality-preview="" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description="safe releases"
+			data-personality-preview="Keep releases safe..." data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	const fullPrompt = "This is the complete release coach system prompt for production work."
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":                     cliProjects,
+		"/personality":                      personalitiesHTML,
+		"/personality/custom/release_coach": `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"` + fullPrompt + `"}`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"personality", "list"}, false, false); err != nil {
+		t.Fatalf("personality list failed: %v", err)
+	}
+	for _, want := range []string{"release_coach", "Release Coach", "safe releases", "Keep releases safe..."} {
+		if !strings.Contains(stripANSI(out.String()), want) {
+			t.Errorf("personality list missing %q:\n%s", want, out.String())
+		}
+	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Fatalf("personality list lost project scope:\n%s", rec.all())
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"personality", "show", "release_coach"}, false, false); err != nil {
+		t.Fatalf("personality show failed: %v", err)
+	}
+	if !strings.Contains(out.String(), fullPrompt) {
+		t.Errorf("personality show omitted full prompt:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"personality", "list"}, false, true); err != nil {
+		t.Fatalf("JSON personality list failed: %v", err)
+	}
+	var got []client.Personality
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+		t.Fatalf("JSON personality list = %q: %v", out.String(), err)
+	}
+	if len(got) != 2 || got[1].Key != "release_coach" || !got[1].Active {
+		t.Fatalf("JSON personalities = %+v", got)
+	}
+	if !strings.Contains(out.String(), "system_prompt_preview") || strings.Contains(out.String(), "system_prompt\\\":\\\""+fullPrompt) {
+		t.Errorf("list JSON should expose preview without the full prompt: %s", out.String())
+	}
+}
+
+func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description="safe releases"
+			data-personality-preview="Keep releases safe..." data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var deleteRequests int
+	var addBody, editBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			if err := json.NewDecoder(r.Body).Decode(&addBody); err != nil {
+				t.Errorf("decode CLI add body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"Keep releases safe in production deployments."}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/release_coach":
+			if err := json.NewDecoder(r.Body).Decode(&editBody); err != nil {
+				t.Errorf("decode CLI edit body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Updated Coach","description":"updated","system_prompt":"Keep every release reversible and observable."}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/release_coach":
+			deleteRequests++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"personality", "add", "Release Coach", "|", "safe releases", "|", "Keep releases safe in production deployments."}, false, false); err != nil {
+		t.Fatalf("CLI personality add failed: %v", err)
+	}
+	if addBody["name"] != "Release Coach" || addBody["description"] != "safe releases" || addBody["system_prompt"] == "" {
+		t.Errorf("CLI add body = %#v", addBody)
+	}
+	if !strings.Contains(out.String(), "key: release_coach") || !strings.Contains(out.String(), "ID: cp1") {
+		t.Errorf("CLI add did not report key/ID:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"personality", "edit", "release_coach", "|", "Updated Coach", "|", "updated", "|", "Keep every release reversible and observable."}, false, false); err != nil {
+		t.Fatalf("CLI personality edit failed: %v", err)
+	}
+	if editBody["name"] != "Updated Coach" || editBody["description"] != "updated" || editBody["system_prompt"] == "" {
+		t.Errorf("CLI edit body = %#v", editBody)
+	}
+
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"personality", "delete", "release_coach"}, false, false); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("delete without --force error = %v", err)
+	}
+	if deleteRequests != 0 {
+		t.Fatal("CLI delete mutated without --force")
+	}
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"personality", "delete", "release_coach"}, true, true); err != nil {
+		t.Fatalf("forced JSON personality delete failed: %v", err)
+	}
+	var deleted map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &deleted); err != nil {
+		t.Fatalf("forced delete JSON = %q: %v", out.String(), err)
+	}
+	if deleted["action"] != "delete" || deleted["key"] != "release_coach" || deleteRequests != 1 {
+		t.Fatalf("delete result = %#v, requests=%d", deleted, deleteRequests)
+	}
+}
 func TestCLIAnalyticsUsageMatchesInteractiveQuotaOutput(t *testing.T) {
 	const usage = `{
 		"totals":{"call_count":2,"total_tokens":700},

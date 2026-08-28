@@ -748,6 +748,79 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 		dimStyle.Render("/alerts approve|reject|dismiss|delete <id> · /alerts read-all")
 }
 
+// --- personalities ---
+
+func renderPersonalities(personalities []client.Personality, filter string) string {
+	rows := [][]string{{"KEY", "NAME", "TYPE", "DESCRIPTION", "PROMPT PREVIEW", "STATE"}}
+	for _, p := range personalities {
+		if !filterMatch(filter, p.Key, p.Name, p.Description, p.SystemPromptPreview) {
+			continue
+		}
+		key := p.Key
+		if key == "" {
+			key = "(base)"
+		}
+		kind := "built-in"
+		if !p.IsPreset {
+			kind = "custom"
+		} else if p.HasCustom {
+			kind = "override"
+		}
+		state := ""
+		if p.Active {
+			state = "active"
+		}
+		rows = append(rows, []string{
+			key,
+			truncate(firstNonEmpty(p.Name, key), 28),
+			kind,
+			truncate(p.Description, 42),
+			truncate(p.SystemPromptPreview, 56),
+			state,
+		})
+	}
+	if len(rows) == 1 {
+		if filter != "" {
+			return dimStyle.Render("no personalities match " + filter)
+		}
+		return dimStyle.Render("no personalities yet — /personality add <name> | <system prompt> creates one")
+	}
+	return table(rows) + "\n\n" +
+		dimStyle.Render("/personality show <key|name> · /personality set <key|name> · /personality edit|delete <key|name>")
+}
+
+func renderPersonalityDetail(p client.Personality) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(p.Name, p.Key, "Base")))
+
+	kind := "built-in"
+	if !p.IsPreset {
+		kind = "custom"
+	} else if p.HasCustom {
+		kind = "override"
+	}
+	key := firstNonEmpty(p.Key, "(base)")
+	fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("key %s · %s%s", key, kind, func() string {
+		if p.Active {
+			return " · active"
+		}
+		return ""
+	}())))
+	if p.ID != "" {
+		fmt.Fprintf(&b, "%s\n", dimStyle.Render("ID "+p.ID))
+	}
+	if p.Description != "" {
+		b.WriteString("\n" + p.Description + "\n")
+	}
+	b.WriteString("\n" + sectionStyle.Render("System prompt") + "\n")
+	if strings.TrimSpace(p.SystemPrompt) == "" {
+		b.WriteString(dimStyle.Render("(no personality prompt applied.)"))
+	} else {
+		b.WriteString(strings.TrimRight(p.SystemPrompt, "\n"))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // --- skills ---
 
 func renderSkills(skills []client.Skill, filter string) string {

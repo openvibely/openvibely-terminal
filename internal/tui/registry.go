@@ -2004,39 +2004,341 @@ func channelsCommand() command {
 	}
 }
 
+// personalityActionJSON is the stable machine-readable record used for
+// personality mutations whose backend response has no resource body.
+type personalityActionJSON struct {
+	Action string `json:"action"`
+	ID     string `json:"id,omitempty"`
+	Key    string `json:"key"`
+	Name   string `json:"name"`
+	Active bool   `json:"active,omitempty"`
+}
+
+func personalitySelector(m Model, usage, command, action string, prefill bool) (Model, tea.Cmd) {
+	c, pid := m.client, m.selectedID
+	prefillSuffix := ""
+	if prefill {
+		prefillSuffix = " | "
+	}
+	return selectorOr(m, usage, selectorForWithSuffix("Personality", command,
+		"no personalities available — /personality add <name> | <system prompt> creates one",
+		prefillSuffix,
+		func(ctx context.Context) ([]selectorItem, error) {
+			personalities, err := c.ListPersonalities(ctx, pid)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]selectorItem, 0, len(personalities))
+			for _, personality := range personalities {
+				personality := personality
+				// Base can be selected or shown, but it is not an editable or
+				// deletable custom key.
+				if personality.Key == "" && (action == "edit" || action == "delete") {
+					continue
+				}
+				ref := personality.Key
+				if ref == "" {
+					ref = personality.Name
+				}
+				kind := "built-in"
+				if !personality.IsPreset {
+					kind = "custom"
+				} else if personality.HasCustom {
+					kind = "override"
+				}
+				item := selectorItem{
+					ref:    ref,
+					label:  firstNonEmpty(personality.Name, ref),
+					detail: strings.TrimSpace(kind + " · " + truncate(personality.Description, 40)),
+				}
+				if !prefill {
+					item.dispatch = func(m Model) (Model, tea.Cmd) {
+						switch action {
+						case "show":
+							return m, personalityShowCommand(c, pid, personality)
+						case "set":
+							return m, personalitySetCommand(c, pid, personality)
+						case "delete":
+							cmd := personalityDeleteCommand(c, pid, personality)
+							return confirmOr(m,
+								fmt.Sprintf("Delete personality %q? Type 'yes' to confirm or Esc to cancel.", personality.Name),
+								fmt.Sprintf("use --force to confirm deletion of personality %q", personality.Name),
+								cmd)
+						}
+						return m, nil
+					}
+				}
+				items = append(items, item)
+			}
+			return items, nil
+		}))
+}
+
+func personalityShowResult(ctx context.Context, c *client.Client, projectID string, personality client.Personality) (string, error) {
+	detail := personality
+	if personality.Key != "" {
+		loaded, err := c.GetCustomPersonality(ctx, projectID, personality.Key)
+		if err != nil {
+			return "", err
+		}
+		detail = *loaded
+	}
+	// The detail route returns the resource fields but not the list-only state
+	// markers, so retain the resolved entry metadata for rendering and JSON
+	// consumers.
+	detail.IsPreset = personality.IsPreset
+	detail.HasCustom = personality.HasCustom
+	detail.Active = personality.Active
+	if jsonMode {
+		return marshalJSON(detail)
+	}
+	return renderPersonalityDetail(detail), nil
+}
+
+func personalityShowCommand(c *client.Client, projectID string, personality client.Personality) tea.Cmd {
+	return run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+		return personalityShowResult(ctx, c, projectID, personality)
+	})
+}
+
+func personalitySetResult(ctx context.Context, c *client.Client, projectID string, personality client.Personality) (string, error) {
+	if err := c.SavePersonality(ctx, projectID, personality.Key); err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(personalityActionJSON{
+			Action: "set",
+			ID:     personality.ID,
+			Key:    personality.Key,
+			Name:   personality.Name,
+			Active: true,
+		})
+	}
+	return "personality set to " + firstNonEmpty(personality.Key, personality.Name), nil
+}
+
+func personalitySetCommand(c *client.Client, projectID string, personality client.Personality) tea.Cmd {
+	return run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+		return personalitySetResult(ctx, c, projectID, personality)
+	})
+}
+
+func personalityDeleteResult(ctx context.Context, c *client.Client, projectID string, personality client.Personality) (string, error) {
+	if err := c.DeleteCustomPersonality(ctx, projectID, personality.Key); err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(personalityActionJSON{
+			Action: "delete",
+			ID:     personality.ID,
+			Key:    personality.Key,
+			Name:   personality.Name,
+		})
+	}
+	return refreshAndRender("deleted personality "+firstNonEmpty(personality.Key, personality.Name),
+		func() ([]client.Personality, error) { return c.ListPersonalities(ctx, projectID) },
+		renderPersonalities)
+}
+
+func personalityDeleteCommand(c *client.Client, projectID string, personality client.Personality) tea.Cmd {
+	return run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+		return personalityDeleteResult(ctx, c, projectID, personality)
+	})
+}
+
 func personalityCommand() command {
-	actions := []string{"show", "set"}
+	actions := []string{"list", "show", "add", "edit", "set", "delete"}
 	return command{
 		name:    "personality",
-		args:    "[set <preset>]",
+		args:    "[key|name]",
 		actions: actions,
-		desc:    "assistant personality presets",
+		desc:    "built-in and custom assistant personalities",
 		usage: []string{
 			"personality                                show the current personality",
-			"personality set <preset>                   switch personality preset",
+			"personality list                           list built-in and custom personalities",
+			"personality show <key|name>                 show the full system prompt",
+			"personality add <name> | <system prompt>   create a custom personality",
+			"personality add <name> | <description> | <system prompt>",
+			"personality edit <key|name> | <name> | <description> | <system prompt>",
+			"personality set <key|name>                  activate a personality",
+			"personality delete <key|name>               delete a custom or reset an override",
+			"omit <key|name> on show/edit/set/delete → interactive selector",
+		},
+		actionUsages: []commandActionUsage{
+			{action: "show", args: "<key|name>"},
+			{action: "add", args: "<name> | <system prompt>"},
+			{action: "edit", args: "<key|name> | <name> | <description> | <system prompt>"},
+			{action: "set", args: "<key|name>"},
+			{action: "delete", args: "<key|name>"},
 		},
 		examples: []string{
-			`personality`,
-			`personality set concise`,
+			`personality list`,
+			`personality add "Release Coach" | Keep advice practical and focused on shipping safely.`,
+			`personality edit release_coach | Release Coach | pragmatic release guidance | Keep advice practical, focused, and safe for production releases.`,
+			`personality set release_coach`,
+			`personality delete release_coach`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, rest := splitAction(actions, args)
+			if action == "" && len(rest) > 0 {
+				return m, errCmd(fmt.Sprintf("unknown personality action %q — use /personality list|show|add|edit|set|delete", rest[0]))
+			}
 			c, pid := m.client, m.selectedID
-			if action == "set" {
-				if len(rest) == 0 {
-					return m, errCmd("usage: /personality set <preset>")
-				}
-				preset := strings.Join(rest, " ")
+			ref := strings.Join(rest, " ")
+
+			switch action {
+			case "":
+				// Keep the original no-argument command as the rendered current
+				// personality page rather than changing it into a list operation.
 				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					if err := c.SavePersonality(ctx, pid, preset); err != nil {
+					return c.GetPersonality(ctx, pid)
+				})
+			case "list":
+				return m, run("Personalities", cmdTimeout, func(ctx context.Context) (string, error) {
+					personalities, err := c.ListPersonalities(ctx, pid)
+					if err != nil {
 						return "", err
 					}
-					return "personality set to " + preset, nil
+					if jsonMode {
+						return marshalJSON(personalities)
+					}
+					return renderPersonalities(personalities, ref), nil
 				})
+			case "show":
+				if ref == "" {
+					return personalitySelector(m, commandUsage("personality", "show"), "personality show", "show", false)
+				}
+				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+					personalities, err := c.ListPersonalities(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					personality, err := matchRef(personalities, ref,
+						func(p client.Personality) string { return p.Key },
+						func(p client.Personality) string { return p.Name })
+					if err != nil {
+						return "", err
+					}
+					return personalityShowResult(ctx, c, pid, personality)
+				})
+			case "add":
+				if ref == "" {
+					return m, errCmd(commandUsage("personality", "add"))
+				}
+				parts := strings.Split(ref, "|")
+				if len(parts) != 2 && len(parts) != 3 {
+					return m, errCmd(commandUsage("personality", "add"))
+				}
+				name := strings.TrimSpace(parts[0])
+				description := ""
+				prompt := strings.TrimSpace(parts[1])
+				if len(parts) == 3 {
+					description = strings.TrimSpace(parts[1])
+					prompt = strings.TrimSpace(parts[2])
+				}
+				if name == "" || prompt == "" {
+					return m, errCmd(commandUsage("personality", "add"))
+				}
+				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+					created, err := c.CreateCustomPersonality(ctx, pid, name, description, prompt)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(created)
+					}
+					status := fmt.Sprintf("created personality %q\nkey: %s\nID: %s", created.Name, created.Key, created.ID)
+					return refreshAndRender(status,
+						func() ([]client.Personality, error) { return c.ListPersonalities(ctx, pid) },
+						renderPersonalities)
+				})
+			case "edit":
+				if strings.TrimSpace(ref) == "" {
+					return personalitySelector(m, commandUsage("personality", "edit"), "personality edit", "edit", true)
+				}
+				parts := strings.Split(ref, "|")
+				if len(parts) == 0 || strings.TrimSpace(parts[0]) == "" {
+					return m, errCmd(commandUsage("personality", "edit"))
+				}
+				if len(parts) != 4 || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[3]) == "" {
+					return m, errCmd(commandUsage("personality", "edit"))
+				}
+				ref2 := strings.TrimSpace(parts[0])
+				name := strings.TrimSpace(parts[1])
+				description := strings.TrimSpace(parts[2])
+				prompt := strings.TrimSpace(parts[3])
+				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+					personalities, err := c.ListPersonalities(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					personality, err := matchRef(personalities, ref2,
+						func(p client.Personality) string { return p.Key },
+						func(p client.Personality) string { return p.Name })
+					if err != nil {
+						return "", err
+					}
+					if personality.Key == "" {
+						return "", fmt.Errorf("base personality cannot be edited")
+					}
+					updated, err := c.UpdateCustomPersonality(ctx, pid, personality.Key, name, description, prompt)
+					if err != nil {
+						return "", err
+					}
+					updated.IsPreset = personality.IsPreset
+					updated.HasCustom = true
+					if jsonMode {
+						return marshalJSON(updated)
+					}
+					return "updated personality " + personality.Key, nil
+				})
+			case "set":
+				if ref == "" {
+					return personalitySelector(m, commandUsage("personality", "set"), "personality set", "set", false)
+				}
+				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+					personalities, err := c.ListPersonalities(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					personality, err := matchRef(personalities, ref,
+						func(p client.Personality) string { return p.Key },
+						func(p client.Personality) string { return p.Name })
+					if err != nil {
+						return "", err
+					}
+					return personalitySetResult(ctx, c, pid, personality)
+				})
+			case "delete":
+				if ref == "" {
+					return personalitySelector(m, commandUsage("personality", "delete"), "personality delete", "delete", false)
+				}
+				cmd := run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+					personalities, err := c.ListPersonalities(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					personality, err := matchRef(personalities, ref,
+						func(p client.Personality) string { return p.Key },
+						func(p client.Personality) string { return p.Name })
+					if err != nil {
+						return "", err
+					}
+					if personality.Key == "" {
+						return "", fmt.Errorf("base personality cannot be deleted; use set Base to reset it")
+					}
+					return personalityDeleteResult(ctx, c, pid, personality)
+				})
+				return confirmOr(m,
+					fmt.Sprintf("Delete personality %q? Type 'yes' to confirm or Esc to cancel.", ref),
+					fmt.Sprintf("use --force to confirm deletion of personality %q", ref),
+					cmd)
 			}
-			return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-				return c.GetPersonality(ctx, pid)
-			})
+			return m, nil
 		},
 	}
 }
