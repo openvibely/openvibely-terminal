@@ -2158,6 +2158,7 @@ func personalityCommand() command {
 			"personality list                           list built-in and custom personalities",
 			"personality show <key|name>                 show the full system prompt",
 			"personality add <name> | <system prompt>   create a custom personality",
+			"personality add <name> | description: <description> | <system prompt>",
 			"personality edit <key|name> | <name> | <description> | <system prompt>",
 			"personality set <key|name>                  activate a personality",
 			"personality delete <key|name>               delete a custom or reset an override",
@@ -2165,7 +2166,7 @@ func personalityCommand() command {
 		},
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<key|name>"},
-			{action: "add", args: "<name> | <system prompt>"},
+			{action: "add", args: `<name> | <system prompt> [or: <name> | description: <description> | <system prompt>]`},
 			{action: "edit", args: "<key|name> | <name> | <description> | <system prompt>"},
 			{action: "set", args: "<key|name>"},
 			{action: "delete", args: "<key|name>"},
@@ -2173,6 +2174,7 @@ func personalityCommand() command {
 		examples: []string{
 			`personality list`,
 			`personality add "Release Coach" | Keep advice practical and focused on shipping safely.`,
+			`personality add "Release Coach" | description: safe release guidance | Keep advice practical, focused, and safe for production releases.`,
 			`personality edit release_coach | Release Coach | pragmatic release guidance | Keep advice practical, focused, and safe for production releases.`,
 			`personality set release_coach`,
 			`personality delete release_coach`,
@@ -2225,15 +2227,12 @@ func personalityCommand() command {
 					return personalityShowResult(ctx, c, pid, personality)
 				})
 			case "add":
-				if ref == "" {
-					return m, errCmd(commandUsage("personality", "add"))
-				}
-				name, prompt := splitPipe(ref)
-				if name == "" || prompt == "" {
-					return m, errCmd(commandUsage("personality", "add"))
+				name, description, prompt, err := parsePersonalityAdd(ref)
+				if err != nil {
+					return m, errCmd(commandUsage("personality", "add") + ": " + err.Error())
 				}
 				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					created, err := c.CreateCustomPersonality(ctx, pid, name, "", prompt)
+					created, err := c.CreateCustomPersonality(ctx, pid, name, description, prompt)
 					if err != nil {
 						return "", err
 					}
@@ -2956,6 +2955,32 @@ func matchProject(projects []client.Project, ref string) (client.Project, error)
 // errCmd reports a usage error in the transcript.
 func errCmd(msg string) tea.Cmd {
 	return func() tea.Msg { return resultMsg{err: fmt.Errorf("%s", msg)} }
+}
+
+// parsePersonalityAdd parses the two unambiguous add forms:
+//
+//	name | system prompt
+//	name | description: description | system prompt
+//
+// The first form treats every character after the first pipe as prompt text.
+// The second form recognizes the explicit description marker and treats only
+// its first following pipe as structural, so prompt pipes remain intact.
+func parsePersonalityAdd(s string) (name, description, prompt string, err error) {
+	name, tail := splitPipe(s)
+	if name == "" || tail == "" {
+		return "", "", "", fmt.Errorf("name and system prompt are required")
+	}
+
+	const marker = "description:"
+	if strings.HasPrefix(strings.ToLower(tail), marker) {
+		description, prompt = splitPipe(strings.TrimSpace(tail[len(marker):]))
+		if description == "" || prompt == "" {
+			return "", "", "", fmt.Errorf("optional description requires a non-empty description and system prompt")
+		}
+		return name, description, prompt, nil
+	}
+
+	return name, "", tail, nil
 }
 
 // splitPipe splits "left | right" on the first pipe.

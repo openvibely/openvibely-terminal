@@ -856,7 +856,7 @@ func TestPersonalityJSONMutationsUseScopedRoutesAndPayloads(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode create body: %v", err)
 			}
-			if body["name"] != "Release Coach" || body["description"] != "safe releases" || body["system_prompt"] != "Keep releases safe in production deployments." {
+			if body["name"] != "Release Coach" || body["description"] != "safe | observable releases" || body["system_prompt"] != "Keep releases safe | observable in production deployments." {
 				t.Errorf("create body = %#v", body)
 			}
 			w.WriteHeader(http.StatusCreated)
@@ -889,7 +889,7 @@ func TestPersonalityJSONMutationsUseScopedRoutesAndPayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	created, err := c.CreateCustomPersonality(ctx, "p1", "Release Coach", "safe releases", "Keep releases safe in production deployments.")
+	created, err := c.CreateCustomPersonality(ctx, "p1", "Release Coach", "safe | observable releases", "Keep releases safe | observable in production deployments.")
 	if err != nil {
 		t.Fatal(err)
 	}

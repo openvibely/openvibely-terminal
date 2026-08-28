@@ -179,6 +179,93 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 		t.Fatalf("delete result = %#v, requests=%d", deleted, deleteRequests)
 	}
 }
+
+func TestCLIPersonalityAddOptionalDescriptionPreservesPromptPipes(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="existing" data-personality-name="Existing" data-personality-description="existing"
+			data-personality-preview="prompt" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	const description = "safe releases for production"
+	const prompt = "Keep every release reversible | observable | and easy to explain."
+	var body map[string]string
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			posts++
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode add body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"cp-new","key":"release_coach","name":"Release Coach","description":"safe releases for production","system_prompt":"created prompt that is long enough"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{
+		"personality", "add", "Release Coach", "|", "description: " + description, "|", prompt,
+	}, false, false); err != nil {
+		t.Fatalf("CLI optional-description add failed: %v", err)
+	}
+	if posts != 1 || body["name"] != "Release Coach" || body["description"] != description || body["system_prompt"] != prompt {
+		t.Fatalf("CLI add requests/body = %d/%#v, want description %q and prompt %q", posts, body, description, prompt)
+	}
+}
+
+func TestCLIPersonalityAddRejectsMalformedOptionalDescription(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case "/personality/custom":
+			if r.Method == http.MethodPost {
+				posts++
+			}
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{
+		{"personality", "add", "Release Coach"},
+		{"personality", "add", "|", "Keep releases safe in production deployments."},
+		{"personality", "add", "Release Coach", "|", "description: safe releases"},
+		{"personality", "add", "Release Coach", "|", "description:", "|", "Keep releases safe in production deployments."},
+		{"personality", "add", "Release Coach", "|", "description: safe releases", "|"},
+	} {
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", args, false, false)
+		if err == nil || !strings.Contains(err.Error(), "personality add") || !strings.Contains(err.Error(), "description") {
+			t.Errorf("malformed CLI add %q error = %v", args, err)
+		}
+	}
+	if posts != 0 {
+		t.Fatalf("malformed optional-description forms made %d POST requests", posts)
+	}
+}
+
 func TestCLIPersonalityFailuresAndReferenceSafety(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="known" data-personality-name="Known" data-personality-description="known"

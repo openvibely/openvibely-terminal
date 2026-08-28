@@ -1711,6 +1711,84 @@ func TestPersonalityPipeCharactersArePreservedInAddAndEditPrompts(t *testing.T) 
 	}
 }
 
+func TestPersonalityAddOptionalDescriptionPreservesPromptPipes(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="existing" data-personality-name="Existing" data-personality-description="existing"
+			data-personality-preview="prompt" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	const description = "safe releases for production"
+	const prompt = "Keep every release reversible | observable | and easy to explain."
+	var body map[string]string
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			posts++
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode add body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"cp-new","key":"release_coach","name":"Release Coach","description":"safe releases for production","system_prompt":"created prompt that is long enough"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/personality add Release Coach | description: "+description+" | "+prompt)
+	if posts != 1 {
+		t.Fatalf("add requests = %d, want 1", posts)
+	}
+	if body["name"] != "Release Coach" || body["description"] != description || body["system_prompt"] != prompt {
+		t.Fatalf("add body = %#v, want description %q and prompt %q", body, description, prompt)
+	}
+}
+
+func TestPersonalityAddRejectsMalformedOptionalDescription(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/personality/custom" {
+			posts++
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	for _, line := range []string{
+		"/personality add Release Coach",
+		"/personality add | Keep releases safe in production deployments.",
+		"/personality add Release Coach | description: safe releases",
+		"/personality add Release Coach | description: | Keep releases safe in production deployments.",
+		"/personality add Release Coach | description: safe releases |",
+	} {
+		m = runLine(t, m, line)
+		if !strings.Contains(transcript(m), "personality add") || !strings.Contains(transcript(m), "description") {
+			t.Errorf("malformed add %q did not show explicit usage: %s", line, transcript(m))
+		}
+	}
+	if posts != 0 {
+		t.Fatalf("malformed optional-description forms made %d POST requests", posts)
+	}
+}
+
 func TestPersonalityMalformedAndUnknownReferencesDoNotMutate(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="known" data-personality-name="Known" data-personality-description="known"
