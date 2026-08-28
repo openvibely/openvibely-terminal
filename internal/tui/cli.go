@@ -70,6 +70,7 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	if !strings.HasPrefix(line, "/") {
 		line = "/" + line
 	}
+	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "/"))
 	name := strings.TrimPrefix(strings.Fields(line)[0], "/")
 
 	cmdDef := lookupCommand(name)
@@ -102,7 +103,7 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	}
 
 	start := len(m.log)
-	next, cmd := m.runCommand(line)
+	next, cmd := m.runCommandFields(fields)
 	m = next.(Model)
 	m = drain(m, cmd)
 

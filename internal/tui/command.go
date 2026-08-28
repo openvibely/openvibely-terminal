@@ -15,6 +15,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -173,9 +174,71 @@ func suggest(word string) []command {
 	return out
 }
 
-// runCommand parses and executes a "/..." line.
+// runCommand parses and executes an interactive "/..." line.
 func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
-	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "/"))
+	fields, err := tokenizeCommand(line)
+	if err != nil {
+		m.append(entry{role: "error", text: err.Error()})
+		return m, nil
+	}
+	return m.runCommandFields(fields)
+}
+
+// tokenizeCommand splits an interactive command into whitespace-delimited
+// fields, grouping text inside single or double quotes. Quote delimiters are
+// syntax and are not included in the resulting fields. Pipes remain ordinary
+// field content so the existing pipe-delimited command handlers can continue
+// to parse them after joining their arguments.
+func tokenizeCommand(line string) ([]string, error) {
+	line = strings.TrimPrefix(strings.TrimSpace(line), "/")
+	if line == "" {
+		return nil, nil
+	}
+
+	var fields []string
+	var field strings.Builder
+	var quote rune
+	fieldStarted := false
+
+	for _, r := range line {
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				continue
+			}
+			field.WriteRune(r)
+			continue
+		}
+
+		switch {
+		case r == '\'' || r == '"':
+			quote = r
+			fieldStarted = true
+		case unicode.IsSpace(r):
+			if fieldStarted {
+				fields = append(fields, field.String())
+				field.Reset()
+				fieldStarted = false
+			}
+		default:
+			field.WriteRune(r)
+			fieldStarted = true
+		}
+	}
+
+	if quote != 0 {
+		return nil, fmt.Errorf("parse error: unmatched quote")
+	}
+	if fieldStarted {
+		fields = append(fields, field.String())
+	}
+	return fields, nil
+}
+
+// runCommandFields dispatches already-tokenized command fields. RunCLI uses
+// this path with its existing strings.Fields tokenization so shell argument
+// handling remains unchanged; interactive input goes through tokenizeCommand.
+func (m Model) runCommandFields(fields []string) (tea.Model, tea.Cmd) {
 	if len(fields) == 0 {
 		return m, nil
 	}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -25,6 +26,56 @@ func TestSplitActionRecognisesKnownActions(t *testing.T) {
 	action, rest = splitAction(actions, nil)
 	if action != "" || rest != nil {
 		t.Errorf("empty args should yield nothing, got %q %v", action, rest)
+	}
+}
+
+func TestTokenizeCommand(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{
+			name:  "double quoted argument",
+			input: `/tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
+			want:  []string{"tasks", "reviews", "add", "Fix login bug", "internal/auth.go:42", "Handle", "token", "refresh", "errors"},
+		},
+		{
+			name:  "pipe spacing",
+			input: `/tasks goal "Fix login bug"   |   "Reproduce on staging"`,
+			want:  []string{"tasks", "goal", "Fix login bug", "|", "Reproduce on staging"},
+		},
+		{
+			name:  "single quoted argument",
+			input: `/tasks show 'Fix login bug' review`,
+			want:  []string{"tasks", "show", "Fix login bug", "review"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tokenizeCommand(tc.input)
+			if err != nil {
+				t.Fatalf("tokenizeCommand() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("tokenizeCommand() = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTokenizeCommandRejectsUnmatchedQuotes(t *testing.T) {
+	for _, input := range []string{
+		`/tasks show "Fix login bug`,
+		`/tasks show 'Fix login bug`,
+	} {
+		t.Run(input, func(t *testing.T) {
+			_, err := tokenizeCommand(input)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "unmatched quote") {
+				t.Fatalf("tokenizeCommand() error = %v, want an unmatched quote error", err)
+			}
+		})
 	}
 }
 

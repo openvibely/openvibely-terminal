@@ -373,6 +373,18 @@ func TestTasksRunRejectsCaseInsensitiveDuplicateExactTitles(t *testing.T) {
 	}
 }
 
+func TestTasksRunResolvesQuotedTaskTitle(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+	m = runLine(t, m, `/tasks run "Refactor the API"`)
+
+	if rec.count("POST", "/tasks/t-1/run") != 1 {
+		t.Fatalf("expected one run call, calls:\n%s", rec.all())
+	}
+	if strings.Contains(transcript(m), "nothing matches") {
+		t.Fatalf("quoted task title should resolve:\n%s", transcript(m))
+	}
+}
+
 func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
@@ -3794,5 +3806,38 @@ func TestTasksReviewsAddPostsInlineComment(t *testing.T) {
 	out := transcript(m)
 	if !strings.Contains(out, "added review comment") || !strings.Contains(out, "Needs error handling") {
 		t.Errorf("expected success confirmation and rendered comments, got:\n%s", out)
+	}
+}
+
+func TestTasksReviewsAddQuotedTaskTitlePostsOneComment(t *testing.T) {
+	board := strings.Replace(taskBoardHTML, "Refactor the API", "Fix login bug", 1)
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             board,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+	m = runLine(t, m, `/tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`)
+
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
+		t.Fatalf("expected exactly one add review call, got %d; calls:\n%s", got, rec.all())
+	}
+	if !rec.sawForm("file_path=internal%2Fauth.go") || !rec.sawForm("line_number=42") || !rec.sawForm("comment_text=Handle+token+refresh+errors") {
+		t.Fatalf("quoted review form was not submitted as intended: %v", rec.forms)
+	}
+	out := transcript(m)
+	if strings.Contains(out, "nothing matches") || !strings.Contains(out, "added review comment") || !strings.Contains(out, "Fix login bug") {
+		t.Fatalf("quoted task title should resolve and render success:\n%s", out)
+	}
+}
+
+func TestInteractiveUnmatchedQuoteReportsParseError(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+	m = runLine(t, m, `/tasks run "Refactor the API`)
+
+	out := strings.ToLower(transcript(m))
+	if !strings.Contains(out, "parse error") || !strings.Contains(out, "unmatched quote") {
+		t.Fatalf("expected a clear unmatched-quote parse error:\n%s", transcript(m))
+	}
+	if strings.Contains(out, "nothing matches") || rec.count("POST", "/tasks/t-1/run") != 0 {
+		t.Fatalf("malformed input must not reach task lookup or mutation:\n%s\ncalls:\n%s", transcript(m), rec.all())
 	}
 }
