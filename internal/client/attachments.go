@@ -232,28 +232,12 @@ func appendMultipartFile(writer *multipart.Writer, path string) error {
 }
 
 func (c *Client) doMultipartHTML(ctx context.Context, method, path string, body io.Reader, contentType string) (*html.Node, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	resp, err := c.doHTMXMutation(ctx, method, path, body, contentType, false)
 	if err != nil {
 		return nil, err
 	}
-	if contentType != "" {
-		req.Header.Set("Content-Type", contentType)
-	}
-	req.Header.Set("HX-Request", "true")
-	req.Header.Set("Accept", "text/html, application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, path, err)
-	}
 	defer drainAndClose(resp.Body)
 
-	if isAuthResponse(resp) {
-		return nil, newAuthRequiredError(method, path, resp)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, apiError(resp)
-	}
 	root, err := html.Parse(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return nil, fmt.Errorf("decoding %s response: %w", path, err)

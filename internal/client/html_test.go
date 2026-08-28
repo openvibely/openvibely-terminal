@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -435,6 +437,342 @@ func TestDoFormLoginRedirectIsNotFollowed(t *testing.T) {
 			}
 			if loginRequests != 0 {
 				t.Errorf("login requests = %d, want 0; redirect was followed", loginRequests)
+			}
+		})
+	}
+}
+
+func TestHTMXMutationPathsPreserveHeadersBodiesAndSuccessfulResponseHandling(t *testing.T) {
+	operations := []struct {
+		name        string
+		contentType string
+		wantBody    string
+		call        func(*Client) error
+	}{
+		{
+			name:        "form",
+			contentType: "application/x-www-form-urlencoded",
+			wantBody:    "name=Ada&note=hello",
+			call: func(c *Client) error {
+				return c.doForm(context.Background(), http.MethodPost, "/mutate", url.Values{
+					"name": {"Ada"},
+					"note": {"hello"},
+				})
+			},
+		},
+		{
+			name:        "json",
+			contentType: "application/json",
+			wantBody:    `{"name":"Ada"}`,
+			call: func(c *Client) error {
+				return c.doJSON(context.Background(), http.MethodPut, "/mutate", struct {
+					Name string `json:"name"`
+				}{Name: "Ada"})
+			},
+		},
+		{
+			name:        "multipart",
+			contentType: "multipart/form-data; boundary=test-boundary",
+			wantBody:    "multipart-body",
+			call: func(c *Client) error {
+				_, err := c.doMultipartHTML(context.Background(), http.MethodPost, "/mutate", strings.NewReader("multipart-body"), "multipart/form-data; boundary=test-boundary")
+				return err
+			},
+		},
+	}
+
+	for _, operation := range operations {
+		for _, status := range []int{http.StatusOK, http.StatusCreated, 299, http.StatusNoContent} {
+			operation, status := operation, status
+			t.Run(fmt.Sprintf("%s_status_%d", operation.name, status), func(t *testing.T) {
+				responseBody := &trackedResponseBody{Reader: strings.NewReader(`<div>updated</div>`)}
+				var gotRequest *http.Request
+				var gotBody []byte
+				transport := htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+					gotRequest = r
+					var err error
+					gotBody, err = io.ReadAll(r.Body)
+					if err != nil {
+						t.Errorf("read request body: %v", err)
+					}
+					return &http.Response{
+						StatusCode: status,
+						Status:     fmt.Sprintf("%d test response", status),
+						Header:     make(http.Header),
+						Body:       responseBody,
+						Request:    r,
+					}, nil
+				})
+				c := &Client{
+					baseURL: "http://backend.test",
+					http: &http.Client{
+						Transport: transport,
+						CheckRedirect: func(req *http.Request, via []*http.Request) error {
+							return http.ErrUseLastResponse
+						},
+					},
+				}
+
+				if err := operation.call(c); err != nil {
+					t.Fatalf("status %d: unexpected error: %v", status, err)
+				}
+				if gotRequest == nil {
+					t.Fatal("mutation did not issue a request")
+				}
+				if gotRequest.Header.Get("HX-Request") != "true" {
+					t.Errorf("HX-Request = %q, want true", gotRequest.Header.Get("HX-Request"))
+				}
+				if gotRequest.Header.Get("Accept") != "text/html, application/json" {
+					t.Errorf("Accept = %q, want text/html, application/json", gotRequest.Header.Get("Accept"))
+				}
+				if gotRequest.Header.Get("Content-Type") != operation.contentType {
+					t.Errorf("Content-Type = %q, want %q", gotRequest.Header.Get("Content-Type"), operation.contentType)
+				}
+				if got := string(gotBody); got != operation.wantBody {
+					t.Errorf("request body = %q, want %q", got, operation.wantBody)
+				}
+				if !responseBody.closed {
+					t.Errorf("status %d: response body was not closed", status)
+				}
+			})
+		}
+	}
+}
+
+func TestHTMXMutationPathsClassifyExactLoginAndOrdinaryRedirects(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{
+			name: "form",
+			call: func(c *Client) error {
+				return c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			},
+		},
+		{
+			name: "json",
+			call: func(c *Client) error {
+				return c.doJSON(context.Background(), http.MethodPost, "/mutate", map[string]string{"value": "one"})
+			},
+		},
+		{
+			name: "multipart",
+			call: func(c *Client) error {
+				_, err := c.doMultipartHTML(context.Background(), http.MethodPost, "/mutate", strings.NewReader("body"), "text/plain")
+				return err
+			},
+		},
+	}
+	redirects := []struct {
+		name      string
+		location  string
+		wantAuth  bool
+		wantError string
+	}{
+		{name: "exact login", location: "/login?next=%2Fmutate", wantAuth: true},
+		{name: "absolute exact login", location: "https://backend.example/login?next=%2Fmutate", wantAuth: true},
+		{name: "login help", location: "/login-help", wantError: "server error (302)"},
+		{name: "login numeric", location: "/login2", wantError: "server error (302)"},
+		{name: "ordinary", location: "/after-mutation", wantError: "server error (302)"},
+	}
+
+	for _, operation := range operations {
+		for _, redirect := range redirects {
+			operation, redirect := operation, redirect
+			t.Run(operation.name+"/"+redirect.name, func(t *testing.T) {
+				responseBody := &trackedResponseBody{Reader: strings.NewReader("redirect body")}
+				transport := htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusFound,
+						Status:     "302 test response",
+						Header:     http.Header{"Location": []string{redirect.location}},
+						Body:       responseBody,
+						Request:    r,
+					}, nil
+				})
+				c := &Client{
+					baseURL: "http://backend.test",
+					http: &http.Client{
+						Transport: transport,
+						CheckRedirect: func(req *http.Request, via []*http.Request) error {
+							return http.ErrUseLastResponse
+						},
+					},
+				}
+
+				err := operation.call(c)
+				if err == nil {
+					t.Fatal("redirect returned nil error")
+				}
+				if got := IsAuthRequired(err); got != redirect.wantAuth {
+					t.Fatalf("auth classification = %t, want %t: %v", got, redirect.wantAuth, err)
+				}
+				if redirect.wantError != "" {
+					wantError := redirect.wantError
+					if operation.name == "form" {
+						wantError = "unexpected redirect status 302"
+					}
+					if !strings.Contains(err.Error(), wantError) {
+						t.Errorf("error = %q, want %q", err, wantError)
+					}
+				}
+				if redirect.name == "exact login" || redirect.name == "absolute exact login" {
+					if !strings.Contains(err.Error(), "unauthorized") {
+						t.Errorf("exact login error = %q, want unauthorized", err)
+					}
+				}
+				if !responseBody.closed {
+					t.Error("redirect response body was not closed")
+				}
+			})
+		}
+	}
+}
+
+func TestHTMXMutationPathsDoNotFollowLoginRedirects(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{
+			name: "form",
+			call: func(c *Client) error {
+				return c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			},
+		},
+		{
+			name: "json",
+			call: func(c *Client) error {
+				return c.doJSON(context.Background(), http.MethodPost, "/mutate", map[string]string{"value": "one"})
+			},
+		},
+		{
+			name: "multipart",
+			call: func(c *Client) error {
+				_, err := c.doMultipartHTML(context.Background(), http.MethodPost, "/mutate", strings.NewReader("body"), "text/plain")
+				return err
+			},
+		},
+	}
+
+	for _, operation := range operations {
+		for _, status := range []int{http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+			operation, status := operation, status
+			t.Run(fmt.Sprintf("%s_status_%d", operation.name, status), func(t *testing.T) {
+				var mutationRequests, loginRequests int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/mutate":
+						mutationRequests++
+						w.Header().Set("Location", "/login?next=%2Fmutate")
+						w.WriteHeader(status)
+					case "/login":
+						loginRequests++
+						w.WriteHeader(http.StatusOK)
+					default:
+						t.Errorf("unexpected request path %q", r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				}))
+				defer srv.Close()
+
+				c, err := New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := operation.call(c); err == nil || !IsAuthRequired(err) {
+					t.Fatalf("status %d: error = %v, want authentication error", status, err)
+				}
+				if mutationRequests != 1 {
+					t.Errorf("mutation requests = %d, want 1", mutationRequests)
+				}
+				if loginRequests != 0 {
+					t.Errorf("login requests = %d, want 0; redirect was followed", loginRequests)
+				}
+			})
+		}
+	}
+}
+
+func TestHTMXMutationPathsHandleAPIErrorsAndTransportFailures(t *testing.T) {
+	operations := []struct {
+		name string
+		call func(*Client) error
+	}{
+		{
+			name: "form",
+			call: func(c *Client) error {
+				return c.doForm(context.Background(), http.MethodPost, "/mutate", nil)
+			},
+		},
+		{
+			name: "json",
+			call: func(c *Client) error {
+				return c.doJSON(context.Background(), http.MethodPost, "/mutate", map[string]string{"value": "one"})
+			},
+		},
+		{
+			name: "multipart",
+			call: func(c *Client) error {
+				_, err := c.doMultipartHTML(context.Background(), http.MethodPost, "/mutate", strings.NewReader("body"), "text/plain")
+				return err
+			},
+		},
+	}
+
+	for _, operation := range operations {
+		operation := operation
+		t.Run(operation.name+"/api_error", func(t *testing.T) {
+			responseBody := &trackedResponseBody{Reader: strings.NewReader(`{"error":"mutation rejected"}`)}
+			transport := htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusUnprocessableEntity,
+					Status:     "422 test response",
+					Header:     make(http.Header),
+					Body:       responseBody,
+					Request:    r,
+				}, nil
+			})
+			c := &Client{
+				baseURL: "http://backend.test",
+				http: &http.Client{
+					Transport: transport,
+					CheckRedirect: func(req *http.Request, via []*http.Request) error {
+						return http.ErrUseLastResponse
+					},
+				},
+			}
+
+			err := operation.call(c)
+			if err == nil || !strings.Contains(err.Error(), "mutation rejected") {
+				t.Fatalf("error = %v, want API error message", err)
+			}
+			if !responseBody.closed {
+				t.Error("API error response body was not closed")
+			}
+		})
+
+		t.Run(operation.name+"/transport_error", func(t *testing.T) {
+			transport := htmlTestRoundTripper(func(*http.Request) (*http.Response, error) {
+				return nil, fmt.Errorf("transport unavailable")
+			})
+			c := &Client{
+				baseURL: "http://backend.test",
+				http: &http.Client{
+					Transport: transport,
+					CheckRedirect: func(req *http.Request, via []*http.Request) error {
+						return http.ErrUseLastResponse
+					},
+				},
+			}
+
+			err := operation.call(c)
+			if err == nil || !strings.Contains(err.Error(), "transport unavailable") {
+				t.Fatalf("error = %v, want transport error", err)
+			}
+			if !strings.Contains(err.Error(), "POST /mutate") {
+				t.Errorf("error = %q, want method and path context", err)
 			}
 		})
 	}

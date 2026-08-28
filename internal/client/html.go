@@ -99,12 +99,24 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 	if form != nil {
 		body = form.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, strings.NewReader(body))
+	contentType := ""
+	if form != nil {
+		contentType = "application/x-www-form-urlencoded"
+	}
+	return c.doHTMXMutation(ctx, method, path, strings.NewReader(body), contentType, true)
+}
+
+// doHTMXMutation builds and executes an HTMX mutation request. A successful
+// response is returned to the caller, which owns its body; failed responses are
+// consumed and closed here. Form mutations retain their specific unexpected
+// redirect error while JSON and multipart mutations use the generic API error.
+func (c *Client) doHTMXMutation(ctx context.Context, method, path string, body io.Reader, contentType string, formRedirectError bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
 	}
-	if form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("HX-Request", "true")
 	req.Header.Set("Accept", "text/html, application/json")
@@ -115,15 +127,16 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 	}
 
 	if isAuthResponse(resp) {
-		defer drainAndClose(resp.Body)
+		drainAndClose(resp.Body)
 		return nil, newAuthRequiredError(method, path, resp)
-	}
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		defer drainAndClose(resp.Body)
-		return nil, fmt.Errorf("%s %s: unexpected redirect status %d", method, path, resp.StatusCode)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp, nil
+	}
+	if formRedirectError && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		err := fmt.Errorf("%s %s: unexpected redirect status %d", method, path, resp.StatusCode)
+		drainAndClose(resp.Body)
+		return nil, err
 	}
 	err = apiError(resp)
 	drainAndClose(resp.Body)
@@ -150,28 +163,7 @@ func (c *Client) doJSONResponse(ctx context.Context, method, path string, payloa
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("HX-Request", "true")
-	req.Header.Set("Accept", "text/html, application/json")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", method, path, err)
-	}
-	if isAuthResponse(resp) {
-		defer drainAndClose(resp.Body)
-		return nil, newAuthRequiredError(method, path, resp)
-	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return resp, nil
-	}
-	err = apiError(resp)
-	drainAndClose(resp.Body)
-	return nil, err
+	return c.doHTMXMutation(ctx, method, path, bytes.NewReader(body), "application/json", false)
 }
 
 var cardNodeText = NodeText
