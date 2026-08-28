@@ -969,6 +969,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		if msg.err != nil {
+			// Some commands can return useful partial output with an error.
+			// Keep that output visible before applying the existing auth,
+			// transport, or ordinary error handling.
+			if strings.TrimSpace(msg.body) != "" {
+				m.append(entry{role: "result", head: msg.title, text: msg.body})
+			}
 			if m.handleAuthError(msg.err) {
 				return m, nil
 			}

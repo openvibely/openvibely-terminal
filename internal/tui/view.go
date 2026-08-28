@@ -474,13 +474,21 @@ func renderTaskDetail(t client.Task, d *client.TaskDetail, tab string) string {
 		body := d.TabText(tab)
 		if meta, ok := client.TaskDetailTabByName(tab); ok {
 			label = meta.Label
-			body = meta.Text(d)
+			if err := d.TabError(tab); err != nil {
+				body = renderTaskDetailLoadFailure(meta.Label, err)
+			} else {
+				body = meta.Text(d)
+			}
 		}
 		fmt.Fprintf(&b, "%s\n%s\n", sectionStyle.Render(label), textOrDash(body))
 		return b.String()
 	}
 
 	for _, meta := range client.TaskDetailTabs() {
+		if err := d.TabError(meta.Name); err != nil {
+			fmt.Fprintf(&b, "%s\n%s\n\n", sectionStyle.Render("▸ "+meta.Label), renderTaskDetailLoadFailure(meta.Label, err))
+			continue
+		}
 		body := strings.TrimSpace(meta.Text(d))
 		if body == "" {
 			continue
@@ -489,6 +497,10 @@ func renderTaskDetail(t client.Task, d *client.TaskDetail, tab string) string {
 	}
 	b.WriteString(dimStyle.Render("/tasks show <id> <" + detailTabHintList() + ">"))
 	return b.String()
+}
+
+func renderTaskDetailLoadFailure(label string, err error) string {
+	return statusErrStyle.Render(fmt.Sprintf("failed to load %s: %v", strings.ToLower(label), err))
 }
 
 func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {

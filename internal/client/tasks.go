@@ -46,6 +46,63 @@ type TaskDetail struct {
 	// tab text so existing task-detail output is unchanged.
 	Attachments []Attachment `json:"attachments,omitempty"`
 	Life        string       // Lifecycle tab
+
+	// loadErrors is populated only when an independent lazy tab request fails.
+	// It is intentionally private; callers use TabError so normal tab text and
+	// JSON compatibility remain unchanged.
+	loadErrors *TaskDetailLoadError
+}
+
+// TaskDetailLoadError reports failures from independent lazy task-detail
+// requests. The returned TaskDetail is still useful and contains every
+// successfully loaded section. Unwrap preserves the original errors so
+// errors.Is/errors.As continue to recognize authentication and transport
+// failures.
+type TaskDetailLoadError struct {
+	Thread    error
+	Changes   error
+	Lifecycle error
+}
+
+func (e *TaskDetailLoadError) Error() string {
+	if e == nil {
+		return "task detail load failed"
+	}
+	failures := make([]string, 0, 3)
+	for _, failure := range []struct {
+		name string
+		err  error
+	}{
+		{name: "thread", err: e.Thread},
+		{name: "changes", err: e.Changes},
+		{name: "lifecycle", err: e.Lifecycle},
+	} {
+		if failure.err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", failure.name, failure.err))
+		}
+	}
+	if len(failures) == 0 {
+		return "task detail load failed"
+	}
+	return "task detail load failed: " + strings.Join(failures, "; ")
+}
+
+// Unwrap exposes every failed lazy request to the standard errors package.
+func (e *TaskDetailLoadError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	errs := make([]error, 0, 3)
+	for _, err := range []error{e.Thread, e.Changes, e.Lifecycle} {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+func (e *TaskDetailLoadError) hasErrors() bool {
+	return e != nil && (e.Thread != nil || e.Changes != nil || e.Lifecycle != nil)
 }
 
 // TaskDetailTab describes one task detail tab across command parsing, display,
@@ -119,6 +176,29 @@ func (d TaskDetail) TabText(tab string) string {
 		return meta.Text(&d)
 	}
 	return d.Details
+}
+
+// TabError returns the lazy-load error for one detail tab, resolving aliases in
+// the same way as TabText. A nil error means the tab loaded successfully or its
+// intentionally empty response was valid.
+func (d TaskDetail) TabError(tab string) error {
+	if d.loadErrors == nil {
+		return nil
+	}
+	meta, ok := TaskDetailTabByName(tab)
+	if !ok {
+		return nil
+	}
+	switch meta.Name {
+	case "thread":
+		return d.loadErrors.Thread
+	case "changes":
+		return d.loadErrors.Changes
+	case "lifecycle":
+		return d.loadErrors.Lifecycle
+	default:
+		return nil
+	}
 }
 
 // TaskForm carries create/update fields for a task.
@@ -441,6 +521,18 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string) (*TaskDe
 			fmt.Fprintf(&b, "%s  %s  %s  %s\n", e.When, e.SkillKey, e.Status, e.StartedAt)
 		}
 		d.Life = b.String()
+	}
+
+	loadErr := &TaskDetailLoadError{
+		Thread:  threadErr,
+		Changes: changesErr,
+	}
+	if needLife {
+		loadErr.Lifecycle = lifeErr
+	}
+	if loadErr.hasErrors() {
+		d.loadErrors = loadErr
+		return d, loadErr
 	}
 	return d, nil
 }

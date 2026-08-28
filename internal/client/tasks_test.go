@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -423,9 +424,8 @@ func TestGetTaskFetchesTabsConcurrently(t *testing.T) {
 	}
 }
 
-// If the thread fetch fails, the changes tab must still populate normally,
-// and the thread tab must fall back to whatever placeholder the initial page
-// fetch produced.
+// If the thread fetch fails, GetTask must return the partial detail and a
+// section-specific error while preserving the changes result.
 func TestGetTaskThreadFailsChangesSucceeds(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -440,6 +440,9 @@ func TestGetTaskThreadFailsChangesSucceeds(t *testing.T) {
 			w.WriteHeader(http.StatusInternalServerError)
 		case "/tasks/t-1/changes":
 			_, _ = w.Write([]byte(`<div>3 files changed</div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -448,18 +451,29 @@ func TestGetTaskThreadFailsChangesSucceeds(t *testing.T) {
 
 	c, _ := New(srv.URL)
 	d, err := c.GetTask(context.Background(), "t-1")
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("GetTask returned success after thread failure")
+	}
+	var loadErr *TaskDetailLoadError
+	if !errors.As(err, &loadErr) {
+		t.Fatalf("error = %T %v, want TaskDetailLoadError", err, err)
+	}
+	if loadErr.Thread == nil || !strings.Contains(loadErr.Thread.Error(), "500") {
+		t.Fatalf("thread load error = %v, want server error", loadErr.Thread)
+	}
+	if loadErr.Changes != nil || loadErr.Lifecycle != nil {
+		t.Fatalf("unexpected independent load errors: %+v", loadErr)
 	}
 	if !strings.Contains(d.Thread, "loading thread") {
-		t.Errorf("thread = %q, want placeholder fallback", d.Thread)
+		t.Errorf("partial thread text = %q, want initial placeholder retained", d.Thread)
 	}
 	if !strings.Contains(d.Changes, "3 files changed") {
 		t.Errorf("changes = %q, want fetched content", d.Changes)
 	}
 }
 
-// Symmetric case: changes fetch fails, thread fetch succeeds.
+// Symmetric case: changes fetch fails, thread fetch succeeds, and the
+// lifecycle request remains an independent successful empty result.
 func TestGetTaskChangesFailsThreadSucceeds(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -474,6 +488,178 @@ func TestGetTaskChangesFailsThreadSucceeds(t *testing.T) {
 			_, _ = w.Write([]byte(`<div>agent: on it</div>`))
 		case "/tasks/t-1/changes":
 			w.WriteHeader(http.StatusInternalServerError)
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	d, err := c.GetTask(context.Background(), "t-1")
+	if err == nil {
+		t.Fatal("GetTask returned success after changes failure")
+	}
+	var loadErr *TaskDetailLoadError
+	if !errors.As(err, &loadErr) {
+		t.Fatalf("error = %T %v, want TaskDetailLoadError", err, err)
+	}
+	if loadErr.Changes == nil || !strings.Contains(loadErr.Changes.Error(), "500") {
+		t.Fatalf("changes load error = %v, want server error", loadErr.Changes)
+	}
+	if loadErr.Thread != nil || loadErr.Lifecycle != nil {
+		t.Fatalf("unexpected independent load errors: %+v", loadErr)
+	}
+	if !strings.Contains(d.Thread, "on it") {
+		t.Errorf("thread = %q, want fetched content", d.Thread)
+	}
+	if !strings.Contains(d.Changes, "loading changes") {
+		t.Errorf("partial changes text = %q, want initial placeholder retained", d.Changes)
+	}
+}
+
+func TestGetTaskLifecycleFailureReturnsPartialDetail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+				<h2 class="font-bold">Task</h2>
+				<div id="tab-details">prompt</div>
+				<div id="tab-chat" hx-get="/tasks/t-1/thread"></div>
+				<div id="tab-changes" hx-get="/tasks/t-1/changes"></div>
+			</div>`))
+		case "/tasks/t-1/thread":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div>thread loaded</div>`))
+		case "/tasks/t-1/changes":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div>changes loaded</div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"lifecycle unavailable"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	d, err := c.GetTask(context.Background(), "t-1")
+	if err == nil {
+		t.Fatal("GetTask returned success after lifecycle failure")
+	}
+	var loadErr *TaskDetailLoadError
+	if !errors.As(err, &loadErr) || loadErr.Lifecycle == nil {
+		t.Fatalf("error = %T %v, want lifecycle TaskDetailLoadError", err, err)
+	}
+	if !strings.Contains(loadErr.Lifecycle.Error(), "lifecycle unavailable") {
+		t.Fatalf("lifecycle load error = %v, want backend detail", loadErr.Lifecycle)
+	}
+	if loadErr.Thread != nil || loadErr.Changes != nil {
+		t.Fatalf("successful sections reported errors: %+v", loadErr)
+	}
+	for name, got := range map[string]string{"thread": d.Thread, "changes": d.Changes} {
+		if !strings.Contains(got, "loaded") {
+			t.Errorf("%s = %q, want successful partial output", name, got)
+		}
+	}
+}
+
+func TestGetTaskLazyAuthFailurePreservesTypedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div><h2 class="font-bold">Task</h2><div id="tab-details">details</div><div id="tab-chat"></div><div id="tab-changes"></div></div>`))
+		case "/tasks/t-1/thread":
+			w.Header().Set("Location", "/login?next=%2Ftasks%2Ft-1%2Fthread")
+			w.WriteHeader(http.StatusFound)
+		case "/tasks/t-1/changes":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div>changes loaded</div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	d, err := c.GetTask(context.Background(), "t-1")
+	if err == nil || !IsAuthRequired(err) {
+		t.Fatalf("GetTask error = %v, want typed authentication failure", err)
+	}
+	var loadErr *TaskDetailLoadError
+	if !errors.As(err, &loadErr) || loadErr.Thread == nil {
+		t.Fatalf("error = %T %v, want thread load error", err, err)
+	}
+	if !IsAuthRequired(loadErr.Thread) {
+		t.Fatalf("thread error = %v, want authentication failure", loadErr.Thread)
+	}
+	if !strings.Contains(d.Changes, "changes loaded") {
+		t.Fatalf("successful changes output was lost: %q", d.Changes)
+	}
+}
+
+func TestGetTaskLazyTransportFailurePreservesTypedError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div><h2 class="font-bold">Task</h2><div id="tab-details">details</div><div id="tab-chat"></div><div id="tab-changes"></div></div>`))
+		case "/tasks/t-1/changes":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div>changes loaded</div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	c.http.Transport = htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/tasks/t-1/thread" {
+			return nil, &url.Error{Op: http.MethodGet, URL: r.URL.String(), Err: errors.New("connection reset")}
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	d, err := c.GetTask(context.Background(), "t-1")
+	if err == nil || !IsTransportError(err) {
+		t.Fatalf("GetTask error = %v, want typed transport failure", err)
+	}
+	var loadErr *TaskDetailLoadError
+	if !errors.As(err, &loadErr) || loadErr.Thread == nil {
+		t.Fatalf("error = %T %v, want thread load error", err, err)
+	}
+	if !IsTransportError(loadErr.Thread) {
+		t.Fatalf("thread error = %v, want transport failure", loadErr.Thread)
+	}
+	if !strings.Contains(d.Changes, "changes loaded") {
+		t.Fatalf("successful changes output was lost: %q", d.Changes)
+	}
+}
+
+func TestGetTaskSuccessfulEmptyLazyFragmentsRemainEmptyWithoutError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div><h2 class="font-bold">Task</h2><div id="tab-details">details</div><div id="tab-chat"></div><div id="tab-changes"></div></div>`))
+		case "/tasks/t-1/thread", "/tasks/t-1/changes":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div></div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -483,13 +669,13 @@ func TestGetTaskChangesFailsThreadSucceeds(t *testing.T) {
 	c, _ := New(srv.URL)
 	d, err := c.GetTask(context.Background(), "t-1")
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("GetTask returned error for successful empty fragments: %v", err)
 	}
-	if !strings.Contains(d.Thread, "on it") {
-		t.Errorf("thread = %q, want fetched content", d.Thread)
+	if d.Thread != "" || d.Changes != "" || d.Life != "" {
+		t.Fatalf("empty lazy fragments were not preserved: thread=%q changes=%q life=%q", d.Thread, d.Changes, d.Life)
 	}
-	if !strings.Contains(d.Changes, "loading changes") {
-		t.Errorf("changes = %q, want placeholder fallback", d.Changes)
+	if d.TabError("thread") != nil || d.TabError("changes") != nil || d.TabError("lifecycle") != nil {
+		t.Fatal("successful empty fragments were marked as failed")
 	}
 }
 

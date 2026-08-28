@@ -21,10 +21,11 @@ const taskDetailHTML = `<div data-task-status="running" data-task-category="acti
 func threadModel(t *testing.T) (Model, *recorder) {
 	t.Helper()
 	return dispatchModel(t, map[string]string{
-		"/tasks":             taskBoardHTML,
-		"/tasks/t-1":         taskDetailHTML,
-		"/tasks/t-1/thread":  `<div>agent: working on it</div>`,
-		"/tasks/t-1/changes": `<div>2 files changed</div>`,
+		"/tasks":                              taskBoardHTML,
+		"/tasks/t-1":                          taskDetailHTML,
+		"/tasks/t-1/thread":                   `<div>agent: working on it</div>`,
+		"/tasks/t-1/changes":                  `<div>2 files changed</div>`,
+		"/api/tasks/t-1/lifecycle-executions": `[]`,
 	})
 }
 

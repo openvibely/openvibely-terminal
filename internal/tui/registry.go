@@ -326,7 +326,14 @@ func tasksCommand() command {
 					}
 					d, err := c.GetTaskForProject(ctx, t.ID, pid)
 					if err != nil {
-						return "", err
+						if d == nil {
+							return "", err
+						}
+						// Lazy tab failures return a useful partial detail alongside
+						// the error. Render it so successful sections remain visible;
+						// the model still receives the typed error for auth/transport
+						// state handling and a non-zero CLI result.
+						return renderTaskDetail(t, d, tab), err
 					}
 					return renderTaskDetail(t, d, tab), nil
 				})

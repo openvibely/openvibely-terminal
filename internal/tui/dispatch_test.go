@@ -457,6 +457,198 @@ func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	}
 }
 
+func TestTasksShowSurfacesLazyFailuresAndPartialOutput(t *testing.T) {
+	tests := []struct {
+		name        string
+		line        string
+		failedPath  string
+		failedBody  string
+		wantFailure string
+		wantSuccess string
+	}{
+		{
+			name:        "thread single tab",
+			line:        "/tasks show t-1 thread",
+			failedPath:  "/tasks/t-1/thread",
+			failedBody:  `{"error":"thread backend failed"}`,
+			wantFailure: "failed to load thread",
+			wantSuccess: "Refactor the API",
+		}, {
+			name:        "changes full detail",
+			line:        "/tasks show t-1",
+			failedPath:  "/tasks/t-1/changes",
+			failedBody:  `{"error":"changes backend failed"}`,
+			wantFailure: "failed to load changes",
+			wantSuccess: "thread loaded",
+		},
+		{
+			name:        "lifecycle full detail",
+			line:        "/tasks show t-1",
+			failedPath:  "/api/tasks/t-1/lifecycle-executions",
+			failedBody:  `{"error":"lifecycle backend failed"}`,
+			wantFailure: "failed to load lifecycle",
+			wantSuccess: "thread loaded",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == tc.failedPath {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(tc.failedBody))
+					return
+				}
+				switch r.URL.Path {
+				case "/tasks":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(taskBoardHTML))
+				case "/tasks/t-1":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+						<h2 class="font-bold">Task</h2>
+						<div id="tab-details">details loaded</div>
+						<div id="tab-chat"></div>
+						<div id="tab-changes"></div>
+					</div>`))
+				case "/tasks/t-1/thread":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(`<div>thread loaded</div>`))
+				case "/tasks/t-1/changes":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(`<div>changes loaded</div>`))
+				case "/api/tasks/t-1/lifecycle-executions":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`[]`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+			m = runLine(t, m, tc.line)
+
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.wantFailure) {
+				t.Fatalf("lazy failure was not visible:\n%s", out)
+			}
+			if !strings.Contains(out, tc.wantSuccess) {
+				t.Fatalf("successful sibling output was lost:\n%s", out)
+			}
+			if strings.Contains(out, "(empty)") {
+				t.Fatalf("failed section was rendered as empty:\n%s", out)
+			}
+			if !strings.Contains(out, "backend failed") {
+				t.Fatalf("backend error detail was not visible:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestTasksShowLazyAuthFailureRemainsVisibleAndMarksSession(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		case "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active">
+				<h2 class="font-bold">Task</h2>
+				<div id="tab-details">details loaded</div>
+				<div id="tab-chat"></div>
+				<div id="tab-changes"></div>
+			</div>`))
+		case "/tasks/t-1/thread":
+			w.Header().Set("Location", "/login?next=%2Ftasks%2Ft-1%2Fthread")
+			w.WriteHeader(http.StatusFound)
+		case "/tasks/t-1/changes":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div>changes loaded</div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	m = runLine(t, m, "/tasks show t-1 thread")
+
+	out := stripANSI(transcript(m))
+	if !m.authRequired || m.connected {
+		t.Fatalf("lazy auth failure did not update connection state: authRequired=%t connected=%t", m.authRequired, m.connected)
+	}
+	for _, want := range []string{"failed to load thread", "authentication required", "requires sign-in", "Refactor the API"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "(empty)") {
+		t.Fatalf("auth failure was rendered as empty:\n%s", out)
+	}
+}
+
+func TestTasksShowSuccessfulEmptyLazyFragmentRendersEmptyState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		case "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div data-task-status="running" data-task-category="active"><h2 class="font-bold">Task</h2><div id="tab-details">details loaded</div><div id="tab-chat"></div><div id="tab-changes"></div></div>`))
+		case "/tasks/t-1/thread", "/tasks/t-1/changes":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div></div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	m = runLine(t, m, "/tasks show t-1 thread")
+
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "(empty)") {
+		t.Fatalf("successful empty fragment did not render its empty state:\n%s", out)
+	}
+	if strings.Contains(out, "failed to load") || strings.Contains(out, "error:") {
+		t.Fatalf("successful empty fragment was treated as a failure:\n%s", out)
+	}
+}
+
 func TestTasksLifecycleRendersOrderedEvents(t *testing.T) {
 	const executions = `[{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"}]`
 	const events = `[

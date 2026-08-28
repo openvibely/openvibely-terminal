@@ -195,7 +195,8 @@ one:
 ```
 
 Tabs: `details`, `thread`, `changes`, `schedules`, `chaining`, `attachments`,
-`lifecycle`.
+`lifecycle`. Lazy thread, changes, and lifecycle failures are shown as explicit
+errors rather than empty tabs; successfully loaded sections remain visible.
 
 ### Task attachments
 
