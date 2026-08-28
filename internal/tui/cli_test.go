@@ -912,6 +912,9 @@ func TestCLIRunsChannelsTest(t *testing.T) {
 	if !rec.saw("POST", "/channels/email/test") {
 		t.Fatalf("no channel test call, calls:\n%s", rec.all())
 	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Fatalf("channel test request was not scoped to the -project selection:\n%s", rec.all())
+	}
 }
 
 func TestCLIChannelsTestFailsOnBackendError(t *testing.T) {
@@ -1117,6 +1120,9 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 		}
 		if !rec.saw("POST", "/channels/email/remove") {
 			t.Errorf("expected backend call with --force:\n%s", rec.all())
+		}
+		if !rec.sawQuery("project_id=p1") {
+			t.Errorf("forced channel removal was not scoped to the -project selection:\n%s", rec.all())
 		}
 	})
 }

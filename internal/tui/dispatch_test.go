@@ -3177,6 +3177,73 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 
 // --- channels ---
 
+func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
+	const channelsPage = `<html><body>Telegram: connected  Slack: disconnected</body></html>`
+	cases := []struct {
+		name         string
+		line         string
+		method       string
+		path         string
+		confirmation bool
+	}{
+		{name: "bare", line: "/channels", method: "GET", path: "/channels"},
+		{name: "list", line: "/channels list", method: "GET", path: "/channels"},
+		{name: "test", line: "/channels test telegram", method: "POST", path: "/channels/telegram/test"},
+		{name: "remove", line: "/channels remove slack", method: "POST", path: "/channels/slack/disconnect", confirmation: true},
+		{name: "integrations alias", line: "/integrations", method: "GET", path: "/channels"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run("no project/"+tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": channelsPage})
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, tc.line)
+			if out := transcript(m); !strings.Contains(out, "no project selected — use /project <name>") {
+				t.Fatalf("expected no-project guidance for %s:\n%s", tc.line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s must not make backend requests:\n%s", tc.line, calls)
+			}
+			if m.selectorActive {
+				t.Fatalf("%s opened a selector without a selected project", tc.line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Fatalf("%s opened a confirmation without a selected project", tc.line)
+			}
+			if m.busy {
+				t.Fatalf("%s left the model busy", tc.line)
+			}
+		})
+
+		t.Run("selected project/"+tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": channelsPage})
+			if tc.confirmation {
+				m = confirmDestructive(t, m, tc.line)
+			} else {
+				m = runLine(t, m, tc.line)
+			}
+
+			if !rec.saw(tc.method, tc.path) {
+				t.Fatalf("expected %s %s, calls:\n%s", tc.method, tc.path, rec.all())
+			}
+			rec.mu.Lock()
+			urls := append([]string(nil), rec.urls...)
+			rec.mu.Unlock()
+			for _, uri := range urls {
+				if !strings.Contains(uri, "project_id=p1") {
+					t.Errorf("%s sent an unscoped request: %s", tc.line, uri)
+				}
+			}
+			if tc.confirmation && m.pendingConfirmation != nil {
+				t.Fatalf("%s left a pending confirmation after confirmation", tc.line)
+			}
+		})
+	}
+}
+
 // TestChannelsCommandListsPage verifies the no-arg /channels command fetches
 // and renders the integrations page unchanged from the read-only behavior.
 func TestChannelsCommandListsPage(t *testing.T) {
