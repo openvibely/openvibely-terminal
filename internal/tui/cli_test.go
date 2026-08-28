@@ -915,6 +915,78 @@ func TestCLIJSONTasksShow(t *testing.T) {
 	}
 }
 
+func TestCLILifecycleJSONEmptyExecutionsIsArray(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":                       cliProjects,
+		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions": "null",
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1"}, false, true); err != nil {
+		t.Fatalf("empty lifecycle executions --json failed: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "[]" {
+		t.Fatalf("empty lifecycle executions JSON = %q, want []", got)
+	}
+	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Error("empty lifecycle executions must not fetch event traces")
+	}
+}
+
+func TestCLILifecycleJSONExecutionsPreserveFieldsAndOrder(t *testing.T) {
+	const executions = `[
+		{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","agent_id":"agent-1","started_at":"2026-01-20T10:00:00Z","completed_at":"2026-01-20T10:00:01Z","summary":"first","error":"","selected_skills":["lint"]},
+		{"id":"exec-2","skill_key":"reviewer","when":"post_task","status":"failed","agent_id":"agent-2","started_at":"2026-01-20T11:00:00Z","completed_at":"2026-01-20T11:00:02Z","summary":"second","error":"review failed","selected_skills":[]}
+	]`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":                       cliProjects,
+		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions": executions,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1"}, false, true); err != nil {
+		t.Fatalf("lifecycle executions --json failed: %v", err)
+	}
+	got := strings.TrimSpace(out.String())
+	var decoded []client.LifecycleExecution
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("output is not lifecycle execution JSON: %v\noutput: %s", err, got)
+	}
+	if len(decoded) != 2 || decoded[0].ID != "exec-1" || decoded[1].ID != "exec-2" {
+		t.Fatalf("decoded executions = %+v", decoded)
+	}
+	if decoded[0].SelectedSkills[0] != "lint" || decoded[1].Error != "review failed" {
+		t.Fatalf("decoded execution fields = %+v", decoded)
+	}
+	for _, want := range []string{`"skill_key"`, `"agent_id"`, `"started_at"`, `"completed_at"`, `"selected_skills"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("JSON output missing %s: %s", want, got)
+		}
+	}
+	if strings.Index(got, `"exec-1"`) > strings.Index(got, `"exec-2"`) {
+		t.Errorf("execution order changed: %s", got)
+	}
+}
+
+func TestCLILifecycleJSONEmptyEventsIsArray(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":                           cliProjects,
+		"/tasks":                                  `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions":     `[{"id":"exec-1","skill_key":"router","status":"completed"}]`,
+		"/api/lifecycle-executions/exec-1/events": "null",
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1", "exec-1"}, false, true); err != nil {
+		t.Fatalf("empty lifecycle events --json failed: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "[]" {
+		t.Fatalf("empty lifecycle events JSON = %q, want []", got)
+	}
+}
+
 func TestCLILifecycleListsMultipleExecutionsPlainText(t *testing.T) {
 	const executions = `[
 		{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"},

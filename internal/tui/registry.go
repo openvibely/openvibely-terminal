@@ -730,7 +730,7 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 		switch len(execs) {
 		case 0:
 			if jsonMode {
-				body, err := marshalJSON(nonNilLifecycleExecutions(execs))
+				body, err := marshalJSON(nonNilSlice(execs))
 				return resultMsg{title: "Task Lifecycle", body: body, err: err}
 			}
 			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
@@ -770,7 +770,7 @@ func lifecycleEventsMessage(ctx context.Context, c *client.Client, projectID str
 		return resultMsg{title: "Task Lifecycle", err: err}
 	}
 	if jsonMode {
-		body, err := marshalJSON(nonNilLifecycleEvents(events))
+		body, err := marshalJSON(nonNilSlice(events))
 		return resultMsg{title: "Task Lifecycle", body: body, err: err}
 	}
 	return resultMsg{title: "Task Lifecycle", body: renderLifecycleEvents(task, execution, events)}
@@ -817,18 +817,11 @@ func matchLifecycleExecution(execs []client.LifecycleExecution, ref string) (cli
 		func(e client.LifecycleExecution) string { return e.SkillKey })
 }
 
-func nonNilLifecycleExecutions(execs []client.LifecycleExecution) []client.LifecycleExecution {
-	if execs == nil {
-		return []client.LifecycleExecution{}
+func nonNilSlice[T any](items []T) []T {
+	if items == nil {
+		return []T{}
 	}
-	return execs
-}
-
-func nonNilLifecycleEvents(events []client.LifecycleEvent) []client.LifecycleEvent {
-	if events == nil {
-		return []client.LifecycleEvent{}
-	}
-	return events
+	return items
 }
 
 // --- schedule ---
