@@ -22,12 +22,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/ansi/parser"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
@@ -1690,24 +1693,100 @@ func (m *Model) handleSSEEvent(ev client.Event) {
 // truncate shortens s to n display cells, measuring runes rather than bytes so
 // non-ASCII titles aren't cut mid-character or truncated far too early.
 func truncate(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
 	if n <= 0 {
 		return ""
 	}
-	if lipgloss.Width(s) <= n {
-		return s
+
+	// Keep the width scan bounded for over-limit previews. A newline normally
+	// behaves like a space here, but replacing it can change grapheme-cluster
+	// boundaries. Restart with the normalized input when one is encountered so
+	// the existing lipgloss semantics remain exact.
+	for {
+		overLimit, needsNormalization := displayWidthExceeds(s, n)
+		if !needsNormalization {
+			if !overLimit {
+				return s
+			}
+			return truncatePrefix(s, n)
+		}
+		s = strings.ReplaceAll(s, "\n", " ")
 	}
-	runes := []rune(s)
-	width, cut := 0, len(runes)
-	for i, r := range runes {
+}
+
+// displayWidthExceeds mirrors the width traversal used by lipgloss.Width but
+// stops as soon as the supplied limit is exceeded. The second return value
+// requests a retry after newline normalization for exact grapheme semantics.
+func displayWidthExceeds(s string, limit int) (overLimit, needsNormalization bool) {
+	state := parser.GroundState
+	width := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			return false, true
+		}
+
+		nextState, action := parser.Table.Transition(state, s[i])
+		if nextState == parser.Utf8State {
+			cluster, clusterWidth := ansi.FirstGraphemeCluster(s[i:], ansi.GraphemeWidth)
+			if strings.IndexByte(cluster, '\n') >= 0 {
+				return false, true
+			}
+			width += clusterWidth
+			if width > limit {
+				return true, false
+			}
+			i += len(cluster) - 1
+			state = parser.GroundState
+			continue
+		}
+		if action == parser.PrintAction {
+			width++
+			if width > limit {
+				return true, false
+			}
+		}
+		state = nextState
+	}
+	return false, false
+}
+
+func truncatePrefix(s string, n int) string {
+	var prefix strings.Builder
+	capacity := n * 4
+	if capacity < n || capacity > len(s) {
+		capacity = len(s)
+	}
+	prefix.Grow(capacity)
+
+	width := 0
+	pendingSpaces := 0
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		originalRune := r
+		if r == '\n' {
+			r = ' '
+		}
 		w := lipgloss.Width(string(r))
 		if width+w > n-1 {
-			cut = i
 			break
 		}
 		width += w
+		i += size
+
+		if r == ' ' {
+			pendingSpaces++
+			continue
+		}
+		for ; pendingSpaces > 0; pendingSpaces-- {
+			prefix.WriteByte(' ')
+		}
+		if originalRune == utf8.RuneError && size == 1 {
+			prefix.WriteString("\uFFFD")
+		} else {
+			prefix.WriteString(s[i-size : i])
+		}
 	}
-	return strings.TrimRight(string(runes[:cut]), " ") + "…"
+	prefix.WriteString("…")
+	return prefix.String()
 }
 
 func (m *Model) markAuthRequired() {

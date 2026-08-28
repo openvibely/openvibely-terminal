@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -8,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -159,6 +162,161 @@ func BenchmarkTable10KRows4Columns(b *testing.B) {
 }
 
 // Wide/multi-byte titles must not be truncated by byte length.
+func TestTruncateMatchesCurrentBehavior(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		valid  bool
+		limits []int
+	}{
+		{name: "short ASCII", input: "short", valid: true, limits: []int{1, 5, 20}},
+		{name: "exact width ASCII", input: "exact", valid: true, limits: []int{5}},
+		{name: "over limit ASCII", input: "truncate me please", valid: true, limits: []int{1, 8, 12}},
+		{name: "accented", input: "café résumé naïve", valid: true, limits: []int{4, 10, 20}},
+		{name: "wide", input: "日本語の長いタイトル", valid: true, limits: []int{1, 2, 6, 12}},
+		{name: "combining", input: "e\u0301e\u0301e\u0301 and more", valid: true, limits: []int{1, 2, 3, 8}},
+		{name: "newlines", input: "first\nsecond\nthird", valid: true, limits: []int{5, 6, 12}},
+		{name: "spaces", input: "a  b    c", valid: true, limits: []int{1, 2, 5, 8}},
+		{name: "ANSI styled", input: "\x1b[31mhello styled text\x1b[0m", valid: true, limits: []int{5, 8, 20}},
+		{name: "malformed UTF-8", input: string([]byte{0xff, 'a', 0xc3, 'b', 0xe2, 0x82, 'c'}), valid: false, limits: []int{1, 2, 4, 8}},
+		{name: "non-positive limit", input: "line one\nline two", valid: true, limits: []int{0, -1}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, limit := range tc.limits {
+				got := truncate(tc.input, limit)
+				want := truncateBaseline(tc.input, limit)
+				if got != want {
+					t.Errorf("truncate(%q, %d) = %q, want current behavior %q", tc.input, limit, got, want)
+				}
+				if tc.valid && !utf8.ValidString(got) {
+					t.Errorf("truncate(%q, %d) returned invalid UTF-8: %q", tc.input, limit, got)
+				}
+			}
+		})
+	}
+}
+
+var truncateBenchmarkSink string
+
+func truncateBenchmarkFixture(size int) string {
+	return strings.Repeat("x", size)
+}
+
+func BenchmarkTruncateLargeFixtures(b *testing.B) {
+	fixtures := []struct {
+		name  string
+		input string
+	}{
+		{name: "1KiB", input: truncateBenchmarkFixture(1 << 10)},
+		{name: "64KiB", input: truncateBenchmarkFixture(64 << 10)},
+		{name: "1MiB", input: truncateBenchmarkFixture(1 << 20)},
+	}
+	limits := []int{24, 70, 96}
+
+	for _, fixture := range fixtures {
+		fixture := fixture
+		for _, limit := range limits {
+			limit := limit
+			b.Run(fmt.Sprintf("%s/limit_%d/baseline", fixture.name, limit), func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					truncateBenchmarkSink = truncateBaseline(fixture.input, limit)
+				}
+			})
+			b.Run(fmt.Sprintf("%s/limit_%d/bounded", fixture.name, limit), func(b *testing.B) {
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					truncateBenchmarkSink = truncate(fixture.input, limit)
+				}
+			})
+		}
+	}
+}
+
+var lifecycleBenchmarkSink string
+var lifecycleJSONBenchmarkSink []byte
+
+func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
+	payload := map[string]any{
+		"message": strings.Repeat("x", 1<<20),
+		"status":  "completed",
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		b.Fatalf("marshal benchmark payload: %v", err)
+	}
+	encodedString := string(encoded)
+	task := client.Task{ID: "task-1", Title: "Large payload task"}
+	execution := client.LifecycleExecution{ID: "execution-1", Status: "completed"}
+	events := []client.LifecycleEvent{{
+		ID:        "event-1",
+		Seq:       1,
+		EventType: "completed",
+		Payload:   payload,
+	}}
+	precomputedRows := [][]string{
+		{"SEQ", "TIMESTAMP", "EVENT TYPE", "PAYLOAD"},
+		{"1", "—", "completed", truncate(encodedString, 96)},
+	}
+
+	b.Run("end_to_end_json_table_truncate", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			lifecycleBenchmarkSink = renderLifecycleEvents(task, execution, events)
+		}
+	})
+	b.Run("json_only", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			lifecycleJSONBenchmarkSink, _ = json.Marshal(payload)
+		}
+	})
+	b.Run("truncate_only_preencoded", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			lifecycleBenchmarkSink = truncate(encodedString, 96)
+		}
+	})
+	b.Run("table_only_pretruncated", func(b *testing.B) {
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			lifecycleBenchmarkSink = table(precomputedRows)
+		}
+	})
+}
+
+// truncateBaseline mirrors the pre-optimization helper for exact output
+// comparisons and paired benchmark measurements.
+func truncateBaseline(s string, n int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if n <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	width, cut := 0, len(runes)
+	for i, r := range runes {
+		w := lipgloss.Width(string(r))
+		if width+w > n-1 {
+			cut = i
+			break
+		}
+		width += w
+	}
+	return strings.TrimRight(string(runes[:cut]), " ") + "…"
+}
+
+// Wide/multi-byte titles must not be truncated by byte length.
 func TestTruncateMeasuresDisplayWidth(t *testing.T) {
 	cases := []struct {
 		in   string
@@ -191,6 +349,32 @@ func TestTruncateNeverCutsMidRune(t *testing.T) {
 		if r == '\uFFFD' {
 			t.Errorf("truncate produced an invalid rune: %q", got)
 		}
+	}
+}
+
+func TestRenderLifecycleEventsDoesNotMutateDecodedPayload(t *testing.T) {
+	payload := map[string]any{
+		"message": strings.Repeat("payload ", 32),
+		"nested":  map[string]any{"ok": true},
+		"items":   []any{"one", float64(2)},
+	}
+	before, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload before render: %v", err)
+	}
+
+	_ = renderLifecycleEvents(
+		client.Task{ID: "task-1", Title: "Task"},
+		client.LifecycleExecution{ID: "execution-1"},
+		[]client.LifecycleEvent{{ID: "event-1", Seq: 1, EventType: "completed", Payload: payload}},
+	)
+
+	after, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload after render: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("renderLifecycleEvents mutated decoded payload\nbefore: %s\nafter:  %s", before, after)
 	}
 }
 
