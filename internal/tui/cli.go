@@ -89,7 +89,7 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 		// An unknown or ambiguous project must fail loudly rather than run the		// command against whichever project happened to be selected.
 		if err := firstError(m); err != nil {
 			if m.connErr != "" {
-				return errors.New(offlineRecoveryMessage(c.BaseURL(), errors.New(m.connErr)))
+				return errors.New(OfflineRecoveryMessage(c.BaseURL(), errors.New(m.connErr)))
 			}
 			return err
 		}

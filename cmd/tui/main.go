@@ -116,6 +116,14 @@ func isStaticHelpCommand(args []string) bool {
 	}
 }
 
+type configuredLoginTransportError struct {
+	message string
+	cause   error
+}
+
+func (e *configuredLoginTransportError) Error() string { return e.message }
+func (e *configuredLoginTransportError) Unwrap() error { return e.cause }
+
 func loginWithConfiguredCredentials(c *client.Client, username, password string) error {
 	if username == "" && password == "" {
 		return nil
@@ -124,7 +132,10 @@ func loginWithConfiguredCredentials(c *client.Client, username, password string)
 	defer cancel()
 	if err := c.Login(ctx, username, password); err != nil {
 		if client.IsLoginTransportError(err) {
-			return fmt.Errorf("Unable to reach the OpenVibely backend at %s.\nTry:\n  - Start or check your local OpenVibely backend, then run /status.\n  - Use -server <url> or OPENVIBELY_SERVER_URL to point at a running backend.\nDetails: %w", c.BaseURL(), err)
+			return &configuredLoginTransportError{
+				message: tui.OfflineRecoveryMessage(c.BaseURL(), err),
+				cause:   err,
+			}
 		}
 		return fmt.Errorf("authenticating with %s: %w", c.BaseURL(), err)
 	}

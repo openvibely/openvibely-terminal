@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
+	"github.com/openvibely/openvibely-tui/internal/tui"
 )
 
 func TestLoginWithConfiguredCredentialsReusesCookieSession(t *testing.T) {
@@ -64,8 +66,8 @@ func TestLoginWithConfiguredCredentialsReusesCookieSession(t *testing.T) {
 	// Authentication failures must remain safe to print from CLI error paths.
 	if err := loginWithConfiguredCredentials(c, "cli-user", "wrong"); err == nil {
 		t.Fatal("expected the test server to reject the second login")
-	} else if strings.Contains(err.Error(), password) {
-		t.Fatalf("CLI authentication error exposed password: %v", err)
+	} else if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), "cli-user") || strings.Contains(err.Error(), "wrong") {
+		t.Fatalf("CLI authentication error exposed credentials: %v", err)
 	}
 }
 
@@ -91,8 +93,21 @@ func TestConfiguredCredentialTransportFailureIncludesOfflineRecovery(t *testing.
 			t.Errorf("error missing %q: %v", want, err)
 		}
 	}
-	if strings.Contains(err.Error(), secret) {
-		t.Fatalf("configured credential transport error exposed password: %v", err)
+	detailsMarker := "\nDetails: "
+	detailsAt := strings.Index(err.Error(), detailsMarker)
+	if detailsAt < 0 {
+		t.Fatalf("configured transport error missing details marker: %v", err)
+	}
+	got := err.Error()
+	details := got[detailsAt+len(detailsMarker):]
+	if want := tui.OfflineRecoveryMessage(c.BaseURL(), errors.New(details)); got != want {
+		t.Fatalf("configured login did not use the shared recovery formatter:\n got: %s\nwant: %s", got, want)
+	}
+	if !client.IsLoginTransportError(err) {
+		t.Fatalf("configured transport error lost its login classification: %T %v", err, err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "configured-user") {
+		t.Fatalf("configured credential transport error exposed credentials: %v", err)
 	}
 }
 

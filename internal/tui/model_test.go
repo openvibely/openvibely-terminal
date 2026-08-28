@@ -110,10 +110,19 @@ func TestOfflineProjectLoadShowsRecoveryGuidance(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := New(c)
-	updated, _ := m.Update(m.loadProjects(false, "")())
+	loadResult := m.loadProjects(false, "")()
+	msg, ok := loadResult.(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("project load returned %T, want projectsLoadedMsg", loadResult)
+	}
+	updated, _ := m.Update(msg)
 	m = updated.(Model)
 
 	out := transcript(m)
+	want := "loading projects: " + OfflineRecoveryMessage(c.BaseURL(), msg.err)
+	if !strings.Contains(out, want) {
+		t.Fatalf("project load omitted shared recovery message:\n got: %s\nwant: %s", out, want)
+	}
 	for _, want := range []string{
 		"Unable to reach the OpenVibely backend",
 		"Start or check your local OpenVibely backend",
@@ -1075,7 +1084,8 @@ func TestNonHealthTransportFailuresEnterOfflineRecovery(t *testing.T) {
 				m.pendingMsgID = "msg-1"
 			}
 
-			next, _ := m.Update(tc.msg(refusedTransportError(t)))
+			transportErr := refusedTransportError(t)
+			next, _ := m.Update(tc.msg(transportErr))
 			m = next.(Model)
 
 			if m.connected || !m.connChecked || m.connErr == "" {
@@ -1084,8 +1094,8 @@ func TestNonHealthTransportFailuresEnterOfflineRecovery(t *testing.T) {
 			if strings.Contains(strings.ToLower(m.renderHeader()), "online") {
 				t.Fatalf("transport failure left online header:\n%s", m.renderHeader())
 			}
-			if !strings.Contains(strings.ToLower(transcript(m)), "unable to reach the openvibely backend") {
-				t.Fatalf("transport failure omitted offline recovery transcript:\n%s", transcript(m))
+			if want := OfflineRecoveryMessage(m.client.BaseURL(), transportErr); !strings.Contains(transcript(m), want) {
+				t.Fatalf("transport failure did not use the shared recovery message:\n got: %s\nwant: %s", transcript(m), want)
 			}
 			if !strings.Contains(strings.ToLower(m.renderStatus()), "offline") {
 				t.Fatalf("transport failure omitted offline status:\n%s", m.renderStatus())
@@ -1809,8 +1819,8 @@ func TestInteractiveLoginTransportFailureUsesOfflineRecovery(t *testing.T) {
 			t.Fatalf("offline login guidance missing %q:\n%s", want, visible)
 		}
 	}
-	if strings.Contains(visible, password) {
-		t.Fatalf("transport login exposed password:\n%s", visible)
+	if strings.Contains(visible, password) || strings.Contains(visible, "admin") {
+		t.Fatalf("transport login exposed credentials:\n%s", visible)
 	}
 }
 

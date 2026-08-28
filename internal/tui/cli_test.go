@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -521,6 +522,15 @@ func TestCLIBackendRequiredFailureIncludesRecoveryGuidance(t *testing.T) {
 	}
 	if !strings.Contains(got, "Details:") || !strings.Contains(got, "GET /api/projects") {
 		t.Fatalf("error should keep concise transport details after guidance:\n%s", got)
+	}
+	detailsMarker := "\nDetails: "
+	detailsAt := strings.Index(got, detailsMarker)
+	if detailsAt < 0 {
+		t.Fatalf("CLI project-load error missing details marker: %s", got)
+	}
+	details := got[detailsAt+len(detailsMarker):]
+	if want := OfflineRecoveryMessage(c.BaseURL(), errors.New(details)); got != want {
+		t.Fatalf("CLI project-load failure did not use the shared recovery formatter:\n got: %s\nwant: %s", got, want)
 	}
 }
 

@@ -826,7 +826,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if wasConnected {
-				m.append(entry{role: "error", text: "lost connection: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
+				m.append(entry{role: "error", text: "lost connection: " + OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			}
 			m.connected = false
 			if !wasAuthRequired {
@@ -884,7 +884,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connected = false
 			m.connChecked = true
 			m.connErr = msg.err.Error()
-			m.append(entry{role: "error", text: "loading projects: " + offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
+			m.append(entry{role: "error", text: "loading projects: " + OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
 		}
 		if msg.startSSE {
@@ -1162,7 +1162,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connErr = msg.err.Error()
 				m.auth = nil
 				m.sseConnected = false
-				m.append(entry{role: "error", text: offlineRecoveryMessage(m.client.BaseURL(), msg.err)})
+				m.append(entry{role: "error", text: OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
 			} else {
 				m.append(entry{role: "error", text: loginFailureText(m.client.BaseURL(), msg.err)})
 			}
@@ -1861,7 +1861,7 @@ func (m *Model) handleTransportError(err error) bool {
 	// Preserve known auth-required precedence while also retaining the network
 	// details needed to explain a temporary offline condition.
 	if !wasOffline {
-		m.append(entry{role: "error", text: offlineRecoveryMessage(m.client.BaseURL(), err)})
+		m.append(entry{role: "error", text: OfflineRecoveryMessage(m.client.BaseURL(), err)})
 	}
 	return true
 }
@@ -1878,7 +1878,10 @@ func authRecoveryMessage(baseURL string) string {
 	return fmt.Sprintf("OpenVibely backend at %s requires sign-in.\nUse /login to enter credentials in the TUI. For CLI runs, use OPENVIBELY_AUTH_USERNAME and OPENVIBELY_AUTH_PASSWORD (or the existing -user/-pass flags). Credentials are not displayed or saved.", baseURL)
 }
 
-func offlineRecoveryMessage(baseURL string, err error) string {
+// OfflineRecoveryMessage formats the recovery guidance shown when the backend
+// cannot be reached. The optional transport error is rendered as diagnostic
+// detail without changing the surrounding recovery instructions.
+func OfflineRecoveryMessage(baseURL string, err error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Unable to reach the OpenVibely backend at %s.", baseURL)
 	b.WriteString("\nTry:\n")
