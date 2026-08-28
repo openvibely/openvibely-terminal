@@ -1,0 +1,9 @@
+# Bounded Terminal Truncation
+
+Use this checklist when changing `internal/tui/model.go` text truncation or any renderer that previews untrusted event, task, description, or lifecycle payloads.
+
+- Preserve the established output contract: normalize newlines as spaces, measure terminal display cells rather than bytes, ignore ANSI escape width, keep grapheme clusters and wide/combining Unicode intact, handle malformed UTF-8 without emitting invalid output, trim trailing spaces before an ellipsis, and return an empty string for `n <= 0`.
+- A bounded implementation must remain bounded for newline-bearing inputs as well as plain ASCII. Do not call `strings.ReplaceAll` across the entire payload or restart a complete scan after discovering a newline; that turns a large over-limit preview back into input-sized CPU and allocation work.
+- Prefer a single stateful scan that stops once the output budget is decided and emits only the retained prefix. Treat a newline as its one-cell space equivalent during scanning, while preserving any grapheme-boundary rules needed by the legacy output. If exact normalization requires a fallback, prove that fallback is limited to the retained region rather than the full payload.
+- Compare optimized output with a small legacy reference across ANSI, newline, malformed-byte, wide-character, combining-mark, whitespace, exact-width, and non-positive-limit cases. Include large benchmark fixtures containing early and late newlines; newline-free fixtures alone cannot demonstrate bounded behavior.
+- Audit every `truncate` call site that can receive backend or lifecycle data, and verify that the rendered result stays within its cell budget without mutating decoded payloads. Preserve focused coverage for the affected renderer and concurrent model or event behavior.
