@@ -114,6 +114,8 @@ Commands take a resource, an optional action, and arguments:
 /alerts delete a1b2           delete one
 /skills add notes | writes release notes
 /tasks move Refactor active   move a task between columns
+/tasks attachments add Refactor ./request.txt ./trace.json
+/tasks attachments delete Refactor att-123
 ```
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
@@ -126,7 +128,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 
 | Command | Aliases | Actions |
 |---|---|---|
-| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
+| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
@@ -195,7 +197,26 @@ one:
 Tabs: `details`, `thread`, `changes`, `schedules`, `chaining`, `attachments`,
 `lifecycle`.
 
-### Lifecycle event logs
+### Task attachments
+
+Attachment reads and mutations use the currently selected project. Upload one or
+more local files with the same command in the interactive TUI or one-shot CLI:
+
+```
+/tasks attachments add refactor ./request.txt ./trace.json
+/tasks attachments list refactor
+/tasks attachments delete refactor att-123
+
+openvibely-tui -project demo tasks attachments add refactor ./request.txt ./trace.json
+openvibely-tui -project demo tasks attachments list refactor
+openvibely-tui -project demo --force tasks attachments delete refactor att-123
+```
+
+The refreshed attachment list prints each stable attachment ID, filename, and
+size. TUI deletion asks for the normal `yes` confirmation; CLI deletion refuses
+to run unless `--force` is supplied. A task-only delete invocation opens the
+interactive attachment selector, where the selected file is still confirmed
+before deletion. `attach` and `attachment` are aliases for `attachments`.
 
 Use the task lifecycle command to inspect execution traces. With no execution
 reference, the TUI auto-opens a sole execution or prompts for one when several
@@ -225,6 +246,8 @@ Anything you can type in the chat window can be run as a one-shot command:
 openvibely-tui tasks                              # print the board
 openvibely-tui -project demo tasks show refactor  # a task's detail tabs
 openvibely-tui -project demo tasks run refactor   # run it
+openvibely-tui -project demo tasks attachments add refactor ./request.txt ./trace.json
+openvibely-tui -project demo --force tasks attachments delete refactor att-123
 openvibely-tui -project demo alerts               # list alerts
 openvibely-tui -project demo analytics usage      # one analytics section
 openvibely-tui -project demo chat "ship the docs" # ask the agent, print the reply
@@ -265,6 +288,8 @@ $ openvibely-tui help tasks
   tasks show <task> [tab]                    details, thread, changes, schedules, …
   tasks lifecycle <task> [execution]         list executions or show ordered events
   tasks logs <task> [execution]              alias for lifecycle event logs
+  tasks attachments add <task> <file>...      upload local files
+  tasks attachments delete <task> <attachment> delete by ID or filename
   tasks new <title> [| <prompt>]             create a task
   tasks edit <task> | <title> [| <prompt>]   edit title/prompt
   tasks run|stop|delete <task>               run, cancel or delete
@@ -324,7 +349,10 @@ equivalent. For these the client:
 
 Mutations post to exactly the routes the web UI posts to (e.g.
 `POST /tasks/:id/run`, `PATCH /tasks/:id/category`, `DELETE /alerts/:id`,
-`POST /skills/:handle/enabled`, `POST /models/:id/set-default`).
+`POST /skills/:handle/enabled`, `POST /models/:id/set-default`). Task attachment
+uploads use repeated multipart `files` parts at `POST /tasks/:id/attachments`,
+and deletion uses `DELETE /attachments/:id`; both carry the selected
+`project_id` query.
 
 Because this layer depends on the server's markup, a template change that
 removes a `data-*` attribute will show up as an empty list rather than a crash.
@@ -350,7 +378,8 @@ internal/client/
   client.go                  base client, auth, projects, chat, capacity
   api.go                     remaining JSON endpoints (analytics, workflows, lifecycle…)
   html.go                    HTML transport: getHTML, doForm, data-* card scraping
-  tasks.go                   task board + task detail tabs + task mutations
+  tasks.go                   task board + task detail tabs + attachment client + task mutations
+  attachments.go              project-scoped multipart upload, HTML parsing, and deletion
   resources.go               alerts, skills, models, agents, schedule, workers,
                              channels, personality, pulse, reflection, insights
   htmltext.go                HTML → text helpers

@@ -1500,7 +1500,7 @@ func (m Model) sendThreadMessage(taskID, title, text string) tea.Cmd {
 		if err := c.SendTaskThreadMessage(ctx, taskID, text); err != nil {
 			return "", err
 		}
-		d, err := c.GetTask(ctx, taskID)
+		d, err := c.GetTaskForProject(ctx, taskID, m.selectedID)
 		if err != nil {
 			return "sent", nil
 		}

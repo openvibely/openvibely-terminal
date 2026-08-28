@@ -534,6 +534,34 @@ func reviewState(r client.ReviewComment) string {
 	return dimStyle.Render("—")
 }
 
+func renderTaskAttachments(attachments []client.Attachment) string {
+	if len(attachments) == 0 {
+		return dimStyle.Render("no attachments yet — /tasks attachments add <task> <file> uploads one")
+	}
+	rows := [][]string{{"ID", "FILE", "SIZE"}}
+	for _, attachment := range attachments {
+		rows = append(rows, []string{
+			firstNonEmpty(attachment.ID, "—"),
+			firstNonEmpty(attachment.FileName, "(unnamed)"),
+			attachmentSizeText(attachment.FileSize),
+		})
+	}
+	return table(rows) + "\n\n" + dimStyle.Render("/tasks attachments delete <task> <id|filename>")
+}
+
+func attachmentSizeText(size int64) string {
+	const unit = int64(1024)
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := unit, 0
+	for n := size / unit; n >= unit && exp < 5; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
+}
+
 func renderLifecycleExecutions(task client.Task, executions []client.LifecycleExecution) string {
 	var b strings.Builder
 	title := firstNonEmpty(task.Title, shortID(task.ID))

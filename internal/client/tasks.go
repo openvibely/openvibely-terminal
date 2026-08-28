@@ -41,7 +41,11 @@ type TaskDetail struct {
 	Schedule string // Schedules tab
 	Chaining string // Chaining tab
 	Attach   string // Attachments tab
-	Life     string // Lifecycle tab
+	// Attachments contains the structured attachment records parsed from the
+	// attachment controls in the task detail page. Attach remains the rendered
+	// tab text so existing task-detail output is unchanged.
+	Attachments []Attachment `json:"attachments,omitempty"`
+	Life        string       // Lifecycle tab
 }
 
 // TaskDetailTab describes one task detail tab across command parsing, display,
@@ -326,11 +330,25 @@ func parseReviewComments(root *html.Node, taskID string) []ReviewComment {
 
 // GetTask fetches the task detail page and extracts each tab's content.
 func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error) {
-	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID))
+	return c.getTask(ctx, taskID, "")
+}
+
+// GetTaskForProject fetches a task detail page within the selected project.
+// Task attachments are embedded in this page, so the project query is part of
+// the attachment read contract as well as the mutation contract.
+func (c *Client) GetTaskForProject(ctx context.Context, taskID, projectID string) (*TaskDetail, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task details")
+	}
+	return c.getTask(ctx, taskID, projectID)
+}
+
+func (c *Client) getTask(ctx context.Context, taskID, projectID string) (*TaskDetail, error) {
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	d := &TaskDetail{Task: Task{ID: taskID}}
+	d := &TaskDetail{Task: Task{ID: taskID, ProjectID: projectID}, Attachments: make([]Attachment, 0)}
 
 	// The page heading carries the real title.
 	if h := findNode(root, func(e *html.Node) bool {
@@ -354,6 +372,14 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error
 				break
 			}
 		}
+	}
+	if projectID != "" {
+		d.Attachments, err = parseTaskAttachmentsForProject(root, taskID, projectID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		d.Attachments = parseTaskAttachments(root, taskID, projectID)
 	}
 	if d.Details == "" {
 		if n := findByID(root, "task-detail-view"); n != nil {
@@ -388,6 +414,10 @@ func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if projectID != "" {
+				execs, lifeErr = c.ListTaskLifecycleExecutionsForProject(ctx, taskID, projectID)
+				return
+			}
 			execs, lifeErr = c.ListTaskLifecycleExecutions(ctx, taskID)
 		}()
 	}

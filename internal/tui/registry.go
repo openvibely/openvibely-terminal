@@ -199,7 +199,7 @@ func taskSelectorWithSuffix(m Model, usage, command, prefillSuffix string) (Mode
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
+	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
 	return command{
 		name:    "tasks",
 		aliases: []string{"task", "t", "board"},
@@ -213,6 +213,9 @@ func tasksCommand() command {
 			"tasks show <task> [tab]                    " + detailTabUsageList(),
 			"tasks reviews [list] <task>                list inline review comments",
 			"tasks reviews add <task> <file>:<line> <comment>",
+			"tasks attachments add <task> <file>...      upload local files",
+			"tasks attachments delete <task> <attachment> delete by ID or filename",
+			"tasks attach ...                            alias for attachments",
 			"tasks lifecycle <task> [execution]         list executions or show ordered events",
 			"tasks logs <task> [execution]              alias for lifecycle event logs",
 			"tasks new <title> [| <prompt>]             create a task",
@@ -228,6 +231,8 @@ func tasksCommand() command {
 		},
 		actionUsages: []commandActionUsage{
 			{action: "reviews add", args: "<task> <file>:<line> <comment>"},
+			{action: "attachments add", args: "<task> <file>...", description: "upload local files"},
+			{action: "attachments delete", args: "<task> <attachment>", description: "delete by ID or filename"},
 			{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
 			{action: "edit", args: "<task> | <title> [| <prompt>]", description: "edit title/prompt"},
 		},
@@ -237,6 +242,8 @@ func tasksCommand() command {
 			`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
 			`tasks show "Fix login bug" review`,
 			`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
+			`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
+			`tasks attachments delete "Fix login bug" request.txt`,
 			`tasks lifecycle "Fix login bug"`,
 			`tasks logs "Fix login bug" execution-id`,
 			`tasks reply "Fix login bug" | PR is up — please review`,
@@ -274,7 +281,7 @@ func tasksCommand() command {
 					if err != nil {
 						return threadOpenedMsg{projectID: pid, err: err}
 					}
-					d, err := c.GetTask(ctx, t.ID)
+					d, err := c.GetTaskForProject(ctx, t.ID, pid)
 					if err != nil {
 						return threadOpenedMsg{projectID: pid, err: err}
 					}
@@ -317,7 +324,7 @@ func tasksCommand() command {
 					if jsonMode {
 						return marshalJSON(t)
 					}
-					d, err := c.GetTask(ctx, t.ID)
+					d, err := c.GetTaskForProject(ctx, t.ID, pid)
 					if err != nil {
 						return "", err
 					}
@@ -386,6 +393,9 @@ func tasksCommand() command {
 						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", filePath, lineNumber, firstNonEmpty(t.Title, shortID(t.ID)), renderTaskReviews(t, reviews)), nil
 					})
 				}
+
+			case "attachments", "attach", "attachment":
+				return taskAttachmentsCommand(m, c, pid, rest)
 
 			case "lifecycle", "logs":
 				if len(rest) == 0 {
@@ -696,10 +706,202 @@ func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (
 		func(t client.Task) string { return t.Title })
 }
 
+func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
+	usageAdd := commandUsage("tasks", "attachments add")
+	usageDelete := commandUsage("tasks", "attachments delete")
+	if len(args) == 0 {
+		return taskSelectorWithSuffix(m, usageAdd, "tasks attachments add", " ")
+	}
+
+	action := strings.ToLower(args[0])
+	rest := args[1:]
+	switch action {
+	case "add", "upload":
+		return taskAttachmentsAddCommand(m, c, projectID, rest, usageAdd)
+	case "delete", "remove":
+		return taskAttachmentsDeleteCommand(m, c, projectID, rest, usageDelete)
+	case "list", "show":
+		return taskAttachmentsListCommand(m, c, projectID, rest)
+	default:
+		// Keep the short form useful for one-shot commands while documenting the
+		// explicit "attachments add" form: /tasks attachments <task> <file>...
+		return taskAttachmentsAddCommand(m, c, projectID, args, usageAdd)
+	}
+}
+
+func taskAttachmentsAddCommand(m Model, c *client.Client, projectID string, args []string, usage string) (Model, tea.Cmd) {
+	if len(args) == 0 {
+		return taskSelectorWithSuffix(m, usage, "tasks attachments add", " ")
+	}
+	if len(args) < 2 {
+		return m, errCmd(usage)
+	}
+
+	return m, run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+		tasks, err := c.ListTasks(ctx, projectID)
+		if err != nil {
+			return "", err
+		}
+		task, filePaths, err := resolveTaskWithOperands(tasks, args, 1)
+		if err != nil {
+			return "", err
+		}
+		attachments, err := c.AddTaskAttachments(ctx, task.ID, projectID, filePaths)
+		if err != nil {
+			return "", err
+		}
+		if jsonMode {
+			return marshalJSON(attachments)
+		}
+		return fmt.Sprintf("uploaded %d attachment(s) to %s\n\n%s", len(filePaths), firstNonEmpty(task.Title, task.ID), renderTaskAttachments(attachments)), nil
+	})
+}
+
+func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, args []string, usage string) (Model, tea.Cmd) {
+	if len(args) == 0 {
+		return taskSelectorWithSuffix(m, usage, "tasks attachments delete", " ")
+	}
+	if len(args) == 1 {
+		return taskAttachmentSelector(m, c, projectID, args[0], usage)
+	}
+
+	cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+		tasks, err := c.ListTasks(ctx, projectID)
+		if err != nil {
+			return "", err
+		}
+		task, attachmentRefParts, err := resolveTaskWithOperands(tasks, args, 1)
+		if err != nil {
+			return "", err
+		}
+		attachmentRef := strings.TrimSpace(strings.Join(attachmentRefParts, " "))
+		if attachmentRef == "" {
+			return "", fmt.Errorf("missing attachment ID or filename")
+		}
+		attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+		if err != nil {
+			return "", err
+		}
+		attachment, err := matchRef(attachments, attachmentRef,
+			func(a client.Attachment) string { return a.ID },
+			func(a client.Attachment) string { return a.FileName })
+		if err != nil {
+			return "", err
+		}
+		return deleteTaskAttachmentResult(ctx, c, projectID, task, attachment)
+	})
+	attachmentDisplay := args[len(args)-1]
+	taskDisplay := strings.Join(args[:len(args)-1], " ")
+	return confirmOr(m,
+		fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachmentDisplay, taskDisplay),
+		fmt.Sprintf("use --force to confirm deletion of attachment %q", attachmentDisplay),
+		cmd)
+}
+
+func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
+	if len(args) == 0 {
+		listUsage := commandUsage("tasks", "attachments list")
+		return taskSelectorWithSuffix(m, listUsage, "tasks attachments list", " ")
+	}
+	return m, run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+		task, err := resolveTask(ctx, c, projectID, strings.Join(args, " "))
+		if err != nil {
+			return "", err
+		}
+		attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+		if err != nil {
+			return "", err
+		}
+		if jsonMode {
+			return marshalJSON(attachments)
+		}
+		return renderTaskAttachments(attachments), nil
+	})
+}
+
+func taskAttachmentSelector(m Model, c *client.Client, projectID, taskRef, usage string) (Model, tea.Cmd) {
+	if cliMode {
+		return m, errCmd(usage)
+	}
+	command := "tasks attachments delete " + taskRef
+	return m, selectorFor("Attachments", command, "no attachments yet — /tasks attachments add <task> <file> uploads one", false,
+		func(ctx context.Context) ([]selectorItem, error) {
+			task, err := resolveTask(ctx, c, projectID, taskRef)
+			if err != nil {
+				return nil, err
+			}
+			attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]selectorItem, 0, len(attachments))
+			for _, attachment := range attachments {
+				attachment := attachment
+				item := selectorItem{
+					ref:    attachment.ID,
+					label:  firstNonEmpty(attachment.FileName, attachment.ID),
+					detail: attachmentSizeText(attachment.FileSize),
+				}
+				item.dispatch = func(mm Model) (Model, tea.Cmd) {
+					cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+						return deleteTaskAttachmentResult(ctx, c, projectID, task, attachment)
+					})
+					return confirmOr(mm,
+						fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachment.FileName, firstNonEmpty(task.Title, task.ID)),
+						fmt.Sprintf("use --force to confirm deletion of attachment %q", attachment.FileName),
+						cmd)
+				}
+				items = append(items, item)
+			}
+			return items, nil
+		})
+}
+
+func deleteTaskAttachmentResult(ctx context.Context, c *client.Client, projectID string, task client.Task, attachment client.Attachment) (string, error) {
+	remaining, err := c.DeleteTaskAttachment(ctx, attachment.ID, projectID)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(remaining)
+	}
+	return fmt.Sprintf("deleted attachment %q from %s\n\n%s", attachment.FileName, firstNonEmpty(task.Title, task.ID), renderTaskAttachments(remaining)), nil
+}
+
+// resolveTaskWithOperands finds the longest task-reference prefix that matches
+// a task, leaving the remaining operands for files or attachment selectors.
+// This preserves multi-word task titles while keeping file names and IDs as
+// ordinary trailing arguments.
+func resolveTaskWithOperands(tasks []client.Task, args []string, trailing int) (client.Task, []string, error) {
+	var zero client.Task
+	if len(args) <= trailing {
+		return zero, nil, fmt.Errorf("missing task reference or attachment operand")
+	}
+	maxRefWords := len(args) - trailing
+	var matched client.Task
+	matchedAt := 0
+	for end := 1; end <= maxRefWords; end++ {
+		task, err := matchRef(tasks, strings.Join(args[:end], " "),
+			func(t client.Task) string { return t.ID },
+			func(t client.Task) string { return t.Title })
+		if err == nil {
+			matched = task
+			matchedAt = end
+		}
+	}
+	if matchedAt == 0 {
+		task, err := matchRef(tasks, strings.Join(args[:maxRefWords], " "),
+			func(t client.Task) string { return t.ID },
+			func(t client.Task) string { return t.Title })
+		return task, nil, err
+	}
+	return matched, args[matchedAt:], nil
+}
+
 // lifecycleCommand resolves a task and its optional execution, then either
 // renders the execution list or the ordered event trace. A missing execution
 // uses the TUI selector when several executions exist; CLI mode lists them so
-// its output remains deterministic and non-interactive.
+// its output remains deterministic.
 func lifecycleCommand(c *client.Client, projectID, action string, args []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
