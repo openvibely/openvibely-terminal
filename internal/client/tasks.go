@@ -378,9 +378,10 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string) (*TaskDe
 		if err != nil {
 			return nil, err
 		}
-	} else {
-		d.Attachments = parseTaskAttachments(root, taskID, projectID)
 	}
+	// Keep the legacy GetTask path text-compatible without exposing structured
+	// attachment records when no selected project was supplied. Callers that
+	// need attachment IDs or sizes must use GetTaskForProject.
 	if d.Details == "" {
 		if n := findByID(root, "task-detail-view"); n != nil {
 			d.Details = NodeText(n)

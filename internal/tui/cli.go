@@ -66,12 +66,9 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	// In CLI mode commands are shell subcommands, so help should print them
 	// without the chat window's leading slash.
 	cmdPrefix = ""
-	line := strings.Join(args, " ")
-	if !strings.HasPrefix(line, "/") {
-		line = "/" + line
-	}
-	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(line), "/"))
-	name := strings.TrimPrefix(strings.Fields(line)[0], "/")
+	fields := append([]string(nil), args...)
+	fields[0] = strings.TrimPrefix(strings.TrimSpace(fields[0]), "/")
+	name := fields[0]
 
 	cmdDef := lookupCommand(name)
 	if cmdDef == nil {

@@ -8,6 +8,68 @@ import (
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
 
+func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want []string
+	}{
+		{
+			name: "double quotes",
+			line: `/tasks attachments add "Fix login bug" "/tmp/monthly report.pdf"`,
+			want: []string{"tasks", "attachments", "add", "Fix login bug", "/tmp/monthly report.pdf"},
+		},
+		{
+			name: "single quotes",
+			line: `/tasks attachments delete 'Fix login bug' 'monthly report.pdf'`,
+			want: []string{"tasks", "attachments", "delete", "Fix login bug", "monthly report.pdf"},
+		},
+		{
+			name: "adjacent quoted text",
+			line: `/tasks show "Fix login"' bug' attachments`,
+			want: []string{"tasks", "show", "Fix login bug", "attachments"},
+		},
+		{
+			name: "empty quoted argument",
+			line: `/tasks show ""`,
+			want: []string{"tasks", "show", ""},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tokenizeCommand(tc.line)
+			if err != nil {
+				t.Fatalf("tokenizeCommand: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("tokenizeCommand(%q) = %#v, want %#v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTokenizeCommandRejectsUnmatchedQuotes(t *testing.T) {
+	for _, line := range []string{
+		`/tasks show "Fix login bug`,
+		`/tasks show 'Fix login bug`,
+	} {
+		if _, err := tokenizeCommand(line); err == nil || !strings.Contains(err.Error(), "unmatched") {
+			t.Errorf("tokenizeCommand(%q) error = %v, want unmatched-quote error", line, err)
+		}
+	}
+}
+
+func TestRunCommandRejectsUnmatchedQuotesBeforeDispatch(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "p1"
+	next, cmd := m.runCommand(`/tasks attachments add "Fix login bug`)
+	if cmd != nil {
+		t.Fatal("unmatched quote must not return a dispatch command")
+	}
+	if out := transcript(next.(Model)); !strings.Contains(out, "parse error: unmatched double quote") {
+		t.Fatalf("unmatched quote error missing from transcript:\n%s", out)
+	}
+}
 func TestSplitActionRecognisesKnownActions(t *testing.T) {
 	actions := []string{"list", "run", "delete"}
 

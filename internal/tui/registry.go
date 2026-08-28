@@ -764,6 +764,9 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 	if len(args) == 1 {
 		return taskAttachmentSelector(m, c, projectID, args[0], usage)
 	}
+	if !cliMode {
+		return m, resolveTaskAttachmentTarget(c, projectID, args)
+	}
 
 	cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
 		tasks, err := c.ListTasks(ctx, projectID)
@@ -790,12 +793,44 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 		}
 		return deleteTaskAttachmentResult(ctx, c, projectID, task, attachment)
 	})
-	attachmentDisplay := args[len(args)-1]
-	taskDisplay := strings.Join(args[:len(args)-1], " ")
+	attachmentDisplay := strings.TrimSpace(args[len(args)-1])
+	taskDisplay := strings.TrimSpace(strings.Join(args[:len(args)-1], " "))
 	return confirmOr(m,
 		fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachmentDisplay, taskDisplay),
 		fmt.Sprintf("use --force to confirm deletion of attachment %q", attachmentDisplay),
 		cmd)
+}
+
+func resolveTaskAttachmentTarget(c *client.Client, projectID string, args []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		tasks, err := c.ListTasks(ctx, projectID)
+		if err != nil {
+			return attachmentDeleteTargetMsg{projectID: projectID, err: err}
+		}
+		task, attachmentRefParts, err := resolveTaskWithOperands(tasks, args, 1)
+		if err != nil {
+			return attachmentDeleteTargetMsg{projectID: projectID, err: err}
+		}
+		attachmentRef := strings.TrimSpace(strings.Join(attachmentRefParts, " "))
+		if attachmentRef == "" {
+			return attachmentDeleteTargetMsg{projectID: projectID, err: fmt.Errorf("missing attachment ID or filename")}
+		}
+		attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+		if err != nil {
+			return attachmentDeleteTargetMsg{projectID: projectID, task: task, err: err}
+		}
+		attachment, err := matchRef(attachments, attachmentRef,
+			func(a client.Attachment) string { return a.ID },
+			func(a client.Attachment) string { return a.FileName })
+		return attachmentDeleteTargetMsg{
+			projectID:  projectID,
+			task:       task,
+			attachment: attachment,
+			err:        err,
+		}
+	}
 }
 
 func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {

@@ -174,74 +174,28 @@ func suggest(word string) []command {
 	return out
 }
 
-// runCommand parses and executes an interactive "/..." line.
+// runCommand parses and executes an interactive "/..." line. Interactive
+// input is one shell-like line, so quoted arguments are grouped and their
+// matching delimiters are removed before command dispatch.
 func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
 	fields, err := tokenizeCommand(line)
 	if err != nil {
-		m.append(entry{role: "error", text: err.Error()})
+		m.busy = false
+		m.append(entry{role: "error", text: "parse error: " + err.Error()})
 		return m, nil
 	}
 	return m.runCommandFields(fields)
 }
 
-// tokenizeCommand splits an interactive command into whitespace-delimited
-// fields, grouping text inside single or double quotes. Quote delimiters are
-// syntax and are not included in the resulting fields. Pipes remain ordinary
-// field content so the existing pipe-delimited command handlers can continue
-// to parse them after joining their arguments.
-func tokenizeCommand(line string) ([]string, error) {
-	line = strings.TrimPrefix(strings.TrimSpace(line), "/")
-	if line == "" {
-		return nil, nil
-	}
-
-	var fields []string
-	var field strings.Builder
-	var quote rune
-	fieldStarted := false
-
-	for _, r := range line {
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-				continue
-			}
-			field.WriteRune(r)
-			continue
-		}
-
-		switch {
-		case r == '\'' || r == '"':
-			quote = r
-			fieldStarted = true
-		case unicode.IsSpace(r):
-			if fieldStarted {
-				fields = append(fields, field.String())
-				field.Reset()
-				fieldStarted = false
-			}
-		default:
-			field.WriteRune(r)
-			fieldStarted = true
-		}
-	}
-
-	if quote != 0 {
-		return nil, fmt.Errorf("parse error: unmatched quote")
-	}
-	if fieldStarted {
-		fields = append(fields, field.String())
-	}
-	return fields, nil
-}
-
-// runCommandFields dispatches already-tokenized command fields. RunCLI uses
-// this path with its existing strings.Fields tokenization so shell argument
-// handling remains unchanged; interactive input goes through tokenizeCommand.
+// runCommandFields dispatches already-tokenized arguments. RunCLI uses this
+// path because os.Args has already preserved shell argument boundaries; joining
+// those arguments and tokenizing again would lose quoted task refs and paths.
 func (m Model) runCommandFields(fields []string) (tea.Model, tea.Cmd) {
 	if len(fields) == 0 {
 		return m, nil
 	}
+	fields = append([]string(nil), fields...)
+	fields[0] = strings.TrimPrefix(fields[0], "/")
 	c := lookupCommand(fields[0])
 	if c == nil {
 		m.append(entry{role: "error", text: fmt.Sprintf("unknown command %q — /help lists everything", fields[0])})
@@ -250,6 +204,57 @@ func (m Model) runCommandFields(fields []string) (tea.Model, tea.Cmd) {
 	m.busy = true
 	newModel, cmd := c.run(m, fields[1:])
 	return newModel, withMessageGeneration(cmd, sessionGenerationOf(newModel), projectGenerationOf(newModel))
+}
+
+// tokenizeCommand groups whitespace inside matching single or double quotes,
+// removes those delimiters, and preserves empty quoted arguments. A dangling
+// quote is rejected before command lookup or any command side effect.
+func tokenizeCommand(line string) ([]string, error) {
+	line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "/"))
+	var (
+		fields       []string
+		current      strings.Builder
+		quoted       rune
+		tokenStarted bool
+	)
+	flush := func() {
+		if !tokenStarted {
+			return
+		}
+		fields = append(fields, current.String())
+		current.Reset()
+		tokenStarted = false
+	}
+
+	for _, r := range line {
+		if quoted != 0 {
+			if r == quoted {
+				quoted = 0
+			} else {
+				current.WriteRune(r)
+			}
+			continue
+		}
+		switch {
+		case r == '\'' || r == '"':
+			quoted = r
+			tokenStarted = true
+		case unicode.IsSpace(r):
+			flush()
+		default:
+			current.WriteRune(r)
+			tokenStarted = true
+		}
+	}
+	if quoted != 0 {
+		name := "single"
+		if quoted == '"' {
+			name = "double"
+		}
+		return nil, fmt.Errorf("unmatched %s quote", name)
+	}
+	flush()
+	return fields, nil
 }
 
 // refreshMenu recomputes the inline command menu from the current input.

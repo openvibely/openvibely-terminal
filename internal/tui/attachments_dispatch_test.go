@@ -3,10 +3,14 @@ package tui
 import (
 	"bytes"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/openvibely/openvibely-tui/internal/client"
 )
 
 const attachmentTaskBoardHTML = `<div>
@@ -141,6 +145,154 @@ func TestTasksAttachmentsUploadErrorIsVisibleWithoutSuccess(t *testing.T) {
 	}
 	if strings.Contains(out, "uploaded 1 attachment") {
 		t.Fatalf("failed upload claimed success:\n%s", out)
+	}
+}
+
+func TestTasksAttachmentsAddSupportsQuotedTaskAndPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "monthly report.pdf")
+	if err := os.WriteFile(path, []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                 attachmentTaskBoardHTML,
+		"/tasks/t-1/attachments": attachmentRowsHTML,
+	})
+	m = runLine(t, m, `/tasks attachments add "Refactor the API" "`+path+`"`)
+
+	if !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
+		t.Fatalf("quoted upload was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "uploaded 1 attachment(s)") || !strings.Contains(out, "request.txt") {
+		t.Fatalf("quoted upload output was incomplete:\n%s", out)
+	}
+}
+
+func TestTasksAttachmentsDeleteConfirmationUsesResolvedTarget(t *testing.T) {
+	rows := `<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><div><p class="text-sm font-medium">monthly report.pdf</p><p class="text-xs">7 B</p></div><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`
+	refreshed := `<div id="attachment-list" data-project-id="p1"></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             attachmentTaskBoardHTML,
+		"/tasks/t-1":         rows,
+		"/attachments/att-1": refreshed,
+	})
+
+	m = runLine(t, m, `/tasks attachments delete Refactor "monthly report.pdf"`)
+	if m.pendingConfirmation == nil {
+		t.Fatal("delete must set a pending confirmation after target resolution")
+	}
+	prompt := m.pendingConfirmation.message
+	want := `Delete attachment "monthly report.pdf" from task "Refactor the API"?`
+	if !strings.Contains(prompt, want) {
+		t.Fatalf("confirmation = %q, want resolved task and filename %q", prompt, want)
+	}
+	if strings.Contains(prompt, `from task "Refactor"`) || strings.Contains(prompt, `attachment "report.pdf"`) {
+		t.Fatalf("confirmation used a partial target: %q", prompt)
+	}
+	if rec.saw("DELETE", "/attachments/att-1") {
+		t.Fatal("delete ran before confirmation")
+	}
+
+	m = runLine(t, m, "yes")
+	if !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") {
+		t.Fatalf("confirmed delete was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "deleted attachment") || !strings.Contains(out, "monthly report.pdf") {
+		t.Fatalf("confirmed delete output was incomplete:\n%s", out)
+	}
+}
+
+func TestTasksAttachmentsConfirmedDeleteErrorIsVisibleWithoutSuccess(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
+		case "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(attachmentRowsHTML))
+		case "/attachments/att-1":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"delete rejected"}`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/tasks attachments delete Refactor att-1")
+	if m.pendingConfirmation == nil {
+		t.Fatal("delete must set a pending confirmation")
+	}
+	m = runLine(t, m, "yes")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "delete rejected") {
+		t.Fatalf("delete failure was not visible:\n%s", out)
+	}
+	if strings.Contains(out, "deleted attachment") {
+		t.Fatalf("failed delete claimed success:\n%s", out)
+	}
+	if !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") {
+		t.Fatalf("delete failure request was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+	}
+}
+
+func TestCLITaskAttachmentsUploadErrorReturnsFailureWithoutSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request body.txt")
+	if err := os.WriteFile(path, []byte("request"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
+		case "/tasks/t-1/attachments":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte(`{"error":"file rejected"}`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"tasks", "attachments", "add", "Refactor the API", path}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "file rejected") {
+		t.Fatalf("CLI upload error = %v, want backend failure", err)
+	}
+	if strings.Contains(out.String(), "uploaded") {
+		t.Fatalf("failed CLI upload claimed success:\n%s", out.String())
+	}
+	if !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
+		t.Fatalf("CLI upload failure request was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
 	}
 }
 

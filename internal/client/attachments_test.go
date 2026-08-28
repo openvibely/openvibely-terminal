@@ -252,6 +252,45 @@ func TestGetTaskForProjectParsesAttachmentsAndScopesDetailLifecycleRead(t *testi
 	}
 }
 
+func TestGetTaskKeepsLegacyAttachmentTextWithoutStructuredScope(t *testing.T) {
+	var detailProjectQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			detailProjectQuery = r.URL.Query().Get("project_id")
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div data-task-status="running"><h2 class="font-bold">Task</h2><div id="tab-details">details</div><div id="tab-attachments">legacy attachment text<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">secret.txt</p><p class="text-xs">6 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div></div></div>`))
+		case "/tasks/t-1/thread", "/tasks/t-1/changes":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div></div>`))
+		case "/api/tasks/t-1/lifecycle-executions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := c.GetTask(context.Background(), "t-1")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if detailProjectQuery != "" {
+		t.Fatalf("legacy detail request unexpectedly supplied project_id=%q", detailProjectQuery)
+	}
+	if !strings.Contains(detail.Attach, "legacy attachment text") {
+		t.Errorf("legacy attachment tab text = %q, want rendered attachment text", detail.Attach)
+	}
+	if len(detail.Attachments) != 0 {
+		t.Fatalf("legacy detail exposed structured attachments: %+v", detail.Attachments)
+	}
+}
+
 func sameStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

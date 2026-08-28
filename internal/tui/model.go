@@ -692,6 +692,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case attachmentDeleteTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case threadOpenedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -980,6 +984,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.append(entry{role: "result", head: msg.title, text: body})
 		return m, nil
+
+	case attachmentDeleteTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil // stale attachment target from an older session or project
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil // stale target from a different project
+		}
+		m.busy = false
+		if msg.err != nil {
+			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
+			if m.handleTransportError(msg.err) {
+				return m, nil
+			}
+			m.append(entry{role: "error", text: msg.err.Error()})
+			return m, nil
+		}
+		projectID := msg.projectID
+		if projectID == "" {
+			projectID = m.selectedID
+		}
+		task := msg.task
+		attachment := msg.attachment
+		cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+			return deleteTaskAttachmentResult(ctx, m.client, projectID, task, attachment)
+		})
+		return confirmOr(m,
+			fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", firstNonEmpty(attachment.FileName, attachment.ID), firstNonEmpty(task.Title, task.ID)),
+			fmt.Sprintf("use --force to confirm deletion of attachment %q", firstNonEmpty(attachment.FileName, attachment.ID)),
+			cmd)
 
 	case chatSentMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {

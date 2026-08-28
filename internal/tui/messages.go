@@ -86,6 +86,17 @@ type resultMsg struct {
 	err               error
 }
 
+// attachmentDeleteTargetMsg carries the project-scoped task and attachment
+// resolved before an interactive delete confirmation is shown.
+type attachmentDeleteTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	task              client.Task
+	attachment        client.Attachment
+	err               error
+}
+
 // threadOpenedMsg enters task-thread mode: subsequent plain-text input is
 // posted as a follow-up on this task rather than to the project agent.
 type threadOpenedMsg struct {
