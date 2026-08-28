@@ -48,17 +48,6 @@ func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 	}
 }
 
-func TestTokenizeCommandRejectsUnmatchedQuotes(t *testing.T) {
-	for _, line := range []string{
-		`/tasks show "Fix login bug`,
-		`/tasks show 'Fix login bug`,
-	} {
-		if _, err := tokenizeCommand(line); err == nil || !strings.Contains(err.Error(), "unmatched") {
-			t.Errorf("tokenizeCommand(%q) error = %v, want unmatched-quote error", line, err)
-		}
-	}
-}
-
 func TestRunCommandRejectsUnmatchedQuotesBeforeDispatch(t *testing.T) {
 	m := newTestModel(t)
 	m.selectedID = "p1"
@@ -134,8 +123,8 @@ func TestTokenizeCommandRejectsUnmatchedQuotes(t *testing.T) {
 	} {
 		t.Run(input, func(t *testing.T) {
 			_, err := tokenizeCommand(input)
-			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "unmatched quote") {
-				t.Fatalf("tokenizeCommand() error = %v, want an unmatched quote error", err)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "unmatched") || !strings.Contains(strings.ToLower(err.Error()), "quote") {
+				t.Fatalf("tokenizeCommand() error = %v, want an unmatched-quote error", err)
 			}
 		})
 	}

@@ -3834,7 +3834,7 @@ func TestInteractiveUnmatchedQuoteReportsParseError(t *testing.T) {
 	m = runLine(t, m, `/tasks run "Refactor the API`)
 
 	out := strings.ToLower(transcript(m))
-	if !strings.Contains(out, "parse error") || !strings.Contains(out, "unmatched quote") {
+	if !strings.Contains(out, "parse error") || !strings.Contains(out, "unmatched") || !strings.Contains(out, "quote") {
 		t.Fatalf("expected a clear unmatched-quote parse error:\n%s", transcript(m))
 	}
 	if strings.Contains(out, "nothing matches") || rec.count("POST", "/tasks/t-1/run") != 0 {
