@@ -2276,6 +2276,7 @@ func personalityCommand() command {
 					}
 					updated.IsPreset = personality.IsPreset
 					updated.HasCustom = true
+					updated.Active = personality.Active
 					if jsonMode {
 						return marshalJSON(updated)
 					}

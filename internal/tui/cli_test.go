@@ -266,6 +266,52 @@ func TestCLIPersonalityAddRejectsMalformedOptionalDescription(t *testing.T) {
 	}
 }
 
+func TestCLIEditingActivePersonalityPreservesActiveJSON(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description="safe releases"
+			data-personality-preview="Keep releases safe..." data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var putRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/release_coach":
+			putRequests++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"updated","system_prompt":"Updated prompt that is long enough."}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{
+		"personality", "edit", "release_coach", "|", "Release Coach", "|", "updated", "|", "Updated prompt that is long enough.",
+	}, false, true); err != nil {
+		t.Fatalf("JSON personality edit failed: %v", err)
+	}
+	var got client.Personality
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+		t.Fatalf("JSON personality edit = %q: %v", out.String(), err)
+	}
+	if putRequests != 1 {
+		t.Fatalf("PUT requests = %d, want 1", putRequests)
+	}
+	if got.Key != "release_coach" || !got.Active {
+		t.Fatalf("edited active personality = %+v, want key release_coach and active=true", got)
+	}
+}
+
 func TestCLIPersonalityFailuresAndReferenceSafety(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="known" data-personality-name="Known" data-personality-description="known"
