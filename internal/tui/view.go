@@ -892,14 +892,19 @@ func renderProviderLimits(accounts []client.AccountUsage) string {
 
 func providerLimitRows(account client.AccountUsage) []client.AccountLimit {
 	limits := make([]client.AccountLimit, 0, len(account.Limits)+1)
+	seen := make(map[client.AccountLimit]struct{}, len(account.Limits)+1)
+	appendUnique := func(limit client.AccountLimit) {
+		if _, ok := seen[limit]; ok {
+			return
+		}
+		seen[limit] = struct{}{}
+		limits = append(limits, limit)
+	}
 	if account.PrimaryLimit != nil {
-		limits = append(limits, *account.PrimaryLimit)
+		appendUnique(*account.PrimaryLimit)
 	}
 	for _, limit := range account.Limits {
-		if account.PrimaryLimit != nil && limit == *account.PrimaryLimit {
-			continue
-		}
-		limits = append(limits, limit)
+		appendUnique(limit)
 	}
 	return limits
 }
@@ -1169,7 +1174,7 @@ func renderUsage(u *client.UsageAnalytics) string {
 		if a.Error != "" {
 			fmt.Fprintf(&b, "    %s\n", statusErrStyle.Render(a.Error))
 		}
-		for _, l := range a.Limits {
+		for _, l := range providerLimitRows(a) {
 			fmt.Fprintf(&b, "    %-22s %s %5.1f%%  %s\n",
 				truncate(l.Label, 22), bar(l.UsedPercent, 100, 16), l.UsedPercent, dimStyle.Render(l.ResetsAt))
 		}

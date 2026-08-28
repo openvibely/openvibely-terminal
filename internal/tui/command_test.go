@@ -359,6 +359,87 @@ func TestRenderUsageIncludesCostAndBreakdown(t *testing.T) {
 	}
 }
 
+func TestRenderUsageIncludesPrimaryLimitOnly(t *testing.T) {
+	out := stripANSI(renderUsage(&client.UsageAnalytics{AccountLimits: []client.AccountUsage{{
+		Provider:    "OpenAI",
+		StatusLabel: "healthy",
+		PrimaryLimit: &client.AccountLimit{
+			Label:       "tokens",
+			UsedPercent: 100,
+			ResetsAt:    "2026-09-01T00:00:00Z",
+		},
+	}}}))
+
+	for _, want := range []string{"OpenAI", "healthy", "tokens", "100.0%", "2026-09-01T00:00:00Z"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage render missing primary-limit field %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderUsageIncludesProviderPrimaryAndDistinctLimits(t *testing.T) {
+	primary := client.AccountLimit{
+		Label:       "tokens",
+		UsedPercent: 100,
+		ResetsAt:    "2026-09-01T00:00:00Z",
+	}
+	secondary := client.AccountLimit{
+		Label:       "requests",
+		UsedPercent: 42.5,
+		ResetsAt:    "tomorrow",
+	}
+	out := stripANSI(renderUsage(&client.UsageAnalytics{
+		Totals: client.UsageTotals{CallCount: 3, TotalTokens: 900},
+		AccountLimits: []client.AccountUsage{{
+			Provider:      "OpenAI",
+			PlanType:      "team",
+			StatusLabel:   "healthy",
+			AccountDetail: "sk-account-detail-must-not-render",
+			PrimaryLimit:  &primary,
+			Limits:        []client.AccountLimit{primary, secondary, secondary},
+		}},
+	}))
+
+	for _, want := range []string{
+		"OpenAI", "team", "healthy", "tokens", "100.0%", "2026-09-01T00:00:00Z",
+		"requests", "42.5%", "tomorrow",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage render missing %q:\n%s", want, out)
+		}
+	}
+	for _, label := range []string{"tokens", "requests"} {
+		if got := strings.Count(out, "\n    "+label); got != 1 {
+			t.Errorf("usage render contains %q %d times, want once:\n%s", label, got, out)
+		}
+	}
+	if strings.Contains(out, "sk-account-detail-must-not-render") {
+		t.Errorf("provider account detail leaked into usage output:\n%s", out)
+	}
+}
+
+func TestRenderUsageKeepsProviderDiagnosticsWithoutQuota(t *testing.T) {
+	secret := "sk-provider-secret"
+	out := stripANSI(renderUsage(&client.UsageAnalytics{AccountLimits: []client.AccountUsage{
+		{
+			Provider:      "Anthropic",
+			PlanType:      "pro",
+			StatusLabel:   "blocked",
+			AccountDetail: secret,
+			Error:         "quota service unavailable",
+		},
+	}}))
+
+	for _, want := range []string{"Anthropic", "pro", "blocked", "quota service unavailable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage diagnostics missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, secret) {
+		t.Errorf("provider account detail leaked into usage output:\n%s", out)
+	}
+}
+
 func TestRenderRatesDrawsGauge(t *testing.T) {
 	out := renderRates([]client.SuccessFailureRate{
 		{Period: "2026-08", SuccessCount: 8, FailureCount: 2, TotalCount: 10, SuccessRate: 80},

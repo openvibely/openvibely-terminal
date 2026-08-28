@@ -713,6 +713,48 @@ func TestSkillsCommandAddAndToggle(t *testing.T) {
 	})
 }
 
+func TestAnalyticsUsageDispatchRendersProviderLimitsAndScope(t *testing.T) {
+	const secret = "sk-analytics-account-detail"
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/analytics/usage": `{
+			"totals":{"call_count":8,"input_tokens":1000,"output_tokens":500,"total_tokens":1500,"cost_usd":1.25,"cost_available":true},
+			"model_breakdown":[{"model":"claude-sonnet-4","call_count":8,"total_tokens":1500,"cost_usd":1.25,"percent":100}],
+			"account_limits":[
+				{"provider":"OpenAI","plan_type":"team","status_label":"healthy","account_detail":"` + secret + `",
+				 "primary_limit":{"label":"tokens","used_percent":100,"resets_at":"2026-09-01T00:00:00Z"}},
+				{"provider":"OpenAI","plan_type":"team","status_label":"healthy",
+				 "primary_limit":{"label":"requests","used_percent":42.5,"resets_at":"tomorrow"},
+				 "limits":[{"label":"requests","used_percent":42.5,"resets_at":"tomorrow"},{"label":"images","used_percent":12.5,"resets_at":"next week"}]},
+				{"provider":"Anthropic","plan_type":"pro","status_label":"healthy",
+				 "limits":[{"label":"tokens","used_percent":12,"resets_at":"later"}]},
+				{"provider":"Gemini","plan_type":"free","status_label":"blocked","error":"quota service unavailable"}
+			]
+		}`,
+	})
+	m = runLine(t, m, "/analytics usage")
+	out := stripANSI(transcript(m))
+
+	for _, want := range []string{
+		"8 calls", "$1.25", "claude-sonnet-4", "OpenAI", "team", "healthy",
+		"tokens", "100.0%", "2026-09-01T00:00:00Z", "requests", "42.5%", "tomorrow",
+		"images", "12.5%", "next week", "Anthropic", "pro", "later",
+		"Gemini", "free", "blocked", "quota service unavailable",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("analytics usage output missing %q:\n%s", want, out)
+		}
+	}
+	if got := strings.Count(out, "    requests"); got != 1 {
+		t.Errorf("duplicate primary limit rendered %d times, want once:\n%s", got, out)
+	}
+	if strings.Contains(out, secret) {
+		t.Errorf("account detail leaked into analytics usage output:\n%s", out)
+	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Errorf("analytics usage request lost selected project scope:\n%s", rec.all())
+	}
+}
+
 func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 	cases := []struct{ line, method, path string }{
 		{"/schedule", "GET", "/schedule"},

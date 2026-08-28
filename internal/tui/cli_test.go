@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
 
@@ -45,6 +47,45 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 }
 
 const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
+
+func TestCLIAnalyticsUsageMatchesInteractiveQuotaOutput(t *testing.T) {
+	const usage = `{
+		"totals":{"call_count":2,"total_tokens":700},
+		"account_limits":[{
+			"provider":"OpenAI","plan_type":"team","status_label":"healthy",
+			"primary_limit":{"label":"tokens","used_percent":100,"resets_at":"tomorrow"},
+			"limits":[{"label":"requests","used_percent":25,"resets_at":"next hour"}]
+		}]
+	}`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        cliProjects,
+		"/api/analytics/usage": usage,
+	})
+
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	interactive := stripANSI(transcript(runLine(t, m, "/analytics usage")))
+
+	var cliOut bytes.Buffer
+	if err := RunCLI(c, &cliOut, "demo", []string{"analytics", "usage"}, false, false); err != nil {
+		t.Fatalf("CLI analytics usage failed: %v", err)
+	}
+	cli := stripANSI(cliOut.String())
+
+	for _, want := range []string{"OpenAI", "team", "healthy", "tokens", "100.0%", "tomorrow", "requests", "25.0%", "next hour"} {
+		if !strings.Contains(interactive, want) {
+			t.Errorf("interactive usage output missing %q:\n%s", want, interactive)
+		}
+		if !strings.Contains(cli, want) {
+			t.Errorf("CLI usage output missing %q:\n%s", want, cli)
+		}
+	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Errorf("CLI analytics usage request lost selected project scope:\n%s", rec.all())
+	}
+}
 
 func TestCLIHelpWorksOffline(t *testing.T) {
 	c, err := client.New("http://127.0.0.1:1") // nothing listening
