@@ -198,10 +198,25 @@ func TestTruncateMatchesCurrentBehavior(t *testing.T) {
 	}
 }
 
+func TestTruncateLargeNewlineInputMatchesCurrentBehavior(t *testing.T) {
+	input := strings.Repeat("payload\n", 1<<16)
+	for _, limit := range []int{24, 70, 96} {
+		got := truncate(input, limit)
+		want := truncateBaseline(input, limit)
+		if got != want {
+			t.Errorf("truncate(large newline input, %d) = %q, want %q", limit, got, want)
+		}
+	}
+}
+
 var truncateBenchmarkSink string
 
 func truncateBenchmarkFixture(size int) string {
 	return strings.Repeat("x", size)
+}
+
+func truncateBenchmarkNewlineFixture(size int) string {
+	return strings.Repeat("x\n", size/2)
 }
 
 func BenchmarkTruncateLargeFixtures(b *testing.B) {
@@ -212,6 +227,9 @@ func BenchmarkTruncateLargeFixtures(b *testing.B) {
 		{name: "1KiB", input: truncateBenchmarkFixture(1 << 10)},
 		{name: "64KiB", input: truncateBenchmarkFixture(64 << 10)},
 		{name: "1MiB", input: truncateBenchmarkFixture(1 << 20)},
+		{name: "1KiB_newlines", input: truncateBenchmarkNewlineFixture(1 << 10)},
+		{name: "64KiB_newlines", input: truncateBenchmarkNewlineFixture(64 << 10)},
+		{name: "1MiB_newlines", input: truncateBenchmarkNewlineFixture(1 << 20)},
 	}
 	limits := []int{24, 70, 96}
 

@@ -1697,42 +1697,39 @@ func truncate(s string, n int) string {
 		return ""
 	}
 
-	// Keep the width scan bounded for over-limit previews. A newline normally
-	// behaves like a space here, but replacing it can change grapheme-cluster
-	// boundaries. Restart with the normalized input when one is encountered so
-	// the existing lipgloss semantics remain exact.
-	for {
-		overLimit, needsNormalization := displayWidthExceeds(s, n)
-		if !needsNormalization {
-			if !overLimit {
-				return s
-			}
-			return truncatePrefix(s, n)
-		}
-		s = strings.ReplaceAll(s, "\n", " ")
+	overLimit, hasNewline := displayWidthExceeds(s, n)
+	if overLimit {
+		return truncatePrefix(s, n)
 	}
+	if hasNewline {
+		return strings.ReplaceAll(s, "\n", " ")
+	}
+	return s
 }
 
 // displayWidthExceeds mirrors the width traversal used by lipgloss.Width but
-// stops as soon as the supplied limit is exceeded. The second return value
-// requests a retry after newline normalization for exact grapheme semantics.
-func displayWidthExceeds(s string, limit int) (overLimit, needsNormalization bool) {
+// stops as soon as the supplied limit is exceeded. Newlines are treated as
+// spaces because truncate normalizes them before measuring.
+func displayWidthExceeds(s string, limit int) (overLimit, hasNewline bool) {
 	state := parser.GroundState
 	width := 0
 	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			return false, true
+		code := s[i]
+		if code == '\n' {
+			code = ' '
+			hasNewline = true
 		}
 
-		nextState, action := parser.Table.Transition(state, s[i])
+		nextState, action := parser.Table.Transition(state, code)
 		if nextState == parser.Utf8State {
 			cluster, clusterWidth := ansi.FirstGraphemeCluster(s[i:], ansi.GraphemeWidth)
 			if strings.IndexByte(cluster, '\n') >= 0 {
-				return false, true
+				hasNewline = true
+				clusterWidth = ansi.StringWidth(strings.ReplaceAll(cluster, "\n", " "))
 			}
 			width += clusterWidth
 			if width > limit {
-				return true, false
+				return true, hasNewline
 			}
 			i += len(cluster) - 1
 			state = parser.GroundState
@@ -1741,12 +1738,12 @@ func displayWidthExceeds(s string, limit int) (overLimit, needsNormalization boo
 		if action == parser.PrintAction {
 			width++
 			if width > limit {
-				return true, false
+				return true, hasNewline
 			}
 		}
 		state = nextState
 	}
-	return false, false
+	return false, hasNewline
 }
 
 func truncatePrefix(s string, n int) string {
