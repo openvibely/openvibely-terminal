@@ -29,6 +29,38 @@ type Attachment struct {
 	FileSize  int64  `json:"file_size"`
 }
 
+// PartialAttachmentUploadError reports a successful HTTP upload response that
+// did not contain evidence for every requested file in the refreshed list.
+// Uploaded contains only newly created attachment records matched to the
+// requested filenames; Missing contains each requested filename without a
+// matching new record, including repeated filenames when applicable.
+type PartialAttachmentUploadError struct {
+	Requested []string
+	Uploaded  []Attachment
+	Missing   []string
+}
+
+func (e *PartialAttachmentUploadError) Error() string {
+	if e == nil {
+		return "partial attachment upload"
+	}
+	return fmt.Sprintf(
+		"partial attachment upload: uploaded %d of %d file(s); successful: %s; not uploaded: %s",
+		len(e.Uploaded), len(e.Requested), formatUploadedAttachments(e.Uploaded), strings.Join(e.Missing, ", "),
+	)
+}
+
+func formatUploadedAttachments(attachments []Attachment) string {
+	if len(attachments) == 0 {
+		return "none"
+	}
+	parts := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		parts = append(parts, fmt.Sprintf("%s (%d B)", attachment.FileName, attachment.FileSize))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // ListTaskAttachments reads the attachment list embedded in a task detail
 // page. The selected project is required because the task page is also the
 // backend's attachment read contract.
@@ -65,7 +97,9 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	requestedNames := make([]string, 0, len(filePaths))
 	for _, path := range filePaths {
+		requestedNames = append(requestedNames, filepath.Base(strings.TrimSpace(path)))
 		if err := appendMultipartFile(writer, path); err != nil {
 			_ = writer.Close()
 			return nil, err
@@ -73,6 +107,11 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 	}
 	if err := writer.Close(); err != nil {
 		return nil, fmt.Errorf("closing attachment upload: %w", err)
+	}
+
+	before, err := c.ListTaskAttachments(ctx, taskID, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("checking existing task attachments: %w", err)
 	}
 
 	path := "/tasks/" + url.PathEscape(taskID) + "/attachments" + query("project_id", projectID)
@@ -87,7 +126,48 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 	for i := range attachments {
 		attachments[i].TaskID = taskID
 	}
+	uploaded, missing := matchUploadedAttachments(before, attachments, requestedNames)
+	if len(missing) > 0 {
+		return attachments, &PartialAttachmentUploadError{
+			Requested: append([]string(nil), requestedNames...),
+			Uploaded:  uploaded,
+			Missing:   missing,
+		}
+	}
 	return attachments, nil
+}
+
+func matchUploadedAttachments(before, after []Attachment, requestedNames []string) ([]Attachment, []string) {
+	existingIDs := make(map[string]struct{}, len(before))
+	for _, attachment := range before {
+		if attachment.ID != "" {
+			existingIDs[attachment.ID] = struct{}{}
+		}
+	}
+
+	newByName := make(map[string][]Attachment)
+	for _, attachment := range after {
+		if attachment.ID == "" {
+			continue
+		}
+		if _, existed := existingIDs[attachment.ID]; existed {
+			continue
+		}
+		newByName[attachment.FileName] = append(newByName[attachment.FileName], attachment)
+	}
+
+	uploaded := make([]Attachment, 0, len(requestedNames))
+	missing := make([]string, 0)
+	for _, requestedName := range requestedNames {
+		candidates := newByName[requestedName]
+		if len(candidates) == 0 {
+			missing = append(missing, requestedName)
+			continue
+		}
+		uploaded = append(uploaded, candidates[0])
+		newByName[requestedName] = candidates[1:]
+	}
+	return uploaded, missing
 }
 
 // UploadTaskAttachments is a descriptive alias for AddTaskAttachments.

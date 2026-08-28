@@ -108,7 +108,11 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 		rec.mu.Lock()
 		rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
 		rec.mu.Unlock()
-		if body, ok := bodies[r.URL.Path]; ok {
+		body, ok := bodies[r.Method+" "+r.URL.Path]
+		if !ok {
+			body, ok = bodies[r.URL.Path]
+		}
+		if ok {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(body))
 			return

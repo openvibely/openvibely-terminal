@@ -40,11 +40,11 @@ func TestTasksAttachmentsAddDispatchesAndRendersRefreshedFiles(t *testing.T) {
 	}
 
 	m, rec := dispatchModel(t, map[string]string{
-		"/tasks":                 attachmentTaskBoardHTML,
-		"/tasks/t-1/attachments": attachmentRowsHTML,
-		"/tasks/t-1":             attachmentRowsHTML,
-		"/attachments/att-1":     refreshedAttachmentRowsHTML,
-		"/attachments/att-2":     refreshedAttachmentRowsHTML,
+		"/tasks":                      attachmentTaskBoardHTML,
+		"GET /tasks/t-1":              `<div id="attachment-list" data-project-id="p1"></div>`,
+		"POST /tasks/t-1/attachments": attachmentRowsHTML,
+		"/attachments/att-1":          refreshedAttachmentRowsHTML,
+		"/attachments/att-2":          refreshedAttachmentRowsHTML,
 	})
 	m = runLine(t, m, "/tasks attachments add Refactor "+firstPath+" "+secondPath)
 
@@ -117,6 +117,47 @@ func TestTasksAttachmentsDeleteCanBeCanceledWithoutBackendMutation(t *testing.T)
 	}
 }
 
+func TestTasksAttachmentsPartialUploadIsVisibleWithoutInflatedSuccess(t *testing.T) {
+	dir := t.TempDir()
+	keptPath := filepath.Join(dir, "kept.txt")
+	skippedPath := filepath.Join(dir, "skipped.txt")
+	for path, contents := range map[string]string{keptPath: "kept", skippedPath: "skipped"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"></div>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/attachments":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("upload project_id = %q, want p1", r.URL.Query().Get("project_id"))
+			}
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">kept.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	})
+
+	m = runLine(t, m, "/tasks attachments add Refactor "+keptPath+" "+skippedPath)
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "partial attachment upload") || !strings.Contains(out, "skipped.txt") {
+		t.Fatalf("partial upload failure was not visible:\n%s", out)
+	}
+	if !strings.Contains(out, "kept.txt") || !strings.Contains(out, "uploaded 1 of 2") {
+		t.Fatalf("partial upload did not report the successful file:\n%s", out)
+	}
+	if strings.Contains(out, "uploaded 2 attachment(s)") {
+		t.Fatalf("partial upload claimed every file succeeded:\n%s", out)
+	}
+}
+
 func TestTasksAttachmentsUploadErrorIsVisibleWithoutSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "request.txt")
@@ -156,8 +197,9 @@ func TestTasksAttachmentsAddSupportsQuotedTaskAndPath(t *testing.T) {
 	}
 
 	m, rec := dispatchModel(t, map[string]string{
-		"/tasks":                 attachmentTaskBoardHTML,
-		"/tasks/t-1/attachments": attachmentRowsHTML,
+		"/tasks":                      attachmentTaskBoardHTML,
+		"GET /tasks/t-1":              `<div id="attachment-list" data-project-id="p1"></div>`,
+		"POST /tasks/t-1/attachments": `<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">monthly report.pdf</p><p class="text-xs">6 B</p><button hx-delete="/attachments/att-3?project_id=p1"></button></div></div>`,
 	})
 	m = runLine(t, m, `/tasks attachments add "Refactor the API" "`+path+`"`)
 
@@ -165,7 +207,7 @@ func TestTasksAttachmentsAddSupportsQuotedTaskAndPath(t *testing.T) {
 		t.Fatalf("quoted upload was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
 	}
 	out := stripANSI(transcript(m))
-	if !strings.Contains(out, "uploaded 1 attachment(s)") || !strings.Contains(out, "request.txt") {
+	if !strings.Contains(out, "uploaded 1 attachment(s)") || !strings.Contains(out, "monthly report.pdf") || !strings.Contains(out, "6 B") {
 		t.Fatalf("quoted upload output was incomplete:\n%s", out)
 	}
 }
@@ -253,6 +295,55 @@ func TestTasksAttachmentsConfirmedDeleteErrorIsVisibleWithoutSuccess(t *testing.
 	}
 }
 
+func TestCLITaskAttachmentsPartialUploadReturnsFailureWithoutInflatedSuccess(t *testing.T) {
+	dir := t.TempDir()
+	keptPath := filepath.Join(dir, "kept.txt")
+	skippedPath := filepath.Join(dir, "skipped.txt")
+	for path, contents := range map[string]string{keptPath: "kept", skippedPath: "skipped"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"></div>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/attachments":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">kept.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"tasks", "attachments", "add", "Refactor the API", keptPath, skippedPath}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "partial attachment upload") || !strings.Contains(err.Error(), "skipped.txt") || !strings.Contains(err.Error(), "kept.txt (4 B)") || !strings.Contains(err.Error(), "uploaded 1 of 2") {
+		t.Fatalf("CLI partial upload error = %v, want explicit successful and skipped details", err)
+	}
+	if strings.Contains(out.String(), "uploaded 2 attachment(s)") {
+		t.Fatalf("partial CLI upload claimed every file succeeded:\n%s", out.String())
+	}
+	if !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
+		t.Fatalf("partial CLI upload was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+	}
+}
 func TestCLITaskAttachmentsUploadErrorReturnsFailureWithoutSuccess(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "request body.txt")

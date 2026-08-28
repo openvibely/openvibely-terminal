@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -36,32 +37,42 @@ func TestAddTaskAttachmentsUsesRepeatedFilesAndProjectScope(t *testing.T) {
 	var gotProject string
 	var gotContentType string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/tasks/t-1/attachments" {
-			t.Errorf("request = %s %s, want POST /tasks/t-1/attachments", r.Method, r.URL.Path)
+		if r.URL.Path != "/tasks/t-1" && r.URL.Path != "/tasks/t-1/attachments" {
+			t.Errorf("request path = %q, want task detail or attachment upload", r.URL.Path)
 		}
-		gotProject = r.URL.Query().Get("project_id")
-		gotContentType = r.Header.Get("Content-Type")
-		if r.Header.Get("HX-Request") != "true" {
-			t.Error("upload must send HX-Request")
-		}
-		if err := r.ParseMultipartForm(4 << 20); err != nil {
-			t.Fatalf("ParseMultipartForm: %v", err)
-		}
-		for _, header := range r.MultipartForm.File["files"] {
-			file, err := header.Open()
-			if err != nil {
-				t.Fatalf("open multipart file: %v", err)
-			}
-			contents, readErr := io.ReadAll(file)
-			closeErr := file.Close()
-			if readErr != nil || closeErr != nil {
-				t.Fatalf("read multipart file %q: read=%v close=%v", header.Filename, readErr, closeErr)
-			}
-			gotNames = append(gotNames, header.Filename)
-			gotContents[header.Filename] = string(contents)
+		if r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
 		}
 		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-1", "p1", "request.txt", "11 B")+attachmentRowMarkup("att-2", "p1", "trace.json", "2.0 KB"))))
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write([]byte(attachmentListMarkup("p1", "")))
+		case http.MethodPost:
+			gotProject = r.URL.Query().Get("project_id")
+			gotContentType = r.Header.Get("Content-Type")
+			if r.Header.Get("HX-Request") != "true" {
+				t.Error("upload must send HX-Request")
+			}
+			if err := r.ParseMultipartForm(4 << 20); err != nil {
+				t.Fatalf("ParseMultipartForm: %v", err)
+			}
+			for _, header := range r.MultipartForm.File["files"] {
+				file, err := header.Open()
+				if err != nil {
+					t.Fatalf("open multipart file: %v", err)
+				}
+				contents, readErr := io.ReadAll(file)
+				closeErr := file.Close()
+				if readErr != nil || closeErr != nil {
+					t.Fatalf("read multipart file %q: read=%v close=%v", header.Filename, readErr, closeErr)
+				}
+				gotNames = append(gotNames, header.Filename)
+				gotContents[header.Filename] = string(contents)
+			}
+			_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-1", "p1", "request.txt", "11 B")+attachmentRowMarkup("att-2", "p1", "trace.json", "2.0 KB"))))
+		default:
+			t.Errorf("method = %s, want GET or POST", r.Method)
+		}
 	}))
 	defer srv.Close()
 
@@ -92,6 +103,68 @@ func TestAddTaskAttachmentsUsesRepeatedFilesAndProjectScope(t *testing.T) {
 	}
 	if attachments[1].FileSize != 2048 {
 		t.Errorf("second attachment size = %d, want 2048", attachments[1].FileSize)
+	}
+}
+
+func TestAddTaskAttachmentsRejectsPartialRefresh(t *testing.T) {
+	dir := t.TempDir()
+	goodPath := filepath.Join(dir, "kept.txt")
+	missingPath := filepath.Join(dir, "skipped.txt")
+	for path, contents := range map[string]string{goodPath: "kept", missingPath: "skipped"} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var gotPostNames []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tasks/t-1" && r.URL.Path != "/tasks/t-1/attachments" {
+			t.Errorf("request path = %q, want task detail or attachment upload", r.URL.Path)
+		}
+		if r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
+		}
+		w.Header().Set("Content-Type", "text/html")
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-existing", "p1", "skipped.txt", "7 B"))))
+		case http.MethodPost:
+			if err := r.ParseMultipartForm(4 << 20); err != nil {
+				t.Fatalf("ParseMultipartForm: %v", err)
+			}
+			for _, header := range r.MultipartForm.File["files"] {
+				gotPostNames = append(gotPostNames, header.Filename)
+			}
+			_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-existing", "p1", "skipped.txt", "7 B")+attachmentRowMarkup("att-1", "p1", "kept.txt", "5 B"))))
+		default:
+			t.Errorf("method = %s, want GET or POST", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments, err := c.AddTaskAttachments(context.Background(), "t-1", "p1", []string{goodPath, missingPath})
+	var partialErr *PartialAttachmentUploadError
+	if err == nil || !errors.As(err, &partialErr) || !strings.Contains(err.Error(), "partial attachment upload") || !strings.Contains(err.Error(), "skipped.txt") {
+		t.Fatalf("partial upload error = %v, want explicit typed error with skipped filename", err)
+	}
+	if len(attachments) != 2 || attachments[0].FileName != "skipped.txt" || attachments[1].FileName != "kept.txt" {
+		t.Fatalf("partial upload result = %+v, want complete refreshed list", attachments)
+	}
+	if len(partialErr.Uploaded) != 1 || partialErr.Uploaded[0].FileName != "kept.txt" || partialErr.Uploaded[0].FileSize != 5 {
+		t.Fatalf("partial uploaded records = %+v, want kept.txt/5 B", partialErr.Uploaded)
+	}
+	if !sameStrings(partialErr.Missing, []string{"skipped.txt"}) {
+		t.Fatalf("partial missing files = %v, want skipped.txt", partialErr.Missing)
+	}
+	if !strings.Contains(err.Error(), "kept.txt (5 B)") {
+		t.Fatalf("partial upload error omitted successful file details: %v", err)
+	}
+	if !sameStrings(gotPostNames, []string{"kept.txt", "skipped.txt"}) {
+		t.Fatalf("uploaded filenames = %v, want both requested files", gotPostNames)
 	}
 }
 
@@ -205,6 +278,17 @@ func TestTaskAttachmentOperationsRejectCrossProjectResponsesAndErrors(t *testing
 			t.Fatal(err)
 		}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
+			}
+			if r.Method == http.MethodGet {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = w.Write([]byte(attachmentListMarkup("p1", "")))
+				return
+			}
+			if r.Method != http.MethodPost || r.URL.Path != "/tasks/t-1/attachments" {
+				t.Errorf("request = %s %s, want POST /tasks/t-1/attachments", r.Method, r.URL.Path)
+			}
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			_, _ = w.Write([]byte(`{"error":"file exceeds limit"}`))
 		}))
