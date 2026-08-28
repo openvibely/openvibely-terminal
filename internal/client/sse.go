@@ -59,6 +59,15 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 	go func() {
 		defer close(events)
 		defer close(errCh)
+		sendErr := func(err error) {
+			if err == nil {
+				return
+			}
+			select {
+			case errCh <- err:
+			case <-ctx.Done():
+			}
+		}
 
 		endpoint := c.baseURL + "/events/live"
 		if projectID != "" {
@@ -66,7 +75,7 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
-			errCh <- err
+			sendErr(err)
 			return
 		}
 		req.Header.Set("Accept", "text/event-stream")
@@ -88,17 +97,17 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 			if ctx.Err() != nil {
 				return
 			}
-			errCh <- fmt.Errorf("connecting to event stream: %w", err)
+			sendErr(fmt.Errorf("connecting to event stream: %w", err))
 			return
 		}
 		defer resp.Body.Close()
 
 		if isReadAuthResponse(resp) {
-			errCh <- newAuthRequiredError(http.MethodGet, "/events/live", resp)
+			sendErr(newAuthRequiredError(http.MethodGet, "/events/live", resp))
 			return
 		}
 		if resp.StatusCode != http.StatusOK {
-			errCh <- fmt.Errorf("event stream returned status %d", resp.StatusCode)
+			sendErr(fmt.Errorf("event stream returned status %d", resp.StatusCode))
 			return
 		}
 		scanner := bufio.NewScanner(resp.Body)
@@ -111,9 +120,14 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 			switch {
 			case line == "":
 				if len(dataLines) > 0 {
-					events <- Event{
+					event := Event{
 						Name: eventName,
 						Data: json.RawMessage(strings.Join(dataLines, "\n")),
+					}
+					select {
+					case events <- event:
+					case <-ctx.Done():
+						return
 					}
 				}
 				eventName = ""
@@ -130,10 +144,10 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 			return
 		}
 		if err := scanner.Err(); err != nil {
-			errCh <- fmt.Errorf("event stream read: %w", err)
+			sendErr(fmt.Errorf("event stream read: %w", err))
 			return
 		}
-		errCh <- fmt.Errorf("event stream closed by server")
+		sendErr(ErrEventStreamClosed)
 	}()
 
 	return events, errCh

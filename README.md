@@ -148,11 +148,30 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/status` | `health` | connection, auth, worker capacity, stream state |
 | `/login` | `signin`, `auth` | enter username and masked password; retry the session without restarting |
 | `/build` | | trigger an autonomous build |
-| `/events` | `stream`, `log` | `on` / `off` — live SSE feed inline |
+| `/events` | `stream`, `log` | interactive `on` / `off` display toggle; one-shot `events on` foreground monitor |
 | `/clear` | | clear the transcript |
 | `/help` | `?`, `commands` | `/help <command>` details one |
 | `/chat` | `back`, `leave` | return to project chat; `/chat <message>` also sends it |
 | `/quit` | `q`, `exit` | |
+
+The interactive TUI and one-shot CLI have different live-event lifecycles:
+
+- In the interactive TUI, `/events` toggles whether the stream owned by that TUI
+  is displayed in the transcript. `/events off` hides those events; it does not
+  stop the backend stream.
+- In a shell, `events on` (or bare `events`) resolves the selected project,
+  opens one project-scoped foreground stream, and writes one plain line per task
+  or chat event until the server closes the stream or you press `Ctrl-C`:
+
+```bash
+openvibely-tui -project demo events on
+```
+
+Use `--json` before the command for newline-delimited JSON with stable event
+fields, for example `openvibely-tui --json -project demo events on`. One-shot
+`events off` cannot turn off a stream owned by another process; it exits nonzero
+and tells you to press `Ctrl-C` in that monitoring process. Use interactive
+`/events off` when you only want to hide events in the current TUI.
 
 Create a project from the terminal without opening the browser. The backend owns
 and persists the project; after a successful creation it becomes the active
@@ -378,8 +397,10 @@ removes a `data-*` attribute will show up as an empty list rather than a crash.
 
 ## Reliability
 
-- **Live events** stream from `/events/live` with automatic reconnect and
-  exponential backoff (1s → 30s cap); the header shows the stream state.
+- **Live events** in the interactive TUI stream from `/events/live` with automatic
+  reconnect and exponential backoff (1s → 30s cap); the header shows the stream
+  state. One-shot `events on` is a foreground, single-connection monitor and
+  exits on `Ctrl-C` or clean server termination.
 - **Connection health** is re-checked every 30s; the header switches to `● offline` for transport failures and to `● sign-in required` for a reachable protected backend. `/status` explains the recovery action.
 - **Interactive auth** uses `/login` with a masked password field, reuses the cookie session, and retries health, projects and SSE after success.
 - **Chat** is asynchronous end to end: the send is accepted with a message ID,

@@ -2,12 +2,14 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1586,5 +1588,339 @@ func TestCLIJSONTaskReviewsAdd(t *testing.T) {
 	}
 	if review.ID != "rc-1" || review.CommentText != "Needs error handling" {
 		t.Fatalf("review = %+v", review)
+	}
+}
+
+// cliEventWriter makes it possible to assert that event lines are written while
+// a foreground stream is still running, rather than only after it terminates.
+type cliEventWriter struct {
+	lines chan string
+}
+
+func (w *cliEventWriter) Write(p []byte) (int, error) {
+	line := string(p)
+	w.lines <- line
+	return len(p), nil
+}
+
+func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
+	var mu sync.Mutex
+	var eventRequests []string
+	writer := &cliEventWriter{lines: make(chan string, 2)}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"other"},{"id":"p2","name":"Demo Project"}]}`)
+		case "/events/live":
+			mu.Lock()
+			eventRequests = append(eventRequests, r.URL.RequestURI())
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatal("SSE response does not support flushing")
+			}
+			_, _ = fmt.Fprint(w, "event: task_status_changed\n")
+			_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p2","task_id":"t1","task_name":"Deploy API","status":"running"}`+"\n\n")
+			flusher.Flush()
+			_, _ = fmt.Fprint(w, "event: chat_new_message\n")
+			_, _ = fmt.Fprint(w, `data: {"type":"chat_new_message","project_id":"p2","exec_id":"e1","message":"hello from chat"}`+"\n\n")
+			flusher.Flush()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(c, writer, "Demo Project", []string{"events", "on"}, false, false); err != nil {
+		t.Fatalf("events on failed: %v", err)
+	}
+
+	mu.Lock()
+	requests := append([]string(nil), eventRequests...)
+	mu.Unlock()
+	if len(requests) != 1 || requests[0] != "/events/live?project_id=p2" {
+		t.Fatalf("event requests = %v, want one scoped request", requests)
+	}
+	var lines []string
+	for i := 0; i < 2; i++ {
+		lines = append(lines, <-writer.lines)
+	}
+	joined := strings.Join(lines, "")
+	for _, want := range []string{"task_status_changed", "Deploy API", "chat_new_message", "hello from chat"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("plain event output missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Count(strings.TrimSpace(joined), "\n") != 1 {
+		t.Fatalf("event output was not exactly two line-oriented records: %q", joined)
+	}
+}
+
+func TestCLIEventsJSONEmitsValidStableLines(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/events/live":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "event: task_status_changed\n")
+			_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"completed","message":"line 1\\nline 2"}`+"\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"events", "on"}, false, true); err != nil {
+		t.Fatalf("JSON events on failed: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("JSON event output lines = %d, want one: %q", len(lines), out.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("JSON event line is invalid: %v\n%s", err, lines[0])
+	}
+	for key, want := range map[string]string{
+		"event":      "task_status_changed",
+		"type":       "task_status_changed",
+		"project_id": "p1",
+		"task_id":    "t1",
+		"status":     "completed",
+	} {
+		if got, _ := record[key].(string); got != want {
+			t.Errorf("JSON %s = %#v, want %q", key, record[key], want)
+		}
+	}
+	if strings.Contains(lines[0], "\n") || strings.Contains(lines[0], "\x1b") {
+		t.Errorf("JSON event line contains an unescaped line/control character: %q", lines[0])
+	}
+}
+
+func TestCLIEventsOnEmptyProjectListDoesNotOpenUnscopedStream(t *testing.T) {
+	var eventRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"projects":[]}`)
+		case "/events/live":
+			eventRequests++
+			http.Error(w, "unexpected unscoped stream", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"events", "on"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "no project selected") {
+		t.Fatalf("empty project list error = %v, want no-project error", err)
+	}
+	if eventRequests != 0 {
+		t.Fatalf("empty project list opened %d event streams", eventRequests)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("empty project list wrote success output: %q", out.String())
+	}
+}
+
+func TestCLIEventsCancellationClosesStream(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestClosed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/events/live":
+			close(requestStarted)
+			w.Header().Set("Content-Type", "text/event-stream")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+			close(requestClosed)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, &bytes.Buffer{}, "demo", []string{"events", "on"}, false, false)
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for foreground event stream")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("cancelled events stream returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled events stream did not return")
+	}
+	select {
+	case <-requestClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled events stream did not close the HTTP request")
+	}
+}
+
+func TestCLIEventsOffIsExplicitlyUnsupportedForAnotherProcess(t *testing.T) {
+	var eventRequests int
+	var projectRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			projectRequests++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/events/live":
+			eventRequests++
+			http.Error(w, "unexpected stream", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"events", "off"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "cannot disable") || !strings.Contains(err.Error(), "Ctrl-C") {
+		t.Fatalf("events off error = %v, want actionable nonzero error", err)
+	}
+	if eventRequests != 0 || projectRequests != 0 || strings.Contains(out.String(), "live events off") {
+		t.Fatalf("events off changed/claimed stream state: projects=%d events=%d output=%q", projectRequests, eventRequests, out.String())
+	}
+}
+
+func TestCLIEventsUsesAuthenticatedCookieSession(t *testing.T) {
+	const session = "session-token"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, cookieErr := r.Cookie("ov_session")
+		authed := cookieErr == nil && cookie.Value == session
+		switch r.URL.Path {
+		case "/login":
+			http.SetCookie(w, &http.Cookie{Name: "ov_session", Value: session})
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+		case "/api/projects":
+			if !authed {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"private"}]}`)
+		case "/events/live":
+			if !authed {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, "event: chat_new_message\n")
+			_, _ = fmt.Fprint(w, `data: {"type":"chat_new_message","project_id":"p1","exec_id":"e1","message":"authenticated"}`+"\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Login(context.Background(), "admin", "secret"); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "private", []string{"events", "on"}, false, false); err != nil {
+		t.Fatalf("authenticated events stream failed: %v", err)
+	}
+	if !strings.Contains(out.String(), "authenticated") {
+		t.Fatalf("authenticated event output missing message: %q", out.String())
+	}
+}
+
+func TestCLIBareEventsResolvesExplicitProjectID(t *testing.T) {
+	var eventRequest string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"other"},{"id":"p2","name":"demo"}]}`)
+		case "/events/live":
+			eventRequest = r.URL.RequestURI()
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p2","task_id":"t2","status":"queued"}`+"\n\n")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "p2", []string{"events"}, false, false); err != nil {
+		t.Fatalf("bare events failed: %v", err)
+	}
+	if eventRequest != "/events/live?project_id=p2" {
+		t.Fatalf("bare events request = %q, want explicit project scope", eventRequest)
+	}
+	if !strings.Contains(out.String(), `task_id="t2"`) {
+		t.Fatalf("bare events output missing task ID: %q", out.String())
+	}
+}
+
+func TestEventsHelpDistinguishesInteractiveAndCLI(t *testing.T) {
+	cmd := lookupCommand("events")
+	if cmd == nil {
+		t.Fatal("events command missing")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"interactive: show events from the TUI stream",
+		"interactive: hide events",
+		"one-shot CLI: monitor the selected project until Ctrl-C or EOF",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("events help missing %q:\n%s", want, help)
+		}
 	}
 }

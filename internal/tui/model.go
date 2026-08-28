@@ -68,6 +68,11 @@ type pendingCmd struct {
 type Model struct {
 	client *client.Client
 
+	// cliContext is set only for headless runs so project preload can honor the
+	// same cancellation that owns a foreground command. Interactive commands use
+	// their existing per-operation contexts.
+	cliContext context.Context
+
 	transcript viewport.Model
 	input      textinput.Model
 	spin       spinner.Model
@@ -401,7 +406,11 @@ func (m Model) loadProjectsWithIDAndSSE(requestID uint64, echo bool, selectName 
 	sessionGeneration := sessionGenerationOf(m)
 	projectGeneration := projectGenerationOf(m)
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		baseCtx := m.cliContext
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 15*time.Second)
 		defer cancel()
 
 		var projects []client.Project

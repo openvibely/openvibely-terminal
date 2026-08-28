@@ -100,7 +100,11 @@ terminal-native ways:
 - Compact tables, trees, timelines, status lines, and ASCII charts.
 - Searchable references by ID prefix, title, name, handle, or unique substring.
 - Keyboard-first navigation in the TUI.
-- Live SSE event streaming in the transcript.
+- Live SSE event streaming in the transcript. In interactive mode `/events`
+  controls display for the TUI-owned stream; in CLI mode `events on` owns one
+  foreground project-scoped stream, emits line-oriented output, and remains
+  active until `Ctrl-C` or clean termination. CLI `events off` must fail clearly
+  rather than pretending to control another process.
 - Clear non-zero exits and stderr messages in CLI mode.
 - Stable, parseable output modes when useful for automation.
 

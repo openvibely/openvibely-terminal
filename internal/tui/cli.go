@@ -16,9 +16,13 @@ package tui
 // written to stdout.
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,18 +54,29 @@ var jsonMode bool
 // json corresponds to the --json CLI flag: when true list/show commands emit
 // raw JSON instead of styled text.
 func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, force bool, json bool) error {
+	return RunCLIContext(context.Background(), c, out, projectRef, args, force, json)
+}
+
+// RunCLIContext is RunCLI with a caller-owned lifetime. Long-running commands
+// such as the foreground events stream use this context for cancellation.
+func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, projectRef string, args []string, force bool, json bool) error {
 	if len(args) == 0 {
 		return errors.New("no command given")
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	// Activate CLI mode so destructive commands apply --force gating instead
 	// of a TUI confirmation prompt.
 	cliMode = true
 	forceMode = force
 	jsonMode = json
+	prevPrefix := cmdPrefix
 	defer func() {
 		cliMode = false
 		forceMode = false
 		jsonMode = false
+		cmdPrefix = prevPrefix
 	}()
 	// In CLI mode commands are shell subcommands, so help should print them
 	// without the chat window's leading slash.
@@ -76,9 +91,20 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 	}
 
 	m := New(c)
+	m.cliContext = ctx
 	m.width, m.height = 100, 40
 	m.transcript.Width = m.width
 	m.log = nil // drop the interactive banner
+
+	if cmdDef.name == "events" {
+		on, err := parseCLIEventsAction(fields[1:])
+		if err != nil {
+			return err
+		}
+		if !on {
+			return errors.New(cliEventsOffMessage)
+		}
+	}
 
 	// Only commands that talk to the backend need a project or connection
 	// state; /help and friends should stay instant and work offline.
@@ -86,7 +112,11 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 		var projectLoad tea.Cmd
 		m, projectLoad = m.beginProjectLoad(false, projectRef)
 		m = drain(m, projectLoad)
-		// An unknown or ambiguous project must fail loudly rather than run the		// command against whichever project happened to be selected.
+		if ctx.Err() != nil {
+			return nil
+		}
+		// An unknown or ambiguous project must fail loudly rather than run the
+		// command against whichever project happened to be selected.
 		if err := firstError(m); err != nil {
 			if m.connErr != "" {
 				return errors.New(OfflineRecoveryMessage(c.BaseURL(), errors.New(m.connErr)))
@@ -94,6 +124,15 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 			return err
 		}
 	}
+
+	// A one-shot events command owns its stream directly. The interactive model
+	// stream is intentionally not started during CLI project preloading, and
+	// feeding a long-lived command through drain would delay line output until
+	// the stream ended.
+	if cmdDef.name == "events" {
+		return runCLIEvents(ctx, c, out, m.selectedID, fields[1:], json)
+	}
+
 	if cmdDef.needsStatus() {
 		m = drain(m, m.checkConnection())
 		m = drain(m, m.fetchStatusCounts())
@@ -110,6 +149,238 @@ func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, f
 		writeEntries(out, m.log[start:])
 	}
 	return firstError(m)
+}
+
+const cliEventsOffMessage = "events off cannot disable a foreground stream owned by another process; press Ctrl-C in that monitoring process (interactive /events off only hides events in that TUI)"
+
+// cliEventRecord is the stable machine-readable envelope for one foreground
+// event. The raw payload is retained in data so newer backend fields remain
+// inspectable without changing the top-level fields consumed by scripts.
+type cliEventRecord struct {
+	Event           string          `json:"event"`
+	Type            string          `json:"type"`
+	ProjectID       string          `json:"project_id"`
+	TaskID          string          `json:"task_id"`
+	TaskName        string          `json:"task_name"`
+	Status          string          `json:"status"`
+	Category        string          `json:"category"`
+	Message         string          `json:"message"`
+	ExecID          string          `json:"exec_id"`
+	Source          string          `json:"source"`
+	AgentName       string          `json:"agent_name"`
+	CompletedOutput string          `json:"completed_output"`
+	Queued          bool            `json:"queued"`
+	Data            json.RawMessage `json:"data,omitempty"`
+}
+
+// cliEventPayload covers the fields used by the backend's task and chat SSE
+// payloads. Unknown fields are preserved in cliEventRecord.Data.
+type cliEventPayload struct {
+	Type            string `json:"type"`
+	ProjectID       string `json:"project_id"`
+	TaskID          string `json:"task_id"`
+	TaskName        string `json:"task_name"`
+	Status          string `json:"status"`
+	Category        string `json:"category"`
+	Message         string `json:"message"`
+	ExecID          string `json:"exec_id"`
+	Source          string `json:"source"`
+	AgentName       string `json:"agent_name"`
+	CompletedOutput string `json:"completed_output"`
+	Queued          bool   `json:"queued"`
+}
+
+// runCLIEvents consumes exactly one project-scoped stream. EOF is a clean
+// foreground termination; transport and authentication failures remain
+// nonzero and use the same safe recovery text as other CLI operations.
+func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectID string, args []string, jsonOutput bool) error {
+	on, err := parseCLIEventsAction(args)
+	if err != nil {
+		return err
+	}
+	if !on {
+		return errors.New(cliEventsOffMessage)
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return errors.New("no project selected — use -project <name|id> and choose a project with live events")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	events, errs := c.StreamEvents(streamCtx, projectID)
+	var terminalErr error
+	for events != nil || errs != nil {
+		if ctx.Err() != nil {
+			cancel()
+			drainCLIEventChannels(events, errs)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			cancel()
+			drainCLIEventChannels(events, errs)
+			return nil
+		case ev, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			line, include, formatErr := formatCLIEvent(ev, projectID, jsonOutput)
+			if formatErr != nil {
+				cancel()
+				drainCLIEventChannels(events, errs)
+				return formatErr
+			}
+			if !include {
+				continue
+			}
+			if _, writeErr := fmt.Fprintln(out, line); writeErr != nil {
+				cancel()
+				drainCLIEventChannels(events, errs)
+				return fmt.Errorf("writing live event output: %w", writeErr)
+			}
+		case streamErr, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			errs = nil
+			if streamErr != nil {
+				terminalErr = streamErr
+			}
+		}
+	}
+
+	if ctx.Err() != nil {
+		return nil
+	}
+	if terminalErr == nil || errors.Is(terminalErr, client.ErrEventStreamClosed) {
+		return nil
+	}
+	if client.IsAuthRequired(terminalErr) {
+		return errors.New(authRecoveryMessage(c.BaseURL()))
+	}
+	if client.IsTransportError(terminalErr) {
+		return errors.New(OfflineRecoveryMessage(c.BaseURL(), terminalErr))
+	}
+	return fmt.Errorf("live events: %w", terminalErr)
+}
+
+func parseCLIEventsAction(args []string) (bool, error) {
+	if len(args) > 1 {
+		return false, errors.New("usage: events [on|off]")
+	}
+	if len(args) == 0 {
+		return true, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "on", "true":
+		return true, nil
+	case "off", "false":
+		return false, nil
+	default:
+		return false, errors.New("usage: events [on|off]")
+	}
+}
+
+func drainCLIEventChannels(events <-chan client.Event, errs <-chan error) {
+	for events != nil || errs != nil {
+		select {
+		case _, ok := <-events:
+			if !ok {
+				events = nil
+			}
+		case _, ok := <-errs:
+			if !ok {
+				errs = nil
+			}
+		}
+	}
+}
+
+func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string, bool, error) {
+	var payload cliEventPayload
+	payloadErr := json.Unmarshal(ev.Data, &payload)
+	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
+	if payload.ProjectID != "" && payload.ProjectID != projectID {
+		return "", false, nil
+	}
+
+	record := cliEventRecord{
+		Event:           strings.TrimSpace(ev.Name),
+		Type:            strings.TrimSpace(payload.Type),
+		ProjectID:       payload.ProjectID,
+		TaskID:          payload.TaskID,
+		TaskName:        payload.TaskName,
+		Status:          payload.Status,
+		Category:        payload.Category,
+		Message:         payload.Message,
+		ExecID:          payload.ExecID,
+		Source:          payload.Source,
+		AgentName:       payload.AgentName,
+		CompletedOutput: payload.CompletedOutput,
+		Queued:          payload.Queued,
+	}
+	if record.Event == "" {
+		record.Event = record.Type
+	}
+	if record.Type == "" {
+		record.Type = record.Event
+	}
+	if compact := compactJSON(ev.Data); compact != nil {
+		record.Data = compact
+	}
+
+	if jsonOutput {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			return "", false, fmt.Errorf("encoding live event: %w", err)
+		}
+		return string(encoded), true, nil
+	}
+
+	parts := []string{"event=" + strconv.Quote(record.Event)}
+	add := func(key, value string) {
+		if value != "" {
+			parts = append(parts, key+"="+strconv.Quote(value))
+		}
+	}
+	add("type", record.Type)
+	add("project_id", record.ProjectID)
+	add("task_id", record.TaskID)
+	add("task_name", record.TaskName)
+	add("status", record.Status)
+	add("category", record.Category)
+	add("message", record.Message)
+	add("exec_id", record.ExecID)
+	add("source", record.Source)
+	add("agent_name", record.AgentName)
+	if record.Queued {
+		parts = append(parts, "queued=true")
+	}
+	add("completed_output", record.CompletedOutput)
+	if len(parts) == 1 || (len(parts) == 2 && record.Type == record.Event) {
+		if record.Data != nil {
+			parts = append(parts, "data="+strconv.Quote(string(record.Data)))
+		} else if payloadErr != nil && strings.TrimSpace(string(ev.Data)) != "" {
+			parts = append(parts, "data="+strconv.Quote(string(ev.Data)))
+		}
+	}
+	return strings.Join(parts, " "), true, nil
+}
+
+func compactJSON(raw []byte) json.RawMessage {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return nil
+	}
+	return json.RawMessage(compact.Bytes())
 }
 
 // CommandSummary lists every command as "name  actions  description" rows for

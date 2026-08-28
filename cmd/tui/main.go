@@ -15,6 +15,7 @@
 //	openvibely-tui tasks run "api refactor"
 //	openvibely-tui -project demo chat "ship the docs"
 //	openvibely-tui projects create demo /Users/me/src/demo
+//	openvibely-tui -project demo events on
 //	openvibely-tui help
 //
 // Configuration (flags override environment variables):
@@ -34,6 +35,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -57,7 +59,7 @@ func run() error {
 	project := flag.String("project", os.Getenv("OPENVIBELY_PROJECT"), "project to select: name, ID or unique prefix")
 	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear)")
 	flag.BoolVar(force, "f", false, "shorthand for -force")
-	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, lifecycle, and project creation commands")
+	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, lifecycle, project creation, and events commands")
 	flag.Usage = usage
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -97,10 +99,16 @@ func run() error {
 
 	// Arguments after the flags mean "run this one command and exit".
 	if len(args) > 0 {
-		return tui.RunCLI(c, os.Stdout, *project, args, *force, *json)
+		return runCLI(c, *project, args, *force, *json)
 	}
 
 	return runTUI(c, *project)
+}
+
+func runCLI(c *client.Client, project string, args []string, force, jsonOutput bool) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return tui.RunCLIContext(ctx, c, os.Stdout, project, args, force, jsonOutput)
 }
 
 func isStaticHelpCommand(args []string) bool {
@@ -170,6 +178,7 @@ examples:
   openvibely-tui tasks
   openvibely-tui tasks run "api refactor"
   openvibely-tui -project demo chat "ship the docs"
+  openvibely-tui -project demo events on
   openvibely-tui help tasks              full syntax of one command
 
 flags:

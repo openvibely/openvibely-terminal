@@ -2819,9 +2819,27 @@ func eventsCommand() command {
 		name:    "events",
 		aliases: []string{"stream", "log"},
 		args:    "[on|off]",
-		desc:    "stream live task/chat events",
+		desc:    "stream live task/chat events (interactive toggle or CLI foreground monitor)",
+		usage: []string{
+			"events [on]                                interactive: show events from the TUI stream",
+			"events off                                 interactive: hide events; CLI off cannot stop another process",
+			"events on                                 one-shot CLI: monitor the selected project until Ctrl-C or EOF",
+		},
+		examples: []string{
+			`events on`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
+			if cliMode {
+				on, err := parseCLIEventsAction(args)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				if !on {
+					return m, errCmd(cliEventsOffMessage)
+				}
+				return m, errCmd("events on must run through the foreground CLI stream; use the openvibely-tui events command")
+			}
 			on := !m.showEvents
 			if len(args) > 0 {
 				switch strings.ToLower(args[0]) {

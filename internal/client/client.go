@@ -30,6 +30,11 @@ import (
 // login before the requested resource can be used.
 var ErrAuthRequired = errors.New("authentication required")
 
+// ErrEventStreamClosed identifies a server-closed SSE connection without a
+// transport or authentication failure. Callers may treat it as clean EOF when
+// a foreground stream has no reconnect owner.
+var ErrEventStreamClosed = errors.New("event stream closed by server")
+
 // AuthRequiredError is returned when the backend responds with an
 // authentication redirect or HTTP 401. It deliberately contains only the
 // request location and status, never request credentials or response bodies.
