@@ -346,6 +346,9 @@ func TestParseActualAutomationLiveRouteMarksOmittedSectionsUnavailable(t *testin
 	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 2 || len(detail.Edges) != 2 {
 		t.Fatalf("actual graph = %+v", detail)
 	}
+	if len(detail.UnmatchedNodeDetails) != 2 || detail.UnmatchedNodeDetails[0].Name != "Start" || detail.UnmatchedNodeDetails[1].Name != "Review" {
+		t.Fatalf("unmatched node details = %+v, want both detail records retained separately", detail.UnmatchedNodeDetails)
+	}
 	if detail.Nodes[0].DisplayState != "recently_completed" {
 		t.Fatalf("actual completed state = %q", detail.Nodes[0].DisplayState)
 	}
@@ -488,6 +491,11 @@ func TestParseAutomationDetailRejectsUnknownExternalStateValues(t *testing.T) {
 			wantWarn: "external state",
 		},
 		{
+			name:     "unknown status text",
+			section:  `<div data-automation-external-state>status: mystery</div>`,
+			wantWarn: "freshness",
+		},
+		{
 			name:     "negated freshness text",
 			section:  `<div data-automation-external-state>not stale</div>`,
 			wantWarn: "freshness",
@@ -495,6 +503,11 @@ func TestParseAutomationDetailRejectsUnknownExternalStateValues(t *testing.T) {
 		{
 			name:     "multi-word negated freshness text",
 			section:  `<div data-automation-external-state>not currently stale</div>`,
+			wantWarn: "freshness",
+		},
+		{
+			name:     "mixed positive and qualified freshness text",
+			section:  `<div data-automation-external-state><div>stale</div><div>maybe stale</div></div>`,
 			wantWarn: "freshness",
 		},
 	}
@@ -512,6 +525,16 @@ func TestParseAutomationDetailRejectsUnknownExternalStateValues(t *testing.T) {
 				t.Fatalf("warnings=%v partial=%t, want warning containing %q", detail.Warnings, detail.Partial, tc.wantWarn)
 			}
 		})
+	}
+}
+
+func TestParseAutomationDetailAcceptsClearlyLabeledFreshnessText(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-external-label" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel></div><div data-automation-external-state><div>status = fresh</div></div></div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ExternalState.Status != "fresh" || !detail.ExternalState.StaleAvailable || detail.ExternalState.Stale {
+		t.Fatalf("labeled freshness = %+v, want fresh", detail.ExternalState)
 	}
 }
 
@@ -584,6 +607,85 @@ func TestParseAutomationDetailRejectsMalformedAutomationCounts(t *testing.T) {
 				t.Fatalf("missing malformed-count warning: %v", detail.Warnings)
 			}
 		})
+	}
+}
+
+func TestParseAutomationDetailRetainsUnidentifiedNodeDetails(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unidentified-detail" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Graph</strong></g></div><section data-automation-live-node-detail><div data-counts='{"running":1}'></div></section></div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("unidentified detail record was dropped: %+v", detail.UnmatchedNodeDetails)
+	}
+	unmatched := detail.UnmatchedNodeDetails[0]
+	if unmatched.Counts.Running != 1 || !unmatched.Counts.RunningAvailable {
+		t.Fatalf("unidentified detail record lost its available fields: %+v", unmatched)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "node detail") {
+		t.Fatalf("unidentified detail did not remain explicitly partial: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+func TestParseAutomationDetailDoesNotRecoverMalformedStructuredCounts(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-strict-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<g data-automation-live-node="n1" data-counts='{"running":2} trailing'><strong>Node</strong><small>9 running</small></g>
+			<g data-automation-live-node="n2"><strong>Negative</strong><small>-2 running</small></g>
+		</svg></div>
+		<line data-automation-live-edge="e1" data-transition-count="not-a-number" aria-label="approved, 8 transitions, 1 recent"></line>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 2 || len(detail.Edges) != 1 {
+		t.Fatalf("parsed records = nodes=%d edges=%d, detail=%+v", len(detail.Nodes), len(detail.Edges), detail)
+	}
+	for _, node := range detail.Nodes {
+		if node.Counts.RunningAvailable || node.Counts.Running != 0 {
+			t.Fatalf("malformed node running count became available for %q: %+v", node.Name, node.Counts)
+		}
+	}
+	edge := detail.Edges[0]
+	if edge.TransitionCountAvailable || edge.TransitionCount != 0 {
+		t.Fatalf("malformed edge transition count recovered from ARIA: %+v", edge)
+	}
+	if !edge.RecentTransitionCountAvailable || edge.RecentTransitionCount != 1 {
+		t.Fatalf("valid independent ARIA recent count was lost: %+v", edge)
+	}
+	warnings := strings.Join(detail.Warnings, "\n")
+	if !strings.Contains(warnings, "node counts") || !strings.Contains(warnings, "edge transition") {
+		t.Fatalf("strict count warnings = %v", detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRejectsConcatenatedTextCounts(t *testing.T) {
+	for _, text := range []string{"running2", "2running", "not no active work", "running 2-foo"} {
+		t.Run(text, func(t *testing.T) {
+			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-boundary" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Node</strong><small>` + text + `</small></g></div></div>`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(detail.Nodes) != 1 {
+				t.Fatalf("nodes = %+v", detail.Nodes)
+			}
+			if detail.Nodes[0].Counts.RunningAvailable {
+				t.Fatalf("concatenated count %q was accepted: %+v", text, detail.Nodes[0].Counts)
+			}
+		})
+	}
+}
+
+func TestParseAutomationDetailInvalidExternalStatusSuppressesDerivedFreshness(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-external-status" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel></div><div data-automation-external-state data-automation-external-status="mystery">stale</div></div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !detail.ExternalStateAvailable || detail.ExternalState.Status != "" || detail.ExternalState.StaleAvailable {
+		t.Fatalf("invalid structured status became confident freshness: %+v", detail.ExternalState)
+	}
+	warnings := strings.Join(detail.Warnings, "\n")
+	if !detail.Partial || !strings.Contains(warnings, "external state status is malformed") {
+		t.Fatalf("invalid status warnings = %v partial=%t", detail.Warnings, detail.Partial)
 	}
 }
 

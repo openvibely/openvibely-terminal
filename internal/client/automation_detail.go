@@ -167,6 +167,7 @@ type AutomationExternalState struct {
 	Stale                     bool   `json:"stale"`
 	StaleAvailable            bool   `json:"stale_available"`
 	Status                    string `json:"status,omitempty"`
+	StatusInvalid             bool   `json:"status_invalid,omitempty"`
 }
 
 // AutomationDetail is the project-scoped read-only live automation response.
@@ -174,15 +175,19 @@ type AutomationExternalState struct {
 // fragments can omit optional sections, and zero is otherwise ambiguous with
 // an explicitly reported zero.
 type AutomationDetail struct {
-	Automation        AutomationMetadata          `json:"automation"`
-	Version           AutomationVersion           `json:"version"`
-	Nodes             []AutomationLiveNode        `json:"nodes"`
-	Edges             []AutomationLiveEdge        `json:"edges"`
-	Resources         []AutomationResourceSummary `json:"resources"`
-	ActiveInvocations int                         `json:"active_invocations"`
-	ActiveWorkItems   int                         `json:"active_work_items"`
-	RecentCutoff      string                      `json:"recent_cutoff,omitempty"`
-	ExternalState     AutomationExternalState     `json:"external_state"`
+	Automation AutomationMetadata   `json:"automation"`
+	Version    AutomationVersion    `json:"version"`
+	Nodes      []AutomationLiveNode `json:"nodes"`
+	// UnmatchedNodeDetails retains detail-panel records that cannot be safely
+	// correlated with graph nodes. Keeping them separate prevents lost config
+	// data without inflating the authoritative graph-node count.
+	UnmatchedNodeDetails []AutomationLiveNode        `json:"unmatched_node_details,omitempty"`
+	Edges                []AutomationLiveEdge        `json:"edges"`
+	Resources            []AutomationResourceSummary `json:"resources"`
+	ActiveInvocations    int                         `json:"active_invocations"`
+	ActiveWorkItems      int                         `json:"active_work_items"`
+	RecentCutoff         string                      `json:"recent_cutoff,omitempty"`
+	ExternalState        AutomationExternalState     `json:"external_state"`
 
 	GraphAvailable             bool     `json:"graph_available"`
 	NodesAvailable             bool     `json:"nodes_available"`
@@ -496,11 +501,10 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 		}
 		// The current live route uses node IDs for SVG graph shapes and
 		// node keys for the details cards, so an unmatched pair cannot be
-		// correlated safely. Keep the graph rows authoritative and surface
-		// the lost correlation rather than duplicating the same node.
-		if parsed.ID != "" || parsed.NodeKey != "" || parsed.Name != "" {
-			detail.Warnings = append(detail.Warnings, "node detail records could not be correlated with graph nodes")
-		}
+		// correlated safely. Keep the graph rows authoritative, retain the
+		// detail record separately, and surface the lost correlation.
+		detail.UnmatchedNodeDetails = append(detail.UnmatchedNodeDetails, parsed)
+		detail.Warnings = append(detail.Warnings, "node detail records could not be correlated with graph nodes")
 	}
 	return out, present, countsPresent
 }
@@ -624,7 +628,21 @@ func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, parsed AutomationLiveN
 
 func mergeAutomationNodeCounts(dst *AutomationNodeCounts, src AutomationNodeCounts) {
 	merge := func(dstValue *int, dstAvailable *bool, dstQuality *int, srcValue int, srcAvailable bool, srcQuality int) {
+		if srcQuality < 0 {
+			// A malformed structured metric is authoritative about its presence:
+			// do not let a lower-quality text value recover it. A later valid
+			// structured value may still repair the same metric.
+			if *dstQuality < 2 {
+				*dstValue = 0
+				*dstAvailable = false
+				*dstQuality = srcQuality
+			}
+			return
+		}
 		if !srcAvailable {
+			return
+		}
+		if *dstQuality < 0 && srcQuality < 2 {
 			return
 		}
 		if !*dstAvailable || srcQuality > *dstQuality {
@@ -638,6 +656,24 @@ func mergeAutomationNodeCounts(dst *AutomationNodeCounts, src AutomationNodeCoun
 	merge(&dst.Blocked, &dst.BlockedAvailable, &dst.blockedQuality, src.Blocked, src.BlockedAvailable, src.blockedQuality)
 	merge(&dst.Failed, &dst.FailedAvailable, &dst.failedQuality, src.Failed, src.FailedAvailable, src.failedQuality)
 	merge(&dst.CompletedRecently, &dst.CompletedRecentlyAvailable, &dst.completedRecentlyQuality, src.CompletedRecently, src.CompletedRecentlyAvailable, src.completedRecentlyQuality)
+}
+
+func markAutomationNodeCountsInvalid(counts *AutomationNodeCounts) {
+	counts.Running = 0
+	counts.Waiting = 0
+	counts.Blocked = 0
+	counts.Failed = 0
+	counts.CompletedRecently = 0
+	counts.RunningAvailable = false
+	counts.WaitingAvailable = false
+	counts.BlockedAvailable = false
+	counts.FailedAvailable = false
+	counts.CompletedRecentlyAvailable = false
+	counts.runningQuality = -1
+	counts.waitingQuality = -1
+	counts.blockedQuality = -1
+	counts.failedQuality = -1
+	counts.completedRecentlyQuality = -1
 }
 
 func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts *AutomationNodeCounts) bool {
@@ -661,6 +697,7 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 		}
 		if decodeErr != nil || values == nil {
 			detail.Warnings = append(detail.Warnings, "node counts are malformed")
+			markAutomationNodeCountsInvalid(counts)
 		} else {
 			mapPresent, malformed := applyAutomationCountMap(values, counts)
 			if malformed {
@@ -688,6 +725,9 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 			value, err := strconv.Atoi(strings.TrimSpace(raw))
 			if err != nil || value < 0 {
 				detail.Warnings = append(detail.Warnings, "node "+field.name+" count is malformed")
+				*field.target = 0
+				*field.available = false
+				*field.quality = -1
 				continue
 			}
 			*field.target = value
@@ -808,7 +848,6 @@ func automationEdgeEndpointKey(edge AutomationLiveEdge) string {
 
 var automationEdgeCountsRE = regexp.MustCompile(`^(.*?),?\s*(\d+)\s+transitions?,\s*(\d+)\s+recent$`)
 var automationFreshnessWordRE = regexp.MustCompile(`(?i)\b(fresh|stale)\b`)
-var automationNegatedFreshnessRE = regexp.MustCompile(`(?i)\b(?:not|never|no|without)\b[^.!?;\n]{0,40}\b(fresh|stale)\b`)
 
 func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (AutomationLiveEdge, bool) {
 	parsed := AutomationLiveEdge{edgeSource: automationEdgeSourceGraph}
@@ -822,30 +861,35 @@ func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (Automat
 	parsed.ConditionJSON = strings.TrimSpace(firstAutomationAttr(edge, "data-automation-edge-condition", "data-edge-condition"))
 	parsed.Highlighted = parseAutomationBool(firstAutomationAttr(edge, "data-automation-edge-highlighted", "data-highlighted"))
 
-	transition, transitionFound := parseAutomationEdgeCount(detail, edge, "edge transition", "data-automation-transition-count", "data-transition-count", "data-transitions")
-	recent, recentFound := parseAutomationEdgeCount(detail, edge, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
+	transition, transitionFound, transitionInvalid := parseAutomationEdgeCount(detail, edge, "edge transition", "data-automation-transition-count", "data-transition-count", "data-transitions")
+	recent, recentFound, recentInvalid := parseAutomationEdgeCount(detail, edge, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
 	if transitionFound {
 		parsed.TransitionCount = transition
 		parsed.transitionCountQuality = 2
+	} else if transitionInvalid {
+		parsed.transitionCountQuality = -1
 	}
 	if recentFound {
 		parsed.RecentTransitionCount = recent
 		parsed.recentTransitionCountQuality = 2
+	} else if recentInvalid {
+		parsed.recentTransitionCountQuality = -1
 	}
 	if aria := strings.TrimSpace(attr(edge, "aria-label")); aria != "" {
 		if match := automationEdgeCountsRE.FindStringSubmatch(aria); match != nil {
 			if parsed.Label == "" {
 				parsed.Label = strings.TrimSpace(strings.TrimSuffix(match[1], ","))
 			}
-			if !transitionFound {
+			if !transitionFound && !transitionInvalid {
 				parsed.TransitionCount, _ = strconv.Atoi(match[2])
 				parsed.transitionCountQuality = 1
+				transitionFound = true
 			}
-			if !recentFound {
+			if !recentFound && !recentInvalid {
 				parsed.RecentTransitionCount, _ = strconv.Atoi(match[3])
 				parsed.recentTransitionCountQuality = 1
+				recentFound = true
 			}
-			transitionFound, recentFound = true, true
 		}
 	}
 	parsed.TransitionCountAvailable = transitionFound
@@ -890,32 +934,36 @@ func parseAutomationEdgeDetail(detail *AutomationDetail, section *html.Node) (Au
 	if parsed.ConditionJSON == "" && len(paragraphs) > 1 {
 		parsed.ConditionJSON = strings.TrimSpace(NodeText(paragraphs[1]))
 	}
-	transition, transitionFound := parseAutomationEdgeCount(detail, section, "edge transition", "data-automation-transition-count", "data-transition-count", "data-transitions")
-	recent, recentFound := parseAutomationEdgeCount(detail, section, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
+	transition, transitionFound, transitionInvalid := parseAutomationEdgeCount(detail, section, "edge transition", "data-automation-transition-count", "data-transition-count", "data-transitions")
+	recent, recentFound, recentInvalid := parseAutomationEdgeCount(detail, section, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
 	if transitionFound {
 		parsed.TransitionCount = transition
 		parsed.transitionCountQuality = 2
+	} else if transitionInvalid {
+		parsed.transitionCountQuality = -1
 	}
 	if recentFound {
 		parsed.RecentTransitionCount = recent
 		parsed.recentTransitionCountQuality = 2
+	} else if recentInvalid {
+		parsed.recentTransitionCountQuality = -1
 	}
 	parsed.TransitionCountAvailable = transitionFound
 	parsed.RecentTransitionCountAvailable = recentFound
 	return parsed, transitionFound || recentFound
 }
 
-func parseAutomationEdgeCount(detail *AutomationDetail, node *html.Node, label string, attrs ...string) (int, bool) {
+func parseAutomationEdgeCount(detail *AutomationDetail, node *html.Node, label string, attrs ...string) (int, bool, bool) {
 	value, found := firstAutomationAttrFoundDeep(node, attrs...)
 	if !found {
-		return 0, false
+		return 0, false, false
 	}
 	parsed, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || parsed < 0 {
 		detail.Warnings = append(detail.Warnings, label+" count is malformed")
-		return 0, false
+		return 0, false, true
 	}
-	return parsed, true
+	return parsed, true, false
 }
 
 func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) {
@@ -960,7 +1008,20 @@ func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveE
 		current.ConditionJSON = parsed.ConditionJSON
 	}
 	mergeCount := func(currentValue *int, currentAvailable *bool, currentQuality *int, parsedValue int, parsedAvailable bool, parsedQuality int) {
-		if parsedAvailable && (!*currentAvailable || parsedQuality > *currentQuality) {
+		if parsedQuality < 0 {
+			// A malformed structured metric must not be repaired by the
+			// lower-quality representation on the same edge.
+			if *currentQuality < 2 {
+				*currentValue = 0
+				*currentAvailable = false
+				*currentQuality = parsedQuality
+			}
+			return
+		}
+		if !parsedAvailable || (*currentQuality < 0 && parsedQuality < 2) {
+			return
+		}
+		if !*currentAvailable || parsedQuality > *currentQuality {
 			*currentValue = parsedValue
 			*currentAvailable = true
 			*currentQuality = parsedQuality
@@ -1179,16 +1240,18 @@ func parseAutomationExternalState(detail *AutomationDetail, live *html.Node) {
 		"data-automation-external-last-updated", "data-external-last-updated", "data-last-updated-at", "data-external-updated-at"))
 	statusRaw, statusRawFound := firstAutomationAttrFoundDeep(section, "data-automation-external-status", "data-external-status")
 	status := ""
+	statusInvalid := false
 	if statusRawFound {
 		var statusValid bool
 		status, statusValid = parseAutomationExternalStatus(statusRaw)
 		if !statusValid {
+			statusInvalid = true
 			detail.Warnings = append(detail.Warnings, "external state status is malformed")
 		}
 	}
 	if section != live {
 		text := NodeText(section)
-		if !staleFound && !staleRawFound {
+		if !staleFound && !staleRawFound && !statusRawFound {
 			if parsedStale, found, ambiguous := parseAutomationFreshnessText(text); ambiguous {
 				detail.Warnings = append(detail.Warnings, "external state freshness is ambiguous")
 			} else if found {
@@ -1198,7 +1261,7 @@ func parseAutomationExternalState(detail *AutomationDetail, live *html.Node) {
 		if lastUpdated == "" {
 			lastUpdated = externalLastUpdatedText(NodeText(section))
 		}
-		if status == "" {
+		if status == "" && !statusRawFound && !statusInvalid {
 			switch {
 			case staleFound && stale:
 				status = "stale"
@@ -1222,6 +1285,7 @@ func parseAutomationExternalState(detail *AutomationDetail, live *html.Node) {
 	detail.ExternalState.StaleAvailable = staleFound
 	detail.ExternalState.LastUpdatedAt = lastUpdated
 	detail.ExternalState.Status = status
+	detail.ExternalState.StatusInvalid = statusInvalid
 	detail.ExternalStateAvailable = true
 }
 
@@ -1355,16 +1419,63 @@ func parseAutomationExternalStatus(value string) (string, bool) {
 	}
 }
 
-// parseAutomationFreshnessText returns (stale, found, ambiguous). A freshness
-// word preceded by "not" is not a positive freshness assertion.
+// parseAutomationFreshnessText returns (stale, found, ambiguous). It accepts
+// only an exact freshness label or a clearly labelled positive value; arbitrary
+// prose is not strong enough to establish the external-state polarity.
 func parseAutomationFreshnessText(text string) (bool, bool, bool) {
-	lower := strings.ToLower(text)
-	negated := automationNegatedFreshnessRE.MatchString(lower)
-	withoutNegated := automationNegatedFreshnessRE.ReplaceAllString(lower, " ")
-	if match := automationFreshnessWordRE.FindStringSubmatch(withoutNegated); match != nil {
-		return match[1] == "stale", true, false
+	normalize := func(value string) string {
+		return strings.ToLower(strings.Join(strings.Fields(value), " "))
 	}
-	return false, false, negated
+	recognized := ""
+	ambiguous := false
+	for _, rawLine := range strings.Split(text, "\n") {
+		line := normalize(rawLine)
+		if line == "" {
+			continue
+		}
+		compact := strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return -1
+			}
+			return r
+		}, line)
+		state := ""
+		switch compact {
+		case "fresh", "status:fresh", "status=fresh", "state:fresh", "state=fresh", "freshness:fresh", "freshness=fresh", "externalstate:fresh", "externalstate=fresh":
+			state = "fresh"
+		case "stale", "status:stale", "status=stale", "state:stale", "state=stale", "freshness:stale", "freshness=stale", "externalstate:stale", "externalstate=stale":
+			state = "stale"
+		}
+		if state != "" {
+			if recognized != "" && recognized != state {
+				ambiguous = true
+			} else {
+				recognized = state
+			}
+			continue
+		}
+		if automationFreshnessWordRE.MatchString(line) || strings.Contains(line, "unknown") || strings.Contains(line, "maybe") {
+			ambiguous = true
+			continue
+		}
+		for _, prefix := range []string{"status:", "status=", "state:", "state=", "freshness:", "freshness=", "externalstate:", "externalstate="} {
+			if strings.HasPrefix(compact, prefix) {
+				ambiguous = true
+				break
+			}
+		}
+	}
+	if ambiguous {
+		return false, false, true
+	}
+	switch recognized {
+	case "fresh":
+		return false, true, false
+	case "stale":
+		return true, true, false
+	default:
+		return false, false, false
+	}
 }
 
 func parseAutomationBoolValue(value string) (bool, bool) {
@@ -1450,6 +1561,9 @@ func applyAutomationCountMap(values map[string]any, counts *AutomationNodeCounts
 		parsed, ok := automationCountNumber(value)
 		if !ok {
 			malformed = true
+			*field.target = 0
+			*field.available = false
+			*field.quality = -1
 			continue
 		}
 		*field.target = parsed
@@ -1478,7 +1592,7 @@ func automationCountNumber(value any) (int, bool) {
 
 func applyAutomationCountText(text string, counts *AutomationNodeCounts) (bool, bool) {
 	text = strings.ToLower(strings.TrimSpace(text))
-	if strings.Contains(text, "no active work") {
+	if text == "no active work" {
 		counts.Running, counts.Waiting, counts.Blocked, counts.Failed, counts.CompletedRecently = 0, 0, 0, 0, 0
 		counts.RunningAvailable = true
 		counts.WaitingAvailable = true
@@ -1539,6 +1653,22 @@ func automationCountBoundaryAfter(text string, end int) bool {
 	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
 }
 
+func automationCountValueBoundaryAfter(text string, end int) bool {
+	if end >= len(text) {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(text[end:])
+	return unicode.IsSpace(r) || strings.ContainsRune(",;·|)", r)
+}
+
+func isAutomationCountSeparator(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(":=(),;·|", r)
+}
+
+func trimAutomationCountSeparators(value string) string {
+	return strings.TrimFunc(value, isAutomationCountSeparator)
+}
+
 func namedAutomationCount(text string, labels ...string) (int, bool) {
 	lower := strings.ToLower(text)
 	for _, label := range labels {
@@ -1553,30 +1683,23 @@ func namedAutomationCount(text string, labels ...string) (int, bool) {
 				break
 			}
 			idx := searchFrom + relative
-
-			// Accept both "running 2" and the compact backend form
-			// "2 running". The latter is what the SVG node labels use.
-			rest := strings.TrimLeft(lower[idx+len(label):], " \t:=()")
-			if strings.HasPrefix(rest, "-") || strings.HasPrefix(rest, "−") {
-				searchFrom = idx + len(label)
+			labelEnd := idx + len(label)
+			if !automationCountBoundaryBefore(lower, idx) || !automationCountBoundaryAfter(lower, labelEnd) {
+				searchFrom = labelEnd
 				continue
 			}
-			end := 0
-			for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
-				end++
-			}
-			if end > 0 && automationCountBoundaryAfter(rest, end) {
-				if value, err := strconv.Atoi(rest[:end]); err == nil {
-					return value, true
-				}
-			}
 
-			prefix := strings.TrimRight(lower[:idx], " \t:=()")
+			// Accept a number before the label only when a separator appears
+			// between it and the label. This rejects 2running and negative
+			// values while preserving the compact backend form 2 running.
+			rawPrefix := lower[:idx]
+			prefix := trimAutomationCountSeparators(rawPrefix)
+			separatorPresent := len(prefix) < len(rawPrefix)
 			start := len(prefix)
 			for start > 0 && prefix[start-1] >= '0' && prefix[start-1] <= '9' {
 				start--
 			}
-			if start < len(prefix) && automationCountBoundaryBefore(prefix, start) {
+			if separatorPresent && start < len(prefix) && automationCountBoundaryBefore(prefix, start) {
 				negative := (start > 0 && prefix[start-1] == '-') || strings.HasSuffix(prefix[:start], "−")
 				if !negative {
 					if value, err := strconv.Atoi(prefix[start:]); err == nil {
@@ -1584,7 +1707,28 @@ func namedAutomationCount(text string, labels ...string) (int, bool) {
 					}
 				}
 			}
-			searchFrom = idx + len(label)
+
+			// The label-before-number form also requires a separator and a
+			// complete numeric token, so running2, running 2oops, and
+			// decimal values remain unavailable.
+			rawSuffix := lower[labelEnd:]
+			rest := strings.TrimLeftFunc(rawSuffix, isAutomationCountSeparator)
+			if len(rawSuffix) != len(rest) {
+				if strings.HasPrefix(rest, "-") || strings.HasPrefix(rest, "−") {
+					searchFrom = labelEnd
+					continue
+				}
+				end := 0
+				for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+					end++
+				}
+				if end > 0 && automationCountValueBoundaryAfter(rest, end) && (end == len(rest) || rest[end] != '.') {
+					if value, err := strconv.Atoi(rest[:end]); err == nil {
+						return value, true
+					}
+				}
+			}
+			searchFrom = labelEnd
 		}
 	}
 	return 0, false

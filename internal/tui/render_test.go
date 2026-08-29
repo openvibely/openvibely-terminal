@@ -1137,6 +1137,56 @@ func TestConnectionHintPreservesTaskThreadPriority(t *testing.T) {
 	}
 }
 
+func TestRenderAutomationDetailDoesNotUseInvalidStatusFreshness(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:             client.AutomationMetadata{ID: "au-invalid-status", Name: "Invalid status", LifecycleState: "active"},
+		GraphAvailable:         true,
+		NodesAvailable:         true,
+		EdgesAvailable:         true,
+		ExternalState:          client.AutomationExternalState{Stale: true, StaleAvailable: true, StatusInvalid: true},
+		ExternalStateAvailable: true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	if !strings.Contains(out, "status:            not reported") {
+		t.Fatalf("invalid status should render unavailable:\n%s", out)
+	}
+	if strings.Contains(out, "status:            fresh") || strings.Contains(out, "status:            stale") {
+		t.Fatalf("invalid status was replaced by freshness:\n%s", out)
+	}
+}
+
+func TestRenderAutomationDetailShowsUnmatchedNodeDetails(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:           client.AutomationMetadata{ID: "au-unmatched", Name: "Unmatched", LifecycleState: "active"},
+		Nodes:                []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{ID: "n1", Name: "Graph node"}}},
+		UnmatchedNodeDetails: []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{NodeKey: "review", Name: "Review", Role: "task"}}, {AutomationNode: client.AutomationNode{NodeKey: "start", Name: "Start", Role: "trigger"}}},
+		GraphAvailable:       true,
+		NodesAvailable:       true,
+		EdgesAvailable:       true,
+		Partial:              true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"Unmatched node details", "correlation unavailable", "Review", "Start"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unmatched detail output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderAutomationDetailSortsResourcesByRelation(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:         client.AutomationMetadata{ID: "au-resources", Name: "Resources", LifecycleState: "active"},
+		Resources:          []client.AutomationResourceSummary{{NodeKey: "shared", ResourceType: "task", ResourceID: "task-1", Relation: "output", Name: "Task"}, {NodeKey: "shared", ResourceType: "task", ResourceID: "task-1", Relation: "input", Name: "Task"}},
+		ResourcesAvailable: true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	input := strings.Index(out, "input")
+	output := strings.Index(out, "output")
+	if input < 0 || output < 0 || input > output {
+		t.Fatalf("resources were not sorted by relation: input=%d output=%d\n%s", input, output, out)
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder

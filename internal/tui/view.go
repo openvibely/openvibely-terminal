@@ -824,7 +824,7 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		status := "not reported"
 		if detail.ExternalState.Status != "" {
 			status = formatAutomationDetailState(detail.ExternalState.Status)
-		} else if detail.ExternalState.StaleAvailable {
+		} else if detail.ExternalState.StaleAvailable && !detail.ExternalState.StatusInvalid {
 			status = "fresh"
 			if detail.ExternalState.Stale {
 				status = "stale"
@@ -879,6 +879,25 @@ func renderAutomationDetailNodes(b *strings.Builder, detail client.AutomationDet
 	}
 	b.WriteString(indentAutomationDetailTable(table(rows)))
 	b.WriteByte('\n')
+	if len(detail.UnmatchedNodeDetails) > 0 {
+		b.WriteString("  " + sectionStyle.Render("Unmatched node details") + "\n")
+		b.WriteString(dimStyle.Render("    correlation unavailable; records retained separately") + "\n")
+		details := append([]client.AutomationLiveNode(nil), detail.UnmatchedNodeDetails...)
+		sort.SliceStable(details, func(i, j int) bool {
+			return automationDetailNodeSortKey(details[i]) < automationDetailNodeSortKey(details[j])
+		})
+		detailRows := [][]string{{"NODE", "KEY", "ROLE", "TYPE"}}
+		for _, node := range details {
+			detailRows = append(detailRows, []string{
+				firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"),
+				firstNonEmpty(node.NodeKey, node.ID, "—"),
+				firstNonEmpty(node.Role, "—"),
+				firstNonEmpty(node.NodeType, "—"),
+			})
+		}
+		b.WriteString(indentAutomationDetailTable(table(detailRows)))
+		b.WriteByte('\n')
+	}
 }
 
 func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDetail) {
@@ -994,9 +1013,14 @@ func automationDetailEdgeSortKey(edge client.AutomationLiveEdge) string {
 
 func automationDetailResourceSortKey(resource client.AutomationResourceSummary) string {
 	return strings.ToLower(strings.Join([]string{
-		firstNonEmpty(resource.NodeKey, resource.NodeID),
-		firstNonEmpty(resource.ResourceType, resource.Name, resource.ResourceID),
+		resource.NodeID,
+		resource.NodeKey,
+		resource.ResourceType,
 		resource.ResourceID,
+		resource.Relation,
+		resource.Name,
+		resource.Status,
+		resource.URL,
 	}, "\x00"))
 }
 
