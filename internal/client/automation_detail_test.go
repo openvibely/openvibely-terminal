@@ -659,7 +659,7 @@ func TestParseAutomationDetailDoesNotRecoverMalformedStructuredCounts(t *testing
 }
 
 func TestParseAutomationDetailRejectsConcatenatedTextCounts(t *testing.T) {
-	for _, text := range []string{"running2", "2running", "not no active work", "running 2-foo"} {
+	for _, text := range []string{"running2", "2running", "not no active work", "running 2-foo", "running 2 trailing", "2 running trailing", "not 2 running"} {
 		t.Run(text, func(t *testing.T) {
 			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-boundary" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Node</strong><small>` + text + `</small></g></div></div>`)
 			if err != nil {
@@ -686,6 +686,149 @@ func TestParseAutomationDetailInvalidExternalStatusSuppressesDerivedFreshness(t 
 	warnings := strings.Join(detail.Warnings, "\n")
 	if !detail.Partial || !strings.Contains(warnings, "external state status is malformed") {
 		t.Fatalf("invalid status warnings = %v partial=%t", detail.Warnings, detail.Partial)
+	}
+}
+
+func TestParseAutomationDetailDoesNotRecoverMalformedAggregateCounts(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-aggregate-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel></div>
+		<div data-automation-live-metrics data-automation-active-invocations="not-a-number" data-automation-active-work-items="2">7 active invocations · 8 active work items</div>
+		<div data-automation-external-state data-automation-external-tracked-resources="not-a-number">9 tracked resources</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.ActiveInvocationsAvailable || detail.ActiveInvocations != 0 {
+		t.Fatalf("malformed active invocations recovered from text: %d/%t", detail.ActiveInvocations, detail.ActiveInvocationsAvailable)
+	}
+	if !detail.ActiveWorkItemsAvailable || detail.ActiveWorkItems != 2 {
+		t.Fatalf("valid active work items changed by malformed sibling: %d/%t", detail.ActiveWorkItems, detail.ActiveWorkItemsAvailable)
+	}
+	if !detail.ExternalStateAvailable || detail.ExternalState.TrackedResourcesAvailable || detail.ExternalState.TrackedResources != 0 {
+		t.Fatalf("malformed tracked resources recovered from text: %+v", detail.ExternalState)
+	}
+	warnings := strings.Join(detail.Warnings, "\n")
+	for _, want := range []string{"active invocations count is malformed", "tracked resources count is malformed"} {
+		if !strings.Contains(warnings, want) {
+			t.Errorf("warnings=%v, missing %q", detail.Warnings, want)
+		}
+	}
+}
+
+func TestParseAutomationDetailRejectsMalformedAndOverflowTextCounts(t *testing.T) {
+	overflow := strings.Repeat("9", 64)
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-count-boundaries" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<g data-automation-live-node="n1"><strong>Trailing</strong><small>running 2 trailing</small></g>
+			<g data-automation-live-node="n2"><strong>Overflow</strong><small>running ` + overflow + `</small></g>
+			<line data-automation-live-edge="e1" class="automation-graph-edge" aria-label="approved, ` + overflow + ` transitions, 1 recent"></line>
+		</svg></div>
+		<div data-automation-live-metrics>6 active invocations trailing</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 2 || len(detail.Edges) != 1 {
+		t.Fatalf("records = nodes=%d edges=%d", len(detail.Nodes), len(detail.Edges))
+	}
+	for _, node := range detail.Nodes {
+		if node.Counts.RunningAvailable || node.Counts.Running != 0 {
+			t.Fatalf("malformed text count was accepted for %q: %+v", node.Name, node.Counts)
+		}
+	}
+	if detail.ActiveInvocationsAvailable || detail.ActiveInvocations != 0 {
+		t.Fatalf("malformed runtime text count was accepted: %d/%t", detail.ActiveInvocations, detail.ActiveInvocationsAvailable)
+	}
+	edge := detail.Edges[0]
+	if edge.TransitionCountAvailable || edge.TransitionCount != 0 {
+		t.Fatalf("overflow ARIA transition count was accepted: %+v", edge)
+	}
+	if !edge.RecentTransitionCountAvailable || edge.RecentTransitionCount != 1 {
+		t.Fatalf("valid independent ARIA count was lost: %+v", edge)
+	}
+	warnings := strings.Join(detail.Warnings, "\n")
+	for _, want := range []string{"node counts are malformed", "active invocations count is malformed", "edge transition count is malformed"} {
+		if !strings.Contains(warnings, want) {
+			t.Errorf("warnings=%v, missing %q", detail.Warnings, want)
+		}
+	}
+}
+
+func TestParseAutomationDetailPreservesIndependentMetricsAfterMalformedStructuredCounts(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-independent-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node="n1" data-counts='{"running":2} trailing'><strong>Node</strong><small>9 running · 3 failed</small></g></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", detail.Nodes)
+	}
+	counts := detail.Nodes[0].Counts
+	if counts.RunningAvailable || counts.Running != 0 {
+		t.Fatalf("malformed structured running count recovered: %+v", counts)
+	}
+	if !counts.FailedAvailable || counts.Failed != 3 {
+		t.Fatalf("independent valid failed count was suppressed: %+v", counts)
+	}
+}
+
+func TestParseAutomationDetailPreservesIndependentMetricsAfterTruncatedStructuredCounts(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-truncated-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node="n1" data-counts='{"running":2,'><strong>Node</strong><small>9 running · 3 failed</small></g></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", detail.Nodes)
+	}
+	counts := detail.Nodes[0].Counts
+	if counts.RunningAvailable || counts.Running != 0 {
+		t.Fatalf("truncated structured running count recovered: %+v", counts)
+	}
+	if !counts.FailedAvailable || counts.Failed != 3 {
+		t.Fatalf("independent failed count was suppressed by truncated payload: %+v", counts)
+	}
+}
+
+func TestParseAutomationDetailRetainsIdentitylessMarkedGraphNodes(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-identityless-node" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node data-counts='{"running":1}'></g></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("identity-less marked graph node was dropped: %+v", detail.Nodes)
+	}
+	if detail.Nodes[0].ID != "" || detail.Nodes[0].NodeKey != "" || detail.Nodes[0].Name != "" {
+		t.Fatalf("identity-less graph node gained fabricated identity: %+v", detail.Nodes[0])
+	}
+	if !detail.Nodes[0].Counts.RunningAvailable || detail.Nodes[0].Counts.Running != 1 {
+		t.Fatalf("identity-less graph node lost counts: %+v", detail.Nodes[0].Counts)
+	}
+}
+
+func TestParseAutomationDetailDoesNotUseUnmatchedDetailMetricsForGraphNodes(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unmatched-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Graph</strong></g></div>
+		<div data-automation-live-details-panel><section data-automation-live-node-detail="detail-only"><h3>Detail only</h3><span data-counts='{"running":5}'></span></section></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 || len(detail.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("mixed graph/detail records = nodes=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+	}
+	if detail.NodeCountsAvailable {
+		t.Fatalf("unmatched detail metric made graph node counts available: %+v", detail)
+	}
+	if detail.Nodes[0].Counts.RunningAvailable {
+		t.Fatalf("graph node inherited unmatched detail metric: %+v", detail.Nodes[0].Counts)
+	}
+	if !detail.UnmatchedNodeDetails[0].Counts.RunningAvailable || detail.UnmatchedNodeDetails[0].Counts.Running != 5 {
+		t.Fatalf("unmatched detail metric was lost: %+v", detail.UnmatchedNodeDetails[0].Counts)
 	}
 }
 

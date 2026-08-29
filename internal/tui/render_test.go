@@ -1187,6 +1187,51 @@ func TestRenderAutomationDetailSortsResourcesByRelation(t *testing.T) {
 	}
 }
 
+func TestRenderAutomationDetailDoesNotUseUnmatchedNodeCountsForGraphRows(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:           client.AutomationMetadata{ID: "au-unmatched-counts", Name: "Unmatched counts", LifecycleState: "active"},
+		Nodes:                []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{Name: "Graph node"}}},
+		UnmatchedNodeDetails: []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{NodeKey: "detail-only", Name: "Detail only"}, Counts: client.AutomationNodeCounts{Running: 5, RunningAvailable: true}}},
+		GraphAvailable:       true,
+		NodesAvailable:       true,
+		EdgesAvailable:       true,
+		NodeCountsAvailable:  true,
+		Partial:              true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	var graphLine string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "Graph node") {
+			graphLine = line
+			break
+		}
+	}
+	if graphLine == "" || !strings.Contains(graphLine, "—") || strings.Contains(graphLine, "0") || strings.Contains(graphLine, "5") {
+		t.Fatalf("unmatched detail count affected graph row: %q\n%s", graphLine, out)
+	}
+	if !strings.Contains(out, "Detail only") || !strings.Contains(out, "5") {
+		t.Fatalf("retained detail count was not rendered separately:\n%s", out)
+	}
+}
+
+func TestRenderAutomationDetailShowsUnmatchedDetailsWhenGraphNodesAreEmpty(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:           client.AutomationMetadata{ID: "au-empty-graph-unmatched", Name: "Empty graph", LifecycleState: "active"},
+		Nodes:                make([]client.AutomationLiveNode, 0),
+		UnmatchedNodeDetails: []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{NodeKey: "detail-only", Name: "Detail only", Role: "task"}}},
+		GraphAvailable:       true,
+		NodesAvailable:       true,
+		EdgesAvailable:       true,
+		Partial:              true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"Unmatched node details", "correlation unavailable", "Detail only"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("empty-graph unmatched output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder
