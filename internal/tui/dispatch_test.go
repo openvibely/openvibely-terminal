@@ -1599,6 +1599,76 @@ func TestWorkersProjectLimitValidatesArgument(t *testing.T) {
 	}
 }
 
+func TestWorkersLimitOperandValidationDispatch(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		wantPost  bool
+		wantForm  string
+		wantError string
+	}{
+		{name: "empty", input: `""`, wantError: "positive number"},
+		{name: "nonnumeric", input: "abc", wantError: "positive number"},
+		{name: "negative", input: "-1", wantError: "positive number"},
+		{name: "overflow 2^63", input: "9223372036854775808", wantError: "positive number"},
+		{name: "overflow max uint64", input: "18446744073709551615", wantError: "positive number"},
+		{name: "overflow 2^64", input: "18446744073709551616", wantError: "positive number"},
+		{name: "positive", input: "6", wantPost: true, wantForm: "max_workers=6"},
+		{name: "zero", input: "0", wantPost: true, wantForm: "max_workers=0"},
+		{name: "surplus operand", input: "6 extra", wantError: "usage"},
+	}
+
+	for _, action := range []string{"limit", "project"} {
+		action := action
+		for _, tc := range cases {
+			tc := tc
+			t.Run(action+"/"+tc.name, func(t *testing.T) {
+				m, rec := dispatchModel(t, nil)
+				m = runLine(t, m, "/workers "+action+" "+tc.input)
+
+				path := "/workers"
+				if action == "project" {
+					path = "/workers/projects/p1/limit"
+				}
+				if tc.wantPost {
+					if got := rec.count("POST", path); got != 1 {
+						t.Fatalf("valid worker limit should make exactly one POST, got %d:\n%s", got, rec.all())
+					}
+					if !rec.sawForm(tc.wantForm) {
+						t.Fatalf("expected %s in form data:\n%v", tc.wantForm, rec.forms)
+					}
+					if tc.input == "0" {
+						if action == "project" && !strings.Contains(transcript(m), "no limit") && !strings.Contains(transcript(m), "unlimited") {
+							t.Errorf("project zero should retain the no-limit message:\n%s", transcript(m))
+						}
+						if action == "limit" && !strings.Contains(transcript(m), "unlimited") {
+							t.Errorf("global zero should retain the unlimited message:\n%s", transcript(m))
+						}
+					} else if !strings.Contains(transcript(m), "set to 6") {
+						t.Errorf("positive worker limit should report its value:\n%s", transcript(m))
+					}
+					return
+				}
+
+				if got := rec.count("POST", path); got != 0 {
+					t.Fatalf("invalid worker limit must not make a POST, got %d:\n%s", got, rec.all())
+				}
+				out := transcript(m)
+				wantError := tc.wantError
+				if wantError == "usage" {
+					wantError = "usage: /workers " + action + " <n>"
+				}
+				if !strings.Contains(out, wantError) {
+					t.Errorf("expected validation text %q:\n%s", wantError, out)
+				}
+				if strings.Contains(out, "unlimited") || strings.Contains(out, "no limit") || strings.Contains(out, "set to") {
+					t.Errorf("invalid worker limit must not report success:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
 func TestScheduleAddResolvesTask(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 daily")

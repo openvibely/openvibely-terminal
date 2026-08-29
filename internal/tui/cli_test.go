@@ -52,6 +52,72 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 
 const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
 
+func TestCLIWorkersLimitOperandValidation(t *testing.T) {
+	cases := []struct {
+		name     string
+		operands []string
+		wantPost bool
+		wantForm string
+	}{
+		{name: "empty", operands: []string{""}},
+		{name: "nonnumeric", operands: []string{"abc"}},
+		{name: "negative", operands: []string{"-1"}},
+		{name: "overflow 2^63", operands: []string{"9223372036854775808"}},
+		{name: "overflow max uint64", operands: []string{"18446744073709551615"}},
+		{name: "overflow 2^64", operands: []string{"18446744073709551616"}},
+		{name: "positive", operands: []string{"6"}, wantPost: true, wantForm: "max_workers=6"},
+		{name: "zero", operands: []string{"0"}, wantPost: true, wantForm: "max_workers=0"},
+		{name: "surplus operand", operands: []string{"6", "extra"}},
+	}
+
+	for _, action := range []string{"limit", "project"} {
+		action := action
+		for _, tc := range cases {
+			tc := tc
+			t.Run(action+"/"+tc.name, func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+				args := append([]string{"workers", action}, tc.operands...)
+				var out bytes.Buffer
+				err := RunCLI(c, &out, "demo", args, false, false)
+
+				path := "/workers"
+				if action == "project" {
+					path = "/workers/projects/p1/limit"
+				}
+				if tc.wantPost {
+					if err != nil {
+						t.Fatalf("valid worker limit failed: %v", err)
+					}
+					if got := rec.count("POST", path); got != 1 {
+						t.Fatalf("valid worker limit should make exactly one POST, got %d:\n%s", got, rec.all())
+					}
+					if !rec.sawForm(tc.wantForm) {
+						t.Fatalf("expected %s in form data:\n%v", tc.wantForm, rec.forms)
+					}
+					if tc.operands[0] == "0" {
+						if !strings.Contains(out.String(), "unlimited") && !strings.Contains(out.String(), "no limit") {
+							t.Errorf("zero worker limit should retain its unlimited message:\n%s", out.String())
+						}
+					} else if !strings.Contains(out.String(), "set to 6") {
+						t.Errorf("positive worker limit should report its value:\n%s", out.String())
+					}
+					return
+				}
+
+				if err == nil {
+					t.Fatalf("invalid worker limit should return a nonzero CLI result; output=%q", out.String())
+				}
+				if got := rec.count("POST", path); got != 0 {
+					t.Fatalf("invalid worker limit must not make a POST, got %d:\n%s", got, rec.all())
+				}
+				if strings.Contains(out.String(), "unlimited") || strings.Contains(out.String(), "no limit") || strings.Contains(out.String(), "set to") {
+					t.Errorf("invalid worker limit must not report success:\n%s", out.String())
+				}
+			})
+		}
+	}
+}
+
 func TestCLIPersonalityListShowAndJSON(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
 		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard tone"

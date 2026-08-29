@@ -1890,12 +1890,9 @@ func workersCommand() command {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			if action == "limit" || action == "project" {
-				if len(rest) == 0 {
-					return m, errCmd("usage: /workers " + action + " <n>")
-				}
-				n := atoiSafe(rest[0])
-				if n < 0 {
-					return m, errCmd("worker limit must be a positive number")
+				n, err := parseWorkerLimit(action, rest)
+				if err != nil {
+					return m, errCmd(err.Error())
 				}
 				if action == "project" {
 					mm, cmd, ok := m.needProject()
@@ -3019,6 +3016,20 @@ func splitPipe(s string) (string, string) {
 		return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
 	}
 	return strings.TrimSpace(s), ""
+}
+
+// parseWorkerLimit validates the sole numeric operand used by the global and
+// project worker-limit commands. Zero is valid and means unlimited; malformed,
+// negative, overflowing, and surplus operands are rejected before any request.
+func parseWorkerLimit(action string, args []string) (int, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("usage: /workers %s <n>", action)
+	}
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("worker limit must be a positive number")
+	}
+	return n, nil
 }
 
 func atoiSafe(s string) int {
