@@ -700,8 +700,7 @@ func automationBadgeText(n *html.Node) string {
 	walk = func(node *html.Node) {
 		if node.Type == html.TextNode {
 			text := strings.ToLower(strings.TrimSpace(node.Data))
-			switch text {
-			case "active", "paused", "draft", "archived":
+			if automationStateRank(text) >= 0 {
 				state = text
 			}
 			return
