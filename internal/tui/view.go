@@ -864,18 +864,16 @@ func renderAutomationDetailNodes(b *strings.Builder, detail client.AutomationDet
 		return automationDetailNodeSortKey(nodes[i]) < automationDetailNodeSortKey(nodes[j])
 	})
 	rows := [][]string{{"NODE", "STATE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
+	legacyNodeCounts := detail.NodeCountsAvailable && !automationDetailHasNodeCountAvailability(detail)
 	for _, node := range nodes {
-		state := formatAutomationDetailState(firstNonEmpty(node.DisplayState, "not reported"))
+		state := formatAutomationNodeState(firstNonEmpty(node.DisplayState, "not reported"))
 		counts := node.Counts
-		countCells := []string{"—", "—", "—", "—", "—"}
-		if detail.NodeCountsAvailable {
-			countCells = []string{
-				fmt.Sprintf("%d", counts.Running),
-				fmt.Sprintf("%d", counts.Waiting),
-				fmt.Sprintf("%d", counts.Blocked),
-				fmt.Sprintf("%d", counts.Failed),
-				fmt.Sprintf("%d", counts.CompletedRecently),
-			}
+		countCells := []string{
+			automationDetailTableCount(counts.Running, counts.RunningAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.Waiting, counts.WaitingAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.Blocked, counts.BlockedAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.Failed, counts.FailedAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.CompletedRecently, counts.CompletedRecentlyAvailable || legacyNodeCounts),
 		}
 		rows = append(rows, append([]string{firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"), state}, countCells...))
 	}
@@ -898,12 +896,10 @@ func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDet
 		return automationDetailEdgeSortKey(edges[i]) < automationDetailEdgeSortKey(edges[j])
 	})
 	rows := [][]string{{"FROM", "TO", "LABEL", "TRANSITIONS", "RECENT"}}
+	legacyEdgeCounts := detail.EdgeCountsAvailable && !automationDetailHasEdgeCountAvailability(detail)
 	for _, edge := range edges {
-		transitions, recent := "—", "—"
-		if detail.EdgeCountsAvailable {
-			transitions = fmt.Sprintf("%d", edge.TransitionCount)
-			recent = fmt.Sprintf("%d", edge.RecentTransitionCount)
-		}
+		transitions := automationDetailTableCount(edge.TransitionCount, edge.TransitionCountAvailable || legacyEdgeCounts)
+		recent := automationDetailTableCount(edge.RecentTransitionCount, edge.RecentTransitionCountAvailable || legacyEdgeCounts)
 		rows = append(rows, []string{
 			firstNonEmpty(edge.SourceName, edge.SourceNodeID, "—"),
 			firstNonEmpty(edge.TargetName, edge.TargetNodeID, "—"),
@@ -929,6 +925,46 @@ func automationDetailCount(value int, available bool) string {
 		return "not reported"
 	}
 	return fmt.Sprintf("%d", value)
+}
+
+func automationDetailTableCount(value int, available bool) string {
+	if !available {
+		return "—"
+	}
+	return fmt.Sprintf("%d", value)
+}
+
+func automationDetailHasNodeCountAvailability(detail client.AutomationDetail) bool {
+	for _, node := range detail.Nodes {
+		counts := node.Counts
+		if counts.RunningAvailable || counts.WaitingAvailable || counts.BlockedAvailable || counts.FailedAvailable || counts.CompletedRecentlyAvailable {
+			return true
+		}
+	}
+	return false
+}
+
+func automationDetailHasEdgeCountAvailability(detail client.AutomationDetail) bool {
+	for _, edge := range detail.Edges {
+		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
+			return true
+		}
+	}
+	return false
+}
+
+func formatAutomationNodeState(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "not reported"
+	}
+	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(value, "_", " "), "-", " "))
+	switch normalized {
+	case "completed", "recent", "completed recently", "recently completed":
+		return "recently completed"
+	default:
+		return normalized
+	}
 }
 
 func formatAutomationDetailState(value string) string {
@@ -1009,6 +1045,17 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 
 // --- personalities ---
 
+// personalityKind returns the user-facing type for a personality.
+func personalityKind(p client.Personality) string {
+	if !p.IsPreset {
+		return "custom"
+	}
+	if p.HasCustom {
+		return "override"
+	}
+	return "built-in"
+}
+
 func renderPersonalities(personalities []client.Personality, filter string) string {
 	rows := [][]string{{"KEY", "NAME", "TYPE", "DESCRIPTION", "PROMPT PREVIEW", "STATE"}}
 	for _, p := range personalities {
@@ -1019,12 +1066,7 @@ func renderPersonalities(personalities []client.Personality, filter string) stri
 		if key == "" {
 			key = "(base)"
 		}
-		kind := "built-in"
-		if !p.IsPreset {
-			kind = "custom"
-		} else if p.HasCustom {
-			kind = "override"
-		}
+		kind := personalityKind(p)
 		state := ""
 		if p.Active {
 			state = "active"
@@ -1052,12 +1094,7 @@ func renderPersonalityDetail(p client.Personality) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(p.Name, p.Key, "Base")))
 
-	kind := "built-in"
-	if !p.IsPreset {
-		kind = "custom"
-	} else if p.HasCustom {
-		kind = "override"
-	}
+	kind := personalityKind(p)
 	key := firstNonEmpty(p.Key, "(base)")
 	fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("key %s · %s%s", key, kind, func() string {
 		if p.Active {
@@ -1349,7 +1386,8 @@ func renderHelp() string {
 			fmt.Fprintf(&b, "  %-*s  %s\n", width, "", dimStyle.Render(line))
 		}
 	}
-	b.WriteString("\n\n" + dimStyle.Render("keys: tab complete · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"))
+	b.WriteString("\n\n" + dimStyle.Render(cliProjectSelectionHint))
+	b.WriteString("\n" + dimStyle.Render("keys: tab complete · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"))
 	b.WriteString("\n" + dimStyle.Render(cmdPrefix+"help <command> shows the full syntax of one command"))
 	return b.String()
 }
@@ -1542,9 +1580,13 @@ func renderUsage(u *client.UsageAnalytics) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func renderAnalyticsNoData(title string) string {
+	return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
+}
+
 func renderRates(rates []client.SuccessFailureRate) string {
 	if len(rates) == 0 {
-		return sectionStyle.Render("Success / failure") + "\n  " + dimStyle.Render("no data")
+		return renderAnalyticsNoData("Success / failure")
 	}
 	var b strings.Builder
 	b.WriteString(sectionStyle.Render("Success / failure by period") + "\n")
@@ -1618,7 +1660,7 @@ func selectTopExecTimes(times []client.AvgExecutionTime) []execTimeCandidate {
 
 func renderExecTimes(title string, times []client.AvgExecutionTime) string {
 	if len(times) == 0 {
-		return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
+		return renderAnalyticsNoData(title)
 	}
 	selected := selectTopExecTimes(times)
 	maxMs := selected[0].value.AvgMs
@@ -1636,7 +1678,7 @@ func renderExecTimes(title string, times []client.AvgExecutionTime) string {
 
 func renderFrequent(tasks []client.TaskFrequency) string {
 	if len(tasks) == 0 {
-		return sectionStyle.Render("Most frequent tasks") + "\n  " + dimStyle.Render("no data")
+		return renderAnalyticsNoData("Most frequent tasks")
 	}
 	maxCount := 0
 	for _, t := range tasks {

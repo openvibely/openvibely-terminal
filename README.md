@@ -37,9 +37,13 @@ It is also a **CLI**: pass a command as arguments and it runs once, prints the
 result and exits — no UI, no alt-screen.
 
 ```bash
+# With one backend project, project-scoped commands can omit -project.
 openvibely-tui tasks
+# With multiple projects, provide a name, full ID, or unique ID prefix.
 openvibely-tui -project demo tasks run "release notes"
 openvibely-tui -project demo chat "why is that task taking so long?"
+# Project-independent commands do not need a project reference.
+openvibely-tui projects list
 openvibely-tui projects create demo /Users/me/src/demo
 ```
 
@@ -64,7 +68,7 @@ Flags override environment variables.
 | `-server` | `OPENVIBELY_SERVER_URL` | `http://localhost:3001` | Backend base URL |
 | `-user` | `OPENVIBELY_AUTH_USERNAME` | – | Username, when the server runs with `AUTH_ENABLED=true` |
 | `-pass` | `OPENVIBELY_AUTH_PASSWORD` | – | Password, when the server runs with `AUTH_ENABLED=true` |
-| `-project` | `OPENVIBELY_PROJECT` | first project | Project to select: name, ID or unique prefix |
+| `-project` | `OPENVIBELY_PROJECT` | only project, when there is exactly one | Project to select: name, ID or unique prefix; required for project-scoped CLI commands when several projects exist |
 
 ```bash
 # Interactive and safest for avoiding shell-history/process-list exposure:
@@ -296,6 +300,14 @@ openvibely-tui --help                             # commands + flags
 
 The leading `/` is optional, so a line copied from the TUI works as-is
 (`openvibely-tui /tasks`). Output is plain text suitable for piping.
+When the backend has exactly one project, project-scoped commands use it when
+`-project` is omitted. When more than one project exists, those commands fail
+before making a project request and require `-project <name|id>` (a full ID,
+name, or unique ID prefix). `projects list`, `projects create`, `help`, `login`,
+and other global commands remain usable without a project reference. In this
+implicit single-project mode, human output begins with `project: <name> (project_id=<id>)`; `--json` output uses an envelope with `project_id`,
+`project_name`, and `data` so scripts can see the selected scope.
+
 Interactive `projects create` selects the new project immediately. In one-shot CLI
 mode, the process ends after creation; the plain result prints the backend project
 ID and a copyable next step such as `openvibely-tui -project <ID> tasks`. Use that
@@ -343,9 +355,12 @@ bare `tasks` on the command line.
 
 Notes:
 
-- `-project` accepts a name, ID or unique prefix. An unknown or **ambiguous**
+- `-project` accepts a name, full ID or unique prefix. An unknown or **ambiguous**
   reference exits non-zero and lists the candidates rather than running against
-  the wrong project. Without it the server's first project is used.
+  the wrong project. A CLI run may omit it only when there are zero or exactly
+  one backend projects; project-scoped commands require `-project <name|id>`
+  when multiple projects exist. `projects list`, `projects create`, `help` and
+  other global commands do not require it.
 - Chat and long-running commands block until the backend finishes, then print
   the result.
 - Errors go to stderr with a non-zero exit status; results go to stdout.

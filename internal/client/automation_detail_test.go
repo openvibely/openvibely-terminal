@@ -129,7 +129,7 @@ func TestParseAutomationDetailDraftHasNoLiveGraph(t *testing.T) {
 }
 
 func TestParseAutomationDetailMalformedOptionalValuesArePartial(t *testing.T) {
-	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au1" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-count-running="not-a-number"><strong>Node</strong></g></div><div data-automation-live-metrics data-automation-active-invocations="NaN" data-automation-active-work-items="2"></div></div>`)
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au1" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-count-running="not-a-number"><strong>Node</strong></g></div><div data-automation-live-metrics data-automation-active-invocations="NaN" data-automation-active-work-items="2"></div><div data-automation-external-state data-automation-external-tracked-resources="NaN"></div></div>`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +138,12 @@ func TestParseAutomationDetailMalformedOptionalValuesArePartial(t *testing.T) {
 	}
 	if detail.ActiveInvocationsAvailable || !detail.ActiveWorkItemsAvailable || detail.ActiveWorkItems != 2 {
 		t.Fatalf("malformed runtime availability = invocations %t, work %d/%t", detail.ActiveInvocationsAvailable, detail.ActiveWorkItems, detail.ActiveWorkItemsAvailable)
+	}
+	if !detail.ExternalStateAvailable || detail.ExternalState.TrackedResourcesAvailable {
+		t.Fatalf("malformed external availability = %+v/%t", detail.ExternalState, detail.ExternalStateAvailable)
+	}
+	if !strings.Contains(strings.Join(detail.Warnings, "\n"), "tracked resources count is malformed") {
+		t.Fatalf("malformed external count warning missing: %v", detail.Warnings)
 	}
 	if len(detail.Warnings) == 0 {
 		t.Fatal("malformed optional values should produce warnings")
@@ -176,6 +182,127 @@ func TestGetAutomationDetailMalformedNotFoundAndBackendErrors(t *testing.T) {
 				t.Fatalf("error %v does not unwrap to ErrAutomationNotFound", err)
 			}
 		})
+	}
+}
+
+func TestParseAutomationDetailTracksPerFieldAvailabilityAndRecentState(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel>
+			<g data-automation-live-node="n1" data-automation-node-key="first" data-counts='{"running":0,"failed":2}'><strong>First</strong></g>
+			<g data-automation-live-node="n2" data-automation-node-key="second"><strong>Second</strong><small>1 blocked</small></g>
+			<g data-automation-live-node="n3" data-automation-node-key="third" class="automation-graph-node--completed"><strong>Third</strong></g>
+			<g data-automation-live-node="n4" data-automation-node-key="fourth" data-counts='{"running":0}'><strong>Fourth</strong><small>9 running · 2 failed</small></g>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 4 || !detail.NodeCountsAvailable {
+		t.Fatalf("nodes = %+v, available=%t", detail.Nodes, detail.NodeCountsAvailable)
+	}
+	first, second, third, fourth := detail.Nodes[0], detail.Nodes[1], detail.Nodes[2], detail.Nodes[3]
+	if !first.Counts.RunningAvailable || first.Counts.Running != 0 || !first.Counts.FailedAvailable || first.Counts.Failed != 2 {
+		t.Fatalf("first counts = %+v", first.Counts)
+	}
+	if first.Counts.WaitingAvailable || first.Counts.BlockedAvailable || first.Counts.CompletedRecentlyAvailable {
+		t.Fatalf("missing first count fields reported: %+v", first.Counts)
+	}
+	if !second.Counts.BlockedAvailable || second.Counts.Blocked != 1 || second.Counts.RunningAvailable || second.Counts.FailedAvailable {
+		t.Fatalf("second counts = %+v", second.Counts)
+	}
+	if third.DisplayState != "recently_completed" {
+		t.Fatalf("third state = %q, want recently_completed", third.DisplayState)
+	}
+	if !fourth.Counts.RunningAvailable || fourth.Counts.Running != 0 || !fourth.Counts.FailedAvailable || fourth.Counts.Failed != 2 || fourth.Counts.WaitingAvailable {
+		t.Fatalf("structured counts should win per field over text counts: %+v", fourth.Counts)
+	}
+}
+
+func TestParseAutomationDetailPreservesDistinctAndUnlabelledEdges(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edges" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<line class="automation-graph-edge" aria-label="approved, 3 transitions, 1 recent"></line>
+			<line class="automation-graph-edge" aria-label="approved, 4 transitions, 0 recent"></line>
+			<line class="automation-graph-edge" aria-label=", 0 transitions, 0 recent"></line>
+			<line class="automation-graph-edge" data-transition-count="0"></line>
+		</svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="e1"><div>Start → Review</div><p>approved</p></div>
+			<div data-automation-live-edge-detail="e2"><div>Start → Deploy</div><p>approved</p></div>
+			<div data-automation-live-edge-detail="e3"><div>Review → Archive</div></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 4 || !detail.EdgeCountsAvailable {
+		t.Fatalf("edges = %+v, available=%t", detail.Edges, detail.EdgeCountsAvailable)
+	}
+	byTopology := make(map[string]AutomationLiveEdge, len(detail.Edges))
+	for _, edge := range detail.Edges {
+		byTopology[edge.SourceName+"→"+edge.TargetName] = edge
+	}
+	startReview, ok := byTopology["Start→Review"]
+	if !ok || startReview.EdgeKey != "e1" || startReview.Label != "approved" || startReview.TransitionCount != 3 || startReview.RecentTransitionCount != 1 {
+		t.Fatalf("start/review edge = %+v", startReview)
+	}
+	startDeploy, ok := byTopology["Start→Deploy"]
+	if !ok || startDeploy.EdgeKey != "e2" || startDeploy.TransitionCount != 4 || !startDeploy.RecentTransitionCountAvailable || startDeploy.RecentTransitionCount != 0 {
+		t.Fatalf("start/deploy edge = %+v", startDeploy)
+	}
+	reviewArchive, ok := byTopology["Review→Archive"]
+	if !ok || reviewArchive.EdgeKey != "e3" || reviewArchive.Label != "" || reviewArchive.TransitionCount != 0 || !reviewArchive.TransitionCountAvailable {
+		t.Fatalf("review/archive edge = %+v", reviewArchive)
+	}
+	countOnly := 0
+	for _, edge := range detail.Edges {
+		if edge.SourceName == "" && edge.TargetName == "" && edge.EdgeKey == "" {
+			if edge.TransitionCountAvailable && edge.TransitionCount == 0 {
+				countOnly++
+			}
+		}
+	}
+	if countOnly != 1 {
+		t.Fatalf("count-only edges = %d, edges=%+v", countOnly, detail.Edges)
+	}
+}
+
+func TestParseActualAutomationLiveRouteMarksOmittedSectionsUnavailable(t *testing.T) {
+	const actualFragment = `<div id="automation-live" data-automation-id="au-actual" data-project-id="p1">
+		<div data-automation-live-header><nav data-automation-breadcrumb><h2>Actual automation</h2></nav><p>Live description</p></div>
+		<div data-automation-readonly-canvas><div data-automation-live-status>active</div><div data-automation-live-health>healthy</div>
+			<div data-automation-graph-panel><svg data-automation-canvas>
+				<line class="automation-graph-edge" aria-label="approved, 2 transitions, 1 recent"></line>
+				<g data-automation-live-node="n1"><rect class="automation-graph-node--completed"></rect><foreignObject><div><strong>Start</strong><span class="automation-node-state--completed">Recently completed</span><small>2 recent</small></div></foreignObject></g>
+				<g data-automation-live-node="n2"><rect class="automation-graph-node--waiting"></rect><foreignObject><div><strong>Review</strong><span class="automation-node-state--waiting">Waiting</span><small>No active work</small></div></foreignObject></g>
+			</svg></div>
+			<div data-automation-live-details-panel><div data-automation-live-node-details>
+				<section data-automation-live-node-detail="start"><div><h3>Start</h3><p>start · trigger</p></div></section>
+				<section data-automation-live-node-detail="review"><div><h3>Review</h3><p>review · implementation</p></div></section>
+			</div><div data-automation-live-edge-details><div data-automation-live-edge-detail="e1"><div>Start → Review</div><p>approved</p></div></div></div>
+		</div>
+	</div>`
+	detail, err := parseAutomationDetailFromString(actualFragment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Automation.ID != "au-actual" || detail.Automation.ProjectID != "p1" || detail.Automation.Name != "Actual automation" || detail.Automation.LifecycleState != "active" || detail.Automation.HealthState != "healthy" {
+		t.Fatalf("metadata = %+v", detail.Automation)
+	}
+	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 2 || len(detail.Edges) != 1 {
+		t.Fatalf("actual graph = %+v", detail)
+	}
+	if detail.Nodes[0].DisplayState != "recently_completed" {
+		t.Fatalf("actual completed state = %q", detail.Nodes[0].DisplayState)
+	}
+	if !detail.NodeCountsAvailable || !detail.Nodes[0].Counts.CompletedRecentlyAvailable || detail.Nodes[0].Counts.CompletedRecently != 2 {
+		t.Fatalf("actual node counts = %+v", detail.Nodes[0].Counts)
+	}
+	if detail.ActiveInvocationsAvailable || detail.ActiveWorkItemsAvailable || detail.ResourcesAvailable || detail.ExternalStateAvailable {
+		t.Fatalf("omitted live sections falsely available: runtime=%t/%t resources=%t external=%t", detail.ActiveInvocationsAvailable, detail.ActiveWorkItemsAvailable, detail.ResourcesAvailable, detail.ExternalStateAvailable)
+	}
+	if !detail.Partial || len(detail.Warnings) == 0 {
+		t.Fatalf("actual omitted sections should be partial with a warning: %+v", detail)
 	}
 }
 

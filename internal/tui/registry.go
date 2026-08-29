@@ -163,15 +163,17 @@ func selectorOr(m Model, usage string, sel tea.Cmd) (Model, tea.Cmd) {
 // taskSelectorItems converts tasks into selector rows.
 func taskSelectorItems(tasks []client.Task) []selectorItem {
 	items := make([]selectorItem, 0, len(tasks))
-	for _, t := range tasks {
-		detail := t.Category
-		if t.Status != "" {
-			detail += " · " + t.Status
+	for _, task := range tasks {
+		task := task
+		detail := task.Category
+		if task.Status != "" {
+			detail += " · " + task.Status
 		}
 		items = append(items, selectorItem{
-			ref:    t.ID,
-			label:  firstNonEmpty(t.Title, shortID(t.ID)),
-			detail: strings.Trim(detail, " ·"),
+			ref:          task.ID,
+			label:        firstNonEmpty(task.Title, shortID(task.ID)),
+			detail:       strings.Trim(detail, " ·"),
+			resolvedTask: &task,
 		})
 	}
 	return items
@@ -372,6 +374,9 @@ func tasksCommand() command {
 						return renderTaskReviews(t, reviews), nil
 					})
 				case "add":
+					if len(reviewRest) == 0 {
+						return taskSelectorWithSuffix(m, commandUsage("tasks", "reviews add"), "tasks reviews add", " ")
+					}
 					if len(reviewRest) < 3 {
 						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
@@ -385,7 +390,7 @@ func tasksCommand() command {
 						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
 					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
-						t, err := resolveTask(ctx, c, pid, reviewRef)
+						t, err := m.resolveReviewTask(ctx, c, pid, reviewRef)
 						if err != nil {
 							return "", err
 						}
@@ -712,6 +717,16 @@ func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (
 	return matchRef(tasks, ref,
 		func(t client.Task) string { return t.ID },
 		func(t client.Task) string { return t.Title })
+}
+
+func (m Model) resolveReviewTask(ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {
+	if m.reviewPrefillTask != nil &&
+		m.reviewPrefillProjectID == projectID &&
+		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTaskRef), strings.TrimSpace(ref)) &&
+		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTask.ID), strings.TrimSpace(m.reviewPrefillTaskRef)) {
+		return *m.reviewPrefillTask, nil
+	}
+	return resolveTask(ctx, c, projectID, ref)
 }
 
 func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
@@ -1556,7 +1571,7 @@ func skillsCommand() command {
 					case "disable":
 						err = c.SetSkillEnabled(ctx, pid, s.Handle, s.Scope, false)
 					case "always", "load":
-						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, s.Scope, !s.AlwaysUse)
+						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, s.Scope, true)
 					}
 					if err != nil {
 						return "", err
@@ -1891,12 +1906,9 @@ func workersCommand() command {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			if action == "limit" || action == "project" {
-				if len(rest) == 0 {
-					return m, errCmd("usage: /workers " + action + " <n>")
-				}
-				n := atoiSafe(rest[0])
-				if n < 0 {
-					return m, errCmd("worker limit must be a positive number")
+				n, err := parseWorkerLimit(action, rest)
+				if err != nil {
+					return m, errCmd(err.Error())
 				}
 				if action == "project" {
 					mm, cmd, ok := m.needProject()
@@ -2052,12 +2064,7 @@ func personalitySelector(m Model, usage, command, action string, prefill bool) (
 				if ref == "" {
 					ref = personality.Name
 				}
-				kind := "built-in"
-				if !personality.IsPreset {
-					kind = "custom"
-				} else if personality.HasCustom {
-					kind = "override"
-				}
+				kind := personalityKind(personality)
 				item := selectorItem{
 					ref:    ref,
 					label:  firstNonEmpty(personality.Name, ref),
@@ -3121,6 +3128,20 @@ func splitPipe(s string) (string, string) {
 		return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
 	}
 	return strings.TrimSpace(s), ""
+}
+
+// parseWorkerLimit validates the sole numeric operand used by the global and
+// project worker-limit commands. Zero is valid and means unlimited; malformed,
+// negative, overflowing, and surplus operands are rejected before any request.
+func parseWorkerLimit(action string, args []string) (int, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("usage: /workers %s <n>", action)
+	}
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("worker limit must be a positive number")
+	}
+	return n, nil
 }
 
 func atoiSafe(s string) int {

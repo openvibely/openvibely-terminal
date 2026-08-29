@@ -177,6 +177,50 @@ func TestListAutomationsReadsCardMarkup(t *testing.T) {
 	}
 }
 
+func parseAutomationCardFixture(t *testing.T, badges string) Automation {
+	t.Helper()
+	page := `<div data-automation-url="/automations/au1">
+	  ` + badges + `
+	  <button data-automation-card-delete="au1" data-automation-name="Fixture"></button>
+	</div>`
+	root, err := html.Parse(strings.NewReader(page))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+	automations := parseAutomations(root)
+	if len(automations) != 1 {
+		t.Fatalf("got %d automations, want 1: %+v", len(automations), automations)
+	}
+	return automations[0]
+}
+
+func TestParseAutomationCardRecognizesLifecycleStates(t *testing.T) {
+	for _, state := range []string{"active", "paused", "draft", "archived"} {
+		t.Run(state, func(t *testing.T) {
+			got := parseAutomationCardFixture(t, `<span class="badge">`+state+`</span>`)
+			if got.State != state {
+				t.Errorf("state = %q, want %q", got.State, state)
+			}
+		})
+	}
+}
+
+func TestParseAutomationCardIgnoresUnknownBadges(t *testing.T) {
+	got := parseAutomationCardFixture(t, `<span class="badge">pending</span><span class="badge"><em>running</em></span>`)
+	if got.State != "" {
+		t.Errorf("state = %q, want empty for unknown badges", got.State)
+	}
+}
+
+func TestParseAutomationCardSelectsHighestRankedLifecycleBadge(t *testing.T) {
+	badges := `<span class="badge">active</span><span class="badge">paused</span>` +
+		`<span class="badge"><strong>draft</strong></span><span class="badge">archived</span>`
+	got := parseAutomationCardFixture(t, badges)
+	if got.State != "archived" {
+		t.Errorf("state = %q, want archived", got.State)
+	}
+}
+
 // benchmarkAutomationsPage builds representative cards with nested action markup.
 // The nested controls are intentionally noisy because that is the DOM work the
 // old whole-page NodeText path normalized even though the list only needs the

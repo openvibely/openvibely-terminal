@@ -52,6 +52,72 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 
 const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
 
+func TestCLIWorkersLimitOperandValidation(t *testing.T) {
+	cases := []struct {
+		name     string
+		operands []string
+		wantPost bool
+		wantForm string
+	}{
+		{name: "empty", operands: []string{""}},
+		{name: "nonnumeric", operands: []string{"abc"}},
+		{name: "negative", operands: []string{"-1"}},
+		{name: "overflow 2^63", operands: []string{"9223372036854775808"}},
+		{name: "overflow max uint64", operands: []string{"18446744073709551615"}},
+		{name: "overflow 2^64", operands: []string{"18446744073709551616"}},
+		{name: "positive", operands: []string{"6"}, wantPost: true, wantForm: "max_workers=6"},
+		{name: "zero", operands: []string{"0"}, wantPost: true, wantForm: "max_workers=0"},
+		{name: "surplus operand", operands: []string{"6", "extra"}},
+	}
+
+	for _, action := range []string{"limit", "project"} {
+		action := action
+		for _, tc := range cases {
+			tc := tc
+			t.Run(action+"/"+tc.name, func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+				args := append([]string{"workers", action}, tc.operands...)
+				var out bytes.Buffer
+				err := RunCLI(c, &out, "demo", args, false, false)
+
+				path := "/workers"
+				if action == "project" {
+					path = "/workers/projects/p1/limit"
+				}
+				if tc.wantPost {
+					if err != nil {
+						t.Fatalf("valid worker limit failed: %v", err)
+					}
+					if got := rec.count("POST", path); got != 1 {
+						t.Fatalf("valid worker limit should make exactly one POST, got %d:\n%s", got, rec.all())
+					}
+					if !rec.sawForm(tc.wantForm) {
+						t.Fatalf("expected %s in form data:\n%v", tc.wantForm, rec.forms)
+					}
+					if tc.operands[0] == "0" {
+						if !strings.Contains(out.String(), "unlimited") && !strings.Contains(out.String(), "no limit") {
+							t.Errorf("zero worker limit should retain its unlimited message:\n%s", out.String())
+						}
+					} else if !strings.Contains(out.String(), "set to 6") {
+						t.Errorf("positive worker limit should report its value:\n%s", out.String())
+					}
+					return
+				}
+
+				if err == nil {
+					t.Fatalf("invalid worker limit should return a nonzero CLI result; output=%q", out.String())
+				}
+				if got := rec.count("POST", path); got != 0 {
+					t.Fatalf("invalid worker limit must not make a POST, got %d:\n%s", got, rec.all())
+				}
+				if strings.Contains(out.String(), "unlimited") || strings.Contains(out.String(), "no limit") || strings.Contains(out.String(), "set to") {
+					t.Errorf("invalid worker limit must not report success:\n%s", out.String())
+				}
+			})
+		}
+	}
+}
+
 func TestCLIPersonalityListShowAndJSON(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
 		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard tone"
@@ -492,6 +558,11 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 	if strings.Contains(got, "/tasks") {
 		t.Errorf("CLI help should not use slash form:\n%s", got)
 	}
+	for _, want := range []string{"-project <name|id>", "projects list/create", "Global commands"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("help output missing project-scope guidance %q:\n%s", want, got)
+		}
+	}
 	// Every registered command must be reachable from help.
 	for _, c := range commands {
 		if !strings.Contains(got, c.name) {
@@ -683,6 +754,143 @@ func TestCLIStatusUsesOneDelayedCountWave(t *testing.T) {
 	}
 	if elapsed >= 2*countDelay {
 		t.Fatalf("CLI status took %s; expected one delayed count-refresh wave, not two", elapsed)
+	}
+}
+
+func TestCLIRequiresExplicitProjectWhenMultipleProjectsExist(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		force     bool
+		json      bool
+		forbidden []string
+	}{
+		{name: "tasks read", args: []string{"tasks"}, forbidden: []string{"/tasks"}},
+		{name: "tasks JSON read", args: []string{"tasks"}, json: true, forbidden: []string{"/tasks"}},
+		{name: "tasks mutation", args: []string{"tasks", "run", "task"}, forbidden: []string{"/tasks"}},
+		{name: "alerts read", args: []string{"alerts"}, forbidden: []string{"/alerts"}},
+		{name: "automations mutation", args: []string{"automations", "pause", "automation"}, forbidden: []string{"/automations"}},
+		{name: "forced task deletion", args: []string{"tasks", "delete", "task"}, force: true, forbidden: []string{"/tasks"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+			})
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "", tc.args, tc.force, tc.json)
+			if err == nil {
+				t.Fatalf("%v succeeded without an explicit project", tc.args)
+			}
+			for _, want := range []string{"multiple projects", "-project <name|id>"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q missing %q", err, want)
+				}
+			}
+			for _, path := range tc.forbidden {
+				if strings.Contains(rec.all(), " "+path) {
+					t.Errorf("unscoped command called %s; requests:\n%s", path, rec.all())
+				}
+			}
+			if out.Len() != 0 {
+				t.Errorf("failed preflight wrote output: %q", out.String())
+			}
+		})
+	}
+}
+
+func TestCLIGlobalProjectListRemainsUsableWithoutProject(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"projects", "list"}, false, true); err != nil {
+		t.Fatalf("projects list failed without a project: %v", err)
+	}
+	var projects []client.Project
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &projects); err != nil {
+		t.Fatalf("projects list output is not the existing JSON shape: %v\n%s", err, out.String())
+	}
+	if len(projects) != 2 || projects[0].ID != "p1" || projects[1].ID != "p2" {
+		t.Fatalf("projects list = %+v", projects)
+	}
+	if rec.saw("GET", "/tasks") || rec.saw("GET", "/alerts") || rec.saw("GET", "/automations") {
+		t.Fatalf("projects list dispatched a project-scoped endpoint:\n%s", rec.all())
+	}
+}
+
+func TestCLISingleProjectImplicitScopeIsVisibleInPlainAndJSONOutput(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1" title="Implicit project task">Implicit project task</a>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": `{"projects":[{"id":"p1","name":"solo"}]}`,
+		"/tasks":        board,
+	})
+
+	var plain bytes.Buffer
+	if err := RunCLI(c, &plain, "", []string{"tasks"}, false, false); err != nil {
+		t.Fatalf("implicit plain tasks failed: %v", err)
+	}
+	if !strings.Contains(plain.String(), "project: solo (project_id=p1)") || !strings.Contains(plain.String(), "Implicit project task") {
+		t.Fatalf("plain output did not identify its implicit scope:\n%s", plain.String())
+	}
+	if !rec.sawQuery("GET /tasks?project_id=p1") {
+		t.Fatalf("implicit plain task request lost project scope:\n%s", rec.all())
+	}
+
+	var machine bytes.Buffer
+	if err := RunCLI(c, &machine, "", []string{"tasks"}, false, true); err != nil {
+		t.Fatalf("implicit JSON tasks failed: %v", err)
+	}
+	var scoped struct {
+		ProjectID   string          `json:"project_id"`
+		ProjectName string          `json:"project_name"`
+		Data        json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(machine.String())), &scoped); err != nil {
+		t.Fatalf("implicit JSON output is not scoped JSON: %v\n%s", err, machine.String())
+	}
+	if scoped.ProjectID != "p1" || scoped.ProjectName != "solo" {
+		t.Fatalf("implicit JSON scope = %q/%q, want p1/solo", scoped.ProjectID, scoped.ProjectName)
+	}
+	var tasks []client.Task
+	if err := json.Unmarshal(scoped.Data, &tasks); err != nil {
+		t.Fatalf("scoped JSON data is not the task list: %v\n%s", err, scoped.Data)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "t-1" {
+		t.Fatalf("scoped JSON tasks = %+v", tasks)
+	}
+}
+
+func TestCLIExplicitProjectNameIDAndPrefixRemainScoped(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1" title="Scoped task">Scoped task</a>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": `{"projects":[{"id":"project-alpha","name":"Demo Project"},{"id":"project-beta","name":"Other Project"}]}`,
+		"/tasks":        board,
+	})
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "name", ref: "Demo Project", want: "project-alpha"},
+		{name: "full ID", ref: "project-beta", want: "project-beta"},
+		{name: "unique prefix", ref: "project-al", want: "project-alpha"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := RunCLI(c, &bytes.Buffer{}, tc.ref, []string{"tasks"}, false, false); err != nil {
+				t.Fatalf("explicit project %q failed: %v", tc.ref, err)
+			}
+			if !rec.sawQuery("GET /tasks?project_id=" + tc.want) {
+				t.Fatalf("project %q was not preserved on the task request:\n%s", tc.ref, rec.all())
+			}
+		})
 	}
 }
 
@@ -940,6 +1148,9 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	}
 	if detail.Automation.ID != "au-1" || detail.Automation.ProjectID != "p2" || detail.Automation.Name != "Native SDLC" {
 		t.Fatalf("automation detail JSON = %+v", detail.Automation)
+	}
+	if len(detail.Nodes) != 1 || !detail.Nodes[0].Counts.RunningAvailable || detail.Nodes[0].Counts.Running != 1 {
+		t.Fatalf("automation count availability was not preserved in JSON: %+v", detail.Nodes)
 	}
 	if strings.Contains(out.String(), "\x1b[") || strings.Contains(out.String(), "OpenVibely") {
 		t.Fatalf("JSON detail contains styling or a banner: %q", out.String())
@@ -1653,6 +1864,25 @@ func TestCLIJSONTaskReviewsAdd(t *testing.T) {
 	}
 	if review.ID != "rc-1" || review.CommentText != "Needs error handling" {
 		t.Fatalf("review = %+v", review)
+	}
+}
+
+func TestCLITaskReviewsAddWithoutReferenceReturnsUsageWithoutMutation(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        taskBoardHTML,
+	})
+
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"tasks", "reviews", "add"}, false, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "usage") {
+		t.Fatalf("expected non-zero usage error, got %v; output: %s", err, out.String())
+	}
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("CLI missing-reference path must not fetch selector tasks, got %d requests", got)
+	}
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
+		t.Fatalf("CLI missing-reference path must not mutate reviews, got %d POSTs", got)
 	}
 }
 

@@ -1599,6 +1599,76 @@ func TestWorkersProjectLimitValidatesArgument(t *testing.T) {
 	}
 }
 
+func TestWorkersLimitOperandValidationDispatch(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		wantPost  bool
+		wantForm  string
+		wantError string
+	}{
+		{name: "empty", input: `""`, wantError: "positive number"},
+		{name: "nonnumeric", input: "abc", wantError: "positive number"},
+		{name: "negative", input: "-1", wantError: "positive number"},
+		{name: "overflow 2^63", input: "9223372036854775808", wantError: "positive number"},
+		{name: "overflow max uint64", input: "18446744073709551615", wantError: "positive number"},
+		{name: "overflow 2^64", input: "18446744073709551616", wantError: "positive number"},
+		{name: "positive", input: "6", wantPost: true, wantForm: "max_workers=6"},
+		{name: "zero", input: "0", wantPost: true, wantForm: "max_workers=0"},
+		{name: "surplus operand", input: "6 extra", wantError: "usage"},
+	}
+
+	for _, action := range []string{"limit", "project"} {
+		action := action
+		for _, tc := range cases {
+			tc := tc
+			t.Run(action+"/"+tc.name, func(t *testing.T) {
+				m, rec := dispatchModel(t, nil)
+				m = runLine(t, m, "/workers "+action+" "+tc.input)
+
+				path := "/workers"
+				if action == "project" {
+					path = "/workers/projects/p1/limit"
+				}
+				if tc.wantPost {
+					if got := rec.count("POST", path); got != 1 {
+						t.Fatalf("valid worker limit should make exactly one POST, got %d:\n%s", got, rec.all())
+					}
+					if !rec.sawForm(tc.wantForm) {
+						t.Fatalf("expected %s in form data:\n%v", tc.wantForm, rec.forms)
+					}
+					if tc.input == "0" {
+						if action == "project" && !strings.Contains(transcript(m), "no limit") && !strings.Contains(transcript(m), "unlimited") {
+							t.Errorf("project zero should retain the no-limit message:\n%s", transcript(m))
+						}
+						if action == "limit" && !strings.Contains(transcript(m), "unlimited") {
+							t.Errorf("global zero should retain the unlimited message:\n%s", transcript(m))
+						}
+					} else if !strings.Contains(transcript(m), "set to 6") {
+						t.Errorf("positive worker limit should report its value:\n%s", transcript(m))
+					}
+					return
+				}
+
+				if got := rec.count("POST", path); got != 0 {
+					t.Fatalf("invalid worker limit must not make a POST, got %d:\n%s", got, rec.all())
+				}
+				out := transcript(m)
+				wantError := tc.wantError
+				if wantError == "usage" {
+					wantError = "usage: /workers " + action + " <n>"
+				}
+				if !strings.Contains(out, wantError) {
+					t.Errorf("expected validation text %q:\n%s", wantError, out)
+				}
+				if strings.Contains(out, "unlimited") || strings.Contains(out, "no limit") || strings.Contains(out, "set to") {
+					t.Errorf("invalid worker limit must not report success:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
 func TestScheduleAddResolvesTask(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 daily")
@@ -2282,7 +2352,7 @@ func automationCardHTML(id, name, state string) string {
 
 func automationDetailHTML(id, projectID, name string) string {
 	return `<div id="automation-live" data-automation-id="` + id + `" data-project-id="` + projectID + `" data-automation-name="` + name + `" data-automation-lifecycle-state="active" data-automation-health-state="healthy" data-automation-version-id="v1" data-automation-version-number="1" data-automation-version-state="published">
-		<div data-automation-graph-panel><svg data-automation-canvas><g data-automation-live-node="n1" data-automation-node-key="start" class="automation-graph-node--running"><strong>Start</strong><span class="automation-node-state--running">running</span><small>1 running</small></g></svg></div>
+		<div data-automation-graph-panel><svg data-automation-canvas><g data-automation-live-node="n1" data-automation-node-key="start" class="automation-graph-node--running"><foreignObject><div><strong>Start</strong><span class="automation-node-state--running">running</span><small>1 running</small></div></foreignObject></g></svg></div>
 		<div data-automation-live-metrics data-automation-active-invocations="2" data-automation-active-work-items="3"></div>
 		<div data-automation-resources><div data-automation-resource-row data-automation-resource-node-key="start" data-automation-resource-type="repository" data-automation-resource-id="repo1" data-automation-resource-status="ready"></div></div>
 		<div data-automation-external-state data-automation-external-status="fresh" data-automation-external-tracked-resources="1"></div>
@@ -2756,6 +2826,99 @@ func TestSkillsEnableAlways(t *testing.T) {
 			t.Errorf("expected refreshed skills:\n%s", out)
 		}
 	})
+}
+
+func TestSkillsAlwaysLoadSetTrueIdempotently(t *testing.T) {
+	tests := []struct {
+		name         string
+		action       string
+		initialState bool
+		invocations  int
+	}{
+		{name: "always false-to-true and repeat", action: "always", initialState: false, invocations: 2},
+		{name: "always already true", action: "always", initialState: true, invocations: 1},
+		{name: "load false-to-true and repeat", action: "load", initialState: false, invocations: 2},
+		{name: "load already true", action: "load", initialState: true, invocations: 1},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			alwaysUse := tc.initialState
+			var gotAlwaysUse []bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/skills":
+					mu.Lock()
+					current := alwaysUse
+					mu.Unlock()
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = fmt.Fprintf(w, `<div data-skill-handle="deploy" data-skill-name="Deploy"
+						data-skill-enabled="true" data-skill-always-use="%t" data-skill-scope="project"></div>`, current)
+				case r.Method == http.MethodPost && r.URL.Path == "/skills/deploy/always_use":
+					var payload struct {
+						AlwaysUse bool   `json:"always_use"`
+						Scope     string `json:"scope"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Errorf("decode always-use request: %v", err)
+					}
+					if payload.Scope != "project" {
+						t.Errorf("scope = %q, want project", payload.Scope)
+					}
+					mu.Lock()
+					gotAlwaysUse = append(gotAlwaysUse, payload.AlwaysUse)
+					alwaysUse = payload.AlwaysUse
+					current := alwaysUse
+					mu.Unlock()
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = fmt.Fprintf(w, `<div data-skill-handle="deploy" data-skill-name="Deploy"
+						data-skill-enabled="true" data-skill-always-use="%t" data-skill-scope="project"></div>`, current)
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{}`))
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+
+			for i := 0; i < tc.invocations; i++ {
+				m = runLine(t, m, "/skills "+tc.action+" deploy")
+			}
+
+			mu.Lock()
+			got := append([]bool(nil), gotAlwaysUse...)
+			finalState := alwaysUse
+			mu.Unlock()
+			want := make([]bool, tc.invocations)
+			for i := range want {
+				want[i] = true
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("always_use requests = %v, want %v", got, want)
+			}
+			if !finalState {
+				t.Error("repeated state-setting command disabled the skill")
+			}
+			out := transcript(m)
+			if strings.Contains(out, "error:") {
+				t.Fatalf("state-setting command reported an error:\n%s", out)
+			}
+			if count := strings.Count(out, tc.action+": deploy"); count != tc.invocations {
+				t.Errorf("success status count = %d, want %d:\n%s", count, tc.invocations, out)
+			}
+		})
+	}
 }
 
 // TestSkillsMutationsUseBackendJSONContract runs the TUI skill commands against
@@ -4696,6 +4859,71 @@ func TestTasksReviewsAddPostsInlineComment(t *testing.T) {
 	out := transcript(m)
 	if !strings.Contains(out, "added review comment") || !strings.Contains(out, "Needs error handling") {
 		t.Errorf("expected success confirmation and rendered comments, got:\n%s", out)
+	}
+}
+
+func TestTasksReviewsAddPickerPrefillsAndSubmitsOneComment(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             selTasksHTML,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+	m = runLine(t, m, "/tasks reviews add")
+	if !m.selectorActive {
+		t.Fatalf("expected task selector, transcript:\n%s", transcript(m))
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := m.input.Value(), "/tasks reviews add t-1 "; got != want {
+		t.Fatalf("prefilled input = %q, want %q", got, want)
+	}
+	if got := rec.count("GET", "/tasks"); got != 1 {
+		t.Fatalf("picker selection must reuse its one task-list lookup, got %d requests; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
+		t.Fatalf("picker selection must not submit before operands, got %d POSTs", got)
+	}
+
+	m = runLine(t, m, "internal/client/tasks.go:42 Needs error handling")
+	if got := rec.count("GET", "/tasks"); got != 1 {
+		t.Fatalf("picker submission must not resolve the selected task again, got %d task-list requests; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
+		t.Fatalf("expected exactly one review submission, got %d; calls:\n%s", got, rec.all())
+	}
+	for _, want := range []string{"file_path=internal%2Fclient%2Ftasks.go", "line_number=42", "line_type=new", "comment_text=Needs+error+handling"} {
+		if !rec.sawForm(want) {
+			t.Errorf("picker submission missing %q, forms: %v", want, rec.forms)
+		}
+	}
+	out := transcript(m)
+	if strings.Contains(strings.ToLower(out), "usage") || !strings.Contains(out, "added review comment") || !strings.Contains(out, "Needs error handling") {
+		t.Fatalf("picker submission should render refreshed review output without usage error:\n%s", out)
+	}
+}
+
+func TestTasksReviewsAddIncompleteOperandsKeepUsageError(t *testing.T) {
+	for _, line := range []string{
+		"/tasks reviews add t-1",
+		"/tasks reviews add t-1 internal/client/tasks.go:42",
+		"/tasks reviews add t-1 not-a-location Needs error handling",
+	} {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":             taskBoardHTML,
+				"/tasks/t-1/reviews": taskReviewHTML,
+			})
+			m = runLine(t, m, line)
+			if m.selectorActive {
+				t.Fatalf("incomplete review command must not open selector:\n%s", transcript(m))
+			}
+			if !strings.Contains(strings.ToLower(transcript(m)), "usage") {
+				t.Fatalf("expected usage error for %q:\n%s", line, transcript(m))
+			}
+			if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
+				t.Fatalf("incomplete review command must not mutate, got %d POSTs", got)
+			}
+		})
 	}
 }
 

@@ -2809,6 +2809,134 @@ func TestInteractiveLoginRetriesHealthProjectsAndSSE(t *testing.T) {
 	}
 }
 
+func runStartupProjectLoginRecovery(t *testing.T, switchProject bool) Model {
+	t.Helper()
+
+	projectIDs := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			http.SetCookie(w, &http.Cookie{Name: "ov_session", Value: "session-token"})
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projects":[{"id":"alpha-id","name":"alpha"},{"id":"beta-id","name":"beta"}]}`))
+		case "/api/capacity/global":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"has_capacity":true}`))
+		case "/auth/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"authenticated":true}`))
+		case "/events/live":
+			projectIDs <- r.URL.Query().Get("project_id")
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c).WithProject("alpha")
+	var loadCmd tea.Cmd
+	m, loadCmd = m.beginProjectLoadWithSSE(false, m.wantProject, true)
+	loaded, ok := loadCmd().(projectsLoadedMsg)
+	if !ok {
+		t.Fatalf("startup project load returned %T, want projectsLoadedMsg", loadCmd())
+	}
+	updated, streamCmd := m.Update(loaded)
+	m = updated.(Model)
+	if streamCmd == nil {
+		t.Fatal("startup project load did not start SSE")
+	}
+	if m.selectedID != "alpha-id" || m.selectedName != "alpha" {
+		t.Fatalf("startup project selection = %q (%q), want alpha-id (alpha)", m.selectedID, m.selectedName)
+	}
+	waitForProjectID := func(want string) {
+		t.Helper()
+		select {
+		case got := <-projectIDs:
+			if got != want {
+				t.Fatalf("SSE project_id = %q, want %q", got, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for SSE project_id %q", want)
+		}
+	}
+	waitForProjectID("alpha-id")
+
+	if switchProject {
+		m.threadID = "alpha-thread"
+		m.threadTitle = "alpha thread"
+		m.pendingMsgID = "alpha-message"
+		m.pendingMsgProjectID = "alpha-id"
+		m.pendingMsgProjectGeneration = m.projectGeneration
+		m.busy = true
+
+		var reconnect tea.Cmd
+		m, reconnect = m.pickProject("beta")
+		if reconnect == nil {
+			t.Fatal("explicit project switch did not reconnect SSE")
+		}
+		if m.selectedID != "beta-id" || m.selectedName != "beta" {
+			t.Fatalf("explicit project selection = %q (%q), want beta-id (beta)", m.selectedID, m.selectedName)
+		}
+		if m.threadID != "" || m.pendingMsgID != "" || m.pendingMsgProjectID != "" || m.busy {
+			t.Fatalf("project switch did not clear old project context: thread=%q pending=%q pendingProject=%q busy=%t", m.threadID, m.pendingMsgID, m.pendingMsgProjectID, m.busy)
+		}
+		waitForProjectID("beta-id")
+	}
+
+	m.authRequired = true
+	m.connected = false
+	m.connChecked = true
+	m, _ = m.beginLogin()
+	m.loginPassword = true
+	m.loginSubmitting = true
+	loginResult, ok := m.login("admin", "correct-password")().(loginResultMsg)
+	if !ok {
+		t.Fatalf("login command returned %T, want loginResultMsg", m.login("admin", "correct-password")())
+	}
+	updated, retry := m.Update(loginResult)
+	m = updated.(Model)
+	m = applyImmediateAuthRetryBatch(t, m, retry)
+
+	wantProjectID := "alpha-id"
+	if switchProject {
+		wantProjectID = "beta-id"
+	}
+	waitForProjectID(wantProjectID)
+	if m.selectedID != wantProjectID {
+		t.Fatalf("post-login selected project = %q, want %q", m.selectedID, wantProjectID)
+	}
+	if switchProject && (m.threadID != "" || m.pendingMsgID != "" || m.pendingMsgProjectID != "") {
+		t.Fatalf("post-login reinstated old project context: thread=%q pending=%q pendingProject=%q", m.threadID, m.pendingMsgID, m.pendingMsgProjectID)
+	}
+	m.Cleanup()
+	return m
+}
+
+func TestLoginRecoveryPreservesExplicitProjectSwitch(t *testing.T) {
+	m := runStartupProjectLoginRecovery(t, true)
+	if m.selectedID != "beta-id" || m.selectedName != "beta" {
+		t.Fatalf("selected project after explicit switch/login = %q (%q), want beta-id (beta)", m.selectedID, m.selectedName)
+	}
+}
+
+func TestLoginRecoveryPreservesStartupProjectWithoutSwitch(t *testing.T) {
+	m := runStartupProjectLoginRecovery(t, false)
+	if m.selectedID != "alpha-id" || m.selectedName != "alpha" {
+		t.Fatalf("selected project without explicit switch/login = %q (%q), want alpha-id (alpha)", m.selectedID, m.selectedName)
+	}
+}
 func TestInteractiveLoginFailureIsRetryableCancelableAndRedacted(t *testing.T) {
 	const password = "wrong-password-that-must-not-appear"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

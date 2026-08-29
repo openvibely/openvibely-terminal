@@ -121,7 +121,8 @@ type Model struct {
 	selectedID   string
 	selectedName string
 	// wantProject is a project requested up front (-project flag) and resolved
-	// once the project list arrives.
+	// only while no project has been installed yet. Subsequent reloads preserve
+	// the active project instead of reapplying this startup hint.
 	wantProject string
 
 	// projectRequestID identifies the newest in-flight project load or creation.
@@ -163,6 +164,15 @@ type Model struct {
 	pendingCommand        string // e.g. "tasks open"; re-dispatched with the chosen ref
 	selectorPrefill       bool   // prime the input instead of dispatching
 	selectorPrefillSuffix string // appended after the chosen ref when priming input
+
+	// reviewPrefillTask carries the task record loaded by the review-add
+	// selector until the user submits its completed command. It avoids a
+	// second task-board lookup while remaining scoped to the exact generated
+	// reference and project.
+	reviewPrefillTask        *client.Task
+	reviewPrefillTaskRef     string
+	reviewPrefillProjectID   string
+	reviewPrefillInputPrefix string
 
 	// live events
 	showEvents           bool // stream events into the transcript
@@ -221,11 +231,21 @@ func (m Model) WithProject(ref string) Model {
 	return m
 }
 
+// projectLoadSelectionHint returns the startup project reference only until
+// the first active project has been installed. Reloads must preserve the
+// current selection, including after authentication recovery.
+func (m Model) projectLoadSelectionHint() string {
+	if m.selectedID != "" {
+		return ""
+	}
+	return m.wantProject
+}
+
 // Init kicks off the initial connection check and project load. The first SSE
 // stream is opened by the project-load response after it installs a selected
 // project, rather than racing that response with an unscoped stream.
 func (m Model) Init() tea.Cmd {
-	_, projectLoad := m.beginProjectLoadWithSSE(false, m.wantProject, true)
+	_, projectLoad := m.beginProjectLoadWithSSE(false, m.projectLoadSelectionHint(), true)
 	return tea.Batch(
 		m.checkConnection(),
 		projectLoad,
@@ -533,6 +553,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		if m.selectorActive {
 			*m = m.clearSelector()
 		}
+		*m = (*m).clearReviewPrefill()
 		m.threadID, m.threadTitle = "", ""
 		m.input.Placeholder = defaultPlaceholder
 		m.invalidateSSE()
@@ -908,7 +929,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.selectName != "" {
 			return m.pickProject(msg.selectName)
 		}
-		if m.selectedID == "" && len(m.projects) > 0 {
+		// Interactive startup retains its convenient first-project default. A
+		// headless run leaves multiple projects unselected so CLI preflight can
+		// require an explicit, unambiguous scope.
+		if m.selectedID == "" && len(m.projects) > 0 && (!cliMode || len(m.projects) == 1) {
 			m.setActiveProject(m.projects[0])
 		}
 		var reconnect tea.Cmd
@@ -1191,7 +1215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sseRetryAfterProject = true
 		m.append(entry{role: "system", text: "signed in; retrying connection and project loading"})
 		var projectLoad tea.Cmd
-		m, projectLoad = m.beginProjectLoad(false, m.wantProject)
+		m, projectLoad = m.beginProjectLoad(false, m.projectLoadSelectionHint())
 		cmds := []tea.Cmd{m.beginConnectionCheck(), projectLoad}
 		if m.pendingMsgID != "" {
 			cmds = append(cmds, m.fetchChatStatus(m.pendingMsgID))
@@ -1437,6 +1461,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.SetValue("")
+		m = m.clearReviewPrefill()
 		return m, nil
 
 	case "enter":
@@ -1497,6 +1522,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.refreshMenu()
+	m = m.invalidateReviewPrefill()
 	return m, cmd
 }
 
@@ -1504,7 +1530,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
-		return m, nil
+		return m.clearReviewPrefill(), nil
 	}
 	// Enter with the menu open and only a command prefix typed accepts the
 	// highlighted suggestion instead of running a partial name.
@@ -1524,9 +1550,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	if strings.HasPrefix(text, "/") {
 		m.append(entry{role: "you", text: text})
-		return m.runCommand(text)
+		newModel, cmd := m.runCommand(text)
+		return newModel.(Model).clearReviewPrefill(), cmd
 	}
 
+	m = m.clearReviewPrefill()
 	m.append(entry{role: "you", text: text})
 
 	// Inside a task thread, plain text is a follow-up on that task.
