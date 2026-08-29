@@ -1295,9 +1295,13 @@ func renderUsage(u *client.UsageAnalytics) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func renderAnalyticsNoData(title string) string {
+	return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
+}
+
 func renderRates(rates []client.SuccessFailureRate) string {
 	if len(rates) == 0 {
-		return sectionStyle.Render("Success / failure") + "\n  " + dimStyle.Render("no data")
+		return renderAnalyticsNoData("Success / failure")
 	}
 	var b strings.Builder
 	b.WriteString(sectionStyle.Render("Success / failure by period") + "\n")
@@ -1371,7 +1375,7 @@ func selectTopExecTimes(times []client.AvgExecutionTime) []execTimeCandidate {
 
 func renderExecTimes(title string, times []client.AvgExecutionTime) string {
 	if len(times) == 0 {
-		return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
+		return renderAnalyticsNoData(title)
 	}
 	selected := selectTopExecTimes(times)
 	maxMs := selected[0].value.AvgMs
@@ -1389,7 +1393,7 @@ func renderExecTimes(title string, times []client.AvgExecutionTime) string {
 
 func renderFrequent(tasks []client.TaskFrequency) string {
 	if len(tasks) == 0 {
-		return sectionStyle.Render("Most frequent tasks") + "\n  " + dimStyle.Render("no data")
+		return renderAnalyticsNoData("Most frequent tasks")
 	}
 	maxCount := 0
 	for _, t := range tasks {

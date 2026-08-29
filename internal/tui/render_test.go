@@ -580,6 +580,55 @@ func TestRenderModelCapacityProviderLimits(t *testing.T) {
 	}
 }
 
+func TestRenderAnalyticsEmptyStates(t *testing.T) {
+	cases := []struct {
+		name   string
+		title  string
+		render func() string
+	}{
+		{
+			name:   "rates",
+			title:  "Success / failure",
+			render: func() string { return renderRates(nil) },
+		},
+		{
+			name:   "execution times",
+			title:  "Avg execution time by task",
+			render: func() string { return renderExecTimes("Avg execution time by task", nil) },
+		},
+		{
+			name:   "frequent tasks",
+			title:  "Most frequent tasks",
+			render: func() string { return renderFrequent(nil) },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.render()
+			want := sectionStyle.Render(tc.title) + "\n  " + dimStyle.Render("no data")
+			if got != want {
+				t.Fatalf("empty analytics output changed\n got: %q\nwant: %q", got, want)
+			}
+			if plain := stripANSI(got); plain != tc.title+"\n  no data" {
+				t.Fatalf("ANSI-stripped empty analytics output = %q, want %q", plain, tc.title+"\n  no data")
+			}
+		})
+	}
+}
+
+func TestRenderFrequentDrawsBars(t *testing.T) {
+	out := stripANSI(renderFrequent([]client.TaskFrequency{
+		{TaskTitle: "build", ExecutionCount: 3},
+		{TaskTitle: "deploy", ExecutionCount: 1},
+	}))
+	for _, want := range []string{"Most frequent tasks", "build", "deploy", "3", "1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("frequent-task render missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderExecTimesEmptyAndSmallInputs(t *testing.T) {
 	if out := stripANSI(renderExecTimes("Execution time", nil)); !strings.Contains(out, "no data") {
 		t.Fatalf("empty execution times = %q, want no-data message", out)
