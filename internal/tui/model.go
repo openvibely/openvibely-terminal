@@ -121,7 +121,8 @@ type Model struct {
 	selectedID   string
 	selectedName string
 	// wantProject is a project requested up front (-project flag) and resolved
-	// once the project list arrives.
+	// only while no project has been installed yet. Subsequent reloads preserve
+	// the active project instead of reapplying this startup hint.
 	wantProject string
 
 	// projectRequestID identifies the newest in-flight project load or creation.
@@ -221,11 +222,21 @@ func (m Model) WithProject(ref string) Model {
 	return m
 }
 
+// projectLoadSelectionHint returns the startup project reference only until
+// the first active project has been installed. Reloads must preserve the
+// current selection, including after authentication recovery.
+func (m Model) projectLoadSelectionHint() string {
+	if m.selectedID != "" {
+		return ""
+	}
+	return m.wantProject
+}
+
 // Init kicks off the initial connection check and project load. The first SSE
 // stream is opened by the project-load response after it installs a selected
 // project, rather than racing that response with an unscoped stream.
 func (m Model) Init() tea.Cmd {
-	_, projectLoad := m.beginProjectLoadWithSSE(false, m.wantProject, true)
+	_, projectLoad := m.beginProjectLoadWithSSE(false, m.projectLoadSelectionHint(), true)
 	return tea.Batch(
 		m.checkConnection(),
 		projectLoad,
@@ -1191,7 +1202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sseRetryAfterProject = true
 		m.append(entry{role: "system", text: "signed in; retrying connection and project loading"})
 		var projectLoad tea.Cmd
-		m, projectLoad = m.beginProjectLoad(false, m.wantProject)
+		m, projectLoad = m.beginProjectLoad(false, m.projectLoadSelectionHint())
 		cmds := []tea.Cmd{m.beginConnectionCheck(), projectLoad}
 		if m.pendingMsgID != "" {
 			cmds = append(cmds, m.fetchChatStatus(m.pendingMsgID))
