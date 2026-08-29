@@ -2671,6 +2671,99 @@ func TestSkillsEnableAlways(t *testing.T) {
 	})
 }
 
+func TestSkillsAlwaysLoadSetTrueIdempotently(t *testing.T) {
+	tests := []struct {
+		name         string
+		action       string
+		initialState bool
+		invocations  int
+	}{
+		{name: "always false-to-true and repeat", action: "always", initialState: false, invocations: 2},
+		{name: "always already true", action: "always", initialState: true, invocations: 1},
+		{name: "load false-to-true and repeat", action: "load", initialState: false, invocations: 2},
+		{name: "load already true", action: "load", initialState: true, invocations: 1},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			alwaysUse := tc.initialState
+			var gotAlwaysUse []bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/skills":
+					mu.Lock()
+					current := alwaysUse
+					mu.Unlock()
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = fmt.Fprintf(w, `<div data-skill-handle="deploy" data-skill-name="Deploy"
+						data-skill-enabled="true" data-skill-always-use="%t" data-skill-scope="project"></div>`, current)
+				case r.Method == http.MethodPost && r.URL.Path == "/skills/deploy/always_use":
+					var payload struct {
+						AlwaysUse bool   `json:"always_use"`
+						Scope     string `json:"scope"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Errorf("decode always-use request: %v", err)
+					}
+					if payload.Scope != "project" {
+						t.Errorf("scope = %q, want project", payload.Scope)
+					}
+					mu.Lock()
+					gotAlwaysUse = append(gotAlwaysUse, payload.AlwaysUse)
+					alwaysUse = payload.AlwaysUse
+					current := alwaysUse
+					mu.Unlock()
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = fmt.Fprintf(w, `<div data-skill-handle="deploy" data-skill-name="Deploy"
+						data-skill-enabled="true" data-skill-always-use="%t" data-skill-scope="project"></div>`, current)
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{}`))
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+
+			for i := 0; i < tc.invocations; i++ {
+				m = runLine(t, m, "/skills "+tc.action+" deploy")
+			}
+
+			mu.Lock()
+			got := append([]bool(nil), gotAlwaysUse...)
+			finalState := alwaysUse
+			mu.Unlock()
+			want := make([]bool, tc.invocations)
+			for i := range want {
+				want[i] = true
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("always_use requests = %v, want %v", got, want)
+			}
+			if !finalState {
+				t.Error("repeated state-setting command disabled the skill")
+			}
+			out := transcript(m)
+			if strings.Contains(out, "error:") {
+				t.Fatalf("state-setting command reported an error:\n%s", out)
+			}
+			if count := strings.Count(out, tc.action+": deploy"); count != tc.invocations {
+				t.Errorf("success status count = %d, want %d:\n%s", count, tc.invocations, out)
+			}
+		})
+	}
+}
+
 // TestSkillsMutationsUseBackendJSONContract runs the TUI skill commands against
 // a contract server that rejects form-encoded skill mutations. Reads continue to
 // use the rendered HTML route, while every mutation must carry the backend JSON

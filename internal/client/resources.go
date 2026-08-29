@@ -194,7 +194,7 @@ func (c *Client) SetSkillEnabled(ctx context.Context, projectID, handle, scope s
 		"/skills/"+url.PathEscape(handle)+"/enabled"+query("project_id", projectID), payload)
 }
 
-// SetSkillAlwaysUse toggles a skill's always-use flag.
+// SetSkillAlwaysUse sets a skill's always-use flag.
 func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle, scope string, always bool) error {
 	payload := struct {
 		AlwaysUse bool   `json:"always_use"`

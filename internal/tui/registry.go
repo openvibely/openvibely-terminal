@@ -1555,7 +1555,7 @@ func skillsCommand() command {
 					case "disable":
 						err = c.SetSkillEnabled(ctx, pid, s.Handle, s.Scope, false)
 					case "always", "load":
-						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, s.Scope, !s.AlwaysUse)
+						err = c.SetSkillAlwaysUse(ctx, pid, s.Handle, s.Scope, true)
 					}
 					if err != nil {
 						return "", err
