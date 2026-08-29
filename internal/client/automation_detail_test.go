@@ -306,6 +306,83 @@ func TestParseActualAutomationLiveRouteMarksOmittedSectionsUnavailable(t *testin
 	}
 }
 
+func TestParseAutomationDetailUsesPerMetricCountProvenance(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-count-provenance" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel>
+			<g data-automation-live-node="n1" data-automation-node-key="shared" data-counts='{"waiting":2}'><strong>Shared</strong><small>9 running · 1 waiting</small></g>
+		</div>
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="shared"><h3>Shared</h3><span data-automation-node-counts='{"running":0}'></span></section>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("nodes = %+v, want one correlated node", detail.Nodes)
+	}
+	counts := detail.Nodes[0].Counts
+	if !counts.RunningAvailable || counts.Running != 0 || !counts.WaitingAvailable || counts.Waiting != 2 {
+		t.Fatalf("mixed count provenance = %+v, want structured running=0 and waiting=2", counts)
+	}
+}
+
+func TestParseAutomationDetailUnknownExternalFreshnessIsUnavailable(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-external" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel></div>
+		<div data-automation-external-state data-automation-external-stale="mystery"></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !detail.ExternalStateAvailable || detail.ExternalState.StaleAvailable || detail.ExternalState.Stale {
+		t.Fatalf("unknown freshness availability = %+v/%t, want section available but freshness unavailable", detail.ExternalState, detail.ExternalStateAvailable)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "external state freshness is malformed") {
+		t.Fatalf("unknown freshness should be partial with a warning: %+v", detail)
+	}
+}
+
+func TestParseAutomationDetailPreservesResourceRelations(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-resources" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-resources>
+			<div data-automation-resource-row data-automation-resource-node-key="shared" data-automation-resource-type="task" data-automation-resource-id="task-1" data-automation-resource-relation="parent" data-automation-resource-name="Parent"></div>
+			<div data-automation-resource-row data-automation-resource-node-key="shared" data-automation-resource-type="task" data-automation-resource-id="task-1" data-automation-resource-relation="child" data-automation-resource-name="Child"></div>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Resources) != 2 {
+		t.Fatalf("resources = %+v, want both relation variants", detail.Resources)
+	}
+	relations := map[string]bool{}
+	for _, resource := range detail.Resources {
+		relations[resource.Relation] = true
+	}
+	if !relations["parent"] || !relations["child"] {
+		t.Fatalf("resource relations = %+v", relations)
+	}
+}
+
+func TestParseAutomationDetailRetainsAllDetailOnlyNodes(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-detail-nodes" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="first"><h3>First</h3><p>first · trigger</p></section>
+			<section data-automation-live-node-detail="second"><h3>Second</h3><p>second · action</p></section>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 2 {
+		t.Fatalf("detail-only nodes = %+v, want both records", detail.Nodes)
+	}
+	if detail.Nodes[0].NodeKey != "first" || detail.Nodes[0].Name != "First" || detail.Nodes[1].NodeKey != "second" || detail.Nodes[1].Name != "Second" {
+		t.Fatalf("detail-only node records = %+v", detail.Nodes)
+	}
+}
+
 func parseAutomationDetailFromString(source string) (AutomationDetail, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {

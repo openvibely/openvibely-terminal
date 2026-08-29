@@ -98,6 +98,10 @@ type AutomationNodeCounts struct {
 	BlockedAvailable           bool `json:"blocked_available"`
 	FailedAvailable            bool `json:"failed_available"`
 	CompletedRecentlyAvailable bool `json:"completed_recently_available"`
+
+	// Per-field provenance is parser-only. Structured values are preferred over
+	// compact visible labels independently for each metric.
+	runningQuality, waitingQuality, blockedQuality, failedQuality, completedRecentlyQuality int
 }
 
 // AutomationLiveNode is one node in the current published graph.
@@ -105,11 +109,6 @@ type AutomationLiveNode struct {
 	AutomationNode
 	Counts       AutomationNodeCounts `json:"counts"`
 	DisplayState string               `json:"display_state"`
-
-	// countQuality is parser-only provenance: structured count attributes are
-	// preferred over compact visible labels when the two representations are
-	// both present in the live fragment.
-	countQuality int
 }
 
 // AutomationEdge is the saved graph edge shape used by the live edge model.
@@ -471,12 +470,15 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 	if len(detailNodes) > 0 {
 		present = true
 	}
+	graphNodesPresent := len(liveNodes) > 0
 	for _, node := range detailNodes {
 		parsed, hasCounts := parseAutomationNodeDetail(detail, node)
 		if hasCounts {
 			countsPresent = true
 		}
-		if len(out) == 0 {
+		if !graphNodesPresent {
+			// Without graph node markers, detail records are the complete node
+			// representation. Retain every distinct stable node key.
 			mergeAutomationLiveNode(&out, parsed)
 			continue
 		}
@@ -535,8 +537,7 @@ func parseAutomationLiveNode(detail *AutomationDetail, node *html.Node) (Automat
 	if parsed.Name == "" {
 		parsed.Name = firstLine(NodeText(node))
 	}
-	countsPresent, countQuality := parseAutomationNodeCounts(detail, node, &parsed.Counts)
-	parsed.countQuality = countQuality
+	countsPresent := parseAutomationNodeCounts(detail, node, &parsed.Counts)
 	return parsed, countsPresent
 }
 
@@ -567,8 +568,7 @@ func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (Au
 			parsed.NodeType = strings.TrimSpace(NodeText(badge))
 		}
 	}
-	countsPresent, countQuality := parseAutomationNodeCounts(detail, section, &parsed.Counts)
-	parsed.countQuality = countQuality
+	countsPresent := parseAutomationNodeCounts(detail, section, &parsed.Counts)
 	return parsed, countsPresent
 }
 
@@ -611,32 +611,29 @@ func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, parsed AutomationLiveN
 	if current.DisplayState == "" {
 		current.DisplayState = parsed.DisplayState
 	}
-	mergeAutomationNodeCounts(&current.Counts, &current.countQuality, parsed.Counts, parsed.countQuality)
+	mergeAutomationNodeCounts(&current.Counts, parsed.Counts)
 }
 
-func mergeAutomationNodeCounts(dst *AutomationNodeCounts, dstQuality *int, src AutomationNodeCounts, srcQuality int) {
-	merge := func(dstValue *int, dstAvailable *bool, srcValue int, srcAvailable bool) {
+func mergeAutomationNodeCounts(dst *AutomationNodeCounts, src AutomationNodeCounts) {
+	merge := func(dstValue *int, dstAvailable *bool, dstQuality *int, srcValue int, srcAvailable bool, srcQuality int) {
 		if !srcAvailable {
 			return
 		}
 		if !*dstAvailable || srcQuality > *dstQuality {
 			*dstValue = srcValue
 			*dstAvailable = true
+			*dstQuality = srcQuality
 		}
 	}
-	merge(&dst.Running, &dst.RunningAvailable, src.Running, src.RunningAvailable)
-	merge(&dst.Waiting, &dst.WaitingAvailable, src.Waiting, src.WaitingAvailable)
-	merge(&dst.Blocked, &dst.BlockedAvailable, src.Blocked, src.BlockedAvailable)
-	merge(&dst.Failed, &dst.FailedAvailable, src.Failed, src.FailedAvailable)
-	merge(&dst.CompletedRecently, &dst.CompletedRecentlyAvailable, src.CompletedRecently, src.CompletedRecentlyAvailable)
-	if srcQuality > *dstQuality {
-		*dstQuality = srcQuality
-	}
+	merge(&dst.Running, &dst.RunningAvailable, &dst.runningQuality, src.Running, src.RunningAvailable, src.runningQuality)
+	merge(&dst.Waiting, &dst.WaitingAvailable, &dst.waitingQuality, src.Waiting, src.WaitingAvailable, src.waitingQuality)
+	merge(&dst.Blocked, &dst.BlockedAvailable, &dst.blockedQuality, src.Blocked, src.BlockedAvailable, src.blockedQuality)
+	merge(&dst.Failed, &dst.FailedAvailable, &dst.failedQuality, src.Failed, src.FailedAvailable, src.failedQuality)
+	merge(&dst.CompletedRecently, &dst.CompletedRecentlyAvailable, &dst.completedRecentlyQuality, src.CompletedRecently, src.CompletedRecentlyAvailable, src.completedRecentlyQuality)
 }
 
-func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts *AutomationNodeCounts) (bool, int) {
+func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts *AutomationNodeCounts) bool {
 	present := false
-	quality := 0
 	countNode := node
 	if nested := findNode(node, func(n *html.Node) bool {
 		return hasAnyHTMLAttr(n, "data-automation-node-counts", "data-node-counts", "data-counts")
@@ -656,7 +653,6 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 			}
 			if mapPresent {
 				present = true
-				quality = 2
 			}
 		}
 	}
@@ -664,13 +660,14 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 		name      string
 		target    *int
 		available *bool
+		quality   *int
 		attrs     []string
 	}{
-		{name: "running", target: &counts.Running, available: &counts.RunningAvailable, attrs: []string{"data-automation-node-count-running", "data-node-running", "data-running-count", "data-running"}},
-		{name: "waiting", target: &counts.Waiting, available: &counts.WaitingAvailable, attrs: []string{"data-automation-node-count-waiting", "data-node-waiting", "data-waiting-count", "data-waiting"}},
-		{name: "blocked", target: &counts.Blocked, available: &counts.BlockedAvailable, attrs: []string{"data-automation-node-count-blocked", "data-node-blocked", "data-blocked-count", "data-blocked"}},
-		{name: "failed", target: &counts.Failed, available: &counts.FailedAvailable, attrs: []string{"data-automation-node-count-failed", "data-node-failed", "data-failed-count", "data-failed"}},
-		{name: "completed recently", target: &counts.CompletedRecently, available: &counts.CompletedRecentlyAvailable, attrs: []string{"data-automation-node-count-completed-recently", "data-node-completed-recently", "data-completed-recently-count", "data-completed-recently", "data-recent-count"}},
+		{name: "running", target: &counts.Running, available: &counts.RunningAvailable, quality: &counts.runningQuality, attrs: []string{"data-automation-node-count-running", "data-node-running", "data-running-count", "data-running"}},
+		{name: "waiting", target: &counts.Waiting, available: &counts.WaitingAvailable, quality: &counts.waitingQuality, attrs: []string{"data-automation-node-count-waiting", "data-node-waiting", "data-waiting-count", "data-waiting"}},
+		{name: "blocked", target: &counts.Blocked, available: &counts.BlockedAvailable, quality: &counts.blockedQuality, attrs: []string{"data-automation-node-count-blocked", "data-node-blocked", "data-blocked-count", "data-blocked"}},
+		{name: "failed", target: &counts.Failed, available: &counts.FailedAvailable, quality: &counts.failedQuality, attrs: []string{"data-automation-node-count-failed", "data-node-failed", "data-failed-count", "data-failed"}},
+		{name: "completed recently", target: &counts.CompletedRecently, available: &counts.CompletedRecentlyAvailable, quality: &counts.completedRecentlyQuality, attrs: []string{"data-automation-node-count-completed-recently", "data-node-completed-recently", "data-completed-recently-count", "data-completed-recently", "data-recent-count"}},
 	} {
 		if raw, found := firstAutomationAttrFoundDeep(node, field.attrs...); found {
 			value, err := strconv.Atoi(strings.TrimSpace(raw))
@@ -680,36 +677,29 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 			}
 			*field.target = value
 			*field.available = true
+			*field.quality = 2
 			present = true
-			quality = 2
 		}
 	}
 	if label := firstAutomationAttrDeep(node, "data-automation-node-count-label", "data-count-label"); label != "" {
-		if mergeAutomationCountText(counts, &quality, label) {
+		if mergeAutomationCountText(counts, label) {
 			present = true
-			if quality < 1 {
-				quality = 1
-			}
 		}
 	}
 	if small := findNode(node, func(n *html.Node) bool { return n.Data == "small" }); small != nil {
-		text := NodeText(small)
-		if mergeAutomationCountText(counts, &quality, text) {
+		if mergeAutomationCountText(counts, NodeText(small)) {
 			present = true
-			if quality < 1 {
-				quality = 1
-			}
 		}
 	}
-	return present, quality
+	return present
 }
 
-func mergeAutomationCountText(counts *AutomationNodeCounts, quality *int, text string) bool {
+func mergeAutomationCountText(counts *AutomationNodeCounts, text string) bool {
 	var parsed AutomationNodeCounts
 	if !applyAutomationCountText(text, &parsed) {
 		return false
 	}
-	mergeAutomationNodeCounts(counts, quality, parsed, 1)
+	mergeAutomationNodeCounts(counts, parsed)
 	return true
 }
 
@@ -1082,8 +1072,11 @@ func parseAutomationResourceNodes(resourceNodes []*html.Node) []AutomationResour
 		if resource.Name == "" {
 			resource.Name = firstLine(NodeText(node))
 		}
-		key := resource.ResourceID + "\x00" + resource.ResourceType + "\x00" + resource.NodeKey
-		if key == "\x00\x00" || seen[key] {
+		key := strings.Join([]string{resource.NodeID, resource.NodeKey, resource.ResourceType, resource.ResourceID, resource.Relation}, "\x00")
+		if resource.NodeID == "" && resource.NodeKey == "" && resource.ResourceType == "" && resource.ResourceID == "" && resource.Relation == "" {
+			continue
+		}
+		if seen[key] {
 			continue
 		}
 		seen[key] = true
@@ -1105,15 +1098,11 @@ func parseAutomationExternalState(detail *AutomationDetail, live *html.Node) {
 	staleRaw, staleRawFound := firstAutomationAttrFoundDeep(section,
 		"data-automation-external-stale", "data-external-stale", "data-stale")
 	stale := false
-	staleFound := staleRawFound
+	staleFound := false
 	if staleRawFound {
-		switch strings.ToLower(strings.TrimSpace(staleRaw)) {
-		case "stale":
-			stale = true
-		case "fresh":
-			stale = false
-		default:
-			stale = parseAutomationBool(staleRaw)
+		stale, staleFound = parseAutomationFreshness(staleRaw)
+		if !staleFound {
+			detail.Warnings = append(detail.Warnings, "external state freshness is malformed")
 		}
 	}
 	lastUpdated := strings.TrimSpace(firstAutomationAttrDeep(section,
@@ -1121,7 +1110,7 @@ func parseAutomationExternalState(detail *AutomationDetail, live *html.Node) {
 	status := normalizeAutomationState(firstAutomationAttrDeep(section, "data-automation-external-status", "data-external-status"))
 	if section != live {
 		text := strings.ToLower(NodeText(section))
-		if !staleFound {
+		if !staleFound && !staleRawFound {
 			if strings.Contains(text, "stale") {
 				stale, staleFound = true, true
 			} else if strings.Contains(text, "fresh") {
@@ -1277,6 +1266,17 @@ func parseAutomationIntDeep(detail *AutomationDetail, n *html.Node, label string
 	return parsed
 }
 
+func parseAutomationFreshness(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "stale", "true", "1", "yes", "on":
+		return true, true
+	case "fresh", "false", "0", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 func parseAutomationBool(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "true", "1", "yes", "on", "fresh":
@@ -1330,12 +1330,13 @@ func applyAutomationCountMap(values map[string]any, counts *AutomationNodeCounts
 		keys      []string
 		target    *int
 		available *bool
+		quality   *int
 	}{
-		{keys: []string{"running"}, target: &counts.Running, available: &counts.RunningAvailable},
-		{keys: []string{"waiting"}, target: &counts.Waiting, available: &counts.WaitingAvailable},
-		{keys: []string{"blocked"}, target: &counts.Blocked, available: &counts.BlockedAvailable},
-		{keys: []string{"failed"}, target: &counts.Failed, available: &counts.FailedAvailable},
-		{keys: []string{"completed_recently", "completed", "recent"}, target: &counts.CompletedRecently, available: &counts.CompletedRecentlyAvailable},
+		{keys: []string{"running"}, target: &counts.Running, available: &counts.RunningAvailable, quality: &counts.runningQuality},
+		{keys: []string{"waiting"}, target: &counts.Waiting, available: &counts.WaitingAvailable, quality: &counts.waitingQuality},
+		{keys: []string{"blocked"}, target: &counts.Blocked, available: &counts.BlockedAvailable, quality: &counts.blockedQuality},
+		{keys: []string{"failed"}, target: &counts.Failed, available: &counts.FailedAvailable, quality: &counts.failedQuality},
+		{keys: []string{"completed_recently", "completed", "recent"}, target: &counts.CompletedRecently, available: &counts.CompletedRecentlyAvailable, quality: &counts.completedRecentlyQuality},
 	} {
 		var value any
 		found := false
@@ -1356,6 +1357,7 @@ func applyAutomationCountMap(values map[string]any, counts *AutomationNodeCounts
 		}
 		*field.target = parsed
 		*field.available = true
+		*field.quality = 2
 		present = true
 	}
 	return present, malformed
@@ -1386,6 +1388,11 @@ func applyAutomationCountText(text string, counts *AutomationNodeCounts) bool {
 		counts.BlockedAvailable = true
 		counts.FailedAvailable = true
 		counts.CompletedRecentlyAvailable = true
+		counts.runningQuality = 1
+		counts.waitingQuality = 1
+		counts.blockedQuality = 1
+		counts.failedQuality = 1
+		counts.completedRecentlyQuality = 1
 		return true
 	}
 	present := false
@@ -1393,16 +1400,18 @@ func applyAutomationCountText(text string, counts *AutomationNodeCounts) bool {
 		labels    []string
 		target    *int
 		available *bool
+		quality   *int
 	}{
-		{labels: []string{"running"}, target: &counts.Running, available: &counts.RunningAvailable},
-		{labels: []string{"waiting", "waiting human"}, target: &counts.Waiting, available: &counts.WaitingAvailable},
-		{labels: []string{"blocked"}, target: &counts.Blocked, available: &counts.BlockedAvailable},
-		{labels: []string{"failed"}, target: &counts.Failed, available: &counts.FailedAvailable},
-		{labels: []string{"completed recently", "recently completed", "recent"}, target: &counts.CompletedRecently, available: &counts.CompletedRecentlyAvailable},
+		{labels: []string{"running"}, target: &counts.Running, available: &counts.RunningAvailable, quality: &counts.runningQuality},
+		{labels: []string{"waiting", "waiting human"}, target: &counts.Waiting, available: &counts.WaitingAvailable, quality: &counts.waitingQuality},
+		{labels: []string{"blocked"}, target: &counts.Blocked, available: &counts.BlockedAvailable, quality: &counts.blockedQuality},
+		{labels: []string{"failed"}, target: &counts.Failed, available: &counts.FailedAvailable, quality: &counts.failedQuality},
+		{labels: []string{"completed recently", "recently completed", "recent"}, target: &counts.CompletedRecently, available: &counts.CompletedRecentlyAvailable, quality: &counts.completedRecentlyQuality},
 	} {
 		if value, found := namedAutomationCount(text, field.labels...); found {
 			*field.target = value
 			*field.available = true
+			*field.quality = 1
 			present = true
 		}
 	}

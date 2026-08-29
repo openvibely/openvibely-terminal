@@ -630,6 +630,25 @@ func TestRenderAutomationDetailMarksPartialOptionalSections(t *testing.T) {
 	}
 }
 
+func TestRenderAutomationDetailDoesNotInventExternalFreshness(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:             client.AutomationMetadata{ID: "au-external", Name: "External flow", LifecycleState: "active"},
+		GraphAvailable:         true,
+		NodesAvailable:         true,
+		EdgesAvailable:         true,
+		ExternalState:          client.AutomationExternalState{},
+		ExternalStateAvailable: true,
+		Partial:                true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	if !strings.Contains(out, "status:            not reported") {
+		t.Fatalf("malformed external freshness should be unavailable:\n%s", out)
+	}
+	if strings.Contains(out, "status:            fresh") || strings.Contains(out, "status:            stale") {
+		t.Fatalf("malformed external freshness was invented:\n%s", out)
+	}
+}
+
 func TestRenderAutomationDetailPreservesFieldAvailabilityAndRecentState(t *testing.T) {
 	detail := client.AutomationDetail{
 		Automation: client.AutomationMetadata{ID: "au-mixed", Name: "Mixed flow", LifecycleState: "active"},
