@@ -898,6 +898,65 @@ func TestCLIRunsAutomationsPause(t *testing.T) {
 	}
 }
 
+// One-shot CLI mode works headlessly for the new automations actions,
+// exiting cleanly on success and nonzero on a backend failure.
+func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
+	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p2">
+		<div class="card-body relative">
+			<span class="badge badge-outline badge-sm">active</span>
+			<button type="button" data-automation-card-delete="au-1" data-automation-name="Native SDLC"></button>
+		</div>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":     cliProjects,
+		"/automations":      automationsHTML,
+		"/automations/au-1": automationDetailHTML("au-1", "p2", "Native SDLC"),
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "other", []string{"automations", "show", "Native"}, false, false); err != nil {
+		t.Fatalf("plain automation show failed: %v", err)
+	}
+	plain := stripANSI(out.String())
+	for _, want := range []string{"Automation: Native SDLC", "Graph", "Nodes", "Runtime", "Resources", "External state"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("plain detail missing %q:\n%s", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("plain CLI detail contains ANSI styling: %q", out.String())
+	}
+	if !rec.sawQuery("GET /automations?project_id=p2") || !rec.sawQuery("GET /automations/au-1?project_id=p2") {
+		t.Fatalf("automation show lost selected project:\n%s", rec.all())
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "other", []string{"automations", "show", "Native"}, false, true); err != nil {
+		t.Fatalf("JSON automation show failed: %v", err)
+	}
+	var detail client.AutomationDetail
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &detail); err != nil {
+		t.Fatalf("automation detail JSON = %q: %v", out.String(), err)
+	}
+	if detail.Automation.ID != "au-1" || detail.Automation.ProjectID != "p2" || detail.Automation.Name != "Native SDLC" {
+		t.Fatalf("automation detail JSON = %+v", detail.Automation)
+	}
+	if strings.Contains(out.String(), "\x1b[") || strings.Contains(out.String(), "OpenVibely") {
+		t.Fatalf("JSON detail contains styling or a banner: %q", out.String())
+	}
+}
+
+func TestCLIAutomationsShowMissingReferenceReturnsUsageWithoutSelectorOrList(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/automations": `<div></div>`})
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "show"}, false, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "usage") {
+		t.Fatalf("missing CLI reference error = %v, want usage", err)
+	}
+	if rec.saw("GET", "/automations") {
+		t.Fatalf("missing CLI reference listed automations or opened a selector:\n%s", rec.all())
+	}
+}
+
 // One-shot CLI mode works headlessly for the new channels actions,
 // exiting cleanly on success and nonzero on a backend failure.
 func TestCLIRunsChannelsTest(t *testing.T) {

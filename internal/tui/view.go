@@ -725,6 +725,253 @@ func renderAutomations(automations []client.Automation, filter string) string {
 		dimStyle.Render("/automations run-now|pause|resume|delete <id|name>")
 }
 
+func renderAutomationDetail(detail client.AutomationDetail) string {
+	var b strings.Builder
+	name := firstNonEmpty(detail.Automation.Name, detail.Automation.ID, "(unnamed automation)")
+	fmt.Fprintf(&b, "%s\n", sectionStyle.Render("Automation: "+name))
+	fmt.Fprintf(&b, "%s\n", dimStyle.Render("ID "+firstNonEmpty(detail.Automation.ID, "not reported")))
+
+	b.WriteString("\n" + sectionStyle.Render("Metadata") + "\n")
+	automationDetailField(&b, "project", detail.Automation.ProjectID)
+	automationDetailField(&b, "stable key", detail.Automation.StableKey)
+	automationDetailField(&b, "type", detail.Automation.AutomationType)
+	automationDetailField(&b, "lifecycle", detail.Automation.LifecycleState)
+	automationDetailField(&b, "health", detail.Automation.HealthState)
+	if detail.Automation.HealthReason != "" {
+		automationDetailField(&b, "health reason", detail.Automation.HealthReason)
+	}
+	if detail.Automation.Description != "" {
+		automationDetailField(&b, "description", detail.Automation.Description)
+	}
+
+	b.WriteString("\n" + sectionStyle.Render("Version") + "\n")
+	versionReported := detail.Version.ID != "" || detail.Version.Version != 0 || detail.Version.State != "" ||
+		detail.Version.Source != "" || detail.Version.AdapterKey != "" || detail.Version.SchemaVersion != 0 ||
+		detail.Version.CreatedAt != "" || detail.Version.PublishedAt != ""
+	if !versionReported {
+		b.WriteString(dimStyle.Render("  not reported") + "\n")
+	} else {
+		version := "not reported"
+		if detail.Version.Version != 0 {
+			version = fmt.Sprintf("v%d", detail.Version.Version)
+		}
+		if detail.Version.State != "" {
+			version += " · " + formatAutomationDetailState(detail.Version.State)
+		}
+		automationDetailField(&b, "version", version)
+		automationDetailField(&b, "version ID", detail.Version.ID)
+		automationDetailField(&b, "source", detail.Version.Source)
+		automationDetailField(&b, "adapter", detail.Version.AdapterKey)
+		if detail.Version.SchemaVersion != 0 {
+			automationDetailField(&b, "schema version", fmt.Sprintf("%d", detail.Version.SchemaVersion))
+		}
+	}
+
+	b.WriteString("\n" + sectionStyle.Render("Graph") + "\n")
+	if !detail.GraphAvailable {
+		reason := "live graph was not returned"
+		if automationDetailIsDraft(detail) {
+			reason = "draft automation has no live graph"
+		}
+		b.WriteString(dimStyle.Render("  unavailable — "+reason) + "\n")
+		b.WriteString(dimStyle.Render("  nodes: unavailable · edges: unavailable") + "\n")
+	} else {
+		nodeSummary := "not reported"
+		if detail.NodesAvailable {
+			nodeSummary = fmt.Sprintf("%d", len(detail.Nodes))
+		}
+		edgeSummary := "not reported"
+		if detail.EdgesAvailable {
+			edgeSummary = fmt.Sprintf("%d", len(detail.Edges))
+		}
+		fmt.Fprintf(&b, "  %s nodes · %s edges\n", nodeSummary, edgeSummary)
+		renderAutomationDetailNodes(&b, detail)
+		renderAutomationDetailEdges(&b, detail)
+	}
+
+	b.WriteString("\n" + sectionStyle.Render("Runtime") + "\n")
+	automationDetailField(&b, "active invocations", automationDetailCount(detail.ActiveInvocations, detail.ActiveInvocationsAvailable))
+	automationDetailField(&b, "active work items", automationDetailCount(detail.ActiveWorkItems, detail.ActiveWorkItemsAvailable))
+
+	b.WriteString("\n" + sectionStyle.Render("Resources") + "\n")
+	if !detail.ResourcesAvailable {
+		b.WriteString(dimStyle.Render("  not reported — optional section unavailable") + "\n")
+	} else if len(detail.Resources) == 0 {
+		b.WriteString(dimStyle.Render("  (empty)") + "\n")
+	} else {
+		resources := append([]client.AutomationResourceSummary(nil), detail.Resources...)
+		sort.SliceStable(resources, func(i, j int) bool {
+			return automationDetailResourceSortKey(resources[i]) < automationDetailResourceSortKey(resources[j])
+		})
+		rows := [][]string{{"NODE", "TYPE", "RESOURCE", "RELATION", "STATUS"}}
+		for _, resource := range resources {
+			rows = append(rows, []string{
+				firstNonEmpty(resource.NodeKey, resource.NodeID, "—"),
+				firstNonEmpty(resource.ResourceType, "—"),
+				firstNonEmpty(resource.Name, resource.ResourceID, "—"),
+				firstNonEmpty(resource.Relation, "—"),
+				firstNonEmpty(resource.Status, "—"),
+			})
+		}
+		b.WriteString(indentAutomationDetailTable(table(rows)))
+		b.WriteByte('\n')
+	}
+
+	b.WriteString("\n" + sectionStyle.Render("External state") + "\n")
+	if !detail.ExternalStateAvailable {
+		b.WriteString(dimStyle.Render("  not reported — optional section unavailable") + "\n")
+	} else {
+		status := "not reported"
+		if detail.ExternalState.Status != "" {
+			status = formatAutomationDetailState(detail.ExternalState.Status)
+		} else if detail.ExternalState.StaleAvailable {
+			status = "fresh"
+			if detail.ExternalState.Stale {
+				status = "stale"
+			}
+		}
+		automationDetailField(&b, "status", status)
+		automationDetailField(&b, "tracked resources", automationDetailCount(detail.ExternalState.TrackedResources, detail.ExternalState.TrackedResourcesAvailable))
+		automationDetailField(&b, "last updated", detail.ExternalState.LastUpdatedAt)
+	}
+
+	if detail.Partial || len(detail.Warnings) > 0 {
+		b.WriteString("\n" + sectionStyle.Render("Notes") + "\n")
+		if detail.Partial {
+			b.WriteString(dimStyle.Render("  partial detail — unavailable optional sections are not treated as empty") + "\n")
+		}
+		for _, warning := range detail.Warnings {
+			if strings.TrimSpace(warning) != "" {
+				b.WriteString(dimStyle.Render("  "+warning) + "\n")
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderAutomationDetailNodes(b *strings.Builder, detail client.AutomationDetail) {
+	b.WriteString("  " + sectionStyle.Render("Nodes") + "\n")
+	if !detail.NodesAvailable {
+		b.WriteString(dimStyle.Render("    unavailable — node section was not returned") + "\n")
+		return
+	}
+	if len(detail.Nodes) == 0 {
+		b.WriteString(dimStyle.Render("    (empty)") + "\n")
+		return
+	}
+	nodes := append([]client.AutomationLiveNode(nil), detail.Nodes...)
+	sort.SliceStable(nodes, func(i, j int) bool {
+		return automationDetailNodeSortKey(nodes[i]) < automationDetailNodeSortKey(nodes[j])
+	})
+	rows := [][]string{{"NODE", "STATE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
+	for _, node := range nodes {
+		state := formatAutomationDetailState(firstNonEmpty(node.DisplayState, "not reported"))
+		counts := node.Counts
+		countCells := []string{"—", "—", "—", "—", "—"}
+		if detail.NodeCountsAvailable {
+			countCells = []string{
+				fmt.Sprintf("%d", counts.Running),
+				fmt.Sprintf("%d", counts.Waiting),
+				fmt.Sprintf("%d", counts.Blocked),
+				fmt.Sprintf("%d", counts.Failed),
+				fmt.Sprintf("%d", counts.CompletedRecently),
+			}
+		}
+		rows = append(rows, append([]string{firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"), state}, countCells...))
+	}
+	b.WriteString(indentAutomationDetailTable(table(rows)))
+	b.WriteByte('\n')
+}
+
+func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDetail) {
+	b.WriteString("  " + sectionStyle.Render("Edges") + "\n")
+	if !detail.EdgesAvailable {
+		b.WriteString(dimStyle.Render("    unavailable — edge section was not returned") + "\n")
+		return
+	}
+	if len(detail.Edges) == 0 {
+		b.WriteString(dimStyle.Render("    (empty)") + "\n")
+		return
+	}
+	edges := append([]client.AutomationLiveEdge(nil), detail.Edges...)
+	sort.SliceStable(edges, func(i, j int) bool {
+		return automationDetailEdgeSortKey(edges[i]) < automationDetailEdgeSortKey(edges[j])
+	})
+	rows := [][]string{{"FROM", "TO", "LABEL", "TRANSITIONS", "RECENT"}}
+	for _, edge := range edges {
+		transitions, recent := "—", "—"
+		if detail.EdgeCountsAvailable {
+			transitions = fmt.Sprintf("%d", edge.TransitionCount)
+			recent = fmt.Sprintf("%d", edge.RecentTransitionCount)
+		}
+		rows = append(rows, []string{
+			firstNonEmpty(edge.SourceName, edge.SourceNodeID, "—"),
+			firstNonEmpty(edge.TargetName, edge.TargetNodeID, "—"),
+			firstNonEmpty(edge.Label, edge.EdgeKey, "(unlabelled)"),
+			transitions,
+			recent,
+		})
+	}
+	b.WriteString(indentAutomationDetailTable(table(rows)))
+	b.WriteByte('\n')
+}
+
+func automationDetailField(b *strings.Builder, label, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = "not reported"
+	}
+	fmt.Fprintf(b, "  %-18s %s\n", label+":", value)
+}
+
+func automationDetailCount(value int, available bool) string {
+	if !available {
+		return "not reported"
+	}
+	return fmt.Sprintf("%d", value)
+}
+
+func formatAutomationDetailState(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "not reported"
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(value), "_", " "), "-", " ")
+}
+
+func automationDetailIsDraft(detail client.AutomationDetail) bool {
+	return strings.EqualFold(detail.Automation.LifecycleState, "draft") || strings.EqualFold(detail.Version.State, "draft")
+}
+
+func automationDetailNodeSortKey(node client.AutomationLiveNode) string {
+	return strings.ToLower(firstNonEmpty(node.NodeKey, node.Name, node.ID))
+}
+
+func automationDetailEdgeSortKey(edge client.AutomationLiveEdge) string {
+	return strings.ToLower(strings.Join([]string{
+		firstNonEmpty(edge.SourceName, edge.SourceNodeID),
+		firstNonEmpty(edge.TargetName, edge.TargetNodeID),
+		firstNonEmpty(edge.Label, edge.EdgeKey),
+		edge.ID,
+	}, "\x00"))
+}
+
+func automationDetailResourceSortKey(resource client.AutomationResourceSummary) string {
+	return strings.ToLower(strings.Join([]string{
+		firstNonEmpty(resource.NodeKey, resource.NodeID),
+		firstNonEmpty(resource.ResourceType, resource.Name, resource.ResourceID),
+		resource.ResourceID,
+	}, "\x00"))
+}
+
+func indentAutomationDetailTable(value string) string {
+	lines := strings.Split(value, "\n")
+	for i, line := range lines {
+		lines[i] = "    " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
 // --- alerts ---
 
 func renderAlerts(alerts []client.Alert, filter string) string {

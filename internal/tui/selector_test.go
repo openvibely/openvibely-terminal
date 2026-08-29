@@ -128,6 +128,8 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"models_default", "/models default", "models default"},
 		{"models_delete", "/models delete", "models delete"},
 		// automations
+		{"automations_show", "/automations show", "automations show"},
+		{"automations_open", "/automations open", "automations open"},
 		{"automations_run-now", "/automations run-now", "automations run-now"},
 		{"automations_pause", "/automations pause", "automations pause"},
 		{"automations_resume", "/automations resume", "automations resume"},
@@ -166,11 +168,37 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 	}
 }
 
+func TestAutomationShowSelectorDispatchesResolvedItemWithoutSecondList(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/automations":      selAutomationsHTML,
+		"/automations/au-1": automationDetailHTML("au-1", "p1", "Nightly sweep"),
+	})
+	m = runLine(t, m, "/automations show")
+	if !m.selectorActive {
+		t.Fatalf("expected automation selector:\n%s", transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive {
+		t.Fatal("selector remained open after selecting an automation")
+	}
+	if rec.count("GET", "/automations") != 1 || rec.count("GET", "/automations/au-1") != 1 {
+		t.Fatalf("selector dispatch requests =\n%s", rec.all())
+	}
+	if !rec.sawQuery("GET /automations/au-1?project_id=p1") {
+		t.Fatalf("selector detail request lost project scope:\n%s", rec.all())
+	}
+	if !strings.Contains(transcript(m), "Automation: Nightly sweep") {
+		t.Fatalf("selector detail output missing:\n%s", transcript(m))
+	}
+}
+
 // TestAutomationsWithoutProjectSkipsSelector verifies that the automation
 // command guard runs before selector resolution when no project is selected.
 func TestAutomationsWithoutProjectSkipsSelector(t *testing.T) {
 	cases := []string{
 		"/automations",
+		"/automations show au-1",
+		"/automations open au-1",
 		"/automations run-now au-1",
 		"/automations pause au-1",
 		"/automations resume au-1",

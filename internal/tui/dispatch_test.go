@@ -2280,6 +2280,163 @@ func automationCardHTML(id, name, state string) string {
 	</div>`
 }
 
+func automationDetailHTML(id, projectID, name string) string {
+	return `<div id="automation-live" data-automation-id="` + id + `" data-project-id="` + projectID + `" data-automation-name="` + name + `" data-automation-lifecycle-state="active" data-automation-health-state="healthy" data-automation-version-id="v1" data-automation-version-number="1" data-automation-version-state="published">
+		<div data-automation-graph-panel><svg data-automation-canvas><g data-automation-live-node="n1" data-automation-node-key="start" class="automation-graph-node--running"><strong>Start</strong><span class="automation-node-state--running">running</span><small>1 running</small></g></svg></div>
+		<div data-automation-live-metrics data-automation-active-invocations="2" data-automation-active-work-items="3"></div>
+		<div data-automation-resources><div data-automation-resource-row data-automation-resource-node-key="start" data-automation-resource-type="repository" data-automation-resource-id="repo1" data-automation-resource-status="ready"></div></div>
+		<div data-automation-external-state data-automation-external-status="fresh" data-automation-external-tracked-resources="1"></div>
+	</div>`
+}
+
+func TestAutomationsShowResolvesReferencesAndLoadsScopedDetail(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+
+	cases := []struct {
+		name string
+		line string
+		id   string
+	}{
+		{name: "exact id", line: "/automations show au-1", id: "au-1"},
+		{name: "exact name", line: "/automations show Native SDLC", id: "au-1"},
+		{name: "unique prefix", line: "/automations show Native", id: "au-1"},
+		{name: "unique substring", line: "/automations show GitHub", id: "au-2"},
+		{name: "open alias", line: "/automations open au-1", id: "au-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/automations":      automationsHTML,
+				"/automations/au-1": automationDetailHTML("au-1", "p1", "Native SDLC"),
+				"/automations/au-2": automationDetailHTML("au-2", "p1", "GitHub SDLC"),
+			})
+			m = runLine(t, m, tc.line)
+			if got := rec.count("GET", "/automations"); got != 1 {
+				t.Fatalf("list requests = %d, want 1; calls:\n%s", got, rec.all())
+			}
+			if got := rec.count("GET", "/automations/"+tc.id); got != 1 {
+				t.Fatalf("detail requests = %d, want 1; calls:\n%s", got, rec.all())
+			}
+			if !rec.sawQuery("GET /automations/" + tc.id + "?project_id=p1") {
+				t.Fatalf("detail request lost selected project:\n%s", rec.all())
+			}
+			out := transcript(m)
+			wantName := "Native SDLC"
+			if tc.id == "au-2" {
+				wantName = "GitHub SDLC"
+			}
+			for _, want := range []string{wantName, "Graph", "Nodes", "Runtime", "active invocations", "Resources", "External state"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("detail output missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "error:") {
+				t.Errorf("unexpected detail error:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestAutomationsShowReferenceFailuresDoNotLoadDetailOrMutate(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "unknown", ref: "missing", want: "error:"},
+		{name: "ambiguous substring", ref: "SDLC", want: "ambiguous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/automations":      automationsHTML,
+				"/automations/au-1": automationDetailHTML("au-1", "p1", "Native SDLC"),
+			})
+			m = runLine(t, m, "/automations show "+tc.ref)
+			if rec.count("GET", "/automations/au-1") != 0 || rec.count("GET", "/automations/au-2") != 0 {
+				t.Fatalf("reference failure loaded detail:\n%s", rec.all())
+			}
+			if rec.saw("POST", "/automations/au-1/run-now") || rec.saw("POST", "/automations/au-1/pause") {
+				t.Fatalf("reference failure mutated automation:\n%s", rec.all())
+			}
+			if !strings.Contains(strings.ToLower(transcript(m)), strings.ToLower(tc.want)) {
+				t.Fatalf("output = %s, want %q:\n%s", tc.want, tc.want, transcript(m))
+			}
+		})
+	}
+}
+
+func TestAutomationsShowDraft404ExplainsUnavailableGraph(t *testing.T) {
+	var detailProject string
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/automations":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(w, `<div>`+automationCardHTML("au-draft", "Draft flow", "draft")+`</div>`)
+		case r.Method == http.MethodGet && r.URL.Path == "/automations/au-draft":
+			detailProject = r.URL.Query().Get("project_id")
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{}`)
+		}
+	})
+	m = runLine(t, m, "/automations show Draft")
+	out := transcript(m)
+	for _, want := range []string{"Automation: Draft flow", "draft automation has no live graph", "nodes: unavailable", "edges: unavailable"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("draft fallback missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "NODE   STATE") || strings.Contains(out, "error:") {
+		t.Errorf("draft fallback claimed graph/error:\n%s", out)
+	}
+	if detailProject != "p1" {
+		t.Errorf("draft detail project_id = %q, want p1", detailProject)
+	}
+}
+
+func TestAutomationsShowDetailFragmentAndBackendErrorsSurfaceClearly(t *testing.T) {
+	cases := []struct {
+		name       string
+		detailBody string
+		status     int
+		want       string
+	}{
+		{name: "malformed fragment", detailBody: `<div data-project-id="p1">missing identity</div>`, status: http.StatusOK, want: "malformed fragment"},
+		{name: "backend error", detailBody: `{"error":"detail unavailable"}`, status: http.StatusBadGateway, want: "detail unavailable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/automations":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = fmt.Fprint(w, `<div>`+automationCardHTML("au-1", "Native SDLC", "active")+`</div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/automations/au-1":
+					w.Header().Set("Content-Type", "text/html")
+					w.WriteHeader(tc.status)
+					_, _ = fmt.Fprint(w, tc.detailBody)
+				default:
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, `{}`)
+				}
+			})
+			m = runLine(t, m, "/automations show au-1")
+			out := transcript(m)
+			if !strings.Contains(strings.ToLower(out), strings.ToLower(tc.want)) || !strings.Contains(out, "error:") {
+				t.Fatalf("detail failure output = %q, want error containing %q", out, tc.want)
+			}
+		})
+	}
+}
+
 func TestAutomationsListUsesStructuredRowsWithNoArguments(t *testing.T) {
 	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
 	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})

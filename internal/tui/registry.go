@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -2463,7 +2464,7 @@ func insightsCommand() command {
 }
 
 func automationsCommand() command {
-	actions := []string{"list", "run-now", "pause", "resume", "delete"}
+	actions := []string{"list", "show", "open", "run-now", "pause", "resume", "delete"}
 	return command{
 		name:    "automations",
 		aliases: []string{"automation"},
@@ -2472,13 +2473,21 @@ func automationsCommand() command {
 		desc:    "recurring automations and workflow rules",
 		usage: []string{
 			"automations [filter]                       list automations",
+			"automations show <automation>              show live graph, runtime and resources",
+			"automations open <automation>              alias for show",
 			"automations run-now <automation>           trigger an immediate run",
 			"automations pause <automation>              pause an active automation",
 			"automations resume <automation>             resume a paused automation",
 			"automations delete <automation>             remove an automation",
-			"omit <automation> on run-now/pause/resume/delete → interactive selector",
+			"omit <automation> on show/open/run-now/pause/resume/delete → interactive selector",
+		},
+		actionUsages: []commandActionUsage{
+			{action: "show", args: "<automation>", description: "show live graph, runtime and resources"},
+			{action: "open", args: "<automation>", description: "alias for show"},
 		},
 		examples: []string{
+			`automations show "Nightly sweep"`,
+			`automations open automation-id`,
 			`automations run-now "Nightly sweep"`,
 			`automations pause "Nightly sweep"`,
 			`automations resume "Nightly sweep"`,
@@ -2504,6 +2513,52 @@ func automationsCommand() command {
 					}
 					return renderAutomations(automations, ref), nil
 				})
+
+			case "show", "open":
+				if ref == "" {
+					usage := commandUsage("automations", action)
+					return selectorOr(m, usage,
+						selectorFor("Automations", "automations "+action,
+							"no automations yet — create one via the web UI", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								automations, err := c.ListAutomations(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(automations))
+								for _, a := range automations {
+									a := a
+									item := selectorItem{
+										ref:    a.ID,
+										label:  firstNonEmpty(a.Name, shortID(a.ID)),
+										detail: a.State,
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										cmd := run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
+											return loadAutomationDetail(ctx, c, pid, a)
+										})
+										m.busy = true
+										return m, cmd
+									}
+									items = append(items, item)
+								}
+								return items, nil
+							}))
+				}
+				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
+					automations, err := c.ListAutomations(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					a, err := matchRef(automations, ref,
+						func(a client.Automation) string { return a.ID },
+						func(a client.Automation) string { return a.Name })
+					if err != nil {
+						return "", err
+					}
+					return loadAutomationDetail(ctx, c, pid, a)
+				})
+
 			default:
 				if ref == "" {
 					return selectorOr(m, fmt.Sprintf("usage: /automations %s <automation>", action),
@@ -2573,6 +2628,53 @@ func automationsCommand() command {
 				return m, cmd
 			}
 		},
+	}
+}
+
+func loadAutomationDetail(ctx context.Context, c *client.Client, projectID string, automation client.Automation) (string, error) {
+	detail, err := c.GetAutomationDetail(ctx, projectID, automation.ID)
+	if err != nil {
+		// The backend deliberately has no live graph for draft automations and
+		// may answer that route with 404. Preserve the resolved card identity and
+		// say exactly what is unavailable instead of presenting it as a loaded
+		// empty graph.
+		if errors.Is(err, client.ErrAutomationNotFound) && strings.EqualFold(automation.State, "draft") {
+			draft := automationDraftDetail(projectID, automation)
+			detail = &draft
+			if jsonMode {
+				return marshalJSON(detail)
+			}
+			return renderAutomationDetail(*detail), nil
+		}
+		return "", err
+	}
+	if detail == nil {
+		return "", fmt.Errorf("automation detail: backend returned no detail")
+	}
+	if jsonMode {
+		return marshalJSON(detail)
+	}
+	return renderAutomationDetail(*detail), nil
+}
+
+func automationDraftDetail(projectID string, automation client.Automation) client.AutomationDetail {
+	return client.AutomationDetail{
+		Automation: client.AutomationMetadata{
+			ID:             automation.ID,
+			ProjectID:      projectID,
+			Name:           automation.Name,
+			LifecycleState: firstNonEmpty(automation.State, "draft"),
+		},
+		Nodes:                  make([]client.AutomationLiveNode, 0),
+		Edges:                  make([]client.AutomationLiveEdge, 0),
+		Resources:              make([]client.AutomationResourceSummary, 0),
+		GraphAvailable:         false,
+		NodesAvailable:         false,
+		EdgesAvailable:         false,
+		CountsAvailable:        false,
+		ResourcesAvailable:     false,
+		ExternalStateAvailable: false,
+		Warnings:               []string{"live graph unavailable: automation is draft"},
 	}
 }
 

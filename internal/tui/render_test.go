@@ -489,6 +489,94 @@ func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
 }
 
 // Empty-state messages must include actionable slash-command hints (VISION.md "Friendly By Default").
+func TestRenderAutomationDetailShowsGraphRuntimeResourcesAndExternalState(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation: client.AutomationMetadata{
+			ID:             "au-1",
+			ProjectID:      "p1",
+			Name:           "Nightly review",
+			LifecycleState: "active",
+			HealthState:    "healthy",
+		},
+		Version: client.AutomationVersion{ID: "v1", Version: 4, State: "published"},
+		Nodes: []client.AutomationLiveNode{
+			{AutomationNode: client.AutomationNode{ID: "n2", NodeKey: "review", Name: "Review"}, DisplayState: "waiting_human", Counts: client.AutomationNodeCounts{Running: 2, Waiting: 1}},
+			{AutomationNode: client.AutomationNode{ID: "n1", NodeKey: "start", Name: "Start"}, DisplayState: "running", Counts: client.AutomationNodeCounts{CompletedRecently: 3}},
+		},
+		Edges: []client.AutomationLiveEdge{
+			{AutomationEdge: client.AutomationEdge{ID: "e1", SourceNodeID: "n1", TargetNodeID: "n2", Label: "approved"}, TransitionCount: 8, RecentTransitionCount: 2, SourceName: "Start", TargetName: "Review"},
+		},
+		Resources:                  []client.AutomationResourceSummary{{NodeKey: "review", ResourceType: "repository", ResourceID: "repo1", Name: "openvibely", Relation: "input", Status: "ready"}},
+		ActiveInvocations:          3,
+		ActiveWorkItems:            5,
+		ExternalState:              client.AutomationExternalState{TrackedResources: 1, TrackedResourcesAvailable: true, StaleAvailable: true, Status: "fresh", LastUpdatedAt: "2025-01-02T03:04:05Z"},
+		GraphAvailable:             true,
+		NodesAvailable:             true,
+		EdgesAvailable:             true,
+		NodeCountsAvailable:        true,
+		EdgeCountsAvailable:        true,
+		ActiveInvocationsAvailable: true,
+		ActiveWorkItemsAvailable:   true,
+		CountsAvailable:            true,
+		ResourcesAvailable:         true,
+		ExternalStateAvailable:     true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{
+		"Automation: Nightly review", "ID au-1", "project:           p1", "published", "Graph", "Nodes", "Review", "waiting human", "RUN", "Edges", "Start", "approved", "8", "Runtime", "active invocations: 3", "active work items: 5", "Resources", "openvibely", "External state", "fresh", "tracked resources: 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("detail output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "start  running") > strings.Index(out, "review  waiting") {
+		t.Errorf("nodes are not rendered deterministically:\n%s", out)
+	}
+	if strings.Contains(out, "optional section unavailable") || strings.Contains(out, "partial detail") {
+		t.Errorf("complete detail unexpectedly reports unavailable optional data:\n%s", out)
+	}
+}
+
+func TestRenderAutomationDetailDoesNotClaimDraftGraphWasLoaded(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:     client.AutomationMetadata{ID: "au-draft", ProjectID: "p1", Name: "Draft flow", LifecycleState: "draft"},
+		Version:        client.AutomationVersion{State: "draft"},
+		GraphAvailable: false,
+		NodesAvailable: false,
+		EdgesAvailable: false,
+		Warnings:       []string{"live graph unavailable: automation is draft"},
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"Automation: Draft flow", "lifecycle:         draft", "Graph", "unavailable", "draft automation has no live graph", "nodes: unavailable", "edges: unavailable", "not reported"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("draft output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "NODE   STATE") || strings.Contains(out, "live graph was returned") {
+		t.Errorf("draft output claims graph data was loaded:\n%s", out)
+	}
+}
+
+func TestRenderAutomationDetailMarksPartialOptionalSections(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:          client.AutomationMetadata{ID: "au-partial", Name: "Partial flow", LifecycleState: "active"},
+		Version:             client.AutomationVersion{State: "published"},
+		GraphAvailable:      true,
+		NodesAvailable:      true,
+		EdgesAvailable:      true,
+		NodeCountsAvailable: true,
+		Edges:               make([]client.AutomationLiveEdge, 0),
+		Nodes:               make([]client.AutomationLiveNode, 0),
+		Partial:             true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"Graph", "(empty)", "active invocations: not reported", "not reported — optional section unavailable", "partial detail"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("partial output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestEmptyStateHints(t *testing.T) {
 	cases := []struct {
 		name string
