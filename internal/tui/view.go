@@ -762,6 +762,17 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 
 // --- personalities ---
 
+// personalityKind returns the user-facing type for a personality.
+func personalityKind(p client.Personality) string {
+	if !p.IsPreset {
+		return "custom"
+	}
+	if p.HasCustom {
+		return "override"
+	}
+	return "built-in"
+}
+
 func renderPersonalities(personalities []client.Personality, filter string) string {
 	rows := [][]string{{"KEY", "NAME", "TYPE", "DESCRIPTION", "PROMPT PREVIEW", "STATE"}}
 	for _, p := range personalities {
@@ -772,12 +783,7 @@ func renderPersonalities(personalities []client.Personality, filter string) stri
 		if key == "" {
 			key = "(base)"
 		}
-		kind := "built-in"
-		if !p.IsPreset {
-			kind = "custom"
-		} else if p.HasCustom {
-			kind = "override"
-		}
+		kind := personalityKind(p)
 		state := ""
 		if p.Active {
 			state = "active"
@@ -805,12 +811,7 @@ func renderPersonalityDetail(p client.Personality) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(p.Name, p.Key, "Base")))
 
-	kind := "built-in"
-	if !p.IsPreset {
-		kind = "custom"
-	} else if p.HasCustom {
-		kind = "override"
-	}
+	kind := personalityKind(p)
 	key := firstNonEmpty(p.Key, "(base)")
 	fmt.Fprintf(&b, "%s\n", dimStyle.Render(fmt.Sprintf("key %s · %s%s", key, kind, func() string {
 		if p.Active {

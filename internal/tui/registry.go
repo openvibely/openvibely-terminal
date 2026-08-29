@@ -2048,12 +2048,7 @@ func personalitySelector(m Model, usage, command, action string, prefill bool) (
 				if ref == "" {
 					ref = personality.Name
 				}
-				kind := "built-in"
-				if !personality.IsPreset {
-					kind = "custom"
-				} else if personality.HasCustom {
-					kind = "override"
-				}
+				kind := personalityKind(personality)
 				item := selectorItem{
 					ref:    ref,
 					label:  firstNonEmpty(personality.Name, ref),

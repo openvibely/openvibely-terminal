@@ -432,6 +432,59 @@ func TestRenderBoardEmptyStates(t *testing.T) {
 	}
 }
 
+func TestPersonalityKindPreservesPrecedence(t *testing.T) {
+	cases := []struct {
+		name        string
+		personality client.Personality
+		want        string
+	}{
+		{
+			name:        "custom takes precedence",
+			personality: client.Personality{HasCustom: true},
+			want:        "custom",
+		},
+		{
+			name:        "preset override",
+			personality: client.Personality{IsPreset: true, HasCustom: true},
+			want:        "override",
+		},
+		{
+			name:        "built-in preset",
+			personality: client.Personality{IsPreset: true},
+			want:        "built-in",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := personalityKind(tc.personality); got != tc.want {
+				t.Errorf("personalityKind(%+v) = %q, want %q", tc.personality, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderPersonalityKinds(t *testing.T) {
+	personalities := []client.Personality{
+		{Key: "alpha", Name: "Alpha", IsPreset: false, HasCustom: true},
+		{Key: "beta", Name: "Beta", IsPreset: true, HasCustom: true},
+		{Key: "gamma", Name: "Gamma", IsPreset: true},
+	}
+	list := stripANSI(renderPersonalities(personalities, ""))
+	for _, want := range []string{"custom", "override", "built-in"} {
+		if !strings.Contains(list, want) {
+			t.Errorf("personality list missing %q:\n%s", want, list)
+		}
+	}
+
+	for _, personality := range personalities {
+		detail := stripANSI(renderPersonalityDetail(personality))
+		want := fmt.Sprintf("key %s · %s", personality.Key, personalityKind(personality))
+		if !strings.Contains(detail, want) {
+			t.Errorf("personality detail missing %q:\n%s", want, detail)
+		}
+	}
+}
+
 // renderBadges drops noise and caps the badge count so rows stay readable.
 func TestRenderBadges(t *testing.T) {
 	if got := renderBadges(nil); got != "" {

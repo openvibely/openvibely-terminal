@@ -166,6 +166,37 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 	}
 }
 
+func TestPersonalitySelectorRendersKinds(t *testing.T) {
+	m, _ := dispatchModel(t, map[string]string{
+		"/personality": `<div id="personality-section" data-selected-personality="override">
+  <div data-personality-key="custom" data-personality-name="Custom"
+       data-personality-description="custom description" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+  <div data-personality-key="override" data-personality-name="Override"
+       data-personality-description="override description" data-personality-is-preset="true" data-personality-has-custom="true"></div>
+  <div data-personality-key="builtin" data-personality-name="Built-in"
+       data-personality-description="built-in description" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+</div>`,
+	})
+	m = runLine(t, m, "/personality show")
+	if !m.selectorActive {
+		t.Fatalf("expected personality selector:\n%s", transcript(m))
+	}
+
+	want := []string{
+		"custom · custom description",
+		"override · override description",
+		"built-in · built-in description",
+	}
+	if len(m.selectorItems) != len(want) {
+		t.Fatalf("selector items = %d, want %d: %+v", len(m.selectorItems), len(want), m.selectorItems)
+	}
+	for i, item := range m.selectorItems {
+		if item.detail != want[i] {
+			t.Errorf("selector item %d detail = %q, want %q", i, item.detail, want[i])
+		}
+	}
+}
+
 // TestAutomationsWithoutProjectSkipsSelector verifies that the automation
 // command guard runs before selector resolution when no project is selected.
 func TestAutomationsWithoutProjectSkipsSelector(t *testing.T) {
