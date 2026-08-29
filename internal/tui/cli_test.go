@@ -1597,6 +1597,25 @@ func TestCLIJSONTaskReviewsAdd(t *testing.T) {
 	}
 }
 
+func TestCLITaskReviewsAddWithoutReferenceReturnsUsageWithoutMutation(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        taskBoardHTML,
+	})
+
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"tasks", "reviews", "add"}, false, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "usage") {
+		t.Fatalf("expected non-zero usage error, got %v; output: %s", err, out.String())
+	}
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("CLI missing-reference path must not fetch selector tasks, got %d requests", got)
+	}
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
+		t.Fatalf("CLI missing-reference path must not mutate reviews, got %d POSTs", got)
+	}
+}
+
 // cliEventWriter makes it possible to assert that event lines are written while
 // a foreground stream is still running, rather than only after it terminates.
 type cliEventWriter struct {

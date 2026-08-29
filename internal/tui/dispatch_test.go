@@ -4542,6 +4542,65 @@ func TestTasksReviewsAddPostsInlineComment(t *testing.T) {
 	}
 }
 
+func TestTasksReviewsAddPickerPrefillsAndSubmitsOneComment(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             selTasksHTML,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+	m = runLine(t, m, "/tasks reviews add")
+	if !m.selectorActive {
+		t.Fatalf("expected task selector, transcript:\n%s", transcript(m))
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := m.input.Value(), "/tasks reviews add t-1 "; got != want {
+		t.Fatalf("prefilled input = %q, want %q", got, want)
+	}
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
+		t.Fatalf("picker selection must not submit before operands, got %d POSTs", got)
+	}
+
+	m = runLine(t, m, "internal/client/tasks.go:42 Needs error handling")
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
+		t.Fatalf("expected exactly one review submission, got %d; calls:\n%s", got, rec.all())
+	}
+	for _, want := range []string{"file_path=internal%2Fclient%2Ftasks.go", "line_number=42", "line_type=new", "comment_text=Needs+error+handling"} {
+		if !rec.sawForm(want) {
+			t.Errorf("picker submission missing %q, forms: %v", want, rec.forms)
+		}
+	}
+	out := transcript(m)
+	if strings.Contains(strings.ToLower(out), "usage") || !strings.Contains(out, "added review comment") || !strings.Contains(out, "Needs error handling") {
+		t.Fatalf("picker submission should render refreshed review output without usage error:\n%s", out)
+	}
+}
+
+func TestTasksReviewsAddIncompleteOperandsKeepUsageError(t *testing.T) {
+	for _, line := range []string{
+		"/tasks reviews add t-1",
+		"/tasks reviews add t-1 internal/client/tasks.go:42",
+		"/tasks reviews add t-1 not-a-location Needs error handling",
+	} {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":             taskBoardHTML,
+				"/tasks/t-1/reviews": taskReviewHTML,
+			})
+			m = runLine(t, m, line)
+			if m.selectorActive {
+				t.Fatalf("incomplete review command must not open selector:\n%s", transcript(m))
+			}
+			if !strings.Contains(strings.ToLower(transcript(m)), "usage") {
+				t.Fatalf("expected usage error for %q:\n%s", line, transcript(m))
+			}
+			if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
+				t.Fatalf("incomplete review command must not mutate, got %d POSTs", got)
+			}
+		})
+	}
+}
+
 func TestTasksReviewsAddQuotedTaskTitlePostsOneComment(t *testing.T) {
 	board := strings.Replace(taskBoardHTML, "Refactor the API", "Fix login bug", 1)
 	m, rec := dispatchModel(t, map[string]string{

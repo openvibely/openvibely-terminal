@@ -99,6 +99,7 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"tasks_open", "/tasks open", "tasks open"},
 		{"tasks_show", "/tasks show", "tasks show"},
 		{"tasks_reviews", "/tasks reviews", "tasks reviews"},
+		{"tasks_reviews_add", "/tasks reviews add", "tasks reviews add"},
 		{"tasks_edit", "/tasks edit", "tasks edit"},
 		{"tasks_run", "/tasks run", "tasks run"},
 		{"tasks_stop", "/tasks stop", "tasks stop"},
@@ -539,6 +540,22 @@ func TestSelectorSingleItemAutoSelects(t *testing.T) {
 	}
 }
 
+func TestSelectorSingleItemReviewAddPrefills(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks": taskBoardHTML,
+	})
+	m = runLine(t, m, "/tasks reviews add")
+	if m.selectorActive {
+		t.Fatal("single task should auto-select instead of opening the picker")
+	}
+	if got, want := m.input.Value(), "/tasks reviews add t-1 "; got != want {
+		t.Fatalf("prefilled input = %q, want %q", got, want)
+	}
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
+		t.Fatalf("auto-selection must not submit before operands, got %d POSTs", got)
+	}
+}
+
 // TestSelectorEmptyListShowsHint verifies an empty backend list renders the
 // existing empty-state hint instead of a selector.
 func TestSelectorEmptyListShowsHint(t *testing.T) {
@@ -585,6 +602,7 @@ func TestSelectorSpacePrefillPrimesInput(t *testing.T) {
 		{"tasks_move", "/tasks move", "/tasks move t-1 "},
 		{"tasks_order", "/tasks order", "/tasks order t-1 "},
 		{"schedule_add", "/schedule add", "/schedule add t-1 "},
+		{"tasks_reviews_add", "/tasks reviews add", "/tasks reviews add t-1 "},
 	}
 	for _, tc := range cases {
 		tc := tc

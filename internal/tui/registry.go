@@ -371,6 +371,9 @@ func tasksCommand() command {
 						return renderTaskReviews(t, reviews), nil
 					})
 				case "add":
+					if len(reviewRest) == 0 {
+						return taskSelectorWithSuffix(m, commandUsage("tasks", "reviews add"), "tasks reviews add", " ")
+					}
 					if len(reviewRest) < 3 {
 						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
