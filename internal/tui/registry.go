@@ -162,15 +162,17 @@ func selectorOr(m Model, usage string, sel tea.Cmd) (Model, tea.Cmd) {
 // taskSelectorItems converts tasks into selector rows.
 func taskSelectorItems(tasks []client.Task) []selectorItem {
 	items := make([]selectorItem, 0, len(tasks))
-	for _, t := range tasks {
-		detail := t.Category
-		if t.Status != "" {
-			detail += " · " + t.Status
+	for _, task := range tasks {
+		task := task
+		detail := task.Category
+		if task.Status != "" {
+			detail += " · " + task.Status
 		}
 		items = append(items, selectorItem{
-			ref:    t.ID,
-			label:  firstNonEmpty(t.Title, shortID(t.ID)),
-			detail: strings.Trim(detail, " ·"),
+			ref:          task.ID,
+			label:        firstNonEmpty(task.Title, shortID(task.ID)),
+			detail:       strings.Trim(detail, " ·"),
+			resolvedTask: &task,
 		})
 	}
 	return items
@@ -387,7 +389,7 @@ func tasksCommand() command {
 						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
 					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
-						t, err := resolveTask(ctx, c, pid, reviewRef)
+						t, err := m.resolveReviewTask(ctx, c, pid, reviewRef)
 						if err != nil {
 							return "", err
 						}
@@ -714,6 +716,16 @@ func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (
 	return matchRef(tasks, ref,
 		func(t client.Task) string { return t.ID },
 		func(t client.Task) string { return t.Title })
+}
+
+func (m Model) resolveReviewTask(ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {
+	if m.reviewPrefillTask != nil &&
+		m.reviewPrefillProjectID == projectID &&
+		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTaskRef), strings.TrimSpace(ref)) &&
+		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTask.ID), strings.TrimSpace(m.reviewPrefillTaskRef)) {
+		return *m.reviewPrefillTask, nil
+	}
+	return resolveTask(ctx, c, projectID, ref)
 }
 
 func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {

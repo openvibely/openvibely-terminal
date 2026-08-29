@@ -164,6 +164,15 @@ type Model struct {
 	selectorPrefill       bool   // prime the input instead of dispatching
 	selectorPrefillSuffix string // appended after the chosen ref when priming input
 
+	// reviewPrefillTask carries the task record loaded by the review-add
+	// selector until the user submits its completed command. It avoids a
+	// second task-board lookup while remaining scoped to the exact generated
+	// reference and project.
+	reviewPrefillTask        *client.Task
+	reviewPrefillTaskRef     string
+	reviewPrefillProjectID   string
+	reviewPrefillInputPrefix string
+
 	// live events
 	showEvents           bool // stream events into the transcript
 	sseConnected         bool
@@ -533,6 +542,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		if m.selectorActive {
 			*m = m.clearSelector()
 		}
+		*m = (*m).clearReviewPrefill()
 		m.threadID, m.threadTitle = "", ""
 		m.input.Placeholder = defaultPlaceholder
 		m.invalidateSSE()
@@ -1437,6 +1447,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.SetValue("")
+		m = m.clearReviewPrefill()
 		return m, nil
 
 	case "enter":
@@ -1497,6 +1508,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.refreshMenu()
+	m = m.invalidateReviewPrefill()
 	return m, cmd
 }
 
@@ -1504,7 +1516,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
 	if text == "" {
-		return m, nil
+		return m.clearReviewPrefill(), nil
 	}
 	// Enter with the menu open and only a command prefix typed accepts the
 	// highlighted suggestion instead of running a partial name.
@@ -1524,9 +1536,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	if strings.HasPrefix(text, "/") {
 		m.append(entry{role: "you", text: text})
-		return m.runCommand(text)
+		newModel, cmd := m.runCommand(text)
+		return newModel.(Model).clearReviewPrefill(), cmd
 	}
 
+	m = m.clearReviewPrefill()
 	m.append(entry{role: "you", text: text})
 
 	// Inside a task thread, plain text is a follow-up on that task.

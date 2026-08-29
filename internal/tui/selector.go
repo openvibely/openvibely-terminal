@@ -105,8 +105,24 @@ func (m Model) clearSelector() Model {
 	m.pendingCommand = ""
 	m.selectorPrefill = false
 	m.selectorPrefillSuffix = ""
+	m = m.clearReviewPrefill()
 	if m.height > 0 {
 		m.transcript.Height = m.transcriptHeight()
+	}
+	return m
+}
+
+func (m Model) clearReviewPrefill() Model {
+	m.reviewPrefillTask = nil
+	m.reviewPrefillTaskRef = ""
+	m.reviewPrefillProjectID = ""
+	m.reviewPrefillInputPrefix = ""
+	return m
+}
+
+func (m Model) invalidateReviewPrefill() Model {
+	if m.reviewPrefillTask != nil && !strings.HasPrefix(m.input.Value(), m.reviewPrefillInputPrefix) {
+		return m.clearReviewPrefill()
 	}
 	return m
 }
@@ -232,8 +248,15 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix string, it selectorItem) (tea.Model, tea.Cmd) {
 	line := "/" + command + " " + it.ref
 	if prefill {
+		m = m.clearReviewPrefill()
 		if prefillSuffix == "" {
 			prefillSuffix = " "
+		}
+		if command == "tasks reviews add" && it.resolvedTask != nil {
+			m.reviewPrefillTask = it.resolvedTask
+			m.reviewPrefillTaskRef = it.ref
+			m.reviewPrefillProjectID = m.selectedID
+			m.reviewPrefillInputPrefix = line + prefillSuffix
 		}
 		m.input.SetValue(line + prefillSuffix)
 		m.input.CursorEnd()

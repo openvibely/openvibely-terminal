@@ -4556,11 +4556,17 @@ func TestTasksReviewsAddPickerPrefillsAndSubmitsOneComment(t *testing.T) {
 	if got, want := m.input.Value(), "/tasks reviews add t-1 "; got != want {
 		t.Fatalf("prefilled input = %q, want %q", got, want)
 	}
+	if got := rec.count("GET", "/tasks"); got != 1 {
+		t.Fatalf("picker selection must reuse its one task-list lookup, got %d requests; calls:\n%s", got, rec.all())
+	}
 	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
 		t.Fatalf("picker selection must not submit before operands, got %d POSTs", got)
 	}
 
 	m = runLine(t, m, "internal/client/tasks.go:42 Needs error handling")
+	if got := rec.count("GET", "/tasks"); got != 1 {
+		t.Fatalf("picker submission must not resolve the selected task again, got %d task-list requests; calls:\n%s", got, rec.all())
+	}
 	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
 		t.Fatalf("expected exactly one review submission, got %d; calls:\n%s", got, rec.all())
 	}
