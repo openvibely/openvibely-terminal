@@ -195,6 +195,8 @@ usage:
 
 commands:
 %s
+project selection:
+  %s
 examples:
   openvibely-tui
   openvibely-tui tasks
@@ -204,7 +206,7 @@ examples:
   openvibely-tui help tasks              full syntax of one command
 
 flags:
-`, tui.CommandSummary())
+`, tui.CommandSummary(), tui.CLIProjectSelectionHint())
 	flag.PrintDefaults()
 }
 

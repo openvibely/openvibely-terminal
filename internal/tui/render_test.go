@@ -432,6 +432,59 @@ func TestRenderBoardEmptyStates(t *testing.T) {
 	}
 }
 
+func TestPersonalityKindPreservesPrecedence(t *testing.T) {
+	cases := []struct {
+		name        string
+		personality client.Personality
+		want        string
+	}{
+		{
+			name:        "custom takes precedence",
+			personality: client.Personality{HasCustom: true},
+			want:        "custom",
+		},
+		{
+			name:        "preset override",
+			personality: client.Personality{IsPreset: true, HasCustom: true},
+			want:        "override",
+		},
+		{
+			name:        "built-in preset",
+			personality: client.Personality{IsPreset: true},
+			want:        "built-in",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := personalityKind(tc.personality); got != tc.want {
+				t.Errorf("personalityKind(%+v) = %q, want %q", tc.personality, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRenderPersonalityKinds(t *testing.T) {
+	personalities := []client.Personality{
+		{Key: "alpha", Name: "Alpha", IsPreset: false, HasCustom: true},
+		{Key: "beta", Name: "Beta", IsPreset: true, HasCustom: true},
+		{Key: "gamma", Name: "Gamma", IsPreset: true},
+	}
+	list := stripANSI(renderPersonalities(personalities, ""))
+	for _, want := range []string{"custom", "override", "built-in"} {
+		if !strings.Contains(list, want) {
+			t.Errorf("personality list missing %q:\n%s", want, list)
+		}
+	}
+
+	for _, personality := range personalities {
+		detail := stripANSI(renderPersonalityDetail(personality))
+		want := fmt.Sprintf("key %s · %s", personality.Key, personalityKind(personality))
+		if !strings.Contains(detail, want) {
+			t.Errorf("personality detail missing %q:\n%s", want, detail)
+		}
+	}
+}
+
 // renderBadges drops noise and caps the badge count so rows stay readable.
 func TestRenderBadges(t *testing.T) {
 	if got := renderBadges(nil); got != "" {
@@ -577,6 +630,55 @@ func TestRenderModelCapacityProviderLimits(t *testing.T) {
 	}
 	if strings.Contains(out, secret) {
 		t.Errorf("provider/account detail leaked into capacity output:\n%s", out)
+	}
+}
+
+func TestRenderAnalyticsEmptyStates(t *testing.T) {
+	cases := []struct {
+		name   string
+		title  string
+		render func() string
+	}{
+		{
+			name:   "rates",
+			title:  "Success / failure",
+			render: func() string { return renderRates(nil) },
+		},
+		{
+			name:   "execution times",
+			title:  "Avg execution time by task",
+			render: func() string { return renderExecTimes("Avg execution time by task", nil) },
+		},
+		{
+			name:   "frequent tasks",
+			title:  "Most frequent tasks",
+			render: func() string { return renderFrequent(nil) },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.render()
+			want := sectionStyle.Render(tc.title) + "\n  " + dimStyle.Render("no data")
+			if got != want {
+				t.Fatalf("empty analytics output changed\n got: %q\nwant: %q", got, want)
+			}
+			if plain := stripANSI(got); plain != tc.title+"\n  no data" {
+				t.Fatalf("ANSI-stripped empty analytics output = %q, want %q", plain, tc.title+"\n  no data")
+			}
+		})
+	}
+}
+
+func TestRenderFrequentDrawsBars(t *testing.T) {
+	out := stripANSI(renderFrequent([]client.TaskFrequency{
+		{TaskTitle: "build", ExecutionCount: 3},
+		{TaskTitle: "deploy", ExecutionCount: 1},
+	}))
+	for _, want := range []string{"Most frequent tasks", "build", "deploy", "3", "1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("frequent-task render missing %q:\n%s", want, out)
+		}
 	}
 }
 

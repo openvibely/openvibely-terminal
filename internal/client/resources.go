@@ -194,7 +194,7 @@ func (c *Client) SetSkillEnabled(ctx context.Context, projectID, handle, scope s
 		"/skills/"+url.PathEscape(handle)+"/enabled"+query("project_id", projectID), payload)
 }
 
-// SetSkillAlwaysUse toggles a skill's always-use flag.
+// SetSkillAlwaysUse sets a skill's always-use flag.
 func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle, scope string, always bool) error {
 	payload := struct {
 		AlwaysUse bool   `json:"always_use"`
@@ -700,8 +700,7 @@ func automationBadgeText(n *html.Node) string {
 	walk = func(node *html.Node) {
 		if node.Type == html.TextNode {
 			text := strings.ToLower(strings.TrimSpace(node.Data))
-			switch text {
-			case "active", "paused", "draft", "archived":
+			if automationStateRank(text) >= 0 {
 				state = text
 			}
 			return

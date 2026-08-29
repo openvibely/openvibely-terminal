@@ -125,6 +125,11 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 		}
 	}
 
+	if err := cliProjectPreflight(*cmdDef, fields[1:], projectRef, m); err != nil {
+		return err
+	}
+	implicitProject, hasImplicitProject := cliImplicitProject(*cmdDef, fields[1:], projectRef, m)
+
 	// A one-shot events command owns its stream directly. The interactive model
 	// stream is intentionally not started during CLI project preloading, and
 	// feeding a long-lived command through drain would delay line output until
@@ -143,12 +148,19 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 	m = next.(Model)
 	m = drain(m, cmd)
 
-	if jsonMode {
+	commandErr := firstError(m)
+	if commandErr == nil && hasImplicitProject {
+		if jsonMode {
+			writeScopedJSONEntries(out, m.log[start:], implicitProject)
+		} else {
+			writeScopedEntries(out, m.log[start:], implicitProject)
+		}
+	} else if jsonMode {
 		writeJSONEntries(out, m.log[start:])
 	} else {
 		writeEntries(out, m.log[start:])
 	}
-	return firstError(m)
+	return commandErr
 }
 
 const cliEventsOffMessage = "events off cannot disable a foreground stream owned by another process; press Ctrl-C in that monitoring process (interactive /events off only hides events in that TUI)"
@@ -311,6 +323,9 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	if payload.ProjectID != "" && payload.ProjectID != projectID {
 		return "", false, nil
 	}
+	if payload.ProjectID == "" {
+		payload.ProjectID = projectID
+	}
 
 	record := cliEventRecord{
 		Event:           strings.TrimSpace(ev.Name),
@@ -403,6 +418,60 @@ func CommandSummary() string {
 	return b.String()
 }
 
+// CLIProjectSelectionHint is the static help text for headless project scope.
+func CLIProjectSelectionHint() string { return cliProjectSelectionHint }
+
+const cliProjectSelectionHint = "Project-scoped CLI commands use the only backend project automatically; when multiple projects exist, pass -project <name|id>. Global commands such as projects list/create and help do not require a project reference."
+
+// cliProjectScoped reports whether this invocation can read or mutate a
+// project-scoped endpoint. Global actions remain usable without selecting a
+// project, even though some of their commands also load the project list.
+func (c command) cliProjectScoped(args []string) bool {
+	switch c.name {
+	case "help", "quit", "clear", "login", "project", "projects", "status":
+		return false
+	case "chat":
+		return len(args) > 0
+	case "agents":
+		action, _ := splitAction(c.actions, args)
+		return action != "metrics"
+	case "workers":
+		action, _ := splitAction(c.actions, args)
+		return action != "limit"
+	default:
+		return true
+	}
+}
+
+// cliProjectPreflight runs after project loading and before command dispatch so
+// no project-scoped endpoint can inherit a backend-selected first project.
+func cliProjectPreflight(c command, args []string, projectRef string, m Model) error {
+	if !c.cliProjectScoped(args) {
+		return nil
+	}
+	if strings.TrimSpace(projectRef) == "" && len(m.projects) > 1 {
+		return fmt.Errorf("multiple projects found; choose one with -project <name|id> before running %s", c.name)
+	}
+	if m.selectedID == "" {
+		return errors.New("no project selected — use /project <name>")
+	}
+	return nil
+}
+
+func cliImplicitProject(c command, args []string, projectRef string, m Model) (client.Project, bool) {
+	if !c.cliProjectScoped(args) || strings.TrimSpace(projectRef) != "" || len(m.projects) != 1 || m.selectedID == "" {
+		return client.Project{}, false
+	}
+	project := m.projects[0]
+	if project.ID == "" {
+		project.ID = m.selectedID
+	}
+	if project.Name == "" {
+		project.Name = m.selectedName
+	}
+	return project, true
+}
+
 // needsBackend reports whether the command requires a selected project.
 func (c command) needsBackend() bool {
 	switch c.name {
@@ -489,6 +558,64 @@ func writeJSONEntries(out io.Writer, entries []entry) {
 		if text != "" {
 			fmt.Fprintln(out, text)
 		}
+	}
+}
+
+// cliScopedJSONOutput keeps implicit project scope alongside the command result
+// without changing the JSON shape of commands that already received an explicit
+// project reference.
+type cliScopedJSONOutput struct {
+	ProjectID   string          `json:"project_id"`
+	ProjectName string          `json:"project_name"`
+	Data        json.RawMessage `json:"data"`
+}
+
+func writeScopedEntries(out io.Writer, entries []entry, project client.Project) {
+	name := strings.TrimSpace(project.Name)
+	id := strings.TrimSpace(project.ID)
+	if name == "" {
+		name = id
+	}
+	if id == "" {
+		fmt.Fprintf(out, "project: %s\n", name)
+	} else {
+		fmt.Fprintf(out, "project: %s (project_id=%s)\n", name, id)
+	}
+	writeEntries(out, entries)
+}
+
+func writeScopedJSONEntries(out io.Writer, entries []entry, project client.Project) {
+	values := make([]json.RawMessage, 0, len(entries))
+	for _, e := range entries {
+		if e.role == "error" || e.role == "system" {
+			continue
+		}
+		text := strings.TrimRight(e.text, "\n")
+		if text == "" {
+			continue
+		}
+		if json.Valid([]byte(strings.TrimSpace(text))) {
+			values = append(values, json.RawMessage(strings.TrimSpace(text)))
+			continue
+		}
+		encoded, _ := json.Marshal(text)
+		values = append(values, encoded)
+	}
+	if len(values) == 0 {
+		return
+	}
+
+	data := values[0]
+	if len(values) > 1 {
+		data, _ = json.Marshal(values)
+	}
+	encoded, err := json.Marshal(cliScopedJSONOutput{
+		ProjectID:   strings.TrimSpace(project.ID),
+		ProjectName: strings.TrimSpace(project.Name),
+		Data:        data,
+	})
+	if err == nil {
+		fmt.Fprintln(out, string(encoded))
 	}
 }
 
