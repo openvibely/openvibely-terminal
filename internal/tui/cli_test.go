@@ -558,6 +558,11 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 	if strings.Contains(got, "/tasks") {
 		t.Errorf("CLI help should not use slash form:\n%s", got)
 	}
+	for _, want := range []string{"-project <name|id>", "projects list/create", "Global commands"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("help output missing project-scope guidance %q:\n%s", want, got)
+		}
+	}
 	// Every registered command must be reachable from help.
 	for _, c := range commands {
 		if !strings.Contains(got, c.name) {
@@ -749,6 +754,143 @@ func TestCLIStatusUsesOneDelayedCountWave(t *testing.T) {
 	}
 	if elapsed >= 2*countDelay {
 		t.Fatalf("CLI status took %s; expected one delayed count-refresh wave, not two", elapsed)
+	}
+}
+
+func TestCLIRequiresExplicitProjectWhenMultipleProjectsExist(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		force     bool
+		json      bool
+		forbidden []string
+	}{
+		{name: "tasks read", args: []string{"tasks"}, forbidden: []string{"/tasks"}},
+		{name: "tasks JSON read", args: []string{"tasks"}, json: true, forbidden: []string{"/tasks"}},
+		{name: "tasks mutation", args: []string{"tasks", "run", "task"}, forbidden: []string{"/tasks"}},
+		{name: "alerts read", args: []string{"alerts"}, forbidden: []string{"/alerts"}},
+		{name: "automations mutation", args: []string{"automations", "pause", "automation"}, forbidden: []string{"/automations"}},
+		{name: "forced task deletion", args: []string{"tasks", "delete", "task"}, force: true, forbidden: []string{"/tasks"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+			})
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "", tc.args, tc.force, tc.json)
+			if err == nil {
+				t.Fatalf("%v succeeded without an explicit project", tc.args)
+			}
+			for _, want := range []string{"multiple projects", "-project <name|id>"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q missing %q", err, want)
+				}
+			}
+			for _, path := range tc.forbidden {
+				if strings.Contains(rec.all(), " "+path) {
+					t.Errorf("unscoped command called %s; requests:\n%s", path, rec.all())
+				}
+			}
+			if out.Len() != 0 {
+				t.Errorf("failed preflight wrote output: %q", out.String())
+			}
+		})
+	}
+}
+
+func TestCLIGlobalProjectListRemainsUsableWithoutProject(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"projects", "list"}, false, true); err != nil {
+		t.Fatalf("projects list failed without a project: %v", err)
+	}
+	var projects []client.Project
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &projects); err != nil {
+		t.Fatalf("projects list output is not the existing JSON shape: %v\n%s", err, out.String())
+	}
+	if len(projects) != 2 || projects[0].ID != "p1" || projects[1].ID != "p2" {
+		t.Fatalf("projects list = %+v", projects)
+	}
+	if rec.saw("GET", "/tasks") || rec.saw("GET", "/alerts") || rec.saw("GET", "/automations") {
+		t.Fatalf("projects list dispatched a project-scoped endpoint:\n%s", rec.all())
+	}
+}
+
+func TestCLISingleProjectImplicitScopeIsVisibleInPlainAndJSONOutput(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1" title="Implicit project task">Implicit project task</a>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": `{"projects":[{"id":"p1","name":"solo"}]}`,
+		"/tasks":        board,
+	})
+
+	var plain bytes.Buffer
+	if err := RunCLI(c, &plain, "", []string{"tasks"}, false, false); err != nil {
+		t.Fatalf("implicit plain tasks failed: %v", err)
+	}
+	if !strings.Contains(plain.String(), "project: solo (project_id=p1)") || !strings.Contains(plain.String(), "Implicit project task") {
+		t.Fatalf("plain output did not identify its implicit scope:\n%s", plain.String())
+	}
+	if !rec.sawQuery("GET /tasks?project_id=p1") {
+		t.Fatalf("implicit plain task request lost project scope:\n%s", rec.all())
+	}
+
+	var machine bytes.Buffer
+	if err := RunCLI(c, &machine, "", []string{"tasks"}, false, true); err != nil {
+		t.Fatalf("implicit JSON tasks failed: %v", err)
+	}
+	var scoped struct {
+		ProjectID   string          `json:"project_id"`
+		ProjectName string          `json:"project_name"`
+		Data        json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(machine.String())), &scoped); err != nil {
+		t.Fatalf("implicit JSON output is not scoped JSON: %v\n%s", err, machine.String())
+	}
+	if scoped.ProjectID != "p1" || scoped.ProjectName != "solo" {
+		t.Fatalf("implicit JSON scope = %q/%q, want p1/solo", scoped.ProjectID, scoped.ProjectName)
+	}
+	var tasks []client.Task
+	if err := json.Unmarshal(scoped.Data, &tasks); err != nil {
+		t.Fatalf("scoped JSON data is not the task list: %v\n%s", err, scoped.Data)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "t-1" {
+		t.Fatalf("scoped JSON tasks = %+v", tasks)
+	}
+}
+
+func TestCLIExplicitProjectNameIDAndPrefixRemainScoped(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1" title="Scoped task">Scoped task</a>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": `{"projects":[{"id":"project-alpha","name":"Demo Project"},{"id":"project-beta","name":"Other Project"}]}`,
+		"/tasks":        board,
+	})
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "name", ref: "Demo Project", want: "project-alpha"},
+		{name: "full ID", ref: "project-beta", want: "project-beta"},
+		{name: "unique prefix", ref: "project-al", want: "project-alpha"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := RunCLI(c, &bytes.Buffer{}, tc.ref, []string{"tasks"}, false, false); err != nil {
+				t.Fatalf("explicit project %q failed: %v", tc.ref, err)
+			}
+			if !rec.sawQuery("GET /tasks?project_id=" + tc.want) {
+				t.Fatalf("project %q was not preserved on the task request:\n%s", tc.ref, rec.all())
+			}
+		})
 	}
 }
 

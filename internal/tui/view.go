@@ -1103,7 +1103,8 @@ func renderHelp() string {
 			fmt.Fprintf(&b, "  %-*s  %s\n", width, "", dimStyle.Render(line))
 		}
 	}
-	b.WriteString("\n\n" + dimStyle.Render("keys: tab complete · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"))
+	b.WriteString("\n\n" + dimStyle.Render(cliProjectSelectionHint))
+	b.WriteString("\n" + dimStyle.Render("keys: tab complete · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"))
 	b.WriteString("\n" + dimStyle.Render(cmdPrefix+"help <command> shows the full syntax of one command"))
 	return b.String()
 }

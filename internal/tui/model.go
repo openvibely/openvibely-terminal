@@ -919,7 +919,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.selectName != "" {
 			return m.pickProject(msg.selectName)
 		}
-		if m.selectedID == "" && len(m.projects) > 0 {
+		// Interactive startup retains its convenient first-project default. A
+		// headless run leaves multiple projects unselected so CLI preflight can
+		// require an explicit, unambiguous scope.
+		if m.selectedID == "" && len(m.projects) > 0 && (!cliMode || len(m.projects) == 1) {
 			m.setActiveProject(m.projects[0])
 		}
 		var reconnect tea.Cmd
