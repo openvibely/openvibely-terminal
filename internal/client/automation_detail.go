@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 )
@@ -136,6 +138,9 @@ type AutomationLiveEdge struct {
 
 	TransitionCountAvailable       bool `json:"transition_count_available"`
 	RecentTransitionCountAvailable bool `json:"recent_transition_count_available"`
+
+	transitionCountQuality       int
+	recentTransitionCountQuality int
 
 	// edgeSource identifies the graph/detail representation during parsing and
 	// is intentionally omitted from machine-readable output.
@@ -411,7 +416,7 @@ func parseAutomationVersion(detail *AutomationDetail, live *html.Node) {
 }
 
 func parseAutomationGraph(detail *AutomationDetail, live *html.Node) {
-	explicitAvailable, explicitFound := firstAutomationBoolAttrDeep(live,
+	explicitAvailable, explicitFound, explicitValid := firstAutomationBoolValueAttrDeep(live,
 		"data-automation-graph-available", "data-automation-live-graph-available", "data-has-live-graph")
 	graphPanel := findNode(live, func(n *html.Node) bool {
 		return hasAnyHTMLAttr(n, "data-automation-graph-panel", "data-automation-canvas", "data-automation-live-graph")
@@ -428,9 +433,12 @@ func parseAutomationGraph(detail *AutomationDetail, live *html.Node) {
 		detail.NodesAvailable = true
 		detail.EdgesAvailable = true
 	}
-	if explicitFound {
+	if explicitFound && explicitValid {
 		detail.GraphAvailable = explicitAvailable
 	} else {
+		if explicitFound && !explicitValid {
+			detail.Warnings = append(detail.Warnings, "graph availability is malformed")
+		}
 		detail.GraphAvailable = graphPanel != nil || nodesPresent || edgesPresent
 	}
 	if detail.Version.State == "draft" || detail.Automation.LifecycleState == "draft" {
@@ -644,7 +652,14 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 		var values map[string]any
 		decoder := json.NewDecoder(strings.NewReader(raw))
 		decoder.UseNumber()
-		if err := decoder.Decode(&values); err != nil || values == nil {
+		decodeErr := decoder.Decode(&values)
+		if decodeErr == nil {
+			var trailing any
+			if err := decoder.Decode(&trailing); err != io.EOF {
+				decodeErr = fmt.Errorf("trailing JSON data")
+			}
+		}
+		if decodeErr != nil || values == nil {
 			detail.Warnings = append(detail.Warnings, "node counts are malformed")
 		} else {
 			mapPresent, malformed := applyAutomationCountMap(values, counts)
@@ -682,21 +697,25 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 		}
 	}
 	if label := firstAutomationAttrDeep(node, "data-automation-node-count-label", "data-count-label"); label != "" {
-		if mergeAutomationCountText(counts, label) {
+		if mergeAutomationCountText(detail, counts, label) {
 			present = true
 		}
 	}
 	if small := findNode(node, func(n *html.Node) bool { return n.Data == "small" }); small != nil {
-		if mergeAutomationCountText(counts, NodeText(small)) {
+		if mergeAutomationCountText(detail, counts, NodeText(small)) {
 			present = true
 		}
 	}
 	return present
 }
 
-func mergeAutomationCountText(counts *AutomationNodeCounts, text string) bool {
+func mergeAutomationCountText(detail *AutomationDetail, counts *AutomationNodeCounts, text string) bool {
 	var parsed AutomationNodeCounts
-	if !applyAutomationCountText(text, &parsed) {
+	present, malformed := applyAutomationCountText(text, &parsed)
+	if malformed {
+		detail.Warnings = append(detail.Warnings, "node counts are malformed")
+	}
+	if !present {
 		return false
 	}
 	mergeAutomationNodeCounts(counts, parsed)
@@ -718,12 +737,14 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	if len(explicit) > 0 {
 		present = true
 	}
+	parsedExplicit := make([]AutomationLiveEdge, 0, len(explicit))
 	for _, edge := range explicit {
 		parsed, hasCounts := parseAutomationLiveEdge(detail, edge)
 		if hasCounts {
 			countsPresent = true
 		}
-		mergeAutomationLiveEdge(&out, parsed)
+		parsedExplicit = append(parsedExplicit, parsed)
+		mergeAutomationLiveEdge(&out, parsed, false)
 	}
 
 	detailEdges := findAll(live, func(n *html.Node) bool {
@@ -732,12 +753,24 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	if len(detailEdges) > 0 {
 		present = true
 	}
+	parsedDetails := make([]AutomationLiveEdge, 0, len(detailEdges))
 	for _, edge := range detailEdges {
 		parsed, hasCounts := parseAutomationEdgeDetail(detail, edge)
 		if hasCounts {
 			countsPresent = true
 		}
-		mergeAutomationLiveEdge(&out, parsed)
+		parsedDetails = append(parsedDetails, parsed)
+	}
+	for _, parsed := range parsedDetails {
+		mergeAutomationLiveEdge(&out, parsed, automationEdgeHasUniqueEndpointMatch(parsed, parsedExplicit, parsedDetails))
+	}
+	if len(explicit) > 0 && len(detailEdges) > 0 {
+		for _, edge := range out {
+			if edge.edgeSource != automationEdgeSourceGraph|automationEdgeSourceDetails {
+				detail.Warnings = append(detail.Warnings, "edge records could not be correlated safely")
+				break
+			}
+		}
 	}
 	for i := range out {
 		resolveAutomationEdgeNames(&out[i], nodes)
@@ -745,7 +778,37 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	return out, present, countsPresent
 }
 
+func automationEdgeHasUniqueEndpointMatch(parsed AutomationLiveEdge, explicit, details []AutomationLiveEdge) bool {
+	key := automationEdgeEndpointKey(parsed)
+	if key == "" || countAutomationEdgeEndpoint(explicit, key) != 1 || countAutomationEdgeEndpoint(details, key) != 1 {
+		return false
+	}
+	return true
+}
+
+func countAutomationEdgeEndpoint(edges []AutomationLiveEdge, key string) int {
+	count := 0
+	for _, edge := range edges {
+		if automationEdgeEndpointKey(edge) == key {
+			count++
+		}
+	}
+	return count
+}
+
+func automationEdgeEndpointKey(edge AutomationLiveEdge) string {
+	if edge.SourceNodeID != "" && edge.TargetNodeID != "" {
+		return "id\x00" + strings.ToLower(edge.SourceNodeID) + "\x00" + strings.ToLower(edge.TargetNodeID)
+	}
+	if edge.SourceName != "" && edge.TargetName != "" {
+		return "name\x00" + strings.ToLower(edge.SourceName) + "\x00" + strings.ToLower(edge.TargetName)
+	}
+	return ""
+}
+
 var automationEdgeCountsRE = regexp.MustCompile(`^(.*?),?\s*(\d+)\s+transitions?,\s*(\d+)\s+recent$`)
+var automationFreshnessWordRE = regexp.MustCompile(`(?i)\b(fresh|stale)\b`)
+var automationNegatedFreshnessRE = regexp.MustCompile(`(?i)\b(?:not|never|no|without)\b[^.!?;\n]{0,40}\b(fresh|stale)\b`)
 
 func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (AutomationLiveEdge, bool) {
 	parsed := AutomationLiveEdge{edgeSource: automationEdgeSourceGraph}
@@ -763,9 +826,11 @@ func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (Automat
 	recent, recentFound := parseAutomationEdgeCount(detail, edge, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
 	if transitionFound {
 		parsed.TransitionCount = transition
+		parsed.transitionCountQuality = 2
 	}
 	if recentFound {
 		parsed.RecentTransitionCount = recent
+		parsed.recentTransitionCountQuality = 2
 	}
 	if aria := strings.TrimSpace(attr(edge, "aria-label")); aria != "" {
 		if match := automationEdgeCountsRE.FindStringSubmatch(aria); match != nil {
@@ -774,9 +839,11 @@ func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (Automat
 			}
 			if !transitionFound {
 				parsed.TransitionCount, _ = strconv.Atoi(match[2])
+				parsed.transitionCountQuality = 1
 			}
 			if !recentFound {
 				parsed.RecentTransitionCount, _ = strconv.Atoi(match[3])
+				parsed.recentTransitionCountQuality = 1
 			}
 			transitionFound, recentFound = true, true
 		}
@@ -827,9 +894,11 @@ func parseAutomationEdgeDetail(detail *AutomationDetail, section *html.Node) (Au
 	recent, recentFound := parseAutomationEdgeCount(detail, section, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
 	if transitionFound {
 		parsed.TransitionCount = transition
+		parsed.transitionCountQuality = 2
 	}
 	if recentFound {
 		parsed.RecentTransitionCount = recent
+		parsed.recentTransitionCountQuality = 2
 	}
 	parsed.TransitionCountAvailable = transitionFound
 	parsed.RecentTransitionCountAvailable = recentFound
@@ -849,13 +918,13 @@ func parseAutomationEdgeCount(detail *AutomationDetail, node *html.Node, label s
 	return parsed, true
 }
 
-func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveEdge) {
+func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) {
 	if parsed.ID == "" && parsed.EdgeKey == "" && parsed.SourceNodeID == "" && parsed.TargetNodeID == "" && parsed.SourceName == "" && parsed.TargetName == "" && parsed.Label == "" && !parsed.TransitionCountAvailable && !parsed.RecentTransitionCountAvailable && !parsed.Highlighted {
 		return
 	}
 	match := -1
 	for i := range *edges {
-		if automationEdgesCanMerge((*edges)[i], parsed) {
+		if automationEdgesCanMerge((*edges)[i], parsed, allowEndpointMerge) {
 			match = i
 			break
 		}
@@ -890,19 +959,22 @@ func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveE
 	if current.ConditionJSON == "" {
 		current.ConditionJSON = parsed.ConditionJSON
 	}
-	if !current.TransitionCountAvailable && parsed.TransitionCountAvailable {
-		current.TransitionCount = parsed.TransitionCount
-		current.TransitionCountAvailable = true
+	mergeCount := func(currentValue *int, currentAvailable *bool, currentQuality *int, parsedValue int, parsedAvailable bool, parsedQuality int) {
+		if parsedAvailable && (!*currentAvailable || parsedQuality > *currentQuality) {
+			*currentValue = parsedValue
+			*currentAvailable = true
+			*currentQuality = parsedQuality
+		}
 	}
-	if !current.RecentTransitionCountAvailable && parsed.RecentTransitionCountAvailable {
-		current.RecentTransitionCount = parsed.RecentTransitionCount
-		current.RecentTransitionCountAvailable = true
-	}
+	mergeCount(&current.TransitionCount, &current.TransitionCountAvailable, &current.transitionCountQuality,
+		parsed.TransitionCount, parsed.TransitionCountAvailable, parsed.transitionCountQuality)
+	mergeCount(&current.RecentTransitionCount, &current.RecentTransitionCountAvailable, &current.recentTransitionCountQuality,
+		parsed.RecentTransitionCount, parsed.RecentTransitionCountAvailable, parsed.recentTransitionCountQuality)
 	current.Highlighted = current.Highlighted || parsed.Highlighted
 	current.edgeSource |= parsed.edgeSource
 }
 
-func automationEdgesCanMerge(current, parsed AutomationLiveEdge) bool {
+func automationEdgesCanMerge(current, parsed AutomationLiveEdge, allowEndpointMerge bool) bool {
 	if current.ID != "" && parsed.ID != "" {
 		if !strings.EqualFold(current.ID, parsed.ID) {
 			return false
@@ -930,17 +1002,15 @@ func automationEdgesCanMerge(current, parsed AutomationLiveEdge) bool {
 	if automationEdgeEndpointConflict(current, parsed) {
 		return false
 	}
-	if automationEdgeEndpointsEqual(current, parsed) {
-		return true
-	}
 	if current.Label != "" && parsed.Label != "" && !strings.EqualFold(current.Label, parsed.Label) {
 		return false
 	}
-	// A graph shape and a detail card can be joined in rendered order when
-	// neither carries a shared stable identity. This is deliberately one-to-one:
-	// same-source records never enter this fallback, so duplicate labels and
-	// unlabelled edges remain distinct.
-	return current.edgeSource != 0 && parsed.edgeSource != 0
+	if allowEndpointMerge && automationEdgeEndpointsEqual(current, parsed) {
+		return true
+	}
+	// Without a shared stable identity or complete matching endpoints, keep
+	// graph and detail records separate rather than guessing from traversal order.
+	return false
 }
 
 func automationEdgeEndpointConflict(a, b AutomationLiveEdge) bool {
@@ -968,7 +1038,7 @@ func automationEdgeEndpointsEqual(a, b AutomationLiveEdge) bool {
 }
 
 func resolveAutomationEdgeNames(edge *AutomationLiveEdge, nodes []AutomationLiveNode) {
-	if edge.SourceName == "" {
+	if edge.SourceName == "" && edge.SourceNodeID != "" {
 		for _, node := range nodes {
 			if node.ID == edge.SourceNodeID || node.NodeKey == edge.SourceNodeID {
 				edge.SourceName = firstNonEmptyAutomation(node.Name, node.NodeKey, node.ID)
@@ -976,7 +1046,7 @@ func resolveAutomationEdgeNames(edge *AutomationLiveEdge, nodes []AutomationLive
 			}
 		}
 	}
-	if edge.TargetName == "" {
+	if edge.TargetName == "" && edge.TargetNodeID != "" {
 		for _, node := range nodes {
 			if node.ID == edge.TargetNodeID || node.NodeKey == edge.TargetNodeID {
 				edge.TargetName = firstNonEmptyAutomation(node.Name, node.NodeKey, node.ID)
@@ -1107,14 +1177,22 @@ func parseAutomationExternalState(detail *AutomationDetail, live *html.Node) {
 	}
 	lastUpdated := strings.TrimSpace(firstAutomationAttrDeep(section,
 		"data-automation-external-last-updated", "data-external-last-updated", "data-last-updated-at", "data-external-updated-at"))
-	status := normalizeAutomationState(firstAutomationAttrDeep(section, "data-automation-external-status", "data-external-status"))
+	statusRaw, statusRawFound := firstAutomationAttrFoundDeep(section, "data-automation-external-status", "data-external-status")
+	status := ""
+	if statusRawFound {
+		var statusValid bool
+		status, statusValid = parseAutomationExternalStatus(statusRaw)
+		if !statusValid {
+			detail.Warnings = append(detail.Warnings, "external state status is malformed")
+		}
+	}
 	if section != live {
-		text := strings.ToLower(NodeText(section))
+		text := NodeText(section)
 		if !staleFound && !staleRawFound {
-			if strings.Contains(text, "stale") {
-				stale, staleFound = true, true
-			} else if strings.Contains(text, "fresh") {
-				stale, staleFound = false, true
+			if parsedStale, found, ambiguous := parseAutomationFreshnessText(text); ambiguous {
+				detail.Warnings = append(detail.Warnings, "external state freshness is ambiguous")
+			} else if found {
+				stale, staleFound = parsedStale, true
 			}
 		}
 		if lastUpdated == "" {
@@ -1198,22 +1276,13 @@ func firstAutomationAttrFoundDeep(n *html.Node, names ...string) (string, bool) 
 	return "", false
 }
 
-func firstAutomationBoolAttr(n *html.Node, names ...string) (bool, bool) {
-	value, found := firstAutomationAttrFound(n, names...)
+func firstAutomationBoolValueAttrDeep(n *html.Node, names ...string) (bool, bool, bool) {
+	value, found := firstAutomationAttrFoundDeep(n, names...)
 	if !found {
-		return false, false
+		return false, false, false
 	}
-	return parseAutomationBool(value), true
-}
-
-func firstAutomationBoolAttrDeep(n *html.Node, names ...string) (bool, bool) {
-	if value, found := firstAutomationBoolAttr(n, names...); found {
-		return value, true
-	}
-	if nested := findNode(n, func(e *html.Node) bool { return hasAnyHTMLAttr(e, names...) }); nested != nil {
-		return firstAutomationBoolAttr(nested, names...)
-	}
-	return false, false
+	parsed, valid := parseAutomationBoolValue(value)
+	return parsed, true, valid
 }
 
 func firstAutomationIntAttr(n *html.Node, names ...string) (int, bool) {
@@ -1277,13 +1346,41 @@ func parseAutomationFreshness(value string) (bool, bool) {
 	}
 }
 
-func parseAutomationBool(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "1", "yes", "on", "fresh":
-		return true
+func parseAutomationExternalStatus(value string) (string, bool) {
+	switch normalizeAutomationState(value) {
+	case "fresh", "stale":
+		return normalizeAutomationState(value), true
 	default:
-		return false
+		return "", false
 	}
+}
+
+// parseAutomationFreshnessText returns (stale, found, ambiguous). A freshness
+// word preceded by "not" is not a positive freshness assertion.
+func parseAutomationFreshnessText(text string) (bool, bool, bool) {
+	lower := strings.ToLower(text)
+	negated := automationNegatedFreshnessRE.MatchString(lower)
+	withoutNegated := automationNegatedFreshnessRE.ReplaceAllString(lower, " ")
+	if match := automationFreshnessWordRE.FindStringSubmatch(withoutNegated); match != nil {
+		return match[1] == "stale", true, false
+	}
+	return false, false, negated
+}
+
+func parseAutomationBoolValue(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true, true
+	case "false", "0", "no", "off":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func parseAutomationBool(value string) bool {
+	parsed, _ := parseAutomationBoolValue(value)
+	return parsed
 }
 
 func normalizeAutomationState(value string) string {
@@ -1379,7 +1476,7 @@ func automationCountNumber(value any) (int, bool) {
 	}
 }
 
-func applyAutomationCountText(text string, counts *AutomationNodeCounts) bool {
+func applyAutomationCountText(text string, counts *AutomationNodeCounts) (bool, bool) {
 	text = strings.ToLower(strings.TrimSpace(text))
 	if strings.Contains(text, "no active work") {
 		counts.Running, counts.Waiting, counts.Blocked, counts.Failed, counts.CompletedRecently = 0, 0, 0, 0, 0
@@ -1393,9 +1490,10 @@ func applyAutomationCountText(text string, counts *AutomationNodeCounts) bool {
 		counts.blockedQuality = 1
 		counts.failedQuality = 1
 		counts.completedRecentlyQuality = 1
-		return true
+		return true, false
 	}
 	present := false
+	malformed := false
 	for _, field := range []struct {
 		labels    []string
 		target    *int
@@ -1413,9 +1511,32 @@ func applyAutomationCountText(text string, counts *AutomationNodeCounts) bool {
 			*field.available = true
 			*field.quality = 1
 			present = true
+			continue
+		}
+		for _, label := range field.labels {
+			if strings.Contains(text, label) {
+				malformed = true
+				break
+			}
 		}
 	}
-	return present
+	return present, malformed
+}
+
+func automationCountBoundaryBefore(text string, start int) bool {
+	if start <= 0 {
+		return true
+	}
+	r, _ := utf8.DecodeLastRuneInString(text[:start])
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+}
+
+func automationCountBoundaryAfter(text string, end int) bool {
+	if end >= len(text) {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(text[end:])
+	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
 }
 
 func namedAutomationCount(text string, labels ...string) (int, bool) {
@@ -1435,25 +1556,32 @@ func namedAutomationCount(text string, labels ...string) (int, bool) {
 
 			// Accept both "running 2" and the compact backend form
 			// "2 running". The latter is what the SVG node labels use.
-			rest := strings.TrimLeft(lower[idx+len(label):], " \t:=()-")
+			rest := strings.TrimLeft(lower[idx+len(label):], " \t:=()")
+			if strings.HasPrefix(rest, "-") || strings.HasPrefix(rest, "−") {
+				searchFrom = idx + len(label)
+				continue
+			}
 			end := 0
 			for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
 				end++
 			}
-			if end > 0 {
+			if end > 0 && automationCountBoundaryAfter(rest, end) {
 				if value, err := strconv.Atoi(rest[:end]); err == nil {
 					return value, true
 				}
 			}
 
-			prefix := strings.TrimRight(lower[:idx], " \t:=()-")
+			prefix := strings.TrimRight(lower[:idx], " \t:=()")
 			start := len(prefix)
 			for start > 0 && prefix[start-1] >= '0' && prefix[start-1] <= '9' {
 				start--
 			}
-			if start < len(prefix) {
-				if value, err := strconv.Atoi(prefix[start:]); err == nil {
-					return value, true
+			if start < len(prefix) && automationCountBoundaryBefore(prefix, start) {
+				negative := (start > 0 && prefix[start-1] == '-') || strings.HasSuffix(prefix[:start], "−")
+				if !negative {
+					if value, err := strconv.Atoi(prefix[start:]); err == nil {
+						return value, true
+					}
 				}
 			}
 			searchFrom = idx + len(label)

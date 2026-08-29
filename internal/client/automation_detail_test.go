@@ -26,7 +26,7 @@ const automationDetailPublishedPage = `<div id="automation-live"
 	<span data-automation-live-health data-state="healthy">healthy</span>
 	<div data-automation-graph-panel>
 		<svg data-automation-canvas>
-			<line class="automation-graph-edge" aria-label="Start → Review, 4 transitions, 2 recent"></line>
+			<line data-automation-live-edge="e1" class="automation-graph-edge" aria-label="Start → Review, 4 transitions, 2 recent"></line>
 			<g data-automation-live-node="n1" data-automation-node-key="start" data-automation-node-type="trigger" data-automation-node-role="trigger" class="automation-graph-node--running"><strong>Start</strong><span class="automation-node-state--running">running</span><small>No active work</small></g>
 			<g data-automation-live-node="n2" data-automation-node-key="review" data-automation-node-type="task" data-automation-node-role="implementation" class="automation-graph-node--waiting"><strong>Review</strong><span class="automation-node-state--waiting">waiting</span><small>2 running · 1 failed</small></g>
 		</svg>
@@ -218,6 +218,60 @@ func TestParseAutomationDetailTracksPerFieldAvailabilityAndRecentState(t *testin
 	}
 }
 
+func TestParseAutomationDetailDoesNotMergeDuplicateEndpointEdgesWithoutUniqueIdentity(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-endpoints" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<line class="automation-graph-edge" data-source-node-name="Start" data-target-node-name="Review" aria-label="approved, 3 transitions, 0 recent"></line>
+			<line class="automation-graph-edge" data-source-node-name="Start" data-target-node-name="Review" aria-label="rejected, 4 transitions, 0 recent"></line>
+		</svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="e2" data-source-node-name="Start" data-target-node-name="Review"><div>Start → Review</div><p>rejected</p></div>
+			<div data-automation-live-edge-detail="e1" data-source-node-name="Start" data-target-node-name="Review"><div>Start → Review</div><p>approved</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 4 {
+		t.Fatalf("duplicate endpoint edges were merged: %+v", detail.Edges)
+	}
+	graphRecords, detailRecords := 0, 0
+	for _, edge := range detail.Edges {
+		if edge.EdgeKey == "" {
+			graphRecords++
+			continue
+		}
+		detailRecords++
+		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
+			t.Errorf("detail edge received counts without a unique join: %+v", edge)
+		}
+	}
+	if graphRecords != 2 || detailRecords != 2 {
+		t.Fatalf("graph records=%d detail records=%d, edges=%+v", graphRecords, detailRecords, detail.Edges)
+	}
+}
+
+func TestParseAutomationDetailDoesNotMergeWhenDetailEndpointIsDuplicated(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-detail-endpoint" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg><line class="automation-graph-edge" data-source-node-name="Start" data-target-node-name="Review" aria-label="approved, 3 transitions, 0 recent"></line></svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="e2" data-source-node-name="Start" data-target-node-name="Review"><div>Start → Review</div><p>approved</p></div>
+			<div data-automation-live-edge-detail="e1" data-source-node-name="Start" data-target-node-name="Review"><div>Start → Review</div><p>approved</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 3 {
+		t.Fatalf("duplicate detail endpoint was merged with the graph edge: %+v", detail.Edges)
+	}
+	for _, edge := range detail.Edges {
+		if edge.EdgeKey != "" && (edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable) {
+			t.Errorf("detail edge received an ambiguous graph count: %+v", edge)
+		}
+	}
+}
+
 func TestParseAutomationDetailPreservesDistinctAndUnlabelledEdges(t *testing.T) {
 	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edges" data-project-id="p1" data-automation-lifecycle-state="active">
 		<div data-automation-graph-panel><svg>
@@ -235,35 +289,35 @@ func TestParseAutomationDetailPreservesDistinctAndUnlabelledEdges(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 4 || !detail.EdgeCountsAvailable {
+	if len(detail.Edges) != 7 || !detail.EdgeCountsAvailable {
 		t.Fatalf("edges = %+v, available=%t", detail.Edges, detail.EdgeCountsAvailable)
 	}
-	byTopology := make(map[string]AutomationLiveEdge, len(detail.Edges))
+	graphTransitions := []int{}
+	detailKeys := map[string]bool{}
 	for _, edge := range detail.Edges {
-		byTopology[edge.SourceName+"→"+edge.TargetName] = edge
-	}
-	startReview, ok := byTopology["Start→Review"]
-	if !ok || startReview.EdgeKey != "e1" || startReview.Label != "approved" || startReview.TransitionCount != 3 || startReview.RecentTransitionCount != 1 {
-		t.Fatalf("start/review edge = %+v", startReview)
-	}
-	startDeploy, ok := byTopology["Start→Deploy"]
-	if !ok || startDeploy.EdgeKey != "e2" || startDeploy.TransitionCount != 4 || !startDeploy.RecentTransitionCountAvailable || startDeploy.RecentTransitionCount != 0 {
-		t.Fatalf("start/deploy edge = %+v", startDeploy)
-	}
-	reviewArchive, ok := byTopology["Review→Archive"]
-	if !ok || reviewArchive.EdgeKey != "e3" || reviewArchive.Label != "" || reviewArchive.TransitionCount != 0 || !reviewArchive.TransitionCountAvailable {
-		t.Fatalf("review/archive edge = %+v", reviewArchive)
-	}
-	countOnly := 0
-	for _, edge := range detail.Edges {
-		if edge.SourceName == "" && edge.TargetName == "" && edge.EdgeKey == "" {
-			if edge.TransitionCountAvailable && edge.TransitionCount == 0 {
-				countOnly++
+		if edge.EdgeKey == "" {
+			if edge.SourceName != "" || edge.TargetName != "" {
+				t.Errorf("uncorrelated graph edge was assigned endpoints: %+v", edge)
 			}
+			if !edge.TransitionCountAvailable {
+				t.Errorf("graph edge lost transition count: %+v", edge)
+			}
+			graphTransitions = append(graphTransitions, edge.TransitionCount)
+			continue
+		}
+		detailKeys[edge.EdgeKey] = true
+		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
+			t.Errorf("detail edge received unverified graph counts: %+v", edge)
 		}
 	}
-	if countOnly != 1 {
-		t.Fatalf("count-only edges = %d, edges=%+v", countOnly, detail.Edges)
+	if len(graphTransitions) != 4 || graphTransitions[0] != 3 || graphTransitions[1] != 4 || graphTransitions[2] != 0 || graphTransitions[3] != 0 {
+		t.Fatalf("graph transition records = %v", graphTransitions)
+	}
+	if len(detailKeys) != 3 || !detailKeys["e1"] || !detailKeys["e2"] || !detailKeys["e3"] {
+		t.Fatalf("detail edge records = %+v", detailKeys)
+	}
+	if !strings.Contains(strings.Join(detail.Warnings, "\n"), "edge") {
+		t.Fatalf("missing edge-correlation warning: %v", detail.Warnings)
 	}
 }
 
@@ -289,7 +343,7 @@ func TestParseActualAutomationLiveRouteMarksOmittedSectionsUnavailable(t *testin
 	if detail.Automation.ID != "au-actual" || detail.Automation.ProjectID != "p1" || detail.Automation.Name != "Actual automation" || detail.Automation.LifecycleState != "active" || detail.Automation.HealthState != "healthy" {
 		t.Fatalf("metadata = %+v", detail.Automation)
 	}
-	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 2 || len(detail.Edges) != 1 {
+	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 2 || len(detail.Edges) != 2 {
 		t.Fatalf("actual graph = %+v", detail)
 	}
 	if detail.Nodes[0].DisplayState != "recently_completed" {
@@ -380,6 +434,156 @@ func TestParseAutomationDetailRetainsAllDetailOnlyNodes(t *testing.T) {
 	}
 	if detail.Nodes[0].NodeKey != "first" || detail.Nodes[0].Name != "First" || detail.Nodes[1].NodeKey != "second" || detail.Nodes[1].Name != "Second" {
 		t.Fatalf("detail-only node records = %+v", detail.Nodes)
+	}
+}
+
+func TestParseAutomationDetailDoesNotGuessGraphDetailEdgeCorrelation(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edge-correlation" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<line class="automation-graph-edge" aria-label="approved, 3 transitions, 0 recent"></line>
+			<line class="automation-graph-edge" aria-label="approved, 4 transitions, 0 recent"></line>
+		</svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="e2"><div>Start → Deploy</div><p>approved</p></div>
+			<div data-automation-live-edge-detail="e1"><div>Start → Review</div><p>approved</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 4 {
+		t.Fatalf("edges = %+v, want separate graph and detail records", detail.Edges)
+	}
+	graphRecords, detailRecords := 0, 0
+	for _, edge := range detail.Edges {
+		if edge.EdgeKey == "" {
+			graphRecords++
+			if !edge.TransitionCountAvailable {
+				t.Errorf("graph edge lost its count: %+v", edge)
+			}
+			continue
+		}
+		detailRecords++
+		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
+			t.Errorf("unverified graph/detail join supplied counts to %q: %+v", edge.EdgeKey, edge)
+		}
+	}
+	if graphRecords != 2 || detailRecords != 2 {
+		t.Fatalf("graph records=%d detail records=%d, edges=%+v", graphRecords, detailRecords, detail.Edges)
+	}
+	if !strings.Contains(strings.Join(detail.Warnings, "\n"), "edge") {
+		t.Fatalf("missing edge-correlation warning: %v", detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRejectsUnknownExternalStateValues(t *testing.T) {
+	tests := []struct {
+		name     string
+		section  string
+		wantWarn string
+	}{
+		{
+			name:     "unknown status attribute",
+			section:  `<div data-automation-external-state data-automation-external-status="mystery"></div>`,
+			wantWarn: "external state",
+		},
+		{
+			name:     "negated freshness text",
+			section:  `<div data-automation-external-state>not stale</div>`,
+			wantWarn: "freshness",
+		},
+		{
+			name:     "multi-word negated freshness text",
+			section:  `<div data-automation-external-state>not currently stale</div>`,
+			wantWarn: "freshness",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-external-values" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel></div>` + tc.section + `</div>`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !detail.ExternalStateAvailable || detail.ExternalState.StaleAvailable || detail.ExternalState.Stale || detail.ExternalState.Status != "" {
+				t.Fatalf("external state = %+v available=%t, want no confident freshness value", detail.ExternalState, detail.ExternalStateAvailable)
+			}
+			warnings := strings.Join(detail.Warnings, "\n")
+			if !detail.Partial || !strings.Contains(warnings, tc.wantWarn) {
+				t.Fatalf("warnings=%v partial=%t, want warning containing %q", detail.Warnings, detail.Partial, tc.wantWarn)
+			}
+		})
+	}
+}
+
+func TestParseAutomationDetailTreatsUnknownGraphAvailabilityAsUncertain(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-graph-availability" data-project-id="p1" data-automation-lifecycle-state="active" data-automation-graph-available="maybe">
+		<div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Start</strong></g></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable {
+		t.Fatalf("unknown graph availability discarded structural evidence: %+v", detail)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "graph availability") {
+		t.Fatalf("unknown graph availability = partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailUsesPerMetricEdgeCountProvenance(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edge-provenance" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg><line data-automation-live-edge="e1" class="automation-graph-edge" aria-label="approved, 3 transitions, 1 recent"></line></svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="e1" data-automation-transition-count="7"><div>Start → Review</div><p>approved</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 1 {
+		t.Fatalf("edges = %+v, want one correlated edge", detail.Edges)
+	}
+	edge := detail.Edges[0]
+	if edge.TransitionCount != 7 || !edge.TransitionCountAvailable || edge.RecentTransitionCount != 1 || !edge.RecentTransitionCountAvailable {
+		t.Fatalf("edge counts = %+v, want structured transition=7 and aria recent=1", edge)
+	}
+}
+
+func TestParseAutomationDetailRejectsMalformedAutomationCounts(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "trailing JSON data",
+			body: `<g data-automation-live-node="n1" data-counts='{"running":2} trailing'><strong>Node</strong></g>`,
+		},
+		{
+			name: "negative text count",
+			body: `<g data-automation-live-node="n1"><strong>Node</strong><small>running -2</small></g>`,
+		},
+		{
+			name: "text count trailing word",
+			body: `<g data-automation-live-node="n1"><strong>Node</strong><small>running 2oops</small></g>`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-malformed-counts" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel>` + tc.body + `</div></div>`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(detail.Nodes) != 1 {
+				t.Fatalf("nodes = %+v", detail.Nodes)
+			}
+			counts := detail.Nodes[0].Counts
+			if counts.RunningAvailable || counts.Running != 0 {
+				t.Fatalf("malformed running count was accepted: %+v", counts)
+			}
+			if !strings.Contains(strings.Join(detail.Warnings, "\n"), "node counts") {
+				t.Fatalf("missing malformed-count warning: %v", detail.Warnings)
+			}
+		})
 	}
 }
 
