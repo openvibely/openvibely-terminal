@@ -832,6 +832,91 @@ func TestParseAutomationDetailDoesNotUseUnmatchedDetailMetricsForGraphNodes(t *t
 	}
 }
 
+func TestParseAutomationDetailRejectsMalformedTextCountContinuations(t *testing.T) {
+	for _, text := range []string{"running 2,garbage", "2 running;garbage", "not running 2"} {
+		t.Run(text, func(t *testing.T) {
+			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-count-continuation" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Node</strong><small>` + text + `</small></g></div></div>`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(detail.Nodes) != 1 || detail.Nodes[0].Counts.RunningAvailable {
+				t.Fatalf("malformed count %q was accepted: %+v", text, detail)
+			}
+			if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "node counts are malformed") {
+				t.Fatalf("malformed count %q did not produce a partial warning: partial=%t warnings=%v", text, detail.Partial, detail.Warnings)
+			}
+		})
+	}
+}
+
+func TestParseAutomationDetailWarnsOnMalformedARIAEdgeCounts(t *testing.T) {
+	for _, aria := range []string{
+		"approved, -1 transitions, 1 recent",
+		"approved, nope transitions, 1 recent",
+		"approved, 3 transitions, 1 recent trailing",
+	} {
+		t.Run(aria, func(t *testing.T) {
+			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-aria-counts" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><svg><line class="automation-graph-edge" aria-label="` + aria + `"></line></svg></div></div>`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(detail.Edges) != 1 {
+				t.Fatalf("malformed ARIA edge was dropped: %+v", detail.Edges)
+			}
+			edge := detail.Edges[0]
+			if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
+				t.Fatalf("malformed ARIA counts became available: %+v", edge)
+			}
+			warnings := strings.Join(detail.Warnings, "\n")
+			if !detail.Partial || !strings.Contains(warnings, "edge transition") {
+				t.Fatalf("malformed ARIA counts lacked a partial warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+			}
+		})
+	}
+}
+
+func TestParseAutomationDetailInvalidatesAllClaimedMetricsInPartiallyDecodedCounts(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-partial-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node="n1" data-counts='{"running":2,"failed":'><strong>Node</strong><small>9 running · 3 failed · 4 waiting</small></g></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", detail.Nodes)
+	}
+	counts := detail.Nodes[0].Counts
+	if counts.RunningAvailable || counts.Running != 0 || counts.FailedAvailable || counts.Failed != 0 {
+		t.Fatalf("claimed metrics recovered from partial JSON: %+v", counts)
+	}
+	if !counts.WaitingAvailable || counts.Waiting != 4 {
+		t.Fatalf("independent waiting metric was not retained: %+v", counts)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "node counts are malformed") {
+		t.Fatalf("partial JSON lacked warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRetainsMalformedIdentitylessGraphEdges(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-identityless-edge" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg><line class="automation-graph-edge" data-transition-count="not-a-number"></line></svg></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 1 {
+		t.Fatalf("identityless malformed edge was dropped: %+v", detail.Edges)
+	}
+	edge := detail.Edges[0]
+	if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
+		t.Fatalf("malformed identityless edge counts became available: %+v", edge)
+	}
+	warnings := strings.Join(detail.Warnings, "\n")
+	if !detail.Partial || !strings.Contains(warnings, "edge record has no stable identity") {
+		t.Fatalf("identityless edge lacked retention warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
 func parseAutomationDetailFromString(source string) (AutomationDetail, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {

@@ -1232,6 +1232,23 @@ func TestRenderAutomationDetailShowsUnmatchedDetailsWhenGraphNodesAreEmpty(t *te
 	}
 }
 
+func TestRenderAutomationDetailShowsDetailOnlyNodesWhenGraphUnavailable(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:           client.AutomationMetadata{ID: "au-unavailable-details", Name: "Unavailable graph", LifecycleState: "active"},
+		Nodes:                []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{NodeKey: "detail-only", Name: "Detail only"}, Counts: client.AutomationNodeCounts{Running: 7, RunningAvailable: true}}},
+		UnmatchedNodeDetails: []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{NodeKey: "unmatched", Name: "Unmatched only"}}},
+		GraphAvailable:       false,
+		NodesAvailable:       true,
+		Partial:              true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"nodes: unavailable", "Detail-only nodes", "Detail only", "7", "Unmatched node details", "correlation unavailable", "Unmatched only"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unavailable graph detail output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder

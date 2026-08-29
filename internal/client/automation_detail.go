@@ -727,7 +727,7 @@ func markAutomationNodeCountFieldsInvalidFromRaw(raw string, counts *AutomationN
 	}
 	values := make(map[string]any, len(matches))
 	for _, match := range matches {
-		values[match[1]] = nil
+		values[strings.ToLower(match[1])] = nil
 	}
 	markAutomationNodeCountMapInvalid(values, counts)
 	return true
@@ -754,16 +754,16 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 		}
 		if decodeErr != nil || values == nil {
 			detail.Warnings = append(detail.Warnings, "node counts are malformed")
-			if values == nil {
-				if !markAutomationNodeCountFieldsInvalidFromRaw(raw, counts) {
+			if !markAutomationNodeCountFieldsInvalidFromRaw(raw, counts) {
+				if values == nil {
 					markAutomationNodeCountsInvalid(counts)
+				} else {
+					// A malformed object can still identify which metrics it was
+					// attempting to provide. Invalidate only those fields so valid
+					// independent metrics may still come from visible text or
+					// explicit attributes.
+					markAutomationNodeCountMapInvalid(values, counts)
 				}
-			} else {
-				// A malformed object can still identify which metrics it was
-				// attempting to provide. Invalidate only those fields so valid
-				// independent metrics may still come from visible text or
-				// explicit attributes.
-				markAutomationNodeCountMapInvalid(values, counts)
 			}
 		} else {
 			mapPresent, malformed := applyAutomationCountMap(values, counts)
@@ -851,6 +851,9 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 			countsPresent = true
 		}
 		parsedExplicit = append(parsedExplicit, parsed)
+		if automationEdgeHasNoStableIdentity(parsed) {
+			detail.Warnings = append(detail.Warnings, "edge record has no stable identity")
+		}
 		mergeAutomationLiveEdge(&out, parsed, false)
 	}
 
@@ -867,6 +870,9 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 			countsPresent = true
 		}
 		parsedDetails = append(parsedDetails, parsed)
+		if automationEdgeHasNoStableIdentity(parsed) {
+			detail.Warnings = append(detail.Warnings, "edge record has no stable identity")
+		}
 	}
 	for _, parsed := range parsedDetails {
 		mergeAutomationLiveEdge(&out, parsed, automationEdgeHasUniqueEndpointMatch(parsed, parsedExplicit, parsedDetails))
@@ -916,6 +922,37 @@ func automationEdgeEndpointKey(edge AutomationLiveEdge) string {
 var automationEdgeCountsRE = regexp.MustCompile(`^(.*?),?\s*(\d+)\s+transitions?,\s*(\d+)\s+recent$`)
 var automationFreshnessWordRE = regexp.MustCompile(`(?i)\b(fresh|stale)\b`)
 
+func automationEdgeCountsMatch(aria string) []string {
+	match := automationEdgeCountsRE.FindStringSubmatch(aria)
+	if match == nil {
+		return nil
+	}
+	indexes := automationEdgeCountsRE.FindStringSubmatchIndex(aria)
+	if len(indexes) < 6 {
+		return nil
+	}
+	numberStart := indexes[4]
+	if numberStart > 0 {
+		previous, _ := utf8.DecodeLastRuneInString(aria[:numberStart])
+		if !unicode.IsSpace(previous) && previous != ',' {
+			return nil
+		}
+		beforeNumber := strings.TrimRightFunc(aria[:numberStart], unicode.IsSpace)
+		if beforeNumber != "" {
+			last, _ := utf8.DecodeLastRuneInString(beforeNumber)
+			if strings.ContainsRune("+-−.", last) {
+				return nil
+			}
+		}
+	}
+	return match
+}
+
+func automationEdgeARIAHasCountWords(aria string) bool {
+	lower := strings.ToLower(aria)
+	return strings.Contains(lower, "transition") || strings.Contains(lower, " recent") || strings.HasSuffix(lower, "recent")
+}
+
 func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (AutomationLiveEdge, bool) {
 	parsed := AutomationLiveEdge{edgeSource: automationEdgeSourceGraph}
 	parsed.ID = strings.TrimSpace(firstAutomationAttr(edge, "data-automation-live-edge-id", "data-automation-edge-id", "data-edge-id"))
@@ -943,7 +980,7 @@ func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (Automat
 		parsed.recentTransitionCountQuality = -1
 	}
 	if aria := strings.TrimSpace(attr(edge, "aria-label")); aria != "" {
-		if match := automationEdgeCountsRE.FindStringSubmatch(aria); match != nil {
+		if match := automationEdgeCountsMatch(aria); match != nil {
 			if parsed.Label == "" {
 				parsed.Label = strings.TrimSpace(strings.TrimSuffix(match[1], ","))
 			}
@@ -970,6 +1007,16 @@ func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (Automat
 					parsed.recentTransitionCountQuality = 1
 					recentFound = true
 				}
+			}
+		} else if automationEdgeARIAHasCountWords(aria) {
+			detail.Warnings = append(detail.Warnings, "edge transition counts are malformed")
+			if !transitionFound && !transitionInvalid {
+				transitionInvalid = true
+				parsed.transitionCountQuality = -1
+			}
+			if !recentFound && !recentInvalid {
+				recentInvalid = true
+				parsed.recentTransitionCountQuality = -1
 			}
 		}
 	}
@@ -1047,10 +1094,20 @@ func parseAutomationEdgeCount(detail *AutomationDetail, node *html.Node, label s
 	return parsed, true, false
 }
 
-func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) {
-	if parsed.ID == "" && parsed.EdgeKey == "" && parsed.SourceNodeID == "" && parsed.TargetNodeID == "" && parsed.SourceName == "" && parsed.TargetName == "" && parsed.Label == "" && !parsed.TransitionCountAvailable && !parsed.RecentTransitionCountAvailable && !parsed.Highlighted {
-		return
+func automationEdgeHasNoStableIdentity(edge AutomationLiveEdge) bool {
+	if edge.ID != "" || edge.EdgeKey != "" {
+		return false
 	}
+	if edge.SourceNodeID != "" && edge.TargetNodeID != "" {
+		return false
+	}
+	if edge.SourceName != "" && edge.TargetName != "" {
+		return false
+	}
+	return true
+}
+
+func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) {
 	match := -1
 	for i := range *edges {
 		if automationEdgesCanMerge((*edges)[i], parsed, allowEndpointMerge) {
@@ -1750,10 +1807,24 @@ func automationCountBoundaryAfter(text string, end int) bool {
 	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
 }
 
+var automationCountContinuationLabels = []string{
+	"active invocations",
+	"active invocation",
+	"active work items",
+	"active work item",
+	"open work items",
+	"open work item",
+	"completed recently",
+	"recently completed",
+	"waiting human",
+	"running",
+	"waiting",
+	"blocked",
+	"failed",
+	"recent",
+}
+
 func automationCountContinuationAfter(text string, end int) bool {
-	if end >= len(text) {
-		return true
-	}
 	for end < len(text) {
 		r, size := utf8.DecodeRuneInString(text[end:])
 		if !unicode.IsSpace(r) {
@@ -1764,8 +1835,113 @@ func automationCountContinuationAfter(text string, end int) bool {
 	if end >= len(text) {
 		return true
 	}
-	r, _ := utf8.DecodeRuneInString(text[end:])
-	return strings.ContainsRune(",;·|)", r)
+	r, size := utf8.DecodeRuneInString(text[end:])
+	if r == ')' {
+		end += size
+		for end < len(text) {
+			r, size = utf8.DecodeRuneInString(text[end:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			end += size
+		}
+		return end >= len(text)
+	}
+	if !strings.ContainsRune(",;·|", r) {
+		return false
+	}
+	end += size
+	for end < len(text) {
+		r, size = utf8.DecodeRuneInString(text[end:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end += size
+	}
+	if end >= len(text) {
+		return false
+	}
+	segmentEnd, ok := automationCountSegmentEnd(text[end:])
+	if !ok {
+		return false
+	}
+	return automationCountContinuationAfter(text[end:], segmentEnd)
+}
+
+func automationCountSegmentEnd(source string) (int, bool) {
+	text := strings.TrimLeftFunc(source, unicode.IsSpace)
+	offset := len(source) - len(text)
+	if text == "" {
+		return 0, false
+	}
+
+	for _, label := range automationCountContinuationLabels {
+		if !strings.HasPrefix(text, label) || !automationCountBoundaryAfter(text, len(label)) {
+			continue
+		}
+		rawSuffix := text[len(label):]
+		rest := strings.TrimLeftFunc(rawSuffix, isAutomationCountSeparator)
+		if len(rawSuffix) == len(rest) || strings.HasPrefix(rest, "-") || strings.HasPrefix(rest, "−") {
+			continue
+		}
+		numberEnd := 0
+		for numberEnd < len(rest) && rest[numberEnd] >= '0' && rest[numberEnd] <= '9' {
+			numberEnd++
+		}
+		if numberEnd == 0 || (numberEnd < len(rest) && rest[numberEnd] == '.') || !automationCountBoundaryAfter(rest, numberEnd) {
+			continue
+		}
+		if _, err := strconv.Atoi(rest[:numberEnd]); err != nil {
+			continue
+		}
+		return offset + len(text) - len(rest) + numberEnd, true
+	}
+
+	numberEnd := 0
+	for numberEnd < len(text) && text[numberEnd] >= '0' && text[numberEnd] <= '9' {
+		numberEnd++
+	}
+	if numberEnd == 0 || numberEnd >= len(text) {
+		return 0, false
+	}
+	separator, _ := utf8.DecodeRuneInString(text[numberEnd:])
+	if !unicode.IsSpace(separator) {
+		return 0, false
+	}
+	if _, err := strconv.Atoi(text[:numberEnd]); err != nil {
+		return 0, false
+	}
+	labelStart := numberEnd
+	for labelStart < len(text) {
+		r, size := utf8.DecodeRuneInString(text[labelStart:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		labelStart += size
+	}
+	for _, label := range automationCountContinuationLabels {
+		labelEnd := labelStart + len(label)
+		if strings.HasPrefix(text[labelStart:], label) && automationCountBoundaryAfter(text, labelEnd) {
+			return offset + labelEnd, true
+		}
+	}
+	return 0, false
+}
+
+func automationCountSequenceComplete(text string) bool {
+	end, ok := automationCountSegmentEnd(text)
+	return ok && automationCountContinuationAfter(text, end)
+}
+
+func automationCountLabelPrefixIsValid(prefix string) bool {
+	if strings.TrimSpace(prefix) == "" {
+		return true
+	}
+	withoutTrailingSeparators := strings.TrimRightFunc(prefix, isAutomationCountSeparator)
+	if strings.TrimSpace(withoutTrailingSeparators) == "" {
+		return false
+	}
+	return automationCountSequenceComplete(strings.TrimSpace(withoutTrailingSeparators))
 }
 
 func automationCountValueBoundaryAfter(text string, end int) bool {
@@ -1833,7 +2009,7 @@ func namedAutomationCount(text string, labels ...string) (int, bool) {
 			// decimal values remain unavailable.
 			rawSuffix := lower[labelEnd:]
 			rest := strings.TrimLeftFunc(rawSuffix, isAutomationCountSeparator)
-			if len(rawSuffix) != len(rest) {
+			if len(rawSuffix) != len(rest) && automationCountLabelPrefixIsValid(rawPrefix) {
 				if strings.HasPrefix(rest, "-") || strings.HasPrefix(rest, "−") {
 					searchFrom = labelEnd
 					continue

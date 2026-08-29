@@ -775,6 +775,9 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		}
 		b.WriteString(dimStyle.Render("  unavailable — "+reason) + "\n")
 		b.WriteString(dimStyle.Render("  nodes: unavailable · edges: unavailable") + "\n")
+		if (detail.NodesAvailable && len(detail.Nodes) > 0) || len(detail.UnmatchedNodeDetails) > 0 {
+			renderAutomationDetailOnlyNodes(&b, detail)
+		}
 	} else {
 		nodeSummary := "not reported"
 		if detail.NodesAvailable {
@@ -850,58 +853,76 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 }
 
 func renderAutomationDetailNodes(b *strings.Builder, detail client.AutomationDetail) {
-	b.WriteString("  " + sectionStyle.Render("Nodes") + "\n")
+	renderAutomationDetailNodeTable(b, detail, "Nodes")
+	renderAutomationDetailUnmatchedNodeDetails(b, detail)
+}
+
+func renderAutomationDetailOnlyNodes(b *strings.Builder, detail client.AutomationDetail) {
+	if detail.NodesAvailable && len(detail.Nodes) > 0 {
+		renderAutomationDetailNodeTable(b, detail, "Detail-only nodes")
+	}
+	renderAutomationDetailUnmatchedNodeDetails(b, detail)
+}
+
+func renderAutomationDetailNodeTable(b *strings.Builder, detail client.AutomationDetail, title string) {
+	b.WriteString("  " + sectionStyle.Render(title) + "\n")
 	if !detail.NodesAvailable {
 		b.WriteString(dimStyle.Render("    unavailable — node section was not returned") + "\n")
-	} else if len(detail.Nodes) == 0 {
+		return
+	}
+	if len(detail.Nodes) == 0 {
 		b.WriteString(dimStyle.Render("    (empty)") + "\n")
-	} else {
-		nodes := append([]client.AutomationLiveNode(nil), detail.Nodes...)
-		sort.SliceStable(nodes, func(i, j int) bool {
-			return automationDetailNodeSortKey(nodes[i]) < automationDetailNodeSortKey(nodes[j])
-		})
-		rows := [][]string{{"NODE", "STATE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
-		legacyNodeCounts := detail.NodeCountsAvailable && len(detail.UnmatchedNodeDetails) == 0 && !automationDetailHasNodeCountAvailability(detail)
-		for _, node := range nodes {
-			state := formatAutomationNodeState(firstNonEmpty(node.DisplayState, "not reported"))
-			counts := node.Counts
-			countCells := []string{
-				automationDetailTableCount(counts.Running, counts.RunningAvailable || legacyNodeCounts),
-				automationDetailTableCount(counts.Waiting, counts.WaitingAvailable || legacyNodeCounts),
-				automationDetailTableCount(counts.Blocked, counts.BlockedAvailable || legacyNodeCounts),
-				automationDetailTableCount(counts.Failed, counts.FailedAvailable || legacyNodeCounts),
-				automationDetailTableCount(counts.CompletedRecently, counts.CompletedRecentlyAvailable || legacyNodeCounts),
-			}
-			rows = append(rows, append([]string{firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"), state}, countCells...))
-		}
-		b.WriteString(indentAutomationDetailTable(table(rows)))
-		b.WriteByte('\n')
+		return
 	}
-	if len(detail.UnmatchedNodeDetails) > 0 {
-		b.WriteString("  " + sectionStyle.Render("Unmatched node details") + "\n")
-		b.WriteString(dimStyle.Render("    correlation unavailable; records retained separately") + "\n")
-		details := append([]client.AutomationLiveNode(nil), detail.UnmatchedNodeDetails...)
-		sort.SliceStable(details, func(i, j int) bool {
-			return automationDetailNodeSortKey(details[i]) < automationDetailNodeSortKey(details[j])
-		})
-		detailRows := [][]string{{"NODE", "KEY", "ROLE", "TYPE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
-		for _, node := range details {
-			counts := node.Counts
-			detailRows = append(detailRows, []string{
-				firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"),
-				firstNonEmpty(node.NodeKey, node.ID, "—"),
-				firstNonEmpty(node.Role, "—"),
-				firstNonEmpty(node.NodeType, "—"),
-				automationDetailTableCount(counts.Running, counts.RunningAvailable),
-				automationDetailTableCount(counts.Waiting, counts.WaitingAvailable),
-				automationDetailTableCount(counts.Blocked, counts.BlockedAvailable),
-				automationDetailTableCount(counts.Failed, counts.FailedAvailable),
-				automationDetailTableCount(counts.CompletedRecently, counts.CompletedRecentlyAvailable),
-			})
+	nodes := append([]client.AutomationLiveNode(nil), detail.Nodes...)
+	sort.SliceStable(nodes, func(i, j int) bool {
+		return automationDetailNodeSortKey(nodes[i]) < automationDetailNodeSortKey(nodes[j])
+	})
+	rows := [][]string{{"NODE", "STATE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
+	legacyNodeCounts := detail.NodeCountsAvailable && len(detail.UnmatchedNodeDetails) == 0 && !automationDetailHasNodeCountAvailability(detail)
+	for _, node := range nodes {
+		state := formatAutomationNodeState(firstNonEmpty(node.DisplayState, "not reported"))
+		counts := node.Counts
+		countCells := []string{
+			automationDetailTableCount(counts.Running, counts.RunningAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.Waiting, counts.WaitingAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.Blocked, counts.BlockedAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.Failed, counts.FailedAvailable || legacyNodeCounts),
+			automationDetailTableCount(counts.CompletedRecently, counts.CompletedRecentlyAvailable || legacyNodeCounts),
 		}
-		b.WriteString(indentAutomationDetailTable(table(detailRows)))
-		b.WriteByte('\n')
+		rows = append(rows, append([]string{firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"), state}, countCells...))
 	}
+	b.WriteString(indentAutomationDetailTable(table(rows)))
+	b.WriteByte('\n')
+}
+
+func renderAutomationDetailUnmatchedNodeDetails(b *strings.Builder, detail client.AutomationDetail) {
+	if len(detail.UnmatchedNodeDetails) == 0 {
+		return
+	}
+	b.WriteString("  " + sectionStyle.Render("Unmatched node details") + "\n")
+	b.WriteString(dimStyle.Render("    correlation unavailable; records retained separately") + "\n")
+	details := append([]client.AutomationLiveNode(nil), detail.UnmatchedNodeDetails...)
+	sort.SliceStable(details, func(i, j int) bool {
+		return automationDetailNodeSortKey(details[i]) < automationDetailNodeSortKey(details[j])
+	})
+	detailRows := [][]string{{"NODE", "KEY", "ROLE", "TYPE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
+	for _, node := range details {
+		counts := node.Counts
+		detailRows = append(detailRows, []string{
+			firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"),
+			firstNonEmpty(node.NodeKey, node.ID, "—"),
+			firstNonEmpty(node.Role, "—"),
+			firstNonEmpty(node.NodeType, "—"),
+			automationDetailTableCount(counts.Running, counts.RunningAvailable),
+			automationDetailTableCount(counts.Waiting, counts.WaitingAvailable),
+			automationDetailTableCount(counts.Blocked, counts.BlockedAvailable),
+			automationDetailTableCount(counts.Failed, counts.FailedAvailable),
+			automationDetailTableCount(counts.CompletedRecently, counts.CompletedRecentlyAvailable),
+		})
+	}
+	b.WriteString(indentAutomationDetailTable(table(detailRows)))
+	b.WriteByte('\n')
 }
 
 func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDetail) {
