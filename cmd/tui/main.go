@@ -106,9 +106,31 @@ func run() error {
 }
 
 func runCLI(c *client.Client, project string, args []string, force, jsonOutput bool) error {
+	if !isForegroundEventsCommand(args) {
+		// Preserve the original CLI behavior for ordinary commands: Ctrl-C keeps
+		// its normal process-interrupt semantics instead of being consumed by a
+		// context that those commands do not use.
+		return tui.RunCLI(c, os.Stdout, project, args, force, jsonOutput)
+	}
+
+	// Foreground events is the one CLI command with a caller-owned lifetime.
+	// Let Ctrl-C cancel its stream so the SSE request and response body close.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	return tui.RunCLIContext(ctx, c, os.Stdout, project, args, force, jsonOutput)
+}
+
+func isForegroundEventsCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(args[0]), "/"))
+	switch name {
+	case "events", "stream", "log":
+		return true
+	default:
+		return false
+	}
 }
 
 func isStaticHelpCommand(args []string) bool {

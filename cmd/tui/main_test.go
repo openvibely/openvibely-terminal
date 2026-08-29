@@ -183,3 +183,27 @@ func TestLoginWithConfiguredCredentialsSkipsEmptyConfiguration(t *testing.T) {
 		t.Fatal("empty credential configuration made a login request")
 	}
 }
+
+func TestOnlyForegroundEventsUseInterruptContext(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "events", args: []string{"events"}, want: true},
+		{name: "events with slash", args: []string{"/events", "on"}, want: true},
+		{name: "stream alias", args: []string{"stream", "on"}, want: true},
+		{name: "log alias case insensitive", args: []string{"LOG", "off"}, want: true},
+		{name: "tasks remains ordinary", args: []string{"tasks", "run", "task"}, want: false},
+		{name: "chat remains ordinary", args: []string{"chat", "wait"}, want: false},
+		{name: "help events remains ordinary", args: []string{"help", "events"}, want: false},
+		{name: "empty arguments", args: nil, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isForegroundEventsCommand(tc.args); got != tc.want {
+				t.Fatalf("isForegroundEventsCommand(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
