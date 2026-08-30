@@ -997,11 +997,24 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	if automationEdgesHaveDuplicateStableIdentity(parsedDetails) {
 		detail.Warnings = append(detail.Warnings, "duplicate edge records could not be correlated safely")
 	}
-	for _, parsed := range parsedDetails {
+	detailAllowEndpointMerge := make([]bool, len(parsedDetails))
+	detailGraphCandidates := make([][]int, len(parsedDetails))
+	graphDetailCandidateCounts := make([]int, len(parsedExplicit))
+	for detailIndex, parsed := range parsedDetails {
 		allowEndpointMerge := automationEdgeHasUniqueEndpointMatch(parsed, parsedExplicit, parsedDetails)
-		if countAutomationEdgeCorrelationCandidates(parsedExplicit, parsed, allowEndpointMerge) == 1 &&
-			countAutomationEdgeCorrelationCandidates(parsedDetails, parsed, allowEndpointMerge) == 1 {
-			mergeAutomationLiveEdge(&out, parsed, allowEndpointMerge)
+		detailAllowEndpointMerge[detailIndex] = allowEndpointMerge
+		for graphIndex, graph := range parsedExplicit {
+			if !automationEdgeRecordsCanCorrelate(graph, parsed, allowEndpointMerge) {
+				continue
+			}
+			detailGraphCandidates[detailIndex] = append(detailGraphCandidates[detailIndex], graphIndex)
+			graphDetailCandidateCounts[graphIndex]++
+		}
+	}
+	for detailIndex, parsed := range parsedDetails {
+		candidates := detailGraphCandidates[detailIndex]
+		if len(candidates) == 1 && graphDetailCandidateCounts[candidates[0]] == 1 {
+			mergeAutomationLiveEdge(&out, parsed, detailAllowEndpointMerge[detailIndex])
 			continue
 		}
 		out = append(out, parsed)
@@ -1037,16 +1050,6 @@ func automationEdgesShareStableIdentity(a, b AutomationLiveEdge) bool {
 		return true
 	}
 	return a.EdgeKey != "" && b.EdgeKey != "" && strings.EqualFold(a.EdgeKey, b.EdgeKey)
-}
-
-func countAutomationEdgeCorrelationCandidates(edges []AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) int {
-	count := 0
-	for _, edge := range edges {
-		if automationEdgeRecordsCanCorrelate(edge, parsed, allowEndpointMerge) {
-			count++
-		}
-	}
-	return count
 }
 
 func sortAutomationDuplicateEdges(edges []AutomationLiveEdge) {
@@ -1558,7 +1561,7 @@ func parseAutomationResources(detail *AutomationDetail, live *html.Node) {
 
 func parseAutomationResourceNodes(resourceNodes []*html.Node) []AutomationResourceSummary {
 	out := make([]AutomationResourceSummary, 0, len(resourceNodes))
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	for _, node := range resourceNodes {
 		resource := AutomationResourceSummary{
 			NodeID:       strings.TrimSpace(firstAutomationAttr(node, "data-automation-resource-node-id", "data-node-id")),
@@ -1577,13 +1580,29 @@ func parseAutomationResourceNodes(resourceNodes []*html.Node) []AutomationResour
 		if resource.NodeID == "" && resource.NodeKey == "" && resource.ResourceType == "" && resource.ResourceID == "" && resource.Relation == "" {
 			continue
 		}
-		if seen[key] {
+		if index, found := seen[key]; found {
+			if automationResourceDeterministicKey(resource) < automationResourceDeterministicKey(out[index]) {
+				out[index] = resource
+			}
 			continue
 		}
-		seen[key] = true
+		seen[key] = len(out)
 		out = append(out, resource)
 	}
 	return out
+}
+
+func automationResourceDeterministicKey(resource AutomationResourceSummary) string {
+	return strings.Join([]string{
+		resource.NodeID,
+		resource.NodeKey,
+		resource.ResourceType,
+		resource.ResourceID,
+		resource.Relation,
+		resource.Name,
+		resource.Status,
+		resource.URL,
+	}, "\x00")
 }
 
 func parseAutomationExternalState(detail *AutomationDetail, live *html.Node) {

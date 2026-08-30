@@ -1247,6 +1247,96 @@ func TestParseAutomationDetailRetainsDuplicateDetailEdgesBeforeCorrelation(t *te
 	}
 }
 
+func TestParseAutomationDetailRequiresGloballyUniqueEdgeCorrelation(t *testing.T) {
+	parse := func(details string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-global-edge-candidates" data-project-id="p1" data-automation-lifecycle-state="active">
+			<div data-automation-graph-panel><svg>
+				<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" aria-label="unknown, 3 transitions, 1 recent"></line>
+			</svg></div>
+			<div data-automation-live-details-panel><div data-automation-live-edge-details>` + details + `</div></div>
+		</div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	approved := `<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1" data-source-node-id="n1" data-target-node-id="n2" data-transition-count="5"><div>Start → Review</div><p>approved</p></div>`
+	rejected := `<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1" data-source-node-id="n3" data-target-node-id="n4" data-transition-count="7"><div>Other → Destination</div><p>rejected</p></div>`
+	first := parse(approved + rejected)
+	second := parse(rejected + approved)
+	if len(first.Edges) != 3 || len(second.Edges) != 3 {
+		t.Fatalf("ambiguous detail edges were merged into an incomplete graph edge: first=%+v second=%+v", first.Edges, second.Edges)
+	}
+	firstJSON, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("globally ambiguous edge correlation depends on input order:\nfirst: %s\nsecond: %s", firstJSON, secondJSON)
+	}
+	graph := first.Edges[0]
+	if graph.SourceNodeID != "" || graph.TargetNodeID != "" || graph.Label != "unknown" || graph.TransitionCount != 3 {
+		t.Fatalf("ambiguous detail record enriched graph edge: %+v", graph)
+	}
+}
+
+func TestParseAutomationDetailTreatsBackendNoActiveWorkAsExplicitZeroes(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-zero-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<g data-automation-live-node="n1"><foreignObject><div><strong>Direct</strong><small>No active work</small></div></foreignObject></g>
+			<a data-automation-task-link aria-label="Model, Idle, No active work"><g data-automation-live-node="n2"><foreignObject><div><strong>Model</strong><small>Project default</small></div></foreignObject></g></a>
+		</svg></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 2 {
+		t.Fatalf("nodes = %+v", detail.Nodes)
+	}
+	for _, node := range detail.Nodes {
+		counts := node.Counts
+		if counts.Running != 0 || counts.Waiting != 0 || counts.Blocked != 0 || counts.Failed != 0 || counts.CompletedRecently != 0 ||
+			!counts.RunningAvailable || !counts.WaitingAvailable || !counts.BlockedAvailable || !counts.FailedAvailable || !counts.CompletedRecentlyAvailable {
+			t.Errorf("node %+v did not expose explicit zero counts: %+v", node.AutomationNode, counts)
+		}
+	}
+}
+
+func TestParseAutomationDetailCanonicalizesDuplicateResourcesDeterministically(t *testing.T) {
+	parse := func(resources string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-resources" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-resources>` + resources + `</div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	alpha := `<div data-automation-resource data-node-key="review" data-resource-type="repository" data-resource-id="repo1" data-relation="input" data-resource-name="Alpha" data-resource-status="ready" data-resource-url="https://example.test/a"></div>`
+	zulu := `<div data-automation-resource data-node-key="review" data-resource-type="repository" data-resource-id="repo1" data-relation="input" data-resource-name="Zulu" data-resource-status="stale" data-resource-url="https://example.test/z"></div>`
+	first := parse(alpha + zulu)
+	second := parse(zulu + alpha)
+	if len(first.Resources) != 1 || len(second.Resources) != 1 {
+		t.Fatalf("duplicate resources were not canonicalized: first=%+v second=%+v", first.Resources, second.Resources)
+	}
+	firstJSON, err := json.Marshal(first.Resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(second.Resources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("duplicate resource output depends on input order: first=%s second=%s", firstJSON, secondJSON)
+	}
+	if first.Resources[0].Name != "Alpha" || first.Resources[0].Status != "ready" || first.Resources[0].URL != "https://example.test/a" {
+		t.Fatalf("unexpected canonical duplicate resource: %+v", first.Resources[0])
+	}
+}
+
 func parseAutomationDetailFromString(source string) (AutomationDetail, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {
