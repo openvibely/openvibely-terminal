@@ -1798,6 +1798,10 @@ func modelsCommand() command {
 			`models delete claude-haiku`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")

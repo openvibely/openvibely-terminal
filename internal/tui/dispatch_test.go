@@ -2460,6 +2460,44 @@ func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
 	}
 }
 
+func TestModelsCommandsRequireSelectedProject(t *testing.T) {
+	cases := []string{
+		"/models",
+		"/models list",
+		"/models capacity",
+		"/models default Sonnet",
+		"/models delete Sonnet",
+		"/models default",
+		"/models delete",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "no project selected — use /project <name>") {
+				t.Fatalf("expected no-project guidance for %s:\n%s", line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s made backend requests without a selected project:\n%s", line, calls)
+			}
+			if m.busy {
+				t.Fatalf("%s left the model busy", line)
+			}
+			if m.selectorActive {
+				t.Fatalf("%s opened a selector without a selected project", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Fatalf("%s opened confirmation without a selected project", line)
+			}
+		})
+	}
+}
+
 func TestModelsDefault(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
