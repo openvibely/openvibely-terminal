@@ -2247,6 +2247,36 @@ func TestCLIEventsOffIsExplicitlyUnsupportedForAnotherProcess(t *testing.T) {
 	}
 }
 
+func TestCLIEventsInvalidArgumentsRejectBeforeProjectLoad(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown mode", args: []string{"events", "maybe"}},
+		{name: "extra argument", args: []string{"events", "on", "extra"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+			})
+			var out bytes.Buffer
+
+			err := RunCLI(c, &out, "demo", tc.args, false, false)
+			if err == nil || !strings.Contains(err.Error(), "usage: events [on|off]") {
+				t.Fatalf("error = %v, want events usage error; output: %q", err, out.String())
+			}
+			if got := rec.count("GET", "/api/projects"); got != 0 {
+				t.Fatalf("invalid events arguments fetched projects %d times", got)
+			}
+			if got := rec.count("GET", "/events/live"); got != 0 {
+				t.Fatalf("invalid events arguments opened %d streams", got)
+			}
+		})
+	}
+}
+
 func TestCLIEventsUsesAuthenticatedCookieSession(t *testing.T) {
 	const session = "session-token"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

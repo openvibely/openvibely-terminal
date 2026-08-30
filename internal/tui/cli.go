@@ -96,12 +96,14 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 	m.transcript.Width = m.width
 	m.log = nil // drop the interactive banner
 
+	var eventsOn bool
 	if cmdDef.name == "events" {
-		on, err := parseCLIEventsAction(fields[1:])
+		var err error
+		eventsOn, err = parseCLIEventsAction(fields[1:])
 		if err != nil {
 			return err
 		}
-		if !on {
+		if !eventsOn {
 			return errors.New(cliEventsOffMessage)
 		}
 	}
@@ -135,7 +137,7 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 	// feeding a long-lived command through drain would delay line output until
 	// the stream ended.
 	if cmdDef.name == "events" {
-		return runCLIEvents(ctx, c, out, m.selectedID, fields[1:], json)
+		return runCLIEvents(ctx, c, out, m.selectedID, eventsOn, json)
 	}
 
 	if cmdDef.needsStatus() {
@@ -202,17 +204,12 @@ type cliEventPayload struct {
 	Queued          bool   `json:"queued"`
 }
 
-// runCLIEvents consumes exactly one project-scoped stream. EOF is a clean
-// foreground termination; transport and authentication failures remain
-// nonzero and use the same safe recovery text as other CLI operations.
-func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectID string, args []string, jsonOutput bool) error {
-	on, err := parseCLIEventsAction(args)
-	if err != nil {
-		return err
-	}
-	if !on {
-		return errors.New(cliEventsOffMessage)
-	}
+// runCLIEvents consumes exactly one project-scoped stream. eventsOn is the
+// normalized result of parseCLIEventsAction; argument validation belongs to
+// RunCLIContext. EOF is a clean foreground termination; transport and
+// authentication failures remain nonzero and use the same safe recovery text
+// as other CLI operations.
+func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectID string, eventsOn bool, jsonOutput bool) error {
 	if strings.TrimSpace(projectID) == "" {
 		return errors.New("no project selected — use -project <name|id> and choose a project with live events")
 	}
