@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1175,6 +1176,74 @@ func TestParseAutomationDetailReadsModelNodeCountsFromParentTaskLinkARIA(t *test
 	counts := detail.Nodes[0].Counts
 	if !counts.RunningAvailable || counts.Running != 3 || !counts.FailedAvailable || counts.Failed != 2 {
 		t.Fatalf("parent task-link aria counts were not parsed: %+v", counts)
+	}
+}
+
+func TestParseAutomationDetailRetainsDuplicateGraphEdgesDeterministically(t *testing.T) {
+	parse := func(edges string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-graph-edges" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><svg>` + edges + `</svg></div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	lower := `<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n1" data-target-node-id="n2" aria-label="approved, 3 transitions, 1 recent"></line>`
+	higher := `<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n1" data-target-node-id="n2" aria-label="approved, 7 transitions, 2 recent"></line>`
+	first := parse(lower + higher)
+	second := parse(higher + lower)
+	if len(first.Edges) != 2 || len(second.Edges) != 2 {
+		t.Fatalf("duplicate graph edges were collapsed: first=%+v second=%+v", first.Edges, second.Edges)
+	}
+	firstJSON, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("duplicate graph edge JSON depends on input order:\nfirst: %s\nsecond: %s", firstJSON, secondJSON)
+	}
+	if first.Edges[0].TransitionCount != 3 || first.Edges[1].TransitionCount != 7 {
+		t.Fatalf("duplicate graph edge metrics were not retained deterministically: %+v", first.Edges)
+	}
+	if !first.Partial || !strings.Contains(strings.Join(first.Warnings, "\n"), "duplicate edge") {
+		t.Fatalf("duplicate graph edges lacked warning: partial=%t warnings=%v", first.Partial, first.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRetainsDuplicateDetailEdgesBeforeCorrelation(t *testing.T) {
+	parse := func(details string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-detail-edges" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><svg><line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n1" data-target-node-id="n2" aria-label="approved, 1 transitions, 0 recent"></line></svg></div><div data-automation-live-details-panel><div data-automation-live-edge-details>` + details + `</div></div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	lower := `<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1" data-source-node-id="n1" data-target-node-id="n2" data-transition-count="5"><div>Start → Review</div><p>approved</p></div>`
+	higher := `<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1" data-source-node-id="n1" data-target-node-id="n2" data-transition-count="7"><div>Start → Review</div><p>approved</p></div>`
+	first := parse(lower + higher)
+	second := parse(higher + lower)
+	if len(first.Edges) != 3 || len(second.Edges) != 3 {
+		t.Fatalf("duplicate detail edges were correlated before ambiguity was known: first=%+v second=%+v", first.Edges, second.Edges)
+	}
+	firstJSON, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("duplicate detail edge JSON depends on input order:\nfirst: %s\nsecond: %s", firstJSON, secondJSON)
+	}
+	if first.Edges[0].TransitionCount != 1 || first.Edges[1].TransitionCount != 5 || first.Edges[2].TransitionCount != 7 {
+		t.Fatalf("ambiguous detail metrics changed the graph edge or were not retained: %+v", first.Edges)
+	}
+	if !first.Partial || !strings.Contains(strings.Join(first.Warnings, "\n"), "duplicate edge") {
+		t.Fatalf("duplicate detail edges lacked warning: partial=%t warnings=%v", first.Partial, first.Warnings)
 	}
 }
 

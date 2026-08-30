@@ -968,7 +968,13 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 		if automationEdgeHasNoStableIdentity(parsed) {
 			detail.Warnings = append(detail.Warnings, "edge record has no stable identity")
 		}
-		mergeAutomationLiveEdge(&out, parsed, false)
+		// Records emitted by the same representation are authoritative topology
+		// rows. Never collapse them before graph/detail correlation has seen the
+		// complete candidate sets.
+		out = append(out, parsed)
+	}
+	if automationEdgesHaveDuplicateStableIdentity(parsedExplicit) {
+		detail.Warnings = append(detail.Warnings, "duplicate edge records could not be correlated safely")
 	}
 
 	detailEdges := findAll(live, func(n *html.Node) bool {
@@ -988,8 +994,17 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 			detail.Warnings = append(detail.Warnings, "edge record has no stable identity")
 		}
 	}
+	if automationEdgesHaveDuplicateStableIdentity(parsedDetails) {
+		detail.Warnings = append(detail.Warnings, "duplicate edge records could not be correlated safely")
+	}
 	for _, parsed := range parsedDetails {
-		mergeAutomationLiveEdge(&out, parsed, automationEdgeHasUniqueEndpointMatch(parsed, parsedExplicit, parsedDetails))
+		allowEndpointMerge := automationEdgeHasUniqueEndpointMatch(parsed, parsedExplicit, parsedDetails)
+		if countAutomationEdgeCorrelationCandidates(parsedExplicit, parsed, allowEndpointMerge) == 1 &&
+			countAutomationEdgeCorrelationCandidates(parsedDetails, parsed, allowEndpointMerge) == 1 {
+			mergeAutomationLiveEdge(&out, parsed, allowEndpointMerge)
+			continue
+		}
+		out = append(out, parsed)
 	}
 	if len(explicit) > 0 && len(detailEdges) > 0 {
 		for _, edge := range out {
@@ -1002,7 +1017,84 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	for i := range out {
 		resolveAutomationEdgeNames(&out[i], nodes)
 	}
+	sortAutomationDuplicateEdges(out)
 	return out, present, len(explicit) > 0, countsPresent
+}
+
+func automationEdgesHaveDuplicateStableIdentity(edges []AutomationLiveEdge) bool {
+	for i := range edges {
+		for j := i + 1; j < len(edges); j++ {
+			if automationEdgesShareStableIdentity(edges[i], edges[j]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func automationEdgesShareStableIdentity(a, b AutomationLiveEdge) bool {
+	if a.ID != "" && b.ID != "" && strings.EqualFold(a.ID, b.ID) {
+		return true
+	}
+	return a.EdgeKey != "" && b.EdgeKey != "" && strings.EqualFold(a.EdgeKey, b.EdgeKey)
+}
+
+func countAutomationEdgeCorrelationCandidates(edges []AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) int {
+	count := 0
+	for _, edge := range edges {
+		if automationEdgeRecordsCanCorrelate(edge, parsed, allowEndpointMerge) {
+			count++
+		}
+	}
+	return count
+}
+
+func sortAutomationDuplicateEdges(edges []AutomationLiveEdge) {
+	visited := make([]bool, len(edges))
+	for start := range edges {
+		if visited[start] {
+			continue
+		}
+		indices := []int{start}
+		visited[start] = true
+		for cursor := 0; cursor < len(indices); cursor++ {
+			current := indices[cursor]
+			for candidate := range edges {
+				if visited[candidate] || edges[current].edgeSource != edges[candidate].edgeSource {
+					continue
+				}
+				if automationEdgesShareStableIdentity(edges[current], edges[candidate]) {
+					visited[candidate] = true
+					indices = append(indices, candidate)
+				}
+			}
+		}
+		if len(indices) < 2 {
+			continue
+		}
+		duplicates := make([]AutomationLiveEdge, len(indices))
+		for i, index := range indices {
+			duplicates[i] = edges[index]
+		}
+		sort.SliceStable(duplicates, func(i, j int) bool {
+			return automationLiveEdgeDeterministicKey(duplicates[i]) < automationLiveEdgeDeterministicKey(duplicates[j])
+		})
+		sort.Ints(indices)
+		for i, index := range indices {
+			edges[index] = duplicates[i]
+		}
+	}
+}
+
+func automationLiveEdgeDeterministicKey(edge AutomationLiveEdge) string {
+	return strings.Join([]string{
+		fmt.Sprintf("%d", edge.edgeSource), edge.ID, edge.EdgeKey,
+		edge.SourceNodeID, edge.TargetNodeID, edge.SourceName, edge.TargetName,
+		edge.Label, edge.ConditionJSON, fmt.Sprintf("%020d", edge.DisplayOrder),
+		fmt.Sprintf("%020d:%t:%d", edge.TransitionCount, edge.TransitionCountAvailable, edge.transitionCountQuality),
+		fmt.Sprintf("%020d:%t:%d", edge.RecentTransitionCount, edge.RecentTransitionCountAvailable, edge.recentTransitionCountQuality),
+		fmt.Sprintf("%t", edge.Highlighted), edge.ProjectID, edge.AutomationID, edge.VersionID,
+	}, "\x00")
 }
 
 func automationEdgeHasUniqueEndpointMatch(parsed AutomationLiveEdge, explicit, details []AutomationLiveEdge) bool {
@@ -1290,6 +1382,15 @@ func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveE
 }
 
 func automationEdgesCanMerge(current, parsed AutomationLiveEdge, allowEndpointMerge bool) bool {
+	if current.edgeSource != 0 && parsed.edgeSource != 0 && current.edgeSource&parsed.edgeSource != 0 {
+		// Multiple records from the same rendered representation are separate
+		// topology rows, even when a malformed fragment repeats a stable identity.
+		return false
+	}
+	return automationEdgeRecordsCanCorrelate(current, parsed, allowEndpointMerge)
+}
+
+func automationEdgeRecordsCanCorrelate(current, parsed AutomationLiveEdge, allowEndpointMerge bool) bool {
 	if current.ID != "" && parsed.ID != "" {
 		if !strings.EqualFold(current.ID, parsed.ID) {
 			return false
@@ -1315,11 +1416,6 @@ func automationEdgesCanMerge(current, parsed AutomationLiveEdge, allowEndpointMe
 		return true
 	}
 
-	if current.edgeSource != 0 && parsed.edgeSource != 0 && current.edgeSource&parsed.edgeSource != 0 {
-		// Multiple records from the same rendered representation are separate
-		// topology rows unless the stable identity branch above matched them.
-		return false
-	}
 	if automationEdgeEndpointConflict(current, parsed) {
 		return false
 	}

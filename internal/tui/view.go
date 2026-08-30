@@ -778,6 +778,9 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		if (detail.NodesAvailable && len(detail.Nodes) > 0) || len(detail.UnmatchedNodeDetails) > 0 {
 			renderAutomationDetailOnlyNodes(&b, detail)
 		}
+		if len(detail.Edges) > 0 {
+			renderAutomationDetailRetainedEdges(&b, detail)
+		}
 	} else {
 		nodeSummary := "not reported"
 		if detail.NodesAvailable {
@@ -932,8 +935,18 @@ func renderAutomationDetailUnmatchedNodeDetails(b *strings.Builder, detail clien
 }
 
 func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDetail) {
-	b.WriteString("  " + sectionStyle.Render("Edges") + "\n")
-	if !detail.EdgesAvailable {
+	renderAutomationDetailEdgeTable(b, detail, "Edges", true)
+}
+
+func renderAutomationDetailRetainedEdges(b *strings.Builder, detail client.AutomationDetail) {
+	b.WriteString("  " + sectionStyle.Render("Retained edge records") + "\n")
+	b.WriteString(dimStyle.Render("    graph unavailable; records retained for diagnostics") + "\n")
+	renderAutomationDetailEdgeRows(b, detail)
+}
+
+func renderAutomationDetailEdgeTable(b *strings.Builder, detail client.AutomationDetail, title string, requireAvailable bool) {
+	b.WriteString("  " + sectionStyle.Render(title) + "\n")
+	if requireAvailable && !detail.EdgesAvailable {
 		b.WriteString(dimStyle.Render("    unavailable — edge section was not returned") + "\n")
 		return
 	}
@@ -941,6 +954,10 @@ func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDet
 		b.WriteString(dimStyle.Render("    (empty)") + "\n")
 		return
 	}
+	renderAutomationDetailEdgeRows(b, detail)
+}
+
+func renderAutomationDetailEdgeRows(b *strings.Builder, detail client.AutomationDetail) {
 	edges := append([]client.AutomationLiveEdge(nil), detail.Edges...)
 	sort.SliceStable(edges, func(i, j int) bool {
 		return automationDetailEdgeSortKey(edges[i]) < automationDetailEdgeSortKey(edges[j])

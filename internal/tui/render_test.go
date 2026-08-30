@@ -1355,6 +1355,31 @@ func TestRenderAutomationDetailSortsCaseOnlyResourceTiesDeterministically(t *tes
 	}
 }
 
+func TestRenderAutomationDetailShowsRetainedEdgesWhenGraphUnavailable(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation: client.AutomationMetadata{ID: "au-retained-edges", Name: "Retained edges", LifecycleState: "active"},
+		Edges: []client.AutomationLiveEdge{{
+			AutomationEdge:                 client.AutomationEdge{EdgeKey: "approval", SourceNodeID: "start", TargetNodeID: "review", Label: "approved"},
+			TransitionCount:                4,
+			RecentTransitionCount:          1,
+			TransitionCountAvailable:       true,
+			RecentTransitionCountAvailable: true,
+		}},
+		GraphAvailable: false,
+		EdgesAvailable: true,
+		Partial:        true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"edges: unavailable", "Retained edge records", "records retained for diagnostics", "start", "review", "approved", "4", "1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("unavailable graph retained-edge output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "0 nodes · 1 edges") {
+		t.Fatalf("retained edge diagnostics were presented as a loaded graph:\n%s", out)
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder
