@@ -917,6 +917,133 @@ func TestParseAutomationDetailRetainsMalformedIdentitylessGraphEdges(t *testing.
 	}
 }
 
+func TestParseAutomationDetailRejectsConflictingNodeIdentityFields(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-node-identity-conflict" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel>
+			<g data-automation-live-node="n1" data-automation-node-key="first"><strong>First</strong></g>
+			<g data-automation-live-node="n2" data-automation-node-key="second"><strong>Second</strong></g>
+		</div>
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="second" data-automation-live-node-id="n1"><h3>Contradictory</h3><span data-counts='{"running":4}'></span></section>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 2 || len(detail.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("conflicting node identities were merged: nodes=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+	}
+	if detail.Nodes[0].Name != "First" || detail.Nodes[0].NodeKey != "first" || detail.Nodes[0].Counts.RunningAvailable {
+		t.Fatalf("graph node was changed by conflicting detail identity: %+v", detail.Nodes[0])
+	}
+	if detail.UnmatchedNodeDetails[0].Name != "Contradictory" || !detail.UnmatchedNodeDetails[0].Counts.RunningAvailable {
+		t.Fatalf("conflicting detail record was not retained independently: %+v", detail.UnmatchedNodeDetails)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "correlated") {
+		t.Fatalf("conflicting node identity lacked partial warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRejectsSharedEdgeIdentityWithConflictingEndpoints(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edge-identity-conflict" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n1" data-target-node-id="n2" aria-label="approved, 3 transitions, 1 recent"></line>
+		</svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1" data-source-node-id="n3" data-target-node-id="n4"><div>Other → Destination</div><p>rejected</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 2 {
+		t.Fatalf("conflicting edge endpoints were merged: %+v", detail.Edges)
+	}
+	graph, retained := detail.Edges[0], detail.Edges[1]
+	if graph.SourceNodeID != "n1" || graph.TargetNodeID != "n2" || !graph.TransitionCountAvailable {
+		t.Fatalf("graph edge changed by conflicting detail identity: %+v", graph)
+	}
+	if retained.SourceNodeID != "n3" || retained.TargetNodeID != "n4" || retained.TransitionCountAvailable {
+		t.Fatalf("conflicting detail edge was not retained independently: %+v", retained)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "correlated") {
+		t.Fatalf("conflicting edge identity lacked partial warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRejectsConflictingNodeIdentityRegardlessOfInputOrder(t *testing.T) {
+	for _, graphNodes := range []string{
+		`<g data-automation-live-node="n1" data-automation-node-key="first"><strong>First</strong></g><g data-automation-live-node="n2" data-automation-node-key="second"><strong>Second</strong></g>`,
+		`<g data-automation-live-node="n2" data-automation-node-key="second"><strong>Second</strong></g><g data-automation-live-node="n1" data-automation-node-key="first"><strong>First</strong></g>`,
+	} {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-node-order-conflict" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel>` + graphNodes + `</div><div data-automation-live-details-panel><section data-automation-live-node-detail="second" data-automation-live-node-id="n1"><h3>Contradictory</h3><span data-counts='{"running":4}'></span></section></div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(detail.Nodes) != 2 || len(detail.UnmatchedNodeDetails) != 1 {
+			t.Fatalf("graph order changed conflict handling: nodes=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+		}
+		if detail.UnmatchedNodeDetails[0].Name != "Contradictory" {
+			t.Fatalf("conflicting detail record changed with graph order: %+v", detail.UnmatchedNodeDetails)
+		}
+	}
+}
+
+func TestParseAutomationDetailRejectsSharedEdgeKeyWithConflictingEndpoints(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edge-key-conflict" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg><line class="automation-graph-edge" data-automation-live-edge="shared" data-source-node-id="n1" data-target-node-id="n2" aria-label="approved, 3 transitions, 1 recent"></line></svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details><div data-automation-live-edge-detail="shared" data-source-node-id="n3" data-target-node-id="n4"><div>Other → Destination</div><p>rejected</p></div></div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 2 {
+		t.Fatalf("shared edge key with conflicting endpoints was merged: %+v", detail.Edges)
+	}
+	if detail.Edges[0].SourceNodeID != "n1" || detail.Edges[1].SourceNodeID != "n3" {
+		t.Fatalf("conflicting edge endpoint records were changed: %+v", detail.Edges)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "correlated") {
+		t.Fatalf("shared edge-key conflict lacked partial warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailInvalidatesUnknownOnlyMalformedStructuredCounts(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unknown-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node="n1" data-counts='{"mystery":1} trailing'><strong>Node</strong><small>9 running · 3 waiting · 5 blocked · 7 failed · 11 recent</small></g></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", detail.Nodes)
+	}
+	counts := detail.Nodes[0].Counts
+	if counts.RunningAvailable || counts.WaitingAvailable || counts.BlockedAvailable || counts.FailedAvailable || counts.CompletedRecentlyAvailable {
+		t.Fatalf("unknown-only malformed structured counts recovered from text: %+v", counts)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "node counts are malformed") {
+		t.Fatalf("unknown-only malformed counts lacked warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRejectsQualifiedTextCountPrefixes(t *testing.T) {
+	for _, text := range []string{"status: 2 running", "maybe, 2 running", "not:2 running"} {
+		t.Run(text, func(t *testing.T) {
+			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-qualified-count" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Node</strong><small>` + text + `</small></g></div></div>`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(detail.Nodes) != 1 || detail.Nodes[0].Counts.RunningAvailable {
+				t.Fatalf("qualified count %q was accepted: %+v", text, detail)
+			}
+			if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "node counts are malformed") {
+				t.Fatalf("qualified count %q lacked malformed warning: partial=%t warnings=%v", text, detail.Partial, detail.Warnings)
+			}
+		})
+	}
+}
+
 func parseAutomationDetailFromString(source string) (AutomationDetail, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {

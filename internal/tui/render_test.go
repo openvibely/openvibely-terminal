@@ -1249,6 +1249,80 @@ func TestRenderAutomationDetailShowsDetailOnlyNodesWhenGraphUnavailable(t *testi
 	}
 }
 
+func TestRenderAutomationDetailDoesNotRelabelRetainedGraphNodesAsDetailOnly(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:        client.AutomationMetadata{ID: "au-retained-graph", Name: "Retained graph", LifecycleState: "draft"},
+		Nodes:             []client.AutomationLiveNode{{AutomationNode: client.AutomationNode{ID: "n1", NodeKey: "start", Name: "Start"}}},
+		GraphAvailable:    false,
+		NodesAvailable:    true,
+		GraphNodesPresent: true,
+		Partial:           true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	if !strings.Contains(out, "Retained graph nodes") {
+		t.Fatalf("retained graph rows were not identified as graph-origin diagnostics:\n%s", out)
+	}
+	if strings.Contains(out, "Detail-only nodes") {
+		t.Fatalf("authoritative graph row was relabeled as detail-only:\n%s", out)
+	}
+}
+
+func TestRenderAutomationDetailSortsDuplicateNodeRowsIndependentlyOfInputOrder(t *testing.T) {
+	first := client.AutomationLiveNode{
+		AutomationNode: client.AutomationNode{ID: "same", NodeKey: "same", Name: "Same"},
+		DisplayState:   "running",
+		Counts:         client.AutomationNodeCounts{Running: 1, RunningAvailable: true},
+	}
+	second := client.AutomationLiveNode{
+		AutomationNode: client.AutomationNode{ID: "same", NodeKey: "same", Name: "Same"},
+		DisplayState:   "waiting",
+		Counts:         client.AutomationNodeCounts{Waiting: 2, WaitingAvailable: true},
+	}
+	base := client.AutomationDetail{
+		Automation:     client.AutomationMetadata{ID: "au-node-order", Name: "Node order", LifecycleState: "active"},
+		GraphAvailable: true,
+		NodesAvailable: true,
+		EdgesAvailable: true,
+	}
+	left := base
+	left.Nodes = []client.AutomationLiveNode{first, second}
+	right := base
+	right.Nodes = []client.AutomationLiveNode{second, first}
+	if got, want := stripANSI(renderAutomationDetail(left)), stripANSI(renderAutomationDetail(right)); got != want {
+		t.Fatalf("duplicate node output depends on input order:\nleft:\n%s\nright:\n%s", got, want)
+	}
+}
+
+func TestRenderAutomationDetailSortsDuplicateEdgeRowsIndependentlyOfInputOrder(t *testing.T) {
+	first := client.AutomationLiveEdge{
+		AutomationEdge:           client.AutomationEdge{ID: "same", EdgeKey: "same", SourceNodeID: "source", TargetNodeID: "target", Label: "approved"},
+		SourceName:               "Source",
+		TargetName:               "Target",
+		TransitionCount:          1,
+		TransitionCountAvailable: true,
+	}
+	second := client.AutomationLiveEdge{
+		AutomationEdge:           client.AutomationEdge{ID: "same", EdgeKey: "same", SourceNodeID: "source", TargetNodeID: "target", Label: "approved"},
+		SourceName:               "Source",
+		TargetName:               "Target",
+		TransitionCount:          2,
+		TransitionCountAvailable: true,
+	}
+	base := client.AutomationDetail{
+		Automation:     client.AutomationMetadata{ID: "au-edge-order", Name: "Edge order", LifecycleState: "active"},
+		GraphAvailable: true,
+		NodesAvailable: true,
+		EdgesAvailable: true,
+	}
+	left := base
+	left.Edges = []client.AutomationLiveEdge{first, second}
+	right := base
+	right.Edges = []client.AutomationLiveEdge{second, first}
+	if got, want := stripANSI(renderAutomationDetail(left)), stripANSI(renderAutomationDetail(right)); got != want {
+		t.Fatalf("duplicate edge output depends on input order:\nleft:\n%s\nright:\n%s", got, want)
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder

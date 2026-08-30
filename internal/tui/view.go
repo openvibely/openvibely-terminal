@@ -859,7 +859,11 @@ func renderAutomationDetailNodes(b *strings.Builder, detail client.AutomationDet
 
 func renderAutomationDetailOnlyNodes(b *strings.Builder, detail client.AutomationDetail) {
 	if detail.NodesAvailable && len(detail.Nodes) > 0 {
-		renderAutomationDetailNodeTable(b, detail, "Detail-only nodes")
+		title := "Detail-only nodes"
+		if detail.GraphNodesPresent {
+			title = "Retained graph nodes"
+		}
+		renderAutomationDetailNodeTable(b, detail, title)
 	}
 	renderAutomationDetailUnmatchedNodeDetails(b, detail)
 }
@@ -1024,16 +1028,55 @@ func automationDetailIsDraft(detail client.AutomationDetail) bool {
 }
 
 func automationDetailNodeSortKey(node client.AutomationLiveNode) string {
-	return strings.ToLower(firstNonEmpty(node.NodeKey, node.Name, node.ID))
+	counts := node.Counts
+	primary := strings.ToLower(firstNonEmpty(node.NodeKey, node.Name, node.ID))
+	return strings.Join([]string{
+		primary,
+		node.NodeKey,
+		node.Name,
+		node.ID,
+		node.ProjectID,
+		node.AutomationID,
+		node.VersionID,
+		node.NodeType,
+		node.Role,
+		node.ConfigJSON,
+		fmt.Sprintf("%.17g", node.PositionX),
+		fmt.Sprintf("%.17g", node.PositionY),
+		node.DisplayState,
+		fmt.Sprintf("%d:%t", counts.Running, counts.RunningAvailable),
+		fmt.Sprintf("%d:%t", counts.Waiting, counts.WaitingAvailable),
+		fmt.Sprintf("%d:%t", counts.Blocked, counts.BlockedAvailable),
+		fmt.Sprintf("%d:%t", counts.Failed, counts.FailedAvailable),
+		fmt.Sprintf("%d:%t", counts.CompletedRecently, counts.CompletedRecentlyAvailable),
+	}, "\x00")
 }
 
 func automationDetailEdgeSortKey(edge client.AutomationLiveEdge) string {
-	return strings.ToLower(strings.Join([]string{
+	primary := strings.ToLower(strings.Join([]string{
 		firstNonEmpty(edge.SourceName, edge.SourceNodeID),
 		firstNonEmpty(edge.TargetName, edge.TargetNodeID),
 		firstNonEmpty(edge.Label, edge.EdgeKey),
 		edge.ID,
 	}, "\x00"))
+	return strings.Join([]string{
+		primary,
+		edge.SourceName,
+		edge.TargetName,
+		edge.SourceNodeID,
+		edge.TargetNodeID,
+		edge.Label,
+		edge.EdgeKey,
+		edge.ID,
+		edge.ProjectID,
+		edge.AutomationID,
+		edge.VersionID,
+		edge.ConditionJSON,
+		fmt.Sprintf("%d", edge.DisplayOrder),
+		fmt.Sprintf("%d:%t", edge.TransitionCount, edge.TransitionCountAvailable),
+		fmt.Sprintf("%d:%t", edge.RecentTransitionCount, edge.RecentTransitionCountAvailable),
+		fmt.Sprintf("%t", edge.Highlighted),
+	}, "\x00")
 }
 
 func automationDetailResourceSortKey(resource client.AutomationResourceSummary) string {

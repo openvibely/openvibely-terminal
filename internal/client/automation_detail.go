@@ -189,9 +189,13 @@ type AutomationDetail struct {
 	RecentCutoff         string                      `json:"recent_cutoff,omitempty"`
 	ExternalState        AutomationExternalState     `json:"external_state"`
 
-	GraphAvailable             bool     `json:"graph_available"`
-	NodesAvailable             bool     `json:"nodes_available"`
-	EdgesAvailable             bool     `json:"edges_available"`
+	GraphAvailable bool `json:"graph_available"`
+	NodesAvailable bool `json:"nodes_available"`
+	EdgesAvailable bool `json:"edges_available"`
+	// GraphNodesPresent preserves source provenance for retained diagnostics
+	// when GraphAvailable is false. It is parser/rendering state, not JSON API
+	// data.
+	GraphNodesPresent          bool     `json:"-"`
 	NodeCountsAvailable        bool     `json:"node_counts_available"`
 	EdgeCountsAvailable        bool     `json:"edge_counts_available"`
 	ActiveInvocationsAvailable bool     `json:"active_invocations_available"`
@@ -488,6 +492,7 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 		present = true
 	}
 	graphNodesPresent := len(liveNodes) > 0
+	detail.GraphNodesPresent = graphNodesPresent
 	for _, node := range detailNodes {
 		parsed, hasCounts := parseAutomationNodeDetail(detail, node)
 		if !graphNodesPresent {
@@ -523,18 +528,47 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 }
 
 func automationLiveNodeHasStableMatch(nodes []AutomationLiveNode, parsed AutomationLiveNode) bool {
+	_, matched, _ := automationLiveNodeMatchIndex(nodes, parsed)
+	return matched
+}
+
+func automationLiveNodeMatchIndex(nodes []AutomationLiveNode, parsed AutomationLiveNode) (int, bool, bool) {
 	if parsed.ID == "" && parsed.NodeKey == "" {
-		return false
+		return -1, false, false
 	}
-	for _, current := range nodes {
+	var idMatches, keyMatches []int
+	for i, current := range nodes {
 		if parsed.ID != "" && current.ID != "" && strings.EqualFold(current.ID, parsed.ID) {
-			return true
+			idMatches = append(idMatches, i)
 		}
 		if parsed.NodeKey != "" && current.NodeKey != "" && strings.EqualFold(current.NodeKey, parsed.NodeKey) {
-			return true
+			keyMatches = append(keyMatches, i)
 		}
 	}
-	return false
+	if len(idMatches) > 1 || len(keyMatches) > 1 {
+		return -1, false, true
+	}
+	if len(idMatches) == 1 && len(keyMatches) == 1 {
+		if idMatches[0] != keyMatches[0] {
+			return -1, false, true
+		}
+		return idMatches[0], true, false
+	}
+	if len(idMatches) == 1 {
+		index := idMatches[0]
+		if parsed.NodeKey != "" && nodes[index].NodeKey != "" && !strings.EqualFold(nodes[index].NodeKey, parsed.NodeKey) {
+			return -1, false, true
+		}
+		return index, true, false
+	}
+	if len(keyMatches) == 1 {
+		index := keyMatches[0]
+		if parsed.ID != "" && nodes[index].ID != "" && !strings.EqualFold(nodes[index].ID, parsed.ID) {
+			return -1, false, true
+		}
+		return index, true, false
+	}
+	return -1, false, false
 }
 
 func parseAutomationLiveNode(detail *AutomationDetail, node *html.Node) (AutomationLiveNode, bool) {
@@ -605,19 +639,8 @@ func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, parsed AutomationLiveN
 		*nodes = append(*nodes, parsed)
 		return
 	}
-	match := -1
-	for i := range *nodes {
-		current := &(*nodes)[i]
-		if parsed.ID != "" && current.ID != "" && strings.EqualFold(current.ID, parsed.ID) {
-			match = i
-			break
-		}
-		if parsed.NodeKey != "" && current.NodeKey != "" && strings.EqualFold(current.NodeKey, parsed.NodeKey) {
-			match = i
-			break
-		}
-	}
-	if match < 0 {
+	match, matched, _ := automationLiveNodeMatchIndex(*nodes, parsed)
+	if !matched {
 		*nodes = append(*nodes, parsed)
 		return
 	}
@@ -755,15 +778,11 @@ func parseAutomationNodeCounts(detail *AutomationDetail, node *html.Node, counts
 		if decodeErr != nil || values == nil {
 			detail.Warnings = append(detail.Warnings, "node counts are malformed")
 			if !markAutomationNodeCountFieldsInvalidFromRaw(raw, counts) {
-				if values == nil {
-					markAutomationNodeCountsInvalid(counts)
-				} else {
-					// A malformed object can still identify which metrics it was
-					// attempting to provide. Invalidate only those fields so valid
-					// independent metrics may still come from visible text or
-					// explicit attributes.
-					markAutomationNodeCountMapInvalid(values, counts)
-				}
+				// When the malformed payload exposes no recognized metric key,
+				// none of its claimed fields can be trusted. Invalidate every
+				// metric so visible text cannot turn an unknown object into a
+				// confident count.
+				markAutomationNodeCountsInvalid(counts)
 			}
 		} else {
 			mapPresent, malformed := applyAutomationCountMap(values, counts)
@@ -1181,6 +1200,9 @@ func automationEdgesCanMerge(current, parsed AutomationLiveEdge, allowEndpointMe
 		if current.EdgeKey != "" && parsed.EdgeKey != "" && !strings.EqualFold(current.EdgeKey, parsed.EdgeKey) {
 			return false
 		}
+		if automationEdgeEndpointConflict(current, parsed) {
+			return false
+		}
 		return true
 	}
 	if current.EdgeKey != "" && parsed.EdgeKey != "" {
@@ -1188,6 +1210,9 @@ func automationEdgesCanMerge(current, parsed AutomationLiveEdge, allowEndpointMe
 			return false
 		}
 		if current.ID != "" && parsed.ID != "" && !strings.EqualFold(current.ID, parsed.ID) {
+			return false
+		}
+		if automationEdgeEndpointConflict(current, parsed) {
 			return false
 		}
 		return true
@@ -1958,11 +1983,11 @@ func trimAutomationCountSeparators(value string) string {
 
 func automationCountPrefixIsValid(prefix string, numberStart int) bool {
 	before := strings.TrimSpace(prefix[:numberStart])
+	before = strings.TrimRightFunc(before, isAutomationCountSeparator)
 	if before == "" {
 		return true
 	}
-	last, _ := utf8.DecodeLastRuneInString(before)
-	return strings.ContainsRune(":=,;·|(", last)
+	return automationCountSequenceComplete(before)
 }
 
 func namedAutomationCount(text string, labels ...string) (int, bool) {
