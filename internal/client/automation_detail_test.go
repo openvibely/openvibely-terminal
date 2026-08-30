@@ -1044,6 +1044,122 @@ func TestParseAutomationDetailRejectsQualifiedTextCountPrefixes(t *testing.T) {
 	}
 }
 
+func TestParseAutomationDetailDetailOnlyMarkersDoNotEstablishGraphAvailability(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-detail-only" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="only"><h3>Only node</h3><p>only · task</p></section>
+			<div data-automation-live-edge-detail="only-edge"><div>Only node → Another</div><p>approved</p></div>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.GraphAvailable || detail.Version.State == "published" {
+		t.Fatalf("detail-only markers established a live graph: graph=%t version=%q detail=%+v", detail.GraphAvailable, detail.Version.State, detail)
+	}
+	if !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 1 || len(detail.Edges) != 1 {
+		t.Fatalf("detail-only records were not retained as separate sections: %+v", detail)
+	}
+}
+
+func TestParseAutomationDetailWarnsForNameOnlyGraphNodeIdentity(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-name-only" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node="" data-automation-node-name="Named only"><strong>Named only</strong></g></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 || detail.Nodes[0].Name != "Named only" {
+		t.Fatalf("name-only graph node was not retained: %+v", detail.Nodes)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "graph node record has no stable identity") {
+		t.Fatalf("name-only graph node lacked identity warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailHandlesDuplicateNodeDetailsDeterministically(t *testing.T) {
+	parse := func(details string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-node-details" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-key="first"><strong>First</strong></g></div><div data-automation-live-details-panel>` + details + `</div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	firstThenSecond := parse(`<section data-automation-live-node-detail="first" data-counts='{"running":5}'><h3>First</h3></section><section data-automation-live-node-detail="first" data-counts='{"running":7}'><h3>First</h3></section>`)
+	secondThenFirst := parse(`<section data-automation-live-node-detail="first" data-counts='{"running":7}'><h3>First</h3></section><section data-automation-live-node-detail="first" data-counts='{"running":5}'><h3>First</h3></section>`)
+	if len(firstThenSecond.Nodes) != 1 || len(secondThenFirst.Nodes) != 1 || len(firstThenSecond.UnmatchedNodeDetails) != 1 || len(secondThenFirst.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("duplicate detail records were not retained separately: first=%+v second=%+v", firstThenSecond, secondThenFirst)
+	}
+	if firstThenSecond.Nodes[0].Counts.Running != secondThenFirst.Nodes[0].Counts.Running || firstThenSecond.UnmatchedNodeDetails[0].Counts.Running != secondThenFirst.UnmatchedNodeDetails[0].Counts.Running {
+		t.Fatalf("duplicate node detail handling depends on input order: first=%+v second=%+v", firstThenSecond, secondThenFirst)
+	}
+	if firstThenSecond.Nodes[0].Counts.Running != 5 || firstThenSecond.UnmatchedNodeDetails[0].Counts.Running != 7 {
+		t.Fatalf("duplicate node details did not choose deterministic canonical data: graph=%+v unmatched=%+v", firstThenSecond.Nodes[0], firstThenSecond.UnmatchedNodeDetails[0])
+	}
+	if !firstThenSecond.Partial || !strings.Contains(strings.Join(firstThenSecond.Warnings, "\n"), "duplicate node detail") {
+		t.Fatalf("duplicate node detail warning missing: partial=%t warnings=%v", firstThenSecond.Partial, firstThenSecond.Warnings)
+	}
+}
+
+func TestParseAutomationDetailRequiresUniqueCompatibleEdgeCandidate(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edge-candidates" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n1" data-target-node-id="n2" aria-label="approved, 3 transitions, 1 recent"></line>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n3" data-target-node-id="n4" aria-label="rejected, 4 transitions, 2 recent"></line>
+		</svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="shared"><div>Unresolved transition</div><p>unknown</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 3 {
+		t.Fatalf("incomplete edge candidate was merged into the first conflicting edge: %+v", detail.Edges)
+	}
+	if detail.Edges[0].SourceNodeID != "n1" || detail.Edges[0].TargetNodeID != "n2" || detail.Edges[1].SourceNodeID != "n3" || detail.Edges[1].TargetNodeID != "n4" {
+		t.Fatalf("conflicting graph edge endpoints changed: %+v", detail.Edges)
+	}
+	retained := detail.Edges[2]
+	if retained.SourceNodeID != "" || retained.TargetNodeID != "" || retained.TransitionCountAvailable || retained.RecentTransitionCountAvailable {
+		t.Fatalf("ambiguous incomplete detail edge received graph data: %+v", retained)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "correlated") {
+		t.Fatalf("ambiguous edge candidate lacked correlation warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailWarningsAreDeterministic(t *testing.T) {
+	parse := func(nodes string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-warning-order" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel>` + nodes + `</div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	first := parse(`<g data-automation-live-node="n1" data-automation-node-count-running="bad"><strong>First</strong></g><g data-automation-live-node="n2" data-automation-node-count-waiting="bad"><strong>Second</strong></g>`)
+	second := parse(`<g data-automation-live-node="n2" data-automation-node-count-waiting="bad"><strong>Second</strong></g><g data-automation-live-node="n1" data-automation-node-count-running="bad"><strong>First</strong></g>`)
+	if strings.Join(first.Warnings, "\n") != strings.Join(second.Warnings, "\n") {
+		t.Fatalf("warning order depends on source order: first=%v second=%v", first.Warnings, second.Warnings)
+	}
+}
+
+func TestParseAutomationDetailReadsModelNodeCountsFromParentTaskLinkARIA(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-model-counts" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><a data-automation-task-link aria-label="Model, Running, 3 running · 2 failed"><g data-automation-live-node="n1" data-automation-node-name="Model"><strong>Model</strong></g></a></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", detail.Nodes)
+	}
+	counts := detail.Nodes[0].Counts
+	if !counts.RunningAvailable || counts.Running != 3 || !counts.FailedAvailable || counts.Failed != 2 {
+		t.Fatalf("parent task-link aria counts were not parsed: %+v", counts)
+	}
+}
+
 func parseAutomationDetailFromString(source string) (AutomationDetail, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {

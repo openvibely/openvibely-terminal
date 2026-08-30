@@ -1323,6 +1323,38 @@ func TestRenderAutomationDetailSortsDuplicateEdgeRowsIndependentlyOfInputOrder(t
 	}
 }
 
+func TestRenderAutomationDetailSortsWarningsDeterministically(t *testing.T) {
+	base := client.AutomationDetail{
+		Automation:      client.AutomationMetadata{ID: "au-warning-order", Name: "Warning order"},
+		GraphAvailable:  false,
+		Partial:         true,
+	}
+	first := base
+	first.Warnings = []string{"zeta warning", "alpha warning"}
+	second := base
+	second.Warnings = []string{"alpha warning", "zeta warning"}
+	if got, want := stripANSI(renderAutomationDetail(first)), stripANSI(renderAutomationDetail(second)); got != want {
+		t.Fatalf("warning output depends on input order:\nfirst:\n%s\nsecond:\n%s", got, want)
+	}
+}
+
+func TestRenderAutomationDetailSortsCaseOnlyResourceTiesDeterministically(t *testing.T) {
+	base := client.AutomationDetail{
+		Automation:     client.AutomationMetadata{ID: "au-resource-order", Name: "Resource order"},
+		Resources:       make([]client.AutomationResourceSummary, 0),
+		ResourcesAvailable: true,
+	}
+	upper := client.AutomationResourceSummary{NodeKey: "Node", ResourceType: "Task", ResourceID: "ID", Relation: "Input", Name: "Name", Status: "Ready"}
+	lower := client.AutomationResourceSummary{NodeKey: "node", ResourceType: "task", ResourceID: "id", Relation: "input", Name: "name", Status: "ready"}
+	first := base
+	first.Resources = []client.AutomationResourceSummary{upper, lower}
+	second := base
+	second.Resources = []client.AutomationResourceSummary{lower, upper}
+	if got, want := stripANSI(renderAutomationDetail(first)), stripANSI(renderAutomationDetail(second)); got != want {
+		t.Fatalf("case-only resource output depends on input order:\nfirst:\n%s\nsecond:\n%s", got, want)
+	}
+}
+
 // stripANSI removes escape sequences so tests can assert on visible text.
 func stripANSI(s string) string {
 	var b strings.Builder

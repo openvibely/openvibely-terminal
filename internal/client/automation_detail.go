@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -309,6 +310,7 @@ func parseAutomationDetail(root *html.Node) (AutomationDetail, error) {
 	}
 	if len(detail.Warnings) > 0 {
 		detail.Partial = true
+		sort.Strings(detail.Warnings)
 	}
 	return detail, nil
 }
