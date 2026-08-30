@@ -2174,7 +2174,7 @@ func personalityCommand() command {
 			"personality list                           list built-in and custom personalities",
 			"personality show <key|name>                 show the full system prompt",
 			"personality add <name> | <system prompt>   create a custom personality",
-			"personality add <name> | description: <description> | <system prompt>",
+			"personality add <name> | description=<description> | <system prompt>",
 			"personality edit <key|name> | <name> | <description> | <system prompt>",
 			"personality set <key|name>                  activate a personality",
 			"personality delete <key|name>               delete a custom or reset an override",
@@ -2182,7 +2182,7 @@ func personalityCommand() command {
 		},
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<key|name>"},
-			{action: "add", args: `<name> | <system prompt> [or: <name> | description: <description> | <system prompt>]`},
+			{action: "add", args: `<name> | <system prompt> [or: <name> | description=<description> | <system prompt>]`},
 			{action: "edit", args: "<key|name> | <name> | <description> | <system prompt>"},
 			{action: "set", args: "<key|name>"},
 			{action: "delete", args: "<key|name>"},
@@ -2190,7 +2190,7 @@ func personalityCommand() command {
 		examples: []string{
 			`personality list`,
 			`personality add "Release Coach" | Keep advice practical and focused on shipping safely.`,
-			`personality add "Release Coach" | description: safe release guidance | Keep advice practical, focused, and safe for production releases.`,
+			`personality add "Release Coach" | description=safe release guidance | Keep advice practical, focused, and safe for production releases.`,
 			`personality edit release_coach | Release Coach | pragmatic release guidance | Keep advice practical, focused, and safe for production releases.`,
 			`personality set release_coach`,
 			`personality delete release_coach`,
@@ -3096,7 +3096,7 @@ func errCmd(msg string) tea.Cmd {
 // parsePersonalityAdd parses the two unambiguous add forms:
 //
 //	name | system prompt
-//	name | description: description | system prompt
+//	name | description=<description> | system prompt
 //
 // The first form treats every character after the first pipe as prompt text.
 // The second form recognizes the explicit description marker and treats only
@@ -3107,11 +3107,11 @@ func parsePersonalityAdd(s string) (name, description, prompt string, err error)
 		return "", "", "", fmt.Errorf("name and system prompt are required")
 	}
 
-	const marker = "description:"
+	const marker = "description="
 	if strings.HasPrefix(strings.ToLower(tail), marker) {
 		description, prompt = splitPipe(strings.TrimSpace(tail[len(marker):]))
 		if description == "" || prompt == "" {
-			return "", "", "", fmt.Errorf("optional description requires a non-empty description and system prompt")
+			return "", "", "", fmt.Errorf("optional description uses description=<description> | <system prompt> and requires non-empty description and system prompt")
 		}
 		return name, description, prompt, nil
 	}

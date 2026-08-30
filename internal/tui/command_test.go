@@ -141,6 +141,82 @@ func TestSplitPipe(t *testing.T) {
 	}
 }
 
+func TestParsePersonalityAddPreservesLiteralDescriptionPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		wantName   string
+		wantDesc   string
+		wantPrompt string
+		wantError  bool
+	}{
+		{
+			name:       "literal prefix without later pipe",
+			input:      "Release Coach | description: Explain release risks clearly",
+			wantName:   "Release Coach",
+			wantDesc:   "",
+			wantPrompt: "description: Explain release risks clearly",
+		},
+		{
+			name:       "literal prefix with later pipes",
+			input:      "Release Coach | description: Explain release risks clearly | preserve every | literal pipe",
+			wantName:   "Release Coach",
+			wantDesc:   "",
+			wantPrompt: "description: Explain release risks clearly | preserve every | literal pipe",
+		},
+		{
+			name:       "explicit description with later pipes",
+			input:      "Release Coach | description=safe release guidance | Keep releases safe | preserve every | literal pipe",
+			wantName:   "Release Coach",
+			wantDesc:   "safe release guidance",
+			wantPrompt: "Keep releases safe | preserve every | literal pipe",
+		},
+		{
+			name:      "marked form requires prompt",
+			input:     "Release Coach | description=safe release guidance",
+			wantError: true,
+		},
+		{
+			name:      "marked form requires description",
+			input:     "Release Coach | description= | Keep releases safe in production deployments.",
+			wantError: true,
+		},
+		{
+			name:      "marked form rejects dangling separator",
+			input:     "Release Coach | description=safe release guidance |",
+			wantError: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, description, prompt, err := parsePersonalityAdd(tc.input)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("parsePersonalityAdd(%q) succeeded: %q, %q, %q", tc.input, name, description, prompt)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePersonalityAdd(%q) error = %v", tc.input, err)
+			}
+			if name != tc.wantName || description != tc.wantDesc || prompt != tc.wantPrompt {
+				t.Fatalf("parsePersonalityAdd(%q) = %q, %q, %q; want %q, %q, %q", tc.input, name, description, prompt, tc.wantName, tc.wantDesc, tc.wantPrompt)
+			}
+		})
+	}
+}
+
+func TestParsePersonalityAddAcceptsCaseInsensitiveDescriptionMarker(t *testing.T) {
+	name, description, prompt, err := parsePersonalityAdd("Release Coach | DESCRIPTION=safe release guidance | Keep releases safe in production deployments.")
+	if err != nil {
+		t.Fatalf("parsePersonalityAdd() error = %v", err)
+	}
+	if name != "Release Coach" || description != "safe release guidance" || prompt != "Keep releases safe in production deployments." {
+		t.Fatalf("parsePersonalityAdd() = %q, %q, %q", name, description, prompt)
+	}
+}
+
 func TestParseProjectCreateArgs(t *testing.T) {
 	cases := []struct {
 		name     string

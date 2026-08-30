@@ -1977,6 +1977,57 @@ func TestPersonalityPipeCharactersArePreservedInAddAndEditPrompts(t *testing.T) 
 	}
 }
 
+func TestPersonalityAddLiteralDescriptionPrefixUsesExactTwoFieldPayload(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description=""
+			data-personality-preview="prompt" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	const prompt = "description: Explain release risks clearly | preserve every literal | pipe."
+	want := map[string]string{
+		"name":          "Release Coach",
+		"description":   "",
+		"system_prompt": prompt,
+	}
+	var body map[string]string
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode add body: %v", err)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"","system_prompt":%q}`, prompt)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/personality add Release Coach | "+prompt)
+	if got := rec.count(http.MethodPost, "/personality/custom"); got != 1 {
+		t.Fatalf("interactive add made %d POST requests, want exactly 1:\n%s", got, rec.all())
+	}
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("interactive add body = %#v, want %#v", body, want)
+	}
+	if strings.Contains(transcript(m), "error:") {
+		t.Fatalf("interactive add reported an error:\n%s", transcript(m))
+	}
+}
+
 func TestPersonalityAddOptionalDescriptionPreservesPromptPipes(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="existing" data-personality-name="Existing" data-personality-description="existing"
@@ -2012,7 +2063,7 @@ func TestPersonalityAddOptionalDescriptionPreservesPromptPipes(t *testing.T) {
 	m.selectedID = "p1"
 	m.selectedName = "demo"
 
-	m = runLine(t, m, "/personality add Release Coach | description: "+description+" | "+prompt)
+	m = runLine(t, m, "/personality add Release Coach | description="+description+" | "+prompt)
 	if posts != 1 {
 		t.Fatalf("add requests = %d, want 1", posts)
 	}
@@ -2041,9 +2092,9 @@ func TestPersonalityAddRejectsMalformedOptionalDescription(t *testing.T) {
 	for _, line := range []string{
 		"/personality add Release Coach",
 		"/personality add | Keep releases safe in production deployments.",
-		"/personality add Release Coach | description: safe releases",
-		"/personality add Release Coach | description: | Keep releases safe in production deployments.",
-		"/personality add Release Coach | description: safe releases |",
+		"/personality add Release Coach | description=safe releases",
+		"/personality add Release Coach | description= | Keep releases safe in production deployments.",
+		"/personality add Release Coach | description=safe releases |",
 	} {
 		m = runLine(t, m, line)
 		if !strings.Contains(transcript(m), "personality add") || !strings.Contains(transcript(m), "description") {
