@@ -1769,6 +1769,121 @@ func TestCLICreateProjectValidationAndBackendFailure(t *testing.T) {
 	}
 }
 
+func TestCLIJSONEntryWritersShareNormalization(t *testing.T) {
+	entries := []entry{
+		{role: "error", text: "hidden error\n"},
+		{role: "system", text: "hidden system\n"},
+		{role: "result", text: "\n\n"},
+		{role: "agent", text: "{\"result\":\"ok\"}\n\n"},
+		{role: "you", text: "plain user entry\n"},
+		{role: "event", text: "event entry\n\n"},
+	}
+
+	var raw bytes.Buffer
+	writeJSONEntries(&raw, entries)
+	if got, want := raw.String(), "{\"result\":\"ok\"}\nplain user entry\nevent entry\n"; got != want {
+		t.Fatalf("raw JSON entries = %q, want %q", got, want)
+	}
+
+	var scoped bytes.Buffer
+	writeScopedJSONEntries(&scoped, entries, client.Project{ID: "p1", Name: "demo"})
+	var output struct {
+		ProjectID   string          `json:"project_id"`
+		ProjectName string          `json:"project_name"`
+		Data        json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(scoped.Bytes(), &output); err != nil {
+		t.Fatalf("scoped JSON output is invalid: %v\n%s", err, scoped.String())
+	}
+	if output.ProjectID != "p1" || output.ProjectName != "demo" {
+		t.Fatalf("scoped project = %q/%q, want p1/demo", output.ProjectID, output.ProjectName)
+	}
+	var values []json.RawMessage
+	if err := json.Unmarshal(output.Data, &values); err != nil {
+		t.Fatalf("scoped data is not an array: %v\n%s", err, output.Data)
+	}
+	if got, want := len(values), 3; got != want {
+		t.Fatalf("scoped data contains %d values, want %d: %s", got, want, output.Data)
+	}
+	if got, want := string(values[0]), `{"result":"ok"}`; got != want {
+		t.Errorf("scoped raw JSON value = %s, want %s", got, want)
+	}
+	if got, want := string(values[1]), `"plain user entry"`; got != want {
+		t.Errorf("scoped non-JSON value = %s, want %s", got, want)
+	}
+	if got, want := string(values[2]), `"event entry"`; got != want {
+		t.Errorf("scoped event value = %s, want %s", got, want)
+	}
+}
+
+func TestCLIJSONEntryWritersOmitEntriesWithoutText(t *testing.T) {
+	entries := []entry{
+		{role: "error", text: "error"},
+		{role: "system", text: "system"},
+		{role: "result", text: "\n\n"},
+	}
+
+	var raw bytes.Buffer
+	writeJSONEntries(&raw, entries)
+	if raw.Len() != 0 {
+		t.Fatalf("raw JSON output = %q, want empty output", raw.String())
+	}
+
+	var scoped bytes.Buffer
+	writeScopedJSONEntries(&scoped, entries, client.Project{ID: "p1", Name: "demo"})
+	if scoped.Len() != 0 {
+		t.Fatalf("scoped JSON output = %q, want empty output", scoped.String())
+	}
+}
+
+func TestCLIJSONScopedEntryPayloadsPreserveJSONAndQuoteText(t *testing.T) {
+	entries := []entry{
+		{role: "result", text: "  {\"answer\":true}  \n"},
+		{role: "agent", text: "not JSON\n"},
+	}
+
+	var out bytes.Buffer
+	writeScopedJSONEntries(&out, entries, client.Project{ID: "p1", Name: "demo"})
+	var output struct {
+		ProjectID   string          `json:"project_id"`
+		ProjectName string          `json:"project_name"`
+		Data        json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &output); err != nil {
+		t.Fatalf("scoped JSON output is invalid: %v\n%s", err, out.String())
+	}
+	var values []json.RawMessage
+	if err := json.Unmarshal(output.Data, &values); err != nil {
+		t.Fatalf("scoped data is not an array: %v\n%s", err, output.Data)
+	}
+	if got, want := string(values[0]), `{"answer":true}`; got != want {
+		t.Errorf("scoped JSON payload = %s, want %s", got, want)
+	}
+	if got, want := string(values[1]), `"not JSON"`; got != want {
+		t.Errorf("scoped text payload = %s, want %s", got, want)
+	}
+}
+
+func TestCLIJSONScopedSingleEntryKeepsDataShape(t *testing.T) {
+	var out bytes.Buffer
+	writeScopedJSONEntries(&out, []entry{{role: "result", text: "{\"ok\":true}\n"}}, client.Project{ID: "p1", Name: "demo"})
+
+	var output struct {
+		ProjectID   string          `json:"project_id"`
+		ProjectName string          `json:"project_name"`
+		Data        json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &output); err != nil {
+		t.Fatalf("scoped JSON output is invalid: %v\n%s", err, out.String())
+	}
+	if got, want := string(output.Data), `{"ok":true}`; got != want {
+		t.Fatalf("single scoped data = %s, want raw JSON object %s", got, want)
+	}
+	if output.ProjectID != "p1" || output.ProjectName != "demo" {
+		t.Fatalf("scoped project = %q/%q, want p1/demo", output.ProjectID, output.ProjectName)
+	}
+}
+
 func TestCLIJSONTasksList(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>

@@ -547,17 +547,29 @@ func writeEntries(out io.Writer, entries []entry) {
 	}
 }
 
-// writeJSONEntries prints result entries as raw text, omitting styled headers.
-// This is used in --json mode so the caller receives the bare JSON payload.
-func writeJSONEntries(out io.Writer, entries []entry) {
+// normalizedJSONEntryTexts returns transcript text eligible for either JSON
+// output path, preserving entry order and omitting housekeeping or empty
+// entries.
+func normalizedJSONEntryTexts(entries []entry) []string {
+	texts := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.role == "error" || e.role == "system" {
 			continue // errors via exit status; system messages are housekeeping noise
 		}
 		text := strings.TrimRight(e.text, "\n")
-		if text != "" {
-			fmt.Fprintln(out, text)
+		if text == "" {
+			continue
 		}
+		texts = append(texts, text)
+	}
+	return texts
+}
+
+// writeJSONEntries prints result entries as raw text, omitting styled headers.
+// This is used in --json mode so the caller receives the bare JSON payload.
+func writeJSONEntries(out io.Writer, entries []entry) {
+	for _, text := range normalizedJSONEntryTexts(entries) {
+		fmt.Fprintln(out, text)
 	}
 }
 
@@ -585,15 +597,9 @@ func writeScopedEntries(out io.Writer, entries []entry, project client.Project) 
 }
 
 func writeScopedJSONEntries(out io.Writer, entries []entry, project client.Project) {
-	values := make([]json.RawMessage, 0, len(entries))
-	for _, e := range entries {
-		if e.role == "error" || e.role == "system" {
-			continue
-		}
-		text := strings.TrimRight(e.text, "\n")
-		if text == "" {
-			continue
-		}
+	texts := normalizedJSONEntryTexts(entries)
+	values := make([]json.RawMessage, 0, len(texts))
+	for _, text := range texts {
 		if json.Valid([]byte(strings.TrimSpace(text))) {
 			values = append(values, json.RawMessage(strings.TrimSpace(text)))
 			continue
