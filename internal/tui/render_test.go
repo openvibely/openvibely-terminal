@@ -1325,9 +1325,9 @@ func TestRenderAutomationDetailSortsDuplicateEdgeRowsIndependentlyOfInputOrder(t
 
 func TestRenderAutomationDetailSortsWarningsDeterministically(t *testing.T) {
 	base := client.AutomationDetail{
-		Automation:      client.AutomationMetadata{ID: "au-warning-order", Name: "Warning order"},
-		GraphAvailable:  false,
-		Partial:         true,
+		Automation:     client.AutomationMetadata{ID: "au-warning-order", Name: "Warning order"},
+		GraphAvailable: false,
+		Partial:        true,
 	}
 	first := base
 	first.Warnings = []string{"zeta warning", "alpha warning"}
@@ -1340,8 +1340,8 @@ func TestRenderAutomationDetailSortsWarningsDeterministically(t *testing.T) {
 
 func TestRenderAutomationDetailSortsCaseOnlyResourceTiesDeterministically(t *testing.T) {
 	base := client.AutomationDetail{
-		Automation:     client.AutomationMetadata{ID: "au-resource-order", Name: "Resource order"},
-		Resources:       make([]client.AutomationResourceSummary, 0),
+		Automation:         client.AutomationMetadata{ID: "au-resource-order", Name: "Resource order"},
+		Resources:          make([]client.AutomationResourceSummary, 0),
 		ResourcesAvailable: true,
 	}
 	upper := client.AutomationResourceSummary{NodeKey: "Node", ResourceType: "Task", ResourceID: "ID", Relation: "Input", Name: "Name", Status: "Ready"}

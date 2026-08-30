@@ -843,7 +843,9 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		if detail.Partial {
 			b.WriteString(dimStyle.Render("  partial detail — unavailable optional sections are not treated as empty") + "\n")
 		}
-		for _, warning := range detail.Warnings {
+		warnings := append([]string(nil), detail.Warnings...)
+		sort.Strings(warnings)
+		for _, warning := range warnings {
 			if strings.TrimSpace(warning) != "" {
 				b.WriteString(dimStyle.Render("  "+warning) + "\n")
 			}
@@ -1080,7 +1082,7 @@ func automationDetailEdgeSortKey(edge client.AutomationLiveEdge) string {
 }
 
 func automationDetailResourceSortKey(resource client.AutomationResourceSummary) string {
-	return strings.ToLower(strings.Join([]string{
+	raw := strings.Join([]string{
 		resource.NodeID,
 		resource.NodeKey,
 		resource.ResourceType,
@@ -1089,7 +1091,8 @@ func automationDetailResourceSortKey(resource client.AutomationResourceSummary) 
 		resource.Name,
 		resource.Status,
 		resource.URL,
-	}, "\x00"))
+	}, "\x00")
+	return strings.ToLower(raw) + "\x00" + raw
 }
 
 func indentAutomationDetailTable(value string) string {

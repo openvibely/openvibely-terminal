@@ -1101,6 +1101,24 @@ func TestParseAutomationDetailHandlesDuplicateNodeDetailsDeterministically(t *te
 	}
 }
 
+func TestParseAutomationDetailHandlesDuplicateNodeDetailAliasesDeterministically(t *testing.T) {
+	parse := func(details string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-node-aliases" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-key="first"><strong>First</strong></g></div><div data-automation-live-details-panel>` + details + `</div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	byKeyThenID := parse(`<section data-automation-live-node-detail="first" data-counts='{"running":5}'><h3>First</h3></section><section data-automation-live-node-detail="" data-automation-live-node-id="n1" data-counts='{"running":7}'><h3>First</h3></section>`)
+	byIDThenKey := parse(`<section data-automation-live-node-detail="" data-automation-live-node-id="n1" data-counts='{"running":7}'><h3>First</h3></section><section data-automation-live-node-detail="first" data-counts='{"running":5}'><h3>First</h3></section>`)
+	if len(byKeyThenID.Nodes) != 1 || len(byIDThenKey.Nodes) != 1 || len(byKeyThenID.UnmatchedNodeDetails) != 1 || len(byIDThenKey.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("duplicate alias records were not retained separately: key-first=%+v id-first=%+v", byKeyThenID, byIDThenKey)
+	}
+	if byKeyThenID.Nodes[0].Counts.Running != byIDThenKey.Nodes[0].Counts.Running || byKeyThenID.UnmatchedNodeDetails[0].Counts.Running != byIDThenKey.UnmatchedNodeDetails[0].Counts.Running {
+		t.Fatalf("duplicate alias handling depends on input order: key-first=%+v id-first=%+v", byKeyThenID, byIDThenKey)
+	}
+}
+
 func TestParseAutomationDetailRequiresUniqueCompatibleEdgeCandidate(t *testing.T) {
 	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edge-candidates" data-project-id="p1" data-automation-lifecycle-state="active">
 		<div data-automation-graph-panel><svg>

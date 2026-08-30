@@ -433,7 +433,7 @@ func parseAutomationGraph(detail *AutomationDetail, live *html.Node) {
 		return hasAnyHTMLAttr(n, "data-automation-graph-panel", "data-automation-canvas", "data-automation-live-graph")
 	})
 	nodes, nodesPresent, nodeCountsPresent := parseAutomationLiveNodes(detail, live)
-	edges, edgesPresent, edgeCountsPresent := parseAutomationLiveEdges(detail, live, nodes)
+	edges, edgesPresent, graphEdgesPresent, edgeCountsPresent := parseAutomationLiveEdges(detail, live, nodes)
 	detail.Nodes = nodes
 	detail.Edges = edges
 	detail.NodesAvailable = nodesPresent
@@ -450,7 +450,7 @@ func parseAutomationGraph(detail *AutomationDetail, live *html.Node) {
 		if explicitFound && !explicitValid {
 			detail.Warnings = append(detail.Warnings, "graph availability is malformed")
 		}
-		detail.GraphAvailable = graphPanel != nil || nodesPresent || edgesPresent
+		detail.GraphAvailable = graphPanel != nil || detail.GraphNodesPresent || graphEdgesPresent
 	}
 	if detail.Version.State == "draft" || detail.Automation.LifecycleState == "draft" {
 		detail.GraphAvailable = false
@@ -477,9 +477,9 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 		if hasCounts {
 			countsPresent = true
 		}
-		if parsed.ID == "" && parsed.NodeKey == "" && parsed.Name == "" {
-			// The marker itself is authoritative graph topology. Retain a record
-			// even when malformed markup provides no recoverable identity.
+		if parsed.ID == "" && parsed.NodeKey == "" {
+			// Display names are not stable correlation identities. Retain the
+			// authoritative graph row, but make the missing ID/key explicit.
 			out = append(out, parsed)
 			detail.Warnings = append(detail.Warnings, "graph node record has no stable identity")
 			continue
@@ -495,38 +495,110 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 	}
 	graphNodesPresent := len(liveNodes) > 0
 	detail.GraphNodesPresent = graphNodesPresent
+	type nodeDetailCandidate struct {
+		node      AutomationLiveNode
+		hasCounts bool
+		identity  string
+		key       string
+	}
+	candidates := make([]nodeDetailCandidate, 0, len(detailNodes))
 	for _, node := range detailNodes {
 		parsed, hasCounts := parseAutomationNodeDetail(detail, node)
+		candidates = append(candidates, nodeDetailCandidate{
+			node:      parsed,
+			hasCounts: hasCounts,
+			identity:  automationLiveNodeCorrelationIdentity(out, parsed, graphNodesPresent),
+			key:       automationLiveNodeDeterministicKey(parsed),
+		})
+	}
+	canonicalKeys := make(map[string]string)
+	for _, candidate := range candidates {
+		if candidate.identity == "" {
+			continue
+		}
+		if current, ok := canonicalKeys[candidate.identity]; !ok || candidate.key < current {
+			canonicalKeys[candidate.identity] = candidate.key
+		}
+	}
+	seenIdentities := make(map[string]bool)
+	for _, candidate := range candidates {
+		parsed, hasCounts := candidate.node, candidate.hasCounts
+		identity := candidate.identity
+		if identity != "" && (seenIdentities[identity] || candidate.key != canonicalKeys[identity]) {
+			detail.UnmatchedNodeDetails = append(detail.UnmatchedNodeDetails, parsed)
+			detail.Warnings = append(detail.Warnings, "duplicate node detail records could not be correlated safely")
+			continue
+		}
+		if identity != "" {
+			seenIdentities[identity] = true
+		}
 		if !graphNodesPresent {
-			// Without graph node markers, detail records are the complete node
-			// representation. Retain every distinct stable node key, including
-			// identity-less marked records.
-			if parsed.ID == "" && parsed.NodeKey == "" && parsed.Name == "" {
-				detail.Warnings = append(detail.Warnings, "node detail record has no stable identity")
-			}
 			if hasCounts {
 				countsPresent = true
+			}
+			// Without graph node markers, detail records are the complete node
+			// representation. Keep one deterministic canonical record per stable
+			// identity and retain any duplicates separately above.
+			if parsed.ID == "" && parsed.NodeKey == "" {
+				detail.Warnings = append(detail.Warnings, "node detail record has no stable identity")
 			}
 			mergeAutomationLiveNode(&out, parsed)
 			continue
 		}
 		if automationLiveNodeHasStableMatch(out, parsed) {
-			// A correlated detail record is authoritative for any metrics that
-			// were absent from the graph representation.
 			if hasCounts {
 				countsPresent = true
 			}
+			// A uniquely correlated detail record is authoritative for metrics that
+			// were absent from the graph representation.
 			mergeAutomationLiveNode(&out, parsed)
 			continue
 		}
-		// The current live route uses node IDs for SVG graph shapes and
-		// node keys for the details cards, so an unmatched pair cannot be
-		// correlated safely. Keep the graph rows authoritative, retain the
-		// detail record separately, and surface the lost correlation.
+		// Node IDs and keys are the only safe correlation identities. Preserve
+		// every uncorrelated detail record without changing graph rows.
 		detail.UnmatchedNodeDetails = append(detail.UnmatchedNodeDetails, parsed)
 		detail.Warnings = append(detail.Warnings, "node detail records could not be correlated with graph nodes")
 	}
 	return out, present, countsPresent
+}
+
+func automationLiveNodeCorrelationIdentity(nodes []AutomationLiveNode, node AutomationLiveNode, graphNodesPresent bool) string {
+	if graphNodesPresent {
+		if index, matched, _ := automationLiveNodeMatchIndex(nodes, node); matched {
+			return fmt.Sprintf("graph\x00%020d", index)
+		}
+	}
+	return automationLiveNodeStableIdentity(node)
+}
+
+func automationLiveNodeStableIdentity(node AutomationLiveNode) string {
+	id := strings.ToLower(strings.TrimSpace(node.ID))
+	key := strings.ToLower(strings.TrimSpace(node.NodeKey))
+	switch {
+	case id != "" && key != "":
+		return "both\x00" + id + "\x00" + key
+	case id != "":
+		return "id\x00" + id
+	case key != "":
+		return "key\x00" + key
+	default:
+		return ""
+	}
+}
+
+func automationLiveNodeDeterministicKey(node AutomationLiveNode) string {
+	counts := node.Counts
+	return strings.Join([]string{
+		automationLiveNodeStableIdentity(node), node.ID, node.NodeKey, node.Name,
+		node.ProjectID, node.AutomationID, node.VersionID, node.NodeType, node.Role,
+		node.ConfigJSON, fmt.Sprintf("%.17g", node.PositionX), fmt.Sprintf("%.17g", node.PositionY),
+		node.DisplayState,
+		fmt.Sprintf("%020d:%t:%d", counts.Running, counts.RunningAvailable, counts.runningQuality),
+		fmt.Sprintf("%020d:%t:%d", counts.Waiting, counts.WaitingAvailable, counts.waitingQuality),
+		fmt.Sprintf("%020d:%t:%d", counts.Blocked, counts.BlockedAvailable, counts.blockedQuality),
+		fmt.Sprintf("%020d:%t:%d", counts.Failed, counts.FailedAvailable, counts.failedQuality),
+		fmt.Sprintf("%020d:%t:%d", counts.CompletedRecently, counts.CompletedRecentlyAvailable, counts.completedRecentlyQuality),
+	}, "\x00")
 }
 
 func automationLiveNodeHasStableMatch(nodes []AutomationLiveNode, parsed AutomationLiveNode) bool {
@@ -599,7 +671,28 @@ func parseAutomationLiveNode(detail *AutomationDetail, node *html.Node) (Automat
 		parsed.Name = firstLine(NodeText(node))
 	}
 	countsPresent := parseAutomationNodeCounts(detail, node, &parsed.Counts)
+	if label := automationParentTaskLinkCountLabel(node); label != "" {
+		if mergeAutomationCountText(detail, &parsed.Counts, label) {
+			countsPresent = true
+		}
+	}
 	return parsed, countsPresent
+}
+
+func automationParentTaskLinkCountLabel(node *html.Node) string {
+	for parent := node.Parent; parent != nil; parent = parent.Parent {
+		if hasHTMLAttr(parent, "data-automation-task-link") {
+			aria := strings.TrimSpace(attr(parent, "aria-label"))
+			if split := strings.LastIndex(aria, ","); split >= 0 {
+				return strings.TrimSpace(aria[split+1:])
+			}
+			return ""
+		}
+		if hasHTMLAttr(parent, "data-automation-graph-panel") {
+			break
+		}
+	}
+	return ""
 }
 
 func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (AutomationLiveNode, bool) {
@@ -855,7 +948,7 @@ const (
 	automationEdgeSourceDetails = 2
 )
 
-func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes []AutomationLiveNode) ([]AutomationLiveEdge, bool, bool) {
+func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes []AutomationLiveNode) ([]AutomationLiveEdge, bool, bool, bool) {
 	var out = make([]AutomationLiveEdge, 0)
 	present := false
 	countsPresent := false
@@ -909,7 +1002,7 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	for i := range out {
 		resolveAutomationEdgeNames(&out[i], nodes)
 	}
-	return out, present, countsPresent
+	return out, present, len(explicit) > 0, countsPresent
 }
 
 func automationEdgeHasUniqueEndpointMatch(parsed AutomationLiveEdge, explicit, details []AutomationLiveEdge) bool {
@@ -1129,19 +1222,21 @@ func automationEdgeHasNoStableIdentity(edge AutomationLiveEdge) bool {
 }
 
 func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) {
-	match := -1
+	matches := make([]int, 0, 1)
 	for i := range *edges {
 		if automationEdgesCanMerge((*edges)[i], parsed, allowEndpointMerge) {
-			match = i
-			break
+			matches = append(matches, i)
 		}
 	}
-	if match < 0 {
+	if len(matches) != 1 {
+		// Zero candidates means this is a distinct retained record. Multiple
+		// compatible candidates are ambiguous and must remain independent rather
+		// than inheriting data from whichever record appeared first.
 		*edges = append(*edges, parsed)
 		return
 	}
 
-	current := &(*edges)[match]
+	current := &(*edges)[matches[0]]
 	if current.ID == "" {
 		current.ID = parsed.ID
 	}
