@@ -150,6 +150,64 @@ func TestGetBestAgentNoData(t *testing.T) {
 	}
 }
 
+func TestGetVoteRecordsUsesEscapedStepExecutionRoute(t *testing.T) {
+	const stepExecID = "step/exec?audit#1"
+	var requests int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet {
+			t.Errorf("method = %s, want GET", r.Method)
+		}
+		if got, want := r.URL.EscapedPath(), "/api/workflows/votes/step%2Fexec%3Faudit%231"; got != want {
+			t.Errorf("escaped path = %q, want %q (raw URI %q)", got, want, r.URL.RequestURI())
+		}
+		if r.URL.RawQuery != "" {
+			t.Errorf("unexpected query %q", r.URL.RawQuery)
+		}
+		_ = json.NewEncoder(w).Encode([]VoteRecord{
+			{ID: "vote-1", StepExecutionID: stepExecID, AgentConfigID: "agent-a", Vote: "approve", Confidence: 0.91, Reasoning: "looks safe"},
+			{ID: "vote-2", StepExecutionID: stepExecID, AgentConfigID: "agent-b", Vote: "reject", Confidence: 0.42, Reasoning: "needs more evidence"},
+		})
+	}))
+
+	records, err := c.GetVoteRecords(context.Background(), stepExecID)
+	if err != nil {
+		t.Fatalf("GetVoteRecords: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("GetVoteRecords made %d requests, want exactly one", requests)
+	}
+	if len(records) != 2 {
+		t.Fatalf("decoded %d vote records, want 2: %+v", len(records), records)
+	}
+	if records[0].AgentConfigID != "agent-a" || records[0].Vote != "approve" || records[0].Confidence != 0.91 || records[0].Reasoning != "looks safe" {
+		t.Errorf("first record = %+v", records[0])
+	}
+	if records[1].AgentConfigID != "agent-b" || records[1].Vote != "reject" || records[1].Confidence != 0.42 || records[1].Reasoning != "needs more evidence" {
+		t.Errorf("second record = %+v", records[1])
+	}
+}
+
+func TestGetVoteRecordsNormalizesEmptyJSONCollection(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/api/workflows/votes/step-empty" {
+			t.Errorf("escaped path = %q", r.URL.EscapedPath())
+		}
+		_, _ = w.Write([]byte("null"))
+	}))
+
+	records, err := c.GetVoteRecords(context.Background(), "step-empty")
+	if err != nil {
+		t.Fatalf("GetVoteRecords: %v", err)
+	}
+	if records == nil {
+		t.Fatal("empty vote collection must be non-nil for stable JSON output")
+	}
+	if len(records) != 0 {
+		t.Fatalf("empty vote collection length = %d, want 0", len(records))
+	}
+}
+
 func TestTriggerAutonomousBuild(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/autonomous/trigger" {

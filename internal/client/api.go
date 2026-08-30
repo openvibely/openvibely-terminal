@@ -287,7 +287,13 @@ func (c *Client) GetCheapestAgent(ctx context.Context, taskType string) (*AgentR
 func (c *Client) GetVoteRecords(ctx context.Context, stepExecID string) ([]VoteRecord, error) {
 	var out []VoteRecord
 	err := c.getJSON(ctx, "/api/workflows/votes/"+url.PathEscape(stepExecID), &out)
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = make([]VoteRecord, 0)
+	}
+	return out, nil
 }
 
 // --- Autonomous builds (/api/autonomous/*) ---

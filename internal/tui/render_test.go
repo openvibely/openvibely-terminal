@@ -733,6 +733,42 @@ func TestEmptyStateHints(t *testing.T) {
 	}
 }
 
+func TestRenderVoteRecordsIsDeterministicAndExplicit(t *testing.T) {
+	records := []client.VoteRecord{
+		{ID: "vote-b", StepExecutionID: "step-1", AgentConfigID: "agent-b", Vote: "reject", Confidence: 0.42, Reasoning: "needs more evidence"},
+		{ID: "vote-a", StepExecutionID: "step-1", AgentConfigID: "agent-a", Vote: "approve", Confidence: 0.91, Reasoning: "safe\nbecause the checks passed"},
+		{ID: "vote-empty", StepExecutionID: "step-1", AgentConfigID: "agent-c", Vote: "abstain"},
+	}
+	original := append([]client.VoteRecord(nil), records...)
+	out := stripANSI(renderVoteRecords("step-1", records))
+
+	for _, want := range []string{
+		"Workflow votes", "step execution: step-1", "AGENT", "VOTE", "CONFIDENCE", "REASONING",
+		"agent-a", "approve", "0.91", "safe because the checks passed",
+		"agent-b", "reject", "0.42", "needs more evidence", "agent-c", "abstain", "0.00", "—",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("vote output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "agent-a") > strings.Index(out, "agent-b") || strings.Index(out, "agent-b") > strings.Index(out, "agent-c") {
+		t.Errorf("votes were not rendered in deterministic agent order:\n%s", out)
+	}
+	if strings.Contains(out, "safe\nbecause") {
+		t.Errorf("reasoning was rendered across multiple lines:\n%s", out)
+	}
+	if !reflect.DeepEqual(records, original) {
+		t.Fatalf("renderVoteRecords mutated its input: got %+v, want %+v", records, original)
+	}
+
+	empty := stripANSI(renderVoteRecords("step-empty", nil))
+	for _, want := range []string{"step execution: step-empty", "no vote records available for this step execution"} {
+		if !strings.Contains(empty, want) {
+			t.Errorf("empty vote output missing %q:\n%s", want, empty)
+		}
+	}
+}
+
 func TestRenderModelCapacityWithoutProviderLimits(t *testing.T) {
 	caps := []client.ModelCapacity{{Name: "Sonnet", Running: 1, MaxWorkers: 4, AvailableSlots: 3}}
 	base := stripANSI(renderModelCapacity(caps))

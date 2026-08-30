@@ -120,6 +120,7 @@ Commands take a resource, an optional action, and arguments:
 /tasks move Refactor active   move a task between columns
 /tasks attachments add Refactor ./request.txt ./trace.json
 /tasks attachments delete Refactor att-123
+/agents votes parallel-step-exec-123     inspect every agent vote
 ```
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
@@ -136,7 +137,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/schedule` | `schedules` | `list`, `add`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
-| `/agents` | `agent` | `list`, `delete`, `generate`, `metrics` |
+| `/agents` | `agent` | `list`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations` | — |
@@ -271,6 +272,26 @@ openvibely-tui -project demo --json tasks lifecycle refactor exec-123
 
 `tasks logs` is an alias for `tasks lifecycle`.
 
+### Parallel workflow votes
+
+Inspect the recorded votes for a completed parallel workflow step after selecting
+its project. The action is read-only and takes the backend step-execution ID
+literally; it makes one request to the vote-record endpoint and prints each
+agent configuration, vote, confidence, and a bounded single-line reasoning
+value:
+
+```
+/agents votes step-exec-123
+openvibely-tui -project demo agents votes step-exec-123
+openvibely-tui -project demo --json agents votes step-exec-123
+```
+
+The plain view names the step execution and shows an explicit no-records state
+when the backend returns an empty collection. `--json` emits only the decoded
+vote-record array, including `[]` for an empty result, so it can be consumed by
+scripts without a human banner or terminal styling. Unknown IDs, authentication
+failures, and backend errors retain the normal non-zero command behavior.
+
 ### Analytics
 
 `/analytics` renders everything; a section name narrows it. Charts are drawn as
@@ -286,6 +307,7 @@ Anything you can type in the chat window can be run as a one-shot command:
 openvibely-tui tasks                              # print the board
 openvibely-tui -project demo tasks show refactor  # a task's detail tabs
 openvibely-tui -project demo tasks run refactor   # run it
+openvibely-tui -project demo agents votes step-exec-123 # inspect parallel votes
 openvibely-tui -project demo tasks attachments add refactor ./request.txt ./trace.json
 openvibely-tui -project demo --force tasks attachments delete refactor att-123
 openvibely-tui -project demo alerts               # list alerts
@@ -378,7 +400,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Projects | `GET /api/projects`, `POST /projects` (HTMX form) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks`, `failed-task-patterns`, `skills` |
-| Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent` |
+| Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Autonomous | `POST /api/autonomous/trigger` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |

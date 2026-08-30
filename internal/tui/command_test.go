@@ -801,6 +801,23 @@ func TestCommandSummaryListsEveryCommand(t *testing.T) {
 	}
 }
 
+func TestAgentsVotesHelpDocumentsParallelInspection(t *testing.T) {
+	cmd := lookupCommand("agents")
+	if cmd == nil {
+		t.Fatal("agents command missing")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"agents votes <step-execution-id>",
+		"inspect parallel-step votes",
+		"agents votes step-exec-123",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("agents help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestModelsHelpDocumentsProviderLimitHealth(t *testing.T) {
 	cmd := lookupCommand("models")
 	if cmd == nil {

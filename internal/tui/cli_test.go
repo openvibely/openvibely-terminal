@@ -19,6 +19,8 @@ import (
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
 
+const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
+
 // cliServer stubs the backend for headless runs.
 func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorder) {
 	t.Helper()
@@ -51,7 +53,171 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 	return c, rec
 }
 
-const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
+// cliVoteServer stubs project loading and one vote-record response for CLI
+// success and error cases.
+func cliVoteServer(t *testing.T, status int, body string) (*client.Client, *recorder) {
+	t.Helper()
+	const votePath = "/api/workflows/votes/step-1"
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case votePath:
+			w.Header().Set("Content-Type", "application/json")
+			if status == http.StatusFound {
+				w.Header().Set("Location", "/login")
+			}
+			if status != http.StatusOK {
+				w.WriteHeader(status)
+			}
+			_, _ = w.Write([]byte(body))
+		default:
+			t.Errorf("unexpected CLI vote request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, rec
+}
+
+func TestCLIAgentsVotesPlainJSONAndEmptyOutput(t *testing.T) {
+	const records = `[
+		{"id":"vote-b","step_execution_id":"step-1","agent_config_id":"agent-b","vote":"reject","confidence":0.42,"reasoning":"needs more evidence"},
+		{"id":"vote-a","step_execution_id":"step-1","agent_config_id":"agent-a","vote":"approve","confidence":0.91,"reasoning":"checks passed"}
+	]`
+
+	t.Run("plain", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":               cliProjects,
+			"/api/workflows/votes/step-1": records,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"agents", "votes", "step-1"}, false, false); err != nil {
+			t.Fatalf("plain vote inspection failed: %v", err)
+		}
+		text := stripANSI(out.String())
+		for _, want := range []string{"Workflow votes", "step execution: step-1", "agent-a", "approve", "0.91", "agent-b", "reject", "0.42", "needs more evidence"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("plain output missing %q:\n%s", want, out.String())
+			}
+		}
+		if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 1 {
+			t.Fatalf("plain vote inspection made %d vote requests, want one:\n%s", got, rec.all())
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":               cliProjects,
+			"/api/workflows/votes/step-1": records,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"agents", "votes", "step-1"}, false, true); err != nil {
+			t.Fatalf("JSON vote inspection failed: %v", err)
+		}
+		var got []client.VoteRecord
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+			t.Fatalf("JSON vote output is invalid: %v\n%s", err, out.String())
+		}
+		if len(got) != 2 || got[0].AgentConfigID != "agent-b" || got[1].Reasoning != "checks passed" {
+			t.Fatalf("JSON vote records = %+v", got)
+		}
+		if strings.Contains(out.String(), "Workflow votes") || strings.Contains(out.String(), "\x1b[") {
+			t.Fatalf("JSON vote output contains human/styled text: %q", out.String())
+		}
+		if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 1 {
+			t.Fatalf("JSON vote inspection made %d vote requests, want one:\n%s", got, rec.all())
+		}
+	})
+
+	t.Run("empty JSON", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":               cliProjects,
+			"/api/workflows/votes/step-1": `[]`,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"agents", "votes", "step-1"}, false, true); err != nil {
+			t.Fatalf("empty JSON vote inspection failed: %v", err)
+		}
+		if got := strings.TrimSpace(out.String()); got != "[]" {
+			t.Fatalf("empty JSON vote output = %q, want []", got)
+		}
+		if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 1 {
+			t.Fatalf("empty JSON vote inspection made %d vote requests, want one:\n%s", got, rec.all())
+		}
+	})
+}
+
+func TestCLIAgentsVotesErrorsAndUnresolvedReferences(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		wantError string
+	}{
+		{name: "malformed", status: http.StatusOK, body: `not-json`, wantError: "decoding /api/workflows/votes/step-1 response"},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"error":"private body"}`, wantError: "requires sign-in"},
+		{name: "server error", status: http.StatusServiceUnavailable, body: `{"error":"vote service unavailable"}`, wantError: "server error (503): vote service unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliVoteServer(t, tc.status, tc.body)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", []string{"agents", "votes", "step-1"}, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %v, want substring %q", err, tc.wantError)
+			}
+			if out.Len() != 0 {
+				t.Errorf("failed vote inspection wrote success output: %q", out.String())
+			}
+			if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 1 {
+				t.Fatalf("failed vote inspection made %d vote requests, want one:\n%s", got, rec.all())
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "missing reference", args: []string{"agents", "votes"}},
+		{name: "extra reference", args: []string{"agents", "votes", "step-1", "other"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", tc.args, false, false)
+			if err == nil || !strings.Contains(err.Error(), "usage: agents votes <step-execution-id>") {
+				t.Fatalf("error = %v, want vote usage", err)
+			}
+			if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 0 {
+				t.Fatalf("unresolved vote reference made %d vote requests, want zero:\n%s", got, rec.all())
+			}
+			if out.Len() != 0 {
+				t.Errorf("unresolved vote reference wrote output: %q", out.String())
+			}
+		})
+	}
+
+	t.Run("multiple projects require selection", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "", []string{"agents", "votes", "step-1"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "multiple projects") {
+			t.Fatalf("error = %v, want multiple-project selection error", err)
+		}
+		if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 0 {
+			t.Fatalf("unselected multi-project vote inspection made %d requests, want zero:\n%s", got, rec.all())
+		}
+	})
+}
 
 func TestCLIWorkersLimitOperandValidation(t *testing.T) {
 	cases := []struct {

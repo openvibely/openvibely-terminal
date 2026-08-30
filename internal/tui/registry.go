@@ -1592,23 +1592,27 @@ func skillsCommand() command {
 // --- agents ---
 
 func agentsCommand() command {
-	actions := []string{"list", "delete", "generate", "metrics"}
+	actions := []string{"list", "delete", "generate", "metrics", "votes"}
 	return command{
 		name:    "agents",
 		aliases: []string{"agent"},
 		args:    "[name]",
 		actions: actions,
-		desc:    "agent definitions and their metrics",
+		desc:    "agent definitions, workflow metrics and vote audits",
 		usage: []string{
 			"agents [filter]                            list agent definitions",
 			"agents generate <description>              create an agent from a description",
 			"agents delete <agent>                      remove an agent definition (omit <agent> → interactive selector)",
 			"agents metrics                             per-agent workflow metrics",
 		},
+		actionUsages: []commandActionUsage{
+			{action: "votes", args: "<step-execution-id>", description: "inspect parallel-step votes"},
+		},
 		examples: []string{
 			`agents generate A code reviewer that checks Go PRs for style and correctness`,
 			`agents delete reviewer`,
 			`agents metrics`,
+			`agents votes step-exec-123`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
@@ -1645,6 +1649,26 @@ func agentsCommand() command {
 						return "", metricsErr
 					}
 					return renderAgentMetrics(metrics, best, cheapest), nil
+				})
+			case "votes":
+				mm, cmd, ok := m.needProject()
+				if !ok {
+					return mm, cmd
+				}
+				m = mm
+				if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
+					return m, errCmd(commandUsage("agents", "votes"))
+				}
+				stepExecID := strings.TrimSpace(rest[0])
+				return m, run("Workflow votes", cmdTimeout, func(ctx context.Context) (string, error) {
+					records, err := c.GetVoteRecords(ctx, stepExecID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(records)
+					}
+					return renderVoteRecords(stepExecID, records), nil
 				})
 			case "generate":
 				if ref == "" {

@@ -1328,6 +1328,56 @@ func renderAgentMetrics(metrics []client.AgentMetric, best, cheapest *client.Age
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// renderVoteRecords renders every agent vote for one parallel workflow step.
+// Records are copied before sorting so the client response remains unchanged.
+func renderVoteRecords(stepExecID string, records []client.VoteRecord) string {
+	stepExecID = truncate(compactProviderText(stepExecID), 80)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", sectionStyle.Render("Workflow votes"))
+	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render("step execution: "+stepExecID))
+	if len(records) == 0 {
+		b.WriteString(dimStyle.Render("no vote records available for this step execution"))
+		return b.String()
+	}
+
+	ordered := append([]client.VoteRecord(nil), records...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		left, right := ordered[i], ordered[j]
+		if left.AgentConfigID != right.AgentConfigID {
+			return left.AgentConfigID < right.AgentConfigID
+		}
+		if left.Vote != right.Vote {
+			return left.Vote < right.Vote
+		}
+		if left.Confidence != right.Confidence {
+			return left.Confidence < right.Confidence
+		}
+		if left.Reasoning != right.Reasoning {
+			return left.Reasoning < right.Reasoning
+		}
+		if left.StepExecutionID != right.StepExecutionID {
+			return left.StepExecutionID < right.StepExecutionID
+		}
+		return left.ID < right.ID
+	})
+
+	rows := [][]string{{"AGENT", "VOTE", "CONFIDENCE", "REASONING"}}
+	for _, record := range ordered {
+		reasoning := truncate(compactProviderText(record.Reasoning), 72)
+		if reasoning == "" {
+			reasoning = "—"
+		}
+		rows = append(rows, []string{
+			firstNonEmpty(compactProviderText(record.AgentConfigID), "—"),
+			firstNonEmpty(compactProviderText(record.Vote), "—"),
+			fmt.Sprintf("%.2f", record.Confidence),
+			reasoning,
+		})
+	}
+	b.WriteString(table(rows))
+	return b.String()
+}
+
 // --- models ---
 
 func renderModels(list []client.LLMModel, filter string) string {

@@ -134,6 +134,131 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 	return m, rec
 }
 
+// dispatchVoteModel wires a selected-project model to one vote-record response,
+// including non-2xx and malformed response cases.
+func dispatchVoteModel(t *testing.T, status int, body string) (Model, *recorder) {
+	t.Helper()
+	const votePath = "/api/workflows/votes/step-1"
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		if r.URL.Path != votePath {
+			t.Errorf("unexpected vote path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if status != http.StatusOK {
+			w.WriteHeader(status)
+		}
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	return m, rec
+}
+
+func TestAgentsVotesInteractiveDispatchAndErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		want       []string
+		wantAuth   bool
+		wantResult bool
+	}{
+		{
+			name:   "success",
+			status: http.StatusOK,
+			body: `[{
+				"id":"vote-b","step_execution_id":"step-1","agent_config_id":"agent-b","vote":"reject","confidence":0.42,"reasoning":"needs more evidence"
+			},{
+				"id":"vote-a","step_execution_id":"step-1","agent_config_id":"agent-a","vote":"approve","confidence":0.91,"reasoning":"checks passed"
+			}]`,
+			want:       []string{"Workflow votes", "step execution: step-1", "agent-a", "approve", "0.91", "checks passed", "agent-b", "reject", "0.42", "needs more evidence"},
+			wantResult: true,
+		},
+		{
+			name:       "empty",
+			status:     http.StatusOK,
+			body:       `[]`,
+			want:       []string{"Workflow votes", "step execution: step-1", "no vote records available for this step execution"},
+			wantResult: true,
+		},
+		{
+			name:   "malformed",
+			status: http.StatusOK,
+			body:   `not-json`,
+			want:   []string{"decoding /api/workflows/votes/step-1 response"},
+		},
+		{
+			name:     "unauthorized",
+			status:   http.StatusUnauthorized,
+			body:     `{"error":"do not expose this body"}`,
+			want:     []string{"requires sign-in", "/login"},
+			wantAuth: true,
+		},
+		{
+			name:   "server error",
+			status: http.StatusServiceUnavailable,
+			body:   `{"error":"vote service unavailable"}`,
+			want:   []string{"server error (503): vote service unavailable"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchVoteModel(t, tc.status, tc.body)
+			m = runLine(t, m, "/agents votes step-1")
+			if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 1 {
+				t.Fatalf("vote inspection made %d route requests, want exactly one:\n%s", got, rec.all())
+			}
+			out := stripANSI(transcript(m))
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+			if tc.wantResult && strings.Contains(out, "server error") {
+				t.Errorf("successful vote inspection reported an error:\n%s", out)
+			}
+			if m.authRequired != tc.wantAuth {
+				t.Errorf("authRequired = %t, want %t", m.authRequired, tc.wantAuth)
+			}
+		})
+	}
+}
+
+func TestAgentsVotesInteractiveRejectsUnresolvedAndUnselectedRequests(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	for _, line := range []string{"/agents votes", "/agents votes step-1 extra"} {
+		m = runLine(t, m, line)
+	}
+	if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 0 {
+		t.Fatalf("invalid vote references made %d vote requests, want zero:\n%s", got, rec.all())
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "usage: /agents votes <step-execution-id>") {
+		t.Fatalf("unresolved vote reference did not report usage:\n%s", out)
+	}
+
+	m, rec = dispatchModel(t, nil)
+	m.selectedID = ""
+	m = runLine(t, m, "/agents votes step-1")
+	if got := rec.count("GET", "/api/workflows/votes/step-1"); got != 0 {
+		t.Fatalf("unselected vote inspection made %d requests, want zero:\n%s", got, rec.all())
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "no project selected") {
+		t.Fatalf("unselected vote inspection did not report project guidance:\n%s", out)
+	}
+}
+
 // confirmDestructive simulates the two-step TUI confirmation flow for
 // destructive commands: it types the command (which parks a pendingConfirmation
 // instead of executing immediately) and then types "yes" to confirm execution.
