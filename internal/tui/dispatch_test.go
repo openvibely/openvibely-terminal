@@ -399,6 +399,26 @@ func TestProjectsCreateSameIDPreservesThreadState(t *testing.T) {
 	}
 }
 
+func TestEmptyProjectCommandsOfferCreationGuidance(t *testing.T) {
+	for _, line := range []string{"/projects", "/project"} {
+		t.Run(line, func(t *testing.T) {
+			m, _ := dispatchModel(t, map[string]string{
+				"/api/projects":          `{"projects":[]}`,
+				"/api/capacity/projects": `[]`,
+			})
+			m.projects = nil
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "/projects create <name> <path>") {
+				t.Fatalf("empty %s state omitted creation guidance:\n%s", line, out)
+			}
+		})
+	}
+}
+
 func TestProjectsCreateUsageErrorsDoNotCallBackend(t *testing.T) {
 	for _, line := range []string{"/projects create", "/projects create demo"} {
 		t.Run(line, func(t *testing.T) {

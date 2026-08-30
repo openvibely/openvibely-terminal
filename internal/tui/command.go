@@ -152,6 +152,16 @@ var commands []command
 // examples help prints can be copied verbatim into whichever mode you're in.
 var cmdPrefix = "/"
 
+const projectCreateCommand = "projects create <name> <path>"
+
+func projectCreationCommand() string {
+	return cmdPrefix + projectCreateCommand
+}
+
+func noProjectsGuidance() string {
+	return "no projects yet — use " + projectCreationCommand()
+}
+
 func lookupCommand(name string) *command {
 	name = strings.ToLower(strings.TrimPrefix(name, "/"))
 	for i := range commands {

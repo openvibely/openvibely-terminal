@@ -1885,6 +1885,23 @@ func TestCLIJSONProjectsList(t *testing.T) {
 	}
 }
 
+func TestCLIJSONEmptyProjectsListStaysAnEmptyArray(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": `{"projects":[]}`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"projects", "list"}, false, true); err != nil {
+		t.Fatalf("empty projects list --json failed: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "[]" {
+		t.Fatalf("empty projects list JSON = %q, want [] without guidance text", got)
+	}
+	if strings.Contains(out.String(), "/projects create <name> <path>") {
+		t.Fatalf("JSON output mixed in interactive creation guidance: %q", out.String())
+	}
+}
+
 func TestCLIJSONTasksShow(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>

@@ -940,6 +940,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedID == "" && len(m.projects) > 0 && (!cliMode || len(m.projects) == 1) {
 			m.setActiveProject(m.projects[0])
 		}
+		if !msg.echo && !cliMode && len(m.projects) == 0 && m.selectedID == "" {
+			m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
+		}
 		var reconnect tea.Cmd
 		if !m.authRequired && m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
 			m.sseRetryAfterProject = false
@@ -1571,7 +1574,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 
 	if m.selectedID == "" {
-		m.append(entry{role: "error", text: "no project selected — use /project <name>"})
+		if len(m.projects) == 0 {
+			m.append(entry{role: "error", text: noProjectsGuidance()})
+		} else {
+			m.append(entry{role: "error", text: "no project selected — use /project <name>"})
+		}
 		return m, nil
 	}
 	m.busy = true

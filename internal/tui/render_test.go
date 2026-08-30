@@ -432,6 +432,15 @@ func TestRenderBoardEmptyStates(t *testing.T) {
 	}
 }
 
+func TestRenderProjectsEmptyStateOffersCreationCommand(t *testing.T) {
+	out := stripANSI(renderProjects(nil, nil, ""))
+	for _, want := range []string{"no projects", "/projects create <name> <path>"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("empty project state missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestPersonalityKindPreservesPrecedence(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -1072,6 +1081,7 @@ func BenchmarkRenderExecTimesLargeInput(b *testing.B) {
 
 func TestConnectionPresentationAcrossHealthTransitions(t *testing.T) {
 	m := newTestModel(t)
+	m.projects = []client.Project{{ID: "p1", Name: "demo"}}
 	cases := []struct {
 		name             string
 		check            *connCheckedMsg

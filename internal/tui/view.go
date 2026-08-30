@@ -73,6 +73,8 @@ func (m Model) renderHeader() string {
 	project := "no project"
 	if m.selectedName != "" {
 		project = m.selectedName
+	} else if len(m.projects) == 0 && m.connectionPhase() == connectionPhaseOnline {
+		project = "no projects"
 	}
 
 	phase := m.connectionPhase()
@@ -183,6 +185,9 @@ func (m Model) hint() string {
 	}
 	if m.threadID != "" {
 		return "in task thread · messages reply to this task · /chat to exit · / for commands"
+	}
+	if m.selectedID == "" && len(m.projects) == 0 {
+		return "no projects yet · " + projectCreationCommand()
 	}
 	return "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"
 }
@@ -1525,7 +1530,7 @@ func renderWorkers(capacity *client.GlobalCapacity, page string) string {
 
 func renderProjects(projects []client.Project, caps []client.ProjectCapacity, selectedID string) string {
 	if len(projects) == 0 {
-		return dimStyle.Render("no projects")
+		return dimStyle.Render(noProjectsGuidance())
 	}
 	byID := map[string]client.ProjectCapacity{}
 	for _, c := range caps {

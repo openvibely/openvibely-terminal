@@ -294,12 +294,45 @@ func TestTransportFailureRemainsOfflineNotSignInRequired(t *testing.T) {
 	}
 }
 
-func TestPlainTextRequiresProject(t *testing.T) {
+func TestStartupEmptyProjectLoadShowsCreationGuidance(t *testing.T) {
+	m := newTestModel(t)
+	m.connected = true
+	m.connChecked = true
+
+	updated, _ := m.Update(projectsLoadedMsg{projects: []client.Project{}})
+	m = updated.(Model)
+
+	if !strings.Contains(transcript(m), "/projects create <name> <path>") {
+		t.Fatalf("startup empty-project load omitted creation guidance:\n%s", transcript(m))
+	}
+	if got := stripANSI(m.View()); !strings.Contains(got, "/projects create <name> <path>") {
+		t.Fatalf("startup empty-project view omitted creation guidance:\n%s", got)
+	}
+}
+
+func TestPlainTextOffersCreationGuidanceWhenNoProjects(t *testing.T) {
 	m := newTestModel(t)
 	m, _ = typeLine(t, m, "hello there")
 
-	if !strings.Contains(transcript(m), "no project selected") {
-		t.Fatalf("expected a project error, got:\n%s", transcript(m))
+	out := transcript(m)
+	if !strings.Contains(out, "no projects") || !strings.Contains(out, "/projects create <name> <path>") {
+		t.Fatalf("expected actionable project-creation guidance, got:\n%s", out)
+	}
+	if strings.Contains(out, "no project selected — use /project <name>") {
+		t.Fatalf("zero-project guidance still only offered project selection:\n%s", out)
+	}
+}
+
+func TestPlainTextRetainsSelectionGuidanceWhenProjectsExist(t *testing.T) {
+	m := newTestModel(t)
+	m.projects = []client.Project{{ID: "p1", Name: "demo"}}
+	m, _ = typeLine(t, m, "hello there")
+
+	if !strings.Contains(transcript(m), "no project selected — use /project <name>") {
+		t.Fatalf("projects-without-selection guidance changed:\n%s", transcript(m))
+	}
+	if strings.Contains(transcript(m), "/projects create <name> <path>") {
+		t.Fatalf("existing projects incorrectly received creation guidance:\n%s", transcript(m))
 	}
 }
 
