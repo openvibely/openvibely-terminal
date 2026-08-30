@@ -4826,6 +4826,151 @@ func TestTasksShowReviewTabListsInlineComments(t *testing.T) {
 	}
 }
 
+func taskReviewsResultText(m Model) string {
+	for i := len(m.log) - 1; i >= 0; i-- {
+		if m.log[i].role == "result" {
+			return m.log[i].text
+		}
+	}
+	return ""
+}
+
+func taskReviewErrorText(m Model) string {
+	for i := len(m.log) - 1; i >= 0; i-- {
+		if m.log[i].role == "error" {
+			return m.log[i].text
+		}
+	}
+	return ""
+}
+
+func TestTaskReviewReadPathsHaveEquivalentPlainOutputAndSingleFetch(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "show review tab", line: "/tasks show Refactor the API review"},
+		{name: "reviews default list", line: "/tasks reviews Refactor the API"},
+		{name: "reviews list subcommand", line: "/tasks reviews list Refactor the API"},
+	}
+
+	var want string
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":             taskBoardHTML,
+				"/tasks/t-1/reviews": taskReviewHTML,
+			})
+			m = runLine(t, m, tc.line)
+
+			if got := rec.count("GET", "/tasks"); got != 1 {
+				t.Fatalf("task resolution should make exactly one board request, got %d:\n%s", got, rec.all())
+			}
+			if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
+				t.Fatalf("review display should make exactly one review request, got %d:\n%s", got, rec.all())
+			}
+			got := taskReviewsResultText(m)
+			if got == "" {
+				t.Fatalf("missing task review result:\n%s", transcript(m))
+			}
+			if want == "" {
+				want = got
+			} else if got != want {
+				t.Errorf("review output differs from the first read path:\n%s\nwant:\n%s", got, want)
+			}
+		})
+	}
+}
+
+func TestTaskReviewReadPathsPreserveEmptyPlainOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "show review tab", line: "/tasks show t-1 review"},
+		{name: "reviews default list", line: "/tasks reviews t-1"},
+		{name: "reviews list subcommand", line: "/tasks reviews list t-1"},
+	}
+	const emptyReviewHTML = `<div id="review-comments-list" data-task-id="t-1" data-comment-count="0"></div>`
+	const emptyMessage = "no review comments yet — /tasks reviews add <task> <file>:<line> <comment>"
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":             taskBoardHTML,
+				"/tasks/t-1/reviews": emptyReviewHTML,
+			})
+			m = runLine(t, m, tc.line)
+
+			if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
+				t.Fatalf("empty review display should make exactly one review request, got %d:\n%s", got, rec.all())
+			}
+			if out := taskReviewsResultText(m); !strings.Contains(out, emptyMessage) {
+				t.Fatalf("empty-state message changed or was missing:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
+func dispatchModelWithReviewError(t *testing.T) (Model, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		case "/tasks/t-1/reviews":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"review fetch failed"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	return m, rec
+}
+
+func TestTaskReviewReadPathsPropagateFetchErrorsIdentically(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "show review tab", line: "/tasks show t-1 review"},
+		{name: "reviews default list", line: "/tasks reviews t-1"},
+		{name: "reviews list subcommand", line: "/tasks reviews list t-1"},
+	}
+	const wantError = "server error (502): review fetch failed"
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModelWithReviewError(t)
+			m = runLine(t, m, tc.line)
+
+			if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
+				t.Fatalf("review error path should make exactly one review request, got %d:\n%s", got, rec.all())
+			}
+			if got := taskReviewErrorText(m); got != wantError {
+				t.Fatalf("review error = %q, want %q; transcript:\n%s", got, wantError, transcript(m))
+			}
+		})
+	}
+}
+
 func TestTasksReviewsListGracefullyHandlesEmptyComments(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/tasks":             taskBoardHTML,

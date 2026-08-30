@@ -107,6 +107,18 @@ func actAndReloadText(status string, act func() error, reload func() (string, er
 	return status + "\n\n" + text, nil
 }
 
+// taskReviewsOutput fetches and formats the read-only review view for a task.
+func taskReviewsOutput(ctx context.Context, c *client.Client, t client.Task) (string, error) {
+	reviews, err := c.ListTaskReviews(ctx, t.ID)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(reviews)
+	}
+	return renderTaskReviews(t, reviews), nil
+}
+
 // marshalJSON marshals v to a JSON string. When jsonMode is false it is never
 // called; callers should guard with `if jsonMode { ... }`.
 func marshalJSON(v any) (string, error) {
@@ -116,7 +128,6 @@ func marshalJSON(v any) (string, error) {
 	}
 	return string(b), nil
 }
-
 func titleFor(name string) string {
 	if name == "" {
 		return ""
@@ -315,14 +326,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					if isReviewTab(tab) {
-						reviews, err := c.ListTaskReviews(ctx, t.ID)
-						if err != nil {
-							return "", err
-						}
-						if jsonMode {
-							return marshalJSON(reviews)
-						}
-						return renderTaskReviews(t, reviews), nil
+						return taskReviewsOutput(ctx, c, t)
 					}
 					if jsonMode {
 						return marshalJSON(t)
@@ -364,14 +368,7 @@ func tasksCommand() command {
 						if err != nil {
 							return "", err
 						}
-						reviews, err := c.ListTaskReviews(ctx, t.ID)
-						if err != nil {
-							return "", err
-						}
-						if jsonMode {
-							return marshalJSON(reviews)
-						}
-						return renderTaskReviews(t, reviews), nil
+						return taskReviewsOutput(ctx, c, t)
 					})
 				case "add":
 					if len(reviewRest) == 0 {

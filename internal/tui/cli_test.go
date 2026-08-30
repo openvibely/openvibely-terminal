@@ -1838,6 +1838,130 @@ func TestCLIJSONTaskReviewsList(t *testing.T) {
 	}
 }
 
+func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing.T) {
+	paths := []struct {
+		name string
+		args []string
+	}{
+		{name: "show review tab", args: []string{"tasks", "show", "t-1", "review"}},
+		{name: "reviews default list", args: []string{"tasks", "reviews", "t-1"}},
+		{name: "reviews list subcommand", args: []string{"tasks", "reviews", "list", "t-1"}},
+	}
+	cases := []struct {
+		name      string
+		reviews   string
+		wantCount int
+	}{
+		{name: "populated", reviews: taskReviewHTML, wantCount: 1},
+		{name: "empty", reviews: `<div id="review-comments-list" data-task-id="t-1" data-comment-count="0"></div>`},
+	}
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var want string
+			for _, path := range paths {
+				path := path
+				t.Run(path.name, func(t *testing.T) {
+					c, rec := cliServer(t, map[string]string{
+						"/api/projects":      cliProjects,
+						"/tasks":             board,
+						"/tasks/t-1/reviews": tc.reviews,
+					})
+
+					var out bytes.Buffer
+					if err := RunCLI(c, &out, "demo", path.args, false, true); err != nil {
+						t.Fatalf("%v --json failed: %v", path.name, err)
+					}
+					got := strings.TrimSpace(out.String())
+					var reviews []client.ReviewComment
+					if err := json.Unmarshal([]byte(got), &reviews); err != nil {
+						t.Fatalf("%v output is not valid JSON: %v\noutput: %s", path.name, err, got)
+					}
+					if len(reviews) != tc.wantCount {
+						t.Fatalf("%v returned %d reviews, want %d: %s", path.name, len(reviews), tc.wantCount, got)
+					}
+					if tc.wantCount == 1 && (reviews[0].ID != "rc-1" || reviews[0].FilePath != "internal/client/tasks.go" || reviews[0].LineNumber != 42) {
+						t.Fatalf("%v returned unexpected review: %+v", path.name, reviews[0])
+					}
+					if got := rec.count("GET", "/tasks"); got != 1 {
+						t.Fatalf("%v should make exactly one board request, got %d:\n%s", path.name, got, rec.all())
+					}
+					if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
+						t.Fatalf("%v should make exactly one review request, got %d:\n%s", path.name, got, rec.all())
+					}
+					if want == "" {
+						want = got
+					} else if got != want {
+						t.Errorf("%v JSON differs from the first read path: %s\nwant: %s", path.name, got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+func cliReviewErrorServer(t *testing.T) (*client.Client, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		case "/tasks/t-1/reviews":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"review fetch failed"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, rec
+}
+
+func TestCLIJSONTaskReviewReadPathsPropagateFetchErrorsIdentically(t *testing.T) {
+	paths := []struct {
+		name string
+		args []string
+	}{
+		{name: "show review tab", args: []string{"tasks", "show", "t-1", "review"}},
+		{name: "reviews default list", args: []string{"tasks", "reviews", "t-1"}},
+		{name: "reviews list subcommand", args: []string{"tasks", "reviews", "list", "t-1"}},
+	}
+	const wantError = "server error (502): review fetch failed"
+
+	for _, path := range paths {
+		path := path
+		t.Run(path.name, func(t *testing.T) {
+			c, rec := cliReviewErrorServer(t)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", path.args, false, true)
+			if err == nil || err.Error() != wantError {
+				t.Fatalf("%v error = %v, want %q; output: %s", path.name, err, wantError, out.String())
+			}
+			if got := rec.count("GET", "/tasks"); got != 1 {
+				t.Fatalf("%v should make exactly one board request, got %d:\n%s", path.name, got, rec.all())
+			}
+			if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
+				t.Fatalf("%v should make exactly one review request, got %d:\n%s", path.name, got, rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIJSONTaskReviewsAdd(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
