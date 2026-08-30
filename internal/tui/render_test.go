@@ -1062,11 +1062,12 @@ func TestConnectionPresentationAcrossHealthTransitions(t *testing.T) {
 			hint: "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit",
 		},
 		{
-			name:           "failed",
-			check:          &connCheckedMsg{err: errors.New("health check failed")},
-			header:         "● offline",
-			statusContains: []string{"server", "offline", "health check failed", "start/check your local backend", "set -server <url> or OPENVIBELY_SERVER_URL"},
-			hint:           "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status",
+			name:             "failed",
+			check:            &connCheckedMsg{err: errors.New("health check failed")},
+			header:           "● backend error",
+			statusContains:   []string{"server", "backend error (unhealthy)", "health check failed", "check backend logs", "set -server <url> or OPENVIBELY_SERVER_URL"},
+			statusNotContain: []string{"offline", "start/check your local backend"},
+			hint:             "backend error: backend responded but is unhealthy · check backend logs or /status",
 		},
 		{
 			name:           "healthy again",
@@ -1079,11 +1080,12 @@ func TestConnectionPresentationAcrossHealthTransitions(t *testing.T) {
 			hint: "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit",
 		},
 		{
-			name:           "failed again",
-			check:          &connCheckedMsg{err: errors.New("health check failed again")},
-			header:         "● offline",
-			statusContains: []string{"server", "offline", "health check failed again", "start/check your local backend", "set -server <url> or OPENVIBELY_SERVER_URL"},
-			hint:           "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status",
+			name:             "failed again",
+			check:            &connCheckedMsg{err: errors.New("health check failed again")},
+			header:           "● backend error",
+			statusContains:   []string{"server", "backend error (unhealthy)", "health check failed again", "check backend logs", "set -server <url> or OPENVIBELY_SERVER_URL"},
+			statusNotContain: []string{"offline", "start/check your local backend"},
+			hint:             "backend error: backend responded but is unhealthy · check backend logs or /status",
 		},
 	}
 
@@ -1132,8 +1134,8 @@ func TestConnectionHintPreservesTaskThreadPriority(t *testing.T) {
 
 	next, _ = m.Update(connCheckedMsg{err: errors.New("health check failed")})
 	m = next.(Model)
-	if got, want := m.hint(), "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"; got != want {
-		t.Errorf("offline thread hint = %q, want %q", got, want)
+	if got, want := m.hint(), "backend error: backend responded but is unhealthy · check backend logs or /status"; got != want {
+		t.Errorf("unhealthy thread hint = %q, want %q", got, want)
 	}
 }
 

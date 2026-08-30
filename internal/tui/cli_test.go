@@ -662,6 +662,65 @@ func TestCLIBackendRequiredFailureIncludesRecoveryGuidance(t *testing.T) {
 	}
 }
 
+func TestCLIProjectLoadFailuresUseReachableBackendPresentation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		diagnostic string
+	}{
+		{
+			name:       "http 500",
+			status:     http.StatusInternalServerError,
+			body:       `{"error":"project store failed"}`,
+			diagnostic: "project store failed",
+		},
+		{
+			name:       "malformed json",
+			status:     http.StatusOK,
+			body:       `{"projects":`,
+			diagnostic: "decoding /api/projects response",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/projects" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", []string{"tasks"}, false, false)
+			if err == nil {
+				t.Fatal("expected project preload failure")
+			}
+			got := strings.ToLower(err.Error())
+			for _, want := range []string{"backend error", "unhealthy", strings.ToLower(tc.diagnostic)} {
+				if !strings.Contains(got, want) {
+					t.Errorf("reachable CLI project failure missing %q: %s", want, err)
+				}
+			}
+			for _, unwanted := range []string{"unable to reach", "offline", "start or check your local backend"} {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("reachable CLI project failure contains offline guidance %q: %s", unwanted, err)
+				}
+			}
+			if out.Len() != 0 {
+				t.Fatalf("failed project preload printed partial output: %q", out.String())
+			}
+		})
+	}
+}
+
 func TestCLIReachableUnauthorizedBackendUsesSignInGuidance(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/projects" {

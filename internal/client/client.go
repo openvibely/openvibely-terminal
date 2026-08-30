@@ -99,6 +99,14 @@ func IsTransportError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded)
 }
 
+// IsReachableError reports whether err is a non-authentication failure from a
+// backend request that was not classified as a transport failure. HTTP status
+// and response-decode errors use this category, allowing callers to present a
+// reachable-but-unhealthy backend without replacing it with offline guidance.
+func IsReachableError(err error) bool {
+	return err != nil && !IsAuthRequired(err) && !IsTransportError(err)
+}
+
 func newAuthRequiredError(method, path string, resp *http.Response) error {
 	return &AuthRequiredError{
 		Method:     method,

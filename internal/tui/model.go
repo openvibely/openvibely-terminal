@@ -102,6 +102,7 @@ type Model struct {
 	sessionGeneration    uint64
 	projectGeneration    uint64
 	connErr              string
+	connReachableError   bool // connErr came from a responding but unhealthy backend
 	capacity             *client.GlobalCapacity
 	auth                 *client.AuthStatus
 
@@ -856,13 +857,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if wasConnected {
-				m.append(entry{role: "error", text: "lost connection: " + OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
+				m.append(entry{role: "error", text: "health check failed: " + connectionErrorMessage(m.client.BaseURL(), msg.err)})
 			}
 			m.connected = false
 			if !wasAuthRequired {
 				m.authRequired = false
 			}
 			m.connErr = msg.err.Error()
+			m.connReachableError = client.IsReachableError(msg.err)
 		} else {
 			// Capacity proves that the backend is reachable, but it does not
 			// establish that the current cookie session is authenticated. Once the
@@ -872,11 +874,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connected = false
 				m.authRequired = true
 				m.connErr = ""
+				m.connReachableError = false
 				return m, nil
 			}
 			m.connected = true
 			m.authRequired = false
 			m.connErr = ""
+			m.connReachableError = false
 			if !wasConnected {
 				m.append(entry{role: "system", text: "Connected to " + m.client.BaseURL() + "."})
 			}
@@ -914,7 +918,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connected = false
 			m.connChecked = true
 			m.connErr = msg.err.Error()
-			m.append(entry{role: "error", text: "loading projects: " + OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
+			m.connReachableError = client.IsReachableError(msg.err)
+			m.append(entry{role: "error", text: "loading projects: " + connectionErrorMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
 		}
 		if msg.startSSE {
@@ -1193,6 +1198,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connected = false
 				m.connChecked = true
 				m.connErr = msg.err.Error()
+				m.connReachableError = false
 				m.auth = nil
 				m.sseConnected = false
 				m.append(entry{role: "error", text: OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
@@ -1210,6 +1216,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connected = false
 		m.connChecked = false
 		m.connErr = ""
+		m.connReachableError = false
 		m.auth = nil
 		m.sseConnected = false
 		m.sseRetryAfterProject = true
@@ -1871,6 +1878,7 @@ func (m *Model) markAuthRequired() {
 	m.connected = false
 	m.connChecked = true
 	m.connErr = ""
+	m.connReachableError = false
 	// An accepted auth failure starts a new session epoch. This invalidates
 	// project, command, chat, selector, and thread results launched before the
 	// backend reported that the session was unauthorized.
@@ -1895,6 +1903,7 @@ func (m *Model) handleTransportError(err error) bool {
 	m.connected = false
 	m.connChecked = true
 	m.connErr = err.Error()
+	m.connReachableError = false
 	// Preserve known auth-required precedence while also retaining the network
 	// details needed to explain a temporary offline condition.
 	if !wasOffline {
@@ -1913,6 +1922,32 @@ func (m *Model) handleAuthError(err error) bool {
 
 func authRecoveryMessage(baseURL string) string {
 	return fmt.Sprintf("OpenVibely backend at %s requires sign-in.\nUse /login to enter credentials in the TUI. For CLI runs, use OPENVIBELY_AUTH_USERNAME and OPENVIBELY_AUTH_PASSWORD (or the existing -user/-pass flags). Credentials are not displayed or saved.", baseURL)
+}
+
+// connectionErrorMessage selects recovery copy after authentication has been
+// handled. A non-transport client error means the backend answered but returned
+// an unusable response, so it must not receive offline/start-the-server advice.
+func connectionErrorMessage(baseURL string, err error) string {
+	if client.IsReachableError(err) {
+		return ReachableBackendErrorMessage(baseURL, err)
+	}
+	return OfflineRecoveryMessage(baseURL, err)
+}
+
+// ReachableBackendErrorMessage formats the recovery guidance shown when the
+// backend responded but health or project loading failed. The optional error is
+// limited to the client's safe status/decode diagnostic.
+func ReachableBackendErrorMessage(baseURL string, err error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Backend error: the OpenVibely backend at %s responded but is unhealthy.", baseURL)
+	b.WriteString("\nTry:\n")
+	b.WriteString("  - Check the backend logs and run /status to diagnose the response.\n")
+	b.WriteString("  - Use -server <url> or OPENVIBELY_SERVER_URL to verify the configured backend.")
+	if err != nil {
+		b.WriteString("\nDetails: ")
+		b.WriteString(err.Error())
+	}
+	return b.String()
 }
 
 // OfflineRecoveryMessage formats the recovery guidance shown when the backend

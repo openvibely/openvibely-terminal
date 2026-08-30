@@ -51,12 +51,15 @@ const (
 	connectionPhaseConnecting connectionPhase = iota
 	connectionPhaseOnline
 	connectionPhaseOffline
+	connectionPhaseUnhealthy
 )
 
 func (m Model) connectionPhase() connectionPhase {
 	switch {
-	case m.connected:
+	case m.connected && !m.authRequired:
 		return connectionPhaseOnline
+	case m.connReachableError && (m.connChecked || m.connErr != ""):
+		return connectionPhaseUnhealthy
 	case m.connChecked || m.connErr != "":
 		return connectionPhaseOffline
 	default:
@@ -82,6 +85,8 @@ func (m Model) renderHeader() string {
 			conn = statusOKStyle.Render("● online")
 		case connectionPhaseOffline:
 			conn = statusErrStyle.Render("● offline")
+		case connectionPhaseUnhealthy:
+			conn = statusErrStyle.Render("● backend error")
 		}
 	}
 	stream := ""
@@ -163,7 +168,7 @@ func (m Model) hint() string {
 		return "tab complete · ↑↓ choose · enter run · esc close"
 	}
 	phase := m.connectionPhase()
-	if m.authRequired && phase != connectionPhaseOnline {
+	if m.authRequired {
 		return "sign-in required: /login · help works without backend"
 	}
 	switch phase {
@@ -171,6 +176,8 @@ func (m Model) hint() string {
 		if m.connErr != "" {
 			return "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
 		}
+	case connectionPhaseUnhealthy:
+		return "backend error: backend responded but is unhealthy · check backend logs or /status"
 	case connectionPhaseConnecting:
 		return "connecting: /help works offline · check -server or OPENVIBELY_SERVER_URL if this stays here"
 	}
@@ -189,9 +196,15 @@ func (m Model) renderStatus() string {
 	if m.authRequired {
 		row("server", noticeStyle.Render("sign-in required")+dimStyle.Render(" "+m.client.BaseURL()))
 		if m.connErr != "" {
-			row("network", statusErrStyle.Render("offline"))
-			row("error", m.connErr)
-			row("try", "start/check your local backend, then run /status")
+			if m.connReachableError {
+				row("network", statusErrStyle.Render("backend error (unhealthy)"))
+				row("error", m.connErr)
+				row("try", "check backend logs, then run /status")
+			} else {
+				row("network", statusErrStyle.Render("offline"))
+				row("error", m.connErr)
+				row("try", "start/check your local backend, then run /status")
+			}
 		}
 		row("try", "use /login to enter credentials")
 		row("try", "help remains available without a backend")
@@ -207,6 +220,13 @@ func (m Model) renderStatus() string {
 				row("error", m.connErr)
 			}
 			row("try", "start/check your local backend, then run /status")
+			row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+		case connectionPhaseUnhealthy:
+			row("server", statusErrStyle.Render("backend error (unhealthy)")+dimStyle.Render(" "+m.client.BaseURL()))
+			if m.connErr != "" {
+				row("error", m.connErr)
+			}
+			row("try", "backend responded but is unhealthy; check backend logs, then run /status")
 			row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
 		}
 	}

@@ -300,6 +300,40 @@ func TestGetGlobalCapacity(t *testing.T) {
 	}
 }
 
+func TestReadErrorsClassifyReachableFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "http 500", body: `{"error":"capacity service failed"}`},
+		{name: "malformed json", body: `{"has_capacity":`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/capacity/global" {
+					t.Errorf("unexpected path %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if tc.name == "http 500" {
+					w.WriteHeader(http.StatusInternalServerError)
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+
+			_, err := c.GetGlobalCapacity(context.Background())
+			if err == nil {
+				t.Fatal("expected health request error")
+			}
+			if !IsReachableError(err) {
+				t.Fatalf("error = %v, want reachable backend classification", err)
+			}
+			if IsTransportError(err) || IsAuthRequired(err) {
+				t.Fatalf("error = %v was classified as transport or authentication", err)
+			}
+		})
+	}
+}
+
 func TestSendChatMessage(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/chat/message" {

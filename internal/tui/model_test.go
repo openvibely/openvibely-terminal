@@ -104,6 +104,139 @@ func TestStartupUsesConnectingCopyUntilHealthPasses(t *testing.T) {
 	}
 }
 
+func TestHealthFailuresUseReachableBackendPresentation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		diagnostic string
+	}{
+		{
+			name:       "http 500",
+			status:     http.StatusInternalServerError,
+			body:       `{"error":"capacity service failed"}`,
+			diagnostic: "capacity service failed",
+		},
+		{
+			name:       "malformed json",
+			status:     http.StatusOK,
+			body:       `{"has_capacity":`,
+			diagnostic: "decoding /api/capacity/global response",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/capacity/global":
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.body))
+				case "/auth/me":
+					_, _ = w.Write([]byte(`{"authenticated":false}`))
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+
+			updated, _ = m.Update(m.checkConnection()())
+			m = updated.(Model)
+			if m.connected || m.authRequired || !m.connReachableError {
+				t.Fatalf("health state = connected=%t authRequired=%t reachableError=%t", m.connected, m.authRequired, m.connReachableError)
+			}
+			if !strings.Contains(m.connErr, tc.diagnostic) {
+				t.Fatalf("health diagnostic = %q, want %q", m.connErr, tc.diagnostic)
+			}
+
+			rendered := strings.ToLower(stripANSI(transcript(m) + "\n" + m.renderHeader() + "\n" + m.renderStatus() + "\n" + m.hint()))
+			for _, want := range []string{"backend error", "unhealthy", strings.ToLower(tc.diagnostic)} {
+				if !strings.Contains(rendered, want) {
+					t.Errorf("reachable health presentation missing %q:\n%s", want, rendered)
+				}
+			}
+			for _, unwanted := range []string{"offline", "unable to reach", "start or check your local backend"} {
+				if strings.Contains(rendered, unwanted) {
+					t.Errorf("reachable health presentation contains offline guidance %q:\n%s", unwanted, rendered)
+				}
+			}
+		})
+	}
+}
+
+func TestProjectLoadFailuresUseReachableBackendPresentation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		diagnostic string
+	}{
+		{
+			name:       "http 500",
+			status:     http.StatusInternalServerError,
+			body:       `{"error":"project store failed"}`,
+			diagnostic: "project store failed",
+		},
+		{
+			name:       "malformed json",
+			status:     http.StatusOK,
+			body:       `{"projects":`,
+			diagnostic: "decoding /api/projects response",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/projects" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.connected = true
+			m.connChecked = true
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+
+			updated, _ = m.Update(m.loadProjects(false, "")())
+			m = updated.(Model)
+			if m.connected || m.authRequired || !m.connReachableError {
+				t.Fatalf("project state = connected=%t authRequired=%t reachableError=%t", m.connected, m.authRequired, m.connReachableError)
+			}
+			if !strings.Contains(m.connErr, tc.diagnostic) {
+				t.Fatalf("project diagnostic = %q, want %q", m.connErr, tc.diagnostic)
+			}
+
+			rendered := strings.ToLower(stripANSI(transcript(m) + "\n" + m.renderHeader() + "\n" + m.renderStatus() + "\n" + m.hint()))
+			for _, want := range []string{"backend error", "unhealthy", strings.ToLower(tc.diagnostic)} {
+				if !strings.Contains(rendered, want) {
+					t.Errorf("reachable project presentation missing %q:\n%s", want, rendered)
+				}
+			}
+			for _, unwanted := range []string{"offline", "unable to reach", "start or check your local backend"} {
+				if strings.Contains(rendered, unwanted) {
+					t.Errorf("reachable project presentation contains offline guidance %q:\n%s", unwanted, rendered)
+				}
+			}
+		})
+	}
+}
+
 func TestOfflineProjectLoadShowsRecoveryGuidance(t *testing.T) {
 	c, err := client.New("http://127.0.0.1:1")
 	if err != nil {

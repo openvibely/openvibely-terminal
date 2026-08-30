@@ -121,6 +121,9 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 		// command against whichever project happened to be selected.
 		if err := firstError(m); err != nil {
 			if m.connErr != "" {
+				if m.connReachableError {
+					return errors.New(ReachableBackendErrorMessage(c.BaseURL(), errors.New(m.connErr)))
+				}
 				return errors.New(OfflineRecoveryMessage(c.BaseURL(), errors.New(m.connErr)))
 			}
 			return err
