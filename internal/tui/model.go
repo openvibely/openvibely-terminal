@@ -117,10 +117,14 @@ type Model struct {
 	loginRestoreEchoMode    textinput.EchoMode
 	loginResumeSSE          bool
 
-	// projects
-	projects     []client.Project
-	selectedID   string
-	selectedName string
+	// projectsLoaded is true only after a successful project-list response (or
+	// project creation installs the first known project). It remains false while
+	// a list request is in flight so an empty slice cannot be mistaken for an
+	// empty backend account.
+	projectsLoaded bool
+	projects       []client.Project
+	selectedID     string
+	selectedName   string
 	// wantProject is a project requested up front (-project flag) and resolved
 	// only while no project has been installed yet. Subsequent reloads preserve
 	// the active project instead of reapplying this startup hint.
@@ -407,6 +411,7 @@ func (m Model) beginProjectLoad(echo bool, selectName string) (Model, tea.Cmd) {
 func (m Model) beginProjectLoadWithSSE(echo bool, selectName string, startSSE bool) (Model, tea.Cmd) {
 	requestID := nextProjectRequestID()
 	m.projectRequestID = requestID
+	m.projectsLoaded = false
 	return m, m.loadProjectsWithIDAndSSE(requestID, echo, selectName, startSSE)
 }
 
@@ -927,10 +932,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Project data alone cannot establish an authenticated session. Keep
 		// authRequired set until a current health check or login succeeds.
-		m.projects = msg.projects
+		m.projectsLoaded = true
 		// An explicit request resolves on its own; defaulting to the first
 		// project first would leave a wrong project selected when the name is
 		// ambiguous or unknown.
+		m.projects = msg.projects
 		if msg.selectName != "" {
 			return m.pickProject(msg.selectName)
 		}
@@ -940,7 +946,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selectedID == "" && len(m.projects) > 0 && (!cliMode || len(m.projects) == 1) {
 			m.setActiveProject(m.projects[0])
 		}
-		if !msg.echo && !cliMode && len(m.projects) == 0 && m.selectedID == "" {
+		if !msg.echo && !cliMode && m.projectsLoaded && len(m.projects) == 0 && m.selectedID == "" {
 			m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
 		}
 		var reconnect tea.Cmd
@@ -975,9 +981,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.startSSE {
 			m.sseRetryAfterProject = true
 		}
+		m.projectsLoaded = true
 		m.setActiveProject(msg.project)
 		m.projects = append(m.projects, msg.project)
-
 		if jsonMode {
 			body, err := marshalJSON(msg.project)
 			if err != nil {
@@ -1574,7 +1580,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 
 	if m.selectedID == "" {
-		if len(m.projects) == 0 {
+		if m.projectsLoaded && len(m.projects) == 0 {
 			m.append(entry{role: "error", text: noProjectsGuidance()})
 		} else {
 			m.append(entry{role: "error", text: "no project selected — use /project <name>"})

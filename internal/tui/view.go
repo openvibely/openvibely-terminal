@@ -73,7 +73,7 @@ func (m Model) renderHeader() string {
 	project := "no project"
 	if m.selectedName != "" {
 		project = m.selectedName
-	} else if len(m.projects) == 0 && m.connectionPhase() == connectionPhaseOnline {
+	} else if m.projectsLoaded && len(m.projects) == 0 && m.connectionPhase() == connectionPhaseOnline {
 		project = "no projects"
 	}
 
@@ -186,7 +186,7 @@ func (m Model) hint() string {
 	if m.threadID != "" {
 		return "in task thread · messages reply to this task · /chat to exit · / for commands"
 	}
-	if m.selectedID == "" && len(m.projects) == 0 {
+	if m.selectedID == "" && m.projectsLoaded && len(m.projects) == 0 {
 		return "no projects yet · " + projectCreationCommand()
 	}
 	return "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"

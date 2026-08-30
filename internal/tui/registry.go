@@ -2750,6 +2750,11 @@ func projectCommand() command {
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
 			if len(args) == 0 {
+				if !m.projectsLoaded {
+					var cmd tea.Cmd
+					m, cmd = m.beginProjectLoadWithSSE(true, "", !cliMode)
+					return m, cmd
+				}
 				if !cliMode && len(m.projects) > 1 {
 					projects := m.projects
 					return m, selectorFor("Projects", "project", "no projects", false,

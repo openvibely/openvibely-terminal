@@ -271,6 +271,7 @@ func TestProjectNoArgOpensSelector(t *testing.T) {
 		{ID: "p1", Name: "demo"},
 		{ID: "p2", Name: "beta"},
 	}
+	m.projectsLoaded = true
 	m = runLine(t, m, "/project")
 	if !m.selectorActive {
 		t.Fatalf("expected the project selector:\n%s", transcript(m))

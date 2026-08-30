@@ -310,8 +310,101 @@ func TestStartupEmptyProjectLoadShowsCreationGuidance(t *testing.T) {
 	}
 }
 
+func TestDelayedStartupProjectLoadDoesNotOfferPrematureCreationGuidance(t *testing.T) {
+	projectsStarted := make(chan struct{})
+	releaseProjects := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseProjects) }) }
+	defer release()
+	var projectStartOnce sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			projectStartOnce.Do(func() { close(projectsStarted) })
+			<-releaseProjects
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
+		case "/api/capacity/global":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"has_capacity":true}`))
+		case "/auth/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"authenticated":true}`))
+		case "/events/live":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	batch, ok := m.Init()().(tea.BatchMsg)
+	if !ok || len(batch) < 2 {
+		t.Fatalf("Init command = %T with %d commands, want startup health and project-load commands", m.Init()(), len(batch))
+	}
+
+	loaded := make(chan tea.Msg, 1)
+	go func() { loaded <- batch[1]() }()
+	select {
+	case <-projectsStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delayed startup project request")
+	}
+
+	updated, _ = m.Update(batch[0]())
+	m = updated.(Model)
+	if m.projectsLoaded {
+		t.Fatal("project list marked loaded before the delayed response")
+	}
+	if strings.Contains(m.hint(), "/projects create <name> <path>") || strings.Contains(stripANSI(m.View()), "/projects create <name> <path>") {
+		t.Fatalf("pending non-empty project load offered creation guidance:\nhint: %s\nview:\n%s", m.hint(), stripANSI(m.View()))
+	}
+	m, _ = typeLine(t, m, "hello there")
+	out := transcript(m)
+	if !strings.Contains(out, "no project selected — use /project <name>") {
+		t.Fatalf("pending project load did not retain selection guidance:\n%s", out)
+	}
+	if strings.Contains(out, "/projects create <name> <path>") {
+		t.Fatalf("pending project load offered creation guidance:\n%s", out)
+	}
+
+	release()
+	var msg tea.Msg
+	select {
+	case msg = <-loaded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delayed startup project response")
+	}
+	updated, _ = m.Update(msg)
+	m = updated.(Model)
+	defer m.Cleanup()
+	if !m.projectsLoaded {
+		t.Fatal("successful project response did not mark the list loaded")
+	}
+	if m.selectedID != "p1" || m.selectedName != "demo" {
+		t.Fatalf("startup project selection = %q (%q), want p1 (demo)", m.selectedID, m.selectedName)
+	}
+	if strings.Contains(m.hint(), "/projects create <name> <path>") {
+		t.Fatalf("non-empty project load retained creation guidance: %s", m.hint())
+	}
+}
+
 func TestPlainTextOffersCreationGuidanceWhenNoProjects(t *testing.T) {
 	m := newTestModel(t)
+	m.projectsLoaded = true
 	m, _ = typeLine(t, m, "hello there")
 
 	out := transcript(m)
