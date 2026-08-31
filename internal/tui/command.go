@@ -18,6 +18,8 @@ import (
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/openvibely/openvibely-tui/internal/client"
 )
 
 // commandActionUsage is the canonical syntax for one action. The command name
@@ -376,6 +378,18 @@ func (m Model) needProject() (Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 	return m, nil, true
+}
+
+// selectedProject returns the full backend project record for the active ID.
+// Commands that need local project metadata must use this record rather than
+// reconstructing a project from only the display name and ID.
+func (m Model) selectedProject() client.Project {
+	for _, project := range m.projects {
+		if project.ID == m.selectedID {
+			return project
+		}
+	}
+	return client.Project{ID: m.selectedID, Name: m.selectedName}
 }
 
 // matchRef finds an item by reference, preferring the most specific match:

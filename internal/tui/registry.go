@@ -26,6 +26,7 @@ func init() {
 		scheduleCommand(),
 		alertsCommand(),
 		skillsCommand(),
+		memoryCommand(),
 		agentsCommand(),
 		modelsCommand(),
 		workersCommand(),
@@ -1587,6 +1588,124 @@ func skillsCommand() command {
 			}
 		},
 	}
+}
+
+// --- memory ---
+
+func memorySelector(m Model, usage string) (Model, tea.Cmd) {
+	project := m.selectedProject()
+	return selectorOr(m, usage, selectorFor("Memory", "memory show",
+		"no indexed project memory — MEMORIES.md has no topic files",
+		false,
+		func(ctx context.Context) ([]selectorItem, error) {
+			list, err := m.client.ListMemories(ctx, project)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]selectorItem, 0, len(list.Memories))
+			for _, memory := range list.Memories {
+				label := firstNonEmpty(memory.Title, memory.File)
+				detail := memory.File
+				if memory.Summary != "" {
+					detail += " · " + truncate(memory.Summary, 50)
+				}
+				items = append(items, selectorItem{ref: memory.File, label: label, detail: detail})
+			}
+			return items, nil
+		}))
+}
+
+func memoryCommand() command {
+	actions := []string{"list", "show", "search"}
+	return command{
+		name:    "memory",
+		aliases: []string{"memories"},
+		args:    "[file|query]",
+		actions: actions,
+		desc:    "read-only durable memory for the selected project",
+		usage: []string{
+			"memory [filter]                            list indexed memory files",
+			"memory list [filter]                       list indexed memory files",
+			"memory show <file|title>                   show one indexed memory file",
+			"memory search <query>                      search indexed files and bodies",
+			"memory is read-only; curation remains owned by the backend lifecycle tools",
+		},
+		examples: []string{
+			`memory list`,
+			`memory show managed_memory.md`,
+			`memory search "selected project"`,
+		},
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
+			action, rest := splitAction(actions, args)
+			c, project := m.client, m.selectedProject()
+			ref := strings.Join(rest, " ")
+
+			switch action {
+			case "", "list":
+				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
+					list, err := c.ListMemories(ctx, project)
+					if err != nil {
+						return "", err
+					}
+					list = filterMemoryList(list, ref)
+					if jsonMode {
+						return marshalJSON(list)
+					}
+					return renderMemoryList(list), nil
+				})
+			case "show":
+				if ref == "" {
+					return memorySelector(m, "usage: /memory show <file|title>")
+				}
+				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
+					document, err := c.ShowMemory(ctx, project, ref)
+					if jsonMode {
+						body, marshalErr := marshalJSON(document)
+						if marshalErr != nil {
+							return "", marshalErr
+						}
+						return body, err
+					}
+					body := renderMemoryDocument(document)
+					return body, err
+				})
+			case "search":
+				if strings.TrimSpace(ref) == "" {
+					return m, errCmd(commandUsage("memory", "search"))
+				}
+				return m, run("Memory Search", cmdTimeout, func(ctx context.Context) (string, error) {
+					result, err := c.SearchMemories(ctx, project, ref)
+					if jsonMode {
+						body, marshalErr := marshalJSON(result)
+						if marshalErr != nil {
+							return "", marshalErr
+						}
+						return body, err
+					}
+					return renderMemorySearch(result), err
+				})
+			default:
+				return m, errCmd(commandUsage("memory", action))
+			}
+		},
+	}
+}
+
+func filterMemoryList(list client.MemoryList, filter string) client.MemoryList {
+	filtered := client.MemoryList{
+		Memories: make([]client.Memory, 0, len(list.Memories)),
+		Warnings: append(make([]string, 0, len(list.Warnings)), list.Warnings...),
+	}
+	for _, memory := range list.Memories {
+		if filterMatch(filter, memory.File, memory.Title, memory.Summary) {
+			filtered.Memories = append(filtered.Memories, memory)
+		}
+	}
+	return filtered
 }
 
 // --- agents ---

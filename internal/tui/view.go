@@ -1292,6 +1292,86 @@ func renderSkillDetail(s client.Skill) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// --- memory ---
+
+func renderMemoryList(list client.MemoryList) string {
+	var b strings.Builder
+	if len(list.Memories) == 0 {
+		b.WriteString(dimStyle.Render("no indexed project memory — .openvibely/memories/MEMORIES.md has no topic files"))
+	} else {
+		rows := [][]string{{"FILE", "TITLE", "SUMMARY"}}
+		for _, memory := range list.Memories {
+			rows = append(rows, []string{
+				memory.File,
+				truncate(firstNonEmpty(memory.Title, memory.File), 32),
+				truncate(memory.Summary, 58),
+			})
+		}
+		b.WriteString(table(rows))
+	}
+	if len(list.Warnings) > 0 {
+		b.WriteString("\n\n" + renderMemoryWarnings(list.Warnings))
+	}
+	b.WriteString("\n\n" + dimStyle.Render("/memory show <file|title> · /memory search <query>"))
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderMemoryDocument(document client.MemoryDocument) string {
+	var b strings.Builder
+	if document.File == "" {
+		b.WriteString(dimStyle.Render("memory file is unavailable"))
+	} else {
+		fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(document.Title, document.File)))
+		fmt.Fprintf(&b, "%s", dimStyle.Render("file "+document.File))
+		if document.Summary != "" {
+			fmt.Fprintf(&b, "\n\n%s", document.Summary)
+		}
+		if strings.TrimSpace(document.Body) == "" {
+			b.WriteString("\n\n" + dimStyle.Render("(empty memory file)"))
+		} else {
+			b.WriteString("\n\n" + clamp(strings.TrimRight(document.Body, "\n"), 80))
+		}
+	}
+	if len(document.Warnings) > 0 {
+		b.WriteString("\n\n" + renderMemoryWarnings(document.Warnings))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderMemorySearch(result client.MemorySearch) string {
+	var b strings.Builder
+	if len(result.Memories) == 0 {
+		fmt.Fprintf(&b, "%s", dimStyle.Render(fmt.Sprintf("no memory matches for %q", result.Query)))
+	} else {
+		fmt.Fprintf(&b, "%s\n\n", sectionStyle.Render(fmt.Sprintf("Memory search: %q", result.Query)))
+		rows := [][]string{{"FILE", "TITLE", "MATCH"}}
+		for _, memory := range result.Memories {
+			match := firstNonEmpty(memory.Snippet, memory.Summary, "match")
+			rows = append(rows, []string{
+				memory.File,
+				truncate(firstNonEmpty(memory.Title, memory.File), 32),
+				truncate(match, 64),
+			})
+		}
+		b.WriteString(table(rows))
+	}
+	if len(result.Warnings) > 0 {
+		b.WriteString("\n\n" + renderMemoryWarnings(result.Warnings))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderMemoryWarnings(warnings []string) string {
+	var b strings.Builder
+	b.WriteString(noticeStyle.Render("warnings:"))
+	for _, warning := range warnings {
+		if strings.TrimSpace(warning) != "" {
+			b.WriteString("\n" + dimStyle.Render("  "+warning))
+		}
+	}
+	return b.String()
+}
+
 // --- agents ---
 
 func renderAgents(agents []client.AgentDef, filter string) string {
@@ -1569,6 +1649,13 @@ func renderHelp() string {
 	const actionsWidth = 74
 	for _, c := range commands {
 		fmt.Fprintf(&b, "  %-*s  %s\n", width, c.summary(), c.desc)
+		if len(c.aliases) > 0 {
+			aliases := make([]string, 0, len(c.aliases))
+			for _, alias := range c.aliases {
+				aliases = append(aliases, cmdPrefix+alias)
+			}
+			fmt.Fprintf(&b, "  %-*s  %s\n", width, "", dimStyle.Render("aliases: "+strings.Join(aliases, ", ")))
+		}
 		for _, line := range wrapJoin(c.actions, " · ", actionsWidth) {
 			fmt.Fprintf(&b, "  %-*s  %s\n", width, "", dimStyle.Render(line))
 		}

@@ -121,6 +121,9 @@ Commands take a resource, an optional action, and arguments:
 /tasks attachments add Refactor ./request.txt ./trace.json
 /tasks attachments delete Refactor att-123
 /agents votes parallel-step-exec-123     inspect every agent vote
+/memory list                             inspect indexed project memory
+/memory show managed_memory.md           read one memory file
+/memory search "project scoped"         search memory files
 ```
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
@@ -137,6 +140,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/schedule` | `schedules` | `list`, `add`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
+| `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
 | `/agents` | `agent` | `list`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
@@ -158,6 +162,26 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/help` | `?`, `commands` | `/help <command>` details one |
 | `/chat` | `back`, `leave` | return to project chat; `/chat <message>` also sends it |
 | `/quit` | `q`, `exit` | |
+
+### Project memory
+
+Inspect the selected project's canonical, repository-local memory index and topic
+files without changing them:
+
+```
+/memory list
+/memory show managed_memory.md
+/memory search "provider architecture"
+
+openvibely-tui -project demo memory list
+openvibely-tui --json -project demo memory search "provider architecture"
+```
+
+`/memories` is a compatibility alias for `/memory`. The terminal reads only
+files indexed by `.openvibely/memories/MEMORIES.md`; malformed or missing topic
+files are shown as safe warnings. The public backend currently exposes no memory
+curation route, so edit/delete is intentionally unavailable here. Corrections
+and removals remain owned by the backend Memory Curator lifecycle tools.
 
 The interactive TUI and one-shot CLI have different live-event lifecycles:
 
