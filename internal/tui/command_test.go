@@ -683,6 +683,28 @@ func TestCommandsWithActionsDocumentTheirSyntax(t *testing.T) {
 	}
 }
 
+func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
+	cmd := lookupCommand("channels")
+	if cmd == nil {
+		t.Fatal("channels command missing")
+	}
+
+	if want := []string{"list", "test", "remove"}; !reflect.DeepEqual(cmd.actions, want) {
+		t.Fatalf("channels actions = %#v, want %#v", cmd.actions, want)
+	}
+
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"/channels list",
+		"/channels test <channel>",
+		"/channels remove <channel>",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("channels help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 // renderCommandHelp must include an "examples:" block for commands that have
 // examples populated, and must not render an empty block for those that don't.
 func TestRenderCommandHelpExamplesBlock(t *testing.T) {

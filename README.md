@@ -144,7 +144,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations` | — |
+| `/channels` | `integrations` | `list`, `test`, `remove` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
@@ -266,6 +266,29 @@ size. TUI deletion asks for the normal `yes` confirmation; CLI deletion refuses
 to run unless `--force` is supplied. A task-only delete invocation opens the
 interactive attachment selector, where the selected file is still confirmed
 before deletion. `attach` and `attachment` are aliases for `attachments`.
+
+### Channels and integrations
+
+`/channels` supports `list`, `test`, and `remove` for the selected project. In the
+interactive TUI, run channel actions with the slash command:
+
+```
+/channels list
+/channels test telegram
+/channels remove discord
+```
+
+The same actions work as one-shot CLI commands. Put `--force` before the command
+when removing a channel:
+
+```bash
+openvibely-tui -project demo channels test telegram
+openvibely-tui -project demo --force channels remove discord
+```
+
+Interactive removal asks you to type `yes` to confirm or press `Esc` to cancel.
+CLI removal requires `--force` (or `-f`). GitHub and Slack OAuth connection and
+callback flows still require a browser.
 
 ### Personalities
 
@@ -394,6 +417,10 @@ $ openvibely-tui help tasks
   tasks activate                             activate the whole backlog
   tasks sweep                                sweep finished tasks
   tasks clear <backlog|completed>            clear a column
+$ openvibely-tui help channels
+  channels list                              list configured integrations
+  channels test <channel>                    send a test message (telegram, slack, discord, email)
+  channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,

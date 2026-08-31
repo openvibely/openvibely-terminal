@@ -2109,7 +2109,7 @@ func channelsCommand() command {
 		actions: actions,
 		desc:    "integrations: Telegram, Slack, Discord, GitHub, email, webhooks",
 		usage: []string{
-			"channels                                   list configured integrations",
+			"channels list                              list configured integrations",
 			"channels test <channel>                    send a test message (telegram, slack, discord, email)",
 			"channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)",
 			"omit <channel> on test/remove → interactive selector",
