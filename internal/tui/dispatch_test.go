@@ -3589,6 +3589,73 @@ func TestPersonalityCommandsRequireSelectedProject(t *testing.T) {
 	}
 }
 
+func TestAgentsCommandsRequireSelectedProject(t *testing.T) {
+	cases := []string{
+		"/agents",
+		"/agents list",
+		"/agent",
+		"/agents generate Build reviewer",
+		"/agent generate Build reviewer",
+		"/agents delete Reviewer",
+		"/agent delete Reviewer",
+		"/agents delete",
+		"/agent delete",
+	}
+	for _, line := range cases {
+		line := line
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "no project selected — use /project <name>") {
+				t.Fatalf("expected no-project guidance for %s:\n%s", line, out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s made backend requests without a selected project:\n%s", line, calls)
+			}
+			if m.busy {
+				t.Fatalf("%s left the model busy", line)
+			}
+			if m.selectorActive {
+				t.Fatalf("%s opened a selector without a selected project", line)
+			}
+			if m.pendingConfirmation != nil {
+				t.Fatalf("%s opened confirmation without a selected project", line)
+			}
+		})
+	}
+}
+
+func TestAgentsMetricsRemainsGlobalWithoutSelectedProject(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/workflows/metrics":        `[]`,
+		"/api/workflows/best-agent":     `{}`,
+		"/api/workflows/cheapest-agent": `{}`,
+	})
+	m.selectedID = ""
+	m.selectedName = ""
+
+	m = runLine(t, m, "/agents metrics")
+	for _, path := range []string{
+		"/api/workflows/metrics",
+		"/api/workflows/best-agent",
+		"/api/workflows/cheapest-agent",
+	} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Fatalf("global metrics request %s count = %d, want one:\n%s", path, got, rec.all())
+		}
+	}
+	if out := stripANSI(transcript(m)); strings.Contains(out, "no project selected") {
+		t.Fatalf("global metrics unexpectedly required a project:\n%s", out)
+	}
+	if m.busy {
+		t.Fatal("global metrics left the model busy")
+	}
+}
+
 func TestAgentsGenerateDelete(t *testing.T) {
 	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
 		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`
@@ -3598,6 +3665,9 @@ func TestAgentsGenerateDelete(t *testing.T) {
 		m = runLine(t, m, "/agents generate a reviewer agent")
 		if !rec.saw("POST", "/agents/generate") {
 			t.Errorf("calls:\n%s", rec.all())
+		}
+		if !rec.sawQuery("project_id=p1") {
+			t.Errorf("generate requests lost selected project scope:\n%s", rec.all())
 		}
 		out := transcript(m)
 		if !strings.Contains(out, "generated an agent from your description") {

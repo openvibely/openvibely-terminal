@@ -1720,6 +1720,13 @@ func agentsCommand() command {
 			`agents votes step-exec-123`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			if len(args) == 0 || !strings.EqualFold(args[0], "metrics") {
+				mm, cmd, ok := m.needProject()
+				if !ok {
+					return mm, cmd
+				}
+				m = mm
+			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
@@ -1756,11 +1763,6 @@ func agentsCommand() command {
 					return renderAgentMetrics(metrics, best, cheapest), nil
 				})
 			case "votes":
-				mm, cmd, ok := m.needProject()
-				if !ok {
-					return mm, cmd
-				}
-				m = mm
 				if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
 					return m, errCmd(commandUsage("agents", "votes"))
 				}

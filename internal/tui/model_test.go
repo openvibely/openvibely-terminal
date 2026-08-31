@@ -402,6 +402,82 @@ func TestDelayedStartupProjectLoadDoesNotOfferPrematureCreationGuidance(t *testi
 	}
 }
 
+func TestAgentsDispatchDuringDelayedStartupProjectLoadRequiresSelection(t *testing.T) {
+	projectsStarted := make(chan struct{})
+	releaseProjects := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseProjects) }) }
+	defer release()
+	var projectStartOnce sync.Once
+	var agentRequests atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects":
+			projectStartOnce.Do(func() { close(projectsStarted) })
+			<-releaseProjects
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
+		case "/agents", "/agents/generate":
+			agentRequests.Add(1)
+			_, _ = w.Write([]byte(`<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"></div>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	batch, ok := m.Init()().(tea.BatchMsg)
+	if !ok || len(batch) < 2 {
+		t.Fatalf("Init command = %T with %d commands, want startup health and project-load commands", m.Init()(), len(batch))
+	}
+
+	loaded := make(chan tea.Msg, 1)
+	go func() { loaded <- batch[1]() }()
+	select {
+	case <-projectsStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delayed startup project request")
+	}
+
+	m = runLine(t, m, "/agents")
+	gotAgentRequests := agentRequests.Load()
+	gotGuidance := strings.Contains(transcript(m), "no project selected — use /project <name>")
+	leftBusy := m.busy
+	openedSelector := m.selectorActive
+	openedConfirmation := m.pendingConfirmation != nil
+
+	release()
+	select {
+	case <-loaded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for delayed startup project response")
+	}
+
+	if gotAgentRequests != 0 {
+		t.Fatalf("agent dispatch made %d requests while startup project loading was pending", gotAgentRequests)
+	}
+	if !gotGuidance {
+		t.Fatalf("agent dispatch omitted no-project guidance:\n%s", transcript(m))
+	}
+	if leftBusy {
+		t.Fatal("agent dispatch left the model busy")
+	}
+	if openedSelector {
+		t.Fatal("agent dispatch opened a selector before project loading completed")
+	}
+	if openedConfirmation {
+		t.Fatal("agent dispatch opened confirmation before project loading completed")
+	}
+}
+
 func TestPlainTextOffersCreationGuidanceWhenNoProjects(t *testing.T) {
 	m := newTestModel(t)
 	m.projectsLoaded = true
