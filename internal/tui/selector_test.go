@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -58,9 +59,9 @@ const (
 </div>`
 
 	selScheduleHTML = `<div id="schedule-content">
-  <div data-task-id="t-1" data-schedule-id="s-1">Nightly build — daily 02:00</div>
-  <div data-task-id="t-2" data-schedule-id="s-2">Weekly report — weekly mon</div>
-</div>`
+	  <div data-task-id="t-1" data-schedule-id="s-1">Nightly build — daily 02:00</div>
+	  <div data-task-id="t-1" data-schedule-id="s-2">Weekly report — weekly mon</div>
+	</div>`
 
 	selPersonalitiesHTML = `<div id="personality-section" data-selected-personality="reviewer">
   <div data-personality-key="reviewer" data-personality-name="Reviewer"
@@ -553,6 +554,55 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 				t.Errorf("output after %s missing %q:\n%s", tc.command, tc.wantOutput, out)
 			}
 		})
+	}
+}
+
+func TestScheduleSelectorListsBothIDsAndTargetsSecondSchedule(t *testing.T) {
+	cases := []struct {
+		action string
+		method string
+		path   string
+	}{
+		{action: "toggle", method: http.MethodPost, path: "/api/schedules/s-2/toggle"},
+		{action: "delete", method: http.MethodDelete, path: "/schedules/s-2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			m, rec := dispatchModel(t, selFixtures())
+			m = runLine(t, m, "/schedule "+tc.action)
+			if !m.selectorActive {
+				t.Fatalf("expected schedule selector:\n%s", transcript(m))
+			}
+			if len(m.selectorItems) != 2 {
+				t.Fatalf("selector items = %d, want 2: %+v", len(m.selectorItems), m.selectorItems)
+			}
+			if got := []string{m.selectorItems[0].ref, m.selectorItems[1].ref}; !reflect.DeepEqual(got, []string{"s-1", "s-2"}) {
+				t.Fatalf("selector refs = %v, want [s-1 s-2]", got)
+			}
+
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			if tc.action == "delete" {
+				if m.pendingConfirmation == nil {
+					t.Fatalf("expected delete confirmation:\n%s", transcript(m))
+				}
+				m = runLine(t, m, "yes")
+			}
+			if !rec.saw(tc.method, tc.path) {
+				t.Fatalf("expected second schedule action %s %s, calls:\n%s", tc.method, tc.path, rec.all())
+			}
+		})
+	}
+}
+
+func TestScheduleListRendersBothSchedulesForOneTask(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/schedule")
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"s-1", "s-2", "Nightly build", "Weekly report"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("schedule output missing %q:\n%s", want, out)
+		}
 	}
 }
 

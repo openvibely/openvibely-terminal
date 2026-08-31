@@ -315,7 +315,9 @@ func BenchmarkAutomationsDOMWork(b *testing.B) {
 func TestGetScheduleScrapesEntries(t *testing.T) {
 	const page = `<div id="schedule-content">
 	  <div data-task-id="t1" data-schedule-id="s1">Nightly build — daily 02:00</div>
-	  <div data-task-id="t2" data-schedule-id="s2">Weekly report — weekly mon</div>
+	  <div data-task-id="t1" data-schedule-id="s2">Weekly report — duplicate wrapper</div>
+	  <div data-task-id="t1" data-schedule-id="s2" data-schedule-enabled="true">Weekly report — weekly mon</div>
+	  <div data-task-id="t2" data-schedule-id="s3">Monthly cleanup — monthly 03:00</div>
 	</div>`
 	c := htmlServer(t, page)
 
@@ -323,14 +325,25 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("got %d entries, want 2", len(entries))
+	if len(entries) != 3 {
+		t.Fatalf("got %d entries, want 3: %+v", len(entries), entries)
 	}
-	if entries[0].ScheduleID != "s1" || entries[0].TaskID != "t1" {
-		t.Errorf("entry = %+v", entries[0])
+	want := []struct {
+		scheduleID string
+		taskID     string
+		text       string
+	}{
+		{scheduleID: "s1", taskID: "t1", text: "Nightly build — daily 02:00"},
+		{scheduleID: "s2", taskID: "t1", text: "Weekly report — weekly mon"},
+		{scheduleID: "s3", taskID: "t2", text: "Monthly cleanup — monthly 03:00"},
 	}
-	if entries[0].Text != "Nightly build — daily 02:00" {
-		t.Errorf("entry text = %q, want %q", entries[0].Text, "Nightly build — daily 02:00")
+	for i, want := range want {
+		if entries[i].ScheduleID != want.scheduleID || entries[i].TaskID != want.taskID {
+			t.Errorf("entry[%d] = %+v, want schedule %s task %s", i, entries[i], want.scheduleID, want.taskID)
+		}
+		if entries[i].Text != want.text {
+			t.Errorf("entry[%d] text = %q, want %q", i, entries[i].Text, want.text)
+		}
 	}
 	if summary == "" {
 		t.Error("expected summary text from #schedule-content")

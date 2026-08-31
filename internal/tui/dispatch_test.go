@@ -1814,6 +1814,32 @@ func TestWorkersLimitOperandValidationDispatch(t *testing.T) {
 	}
 }
 
+func TestScheduleDirectDispatchResolvesSecondScheduleID(t *testing.T) {
+	cases := []struct {
+		action string
+		method string
+		path   string
+	}{
+		{action: "toggle", method: http.MethodPost, path: "/api/schedules/s-2/toggle"},
+		{action: "delete", method: http.MethodDelete, path: "/schedules/s-2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/schedule": selScheduleHTML})
+			m = runLine(t, m, "/schedule "+tc.action+" s-2")
+			if tc.action == "delete" {
+				if m.pendingConfirmation == nil {
+					t.Fatalf("expected delete confirmation:\n%s", transcript(m))
+				}
+				m = runLine(t, m, "yes")
+			}
+			if !rec.saw(tc.method, tc.path) {
+				t.Fatalf("expected direct second schedule action %s %s, calls:\n%s", tc.method, tc.path, rec.all())
+			}
+		})
+	}
+}
+
 func TestScheduleAddResolvesTask(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 daily")

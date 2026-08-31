@@ -314,7 +314,7 @@ func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleE
 	if err != nil {
 		return nil, "", err
 	}
-	cards := dedupedCards(root, "data-task-id")
+	cards := dedupedCards(root, "data-schedule-id")
 	out := make([]ScheduleEntry, 0, len(cards))
 	for _, card := range cards {
 		out = append(out, ScheduleEntry{
