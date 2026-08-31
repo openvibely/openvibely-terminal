@@ -183,10 +183,11 @@ func TestMemoryListFilterReportsNoMatchesDistinctFromEmptyIndex(t *testing.T) {
 func TestRenderMemoryDocumentBoundsAndSanitizesTerminalText(t *testing.T) {
 	body := "\x1b[2J" + strings.Repeat("x", 8192) + "\a\r\t"
 	output := renderMemoryDocument(client.MemoryDocument{
-		File:    "notes.md",
-		Title:   "\x1b[31mUnsafe title\x1b[0m",
-		Summary: "summary\a\r\t",
-		Body:    body,
+		File:      "notes.md",
+		Title:     "\x1b[31mUnsafe title\x1b[0m",
+		Summary:   "summary\a\r\t",
+		Body:      body,
+		Available: true,
 	})
 	plain := stripANSI(output)
 	for _, r := range plain {
@@ -325,6 +326,21 @@ func TestRenderUnavailableMemoryDocumentIsNotLabeledEmpty(t *testing.T) {
 	}
 	if strings.Contains(plain, "(empty memory file)") {
 		t.Fatalf("unavailable document was labeled empty:\n%s", plain)
+	}
+}
+
+func TestRenderUnavailableMemoryDocumentWithoutWarningsIsNotLabeledEmpty(t *testing.T) {
+	output := renderMemoryDocument(client.MemoryDocument{
+		File:      "cancelled.md",
+		Title:     "Cancelled",
+		Available: false,
+	})
+	plain := stripANSI(output)
+	if !strings.Contains(plain, "(memory file unavailable)") {
+		t.Fatalf("unavailable document marker missing without warnings:\n%s", plain)
+	}
+	if strings.Contains(plain, "(empty memory file)") {
+		t.Fatalf("unavailable document without warnings was labeled empty:\n%s", plain)
 	}
 }
 

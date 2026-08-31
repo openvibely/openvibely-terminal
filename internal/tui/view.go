@@ -1350,10 +1350,7 @@ func renderMemoryDocument(document client.MemoryDocument) string {
 		if strings.TrimSpace(summary) != "" {
 			fmt.Fprintf(&b, "\n\n%s", truncate(summary, memoryDisplayValueWidth))
 		}
-		// The fallback keeps directly constructed MemoryDocument values
-		// backwards-compatible while the client-provided Available bit
-		// distinguishes a genuinely empty file from a failed read.
-		available := document.Available || document.Body != "" || len(document.Warnings) == 0
+		available := document.Available
 		if !available {
 			b.WriteString("\n\n" + dimStyle.Render("(memory file unavailable)"))
 		} else {
