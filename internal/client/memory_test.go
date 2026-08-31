@@ -33,6 +33,7 @@ func TestParseMemoryIndexSupportsCanonicalAndPartialEntries(t *testing.T) {
 - [Broken](partial.md
 - [Unsafe](../outside.md) - must not be read
 - No topic files have been created yet.
+- This prose mentions a .md suffix but is not an entry.
 `
 
 	entries, warnings := parseMemoryIndex(index)
@@ -161,20 +162,96 @@ func TestShowMemoryRejectsUnindexedAndUnsafeReferences(t *testing.T) {
 	}
 }
 
-func TestMemoryListReportsMissingIndexedFilesWithoutLeakingPaths(t *testing.T) {
+func TestMemoryRejectsCanonicalAndTopicSymlinkEscapes(t *testing.T) {
 	repo := t.TempDir()
-	writeProjectMemory(t, repo, "- [Missing](missing.md)\n", nil)
+	outside := t.TempDir()
+	memoryDir := filepath.Join(repo, ".openvibely", "memories")
+	if err := os.MkdirAll(memoryDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll memory dir: %v", err)
+	}
+
+	outsideIndex := filepath.Join(outside, "MEMORIES.md")
+	if err := os.WriteFile(outsideIndex, []byte("outside index secret"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside index: %v", err)
+	}
+	indexPath := filepath.Join(memoryDir, projectMemoryIndex)
+	if err := os.Symlink(outsideIndex, indexPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
 	list, err := (&Client{}).ListMemories(context.Background(), Project{Path: repo})
+	if err == nil || !strings.Contains(err.Error(), "unable to read project memory index") {
+		t.Fatalf("symlinked index error = %v, want safe unavailable error", err)
+	}
+	if len(list.Warnings) != 1 || !strings.Contains(list.Warnings[0], "unsafe path") {
+		t.Fatalf("symlinked index warnings = %#v", list.Warnings)
+	}
+	if strings.Contains(err.Error(), outside) || strings.Contains(strings.Join(list.Warnings, "\n"), outside) {
+		t.Fatalf("symlinked index leaked outside path: err=%q warnings=%v", err, list.Warnings)
+	}
+
+	if err := os.Remove(indexPath); err != nil {
+		t.Fatalf("remove symlinked index: %v", err)
+	}
+	if err := os.WriteFile(indexPath, []byte("- [Escape](escape.md)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile index: %v", err)
+	}
+	outsideMemory := filepath.Join(outside, "escape.md")
+	if err := os.WriteFile(outsideMemory, []byte("outside topic secret"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside memory: %v", err)
+	}
+	if err := os.Symlink(outsideMemory, filepath.Join(memoryDir, "escape.md")); err != nil {
+		t.Fatalf("Symlink topic: %v", err)
+	}
+
+	list, err = (&Client{}).ListMemories(context.Background(), Project{Path: repo})
+	if err != nil || len(list.Memories) != 1 {
+		t.Fatalf("topic symlink list = %#v, err=%v", list, err)
+	}
+	if len(list.Warnings) != 1 || !strings.Contains(list.Warnings[0], "unsafe path") {
+		t.Fatalf("topic symlink list warnings = %#v", list.Warnings)
+	}
+	document, err := (&Client{}).ShowMemory(context.Background(), Project{Path: repo}, "escape.md")
+	if err == nil || !strings.Contains(err.Error(), "indexed file reference is unsafe") {
+		t.Fatalf("topic symlink show error = %v, want safe path error", err)
+	}
+	if len(document.Warnings) != 1 || !strings.Contains(document.Warnings[0], "unsafe path") {
+		t.Fatalf("topic symlink show warnings = %#v", document.Warnings)
+	}
+	search, err := (&Client{}).SearchMemories(context.Background(), Project{Path: repo}, "not-present")
 	if err != nil {
-		t.Fatalf("ListMemories: %v", err)
+		t.Fatalf("topic symlink search: %v", err)
 	}
-	if len(list.Memories) != 1 || len(list.Warnings) != 1 {
-		t.Fatalf("unexpected missing-file result: %+v", list)
+	if len(search.Memories) != 0 || len(search.Warnings) != 1 || !strings.Contains(search.Warnings[0], "unsafe path") {
+		t.Fatalf("topic symlink search = %#v", search)
 	}
-	if want := `memory file "missing.md" is missing`; list.Warnings[0] != want {
-		t.Fatalf("warning = %q, want %q", list.Warnings[0], want)
+	for _, body := range []string{document.Body, strings.Join(search.Warnings, "\n")} {
+		if strings.Contains(body, "outside topic secret") || strings.Contains(body, outside) {
+			t.Fatalf("topic symlink exposed external content: %q", body)
+		}
 	}
-	if strings.Contains(list.Warnings[0], repo) {
-		t.Fatalf("warning leaked repository path: %q", list.Warnings[0])
+}
+
+func TestMemoryRejectsNonRegularIndexedFiles(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Directory](directory.md)\n", nil)
+	if err := os.Mkdir(filepath.Join(repo, ".openvibely", "memories", "directory.md"), 0o755); err != nil {
+		t.Fatalf("Mkdir directory memory: %v", err)
+	}
+
+	client := &Client{}
+	list, err := client.ListMemories(context.Background(), Project{Path: repo})
+	if err != nil || len(list.Memories) != 1 {
+		t.Fatalf("non-regular list = %#v, err=%v", list, err)
+	}
+	if len(list.Warnings) != 1 || !strings.Contains(list.Warnings[0], "not a regular file") {
+		t.Fatalf("non-regular list warnings = %#v", list.Warnings)
+	}
+	document, err := client.ShowMemory(context.Background(), Project{Path: repo}, "directory.md")
+	if err == nil || !strings.Contains(err.Error(), "unable to read indexed memory file") {
+		t.Fatalf("non-regular show error = %v", err)
+	}
+	if len(document.Warnings) != 1 || !strings.Contains(document.Warnings[0], "not a regular file") {
+		t.Fatalf("non-regular show warnings = %#v", document.Warnings)
 	}
 }

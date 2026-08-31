@@ -1648,14 +1648,15 @@ func memoryCommand() command {
 			case "", "list":
 				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
 					list, err := c.ListMemories(ctx, project)
-					if err != nil {
-						return "", err
-					}
 					list = filterMemoryList(list, ref)
 					if jsonMode {
-						return marshalJSON(list)
+						body, marshalErr := marshalJSON(list)
+						if marshalErr != nil {
+							return "", marshalErr
+						}
+						return body, err
 					}
-					return renderMemoryList(list), nil
+					return renderMemoryListForFilter(list, ref), err
 				})
 			case "show":
 				if ref == "" {

@@ -163,6 +163,48 @@ func TestMemoryAliasCompletionHelpAndJSONEmptyState(t *testing.T) {
 	}
 }
 
+func TestMemoryListFilterReportsNoMatchesDistinctFromEmptyIndex(t *testing.T) {
+	repo := t.TempDir()
+	writeTUIProjectMemory(t, repo, "- [Notes](notes.md) - terminal notes\n", map[string]string{
+		"notes.md": "# Notes\n\nUse the terminal.\n",
+	})
+	m, _ := memoryDispatchModel(t, repo)
+
+	m = runLine(t, m, "/memory list absent")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, `no memory matches for "absent"`) {
+		t.Fatalf("filtered-empty output missing no-match state:\n%s", out)
+	}
+	if strings.Contains(out, "has no topic files") {
+		t.Fatalf("filtered-empty output claimed the index was empty:\n%s", out)
+	}
+}
+
+func TestRenderMemoryDocumentBoundsAndSanitizesTerminalText(t *testing.T) {
+	body := "\x1b[2J" + strings.Repeat("x", 8192) + "\a\r\t"
+	output := renderMemoryDocument(client.MemoryDocument{
+		File:    "notes.md",
+		Title:   "\x1b[31mUnsafe title\x1b[0m",
+		Summary: "summary\a\r\t",
+		Body:    body,
+	})
+	plain := stripANSI(output)
+	for _, r := range plain {
+		if r != '\n' && (r < 0x20 || (r >= 0x7f && r <= 0x9f)) {
+			t.Fatalf("rendered memory contains terminal control %U: %q", r, plain)
+		}
+	}
+	if strings.Contains(output, "\x1b[2J") || strings.Contains(output, "\x1b[31m") {
+		t.Fatalf("rendered memory retained injected ANSI sequence: %q", output)
+	}
+	if len(plain) >= 2000 {
+		t.Fatalf("rendered single-line memory was not bounded: %d bytes", len(plain))
+	}
+	if !strings.Contains(plain, "…") {
+		t.Fatalf("bounded memory output missing truncation marker:\n%s", plain)
+	}
+}
+
 func TestMemoryCLINoProjectFailsBeforeMemoryInspection(t *testing.T) {
 	var projectRequests int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

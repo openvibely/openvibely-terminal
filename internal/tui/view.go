@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
@@ -1294,17 +1296,36 @@ func renderSkillDetail(s client.Skill) string {
 
 // --- memory ---
 
+const (
+	memoryListFileWidth     = 48
+	memoryDocumentMaxLines  = 80
+	memoryDocumentLineWidth = 240
+	memoryDisplayValueWidth = 240
+	memorySearchQueryWidth  = 120
+)
+
 func renderMemoryList(list client.MemoryList) string {
+	return renderMemoryListForFilter(list, "")
+}
+
+func renderMemoryListForFilter(list client.MemoryList, filter string) string {
 	var b strings.Builder
 	if len(list.Memories) == 0 {
-		b.WriteString(dimStyle.Render("no indexed project memory — .openvibely/memories/MEMORIES.md has no topic files"))
+		if strings.TrimSpace(filter) != "" {
+			fmt.Fprintf(&b, "%s", dimStyle.Render(fmt.Sprintf("no memory matches for %q", truncate(sanitizeMemoryText(filter), memorySearchQueryWidth))))
+		} else {
+			b.WriteString(dimStyle.Render("no indexed project memory — .openvibely/memories/MEMORIES.md has no topic files"))
+		}
 	} else {
 		rows := [][]string{{"FILE", "TITLE", "SUMMARY"}}
 		for _, memory := range list.Memories {
+			file := sanitizeMemoryText(memory.File)
+			title := sanitizeMemoryText(firstNonEmpty(memory.Title, memory.File))
+			summary := sanitizeMemoryText(memory.Summary)
 			rows = append(rows, []string{
-				memory.File,
-				truncate(firstNonEmpty(memory.Title, memory.File), 32),
-				truncate(memory.Summary, 58),
+				truncate(file, memoryListFileWidth),
+				truncate(title, 32),
+				truncate(summary, 58),
 			})
 		}
 		b.WriteString(table(rows))
@@ -1318,18 +1339,22 @@ func renderMemoryList(list client.MemoryList) string {
 
 func renderMemoryDocument(document client.MemoryDocument) string {
 	var b strings.Builder
-	if document.File == "" {
+	if strings.TrimSpace(document.File) == "" {
 		b.WriteString(dimStyle.Render("memory file is unavailable"))
 	} else {
-		fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(document.Title, document.File)))
-		fmt.Fprintf(&b, "%s", dimStyle.Render("file "+document.File))
-		if document.Summary != "" {
-			fmt.Fprintf(&b, "\n\n%s", document.Summary)
+		file := sanitizeMemoryText(document.File)
+		title := sanitizeMemoryText(firstNonEmpty(document.Title, document.File))
+		summary := sanitizeMemoryText(document.Summary)
+		fmt.Fprintf(&b, "%s\n", sectionStyle.Render(truncate(title, memoryDisplayValueWidth)))
+		fmt.Fprintf(&b, "%s", dimStyle.Render("file "+truncate(file, memoryDisplayValueWidth)))
+		if strings.TrimSpace(summary) != "" {
+			fmt.Fprintf(&b, "\n\n%s", truncate(summary, memoryDisplayValueWidth))
 		}
-		if strings.TrimSpace(document.Body) == "" {
+		body := renderMemoryBody(document.Body)
+		if body == "" {
 			b.WriteString("\n\n" + dimStyle.Render("(empty memory file)"))
 		} else {
-			b.WriteString("\n\n" + clamp(strings.TrimRight(document.Body, "\n"), 80))
+			b.WriteString("\n\n" + body)
 		}
 	}
 	if len(document.Warnings) > 0 {
@@ -1338,18 +1363,42 @@ func renderMemoryDocument(document client.MemoryDocument) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func renderMemoryBody(body string) string {
+	body = sanitizeMemoryText(strings.TrimRight(body, "\n"))
+	if body == "" {
+		return ""
+	}
+	lines := strings.Split(body, "\n")
+	moreLines := 0
+	if len(lines) > memoryDocumentMaxLines {
+		moreLines = len(lines) - memoryDocumentMaxLines
+		lines = lines[:memoryDocumentMaxLines]
+	}
+	for i := range lines {
+		lines[i] = truncate(lines[i], memoryDocumentLineWidth)
+	}
+	result := strings.Join(lines, "\n")
+	if moreLines > 0 {
+		result += "\n" + dimStyle.Render(fmt.Sprintf("… %d more lines", moreLines))
+	}
+	return result
+}
+
 func renderMemorySearch(result client.MemorySearch) string {
+	query := truncate(sanitizeMemoryText(result.Query), memorySearchQueryWidth)
 	var b strings.Builder
 	if len(result.Memories) == 0 {
-		fmt.Fprintf(&b, "%s", dimStyle.Render(fmt.Sprintf("no memory matches for %q", result.Query)))
+		fmt.Fprintf(&b, "%s", dimStyle.Render(fmt.Sprintf("no memory matches for %q", query)))
 	} else {
-		fmt.Fprintf(&b, "%s\n\n", sectionStyle.Render(fmt.Sprintf("Memory search: %q", result.Query)))
+		fmt.Fprintf(&b, "%s\n\n", sectionStyle.Render(fmt.Sprintf("Memory search: %q", query)))
 		rows := [][]string{{"FILE", "TITLE", "MATCH"}}
 		for _, memory := range result.Memories {
-			match := firstNonEmpty(memory.Snippet, memory.Summary, "match")
+			file := sanitizeMemoryText(memory.File)
+			title := sanitizeMemoryText(firstNonEmpty(memory.Title, memory.File))
+			match := sanitizeMemoryText(firstNonEmpty(memory.Snippet, memory.Summary, "match"))
 			rows = append(rows, []string{
-				memory.File,
-				truncate(firstNonEmpty(memory.Title, memory.File), 32),
+				truncate(file, memoryListFileWidth),
+				truncate(title, 32),
 				truncate(match, 64),
 			})
 		}
@@ -1365,8 +1414,28 @@ func renderMemoryWarnings(warnings []string) string {
 	var b strings.Builder
 	b.WriteString(noticeStyle.Render("warnings:"))
 	for _, warning := range warnings {
+		warning = truncate(sanitizeMemoryText(warning), memoryDisplayValueWidth)
 		if strings.TrimSpace(warning) != "" {
 			b.WriteString("\n" + dimStyle.Render("  "+warning))
+		}
+	}
+	return b.String()
+}
+
+func sanitizeMemoryText(value string) string {
+	value = ansi.Strip(value)
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r == '\n':
+			b.WriteRune(r)
+		case r == '\t' || r == '\r':
+			b.WriteByte(' ')
+		case unicode.IsControl(r):
+			continue
+		default:
+			b.WriteRune(r)
 		}
 	}
 	return b.String()

@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -18,7 +19,11 @@ const (
 	maxMemoryFileBytes     = 8 << 20
 )
 
-var errMemoryFileTooLarge = errors.New("memory file exceeds the read limit")
+var (
+	errMemoryFileTooLarge     = errors.New("memory file exceeds the read limit")
+	errMemoryFileNotRegular   = errors.New("memory path is not a regular file")
+	errMemoryIndexUnavailable = errors.New("memory: unable to read project memory index")
+)
 
 // Memory is a stable, read-only representation of one indexed project memory
 // file. List and search leave Body empty; show populates it with the canonical
@@ -201,7 +206,10 @@ func loadMemoryIndex(ctx context.Context, project Project) (string, []memoryInde
 		return root, nil, nil, errors.New("memory: project memory path is not a directory")
 	}
 
-	indexPath := filepath.Join(root, projectMemoryIndex)
+	indexPath, err := safeMemoryIndexPath(root)
+	if err != nil {
+		return root, make([]memoryIndexEntry, 0), []string{"project memory index has an unsafe path"}, errMemoryIndexUnavailable
+	}
 	data, err := readMemoryPath(ctx, indexPath, maxMemoryIndexBytes)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -210,7 +218,10 @@ func loadMemoryIndex(ctx context.Context, project Project) (string, []memoryInde
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return root, nil, nil, err
 		}
-		return root, nil, nil, errors.New("memory: unable to read project memory index")
+		if errors.Is(err, errMemoryFileNotRegular) {
+			return root, make([]memoryIndexEntry, 0), []string{"project memory index is not a regular file"}, errMemoryIndexUnavailable
+		}
+		return root, nil, []string{"project memory index could not be read"}, errMemoryIndexUnavailable
 	}
 	entries, warnings := parseMemoryIndex(string(data))
 	return root, entries, warnings, nil
@@ -241,8 +252,8 @@ func parseMemoryIndex(index string) ([]memoryIndexEntry, []string) {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		line = stripMemoryIndexMarker(line)
-		if !strings.Contains(strings.ToLower(line), ".md") {
+		line, isEntry := stripMemoryIndexMarker(line)
+		if !isEntry || !looksLikeMemoryIndexEntry(line) {
 			continue
 		}
 
@@ -254,7 +265,7 @@ func parseMemoryIndex(index string) ([]memoryIndexEntry, []string) {
 			continue
 		}
 		handle = normalizeMemoryHandle(handle)
-		if handle == "" {
+		if handle == "" || strings.EqualFold(path.Base(handle), ".md") {
 			appendMemoryWarning(&warnings, fmt.Sprintf("memory index line %d contains an unsafe file reference", lineNumber+1))
 			continue
 		}
@@ -275,12 +286,20 @@ func parseMemoryIndex(index string) ([]memoryIndexEntry, []string) {
 	return entries, warnings
 }
 
-func stripMemoryIndexMarker(line string) string {
-	line = strings.TrimSpace(strings.TrimLeft(line, "-*+"))
-	if dot := strings.Index(line, ". "); dot > 0 && allMemoryIndexDigits(line[:dot]) {
-		line = strings.TrimSpace(line[dot+2:])
+func stripMemoryIndexMarker(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", false
 	}
-	return line
+	if line[0] == '-' || line[0] == '*' || line[0] == '+' {
+		if len(line) == 1 || line[1] == ' ' || line[1] == '\t' {
+			return strings.TrimSpace(line[1:]), true
+		}
+	}
+	if dot := strings.Index(line, ". "); dot > 0 && allMemoryIndexDigits(line[:dot]) {
+		return strings.TrimSpace(line[dot+2:]), true
+	}
+	return "", false
 }
 
 func allMemoryIndexDigits(value string) bool {
@@ -295,29 +314,95 @@ func allMemoryIndexDigits(value string) bool {
 	return true
 }
 
+func looksLikeMemoryIndexEntry(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	if strings.HasPrefix(line, "[") && strings.Contains(line, "]") {
+		return true
+	}
+	if strings.HasPrefix(line, "`") {
+		return true
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return false
+	}
+	field := strings.Trim(fields[0], "`<>")
+	return hasMemoryFileSuffix(strings.TrimSuffix(field, ":"))
+}
+
 func indexedMemoryLine(line string) (handle, title, summary string, wellFormed bool) {
-	wellFormed = true
-	if open := strings.Index(line, "]("); open >= 0 {
-		start := open + len("](")
-		closeOffset := strings.Index(line[start:], ")")
-		if closeOffset < 0 {
-			return memoryHandleToken(line[start:]), memoryLinkLabel(line[:open]), "", false
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "[") {
+		if open := strings.Index(line, "]("); open >= 0 {
+			start := open + len("](")
+			closeOffset := strings.Index(line[start:], ")")
+			if closeOffset < 0 {
+				return memoryHandleToken(line[start:]), memoryLinkLabel(line[:open]), "", false
+			}
+			close := start + closeOffset
+			return line[start:close], memoryLinkLabel(line[:open]), line[close+1:], true
 		}
-		close := start + closeOffset
-		return line[start:close], memoryLinkLabel(line[:open]), line[close+1:], true
+		return "", "", "", false
 	}
 
-	lower := strings.ToLower(line)
-	if idx := strings.Index(lower, ".md"); idx >= 0 {
-		end := idx + len(".md")
-		start := end - 1
-		for start >= 0 && isMemoryPathChar(line[start]) {
-			start--
-		}
-		start++
-		return line[start:end], "", line[end:], true
+	return explicitMemoryLine(line)
+}
+
+func explicitMemoryLine(line string) (handle, title, summary string, wellFormed bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", "", "", false
 	}
-	return "", "", "", false
+	if line[0] == '`' {
+		closeOffset := strings.IndexByte(line[1:], '`')
+		if closeOffset < 0 {
+			return "", "", "", false
+		}
+		close := closeOffset + 1
+		handle = line[1:close]
+		if !hasMemoryFileSuffix(handle) {
+			return "", "", "", false
+		}
+		return handle, "", line[close+1:], true
+	}
+
+	fieldEnd := len(line)
+	for i, r := range line {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			fieldEnd = i
+			break
+		}
+	}
+	if fieldEnd == 0 {
+		return "", "", "", false
+	}
+	rawHandle := line[:fieldEnd]
+	handle = strings.TrimSuffix(rawHandle, ":")
+	if !hasMemoryFileSuffix(handle) || (!strings.HasSuffix(rawHandle, ":") && !memoryEntryRemainder(line[fieldEnd:])) {
+		return "", "", "", false
+	}
+	return handle, "", line[fieldEnd:], true
+}
+
+func memoryEntryRemainder(remainder string) bool {
+	remainder = strings.TrimSpace(remainder)
+	if remainder == "" {
+		return true
+	}
+	first, _ := utf8.DecodeRuneInString(remainder)
+	switch first {
+	case ':', '-', '|', '–', '—':
+		return true
+	default:
+		return false
+	}
+}
+
+func hasMemoryFileSuffix(handle string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(handle)), ".md")
 }
 
 func memoryLinkLabel(line string) string {
@@ -329,23 +414,11 @@ func memoryLinkLabel(line string) string {
 }
 
 func memoryHandleToken(value string) string {
-	lower := strings.ToLower(value)
-	idx := strings.Index(lower, ".md")
-	if idx < 0 {
+	fields := strings.Fields(strings.TrimSpace(value))
+	if len(fields) == 0 || !hasMemoryFileSuffix(fields[0]) {
 		return ""
 	}
-	end := idx + len(".md")
-	start := end - 1
-	for start >= 0 && isMemoryPathChar(value[start]) {
-		start--
-	}
-	start++
-	return value[start:end]
-}
-
-func isMemoryPathChar(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
-		(b >= '0' && b <= '9') || b == '_' || b == '-' || b == '.' || b == '/' || b == '\\'
+	return strings.Trim(fields[0], "`<>")
 }
 
 func normalizeMemoryHandle(handle string) string {
@@ -388,17 +461,31 @@ func readIndexedMemory(ctx context.Context, root string, entry memoryIndexEntry)
 	base := Memory{File: entry.File, Title: entry.Title, Summary: entry.Summary, Snippet: "", Body: ""}
 	filePath, err := safeMemoryPath(root, entry.File)
 	if err != nil {
-		return base, "", nil, errors.New("memory: indexed file reference is unsafe")
+		return base, "", []string{memoryFileUnsafeWarning(entry.File)}, errors.New("memory: indexed file reference is unsafe")
 	}
 	data, err := readMemoryPath(ctx, filePath, maxMemoryFileBytes)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return base, "", nil, err
 		}
-		return base, "", []string{fmt.Sprintf("memory file %q could not be read", entry.File)}, errors.New("memory: unable to read indexed memory file")
+		return base, "", []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
 	}
 	memory, content, warnings := parseMemoryDocument(entry, string(data))
 	return memory, content, warnings, nil
+}
+
+func memoryFileUnsafeWarning(handle string) string {
+	return fmt.Sprintf("memory file %q has an unsafe path", handle)
+}
+
+func memoryFileReadWarning(handle string, err error) string {
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Sprintf("memory file %q is missing", handle)
+	}
+	if errors.Is(err, errMemoryFileNotRegular) {
+		return fmt.Sprintf("memory file %q is not a regular file", handle)
+	}
+	return fmt.Sprintf("memory file %q could not be read", handle)
 }
 
 func parseMemoryDocument(entry memoryIndexEntry, raw string) (Memory, string, []string) {
@@ -611,17 +698,14 @@ func inspectIndexedMemory(ctx context.Context, root, handle string) string {
 	}
 	filePath, err := safeMemoryPath(root, handle)
 	if err != nil {
-		return fmt.Sprintf("memory file %q has an unsafe path", handle)
+		return memoryFileUnsafeWarning(handle)
 	}
 	info, err := os.Stat(filePath)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Sprintf("memory file %q is missing", handle)
-		}
-		return fmt.Sprintf("memory file %q could not be inspected", handle)
+		return memoryFileReadWarning(handle, err)
 	}
-	if info.IsDir() {
-		return fmt.Sprintf("memory file %q is a directory", handle)
+	if !info.Mode().IsRegular() {
+		return memoryFileReadWarning(handle, errMemoryFileNotRegular)
 	}
 	return ""
 }
@@ -631,6 +715,14 @@ func safeMemoryPath(root, handle string) (string, error) {
 	if handle == "" {
 		return "", errors.New("unsafe memory handle")
 	}
+	return safeMemoryTarget(root, handle)
+}
+
+func safeMemoryIndexPath(root string) (string, error) {
+	return safeMemoryTarget(root, projectMemoryIndex)
+}
+
+func safeMemoryTarget(root, handle string) (string, error) {
 	root, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {
 		return "", err
@@ -686,11 +778,25 @@ func readMemoryPath(ctx context.Context, filePath string, maxBytes int64) ([]byt
 	if err := contextErr(ctx); err != nil {
 		return nil, err
 	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errMemoryFileNotRegular
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return nil, errMemoryFileNotRegular
+	}
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return nil, err
