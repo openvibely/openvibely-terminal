@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,6 +233,84 @@ func TestMemoryRejectsCanonicalAndTopicSymlinkEscapes(t *testing.T) {
 	}
 }
 
+func TestMemoryRejectsMemoryDirectorySymlinkEscape(t *testing.T) {
+	repo := t.TempDir()
+	outside := t.TempDir()
+	memoryParent := filepath.Join(repo, ".openvibely")
+	if err := os.MkdirAll(memoryParent, 0o755); err != nil {
+		t.Fatalf("MkdirAll memory parent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, projectMemoryIndex), []byte("- [Outside](outside.md)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile outside index: %v", err)
+	}
+	memoryDir := filepath.Join(memoryParent, "memories")
+	if err := os.Symlink(outside, memoryDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	list, err := (&Client{}).ListMemories(context.Background(), Project{Path: repo})
+	if err == nil || !strings.Contains(err.Error(), "unable to read project memory index") {
+		t.Fatalf("memory directory symlink error = %v, want safe unavailable error", err)
+	}
+	if len(list.Memories) != 0 || len(list.Warnings) != 1 || !strings.Contains(list.Warnings[0], "unsafe path") {
+		t.Fatalf("memory directory symlink result = %#v", list)
+	}
+	if strings.Contains(err.Error(), outside) || strings.Contains(strings.Join(list.Warnings, "\n"), outside) {
+		t.Fatalf("memory directory symlink leaked outside path: err=%q warnings=%v", err, list.Warnings)
+	}
+}
+
+func TestParseMemoryIndexSupportsBackendUnmarkedEntriesAndWarnsEmptyTargets(t *testing.T) {
+	index := "# Memory Index\nmanaged_memory.md: lifecycle summary\n- [Empty]() - missing target\n- [Known](known.md) - usable topic\n"
+	entries, warnings := parseMemoryIndex(index)
+	if len(entries) != 2 {
+		t.Fatalf("parsed %d entries, want 2: %+v", len(entries), entries)
+	}
+	if entries[0] != (memoryIndexEntry{File: "managed_memory.md", Title: "managed_memory", Summary: "lifecycle summary"}) {
+		t.Fatalf("unmarked entry = %+v", entries[0])
+	}
+	if entries[1] != (memoryIndexEntry{File: "known.md", Title: "Known", Summary: "usable topic"}) {
+		t.Fatalf("canonical entry = %+v", entries[1])
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "line 3 is malformed") {
+		t.Fatalf("empty target warning missing: %v", warnings)
+	}
+}
+
+func TestReadMemoryFileRejectsReplacementAfterValidation(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "memory.md")
+	replacementPath := filepath.Join(dir, "replacement.md")
+	if err := os.WriteFile(filePath, []byte("original"), 0o644); err != nil {
+		t.Fatalf("WriteFile original: %v", err)
+	}
+	expectedInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Stat original: %v", err)
+	}
+	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o644); err != nil {
+		t.Fatalf("WriteFile replacement: %v", err)
+	}
+	replacementInfo, err := os.Stat(replacementPath)
+	if err != nil {
+		t.Fatalf("Stat replacement: %v", err)
+	}
+	if os.SameFile(expectedInfo, replacementInfo) {
+		t.Skip("filesystem reused the same file identity")
+	}
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("Remove original: %v", err)
+	}
+	if err := os.Rename(replacementPath, filePath); err != nil {
+		t.Fatalf("Rename replacement: %v", err)
+	}
+
+	_, err = readMemoryFile(context.Background(), filePath, expectedInfo, maxMemoryFileBytes)
+	if !errors.Is(err, errMemoryFileChanged) {
+		t.Fatalf("replacement read error = %v, want %v", err, errMemoryFileChanged)
+	}
+}
+
 func TestMemoryRejectsNonRegularIndexedFiles(t *testing.T) {
 	repo := t.TempDir()
 	writeProjectMemory(t, repo, "- [Directory](directory.md)\n", nil)
@@ -253,5 +332,20 @@ func TestMemoryRejectsNonRegularIndexedFiles(t *testing.T) {
 	}
 	if len(document.Warnings) != 1 || !strings.Contains(document.Warnings[0], "not a regular file") {
 		t.Fatalf("non-regular show warnings = %#v", document.Warnings)
+	}
+	if document.Available {
+		t.Fatal("non-regular show must be marked unavailable")
+	}
+}
+
+func TestMemoryDocumentAvailabilityDistinguishesEmptyFile(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Empty](empty.md)\n", map[string]string{"empty.md": ""})
+	document, err := (&Client{}).ShowMemory(context.Background(), Project{Path: repo}, "empty.md")
+	if err != nil {
+		t.Fatalf("empty ShowMemory: %v", err)
+	}
+	if !document.Available || document.Body != "" || len(document.Warnings) != 0 {
+		t.Fatalf("empty document availability = %#v", document)
 	}
 }

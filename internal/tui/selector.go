@@ -16,6 +16,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+const (
+	selectorTitleDisplayWidth     = 80
+	selectorLabelDisplayWidth     = 96
+	selectorDetailDisplayWidth    = 160
+	selectorReferenceDisplayWidth = 48
+	selectorEchoWidth             = 240
+)
+
+func selectorDisplay(value string, width int) string {
+	return truncate(sanitizeMemoryText(value), width)
+}
+
 // selectorItemDispatch runs an action against the resource already loaded for
 // a selector item. Items without one retain the text re-dispatch path.
 type selectorItemDispatch func(Model) (Model, tea.Cmd)
@@ -32,10 +44,24 @@ func selectorFor(title, command, emptyHint string, prefill bool, fetch func(ctx 
 }
 
 func selectorForWithSuffix(title, command, emptyHint, prefillSuffix string, fetch func(ctx context.Context) ([]selectorItem, error)) tea.Cmd {
+	return selectorForWithWarningsSuffix(title, command, emptyHint, prefillSuffix,
+		func(ctx context.Context) ([]selectorItem, []string, error) {
+			items, err := fetch(ctx)
+			return items, nil, err
+		})
+}
+
+// selectorForWithWarnings is the selector variant for list sources that can
+// return usable items alongside safe diagnostics about partial or empty state.
+func selectorForWithWarnings(title, command, emptyHint string, fetch func(context.Context) ([]selectorItem, []string, error)) tea.Cmd {
+	return selectorForWithWarningsSuffix(title, command, emptyHint, "", fetch)
+}
+
+func selectorForWithWarningsSuffix(title, command, emptyHint, prefillSuffix string, fetch func(context.Context) ([]selectorItem, []string, error)) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		items, err := fetch(ctx)
+		items, warnings, err := fetch(ctx)
 		return selectorActiveMsg{
 			title:         title,
 			command:       command,
@@ -43,6 +69,7 @@ func selectorForWithSuffix(title, command, emptyHint, prefillSuffix string, fetc
 			prefill:       prefillSuffix != "",
 			prefillSuffix: prefillSuffix,
 			items:         items,
+			warnings:      warnings,
 			err:           err,
 		}
 	}
@@ -56,28 +83,40 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	}
 	m.busy = false
 	m = m.clearSelector()
+	warnings := append([]string(nil), msg.warnings...)
 	if msg.err != nil {
+		if len(warnings) > 0 {
+			m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: renderMemoryWarnings(warnings)})
+		}
 		if m.handleAuthError(msg.err) {
 			return m, nil
 		}
 		if m.handleTransportError(msg.err) {
 			return m, nil
 		}
-		m.append(entry{role: "error", text: msg.err.Error()})
+		m.append(entry{role: "error", text: selectorDisplay(msg.err.Error(), selectorEchoWidth)})
 		return m, nil
 	}
 	if len(msg.items) == 0 {
-		m.append(entry{role: "result", head: msg.title, text: dimStyle.Render(msg.emptyHint)})
+		text := dimStyle.Render(selectorDisplay(msg.emptyHint, selectorDetailDisplayWidth))
+		if len(warnings) > 0 {
+			text += "\n\n" + renderMemoryWarnings(warnings)
+		}
+		m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: text})
 		return m, nil
 	}
 	if len(msg.items) == 1 {
+		if len(warnings) > 0 {
+			m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: renderMemoryWarnings(warnings)})
+		}
 		it := msg.items[0]
-		m.append(entry{role: "system", text: "only one match — selected " + it.label})
+		m.append(entry{role: "system", text: "only one match — selected " + selectorDisplay(it.label, selectorLabelDisplayWidth)})
 		return m.selectorDispatch(msg.command, msg.prefill, msg.prefillSuffix, it)
 	}
 	m.selectorActive = true
 	m.selectorTitle = msg.title
 	m.selectorItems = msg.items
+	m.selectorWarnings = warnings
 	m.selectorSearch = selectorSearchTexts(msg.items)
 	m.selectorFilter = ""
 	m.selectorFiltered = msg.items
@@ -101,6 +140,7 @@ func (m Model) clearSelector() Model {
 	m.selectorFilter = ""
 	m.selectorFiltered = nil
 	m.selectorFilteredFor = ""
+	m.selectorWarnings = nil
 	m.selectorCursor = 0
 	m.pendingCommand = ""
 	m.selectorPrefill = false
@@ -261,10 +301,10 @@ func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix stri
 		m.input.SetValue(line + prefillSuffix)
 		m.input.CursorEnd()
 		m.refreshMenu()
-		m.append(entry{role: "system", text: "selected " + it.label + " — finish the command and press enter"})
+		m.append(entry{role: "system", text: "selected " + selectorDisplay(it.label, selectorLabelDisplayWidth) + " — finish the command and press enter"})
 		return m, nil
 	}
-	m.append(entry{role: "you", text: line})
+	m.append(entry{role: "you", text: selectorDisplay(line, selectorEchoWidth)})
 	if it.dispatch != nil {
 		next, cmd := it.dispatch(m)
 		return next, withMessageGeneration(cmd, sessionGenerationOf(next), projectGenerationOf(next))
@@ -276,12 +316,15 @@ func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix stri
 // items with the cursor highlighted.
 func (m Model) renderSelector() string {
 	var rows []string
-	rows = append(rows, sectionStyle.Render("▸ "+m.selectorTitle))
-	rows = append(rows, "> "+m.selectorFilter+"█")
+	rows = append(rows, sectionStyle.Render("▸ "+selectorDisplay(m.selectorTitle, selectorTitleDisplayWidth)))
+	rows = append(rows, "> "+selectorDisplay(m.selectorFilter, selectorDetailDisplayWidth)+"█")
 
 	items := m.filteredSelectorItems()
 	if len(items) == 0 {
 		rows = append(rows, dimStyle.Render("  no matches — backspace to widen"))
+		if len(m.selectorWarnings) > 0 {
+			rows = append(rows, renderMemoryWarnings(m.selectorWarnings))
+		}
 		return paletteStyle.Render(strings.Join(rows, "\n"))
 	}
 
@@ -300,11 +343,11 @@ func (m Model) renderSelector() string {
 	}
 	for i := start; i < end; i++ {
 		it := items[i]
-		line := it.label
-		if it.detail != "" {
-			line += dimStyle.Render("  " + it.detail)
+		line := selectorDisplay(it.label, selectorLabelDisplayWidth)
+		if detail := selectorDisplay(it.detail, selectorDetailDisplayWidth); detail != "" {
+			line += dimStyle.Render("  " + detail)
 		}
-		line += dimStyle.Render("  " + shortID(it.ref))
+		line += dimStyle.Render("  " + selectorDisplay(shortID(it.ref), selectorReferenceDisplayWidth))
 		if i == cur {
 			rows = append(rows, paletteSelStyle.Render("▸ ")+line)
 		} else {
@@ -313,6 +356,9 @@ func (m Model) renderSelector() string {
 	}
 	if end < len(items) || start > 0 {
 		rows = append(rows, dimStyle.Render(fmt.Sprintf("  … showing %d of %d", end-start, len(items))))
+	}
+	if len(m.selectorWarnings) > 0 {
+		rows = append(rows, renderMemoryWarnings(m.selectorWarnings))
 	}
 	return paletteStyle.Render(strings.Join(rows, "\n"))
 }

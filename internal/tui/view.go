@@ -1350,11 +1350,19 @@ func renderMemoryDocument(document client.MemoryDocument) string {
 		if strings.TrimSpace(summary) != "" {
 			fmt.Fprintf(&b, "\n\n%s", truncate(summary, memoryDisplayValueWidth))
 		}
-		body := renderMemoryBody(document.Body)
-		if body == "" {
-			b.WriteString("\n\n" + dimStyle.Render("(empty memory file)"))
+		// The fallback keeps directly constructed MemoryDocument values
+		// backwards-compatible while the client-provided Available bit
+		// distinguishes a genuinely empty file from a failed read.
+		available := document.Available || document.Body != "" || len(document.Warnings) == 0
+		if !available {
+			b.WriteString("\n\n" + dimStyle.Render("(memory file unavailable)"))
 		} else {
-			b.WriteString("\n\n" + body)
+			body := renderMemoryBody(document.Body)
+			if body == "" {
+				b.WriteString("\n\n" + dimStyle.Render("(empty memory file)"))
+			} else {
+				b.WriteString("\n\n" + body)
+			}
 		}
 	}
 	if len(document.Warnings) > 0 {
@@ -1413,11 +1421,23 @@ func renderMemorySearch(result client.MemorySearch) string {
 func renderMemoryWarnings(warnings []string) string {
 	var b strings.Builder
 	b.WriteString(noticeStyle.Render("warnings:"))
+	cleaned := make([]string, 0, len(warnings))
 	for _, warning := range warnings {
 		warning = truncate(sanitizeMemoryText(warning), memoryDisplayValueWidth)
 		if strings.TrimSpace(warning) != "" {
-			b.WriteString("\n" + dimStyle.Render("  "+warning))
+			cleaned = append(cleaned, warning)
 		}
+	}
+	const maxDisplayedWarnings = 8
+	shown := len(cleaned)
+	if shown > maxDisplayedWarnings {
+		shown = maxDisplayedWarnings
+	}
+	for _, warning := range cleaned[:shown] {
+		b.WriteString("\n" + dimStyle.Render("  "+warning))
+	}
+	if len(cleaned) > shown {
+		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("  … %d more warnings", len(cleaned)-shown)))
 	}
 	return b.String()
 }

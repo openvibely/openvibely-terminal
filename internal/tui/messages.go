@@ -152,6 +152,7 @@ type selectorActiveMsg struct {
 	prefill       bool
 	prefillSuffix string
 	items         []selectorItem
+	warnings      []string
 	err           error
 }
 

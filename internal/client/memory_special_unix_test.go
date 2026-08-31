@@ -12,6 +12,38 @@ import (
 	"time"
 )
 
+func TestMemoryRejectsFIFOReplacementWithoutBlocking(t *testing.T) {
+	repo := t.TempDir()
+	filePath := filepath.Join(repo, "memory.md")
+	if err := os.WriteFile(filePath, []byte("regular"), 0o600); err != nil {
+		t.Fatalf("WriteFile regular: %v", err)
+	}
+	expectedInfo, err := os.Stat(filePath)
+	if err != nil {
+		t.Fatalf("Stat regular: %v", err)
+	}
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("Remove regular: %v", err)
+	}
+	if err := syscall.Mkfifo(filePath, 0o600); err != nil {
+		t.Skipf("Mkfifo replacement unavailable: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, readErr := readMemoryFile(context.Background(), filePath, expectedInfo, maxMemoryFileBytes)
+		done <- readErr
+	}()
+	select {
+	case readErr := <-done:
+		if readErr != errMemoryFileNotRegular {
+			t.Fatalf("FIFO replacement error = %v, want %v", readErr, errMemoryFileNotRegular)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("readMemoryFile blocked on a FIFO replacement")
+	}
+}
+
 func TestMemoryRejectsFIFOWithoutBlocking(t *testing.T) {
 	repo := t.TempDir()
 	memoryDir := filepath.Join(repo, ".openvibely", "memories")

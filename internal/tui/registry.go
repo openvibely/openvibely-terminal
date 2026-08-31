@@ -1594,14 +1594,10 @@ func skillsCommand() command {
 
 func memorySelector(m Model, usage string) (Model, tea.Cmd) {
 	project := m.selectedProject()
-	return selectorOr(m, usage, selectorFor("Memory", "memory show",
+	return selectorOr(m, usage, selectorForWithWarnings("Memory", "memory show",
 		"no indexed project memory — MEMORIES.md has no topic files",
-		false,
-		func(ctx context.Context) ([]selectorItem, error) {
+		func(ctx context.Context) ([]selectorItem, []string, error) {
 			list, err := m.client.ListMemories(ctx, project)
-			if err != nil {
-				return nil, err
-			}
 			items := make([]selectorItem, 0, len(list.Memories))
 			for _, memory := range list.Memories {
 				label := firstNonEmpty(memory.Title, memory.File)
@@ -1611,7 +1607,7 @@ func memorySelector(m Model, usage string) (Model, tea.Cmd) {
 				}
 				items = append(items, selectorItem{ref: memory.File, label: label, detail: detail})
 			}
-			return items, nil
+			return items, list.Warnings, err
 		}))
 }
 
@@ -1625,13 +1621,14 @@ func memoryCommand() command {
 		desc:    "read-only durable memory for the selected project",
 		usage: []string{
 			"memory [filter]                            list indexed memory files",
-			"memory list [filter]                       list indexed memory files",
-			"memory show <file|title>                   show one indexed memory file",
-			"memory search <query>                      search indexed files and bodies",
 			"memory is read-only; curation remains owned by the backend lifecycle tools",
 		},
-		examples: []string{
-			`memory list`,
+		actionUsages: []commandActionUsage{
+			{action: "list", args: "[filter]", description: "list indexed memory files"},
+			{action: "show", args: "<file|title>", description: "show one indexed memory file"},
+			{action: "search", args: "<query>", description: "search indexed files and bodies"},
+		},
+		examples: []string{`memory list`,
 			`memory show managed_memory.md`,
 			`memory search "selected project"`,
 		},
@@ -1660,7 +1657,7 @@ func memoryCommand() command {
 				})
 			case "show":
 				if ref == "" {
-					return memorySelector(m, "usage: /memory show <file|title>")
+					return memorySelector(m, commandUsage("memory", "show"))
 				}
 				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
 					document, err := c.ShowMemory(ctx, project, ref)

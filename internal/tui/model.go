@@ -165,6 +165,7 @@ type Model struct {
 	selectorFilter        string
 	selectorFiltered      []selectorItem
 	selectorFilteredFor   string
+	selectorWarnings      []string
 	selectorCursor        int
 	pendingCommand        string // e.g. "tasks open"; re-dispatched with the chosen ref
 	selectorPrefill       bool   // prime the input instead of dispatching

@@ -233,6 +233,101 @@ func TestMemoryCLINoProjectFailsBeforeMemoryInspection(t *testing.T) {
 	}
 }
 
+func TestMemoryCLIMissingShowReferenceKeepsUsageError(t *testing.T) {
+	repo := t.TempDir()
+	writeTUIProjectMemory(t, repo, "- [Notes](notes.md)\n", map[string]string{"notes.md": "# Notes\n"})
+	var projectRequests int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/projects" {
+			t.Errorf("unexpected CLI request %s", r.URL.Path)
+		}
+		atomic.AddInt32(&projectRequests, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"Demo","path":"` + repo + `"}]}`))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "p1", []string{"memory", "show"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "usage:") || !strings.Contains(err.Error(), "memory show <file|title>") {
+		t.Fatalf("RunCLI missing memory show ref error = %v, want usage", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("missing memory show ref wrote output: %q", out.String())
+	}
+	if got := atomic.LoadInt32(&projectRequests); got != 1 {
+		t.Fatalf("missing memory show ref made %d project requests, want one preload only", got)
+	}
+}
+
+func TestMemorySelectorPreservesWarningsAndSanitizesDisplay(t *testing.T) {
+	repo := t.TempDir()
+	unsafeTitle := "\x1b[31m" + strings.Repeat("Unsafe title ", 20)
+	unsafeSummary := "summary\a\r\t" + strings.Repeat("detail ", 80)
+	index := "- [" + unsafeTitle + "](known.md) - " + unsafeSummary + "\n- [Missing](missing.md)\n"
+	writeTUIProjectMemory(t, repo, index, map[string]string{"known.md": "# Known\n\nreadable body\n"})
+	m, _ := memoryDispatchModel(t, repo)
+	m = runLine(t, m, "/memory show")
+	if !m.selectorActive {
+		t.Fatalf("memory selector did not open:\n%s", transcript(m))
+	}
+	if len(m.selectorWarnings) == 0 || !strings.Contains(strings.Join(m.selectorWarnings, "\n"), "missing.md") {
+		t.Fatalf("selector warnings = %#v", m.selectorWarnings)
+	}
+	view := m.View()
+	if strings.Contains(view, "\x1b") {
+		t.Fatalf("selector retained an ANSI escape: %q", view)
+	}
+	plain := stripANSI(view)
+	for _, r := range plain {
+		if r != '\n' && (r < 0x20 || (r >= 0x7f && r <= 0x9f)) {
+			t.Fatalf("selector rendered terminal control %U: %q", r, plain)
+		}
+	}
+	if strings.Contains(plain, strings.Repeat("Unsafe title ", 12)) {
+		t.Fatalf("selector title was not bounded: %d bytes", len(plain))
+	}
+	if !strings.Contains(plain, "memory file \"missing.md\" is missing") {
+		t.Fatalf("selector warning missing from view:\n%s", plain)
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if strings.Contains(transcript(m), "\x1b") {
+		t.Fatalf("selection transcript retained an ANSI escape: %q", transcript(m))
+	}
+}
+
+func TestMemorySelectorEmptyStateIncludesWarnings(t *testing.T) {
+	m, _ := memoryDispatchModel(t, t.TempDir())
+	m = runLine(t, m, "/memory show")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "project memory directory is missing") {
+		t.Fatalf("empty selector warning missing:\n%s", out)
+	}
+	if !strings.Contains(out, "no indexed project memory") {
+		t.Fatalf("empty selector hint missing:\n%s", out)
+	}
+}
+
+func TestRenderUnavailableMemoryDocumentIsNotLabeledEmpty(t *testing.T) {
+	output := renderMemoryDocument(client.MemoryDocument{
+		File:      "missing.md",
+		Title:     "Missing",
+		Available: false,
+		Warnings:  []string{"memory file \"missing.md\" is missing"},
+	})
+	plain := stripANSI(output)
+	if !strings.Contains(plain, "(memory file unavailable)") {
+		t.Fatalf("unavailable document marker missing:\n%s", plain)
+	}
+	if strings.Contains(plain, "(empty memory file)") {
+		t.Fatalf("unavailable document was labeled empty:\n%s", plain)
+	}
+}
+
 func TestMemoryCLIUsesSelectedProjectAndEmitsStableJSON(t *testing.T) {
 	repo := t.TempDir()
 	writeTUIProjectMemory(t, repo, "# Memory Index\n- [Notes](notes.md) - terminal notes\n", map[string]string{"notes.md": "# Notes\n\nUse the terminal.\n"})
