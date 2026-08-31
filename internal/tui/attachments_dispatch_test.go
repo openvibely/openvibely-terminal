@@ -212,6 +212,58 @@ func TestTasksAttachmentsAddSupportsQuotedTaskAndPath(t *testing.T) {
 	}
 }
 
+func TestTasksAttachmentsDeleteInteractiveAndCLIResolveEquivalentRefs(t *testing.T) {
+	rows := `<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><div><p class="text-sm font-medium">monthly report.pdf</p><p class="text-xs">7 B</p></div><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`
+	refreshed := `<div id="attachment-list" data-project-id="p1"></div>`
+
+	t.Run("interactive", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/tasks":             attachmentTaskBoardHTML,
+			"/tasks/t-1":         rows,
+			"/attachments/att-1": refreshed,
+		})
+
+		m = runLine(t, m, `/tasks attachments delete "Refactor the API" "monthly report.pdf"`)
+		if m.pendingConfirmation == nil {
+			t.Fatal("delete must set a pending confirmation")
+		}
+		wantPrompt := `Delete attachment "monthly report.pdf" from task "Refactor the API"?`
+		if !strings.Contains(m.pendingConfirmation.message, wantPrompt) {
+			t.Fatalf("confirmation = %q, want resolved target %q", m.pendingConfirmation.message, wantPrompt)
+		}
+		if rec.saw("DELETE", "/attachments/att-1") {
+			t.Fatal("interactive delete ran before confirmation")
+		}
+
+		m = runLine(t, m, "yes")
+		if !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") {
+			t.Fatalf("interactive delete was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+		}
+		if !strings.Contains(stripANSI(transcript(m)), "deleted attachment \"monthly report.pdf\"") {
+			t.Fatalf("interactive delete output used the wrong attachment:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("forced CLI", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":      cliProjects,
+			"/tasks":             attachmentTaskBoardHTML,
+			"/tasks/t-1":         rows,
+			"/attachments/att-1": refreshed,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor the API", "monthly report.pdf"}, true, false); err != nil {
+			t.Fatalf("forced CLI delete failed: %v", err)
+		}
+		if !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") {
+			t.Fatalf("forced CLI delete was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+		}
+		if !strings.Contains(out.String(), "deleted attachment \"monthly report.pdf\"") {
+			t.Fatalf("forced CLI delete output used the wrong attachment:\n%s", out.String())
+		}
+	})
+}
+
 func TestTasksAttachmentsDeleteConfirmationUsesResolvedTarget(t *testing.T) {
 	rows := `<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><div><p class="text-sm font-medium">monthly report.pdf</p><p class="text-xs">7 B</p></div><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`
 	refreshed := `<div id="attachment-list" data-project-id="p1"></div>`

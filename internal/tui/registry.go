@@ -790,25 +790,7 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 	}
 
 	cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-		tasks, err := c.ListTasks(ctx, projectID)
-		if err != nil {
-			return "", err
-		}
-		task, attachmentRefParts, err := resolveTaskWithOperands(tasks, args, 1)
-		if err != nil {
-			return "", err
-		}
-		attachmentRef := strings.TrimSpace(strings.Join(attachmentRefParts, " "))
-		if attachmentRef == "" {
-			return "", fmt.Errorf("missing attachment ID or filename")
-		}
-		attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
-		if err != nil {
-			return "", err
-		}
-		attachment, err := matchRef(attachments, attachmentRef,
-			func(a client.Attachment) string { return a.ID },
-			func(a client.Attachment) string { return a.FileName })
+		task, attachment, err := lookupTaskAttachmentTarget(ctx, c, projectID, args)
 		if err != nil {
 			return "", err
 		}
@@ -822,29 +804,36 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 		cmd)
 }
 
+func lookupTaskAttachmentTarget(ctx context.Context, c *client.Client, projectID string, args []string) (client.Task, client.Attachment, error) {
+	var zeroTask client.Task
+	var zeroAttachment client.Attachment
+	tasks, err := c.ListTasks(ctx, projectID)
+	if err != nil {
+		return zeroTask, zeroAttachment, err
+	}
+	task, attachmentRefParts, err := resolveTaskWithOperands(tasks, args, 1)
+	if err != nil {
+		return task, zeroAttachment, err
+	}
+	attachmentRef := strings.TrimSpace(strings.Join(attachmentRefParts, " "))
+	if attachmentRef == "" {
+		return task, zeroAttachment, fmt.Errorf("missing attachment ID or filename")
+	}
+	attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+	if err != nil {
+		return task, zeroAttachment, err
+	}
+	attachment, err := matchRef(attachments, attachmentRef,
+		func(a client.Attachment) string { return a.ID },
+		func(a client.Attachment) string { return a.FileName })
+	return task, attachment, err
+}
+
 func resolveTaskAttachmentTarget(c *client.Client, projectID string, args []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		tasks, err := c.ListTasks(ctx, projectID)
-		if err != nil {
-			return attachmentDeleteTargetMsg{projectID: projectID, err: err}
-		}
-		task, attachmentRefParts, err := resolveTaskWithOperands(tasks, args, 1)
-		if err != nil {
-			return attachmentDeleteTargetMsg{projectID: projectID, err: err}
-		}
-		attachmentRef := strings.TrimSpace(strings.Join(attachmentRefParts, " "))
-		if attachmentRef == "" {
-			return attachmentDeleteTargetMsg{projectID: projectID, err: fmt.Errorf("missing attachment ID or filename")}
-		}
-		attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
-		if err != nil {
-			return attachmentDeleteTargetMsg{projectID: projectID, task: task, err: err}
-		}
-		attachment, err := matchRef(attachments, attachmentRef,
-			func(a client.Attachment) string { return a.ID },
-			func(a client.Attachment) string { return a.FileName })
+		task, attachment, err := lookupTaskAttachmentTarget(ctx, c, projectID, args)
 		return attachmentDeleteTargetMsg{
 			projectID:  projectID,
 			task:       task,
