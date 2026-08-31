@@ -203,7 +203,7 @@ func taskSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd)
 func taskSelectorWithSuffix(m Model, usage, command, prefillSuffix string) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
 	return selectorOr(m, usage, selectorForWithSuffix("Tasks", command,
-		"no tasks yet — /tasks new <title> creates one", prefillSuffix,
+		taskEmptyStateHint, prefillSuffix,
 		func(ctx context.Context) ([]selectorItem, error) {
 			tasks, err := c.ListTasks(ctx, pid)
 			if err != nil {
@@ -869,7 +869,7 @@ func taskAttachmentSelector(m Model, c *client.Client, projectID, taskRef, usage
 		return m, errCmd(usage)
 	}
 	command := "tasks attachments delete " + taskRef
-	return m, selectorFor("Attachments", command, "no attachments yet — /tasks attachments add <task> <file> uploads one", false,
+	return m, selectorFor("Attachments", command, attachmentEmptyStateHint, false,
 		func(ctx context.Context) ([]selectorItem, error) {
 			task, err := resolveTask(ctx, c, projectID, taskRef)
 			if err != nil {
@@ -1154,8 +1154,7 @@ func scheduleCommand() command {
 				if ref == "" {
 					return selectorOr(m, "usage: /schedule "+action+" <id>",
 						selectorFor("Schedule", "schedule "+action,
-							"nothing scheduled — /schedule add <task> <2006-01-02T15:04> daily", false,
-							func(ctx context.Context) ([]selectorItem, error) {
+							scheduleEmptyStateHint, false, func(ctx context.Context) ([]selectorItem, error) {
 								entries, _, err := c.GetSchedule(ctx, pid)
 								if err != nil {
 									return nil, err
@@ -1406,7 +1405,7 @@ func alertsCommand() command {
 func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
 	return selectorOr(m, usage, selectorFor("Skills", command,
-		"no skills yet — /skills add <name> creates one", prefill,
+		skillEmptyStateHint, prefill,
 		func(ctx context.Context) ([]selectorItem, error) {
 			skills, err := c.ListSkills(ctx, pid)
 			if err != nil {
@@ -2657,7 +2656,7 @@ func automationsCommand() command {
 					usage := commandUsage("automations", action)
 					return selectorOr(m, usage,
 						selectorFor("Automations", "automations "+action,
-							"no automations yet — create one via the web UI", false,
+							automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								automations, err := c.ListAutomations(ctx, pid)
 								if err != nil {
@@ -2701,7 +2700,7 @@ func automationsCommand() command {
 				if ref == "" {
 					return selectorOr(m, fmt.Sprintf("usage: /automations %s <automation>", action),
 						selectorFor("Automations", "automations "+action,
-							"no automations yet — create one via the web UI", false,
+							automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								automations, err := c.ListAutomations(ctx, pid)
 								if err != nil {

@@ -629,6 +629,67 @@ func TestSelectorEmptyListShowsHint(t *testing.T) {
 	}
 }
 
+// TestResourceEmptyStateHintsMatchPageAndSelectors keeps the actionable empty
+// state shown by each page identical to the hint emitted by its ref-less
+// selector. The automation cases cover both selector branches.
+func TestResourceEmptyStateHintsMatchPageAndSelectors(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		page    string
+		bodies  map[string]string
+	}{
+		{
+			name:    "tasks",
+			command: "/tasks run",
+			page:    stripANSI(renderBoard(nil, "")),
+		},
+		{
+			name:    "attachments",
+			command: "/tasks attachments delete Refactor",
+			page:    stripANSI(renderTaskAttachments(nil)),
+			bodies: map[string]string{
+				"/tasks":     taskBoardHTML,
+				"/tasks/t-1": `<div id="attachment-list" data-project-id="p1"></div>`,
+			},
+		},
+		{
+			name:    "schedule",
+			command: "/schedule delete",
+			page:    stripANSI(renderSchedule(nil, "")),
+		},
+		{
+			name:    "skills",
+			command: "/skills show",
+			page:    stripANSI(renderSkills(nil, "")),
+		},
+		{
+			name:    "automations show",
+			command: "/automations show",
+			page:    stripANSI(renderAutomations(nil, "")),
+		},
+		{
+			name:    "automations mutation",
+			command: "/automations pause",
+			page:    stripANSI(renderAutomations(nil, "")),
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, tc.bodies)
+			m = runLine(t, m, tc.command)
+			if m.selectorActive {
+				t.Fatalf("empty selector should not remain active:\n%s", transcript(m))
+			}
+			if got := stripANSI(transcript(m)); !strings.Contains(got, tc.page) {
+				t.Fatalf("selector empty-state guidance does not match page output\npage: %q\nselector transcript: %q", tc.page, got)
+			}
+		})
+	}
+}
+
 // TestSelectorPrefillPrimesInput verifies that piped commands (edit/goal/
 // reply) prime the input with "/<command> <ref> | " instead of dispatching.
 func TestSelectorPrefillPrimesInput(t *testing.T) {

@@ -18,6 +18,15 @@ import (
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
 
+// Shared resource empty-state guidance keeps page and selector wording in sync.
+const (
+	taskEmptyStateHint       = "no tasks yet — /tasks new <title> creates one"
+	attachmentEmptyStateHint = "no attachments yet — /tasks attachments add <task> <file> uploads one"
+	scheduleEmptyStateHint   = "nothing scheduled — /schedule add <task> <2006-01-02T15:04> daily"
+	skillEmptyStateHint      = "no skills yet — /skills add <name> creates one"
+	automationEmptyStateHint = "no automations yet — create one via the web UI"
+)
+
 // View renders header, transcript, command menu and input.
 func (m Model) View() string {
 	if m.quitting {
@@ -451,7 +460,7 @@ func renderBoard(tasks []client.Task, filter string) string {
 		if filter != "" {
 			return dimStyle.Render("no tasks match " + filter)
 		}
-		return dimStyle.Render("no tasks yet — /tasks new <title> creates one")
+		return dimStyle.Render(taskEmptyStateHint)
 	}
 	b.WriteString(dimStyle.Render("/tasks show <id|title> · /tasks open <id> enters its thread · /tasks run <id>"))
 	return b.String()
@@ -575,7 +584,7 @@ func reviewState(r client.ReviewComment) string {
 
 func renderTaskAttachments(attachments []client.Attachment) string {
 	if len(attachments) == 0 {
-		return dimStyle.Render("no attachments yet — /tasks attachments add <task> <file> uploads one")
+		return dimStyle.Render(attachmentEmptyStateHint)
 	}
 	rows := [][]string{{"ID", "FILE", "SIZE"}}
 	for _, attachment := range attachments {
@@ -721,7 +730,7 @@ func renderSchedule(entries []client.ScheduleEntry, summary string) string {
 		if strings.TrimSpace(summary) != "" {
 			return clamp(strings.TrimSpace(summary), 40)
 		}
-		return dimStyle.Render("nothing scheduled — /schedule add <task> <2006-01-02T15:04> daily")
+		return dimStyle.Render(scheduleEmptyStateHint)
 	}
 	rows := [][]string{{"SCHEDULE", "TASK", "WHEN"}}
 	for _, e := range entries {
@@ -746,7 +755,7 @@ func renderAutomations(automations []client.Automation, filter string) string {
 		if filter != "" {
 			return dimStyle.Render("no automations match " + filter)
 		}
-		return dimStyle.Render("no automations yet — create one via the web UI")
+		return dimStyle.Render(automationEmptyStateHint)
 	}
 	return table(rows) + "\n\n" +
 		dimStyle.Render("/automations run-now|pause|resume|delete <id|name>")
@@ -1274,7 +1283,7 @@ func renderSkills(skills []client.Skill, filter string) string {
 		rows = append(rows, []string{s.Handle, state, s.Scope, truncate(s.Description, 50)})
 	}
 	if len(rows) == 0 {
-		return dimStyle.Render("no skills yet — /skills add <name> creates one")
+		return dimStyle.Render(skillEmptyStateHint)
 	}
 	return table(append([][]string{{"HANDLE", "STATE", "SCOPE", "DESCRIPTION"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/skills show <handle> · /skills enable|disable|always|delete <handle>")
