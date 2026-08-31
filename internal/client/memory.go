@@ -14,12 +14,14 @@ import (
 )
 
 const (
-	projectMemoryDirectory = ".openvibely/memories"
-	projectMemoryIndex     = "MEMORIES.md"
-	maxMemoryIndexBytes    = 1 << 20
-	maxMemoryFileBytes     = 8 << 20
-	maxMemoryWarnings      = 64
-	maxMemoryWarningRunes  = 240
+	projectMemoryDirectory           = ".openvibely/memories"
+	projectMemoryIndex               = "MEMORIES.md"
+	maxMemoryIndexBytes              = 1 << 20
+	maxMemoryFileBytes               = 8 << 20
+	maxMemoryWarnings                = 64
+	maxMemoryWarningRunes            = 240
+	maxMemoryAmbiguityCandidates     = 8
+	maxMemoryAmbiguityCandidateRunes = 64
 )
 
 var (
@@ -450,7 +452,7 @@ func memoryHandleToken(value string) string {
 
 func normalizeMemoryHandle(handle string) string {
 	handle = strings.TrimSpace(strings.ReplaceAll(handle, "\\", "/"))
-	if handle == "" || strings.ContainsRune(handle, '\x00') || strings.HasPrefix(handle, "/") ||
+	if handle == "" || strings.ContainsRune(handle, '\x00') || strings.IndexFunc(handle, unicode.IsControl) >= 0 || strings.HasPrefix(handle, "/") ||
 		strings.HasPrefix(handle, "./") || strings.Contains(handle, ":") {
 		return ""
 	}
@@ -673,11 +675,7 @@ func resolveMemoryEntry(entries []memoryIndexEntry, reference string) (memoryInd
 		return exactTitles[0], nil
 	}
 	if len(exactTitles) > 1 {
-		files := make([]string, 0, len(exactTitles))
-		for _, match := range exactTitles {
-			files = append(files, match.File)
-		}
-		return zero, fmt.Errorf("memory: reference is ambiguous; choose one of %s", strings.Join(files, ", "))
+		return zero, memoryAmbiguousReferenceError(exactTitles)
 	}
 	for _, tier := range []func(memoryIndexEntry) bool{
 		func(entry memoryIndexEntry) bool {
@@ -692,14 +690,29 @@ func resolveMemoryEntry(entries []memoryIndexEntry, reference string) (memoryInd
 			return matches[0], nil
 		}
 		if len(matches) > 1 {
-			files := make([]string, 0, len(matches))
-			for _, match := range matches {
-				files = append(files, match.File)
-			}
-			return zero, fmt.Errorf("memory: reference is ambiguous; choose one of %s", strings.Join(files, ", "))
+			return zero, memoryAmbiguousReferenceError(matches)
 		}
 	}
 	return zero, errors.New("memory: requested memory is not indexed; use memory list")
+}
+
+func memoryAmbiguousReferenceError(matches []memoryIndexEntry) error {
+	candidates := make([]string, 0, min(len(matches), maxMemoryAmbiguityCandidates))
+	for i, match := range matches {
+		if i >= maxMemoryAmbiguityCandidates {
+			break
+		}
+		candidate := sanitizeMemoryWarning(match.File)
+		if candidate == "" {
+			candidate = "(unnamed)"
+		}
+		candidates = append(candidates, truncateMemoryText(candidate, maxMemoryAmbiguityCandidateRunes))
+	}
+	if len(matches) > maxMemoryAmbiguityCandidates {
+		candidates = append(candidates, fmt.Sprintf("… %d more", len(matches)-maxMemoryAmbiguityCandidates))
+	}
+	message := fmt.Sprintf("memory: reference is ambiguous; choose one of %s", strings.Join(candidates, ", "))
+	return errors.New(sanitizeMemoryWarning(message))
 }
 
 func memoryEntryMatches(entries []memoryIndexEntry, predicate func(memoryIndexEntry) bool) []memoryIndexEntry {

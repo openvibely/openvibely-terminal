@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func writeProjectMemory(t *testing.T, repo, index string, files map[string]string) {
@@ -347,5 +349,49 @@ func TestMemoryDocumentAvailabilityDistinguishesEmptyFile(t *testing.T) {
 	}
 	if !document.Available || document.Body != "" || len(document.Warnings) != 0 {
 		t.Fatalf("empty document availability = %#v", document)
+	}
+}
+
+func TestResolveMemoryEntryAmbiguityErrorIsSanitizedAndBounded(t *testing.T) {
+	entries := make([]memoryIndexEntry, 0, maxMemoryAmbiguityCandidates+4)
+	for i := 0; i < cap(entries); i++ {
+		entries = append(entries, memoryIndexEntry{
+			File:  fmt.Sprintf("candidate-%02d-\x1b[31m%s.md", i, strings.Repeat("x", 120)),
+			Title: "Same title",
+		})
+	}
+
+	_, err := resolveMemoryEntry(entries, "Same title")
+	if err == nil {
+		t.Fatal("ambiguous memory reference unexpectedly resolved")
+	}
+	message := err.Error()
+	for _, r := range message {
+		if unicode.IsControl(r) {
+			t.Fatalf("ambiguity error contains terminal control %U: %q", r, message)
+		}
+	}
+	if got := len([]rune(message)); got > maxMemoryWarningRunes {
+		t.Fatalf("ambiguity error is unbounded: %d runes", got)
+	}
+	if !strings.Contains(message, "candidate-00-") || !strings.Contains(message, "ambiguous") {
+		t.Fatalf("ambiguity error lost useful candidate context: %q", message)
+	}
+}
+
+func TestParseMemoryIndexRejectsControlCharacterHandles(t *testing.T) {
+	entries, warnings := parseMemoryIndex("- [Unsafe](unsafe-\x1b[31m.md)\n")
+	if len(entries) != 0 {
+		t.Fatalf("control-bearing memory handle was accepted: %+v", entries)
+	}
+	if !strings.Contains(strings.Join(warnings, "\n"), "unsafe file reference") {
+		t.Fatalf("unsafe-handle warning missing: %v", warnings)
+	}
+	for _, warning := range warnings {
+		for _, r := range warning {
+			if unicode.IsControl(r) {
+				t.Fatalf("unsafe-handle warning contains terminal control %U: %q", r, warning)
+			}
+		}
 	}
 }
