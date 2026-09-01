@@ -1997,6 +1997,211 @@ func TestScheduleDirectDispatchResolvesSecondScheduleID(t *testing.T) {
 	}
 }
 
+func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
+	actions := []struct {
+		name           string
+		line           string
+		method         string
+		path           string
+		status         string
+		initialGETs    int
+		needsTaskBoard bool
+	}{
+		{
+			name:           "add",
+			line:           "/schedule add Refactor 2026-09-01T10:00 daily",
+			method:         http.MethodPost,
+			path:           "/tasks/t-1/schedule",
+			status:         "scheduled Refactor the API for 2026-09-01T10:00 (daily)",
+			needsTaskBoard: true,
+		},
+		{
+			name:        "delete",
+			line:        "/schedule delete s-1",
+			method:      http.MethodDelete,
+			path:        "/schedules/s-1",
+			status:      "deleted schedule",
+			initialGETs: 1,
+		},
+		{
+			name:        "toggle",
+			line:        "/schedule toggle s-1",
+			method:      http.MethodPost,
+			path:        "/api/schedules/s-1/toggle",
+			status:      "toggled schedule",
+			initialGETs: 1,
+		},
+	}
+	failures := []struct {
+		name      string
+		transport bool
+	}{
+		{name: "server error"},
+		{name: "transport failure", transport: true},
+	}
+
+	for _, tc := range actions {
+		tc := tc
+		for _, failure := range failures {
+			failure := failure
+			t.Run(tc.name+"/"+failure.name, func(t *testing.T) {
+				rec := &recorder{}
+				scheduleGETs := 0
+				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					rec.recordURL(r.Method, r.URL.RequestURI())
+					switch {
+					case tc.needsTaskBoard && r.Method == http.MethodGet && r.URL.Path == "/tasks":
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = w.Write([]byte(taskBoardHTML))
+					case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+						scheduleGETs++
+						if got := r.URL.Query().Get("project_id"); got != "p1" {
+							t.Errorf("schedule GET project_id = %q, want p1", got)
+						}
+						if scheduleGETs <= tc.initialGETs {
+							w.Header().Set("Content-Type", "text/html")
+							_, _ = w.Write([]byte(selScheduleHTML))
+							return
+						}
+						if failure.transport {
+							hijacker, ok := w.(http.Hijacker)
+							if !ok {
+								t.Error("test server does not support connection hijacking")
+								return
+							}
+							conn, _, err := hijacker.Hijack()
+							if err != nil {
+								t.Errorf("hijack refresh request: %v", err)
+								return
+							}
+							_ = conn.Close()
+							return
+						}
+						http.Error(w, "refresh failed", http.StatusInternalServerError)
+					case r.Method == tc.method && r.URL.Path == tc.path:
+						if tc.name == "toggle" {
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = w.Write([]byte(`{}`))
+							return
+						}
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+						w.WriteHeader(http.StatusNotFound)
+					}
+				})
+
+				if tc.name == "delete" {
+					m = confirmDestructive(t, m, tc.line)
+				} else {
+					m = runLine(t, m, tc.line)
+				}
+
+				if got := rec.count(tc.method, tc.path); got != 1 {
+					t.Fatalf("%s mutation count = %d, want 1; calls:\n%s", tc.name, got, rec.all())
+				}
+				if got, want := scheduleGETs, tc.initialGETs+1; got < want {
+					t.Fatalf("%s schedule GET count = %d, want at least %d; calls:\n%s", tc.name, got, want, rec.all())
+				}
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, tc.status) {
+					t.Fatalf("successful %s status missing after refresh failure:\n%s", tc.name, out)
+				}
+				if strings.Contains(out, "nothing scheduled") {
+					t.Fatalf("failed refresh must not claim that nothing is scheduled:\n%s", out)
+				}
+				if strings.Contains(out, "error:") || strings.Contains(out, "refresh failed") {
+					t.Fatalf("successful mutation must not be paired with a refresh error:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
+	actions := []struct {
+		name        string
+		line        string
+		method      string
+		path        string
+		status      string
+		initialGETs int
+	}{
+		{
+			name:   "add",
+			line:   "/schedule add Refactor 2026-09-01T10:00 daily",
+			method: http.MethodPost,
+			path:   "/tasks/t-1/schedule",
+			status: "scheduled Refactor the API",
+		},
+		{
+			name:        "delete",
+			line:        "/schedule delete s-1",
+			method:      http.MethodDelete,
+			path:        "/schedules/s-1",
+			status:      "deleted schedule",
+			initialGETs: 1,
+		},
+		{
+			name:        "toggle",
+			line:        "/schedule toggle s-1",
+			method:      http.MethodPost,
+			path:        "/api/schedules/s-1/toggle",
+			status:      "toggled schedule",
+			initialGETs: 1,
+		},
+	}
+
+	for _, tc := range actions {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			scheduleGETs := 0
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				rec.recordURL(r.Method, r.URL.RequestURI())
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(taskBoardHTML))
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					scheduleGETs++
+					if got := r.URL.Query().Get("project_id"); got != "p1" {
+						t.Errorf("schedule GET project_id = %q, want p1", got)
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(selScheduleHTML))
+				case r.Method == tc.method && r.URL.Path == tc.path:
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":"schedule mutation failed"}`))
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+
+			if tc.name == "delete" {
+				m = confirmDestructive(t, m, tc.line)
+			} else {
+				m = runLine(t, m, tc.line)
+			}
+
+			if got := rec.count(tc.method, tc.path); got != 1 {
+				t.Fatalf("%s mutation count = %d, want 1; calls:\n%s", tc.name, got, rec.all())
+			}
+			if got, want := scheduleGETs, tc.initialGETs; got != want {
+				t.Fatalf("%s schedule GET count = %d, want %d after action failure; calls:\n%s", tc.name, got, want, rec.all())
+			}
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "schedule mutation failed") {
+				t.Fatalf("%s action failure missing from transcript:\n%s", tc.name, out)
+			}
+			if strings.Contains(out, tc.status) {
+				t.Fatalf("failed %s mutation reported success:\n%s", tc.name, out)
+			}
+		})
+	}
+}
 func TestScheduleAddResolvesTask(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 daily")

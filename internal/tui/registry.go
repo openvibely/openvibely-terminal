@@ -108,6 +108,18 @@ func actAndReloadText(status string, act func() error, reload func() (string, er
 	return status + "\n\n" + text, nil
 }
 
+// scheduleMutationOutput returns the confirmed schedule mutation status and,
+// when available, the refreshed schedule page. A failed refresh is not an
+// action failure: the mutation already succeeded, so return only its status
+// instead of rendering nil entries as an authoritative empty schedule.
+func scheduleMutationOutput(status string, reload func() ([]client.ScheduleEntry, string, error)) (string, error) {
+	entries, summary, err := reload()
+	if err != nil {
+		return status, nil
+	}
+	return status + "\n\n" + renderSchedule(entries, summary), nil
+}
+
 // taskReviewsOutput fetches and formats the read-only review view for a task.
 func taskReviewsOutput(ctx context.Context, c *client.Client, t client.Task) (string, error) {
 	reviews, err := c.ListTaskReviews(ctx, t.ID)
@@ -1223,8 +1235,8 @@ func scheduleCommand() command {
 					if err := c.CreateSchedule(ctx, t.ID, when, repeat, interval); err != nil {
 						return "", err
 					}
-					entries, summary, _ := c.GetSchedule(ctx, pid)
-					return "scheduled " + t.Title + " for " + when + " (" + repeat + ")\n\n" + renderSchedule(entries, summary), nil
+					return scheduleMutationOutput("scheduled "+t.Title+" for "+when+" ("+repeat+")",
+						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
 				})
 			case "delete", "toggle":
 				ref := strings.Join(rest, " ")
@@ -1257,8 +1269,8 @@ func scheduleCommand() command {
 											if err != nil {
 												return "", err
 											}
-											entries, summary, _ := c.GetSchedule(ctx, pid)
-											return action + "d schedule\n\n" + renderSchedule(entries, summary), nil
+											return scheduleMutationOutput(action+"d schedule",
+												func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
 										})
 										if action == "delete" {
 											return confirmOr(m,
@@ -1296,8 +1308,8 @@ func scheduleCommand() command {
 					if err != nil {
 						return "", err
 					}
-					entries, summary, _ := c.GetSchedule(ctx, pid)
-					return action + "d schedule\n\n" + renderSchedule(entries, summary), nil
+					return scheduleMutationOutput(action+"d schedule",
+						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
 				})
 				if action == "delete" {
 					return confirmOr(m,
