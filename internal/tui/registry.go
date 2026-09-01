@@ -785,6 +785,16 @@ func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (
 		func(t client.Task) string { return t.Title })
 }
 
+func resolvePersonality(ctx context.Context, c *client.Client, projectID, ref string) (client.Personality, error) {
+	personalities, err := c.ListPersonalities(ctx, projectID)
+	if err != nil {
+		return client.Personality{}, err
+	}
+	return matchRef(personalities, ref,
+		func(p client.Personality) string { return p.Key },
+		func(p client.Personality) string { return p.Name })
+}
+
 func (m Model) reviewTaskCandidates(ctx context.Context, c *client.Client, projectID string) ([]client.Task, error) {
 	if m.reviewPrefillTask != nil &&
 		m.reviewPrefillProjectID == projectID &&
@@ -2483,13 +2493,7 @@ func personalityCommand() command {
 					return personalitySelector(m, commandUsage("personality", "show"), "personality show", "show", false)
 				}
 				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					personalities, err := c.ListPersonalities(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					personality, err := matchRef(personalities, ref,
-						func(p client.Personality) string { return p.Key },
-						func(p client.Personality) string { return p.Name })
+					personality, err := resolvePersonality(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
@@ -2526,13 +2530,7 @@ func personalityCommand() command {
 				description := strings.TrimSpace(parts[2])
 				prompt := strings.TrimSpace(parts[3])
 				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					personalities, err := c.ListPersonalities(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					personality, err := matchRef(personalities, ref2,
-						func(p client.Personality) string { return p.Key },
-						func(p client.Personality) string { return p.Name })
+					personality, err := resolvePersonality(ctx, c, pid, ref2)
 					if err != nil {
 						return "", err
 					}
@@ -2556,13 +2554,7 @@ func personalityCommand() command {
 					return personalitySelector(m, commandUsage("personality", "set"), "personality set", "set", false)
 				}
 				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					personalities, err := c.ListPersonalities(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					personality, err := matchRef(personalities, ref,
-						func(p client.Personality) string { return p.Key },
-						func(p client.Personality) string { return p.Name })
+					personality, err := resolvePersonality(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
@@ -2573,13 +2565,7 @@ func personalityCommand() command {
 					return personalitySelector(m, commandUsage("personality", "delete"), "personality delete", "delete", false)
 				}
 				cmd := run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					personalities, err := c.ListPersonalities(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					personality, err := matchRef(personalities, ref,
-						func(p client.Personality) string { return p.Key },
-						func(p client.Personality) string { return p.Name })
+					personality, err := resolvePersonality(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}

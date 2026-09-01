@@ -194,6 +194,32 @@ func TestAutomationShowSelectorDispatchesResolvedItemWithoutSecondList(t *testin
 	}
 }
 
+func TestPersonalitySelectorSetUsesResolvedItemWithoutSecondCatalogLookup(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/personality": selPersonalitiesHTML,
+	})
+	m = runLine(t, m, "/personality set")
+	if !m.selectorActive {
+		t.Fatalf("expected personality selector:\n%s", transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive {
+		t.Fatal("selector remained open after selecting a personality")
+	}
+	if got := rec.count(http.MethodGet, "/personality"); got != 1 {
+		t.Fatalf("selector set made %d catalog requests, want exactly one:\n%s", got, rec.all())
+	}
+	if got := rec.count(http.MethodPost, "/personality/save"); got != 1 {
+		t.Fatalf("selector set made %d save requests, want exactly one:\n%s", got, rec.all())
+	}
+	if !rec.sawQuery("POST /personality/save?project_id=p1") {
+		t.Fatalf("selector set lost project scope:\n%s", rec.all())
+	}
+	if !rec.sawForm("POST /personality/save?personality=reviewer") {
+		t.Fatalf("selector set did not use the canonical key:\n%s", rec.all())
+	}
+}
+
 func TestPersonalitySelectorRendersKinds(t *testing.T) {
 	m, _ := dispatchModel(t, map[string]string{
 		"/personality": `<div id="personality-section" data-selected-personality="override">

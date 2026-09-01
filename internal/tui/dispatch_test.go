@@ -2077,6 +2077,130 @@ func TestPersonalitySet(t *testing.T) {
 	}
 }
 
+func TestResolvePersonalityReferenceTiers(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="" data-personality-name="Base" data-personality-is-preset="true"></div>
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-is-preset="false"></div>
+		<div data-personality-key="quiet_mode" data-personality-name="Quiet Builder" data-personality-is-preset="false"></div>
+		<div data-personality-key="archive_mode" data-personality-name="Archive Specialist" data-personality-is-preset="false"></div>
+		<div data-personality-key="review_one" data-personality-name="Review One" data-personality-is-preset="false"></div>
+		<div data-personality-key="review_two" data-personality-name="Review Two" data-personality-is-preset="false"></div>
+	</div>`
+	var catalogRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/personality" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		catalogRequests++
+		if got := r.URL.Query().Get("project_id"); got != "project-two" {
+			t.Errorf("personality catalog project_id = %q, want project-two", got)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(personalitiesHTML))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name      string
+		ref       string
+		wantKey   string
+		wantError string
+	}{
+		{name: "exact key", ref: "RELEASE_COACH", wantKey: "release_coach"},
+		{name: "exact name", ref: "release coach", wantKey: "release_coach"},
+		{name: "unique prefix", ref: "quiet", wantKey: "quiet_mode"},
+		{name: "unique substring", ref: "pecial", wantKey: "archive_mode"},
+		{name: "ambiguous prefix", ref: "review", wantError: "ambiguous"},
+		{name: "unknown", ref: "missing", wantError: "nothing matches"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolvePersonality(context.Background(), c, "project-two", tc.ref)
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("resolvePersonality(%q) error = %v, want %q", tc.ref, err, tc.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolvePersonality(%q) failed: %v", tc.ref, err)
+			}
+			if got.Key != tc.wantKey {
+				t.Fatalf("resolvePersonality(%q) key = %q, want %q", tc.ref, got.Key, tc.wantKey)
+			}
+		})
+	}
+	if catalogRequests != len(cases) {
+		t.Fatalf("personality catalog requests = %d, want %d", catalogRequests, len(cases))
+	}
+}
+
+func TestPersonalityDirectActionsStopOnCatalogFailure(t *testing.T) {
+	cases := []struct {
+		name         string
+		line         string
+		needsConfirm bool
+	}{
+		{name: "show", line: "/personality show known"},
+		{name: "edit", line: "/personality edit known | Updated | description | A valid prompt that is long enough"},
+		{name: "set", line: "/personality set known"},
+		{name: "delete", line: "/personality delete known", needsConfirm: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var catalogRequests, mutationRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/personality" {
+					catalogRequests++
+					if got := r.URL.Query().Get("project_id"); got != "p1" {
+						t.Errorf("catalog project_id = %q, want p1", got)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = fmt.Fprint(w, `{"error":"personality catalog unavailable"}`)
+					return
+				}
+				mutationRequests++
+				t.Errorf("catalog failure must not reach mutation route: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID = "p1"
+			m.selectedName = "demo"
+
+			if tc.needsConfirm {
+				m = runLine(t, m, tc.line)
+				if m.pendingConfirmation == nil {
+					t.Fatal("delete did not wait for confirmation")
+				}
+				m = runLine(t, m, "yes")
+			} else {
+				m = runLine(t, m, tc.line)
+			}
+			if catalogRequests != 1 {
+				t.Fatalf("catalog requests = %d, want 1", catalogRequests)
+			}
+			if mutationRequests != 0 {
+				t.Fatalf("mutation requests = %d, want 0", mutationRequests)
+			}
+			if out := stripANSI(transcript(m)); !strings.Contains(out, "personality catalog unavailable") {
+				t.Fatalf("catalog failure missing from transcript:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestPersonalityListShowSetAndUnknownAction(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="release_coach">
 		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard tone"
