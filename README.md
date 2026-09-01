@@ -151,7 +151,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/reflection` | `history` | `show`, `summary` |
 | `/grades` | | — |
 | `/insights` | `suggestions` | `show`, `analyze` |
-| `/automations` | | — |
+| `/automations` | `automation` | `list`, `show`, `open`, `run-now`, `pause`, `resume`, `delete` |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
 | `/projects` | | `list`, `create <name> <path>` |
 | `/project <name>` | | select the active project |
@@ -290,6 +290,44 @@ openvibely-tui -project demo --force channels remove discord
 Interactive removal asks you to type `yes` to confirm or press `Esc` to cancel.
 CLI removal requires `--force` (or `-f`). GitHub and Slack OAuth connection and
 callback flows still require a browser.
+
+### Automations
+
+`/automations` (also `/automation`) exposes the selected project's recurring
+automation inspection and lifecycle controls. The supported actions are `list`,
+`show`, `open`, `run-now`, `pause`, `resume`, and `delete`; `open` is an alias
+for `show`. Automation creation is not exposed by this command and remains
+handled elsewhere.
+
+In the interactive TUI:
+
+```
+/automations list
+/automations show "Nightly sweep"
+/automations open automation-id
+/automations run-now "Nightly sweep"
+/automations pause "Nightly sweep"
+/automations resume "Nightly sweep"
+/automations delete "Nightly sweep"
+```
+
+The same controls work as one-shot CLI commands. Put global flags before the
+command:
+
+```bash
+openvibely-tui -project demo automations list
+openvibely-tui -project demo automations show "Nightly sweep"
+openvibely-tui -project demo automations open automation-id
+openvibely-tui -project demo automations run-now "Nightly sweep"
+openvibely-tui -project demo automations pause "Nightly sweep"
+openvibely-tui -project demo automations resume "Nightly sweep"
+openvibely-tui -project demo --force automations delete "Nightly sweep"
+```
+
+Interactive deletion requires typing `yes` to confirm, or `Esc` to cancel.
+One-shot CLI deletion requires `--force` or its `-f` shorthand; without it the
+command exits without deleting anything. Automation references resolve by ID,
+ID prefix, or name, and all actions use the selected project.
 
 ### Personalities
 

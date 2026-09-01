@@ -2721,7 +2721,7 @@ func automationsCommand() command {
 			"automations run-now <automation>           trigger an immediate run",
 			"automations pause <automation>              pause an active automation",
 			"automations resume <automation>             resume a paused automation",
-			"automations delete <automation>             remove an automation",
+			"automations delete <automation>             remove an automation (interactive: type 'yes'; CLI: use --force/-f before the command)",
 			"omit <automation> on show/open/run-now/pause/resume/delete → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
@@ -2729,11 +2729,13 @@ func automationsCommand() command {
 			{action: "open", args: "<automation>", description: "alias for show"},
 		},
 		examples: []string{
+			`automations list`,
 			`automations show "Nightly sweep"`,
 			`automations open automation-id`,
 			`automations run-now "Nightly sweep"`,
 			`automations pause "Nightly sweep"`,
 			`automations resume "Nightly sweep"`,
+			`automations delete "Nightly sweep"`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()

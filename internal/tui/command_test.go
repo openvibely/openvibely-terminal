@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -754,6 +757,68 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("channels help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
+	defer func() { cmdPrefix = "/" }()
+	cmdPrefix = "/"
+
+	cmd := lookupCommand("automations")
+	if cmd == nil {
+		t.Fatal("automations command missing")
+	}
+	wantActions := []string{"list", "show", "open", "run-now", "pause", "resume", "delete"}
+	if !reflect.DeepEqual(cmd.actions, wantActions) {
+		t.Fatalf("automations actions = %#v, want %#v", cmd.actions, wantActions)
+	}
+
+	help := renderCommandHelp(*cmd)
+	for _, action := range wantActions {
+		if !strings.Contains(help, action) {
+			t.Errorf("automations help missing %q:\n%s", action, help)
+		}
+	}
+	for _, example := range cmd.examples {
+		if want := "/" + example; !strings.Contains(help, want) {
+			t.Errorf("automations help missing example %q:\n%s", want, help)
+		}
+	}
+	for _, want := range []string{"type 'yes'", "--force/-f"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("automations help missing deletion safety %q:\n%s", want, help)
+		}
+	}
+
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed while locating README.md")
+	}
+	readme, err := os.ReadFile(filepath.Join(filepath.Dir(source), "..", "..", "README.md"))
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	readmeText := string(readme)
+	row := "| `/automations` | `automation` | `list`, `show`, `open`, `run-now`, `pause`, `resume`, `delete` |"
+	if !strings.Contains(readmeText, row) {
+		t.Fatalf("README automation command row is missing or out of sync:\n%s", row)
+	}
+	for _, example := range cmd.examples {
+		if want := "/" + example; !strings.Contains(readmeText, want) {
+			t.Errorf("README missing interactive automation example %q", want)
+		}
+		cliExample := "openvibely-tui -project demo " + example
+		if strings.HasPrefix(example, "automations delete ") {
+			cliExample = "openvibely-tui -project demo --force " + example
+		}
+		if !strings.Contains(readmeText, cliExample) {
+			t.Errorf("README missing one-shot automation example %q", cliExample)
+		}
+	}
+	for _, want := range []string{"typing `yes`", "`--force` or its `-f` shorthand"} {
+		if !strings.Contains(readmeText, want) {
+			t.Errorf("README missing deletion safety %q", want)
 		}
 	}
 }
