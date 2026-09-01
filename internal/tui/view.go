@@ -610,10 +610,14 @@ func attachmentSizeText(size int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "KMGTPE"[exp])
 }
 
+func renderLifecycleTaskHeading(task client.Task) string {
+	title := firstNonEmpty(task.Title, shortID(task.ID))
+	return fmt.Sprintf("%s  (id %s)\n", sectionStyle.Render(title), task.ID)
+}
+
 func renderLifecycleExecutions(task client.Task, executions []client.LifecycleExecution) string {
 	var b strings.Builder
-	title := firstNonEmpty(task.Title, shortID(task.ID))
-	fmt.Fprintf(&b, "%s  (id %s)\n", sectionStyle.Render(title), task.ID)
+	b.WriteString(renderLifecycleTaskHeading(task))
 	if len(executions) == 0 {
 		b.WriteString(dimStyle.Render("no executions for this task"))
 		return b.String()
@@ -635,8 +639,7 @@ func renderLifecycleExecutions(task client.Task, executions []client.LifecycleEx
 
 func renderLifecycleEvents(task client.Task, execution client.LifecycleExecution, events []client.LifecycleEvent) string {
 	var b strings.Builder
-	taskTitle := firstNonEmpty(task.Title, shortID(task.ID))
-	fmt.Fprintf(&b, "%s  (id %s)\n", sectionStyle.Render(taskTitle), task.ID)
+	b.WriteString(renderLifecycleTaskHeading(task))
 	fmt.Fprintf(&b, "execution %s", firstNonEmpty(execution.ID, "(unnamed)"))
 	if execution.SkillKey != "" {
 		b.WriteString(" · " + execution.SkillKey)

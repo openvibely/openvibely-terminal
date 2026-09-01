@@ -370,6 +370,40 @@ func TestTruncateNeverCutsMidRune(t *testing.T) {
 	}
 }
 
+func TestRenderLifecycleRenderersShareTaskHeading(t *testing.T) {
+	cases := []struct {
+		name      string
+		task      client.Task
+		wantTitle string
+	}{
+		{
+			name:      "titled task",
+			task:      client.Task{ID: "task-123456", Title: "Deploy API"},
+			wantTitle: "Deploy API",
+		},
+		{
+			name:      "empty title uses short ID",
+			task:      client.Task{ID: "task-123456"},
+			wantTitle: "task-123",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			executionHeading := strings.SplitN(renderLifecycleExecutions(tc.task, nil), "\n", 2)[0]
+			eventHeading := strings.SplitN(renderLifecycleEvents(tc.task, client.LifecycleExecution{ID: "execution-1"}, nil), "\n", 2)[0]
+			if executionHeading != eventHeading {
+				t.Fatalf("lifecycle headings differ\nexecutions: %q\nevents: %q", executionHeading, eventHeading)
+			}
+
+			want := fmt.Sprintf("%s  (id %s)", tc.wantTitle, tc.task.ID)
+			if got := stripANSI(executionHeading); got != want {
+				t.Fatalf("lifecycle heading = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestRenderLifecycleEventsDoesNotMutateDecodedPayload(t *testing.T) {
 	payload := map[string]any{
 		"message": strings.Repeat("payload ", 32),
