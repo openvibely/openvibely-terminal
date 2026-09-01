@@ -762,6 +762,31 @@ func TestGlobalSkillMutationsSendGlobalScope(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeScheduleRepeat(t *testing.T) {
+	cases := []struct {
+		name   string
+		repeat string
+		want   string
+	}{
+		{name: "hourly alias", repeat: "hourly", want: "hours"},
+		{name: "once", repeat: "once", want: "once"},
+		{name: "daily", repeat: "daily", want: "daily"},
+		{name: "weekly", repeat: "weekly", want: "weekly"},
+		{name: "monthly", repeat: "monthly", want: "monthly"},
+		{name: "seconds", repeat: "seconds", want: "seconds"},
+		{name: "minutes", repeat: "minutes", want: "minutes"},
+		{name: "hours", repeat: "hours", want: "hours"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NormalizeScheduleRepeat(tc.repeat); got != tc.want {
+				t.Errorf("NormalizeScheduleRepeat(%q) = %q, want %q", tc.repeat, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCreateScheduleSendsRepeat(t *testing.T) {
 	var form url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

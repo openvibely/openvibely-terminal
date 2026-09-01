@@ -330,6 +330,15 @@ func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleE
 	return out, summary, nil
 }
 
+// NormalizeScheduleRepeat converts the user-facing "hourly" schedule alias
+// to the backend's "hours" repeat type. Other repeat values are unchanged.
+func NormalizeScheduleRepeat(repeat string) string {
+	if repeat == "hourly" {
+		return "hours"
+	}
+	return repeat
+}
+
 // CreateSchedule schedules a task. repeat is
 // once/daily/weekly/monthly/seconds/minutes/hours/hourly. The user-facing
 // "hourly" keyword is translated to the backend's "hours" repeat_type, since
@@ -338,9 +347,7 @@ func (c *Client) CreateSchedule(ctx context.Context, taskID, runAt, repeat strin
 	if interval < 1 || interval > 365 {
 		return fmt.Errorf("repeat interval must be between 1 and 365")
 	}
-	if repeat == "hourly" {
-		repeat = "hours"
-	}
+	repeat = NormalizeScheduleRepeat(repeat)
 	v := url.Values{}
 	v.Set("run_at", runAt)
 	v.Set("repeat_type", repeat)

@@ -1963,6 +1963,10 @@ func TestScheduleAddFastRepeatTypes(t *testing.T) {
 		wantRepeatType string
 		wantInterval   string
 	}{
+		{"/schedule add Refactor 2026-09-01T10:00 once", "repeat_type=once", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 daily", "repeat_type=daily", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 weekly", "repeat_type=weekly", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 monthly", "repeat_type=monthly", "repeat_interval=1"},
 		{"/schedule add Refactor 2026-09-01T10:00 seconds", "repeat_type=seconds", "repeat_interval=1"},
 		{"/schedule add Refactor 2026-09-01T10:00 seconds 1", "repeat_type=seconds", "repeat_interval=1"},
 		{"/schedule add Refactor 2026-09-01T10:00 seconds 30", "repeat_type=seconds", "repeat_interval=30"},
@@ -1970,7 +1974,7 @@ func TestScheduleAddFastRepeatTypes(t *testing.T) {
 		{"/schedule add Refactor 2026-09-01T10:00 minutes 15", "repeat_type=minutes", "repeat_interval=15"},
 		{"/schedule add Refactor 2026-09-01T10:00 hours", "repeat_type=hours", "repeat_interval=1"},
 		{"/schedule add Refactor 2026-09-01T10:00 hours 4", "repeat_type=hours", "repeat_interval=4"},
-		{"/schedule add Refactor 2026-09-01T10:00 hourly", "repeat_type=hours", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 HoUrLy", "repeat_type=hours", "repeat_interval=1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.line, func(t *testing.T) {

@@ -1133,7 +1133,7 @@ func scheduleCommand() command {
 					return m, errCmd("repeat interval must be between 1 and 365")
 				}
 				if isRepeat(rest[len(rest)-1]) {
-					repeat = normalizeRepeat(rest[len(rest)-1])
+					repeat = client.NormalizeScheduleRepeat(strings.ToLower(rest[len(rest)-1]))
 					rest = rest[:len(rest)-1]
 				}
 				when := rest[len(rest)-1]
@@ -1241,16 +1241,6 @@ func isRepeat(s string) bool {
 		return true
 	}
 	return false
-}
-
-// normalizeRepeat maps user-facing repeat keywords to backend repeat types,
-// keeping "hourly" as an accepted synonym for "hours".
-func normalizeRepeat(s string) string {
-	r := strings.ToLower(s)
-	if r == "hourly" {
-		return "hours"
-	}
-	return r
 }
 
 // --- alerts ---
