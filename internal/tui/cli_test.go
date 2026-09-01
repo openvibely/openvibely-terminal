@@ -2403,6 +2403,60 @@ func TestCLIJSONTaskReviewsAdd(t *testing.T) {
 	}
 }
 
+func TestCLIJSONTaskReviewsAddUnquotedTitleContainingLocationToken(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Add 1:1 customer support">Add 1:1 customer support</a>
+	</div>`
+	addedReview := strings.Replace(taskReviewHTML, "internal/client/tasks.go", "internal/auth.go", 1)
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":      cliProjects,
+		"/tasks":             board,
+		"/tasks/t-1/reviews": addedReview,
+	})
+
+	var out bytes.Buffer
+	args := []string{"tasks", "reviews", "add", "Add", "1:1", "customer", "support", "internal/auth.go:42", "Needs", "error", "handling"}
+	if err := RunCLI(c, &out, "demo", args, false, true); err != nil {
+		t.Fatalf("tasks reviews add --json failed: %v\noutput: %s", err, out.String())
+	}
+	wantForm := "POST /tasks/t-1/reviews?comment_text=Needs+error+handling&file_path=internal%2Fauth.go&line_number=42&line_type=new"
+	if !rec.sawForm(wantForm) {
+		t.Fatalf("unquoted location-shaped title posted unexpected form, want %q; forms: %v", wantForm, rec.forms)
+	}
+	var review client.ReviewComment
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &review); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, out.String())
+	}
+	if review.FilePath != "internal/auth.go" || review.LineNumber != 42 || review.CommentText != "Needs error handling" || review.LineType != "new" {
+		t.Fatalf("review = %+v, want exact submitted fields", review)
+	}
+}
+
+func TestCLITaskReviewsAddAmbiguousPrefixDoesNotMutate(t *testing.T) {
+	const board = `<div>
+	  <div data-task-id="t-1" data-task-status="pending" data-task-category="backlog">
+	    <a href="/tasks/t-1?from=tasks" title="Add 1:1 customer support">Add 1:1 customer support</a>
+	  </div>
+	  <div data-task-id="t-2" data-task-status="pending" data-task-category="backlog">
+	    <a href="/tasks/t-2?from=tasks" title="Add 1:1 customer success">Add 1:1 customer success</a>
+	  </div>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        board,
+	})
+
+	var out bytes.Buffer
+	args := []string{"tasks", "reviews", "add", "Add", "1:1", "customer", "internal/auth.go:42", "Needs", "error", "handling"}
+	err := RunCLI(c, &out, "demo", args, false, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "ambiguous") {
+		t.Fatalf("expected ambiguous task-reference error, got %v; output: %s", err, out.String())
+	}
+	if got := rec.count("POST", "/tasks/t-1/reviews") + rec.count("POST", "/tasks/t-2/reviews"); got != 0 {
+		t.Fatalf("ambiguous task/location boundary must not mutate, got %d POSTs; calls:\n%s", got, rec.all())
+	}
+}
+
 func TestCLITaskReviewsAddWithoutReferenceReturnsUsageWithoutMutation(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

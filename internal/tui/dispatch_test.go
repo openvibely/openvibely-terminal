@@ -5535,6 +5535,69 @@ func TestTasksReviewsAddQuotedTaskTitlePostsOneComment(t *testing.T) {
 	}
 }
 
+func TestTasksReviewsAddUnquotedTitleContainingLocationToken(t *testing.T) {
+	board := strings.Replace(taskBoardHTML, "Refactor the API", "Add 1:1 customer support", 1)
+	addedReview := strings.Replace(taskReviewHTML, "internal/client/tasks.go", "internal/auth.go", 1)
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             board,
+		"/tasks/t-1/reviews": addedReview,
+	})
+	m = runLine(t, m, "/tasks reviews add Add 1:1 customer support internal/auth.go:42 Needs error handling")
+
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
+		t.Fatalf("expected exactly one add review call, got %d; calls:\n%s", got, rec.all())
+	}
+	wantForm := "POST /tasks/t-1/reviews?comment_text=Needs+error+handling&file_path=internal%2Fauth.go&line_number=42&line_type=new"
+	if !rec.sawForm(wantForm) {
+		t.Fatalf("unquoted location-shaped title posted unexpected form, want %q; forms: %v", wantForm, rec.forms)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "added review comment on internal/auth.go:42 for Add 1:1 customer support") {
+		t.Fatalf("success confirmation did not identify the complete task and location:\n%s", out)
+	}
+	if strings.Contains(out, "for 1:1") {
+		t.Fatalf("success confirmation used a synthetic task reference:\n%s", out)
+	}
+}
+
+func TestTasksReviewsAddLocationShapedCommentTokenRemainsComment(t *testing.T) {
+	addedReview := strings.Replace(taskReviewHTML, "internal/client/tasks.go", "internal/auth.go", 1)
+	addedReview = strings.Replace(addedReview, "Needs error handling", "See 1:1 for context", 1)
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             taskBoardHTML,
+		"/tasks/t-1/reviews": addedReview,
+	})
+	m = runLine(t, m, "/tasks reviews add Refactor the API internal/auth.go:42 See 1:1 for context")
+
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
+		t.Fatalf("expected exactly one add review call, got %d; calls:\n%s", got, rec.all())
+	}
+	wantForm := "POST /tasks/t-1/reviews?comment_text=See+1%3A1+for+context&file_path=internal%2Fauth.go&line_number=42&line_type=new"
+	if !rec.sawForm(wantForm) {
+		t.Fatalf("location-shaped comment token was parsed as a location, want %q; forms: %v", wantForm, rec.forms)
+	}
+}
+
+func TestTasksReviewsAddAmbiguousPrefixDoesNotMutate(t *testing.T) {
+	const ambiguousTasks = `<div>
+	  <div data-task-id="t-1" data-task-status="pending" data-task-category="backlog">
+	    <a href="/tasks/t-1?from=tasks" title="Add 1:1 customer support">Add 1:1 customer support</a>
+	  </div>
+	  <div data-task-id="t-2" data-task-status="pending" data-task-category="backlog">
+	    <a href="/tasks/t-2?from=tasks" title="Add 1:1 customer success">Add 1:1 customer success</a>
+	  </div>
+	</div>`
+	m, rec := dispatchModel(t, map[string]string{"/tasks": ambiguousTasks})
+	m = runLine(t, m, "/tasks reviews add Add 1:1 customer internal/auth.go:42 Needs error handling")
+
+	if got := rec.count("POST", "/tasks/t-1/reviews") + rec.count("POST", "/tasks/t-2/reviews"); got != 0 {
+		t.Fatalf("ambiguous task/location boundary must not mutate, got %d POSTs; calls:\n%s", got, rec.all())
+	}
+	if out := strings.ToLower(stripANSI(transcript(m))); !strings.Contains(out, "ambiguous") {
+		t.Fatalf("expected an ambiguous task-reference error:\n%s", transcript(m))
+	}
+}
+
 func TestInteractiveUnmatchedQuoteReportsParseError(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	m = runLine(t, m, `/tasks run "Refactor the API`)

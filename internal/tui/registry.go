@@ -375,24 +375,23 @@ func tasksCommand() command {
 					if len(reviewRest) == 0 {
 						return taskSelectorWithSuffix(m, commandUsage("tasks", "reviews add"), "tasks reviews add", " ")
 					}
-					if len(reviewRest) < 3 {
-						return m, errCmd(commandUsage("tasks", "reviews add"))
-					}
-					locIdx, filePath, lineNumber := findReviewLocation(reviewRest)
-					if locIdx <= 0 || locIdx >= len(reviewRest)-1 {
-						return m, errCmd(commandUsage("tasks", "reviews add"))
-					}
-					reviewRef := strings.Join(reviewRest[:locIdx], " ")
-					commentText := strings.TrimSpace(strings.Join(reviewRest[locIdx+1:], " "))
-					if reviewRef == "" || filePath == "" || lineNumber <= 0 || commentText == "" {
+					if len(reviewRest) < 3 || len(reviewLocationCandidates(reviewRest)) == 0 {
 						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
 					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
-						t, err := m.resolveReviewTask(ctx, c, pid, reviewRef)
+						tasks, err := m.reviewTaskCandidates(ctx, c, pid)
 						if err != nil {
 							return "", err
 						}
-						form := client.ReviewCommentForm{FilePath: filePath, LineNumber: lineNumber, LineType: "new", CommentText: commentText}
+						t, location, err := resolveReviewLocation(tasks, reviewRest)
+						if err != nil {
+							return "", err
+						}
+						commentText := strings.TrimSpace(strings.Join(reviewRest[location.index+1:], " "))
+						if commentText == "" {
+							return "", fmt.Errorf("%s", commandUsage("tasks", "reviews add"))
+						}
+						form := client.ReviewCommentForm{FilePath: location.filePath, LineNumber: location.lineNumber, LineType: "new", CommentText: commentText}
 						reviews, err := c.AddTaskReviewComment(ctx, t.ID, form)
 						if err != nil {
 							return "", err
@@ -401,7 +400,7 @@ func tasksCommand() command {
 						if jsonMode {
 							return marshalJSON(added)
 						}
-						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", filePath, lineNumber, firstNonEmpty(t.Title, shortID(t.ID)), renderTaskReviews(t, reviews)), nil
+						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", location.filePath, location.lineNumber, firstNonEmpty(t.Title, shortID(t.ID)), renderTaskReviews(t, reviews)), nil
 					})
 				}
 
@@ -667,14 +666,83 @@ func isReviewTab(s string) bool {
 	return ok && tab.Name == "review"
 }
 
-func findReviewLocation(args []string) (int, string, int) {
-	for i, arg := range args {
-		filePath, lineNumber, ok := parseReviewLocation(arg)
-		if ok {
-			return i, filePath, lineNumber
+type reviewLocation struct {
+	index      int
+	filePath   string
+	lineNumber int
+}
+
+func reviewLocationCandidates(args []string) []reviewLocation {
+	var candidates []reviewLocation
+	for i := 1; i < len(args)-1; i++ {
+		filePath, lineNumber, ok := parseReviewLocation(args[i])
+		if !ok || strings.TrimSpace(strings.Join(args[i+1:], " ")) == "" {
+			continue
+		}
+		candidates = append(candidates, reviewLocation{index: i, filePath: filePath, lineNumber: lineNumber})
+	}
+	return candidates
+}
+
+// resolveReviewLocation finds the longest task-reference prefix that precedes a
+// valid file:line operand. Resolving all candidates is important because an
+// unquoted task title can itself contain a location-shaped token. A later
+// ambiguous candidate is retained as an error rather than allowing a shorter
+// prefix to select a potentially wrong task and location.
+func resolveReviewLocation(tasks []client.Task, args []string) (client.Task, reviewLocation, error) {
+	var zero client.Task
+	var empty reviewLocation
+	candidates := reviewLocationCandidates(args)
+	if len(candidates) == 0 {
+		return zero, empty, fmt.Errorf("missing task reference, review location, or comment")
+	}
+
+	var bestTask client.Task
+	var bestLocation reviewLocation
+	bestIndex := -1
+	var bestAmbiguous error
+	bestAmbiguousIndex := -1
+	var bestOtherErr error
+	bestOtherErrIndex := -1
+	for _, location := range candidates {
+		ref := strings.Join(args[:location.index], " ")
+		task, err := matchRef(tasks, ref,
+			func(t client.Task) string { return t.ID },
+			func(t client.Task) string { return t.Title })
+		if err == nil {
+			if location.index > bestIndex {
+				bestTask = task
+				bestLocation = location
+				bestIndex = location.index
+			}
+			continue
+		}
+		if strings.Contains(err.Error(), "ambiguous") {
+			if location.index > bestAmbiguousIndex {
+				bestAmbiguous = err
+				bestAmbiguousIndex = location.index
+			}
+			continue
+		}
+		if location.index > bestOtherErrIndex {
+			bestOtherErr = err
+			bestOtherErrIndex = location.index
 		}
 	}
-	return -1, "", 0
+
+	if bestAmbiguousIndex > bestIndex {
+		return zero, empty, bestAmbiguous
+	}
+	if bestIndex >= 0 {
+		return bestTask, bestLocation, nil
+	}
+	if bestAmbiguous != nil {
+		return zero, empty, bestAmbiguous
+	}
+	if bestOtherErr != nil {
+		return zero, empty, bestOtherErr
+	}
+	return zero, empty, fmt.Errorf("nothing matches a task reference")
 }
 
 func parseReviewLocation(s string) (string, int, bool) {
@@ -717,14 +785,13 @@ func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (
 		func(t client.Task) string { return t.Title })
 }
 
-func (m Model) resolveReviewTask(ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {
+func (m Model) reviewTaskCandidates(ctx context.Context, c *client.Client, projectID string) ([]client.Task, error) {
 	if m.reviewPrefillTask != nil &&
 		m.reviewPrefillProjectID == projectID &&
-		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTaskRef), strings.TrimSpace(ref)) &&
 		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTask.ID), strings.TrimSpace(m.reviewPrefillTaskRef)) {
-		return *m.reviewPrefillTask, nil
+		return []client.Task{*m.reviewPrefillTask}, nil
 	}
-	return resolveTask(ctx, c, projectID, ref)
+	return c.ListTasks(ctx, projectID)
 }
 
 func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
