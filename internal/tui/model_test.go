@@ -1917,33 +1917,48 @@ func TestQueuedChatPromotionCorrelatesSSECompletion(t *testing.T) {
 func TestChatCompletionAppendsAgentReply(t *testing.T) {
 	m := newTestModel(t)
 	m.pendingMsgID = "msg-1"
+	m.pendingMsgExecutionID = "exec-1"
+	m.pendingMsgProjectID = "project-1"
+	m.pendingMsgProjectGeneration = 7
 	m.busy = true
 
 	next, _ := m.Update(chatStatusMsg{status: &client.ChatStatus{
-		Status: "completed", Response: "done!", TaskIDs: []string{"t1"},
+		Status: "completed", Response: "done!", TaskIDs: []string{"t1", "t2"},
 	}})
 	m = next.(Model)
 
-	if m.busy || m.pendingMsgID != "" {
-		t.Error("completion should clear the pending state")
+	if m.busy || m.pendingMsgID != "" || m.pendingMsgExecutionID != "" || m.pendingMsgProjectID != "" || m.pendingMsgProjectGeneration != 0 {
+		t.Errorf("completion should clear pending state: busy=%t id=%q execution=%q project=%q generation=%d", m.busy, m.pendingMsgID, m.pendingMsgExecutionID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
 	}
 	out := transcript(m)
 	if !strings.Contains(out, "agent::done!") {
 		t.Errorf("agent reply missing:\n%s", out)
 	}
-	if !strings.Contains(out, "created tasks: t1") {
+	if !strings.Contains(out, "created tasks: t1, t2") {
 		t.Errorf("task ids missing:\n%s", out)
 	}
 }
 
-func TestChatFailureIsReported(t *testing.T) {
-	m := newTestModel(t)
-	m.pendingMsgID = "msg-1"
-	next, _ := m.Update(chatStatusMsg{status: &client.ChatStatus{Status: "failed", Error: "nope"}})
-	m = next.(Model)
+func TestChatFailureIsReportedAndClearsPendingState(t *testing.T) {
+	for _, status := range []string{"failed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			m := newTestModel(t)
+			m.pendingMsgID = "msg-1"
+			m.pendingMsgExecutionID = "exec-1"
+			m.pendingMsgProjectID = "project-1"
+			m.pendingMsgProjectGeneration = 7
+			m.busy = true
 
-	if !strings.Contains(transcript(m), "failed: nope") {
-		t.Errorf("expected failure text:\n%s", transcript(m))
+			next, _ := m.Update(chatStatusMsg{status: &client.ChatStatus{Status: status, Error: "nope"}})
+			m = next.(Model)
+
+			if m.busy || m.pendingMsgID != "" || m.pendingMsgExecutionID != "" || m.pendingMsgProjectID != "" || m.pendingMsgProjectGeneration != 0 {
+				t.Errorf("%s should clear pending state: busy=%t id=%q execution=%q project=%q generation=%d", status, m.busy, m.pendingMsgID, m.pendingMsgExecutionID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+			}
+			if !strings.Contains(transcript(m), status+": nope") {
+				t.Errorf("expected %s text:\n%s", status, transcript(m))
+			}
+		})
 	}
 }
 
@@ -2996,7 +3011,7 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"pending"}`))
+		_, _ = w.Write([]byte(`{"message_id":"msg-42","status":"completed","response":"fallback reply"}`))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -3009,6 +3024,10 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 	m = updated.(Model)
 
 	m.pendingMsgID = "msg-42"
+	m.pendingMsgExecutionID = "exec-42"
+	m.pendingMsgProjectID = "project-A"
+	m.pendingMsgProjectGeneration = 1
+	m.selectedID = "project-A"
 	m.busy = true
 
 	// Wire up closed SSE channels so waitForSSE() returns immediately in the test.
@@ -3022,7 +3041,7 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 	// Deliver a chat_response_done SSE event for the pending execution with no CompletedOutput.
 	ev := client.Event{
 		Name: "chat_response_done",
-		Data: json.RawMessage(`{"exec_id":"msg-42"}`),
+		Data: json.RawMessage(`{"exec_id":"msg-42","project_id":"project-A"}`),
 	}
 	_, cmd := m.Update(sseEventMsg{event: ev})
 
@@ -3031,24 +3050,40 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 	}
 
 	// tea.Batch returns a Cmd that, when called, yields a BatchMsg containing
-	// the sub-cmds rather than running them immediately. Unwrap the batch and
-	// run each sub-cmd in its own goroutine so we can observe the fetch.
+	// the sub-cmds rather than running them immediately. Execute each one so
+	// the immediate status result can be fed back through Update.
 	result := cmd()
 	batch, ok := result.(tea.BatchMsg)
 	if !ok {
 		t.Fatalf("expected tea.BatchMsg from sseEventMsg chat_response_done branch, got %T", result)
 	}
+	var fetched chatStatusMsg
 	for _, subcmd := range batch {
-		if subcmd != nil {
-			go subcmd()
+		if subcmd == nil {
+			continue
+		}
+		if msg, ok := subcmd().(chatStatusMsg); ok {
+			fetched = msg
 		}
 	}
 
 	select {
 	case <-fetchCalled:
 		// immediate fetch confirmed
-	case <-time.After(2 * time.Second):
-		t.Error("expected an immediate GetChatStatus fetch, but none arrived within 2s")
+	default:
+		t.Fatal("expected an immediate GetChatStatus fetch")
+	}
+	if fetched.status == nil {
+		t.Fatal("immediate fetch did not return a chat status")
+	}
+
+	updated, _ = m.Update(fetched)
+	m = updated.(Model)
+	if m.busy || m.pendingMsgID != "" || m.pendingMsgExecutionID != "" || m.pendingMsgProjectID != "" || m.pendingMsgProjectGeneration != 0 {
+		t.Errorf("fallback completion should clear pending state: busy=%t id=%q execution=%q project=%q generation=%d", m.busy, m.pendingMsgID, m.pendingMsgExecutionID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+	}
+	if !strings.Contains(transcript(m), "agent::fallback reply") {
+		t.Fatalf("status fallback did not render the response:\n%s", transcript(m))
 	}
 }
 
@@ -3057,11 +3092,16 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 // displays the reply immediately without an extra HTTP round-trip.
 func TestSSEChatResponseDoneCompletedOutputFastPath(t *testing.T) {
 	m := newTestModel(t)
+	m.selectedID = "project-A"
 	m.pendingMsgID = "msg-99"
+	m.pendingMsgExecutionID = "exec-99"
+	m.pendingMsgProjectID = "project-A"
+	m.pendingMsgProjectGeneration = 1
 	m.busy = true
 
 	payload, _ := json.Marshal(client.ChatEvent{
 		Type:            "chat_response_done",
+		ProjectID:       "project-A",
 		ExecID:          "msg-99",
 		CompletedOutput: "hello from the agent",
 	})
@@ -3072,14 +3112,15 @@ func TestSSEChatResponseDoneCompletedOutputFastPath(t *testing.T) {
 	next, _ := m.Update(sseEventMsg{event: ev})
 	m = next.(Model)
 
-	if m.pendingMsgID != "" {
-		t.Error("pendingMsgID should be cleared after CompletedOutput fast path")
+	if m.busy || m.pendingMsgID != "" || m.pendingMsgExecutionID != "" || m.pendingMsgProjectID != "" || m.pendingMsgProjectGeneration != 0 {
+		t.Errorf("inline completion should clear pending state: busy=%t id=%q execution=%q project=%q generation=%d", m.busy, m.pendingMsgID, m.pendingMsgExecutionID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
 	}
-	if m.busy {
-		t.Error("busy should be false after CompletedOutput fast path")
+	out := transcript(m)
+	if !strings.Contains(out, "agent::hello from the agent") {
+		t.Errorf("expected agent reply in transcript:\n%s", out)
 	}
-	if !strings.Contains(transcript(m), "agent::hello from the agent") {
-		t.Errorf("expected agent reply in transcript:\n%s", transcript(m))
+	if strings.Contains(out, "created tasks:") {
+		t.Errorf("inline SSE completion should not invent task metadata:\n%s", out)
 	}
 	duplicate, _ := m.Update(sseEventMsg{event: ev})
 	m = duplicate.(Model)

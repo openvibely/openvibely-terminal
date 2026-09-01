@@ -658,6 +658,20 @@ func (m Model) matchesPendingChatExecution(id string) bool {
 	return id != "" && (id == m.pendingMsgID || id == m.pendingMsgExecutionID)
 }
 
+// completeChat settles a successful project-chat response. Task IDs are
+// optional because only polling status responses include them.
+func (m *Model) completeChat(response string, taskIDs []string) {
+	m.pendingMsgID = ""
+	m.pendingMsgExecutionID = ""
+	m.pendingMsgProjectID = ""
+	m.pendingMsgProjectGeneration = 0
+	m.busy = false
+	m.append(entry{role: "agent", text: response})
+	if len(taskIDs) > 0 {
+		m.append(entry{role: "system", text: "created tasks: " + strings.Join(taskIDs, ", ")})
+	}
+}
+
 func (m Model) login(username, password string) tea.Cmd {
 	c := m.client
 	sessionGeneration := sessionGenerationOf(m)
@@ -1218,12 +1232,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.status.Status {
 		case "completed":
-			m.clearPendingChat()
-			m.busy = false
-			m.append(entry{role: "agent", text: msg.status.Response})
-			if len(msg.status.TaskIDs) > 0 {
-				m.append(entry{role: "system", text: "created tasks: " + strings.Join(msg.status.TaskIDs, ", ")})
-			}
+			m.completeChat(msg.status.Response, msg.status.TaskIDs)
 			return m, nil
 		case "failed", "cancelled":
 			m.clearPendingChat()
@@ -1343,11 +1352,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Fast path: if the backend populated CompletedOutput in the SSE
 			// payload, display it immediately without an extra HTTP round-trip.
 			if ce.CompletedOutput != "" {
-				m.clearPendingChat()
-				m.busy = false
-				m.append(entry{role: "agent", text: ce.CompletedOutput})
+				m.completeChat(ce.CompletedOutput, nil)
 				return m, m.waitForCurrentSSE(msg.generation)
 			}
+
 			// Otherwise issue an immediate status fetch instead of waiting for
 			// the next 1500ms poll tick.
 			return m, tea.Batch(m.waitForCurrentSSE(msg.generation), m.fetchChatStatus(m.pendingMsgID))
