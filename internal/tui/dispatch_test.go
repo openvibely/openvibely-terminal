@@ -68,6 +68,12 @@ func (r *recorder) sawQuery(substr string) bool {
 	return false
 }
 
+func (r *recorder) urlsSnapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.urls...)
+}
+
 func (r *recorder) saw(method, path string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1064,6 +1070,109 @@ func TestSkillsCommandAddAndToggle(t *testing.T) {
 			t.Errorf("calls:\n%s", rec.all())
 		}
 	})
+}
+
+func TestAnalyticsInteractiveRequiresProjectBeforeDispatch(t *testing.T) {
+	lines := []string{
+		"/analytics",
+		"/analytics usage",
+		"/analytics rates",
+		"/analytics agents",
+		"/analytics frequent",
+		"/analytics failures",
+		"/analytics skills",
+		"/analytics trends",
+	}
+	for _, line := range lines {
+		t.Run(strings.TrimPrefix(line, "/"), func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = ""
+
+			m, cmd := typeLine(t, m, line)
+			if cmd != nil {
+				// Execute an accidentally returned command so this regression also
+				// observes any requests started after dispatch.
+				_ = cmd()
+			}
+			if cmd != nil {
+				t.Errorf("unselected analytics command returned pending work")
+			}
+			if m.busy {
+				t.Errorf("unselected analytics command left the model busy")
+			}
+			for _, uri := range rec.urlsSnapshot() {
+				if strings.Contains(uri, "/api/analytics/") {
+					t.Errorf("unselected analytics command made request %q", uri)
+				}
+			}
+			if out := stripANSI(transcript(m)); !strings.Contains(out, "no project selected — use /project <name>") {
+				t.Fatalf("unselected analytics command did not report project guidance:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
+	const projectID = "selected-project"
+	bodies := map[string]string{
+		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
+		"/api/analytics/success-failure-rates":       `[]`,
+		"/api/analytics/avg-execution-time-by-agent": `[]`,
+		"/api/analytics/avg-execution-time-by-task":  `[]`,
+		"/api/analytics/most-frequent-tasks":         `[]`,
+		"/api/analytics/failed-task-patterns":        `[]`,
+		"/api/analytics/skills":                      `{}`,
+	}
+	allPaths := []string{
+		"/api/analytics/usage",
+		"/api/analytics/success-failure-rates",
+		"/api/analytics/avg-execution-time-by-agent",
+		"/api/analytics/avg-execution-time-by-task",
+		"/api/analytics/most-frequent-tasks",
+		"/api/analytics/failed-task-patterns",
+		"/api/analytics/skills",
+	}
+	cases := []struct {
+		line  string
+		paths []string
+	}{
+		{line: "/analytics", paths: allPaths},
+		{line: "/analytics usage", paths: []string{"/api/analytics/usage"}},
+		{line: "/analytics rates", paths: []string{"/api/analytics/success-failure-rates"}},
+		{line: "/analytics agents", paths: []string{"/api/analytics/avg-execution-time-by-agent"}},
+		{line: "/analytics frequent", paths: []string{"/api/analytics/most-frequent-tasks"}},
+		{line: "/analytics failures", paths: []string{"/api/analytics/failed-task-patterns"}},
+		{line: "/analytics skills", paths: []string{"/api/analytics/skills"}},
+		{line: "/analytics trends", paths: []string{"/api/analytics/avg-execution-time-by-task"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(strings.TrimPrefix(tc.line, "/"), func(t *testing.T) {
+			m, rec := dispatchModel(t, bodies)
+			m.selectedID = projectID
+			_ = runLine(t, m, tc.line)
+
+			want := make(map[string]int, len(tc.paths))
+			for _, path := range tc.paths {
+				want[path]++
+			}
+			got := make(map[string]int, len(tc.paths))
+			for _, uri := range rec.urlsSnapshot() {
+				parts := strings.SplitN(uri, " ", 2)
+				if len(parts) != 2 {
+					t.Fatalf("malformed recorded request %q", uri)
+				}
+				request := strings.SplitN(parts[1], "?", 2)
+				if !strings.Contains(parts[1], "project_id="+projectID) {
+					t.Errorf("analytics request lost selected project scope: %q", uri)
+				}
+				got[request[0]]++
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("analytics endpoints = %v, want %v; requests:\n%s", got, want, rec.all())
+			}
+		})
+	}
 }
 
 func TestAnalyticsUsageDispatchRendersProviderLimitsAndScope(t *testing.T) {

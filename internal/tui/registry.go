@@ -2842,6 +2842,11 @@ func analyticsCommand() command {
 			`analytics failures`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			var cmd tea.Cmd
+			m, cmd, ok := m.needProject()
+			if !ok {
+				return m, cmd
+			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			return m, run("Analytics", cmdTimeout, func(ctx context.Context) (string, error) {
