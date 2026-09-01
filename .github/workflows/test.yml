@@ -4,7 +4,19 @@ on:
   push:
   pull_request:
   workflow_call:
+    inputs:
+      uncached:
+        description: Run tests without the Go test cache
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
+    inputs:
+      uncached:
+        description: Run tests without the Go test cache
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -37,7 +49,11 @@ jobs:
           GOMAXPROCS=1 go vet ./... &
           vet_pid=$!
 
-          go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt || test_status=$?
+          if [[ "${{ inputs.uncached }}" == "true" ]]; then
+            go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt || test_status=$?
+          else
+            go test ./... -timeout 120s -coverpkg=./... -coverprofile=coverage.txt || test_status=$?
+          fi
 
           # Always reap vet so a test failure cannot hide a vet failure or leave it running.
           wait "$vet_pid" || vet_status=$?

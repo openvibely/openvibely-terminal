@@ -569,6 +569,15 @@ make vet          # go vet ./...
 make build
 ```
 
+Routine runs of the GitHub Actions test workflow use Go's successful-test cache.
+For a fresh execution, manually dispatch the workflow with its `uncached` input,
+or run the equivalent local coverage command:
+
+```bash
+go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt
+go tool cover -func=coverage.txt
+```
+
 Tests cover the HTML scrapers and JSON client against `httptest` servers, the
 chat update loop (history, menus, chat polling, SSE backoff), the renderers,
 and an end-to-end dispatch suite asserting that each slash command issues the
@@ -580,7 +589,7 @@ precedes a card's title), because simplified fixtures hide scraping bugs.
 To additionally verify the scrapers against a **running** server:
 
 ```bash
-OPENVIBELY_LIVE=http://localhost:3001 go test ./internal/client -run TestLiveBackend -v
+OPENVIBELY_LIVE=http://localhost:3001 go test ./internal/client -run TestLiveBackend -count=1 -v
 ```
 
 That test is skipped unless `OPENVIBELY_LIVE` is set, so ordinary runs stay
