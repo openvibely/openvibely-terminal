@@ -321,8 +321,8 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 			if got, want := r.FormValue("repo_path"), `C:\Users\me\repo`; got != want {
 				t.Errorf("repo_path = %q, want %q", got, want)
 			}
-			w.Header().Set("HX-Redirect", "/tasks?project_id=created-project")
-			w.WriteHeader(http.StatusNoContent)
+			w.Header().Set("Location", "/tasks?project_id=created-project")
+			w.WriteHeader(http.StatusFound)
 		case r.Method == http.MethodGet && r.URL.Path == "/events/live":
 			select {
 			case requestURI <- r.URL.RequestURI():

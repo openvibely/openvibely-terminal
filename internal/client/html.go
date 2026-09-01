@@ -95,6 +95,16 @@ func (c *Client) doFormHTML(ctx context.Context, method, path string, form url.V
 }
 
 func (c *Client) doFormResponse(ctx context.Context, method, path string, form url.Values) (*http.Response, error) {
+	return c.doFormResponseWithPolicy(ctx, method, path, form, mutationRedirectUnexpectedError)
+}
+
+// doProjectFormResponse retains a non-login redirect for CreateProject, whose
+// endpoint uses the redirect target to return the backend-assigned project ID.
+func (c *Client) doProjectFormResponse(ctx context.Context, method, path string, form url.Values) (*http.Response, error) {
+	return c.doFormResponseWithPolicy(ctx, method, path, form, mutationRedirectReturn)
+}
+
+func (c *Client) doFormResponseWithPolicy(ctx context.Context, method, path string, form url.Values, redirectPolicy mutationRedirectPolicy) (*http.Response, error) {
 	var body string
 	if form != nil {
 		body = form.Encode()
@@ -103,14 +113,22 @@ func (c *Client) doFormResponse(ctx context.Context, method, path string, form u
 	if form != nil {
 		contentType = "application/x-www-form-urlencoded"
 	}
-	return c.doHTMXMutation(ctx, method, path, strings.NewReader(body), contentType, true)
+	return c.doHTMXMutation(ctx, method, path, strings.NewReader(body), contentType, redirectPolicy)
 }
 
-// doHTMXMutation builds and executes an HTMX mutation request. A successful
+type mutationRedirectPolicy uint8
+
+const (
+	mutationRedirectAPIError mutationRedirectPolicy = iota
+	mutationRedirectUnexpectedError
+	mutationRedirectReturn
+)
+
+// doHTMXMutation builds and executes an HTMX mutation request. An accepted
 // response is returned to the caller, which owns its body; failed responses are
 // consumed and closed here. Form mutations retain their specific unexpected
 // redirect error while JSON and multipart mutations use the generic API error.
-func (c *Client) doHTMXMutation(ctx context.Context, method, path string, body io.Reader, contentType string, formRedirectError bool) (*http.Response, error) {
+func (c *Client) doHTMXMutation(ctx context.Context, method, path string, body io.Reader, contentType string, redirectPolicy mutationRedirectPolicy) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
@@ -133,10 +151,15 @@ func (c *Client) doHTMXMutation(ctx context.Context, method, path string, body i
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp, nil
 	}
-	if formRedirectError && resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		err := fmt.Errorf("%s %s: unexpected redirect status %d", method, path, resp.StatusCode)
-		drainAndClose(resp.Body)
-		return nil, err
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		switch redirectPolicy {
+		case mutationRedirectReturn:
+			return resp, nil
+		case mutationRedirectUnexpectedError:
+			err := fmt.Errorf("%s %s: unexpected redirect status %d", method, path, resp.StatusCode)
+			drainAndClose(resp.Body)
+			return nil, err
+		}
 	}
 	err = apiError(resp)
 	drainAndClose(resp.Body)
@@ -163,7 +186,7 @@ func (c *Client) doJSONResponse(ctx context.Context, method, path string, payloa
 	if err != nil {
 		return nil, err
 	}
-	return c.doHTMXMutation(ctx, method, path, bytes.NewReader(body), "application/json", false)
+	return c.doHTMXMutation(ctx, method, path, bytes.NewReader(body), "application/json", mutationRedirectAPIError)
 }
 
 var cardNodeText = NodeText

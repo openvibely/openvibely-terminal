@@ -1700,8 +1700,8 @@ func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
 		if r.FormValue("name") == "JSON Project" {
 			id = "json-project"
 		}
-		w.Header().Set("HX-Redirect", "/tasks?project_id="+id)
-		w.WriteHeader(http.StatusNoContent)
+		w.Header().Set("Location", "/tasks?project_id="+id)
+		w.WriteHeader(http.StatusFound)
 	}))
 	t.Cleanup(srv.Close)
 

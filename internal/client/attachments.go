@@ -232,7 +232,7 @@ func appendMultipartFile(writer *multipart.Writer, path string) error {
 }
 
 func (c *Client) doMultipartHTML(ctx context.Context, method, path string, body io.Reader, contentType string) (*html.Node, error) {
-	resp, err := c.doHTMXMutation(ctx, method, path, body, contentType, false)
+	resp, err := c.doHTMXMutation(ctx, method, path, body, contentType, mutationRedirectAPIError)
 	if err != nil {
 		return nil, err
 	}

@@ -320,7 +320,7 @@ func (c *Client) CreateProject(ctx context.Context, name, path string) (*Project
 	form.Set("repo_source", "local")
 	form.Set("repo_path", path)
 
-	resp, err := c.doFormResponse(ctx, http.MethodPost, "/projects", form)
+	resp, err := c.doProjectFormResponse(ctx, http.MethodPost, "/projects", form)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +349,9 @@ func projectIDFromRedirect(redirect string) (string, error) {
 	u, err := url.Parse(redirect)
 	if err != nil {
 		return "", fmt.Errorf("create project: invalid backend redirect: %w", err)
+	}
+	if u.Path != "/tasks" {
+		return "", fmt.Errorf("create project: unexpected backend redirect path %q", u.Path)
 	}
 	projectID := strings.TrimSpace(u.Query().Get("project_id"))
 	if projectID == "" {

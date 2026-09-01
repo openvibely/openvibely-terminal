@@ -89,6 +89,85 @@ func TestCreateProject(t *testing.T) {
 	}
 }
 
+func TestCreateProjectAcceptsLocationRedirect(t *testing.T) {
+	var projectRequests, redirectedRequests int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/projects":
+			projectRequests++
+			if r.Method != http.MethodPost {
+				t.Errorf("project request method = %s, want POST", r.Method)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got, want := r.FormValue("name"), "Location Project"; got != want {
+				t.Errorf("name = %q, want %q", got, want)
+			}
+			if got, want := r.FormValue("repo_path"), "/tmp/location-project"; got != want {
+				t.Errorf("repo_path = %q, want %q", got, want)
+			}
+			w.Header().Set("Location", "/tasks?project_id=created-by-location")
+			w.WriteHeader(http.StatusFound)
+		case "/tasks":
+			redirectedRequests++
+			t.Errorf("project creation redirect was followed")
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+
+	project, err := c.CreateProject(context.Background(), "  Location Project  ", "  /tmp/location-project  ")
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	if project == nil {
+		t.Fatal("CreateProject returned nil project")
+	}
+	if project.ID != "created-by-location" || project.Name != "Location Project" || project.Path != "/tmp/location-project" {
+		t.Fatalf("unexpected project: %+v", project)
+	}
+	if projectRequests != 1 || redirectedRequests != 0 {
+		t.Fatalf("project requests = %d, followed redirects = %d", projectRequests, redirectedRequests)
+	}
+}
+
+func TestCreateProjectRejectsInvalidRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		location string
+		want     string
+	}{
+		{name: "missing location", location: "", want: "did not include a project ID"},
+		{name: "missing ID", location: "/tasks", want: "did not include a project ID"},
+		{name: "empty ID", location: "/tasks?project_id=   ", want: "did not include a project ID"},
+		{name: "malformed ID", location: "/tasks?project_id=%zz", want: "did not include a project ID"},
+		{name: "unrelated target", location: "/after-mutation?project_id=wrong-target", want: "unexpected backend redirect path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(http.StatusFound)
+			}))
+
+			project, err := c.CreateProject(context.Background(), "Project", "/tmp/project")
+			if project != nil {
+				t.Fatalf("invalid redirect returned project: %+v", project)
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CreateProject error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestCreateProjectValidatesNameAndPathBeforeHTTP(t *testing.T) {
 	requests := 0
 	c := newTestClient(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
