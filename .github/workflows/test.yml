@@ -26,11 +26,37 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run go vet
-        run: go vet ./...
+      - name: Run vet and all tests with coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          vet_status=0
+          test_status=0
 
-      - name: Run all tests with coverage
-        run: go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt
+          # Keep vet's build fan-out bounded while it overlaps with the full test build.
+          GOMAXPROCS=1 go vet ./... &
+          vet_pid=$!
+
+          go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt || test_status=$?
+
+          # Always reap vet so a test failure cannot hide a vet failure or leave it running.
+          wait "$vet_pid" || vet_status=$?
+
+          if (( vet_status != 0 )); then
+            echo "::error::go vet ./... failed with exit code ${vet_status}"
+          fi
+          if (( test_status != 0 )); then
+            echo "::error::go test ./... failed with exit code ${test_status}"
+          fi
+          if (( vet_status != 0 || test_status != 0 )); then
+            exit 1
+          fi
+
+          if [[ ! -s coverage.txt ]]; then
+            echo "::error::go test did not produce a non-empty coverage profile"
+            exit 1
+          fi
 
       - name: Show coverage summary
+        if: ${{ success() }}
         run: go tool cover -func=coverage.txt | tail -1
