@@ -145,7 +145,12 @@ type Model struct {
 	pendingMsgExecutionID       string // promoted execution ID, when a queued input is applied
 	pendingMsgProjectID         string
 	pendingMsgProjectGeneration uint64
-	busy                        bool
+	// chatSubmissionPending covers the window before the backend returns the
+	// accepted message ID. chatSubmissionID keeps delayed acknowledgements from
+	// an older turn from replacing a newer active submission.
+	chatSubmissionPending bool
+	chatSubmissionID      uint64
+	busy                  bool
 
 	// operational counts cached by /status
 	pendingAlertCount int
@@ -555,6 +560,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.pendingMsgExecutionID = ""
 		m.pendingMsgProjectID = ""
 		m.pendingMsgProjectGeneration = 0
+		m.chatSubmissionPending = false
 		m.busy = false
 		m.pendingConfirmation = nil
 		if m.selectorActive {
@@ -614,6 +620,40 @@ func sseEventProjectID(ev client.Event) string {
 	return strings.TrimSpace(payload.ProjectID)
 }
 
+func (m Model) hasPendingChat() bool {
+	return m.chatSubmissionPending || m.pendingMsgID != ""
+}
+
+const chatStillProcessingMessage = "chat still processing — wait for the current reply"
+
+func (m *Model) rejectPendingChat() bool {
+	if !m.hasPendingChat() {
+		return false
+	}
+	m.append(entry{role: "system", text: chatStillProcessingMessage})
+	return true
+}
+
+func (m *Model) beginChatSubmission(projectID string) (uint64, bool) {
+	if m.rejectPendingChat() {
+		return 0, false
+	}
+	m.chatSubmissionID++
+	m.chatSubmissionPending = true
+	m.pendingMsgProjectID = projectID
+	m.pendingMsgProjectGeneration = projectGenerationOf(*m)
+	m.busy = true
+	return m.chatSubmissionID, true
+}
+
+func (m *Model) clearPendingChat() {
+	m.pendingMsgID = ""
+	m.pendingMsgExecutionID = ""
+	m.pendingMsgProjectID = ""
+	m.pendingMsgProjectGeneration = 0
+	m.chatSubmissionPending = false
+}
+
 func (m Model) matchesPendingChatExecution(id string) bool {
 	return id != "" && (id == m.pendingMsgID || id == m.pendingMsgExecutionID)
 }
@@ -630,15 +670,19 @@ func (m Model) login(username, password string) tea.Cmd {
 	}
 }
 
-func (m Model) sendChat(projectID, message string) tea.Cmd {
+func (m Model) sendChat(projectID, message string, submissionIDs ...uint64) tea.Cmd {
 	c := m.client
 	sessionGeneration := sessionGenerationOf(m)
 	projectGeneration := projectGenerationOf(m)
+	var submissionID uint64
+	if len(submissionIDs) > 0 {
+		submissionID = submissionIDs[0]
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		accepted, err := c.SendChatMessage(ctx, projectID, message)
-		return chatSentMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: projectID, accepted: accepted, err: err}
+		return chatSentMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: projectID, submissionID: submissionID, accepted: accepted, err: err}
 	}
 }
 
@@ -654,6 +698,7 @@ func (m Model) doChatStatus(messageID, projectID string, projectGeneration uint6
 		sessionGeneration: sessionGenerationOf(m),
 		projectGeneration: projectGeneration,
 		messageID:         messageID,
+		submissionID:      m.chatSubmissionID,
 		resolvedMessageID: resolvedMessageID,
 		projectID:         projectID,
 		status:            status,
@@ -1078,7 +1123,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.projectID != "" && msg.projectID != m.selectedID {
 			return m, nil // stale acknowledgement from a different project
 		}
+		// Once an acknowledgement has installed the pending ID, a later
+		// acknowledgement must never replace it. Tagged acknowledgements also
+		// have to belong to the one submission currently in flight. The untagged
+		// branch keeps hand-built legacy test messages usable, but cannot replace
+		// a runtime submission that has an active token.
+		if m.pendingMsgID != "" {
+			return m, nil
+		}
+		if msg.submissionID != 0 {
+			if !m.chatSubmissionPending || msg.submissionID != m.chatSubmissionID {
+				return m, nil
+			}
+		} else if m.chatSubmissionPending || !m.busy {
+			return m, nil
+		}
 		if msg.err != nil {
+			m.clearPendingChat()
 			m.busy = false
 			if m.handleAuthError(msg.err) {
 				return m, nil
@@ -1089,15 +1150,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: "send failed: " + msg.err.Error()})
 			return m, nil
 		}
+		if msg.accepted == nil {
+			m.clearPendingChat()
+			m.busy = false
+			m.append(entry{role: "error", text: "send failed: empty acknowledgement"})
+			return m, nil
+		}
+		m.chatSubmissionPending = true
 		m.pendingMsgID = msg.accepted.MessageID
 		m.pendingMsgExecutionID = ""
-		m.pendingMsgProjectID = msg.projectID
 		if m.pendingMsgProjectID == "" {
-			m.pendingMsgProjectID = m.selectedID
+			m.pendingMsgProjectID = msg.projectID
+			if m.pendingMsgProjectID == "" {
+				m.pendingMsgProjectID = m.selectedID
+			}
 		}
-		m.pendingMsgProjectGeneration = msg.projectGeneration
 		if m.pendingMsgProjectGeneration == 0 {
-			m.pendingMsgProjectGeneration = projectGenerationOf(m)
+			m.pendingMsgProjectGeneration = msg.projectGeneration
+			if m.pendingMsgProjectGeneration == 0 {
+				m.pendingMsgProjectGeneration = projectGenerationOf(m)
+			}
 		}
 		if msg.accepted.Queued {
 			m.append(entry{role: "system", text: "queued behind an active chat turn…"})
@@ -1110,6 +1182,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.projectID != "" && msg.projectID != m.selectedID {
 			return m, nil // stale status from a different project
+		}
+		if msg.submissionID != 0 && msg.submissionID != m.chatSubmissionID {
+			return m, nil // stale status from an older chat turn
 		}
 		if m.pendingMsgID == "" {
 			return m, nil
@@ -1138,12 +1213,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration) // transient; keep polling
 		}
+		if msg.status == nil {
+			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+		}
 		switch msg.status.Status {
 		case "completed":
-			m.pendingMsgID = ""
-			m.pendingMsgExecutionID = ""
-			m.pendingMsgProjectID = ""
-			m.pendingMsgProjectGeneration = 0
+			m.clearPendingChat()
 			m.busy = false
 			m.append(entry{role: "agent", text: msg.status.Response})
 			if len(msg.status.TaskIDs) > 0 {
@@ -1151,10 +1226,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "failed", "cancelled":
-			m.pendingMsgID = ""
-			m.pendingMsgExecutionID = ""
-			m.pendingMsgProjectID = ""
-			m.pendingMsgProjectGeneration = 0
+			m.clearPendingChat()
 			m.busy = false
 			text := msg.status.Status
 			if msg.status.Error != "" {
@@ -1271,10 +1343,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Fast path: if the backend populated CompletedOutput in the SSE
 			// payload, display it immediately without an extra HTTP round-trip.
 			if ce.CompletedOutput != "" {
-				m.pendingMsgID = ""
-				m.pendingMsgExecutionID = ""
-				m.pendingMsgProjectID = ""
-				m.pendingMsgProjectGeneration = 0
+				m.clearPendingChat()
 				m.busy = false
 				m.append(entry{role: "agent", text: ce.CompletedOutput})
 				return m, m.waitForCurrentSSE(msg.generation)
@@ -1336,6 +1405,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) beginLogin() (Model, tea.Cmd) {
 	if m.loginActive {
 		return m, nil
+	}
+	// A send that has not received an accepted message ID cannot be resumed
+	// after the session epoch changes. Accepted turns retain their polling ID
+	// and are refreshed after login below.
+	if m.chatSubmissionPending && m.pendingMsgID == "" {
+		m.clearPendingChat()
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
@@ -1572,6 +1647,9 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 
 	m = m.clearReviewPrefill()
+	if m.rejectPendingChat() {
+		return m, nil
+	}
 	m.append(entry{role: "you", text: text})
 
 	// Inside a task thread, plain text is a follow-up on that task.
@@ -1588,8 +1666,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	m.busy = true
-	return m, m.sendChat(m.selectedID, text)
+	submissionID, ok := m.beginChatSubmission(m.selectedID)
+	if !ok {
+		return m, nil
+	}
+	return m, m.sendChat(m.selectedID, text, submissionID)
 }
 
 // sendThreadMessage posts a follow-up into a task thread and echoes the
@@ -1893,6 +1974,11 @@ func (m *Model) markAuthRequired() {
 	m.connChecked = true
 	m.connErr = ""
 	m.connReachableError = false
+	// A send without an accepted ID cannot be correlated after the session
+	// epoch changes. An accepted turn remains resumable through its polling ID.
+	if m.chatSubmissionPending && m.pendingMsgID == "" {
+		m.clearPendingChat()
+	}
 	// An accepted auth failure starts a new session epoch. This invalidates
 	// project, command, chat, selector, and thread results launched before the
 	// backend reported that the session was unauthorized.

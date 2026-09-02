@@ -58,6 +58,7 @@ type chatSentMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
 	projectID         string
+	submissionID      uint64
 	accepted          *client.ChatAccepted
 	err               error
 }
@@ -67,6 +68,10 @@ type chatStatusMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
 	messageID         string
+	// submissionID identifies the chat turn whose polling request produced this
+	// status. It prevents a delayed status from an earlier turn from settling a
+	// newer one that happens to share the same project and session.
+	submissionID uint64
 	// resolvedMessageID is the authoritative execution ID returned by the
 	// status endpoint. Queued inputs keep messageID as their polling key while
 	// this field records a promoted execution for SSE correlation.

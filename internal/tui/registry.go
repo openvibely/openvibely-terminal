@@ -3228,6 +3228,10 @@ func chatCommand() command {
 		args:    "[message]",
 		desc:    "return to project chat, or send a message",
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			if len(args) > 0 && m.hasPendingChat() {
+				m.append(entry{role: "system", text: chatStillProcessingMessage})
+				return m, nil
+			}
 			m.busy = false
 			if m.threadID != "" {
 				title := m.threadTitle
@@ -3244,8 +3248,11 @@ func chatCommand() command {
 			if !ok {
 				return mm, cmd
 			}
-			m.busy = true
-			return m, m.sendChat(m.selectedID, strings.Join(args, " "))
+			submissionID, ok := m.beginChatSubmission(m.selectedID)
+			if !ok {
+				return m, nil
+			}
+			return m, m.sendChat(m.selectedID, strings.Join(args, " "), submissionID)
 		},
 	}
 }

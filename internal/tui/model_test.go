@@ -522,6 +522,304 @@ func TestPlainTextSendsChatWhenProjectSelected(t *testing.T) {
 	}
 }
 
+func chatAckClient(t *testing.T) (*client.Client, *atomic.Int32) {
+	t.Helper()
+	var posts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/chat/message" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		n := posts.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(client.ChatAccepted{
+			MessageID: fmt.Sprintf("msg-%d", n),
+			Status:    "processing",
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, &posts
+}
+
+func TestRapidPlainChatSubmissionsAreSerialized(t *testing.T) {
+	c, posts := chatAckClient(t)
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+
+	first, firstCmd := typeLine(t, m, "first message")
+	if firstCmd == nil || !first.chatSubmissionPending || first.pendingMsgID != "" {
+		t.Fatalf("first submission state = pending=%t id=%q cmd=%v", first.chatSubmissionPending, first.pendingMsgID, firstCmd)
+	}
+	second, secondCmd := typeLine(t, first, "second message")
+	if secondCmd != nil {
+		t.Fatal("overlapping plain submission returned a second command")
+	}
+	if second.pendingMsgID != "" || !second.chatSubmissionPending {
+		t.Fatalf("overlapping plain submission changed active state: pending=%t id=%q", second.chatSubmissionPending, second.pendingMsgID)
+	}
+	if !strings.Contains(transcript(second), chatStillProcessingMessage) {
+		t.Fatalf("overlapping plain submission gave no visible feedback:\n%s", transcript(second))
+	}
+	if got := posts.Load(); got != 0 {
+		t.Fatalf("second plain submission made a POST before the first command ran: %d", got)
+	}
+
+	firstMsg := firstCmd()
+	next, pollCmd := first.Update(firstMsg)
+	m = next.(Model)
+	if pollCmd == nil || posts.Load() != 1 {
+		t.Fatalf("first acknowledgement did not establish one pending turn: poll=%v posts=%d", pollCmd != nil, posts.Load())
+	}
+	if m.pendingMsgID != "msg-1" || !m.chatSubmissionPending {
+		t.Fatalf("first acknowledgement changed pending identity: pending=%t id=%q", m.chatSubmissionPending, m.pendingMsgID)
+	}
+
+	next, _ = m.Update(chatStatusMsg{
+		messageID: "msg-1",
+		projectID: "p1",
+		status: &client.ChatStatus{
+			MessageID: "msg-1",
+			Status:    "completed",
+			Response:  "first reply",
+			TaskIDs:   []string{"task-1"},
+		},
+	})
+	m = next.(Model)
+	out := transcript(m)
+	if m.chatSubmissionPending || m.pendingMsgID != "" {
+		t.Fatalf("terminal completion left chat pending: pending=%t id=%q", m.chatSubmissionPending, m.pendingMsgID)
+	}
+	if strings.Count(out, "agent::first reply") != 1 || strings.Count(out, "created tasks: task-1") != 1 {
+		t.Fatalf("first response/task IDs were not rendered exactly once:\n%s", out)
+	}
+	duplicate, _ := m.Update(chatStatusMsg{
+		messageID: "msg-1",
+		projectID: "p1",
+		status:    &client.ChatStatus{MessageID: "msg-1", Status: "completed", Response: "first reply", TaskIDs: []string{"task-1"}},
+	})
+	m = duplicate.(Model)
+	if got := strings.Count(transcript(m), "agent::first reply"); got != 1 {
+		t.Fatalf("duplicate terminal status rendered the response %d times", got)
+	}
+	if got := strings.Count(transcript(m), "created tasks: task-1"); got != 1 {
+		t.Fatalf("duplicate terminal status rendered task IDs %d times", got)
+	}
+
+	m, nextCmd := typeLine(t, m, "third message")
+	if nextCmd == nil {
+		t.Fatal("new plain submission after completion was rejected")
+	}
+	updated, _ = m.Update(nextCmd())
+	m = updated.(Model)
+	if posts.Load() != 2 || m.pendingMsgID != "msg-2" {
+		t.Fatalf("post-completion submission state: posts=%d pending=%q", posts.Load(), m.pendingMsgID)
+	}
+}
+
+func TestRapidChatCommandSubmissionsAreSerialized(t *testing.T) {
+	c, posts := chatAckClient(t)
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+
+	first, firstCmd := typeLine(t, m, "/chat first command")
+	if firstCmd == nil || !first.chatSubmissionPending {
+		t.Fatalf("first /chat state = pending=%t cmd=%v", first.chatSubmissionPending, firstCmd)
+	}
+	second, secondCmd := typeLine(t, first, "/chat second command")
+	if secondCmd != nil {
+		t.Fatal("overlapping /chat submission returned a second command")
+	}
+	if !strings.Contains(transcript(second), chatStillProcessingMessage) {
+		t.Fatalf("overlapping /chat submission gave no visible feedback:\n%s", transcript(second))
+	}
+	if posts.Load() != 0 {
+		t.Fatalf("overlapping /chat submission made a POST before the first command ran: %d", posts.Load())
+	}
+
+	next, _ := first.Update(firstCmd())
+	m = next.(Model)
+	if posts.Load() != 1 || m.pendingMsgID != "msg-1" {
+		t.Fatalf("first /chat acknowledgement changed pending state: posts=%d pending=%q", posts.Load(), m.pendingMsgID)
+	}
+	next, _ = m.Update(chatStatusMsg{
+		messageID: "msg-1",
+		projectID: "p1",
+		status:    &client.ChatStatus{MessageID: "msg-1", Status: "completed", Response: "command reply"},
+	})
+	m = next.(Model)
+	if strings.Count(transcript(m), "agent::command reply") != 1 {
+		t.Fatalf("/chat reply did not render exactly once:\n%s", transcript(m))
+	}
+
+	m, nextCmd := typeLine(t, m, "/chat after completion")
+	if nextCmd == nil {
+		t.Fatal("new /chat submission after completion was rejected")
+	}
+	updated, _ = m.Update(nextCmd())
+	m = updated.(Model)
+	if posts.Load() != 2 || m.pendingMsgID != "msg-2" {
+		t.Fatalf("post-completion /chat state: posts=%d pending=%q", posts.Load(), m.pendingMsgID)
+	}
+}
+
+func TestChatAcknowledgementsCannotReplaceActiveSubmission(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		staleFirst bool
+	}{
+		{name: "stale acknowledgement first", staleFirst: true},
+		{name: "active acknowledgement first", staleFirst: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, posts := chatAckClient(t)
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+
+			first, firstCmd := typeLine(t, m, "first")
+			firstNext, _ := first.Update(firstCmd())
+			m = firstNext.(Model)
+			firstSubmissionID := m.chatSubmissionID
+			next, _ := m.Update(chatStatusMsg{
+				messageID: "msg-1",
+				projectID: "p1",
+				status:    &client.ChatStatus{MessageID: "msg-1", Status: "completed", Response: "first"},
+			})
+			m = next.(Model)
+
+			second, secondCmd := typeLine(t, m, "second")
+			activeSubmissionID := second.chatSubmissionID
+			if activeSubmissionID == firstSubmissionID || !second.chatSubmissionPending {
+				t.Fatalf("new submission token = %d, previous = %d, pending=%t", activeSubmissionID, firstSubmissionID, second.chatSubmissionPending)
+			}
+			staleAck := chatSentMsg{
+				projectID:    "p1",
+				submissionID: firstSubmissionID,
+				accepted:     &client.ChatAccepted{MessageID: "stale-message"},
+			}
+
+			if tc.staleFirst {
+				next, _ := second.Update(staleAck)
+				second = next.(Model)
+				if second.pendingMsgID != "" || !second.chatSubmissionPending {
+					t.Fatalf("stale first acknowledgement changed active send: pending=%q active=%t", second.pendingMsgID, second.chatSubmissionPending)
+				}
+			}
+			next, _ = second.Update(secondCmd())
+			second = next.(Model)
+			if second.pendingMsgID != "msg-2" || posts.Load() != 2 {
+				t.Fatalf("active acknowledgement did not install original identity: pending=%q posts=%d", second.pendingMsgID, posts.Load())
+			}
+			if !tc.staleFirst {
+				next, _ := second.Update(staleAck)
+				second = next.(Model)
+			}
+			if second.pendingMsgID != "msg-2" || second.pendingMsgProjectID != "p1" {
+				t.Fatalf("stale acknowledgement replaced active identity: pending=%q project=%q", second.pendingMsgID, second.pendingMsgProjectID)
+			}
+		})
+	}
+}
+
+func TestChatTerminalStatesPermitResubmission(t *testing.T) {
+	for _, terminalState := range []string{"completed", "failed", "cancelled"} {
+		t.Run(terminalState, func(t *testing.T) {
+			c, posts := chatAckClient(t)
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+
+			m, cmd := typeLine(t, m, "before terminal")
+			if cmd == nil {
+				t.Fatal("initial chat submission returned no command")
+			}
+			updated, _ = m.Update(cmd())
+			m = updated.(Model)
+			if posts.Load() != 1 || m.pendingMsgID != "msg-1" {
+				t.Fatalf("initial acknowledgement: posts=%d pending=%q", posts.Load(), m.pendingMsgID)
+			}
+
+			status := &client.ChatStatus{MessageID: "msg-1", Status: terminalState}
+			if terminalState == "failed" {
+				status.Error = "failed by test"
+			}
+			updated, _ = m.Update(chatStatusMsg{messageID: "msg-1", projectID: "p1", status: status})
+			m = updated.(Model)
+			if m.chatSubmissionPending || m.pendingMsgID != "" {
+				t.Fatalf("%s state remained pending: active=%t id=%q", terminalState, m.chatSubmissionPending, m.pendingMsgID)
+			}
+
+			m, cmd = typeLine(t, m, "after terminal")
+			if cmd == nil {
+				t.Fatalf("new chat after %s was rejected", terminalState)
+			}
+			updated, _ = m.Update(cmd())
+			m = updated.(Model)
+			if posts.Load() != 2 || m.pendingMsgID != "msg-2" {
+				t.Fatalf("resubmission after %s: posts=%d pending=%q", terminalState, posts.Load(), m.pendingMsgID)
+			}
+		})
+	}
+}
+
+func TestChatStatusFromOlderSubmissionCannotSettleNewTurn(t *testing.T) {
+	c, posts := chatAckClient(t)
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+
+	m, cmd := typeLine(t, m, "first")
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	firstSubmissionID := m.chatSubmissionID
+	updated, _ = m.Update(chatStatusMsg{
+		messageID: "msg-1",
+		projectID: "p1",
+		status:    &client.ChatStatus{MessageID: "msg-1", Status: "completed", Response: "first reply"},
+	})
+	m = updated.(Model)
+
+	second, secondCmd := typeLine(t, m, "second")
+	if !second.chatSubmissionPending || second.pendingMsgID != "" {
+		t.Fatalf("second submission state: active=%t pending=%q", second.chatSubmissionPending, second.pendingMsgID)
+	}
+	oldStatus := chatStatusMsg{
+		messageID:    "msg-1",
+		submissionID: firstSubmissionID,
+		projectID:    "p1",
+		status:       &client.ChatStatus{MessageID: "msg-1", Status: "completed", Response: "old reply", TaskIDs: []string{"old-task"}},
+	}
+	updated, _ = second.Update(oldStatus)
+	second = updated.(Model)
+	if second.pendingMsgID != "" || !second.chatSubmissionPending || strings.Contains(transcript(second), "old reply") {
+		t.Fatalf("old status settled the pre-ack new turn: pending=%q active=%t transcript=%q", second.pendingMsgID, second.chatSubmissionPending, transcript(second))
+	}
+
+	updated, _ = second.Update(secondCmd())
+	second = updated.(Model)
+	if posts.Load() != 2 || second.pendingMsgID != "msg-2" {
+		t.Fatalf("second acknowledgement: posts=%d pending=%q", posts.Load(), second.pendingMsgID)
+	}
+	updated, _ = second.Update(oldStatus)
+	second = updated.(Model)
+	if second.pendingMsgID != "msg-2" || strings.Contains(transcript(second), "old reply") {
+		t.Fatalf("old status replaced active second turn: pending=%q transcript=%q", second.pendingMsgID, transcript(second))
+	}
+}
+
 func TestSlashCommandMenuAppearsAndCompletes(t *testing.T) {
 	m := typeInput(t, newTestModel(t), "/ta")
 	if len(m.menu) == 0 {
@@ -2782,6 +3080,11 @@ func TestSSEChatResponseDoneCompletedOutputFastPath(t *testing.T) {
 	}
 	if !strings.Contains(transcript(m), "agent::hello from the agent") {
 		t.Errorf("expected agent reply in transcript:\n%s", transcript(m))
+	}
+	duplicate, _ := m.Update(sseEventMsg{event: ev})
+	m = duplicate.(Model)
+	if got := strings.Count(transcript(m), "agent::hello from the agent"); got != 1 {
+		t.Fatalf("duplicate SSE completion rendered the reply %d times", got)
 	}
 }
 
