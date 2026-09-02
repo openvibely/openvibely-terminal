@@ -661,10 +661,7 @@ func (m Model) matchesPendingChatExecution(id string) bool {
 // completeChat settles a successful project-chat response. Task IDs are
 // optional because only polling status responses include them.
 func (m *Model) completeChat(response string, taskIDs []string) {
-	m.pendingMsgID = ""
-	m.pendingMsgExecutionID = ""
-	m.pendingMsgProjectID = ""
-	m.pendingMsgProjectGeneration = 0
+	m.clearPendingChat()
 	m.busy = false
 	m.append(entry{role: "agent", text: response})
 	if len(taskIDs) > 0 {
