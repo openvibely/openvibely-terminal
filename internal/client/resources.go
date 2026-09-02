@@ -29,6 +29,51 @@ type Alert struct {
 	Text    string   `json:"text"`   // searchable text (type, state, body)
 	Badges  []string `json:"badges"` // type, decision state, processing state
 	Read    bool     `json:"read"`
+
+	// The web alert card exposes these bounded summary values through badges and
+	// semantic classes. Keep them out of the legacy list JSON shape; show/inspect
+	// copies them into AlertSummary, where the fields have stable JSON names.
+	ProjectID       string `json:"-"`
+	Scope           string `json:"-"`
+	Type            string `json:"-"`
+	Severity        string `json:"-"`
+	Source          string `json:"-"`
+	DecisionState   string `json:"-"`
+	ProcessingState string `json:"-"`
+}
+
+// AlertSummary is the bounded identity and workflow state shown alongside an
+// alert's full detail. It is separate from Alert so the existing list JSON
+// contract remains unchanged.
+type AlertSummary struct {
+	ID              string   `json:"id"`
+	ProjectID       string   `json:"project_id"`
+	Scope           string   `json:"scope"`
+	Type            string   `json:"type"`
+	Severity        string   `json:"severity"`
+	Title           string   `json:"title"`
+	Message         string   `json:"message"`
+	Source          string   `json:"source"`
+	DecisionState   string   `json:"decision_state"`
+	ProcessingState string   `json:"processing_state"`
+	Text            string   `json:"text"`
+	Badges          []string `json:"badges"`
+	Read            bool     `json:"read"`
+}
+
+// AlertDetail is the on-demand project-scoped detail fragment for one alert.
+// Metadata is always initialized to an empty map when the backend has no
+// structured metadata, so JSON callers receive {} rather than null.
+type AlertDetail struct {
+	Body     string         `json:"body"`
+	Metadata map[string]any `json:"metadata"`
+}
+
+// AlertInspection combines the bounded alert summary with its on-demand full
+// detail for the read-only show/inspect command.
+type AlertInspection struct {
+	Summary AlertSummary `json:"summary"`
+	Detail  AlertDetail  `json:"detail"`
 }
 
 // ListAlerts scrapes the alerts screen for a project.
@@ -53,11 +98,52 @@ func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, err
 		}
 		seen[id] = true
 
+		badges := cardBadges(n)
 		a := Alert{
-			ID:     id,
-			Text:   attr(n, "data-search-text"),
-			Read:   strings.Contains(attr(n, "class"), "opacity-60"),
-			Badges: cardBadges(n),
+			ID:              id,
+			ProjectID:       projectID,
+			Scope:           firstAlertAttribute(n, "data-alert-scope"),
+			Type:            firstAlertAttribute(n, "data-alert-type"),
+			Severity:        firstAlertAttribute(n, "data-alert-severity"),
+			Source:          firstAlertAttribute(n, "data-alert-source"),
+			DecisionState:   firstAlertAttribute(n, "data-alert-decision-state", "data-alert-decision"),
+			ProcessingState: firstAlertAttribute(n, "data-alert-processing-state", "data-alert-processing"),
+			Text:            attr(n, "data-search-text"),
+			Read:            strings.Contains(attr(n, "class"), "opacity-60"),
+			Badges:          badges,
+		}
+		if a.Scope == "" {
+			a.Scope = "project"
+		}
+		if a.Type == "" {
+			a.Type = alertTypeFromBadges(badges)
+		}
+		if a.DecisionState == "" {
+			a.DecisionState = alertDecisionFromBadges(badges)
+		}
+		if a.ProcessingState == "" {
+			a.ProcessingState = alertProcessingFromBadges(badges)
+		}
+		if a.Severity == "" {
+			a.Severity = alertSeverityFromCard(n)
+		}
+		if a.Type == "" || a.DecisionState == "" || a.ProcessingState == "" || a.Severity == "" {
+			// data-search-text is a stable bounded summary marker on the backend
+			// card. It also keeps parsing compatible with compact fixtures that do
+			// not include all of the visual badge/icon markup.
+			searchType, searchSeverity, searchDecision, searchProcessing := alertValuesFromSearchText(a.Text)
+			if a.Type == "" {
+				a.Type = searchType
+			}
+			if a.Severity == "" {
+				a.Severity = searchSeverity
+			}
+			if a.DecisionState == "" {
+				a.DecisionState = searchDecision
+			}
+			if a.ProcessingState == "" {
+				a.ProcessingState = searchProcessing
+			}
 		}
 		if p := findNode(n, func(e *html.Node) bool {
 			return e.Data == "p" && strings.Contains(attr(e, "class"), "font-semibold")
@@ -76,6 +162,199 @@ func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, err
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+func firstAlertAttribute(node *html.Node, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(attr(node, name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func alertTypeFromBadges(badges []string) string {
+	for _, badge := range badges {
+		value := strings.ToLower(strings.TrimSpace(badge))
+		switch value {
+		case "task_failed", "task_needs_followup", "custom":
+			return value
+		}
+	}
+	for _, badge := range badges {
+		value := strings.ToLower(strings.TrimSpace(badge))
+		if value == "" || isAlertStateValue(value) || value == "project scoped" || value == "operational" {
+			continue
+		}
+		return value
+	}
+	return ""
+}
+
+func alertDecisionFromBadges(badges []string) string {
+	for _, badge := range badges {
+		value := strings.ToLower(strings.TrimSpace(badge))
+		switch value {
+		case "not_required", "pending", "approved", "rejected", "dismissed":
+			return value
+		case "operational":
+			return "not_required"
+		}
+	}
+	return ""
+}
+
+func alertProcessingFromBadges(badges []string) string {
+	for _, badge := range badges {
+		value := strings.ToLower(strings.TrimSpace(badge))
+		switch value {
+		case "not_applicable", "unclaimed", "claimed", "implementation_task_linked", "completed", "failed":
+			return value
+		}
+	}
+	return ""
+}
+
+func isAlertStateValue(value string) bool {
+	switch value {
+	case "not_required", "pending", "approved", "rejected", "dismissed",
+		"not_applicable", "unclaimed", "claimed", "implementation_task_linked", "completed", "failed",
+		"info", "warning", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func alertSeverityFromCard(card *html.Node) string {
+	if value := firstAlertAttribute(card, "data-alert-severity"); value != "" {
+		return strings.ToLower(value)
+	}
+	icon := findNode(card, func(node *html.Node) bool {
+		return node.Data == "svg" && (strings.Contains(attr(node, "class"), "text-error") ||
+			strings.Contains(attr(node, "class"), "text-warning") ||
+			strings.Contains(attr(node, "class"), "text-info"))
+	})
+	if icon == nil {
+		return ""
+	}
+	class := attr(icon, "class")
+	switch {
+	case strings.Contains(class, "text-error"):
+		return "error"
+	case strings.Contains(class, "text-warning"):
+		return "warning"
+	case strings.Contains(class, "text-info"):
+		return "info"
+	default:
+		return ""
+	}
+}
+
+func alertValuesFromSearchText(text string) (typ, severity, decision, processing string) {
+	for _, value := range strings.Fields(strings.ToLower(text)) {
+		switch value {
+		case "task_failed", "task_needs_followup", "custom":
+			typ = firstAlertValue(typ, value)
+		case "info", "warning", "error":
+			severity = firstAlertValue(severity, value)
+		case "not_required", "pending", "approved", "rejected", "dismissed":
+			decision = firstAlertValue(decision, value)
+		case "not_applicable", "unclaimed", "claimed", "implementation_task_linked", "completed", "failed":
+			processing = firstAlertValue(processing, value)
+		}
+	}
+	return typ, severity, decision, processing
+}
+
+func firstAlertValue(current, value string) string {
+	if current != "" {
+		return current
+	}
+	return value
+}
+
+// GetAlertDetail fetches the full detail fragment for one alert in the selected
+// project. The endpoint is read-only and intentionally makes no list or
+// mutation request.
+func (c *Client) GetAlertDetail(ctx context.Context, alertID, projectID string) (*AlertDetail, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for alert details")
+	}
+	path := "/alerts/" + url.PathEscape(alertID) + "/details" + query("project_id", projectID)
+	root, err := c.getHTML(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := parseAlertDetail(root)
+	if err != nil {
+		return nil, err
+	}
+	return &detail, nil
+}
+
+func parseAlertDetail(root *html.Node) (AlertDetail, error) {
+	detail := AlertDetail{Metadata: make(map[string]any)}
+	if root == nil {
+		return detail, nil
+	}
+
+	scope := findNode(root, func(node *html.Node) bool {
+		return hasHTMLAttr(node, "data-alert-detail-loaded")
+	})
+	if scope == nil {
+		scope = root
+	}
+	if body := findNode(scope, func(node *html.Node) bool {
+		return hasHTMLAttr(node, "data-alert-markdown") && hasHTMLAttr(node, "data-raw-content")
+	}); body != nil {
+		detail.Body = attr(body, "data-raw-content")
+	}
+
+	metadataText := ""
+	if metadata := findNode(scope, func(node *html.Node) bool {
+		return hasHTMLAttr(node, "data-alert-metadata")
+	}); metadata != nil {
+		metadataText = attr(metadata, "data-alert-metadata")
+		if metadataText == "" {
+			metadataText = rawNodeText(metadata)
+		}
+	} else if metadata := findNode(scope, func(node *html.Node) bool {
+		return node.Data == "pre" && !hasHTMLAttr(node, "data-alert-copy-text")
+	}); metadata != nil {
+		metadataText = rawNodeText(metadata)
+	}
+	if strings.TrimSpace(metadataText) == "" {
+		return detail, nil
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metadataText), &metadata); err != nil {
+		return detail, fmt.Errorf("decoding alert detail metadata: %w", err)
+	}
+	if metadata != nil {
+		detail.Metadata = metadata
+	}
+	return detail, nil
+}
+
+func rawNodeText(node *html.Node) string {
+	if node == nil {
+		return ""
+	}
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(current *html.Node) {
+		if current.Type == html.TextNode {
+			b.WriteString(current.Data)
+			return
+		}
+		for child := current.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(node)
+	return b.String()
 }
 
 // AlertAction runs read/approve/reject/dismiss on one alert.

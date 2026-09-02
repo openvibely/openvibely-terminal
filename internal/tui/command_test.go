@@ -468,6 +468,59 @@ func TestRenderTaskDetailShowsTabs(t *testing.T) {
 	}
 }
 
+func TestAlertsShowHelpAndCompletion(t *testing.T) {
+	cmd := lookupCommand("alerts")
+	if cmd == nil {
+		t.Fatal("alerts command missing")
+	}
+	if !strings.Contains(strings.Join(cmd.actions, " "), "show") {
+		t.Fatalf("alerts actions = %#v, want show", cmd.actions)
+	}
+	if got := completeSlashInput("/alerts sh", *cmd); got != "/alerts show " {
+		t.Fatalf("alerts show completion = %q, want %q", got, "/alerts show ")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"/alerts show <id|title>",
+		"inspect full alert context",
+		"alerts show \"Add retry logic to HTTP client\"",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("alerts help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestRenderAlertInspectionPreservesBodyAndShowsEmptyDetail(t *testing.T) {
+	inspection := client.AlertInspection{
+		Summary: client.AlertSummary{
+			ID: "a-1", ProjectID: "p1", Title: "Review request", Type: "custom",
+			Severity: "warning", DecisionState: "pending", ProcessingState: "unclaimed",
+		},
+		Detail: client.AlertDetail{Body: "line one\nline two\n\x1b[31munsafe\x1b[0m", Metadata: map[string]any{"key": "value"}},
+	}
+	out := renderAlertInspection(inspection)
+	plain := stripANSI(out)
+	for _, want := range []string{"id: a-1", "type: custom · severity: warning", "decision: pending · processing: unclaimed", "line one\nline two\nunsafe", `"key": "value"`} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("alert detail output missing %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(out, "\x1b[31munsafe") {
+		t.Fatal("alert body retained a raw ANSI sequence")
+	}
+
+	empty := renderAlertInspection(client.AlertInspection{
+		Summary: client.AlertSummary{ID: "empty", Title: "No detail"},
+		Detail:  client.AlertDetail{Metadata: map[string]any{}},
+	})
+	for _, want := range []string{"(empty body)", "(empty metadata)", "No additional detail."} {
+		if !strings.Contains(stripANSI(empty), want) {
+			t.Fatalf("empty alert detail missing %q:\n%s", want, stripANSI(empty))
+		}
+	}
+}
+
 func TestRenderAlertsAndSkills(t *testing.T) {
 	alerts := renderAlerts([]client.Alert{{ID: "a1", Title: "Build failed"}}, "")
 	if !strings.Contains(alerts, "Build failed") {

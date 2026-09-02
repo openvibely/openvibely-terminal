@@ -1312,8 +1312,23 @@ func isRepeat(s string) bool {
 
 // --- alerts ---
 
+func alertInspectionOutput(ctx context.Context, c *client.Client, projectID string, alert client.Alert) (string, error) {
+	detail, err := c.GetAlertDetail(ctx, alert.ID, projectID)
+	if err != nil {
+		return "", err
+	}
+	inspection := client.AlertInspection{
+		Summary: alertSummaryFor(alert, projectID),
+		Detail:  *detail,
+	}
+	if jsonMode {
+		return marshalJSON(inspection)
+	}
+	return renderAlertInspection(inspection), nil
+}
+
 func alertsCommand() command {
-	actions := []string{"list", "read", "approve", "reject", "dismiss", "delete", "read-all", "clear"}
+	actions := []string{"list", "show", "read", "approve", "reject", "dismiss", "delete", "read-all", "clear"}
 	return command{
 		name:    "alerts",
 		aliases: []string{"alert"},
@@ -1322,13 +1337,18 @@ func alertsCommand() command {
 		desc:    "notifications awaiting review",
 		usage: []string{
 			"alerts [filter]                            list alerts",
+			"alerts show <alert>                         inspect full body and metadata",
 			"alerts read|approve|reject|dismiss <alert>",
 			"alerts delete <alert>                      delete one alert",
-			"omit <alert> on read/approve/reject/dismiss/delete → interactive selector",
+			"omit <alert> on show/read/approve/reject/dismiss/delete → interactive selector",
 			"alerts read-all                            mark every alert read",
 			"alerts clear                               delete every alert",
 		},
+		actionUsages: []commandActionUsage{
+			{action: "show", args: "<id|title>", description: "inspect full alert context"},
+		},
 		examples: []string{
+			`alerts show "Add retry logic to HTTP client"`,
 			`alerts approve "Add retry logic to HTTP client"`,
 			`alerts reject "Refactor database layer"`,
 			`alerts read-all`,
@@ -1353,6 +1373,47 @@ func alertsCommand() command {
 						return marshalJSON(alerts)
 					}
 					return renderAlerts(alerts, ref), nil
+				})
+			case "show":
+				if ref == "" {
+					return selectorOr(m, commandUsage("alerts", "show"),
+						selectorFor("Alerts", "alerts show", "no alerts in the current project", false,
+							func(ctx context.Context) ([]selectorItem, error) {
+								alerts, err := c.ListAlerts(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(alerts))
+								for _, alert := range alerts {
+									a := alert
+									item := selectorItem{
+										ref:    a.ID,
+										label:  firstNonEmpty(a.Title, a.Message, a.Text, shortID(a.ID)),
+										detail: strings.Join(a.Badges, " "),
+									}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										m.busy = true
+										return m, run("Alert", cmdTimeout, func(ctx context.Context) (string, error) {
+											return alertInspectionOutput(ctx, c, pid, a)
+										})
+									}
+									items = append(items, item)
+								}
+								return items, nil
+							}))
+				}
+				return m, run("Alert", cmdTimeout, func(ctx context.Context) (string, error) {
+					alerts, err := c.ListAlerts(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					a, err := matchRef(alerts, ref,
+						func(a client.Alert) string { return a.ID },
+						func(a client.Alert) string { return a.Title })
+					if err != nil {
+						return "", err
+					}
+					return alertInspectionOutput(ctx, c, pid, a)
 				})
 			case "read-all":
 				return m, run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {

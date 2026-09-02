@@ -1937,6 +1937,177 @@ func TestCLIJSONAlertsList(t *testing.T) {
 	}
 }
 
+func TestCLIJSONAlertsShowIncludesSummaryAndFullDetail(t *testing.T) {
+	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
+		data-search-text="review pending unclaimed" data-alert-type="custom"
+		data-alert-severity="warning" data-alert-decision-state="pending"
+		data-alert-processing-state="unclaimed">
+		<svg class="h-5 w-5 text-warning"></svg>
+		<p class="font-semibold">Review request</p>
+		<p class="text-sm opacity-60">Approval is needed</p>
+	</div>`
+	const detailHTML = `<div data-alert-detail-loaded>
+		<div data-alert-markdown data-raw-content="# Review request&#10;&#10;First line&#10;Second line"></div>
+		<pre>{
+  "owner": "release team",
+  "attempt": 2
+}</pre>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":       cliProjects,
+		"/alerts":             alertsHTML,
+		"/alerts/a-1/details": detailHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"alerts", "show", "a-1"}, false, true); err != nil {
+		t.Fatalf("alerts show --json failed: %v", err)
+	}
+	if strings.Contains(out.String(), "\x1b") || strings.Contains(out.String(), "Alert\n") || strings.Contains(out.String(), "project:") {
+		t.Fatalf("JSON output contains ANSI or banner text: %q", out.String())
+	}
+	var inspection client.AlertInspection
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &inspection); err != nil {
+		t.Fatalf("alerts show JSON is invalid: %v\noutput: %s", err, out.String())
+	}
+	if inspection.Summary.ID != "a-1" || inspection.Summary.Title != "Review request" {
+		t.Fatalf("summary identity = %+v", inspection.Summary)
+	}
+	if inspection.Summary.Type != "custom" || inspection.Summary.Severity != "warning" || inspection.Summary.DecisionState != "pending" || inspection.Summary.ProcessingState != "unclaimed" {
+		t.Fatalf("summary state = %+v", inspection.Summary)
+	}
+	if inspection.Detail.Body != "# Review request\n\nFirst line\nSecond line" {
+		t.Fatalf("detail body = %q", inspection.Detail.Body)
+	}
+	if inspection.Detail.Metadata == nil || inspection.Detail.Metadata["owner"] != "release team" {
+		t.Fatalf("detail metadata = %#v", inspection.Detail.Metadata)
+	}
+	if got := rec.count("GET", "/alerts/a-1/details"); got != 1 {
+		t.Fatalf("detail requests = %d, want one:\n%s", got, rec.all())
+	}
+	if rec.count("POST", "/alerts/a-1/approve") != 0 || rec.count("DELETE", "/alerts/a-1") != 0 {
+		t.Fatalf("show made a mutation:\n%s", rec.all())
+	}
+}
+
+func TestCLIJSONAlertsShowEmptyDetailUsesExplicitValues(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":       cliProjects,
+		"/alerts":             `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><p class="font-semibold">No detail</p></div>`,
+		"/alerts/a-1/details": `<p class="text-sm opacity-60">No additional detail.</p>`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"alerts", "show", "a-1"}, false, true); err != nil {
+		t.Fatalf("empty alerts show --json failed: %v", err)
+	}
+	var inspection client.AlertInspection
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &inspection); err != nil {
+		t.Fatalf("empty alerts show JSON is invalid: %v\noutput: %s", err, out.String())
+	}
+	if inspection.Detail.Body != "" {
+		t.Fatalf("empty detail body = %q, want empty string", inspection.Detail.Body)
+	}
+	if inspection.Detail.Metadata == nil || len(inspection.Detail.Metadata) != 0 {
+		t.Fatalf("empty detail metadata = %#v, want {}", inspection.Detail.Metadata)
+	}
+	if !strings.Contains(strings.TrimSpace(out.String()), `"body":""`) || !strings.Contains(strings.TrimSpace(out.String()), `"metadata":{}`) {
+		t.Fatalf("empty detail JSON does not represent empty values explicitly: %s", out.String())
+	}
+}
+
+func TestCLIAlertsShowReferenceAndBackendErrors(t *testing.T) {
+	const oneAlert = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="review"><p class="font-semibold">Review request</p></div>`
+	const twoAlerts = `<div>
+		<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="same one"><p class="font-semibold">Same title</p></div>
+		<div class="card" data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="same two"><p class="font-semibold">Same title</p></div>
+	</div>`
+
+	t.Run("unknown reference", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/alerts":       oneAlert,
+		})
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", []string{"alerts", "show", "missing"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), `nothing matches "missing"`) {
+			t.Fatalf("unknown reference error = %v", err)
+		}
+		if rec.count("GET", "/alerts/a-1/details") != 0 {
+			t.Fatal("unknown reference requested detail")
+		}
+	})
+
+	t.Run("ambiguous reference", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/alerts":       twoAlerts,
+		})
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", []string{"alerts", "show", "same"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+			t.Fatalf("ambiguous reference error = %v", err)
+		}
+		if rec.count("GET", "/alerts/a-1/details") != 0 || rec.count("GET", "/alerts/a-2/details") != 0 {
+			t.Fatal("ambiguous reference requested detail")
+		}
+	})
+}
+
+func TestCLIAlertsShowPropagatesUnauthorizedAndBackendErrors(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><p class="font-semibold">Review request</p></div>`
+	for _, tc := range []struct {
+		name       string
+		status     int
+		body       string
+		location   string
+		wantError  string
+		wantSecret string
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"error":"private detail"}`, wantError: "requires sign-in", wantSecret: "private detail"},
+		{name: "backend error", status: http.StatusServiceUnavailable, body: `{"error":"detail service unavailable"}`, wantError: "server error (503): detail service unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.recordURL(r.Method, r.URL.RequestURI())
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(cliProjects))
+				case "/alerts":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(alertsHTML))
+				case "/alerts/a-1/details":
+					if tc.location != "" {
+						w.Header().Set("Location", tc.location)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tc.status)
+					_, _ = w.Write([]byte(tc.body))
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", []string{"alerts", "show", "a-1"}, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %v, want %q", err, tc.wantError)
+			}
+			if tc.wantSecret != "" && (strings.Contains(err.Error(), tc.wantSecret) || strings.Contains(out.String(), tc.wantSecret)) {
+				t.Fatalf("error/output leaked response detail %q: error=%v output=%q", tc.wantSecret, err, out.String())
+			}
+		})
+	}
+}
+
 func TestCLIJSONAutomationsList(t *testing.T) {
 	const automationsHTML = `<div>
 		<div class="card" data-automation-url="/automations/au-1?project_id=p1">

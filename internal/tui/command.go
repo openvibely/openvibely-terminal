@@ -2,10 +2,12 @@ package tui
 
 // Slash commands. Every command is "/resource [action] [args...]" and its
 // output is rendered back into the chat transcript. With no action a resource
-// lists itself; with an action it mutates and then re-lists.
+// lists itself; read-only show actions fetch detail, while mutation actions
+// change the resource and may refresh its list.
 //
 //	/tasks                        list the board
 //	/tasks run api refactor       run the task whose title matches
+//	/alerts show 1a2b             inspect an alert's full context
 //	/alerts delete 1a2b           delete an alert
 //	/skills add my-skill          create a skill
 //

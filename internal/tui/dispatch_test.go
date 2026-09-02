@@ -1021,11 +1021,59 @@ func TestSkillsAddEmptyNameFromPipeInput(t *testing.T) {
 	})
 }
 
+func TestAlertsShowLoadsFullDetailWithoutMutation(t *testing.T) {
+	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
+		data-search-text="review pending unclaimed" data-alert-type="custom"
+		data-alert-severity="warning" data-alert-decision-state="pending"
+		data-alert-processing-state="unclaimed">
+		<svg class="h-5 w-5 text-warning"></svg>
+		<p class="font-semibold">Review request</p>
+		<p class="text-sm opacity-60 mt-1">Approval is needed</p>
+	</div>`
+	const detailHTML = `<div data-alert-detail-loaded>
+		<div data-alert-markdown data-raw-content="# Review request&#10;&#10;First line&#10;Second line"></div>
+		<pre>{
+  "owner": "release team",
+  "attempt": 2
+}</pre>
+	</div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/alerts":             alertsHTML,
+		"/alerts/a-1/details": detailHTML,
+	})
+
+	m = runLine(t, m, "/alerts show a-1")
+	out := transcript(m)
+	plain := stripANSI(out)
+	for _, want := range []string{
+		"Review request",
+		"id: a-1",
+		"type: custom · severity: warning",
+		"decision: pending · processing: unclaimed",
+		"# Review request\n\nFirst line\nSecond line",
+		`"owner": "release team"`,
+		`"attempt": 2`,
+	} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("alerts show output missing %q:\n%s", want, plain)
+		}
+	}
+	if !rec.sawQuery("GET /alerts?project_id=p1") || !rec.sawQuery("GET /alerts/a-1/details?project_id=p1") {
+		t.Fatalf("alerts show requests were not project-scoped:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
+	}
+	if got := rec.count("GET", "/alerts/a-1/details"); got != 1 {
+		t.Fatalf("detail requests = %d, want one:\n%s", got, rec.all())
+	}
+	if rec.count("POST", "/alerts/a-1/approve") != 0 || rec.count("POST", "/alerts/a-1/read") != 0 || rec.count("DELETE", "/alerts/a-1") != 0 {
+		t.Fatalf("alerts show made a mutation:\n%s", rec.all())
+	}
+}
+
 func TestAlertsCommandChainsDelete(t *testing.T) {
 	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
-	  data-search-text="build failed">
-	  <p class="font-semibold">Build failed</p>
-	</div>`
+  data-search-text="build failed">
+  <p class="font-semibold">Build failed</p>
+</div>`
 	m, rec := dispatchModel(t, map[string]string{"/alerts": alertsHTML})
 
 	m = runLine(t, m, "/alerts")
@@ -2523,6 +2571,7 @@ func TestAlertsCommandsRequireProject(t *testing.T) {
 		checkSelector     bool
 	}{
 		{name: "list", line: "/alerts"},
+		{name: "show", line: "/alerts show a-1"},
 		{name: "read_all", line: "/alerts read-all"},
 		{name: "clear", line: "/alerts clear", checkConfirmation: true},
 		{name: "approve", line: "/alerts approve a-1"},

@@ -78,6 +78,94 @@ func TestListAlertsScrapesCards(t *testing.T) {
 	}
 }
 
+func TestGetAlertDetailUsesProjectScopedRouteAndPreservesDetail(t *testing.T) {
+	const body = "# Build failure\n\nThe second line stays\n"
+	var requests int
+	var gotMethod, gotPath, gotProject, gotAccept, gotHX string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotMethod = r.Method
+		gotPath = r.URL.EscapedPath()
+		gotProject = r.URL.Query().Get("project_id")
+		gotAccept = r.Header.Get("Accept")
+		gotHX = r.Header.Get("HX-Request")
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, `<div data-alert-detail-loaded>
+			<div data-alert-markdown data-raw-content="# Build failure&#10;&#10;The second line stays&#10;"></div>
+			<pre>{
+  "attempt": 2,
+  "note": "keep  spacing"
+}</pre>
+			<pre data-alert-copy-text data-alert-copy-base64="ignored"></pre>
+		</div>`)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := c.GetAlertDetail(context.Background(), "alert-1", "project/one")
+	if err != nil {
+		t.Fatalf("GetAlertDetail: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("detail requests = %d, want exactly one", requests)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/alerts/alert-1/details" {
+		t.Fatalf("request = %s %s, want GET /alerts/alert-1/details", gotMethod, gotPath)
+	}
+	if gotProject != "project/one" {
+		t.Fatalf("project_id = %q, want %q", gotProject, "project/one")
+	}
+	if gotAccept != "text/html" || gotHX != "true" {
+		t.Fatalf("headers Accept=%q HX-Request=%q, want text/html/true", gotAccept, gotHX)
+	}
+	if detail.Body != body {
+		t.Fatalf("body = %q, want %q", detail.Body, body)
+	}
+	if got, ok := detail.Metadata["attempt"].(float64); !ok || got != 2 {
+		t.Fatalf("metadata attempt = %#v, want numeric 2", detail.Metadata["attempt"])
+	}
+	if got, want := detail.Metadata["note"], "keep  spacing"; got != want {
+		t.Fatalf("metadata note = %#v, want %q", got, want)
+	}
+}
+
+func TestGetAlertDetailRepresentsEmptyDetailExplicitly(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/alerts/empty/details" || r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, `<p class="text-sm opacity-60">No additional detail.</p>`)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := c.GetAlertDetail(context.Background(), "empty", "p1")
+	if err != nil {
+		t.Fatalf("GetAlertDetail: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("detail requests = %d, want exactly one", requests)
+	}
+	if detail.Body != "" {
+		t.Fatalf("empty detail body = %q, want empty", detail.Body)
+	}
+	if detail.Metadata == nil {
+		t.Fatal("empty detail metadata must be a non-nil map")
+	}
+	if len(detail.Metadata) != 0 {
+		t.Fatalf("empty detail metadata = %#v, want empty", detail.Metadata)
+	}
+}
+
 func TestListSkillsReadsDataAttributes(t *testing.T) {
 	const page = `<div>
 	  <div data-skill-handle="deploy" data-skill-name="Deploy"

@@ -1161,6 +1161,82 @@ func indentAutomationDetailTable(value string) string {
 
 // --- alerts ---
 
+func alertSummaryFor(a client.Alert, projectID string) client.AlertSummary {
+	badges := append([]string{}, a.Badges...)
+	return client.AlertSummary{
+		ID:              a.ID,
+		ProjectID:       firstNonEmpty(a.ProjectID, projectID),
+		Scope:           firstNonEmpty(a.Scope, "project"),
+		Type:            a.Type,
+		Severity:        a.Severity,
+		Title:           a.Title,
+		Message:         a.Message,
+		Source:          a.Source,
+		DecisionState:   a.DecisionState,
+		ProcessingState: a.ProcessingState,
+		Text:            a.Text,
+		Badges:          badges,
+		Read:            a.Read,
+	}
+}
+
+func renderAlertInspection(inspection client.AlertInspection) string {
+	summary := inspection.Summary
+	var b strings.Builder
+	title := firstNonEmpty(sanitizeAlertText(summary.Title), sanitizeAlertText(summary.Message), sanitizeAlertText(summary.ID), "(untitled alert)")
+	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(title))
+	fmt.Fprintf(&b, "%s\n", dimStyle.Render("id: "+firstNonEmpty(sanitizeAlertText(summary.ID), "(unknown)")))
+	fmt.Fprintf(&b, "%s\n", dimStyle.Render("type: "+alertDisplayValue(summary.Type)+" · severity: "+alertDisplayValue(summary.Severity)))
+	fmt.Fprintf(&b, "%s\n", dimStyle.Render("decision: "+alertDisplayValue(summary.DecisionState)+" · processing: "+alertDisplayValue(summary.ProcessingState)))
+	if message := sanitizeAlertText(summary.Message); message != "" && message != title {
+		fmt.Fprintf(&b, "%s\n", dimStyle.Render("message: "+message))
+	}
+	if projectID := sanitizeAlertText(summary.ProjectID); projectID != "" {
+		fmt.Fprintf(&b, "%s\n", dimStyle.Render("project_id: "+projectID))
+	}
+
+	body := sanitizeAlertText(inspection.Detail.Body)
+	metadata := inspection.Detail.Metadata
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadataJSON, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		metadataJSON = []byte("{}")
+	}
+
+	b.WriteString("\n" + sectionStyle.Render("Body") + "\n")
+	if body == "" {
+		b.WriteString(dimStyle.Render("(empty body)"))
+	} else {
+		b.WriteString(strings.TrimRight(body, "\n"))
+	}
+	b.WriteString("\n\n" + sectionStyle.Render("Metadata") + "\n")
+	if len(metadata) == 0 {
+		b.WriteString(dimStyle.Render("(empty metadata)"))
+	} else {
+		b.Write(metadataJSON)
+	}
+	if body == "" && len(metadata) == 0 {
+		b.WriteString("\n\n" + dimStyle.Render("No additional detail."))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func alertDisplayValue(value string) string {
+	value = sanitizeAlertText(strings.TrimSpace(value))
+	if value == "" {
+		return "(unknown)"
+	}
+	return value
+}
+
+func sanitizeAlertText(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return sanitizeMemoryText(value)
+}
+
 func renderAlerts(alerts []client.Alert, filter string) string {
 	rows := [][]string{{"ID", "", "ALERT", "STATE"}}
 	unread := 0

@@ -115,6 +115,7 @@ Commands take a resource, an optional action, and arguments:
 
 ```
 /alerts                       list alerts
+/alerts show a1b2             inspect full body and metadata
 /alerts delete a1b2           delete one
 /skills add notes | writes release notes
 /tasks move Refactor active   move a task between columns
@@ -138,7 +139,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 |---|---|---|
 | `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `delete`, `toggle` |
-| `/alerts` | `alert` | `list`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
+| `/alerts` | `alert` | `list`, `show`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
 | `/agents` | `agent` | `list`, `delete`, `generate`, `metrics`, `votes` |
