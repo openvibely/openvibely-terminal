@@ -220,6 +220,37 @@ func TestPersonalitySelectorSetUsesResolvedItemWithoutSecondCatalogLookup(t *tes
 	}
 }
 
+func TestPersonalitySelectorsExcludeBaseForEditAndDelete(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="" data-personality-name="Base" data-personality-description="standard"
+			data-personality-is-preset="true" data-personality-has-custom="false"></div>
+		<div data-personality-key="custom" data-personality-name="Custom" data-personality-description="custom"
+			data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="reviewer" data-personality-name="Reviewer" data-personality-description="reviews"
+			data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	for _, action := range []string{"edit", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/personality": personalitiesHTML})
+			m = runLine(t, m, "/personality "+action)
+			if !m.selectorActive {
+				t.Fatalf("expected %s selector:\n%s", action, transcript(m))
+			}
+			if len(m.selectorItems) != 2 {
+				t.Fatalf("%s selector items = %d, want two custom items: %+v", action, len(m.selectorItems), m.selectorItems)
+			}
+			for i, wantRef := range []string{"custom", "reviewer"} {
+				if item := m.selectorItems[i]; item.ref != wantRef || item.label == "Base" {
+					t.Fatalf("%s selector item %d = %+v, want non-Base personality %q", action, i, item, wantRef)
+				}
+			}
+			if rec.count(http.MethodGet, "/personality") != 1 {
+				t.Fatalf("%s selector made unexpected catalog requests:\n%s", action, rec.all())
+			}
+		})
+	}
+}
+
 func TestPersonalitySelectorRendersKinds(t *testing.T) {
 	m, _ := dispatchModel(t, map[string]string{
 		"/personality": `<div id="personality-section" data-selected-personality="override">

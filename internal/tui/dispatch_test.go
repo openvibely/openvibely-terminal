@@ -2141,6 +2141,53 @@ func TestResolvePersonalityReferenceTiers(t *testing.T) {
 	}
 }
 
+func TestPersonalityDirectActionsRejectBaseEntry(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="" data-personality-name="Base" data-personality-is-preset="true"></div>
+		<div data-personality-key="custom" data-personality-name="Custom" data-personality-is-preset="false"></div>
+	</div>`
+	cases := []struct {
+		name         string
+		line         string
+		mutationVerb string
+		errorText    string
+		confirm      bool
+	}{
+		{
+			name:         "edit",
+			line:         "/personality edit Base | Updated Base | description | A valid prompt that is long enough",
+			mutationVerb: "PUT",
+			errorText:    "base personality cannot be edited",
+		},
+		{
+			name:         "delete",
+			line:         "/personality delete Base",
+			mutationVerb: "DELETE",
+			errorText:    "base personality cannot be deleted",
+			confirm:      true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/personality": personalitiesHTML})
+			m = runLine(t, m, tc.line)
+			if tc.confirm {
+				if m.pendingConfirmation == nil {
+					t.Fatal("delete did not wait for confirmation")
+				}
+				m = runLine(t, m, "yes")
+			}
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.errorText) {
+				t.Fatalf("Base %s error missing:\n%s", tc.name, out)
+			}
+			if strings.Contains(rec.all(), tc.mutationVerb+" /personality/custom") {
+				t.Fatalf("Base %s reached a mutation route:\n%s", tc.name, rec.all())
+			}
+		})
+	}
+}
+
 func TestPersonalityDirectActionsStopOnCatalogFailure(t *testing.T) {
 	cases := []struct {
 		name         string
