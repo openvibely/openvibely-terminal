@@ -761,7 +761,7 @@ func renderAutomations(automations []client.Automation, filter string) string {
 		return dimStyle.Render(automationEmptyStateHint)
 	}
 	return table(rows) + "\n\n" +
-		dimStyle.Render("/automations run-now|pause|resume|delete <id|name>")
+		dimStyle.Render("/automations run|pause|resume|delete <id|name>")
 }
 
 func renderAutomationDetail(detail client.AutomationDetail) string {

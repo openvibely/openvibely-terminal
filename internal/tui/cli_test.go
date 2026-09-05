@@ -1394,8 +1394,34 @@ func TestCLIRunsAutomationsPause(t *testing.T) {
 	}
 }
 
-// One-shot CLI mode works headlessly for the new automations actions,
-// exiting cleanly on success and nonzero on a backend failure.
+func TestCLIRunsAutomationsRunAndCompatibilityAlias(t *testing.T) {
+	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p1">
+		<div class="card-body relative">
+			<span class="badge badge-outline badge-sm">active</span>
+			<button type="button" data-automation-card-delete="au-1" data-automation-name="Native SDLC"></button>
+		</div>
+	</div>`
+	for _, action := range []string{"run", "run-now"} {
+		t.Run(action, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/automations":  automationsHTML,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"automations", action, "Native"}, false, false); err != nil {
+				t.Fatalf("%s failed: %v", action, err)
+			}
+			if !rec.sawQuery("POST /automations/au-1/run-now?project_id=p1") {
+				t.Fatalf("%s lost backend route or project scope, calls:\n%s", action, rec.all())
+			}
+			if !strings.Contains(stripANSI(out.String()), "run: Native SDLC") {
+				t.Fatalf("%s output did not use canonical action:\n%s", action, out.String())
+			}
+		})
+	}
+}
+
+// One-shot CLI mode works headlessly for automation detail and JSON output.
 func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p2">
 		<div class="card-body relative">
@@ -1453,6 +1479,20 @@ func TestCLIAutomationsShowMissingReferenceReturnsUsageWithoutSelectorOrList(t *
 	}
 	if rec.saw("GET", "/automations") {
 		t.Fatalf("missing CLI reference listed automations or opened a selector:\n%s", rec.all())
+	}
+}
+
+func TestCLIAutomationsRunMissingReferenceUsesCanonicalUsageWithoutList(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/automations": `<div></div>`})
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "run"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "usage: automations run <automation>") {
+		t.Fatalf("missing CLI run reference error = %v, want canonical usage", err)
+	}
+	if strings.Contains(err.Error(), "run-now") {
+		t.Fatalf("missing CLI run reference advertised compatibility alias: %v", err)
+	}
+	if rec.saw("GET", "/automations") {
+		t.Fatalf("missing CLI run reference listed automations or opened a selector:\n%s", rec.all())
 	}
 }
 

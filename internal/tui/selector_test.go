@@ -132,7 +132,7 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		// automations
 		{"automations_show", "/automations show", "automations show"},
 		{"automations_open", "/automations open", "automations open"},
-		{"automations_run-now", "/automations run-now", "automations run-now"},
+		{"automations_run", "/automations run", "automations run"},
 		{"automations_pause", "/automations pause", "automations pause"},
 		{"automations_resume", "/automations resume", "automations resume"},
 		{"automations_delete", "/automations delete", "automations delete"},
@@ -289,6 +289,7 @@ func TestAutomationsWithoutProjectSkipsSelector(t *testing.T) {
 		"/automations",
 		"/automations show au-1",
 		"/automations open au-1",
+		"/automations run au-1",
 		"/automations run-now au-1",
 		"/automations pause au-1",
 		"/automations resume au-1",
@@ -550,12 +551,12 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 			wantOutput:  "delete: GPT-4o",
 		},
 		{
-			name:       "automations run-now",
-			command:    "/automations run-now",
+			name:       "automations run",
+			command:    "/automations run",
 			method:     "POST",
 			path:       "/automations/au-1/run-now",
 			listPath:   "/automations",
-			wantOutput: "run-now: Nightly sweep",
+			wantOutput: "run: Nightly sweep",
 		},
 		{
 			name:       "automations pause",
