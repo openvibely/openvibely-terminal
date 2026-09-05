@@ -61,7 +61,7 @@ func run() error {
 	flag.BoolVar(force, "f", false, "shorthand for -force")
 	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, lifecycle, workflow-vote, project creation, and events commands")
 	flag.Usage = usage
-	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+	if err := parseInterspersedFlags(flag.CommandLine, os.Args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return nil
 		}
@@ -103,6 +103,67 @@ func run() error {
 	}
 
 	return runTUI(c, *project)
+}
+
+type boolFlag interface {
+	IsBoolFlag() bool
+}
+
+// parseInterspersedFlags lets registered global flags appear anywhere before
+// an explicit -- boundary. It preserves every other token in its original
+// order so subcommands remain responsible for their own flags and operands.
+func parseInterspersedFlags(fs *flag.FlagSet, args []string) error {
+	flags := make([]string, 0, len(args))
+	operands := make([]string, 0, len(args))
+	seenOperand := false
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			operands = append(operands, args[i+1:]...)
+			break
+		}
+
+		name, hasValue, isFlag := flagToken(arg)
+		registered := fs.Lookup(name)
+		isHelp := name == "h" || name == "help"
+		if !isFlag || (registered == nil && !isHelp && seenOperand) {
+			operands = append(operands, arg)
+			seenOperand = true
+			continue
+		}
+
+		flags = append(flags, arg)
+		if registered == nil || hasValue {
+			continue
+		}
+		if bf, ok := registered.Value.(boolFlag); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+
+	return fs.Parse(append(flags, operands...))
+}
+
+func flagToken(arg string) (name string, hasValue, ok bool) {
+	if len(arg) < 2 || arg[0] != '-' || arg == "-" {
+		return "", false, false
+	}
+	name = arg[1:]
+	if strings.HasPrefix(name, "-") {
+		name = name[1:]
+	}
+	if name == "" {
+		return "", false, false
+	}
+	if before, _, found := strings.Cut(name, "="); found {
+		return before, true, true
+	}
+	return name, false, true
 }
 
 func runCLI(c *client.Client, project string, args []string, force, jsonOutput bool) error {
@@ -191,7 +252,7 @@ func usage() {
 
 usage:
   openvibely-tui [flags]                 start the interactive chat UI
-  openvibely-tui [flags] <command> ...   run one command and print the result
+  openvibely-tui [flags] <command> [flags] ...   run one command and print the result
 
 commands:
 %s
@@ -202,6 +263,7 @@ examples:
   openvibely-tui tasks
   openvibely-tui tasks run "api refactor"
   openvibely-tui -project demo chat "ship the docs"
+  openvibely-tui chat -project demo "ship the docs"
   openvibely-tui -project demo events on
   openvibely-tui help tasks              full syntax of one command
 
