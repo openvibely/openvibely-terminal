@@ -245,16 +245,18 @@ func tasksCommand() command {
 			{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
 			{after: []string{"attach"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
 			{after: []string{"attachment"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
-			{after: []string{"move", "**"}, values: []string{"backlog", "active", "completed"}},
+			{after: []string{"move", "**"}, onlyEmpty: true, values: []string{"backlog", "active", "completed"}},
 			{after: []string{"clear"}, values: []string{"backlog", "completed"}},
-			{after: []string{"show", "**"}, values: taskDetailCompletionValues()},
+			{after: []string{"show", "**"}, onlyEmpty: true, values: taskDetailCompletionValues()},
 		},
 		selectorPaths: [][]string{
 			{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
 			{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
 			{"order"}, {"goal"}, {"reply"}, {"attachments"}, {"attachments", "add"},
 			{"attachments", "upload"}, {"attachments", "list"}, {"attachments", "show"},
-			{"attachments", "delete"}, {"attachments", "remove"}, {"attach"}, {"attachment"},
+			{"attachments", "delete"}, {"attachments", "remove"},
+			{"attach"}, {"attach", "add"}, {"attach", "upload"}, {"attach", "list"}, {"attach", "show"}, {"attach", "delete"}, {"attach", "remove"},
+			{"attachment"}, {"attachment", "add"}, {"attachment", "upload"}, {"attachment", "list"}, {"attachment", "show"}, {"attachment", "delete"}, {"attachment", "remove"},
 		},
 		desc: "the task board and task threads",
 		usage: []string{
@@ -579,8 +581,12 @@ func tasksCommand() command {
 				category := strings.ToLower(rest[len(rest)-1])
 				if category != "backlog" && category != "active" && category != "completed" {
 					if !cliMode {
-						return optionSelector(m, "Task column", "tasks move "+strings.Join(rest, " "),
-							"usage: /tasks move <task> <backlog|active|completed>", registryCompletionValues("tasks", append([]string{"move"}, rest...)...))
+						pendingRest := rest
+						if len(matchingActions(registryCompletionValues("tasks", append([]string{"move"}, rest[:len(rest)-1]...)...), category)) > 0 {
+							pendingRest = rest[:len(rest)-1]
+						}
+						return optionSelector(m, "Task column", "tasks move "+strings.Join(pendingRest, " "),
+							"usage: /tasks move <task> <backlog|active|completed>", registryCompletionValues("tasks", append([]string{"move"}, pendingRest...)...))
 					}
 					return m, errCmd("usage: /tasks move <task> <backlog|active|completed>")
 				}
@@ -1218,7 +1224,7 @@ func scheduleCommand() command {
 		args:    "[args]",
 		actions: actions,
 		completions: []commandCompletion{
-			{after: []string{"add", "**"}, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
+			{after: []string{"add", "*", "**"}, onlyEmpty: true, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
 		},
 		selectorPaths: [][]string{{"add"}, {"delete"}, {"toggle"}},
 		desc:          "scheduled/recurring task runs",

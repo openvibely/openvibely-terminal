@@ -204,6 +204,61 @@ func TestOmittedTypedOperandsOpenRegistryOptionSelectors(t *testing.T) {
 	}
 }
 
+func TestPartialTaskMoveOptionSelectionReplacesEnumPrefix(t *testing.T) {
+	m, rec := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/tasks move t-1 ac")
+	if !m.selectorActive || m.pendingCommand != "tasks move t-1" {
+		t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown}) // active
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !rec.saw("PATCH", "/tasks/t-1/category") || !rec.sawForm("category=active") {
+		t.Fatalf("selected option was not dispatched as a replacement:\nrequests:\n%s\nforms: %v", rec.all(), rec.forms)
+	}
+	if strings.Contains(rec.all(), "ac active") {
+		t.Fatalf("partial option was appended instead of replaced:\n%s", rec.all())
+	}
+}
+
+func TestNonEnumTaskTitleWordIsPreservedWhenSelectingMoveOption(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/tasks move Fix login")
+	if !m.selectorActive || m.pendingCommand != "tasks move Fix login" {
+		t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+	}
+}
+
+func TestWorksAliasOpensWorkerLimitOptions(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/works limit")
+	if !m.selectorActive || m.pendingCommand != "workers limit" {
+		t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+	}
+}
+
+func TestAttachmentAliasesOfferNestedResourceSelectorsOnTab(t *testing.T) {
+	for _, alias := range []string{"attach", "attachment"} {
+		t.Run(alias, func(t *testing.T) {
+			m, _ := dispatchModel(t, selFixtures())
+			m.input.SetValue("/tasks " + alias + " add ")
+			m.input.CursorEnd()
+			m.refreshMenu()
+
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+			m = next.(Model)
+			if cmd == nil {
+				t.Fatalf("Tab did not request a task selector for %q", alias)
+			}
+			next, _ = m.Update(cmd())
+			m = next.(Model)
+			if !m.selectorActive || m.pendingCommand != "tasks attachments add" {
+				t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+			}
+		})
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

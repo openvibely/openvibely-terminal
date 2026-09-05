@@ -56,9 +56,12 @@ func (u commandActionUsage) helpLine(commandName string) string {
 
 type commandCompletion struct {
 	// after describes the already-complete argument path. Literal words match
-	// themselves; "*" matches one operand and "**" matches any operands.
-	after  []string
-	values []string
+	// themselves; "*" matches one operand and "**" matches one or more.
+	after []string
+	// onlyEmpty prevents a partial token from being rewritten where a preceding
+	// free-form resource reference has no syntactic boundary.
+	onlyEmpty bool
+	values    []string
 }
 
 // command is one entry in the registry.
@@ -358,7 +361,7 @@ func completeSlashInputAt(value string, cursor int, selected command) (string, i
 			return value, cursor
 		}
 		selected = *c
-		candidates = selected.completionValues(fields[1:])
+		candidates = selected.completionValuesForTab(fields[1:], prefix)
 	}
 	matches := matchingActions(candidates, strings.ToLower(prefix))
 	if len(matches) != 1 {
@@ -405,12 +408,20 @@ func registryCompletionValues(commandName string, after ...string) []string {
 }
 
 func (c command) completionValues(after []string) []string {
+	return c.completionValuesMatching(after, false)
+}
+
+func (c command) completionValuesForTab(after []string, prefix string) []string {
+	return c.completionValuesMatching(after, prefix != "")
+}
+
+func (c command) completionValuesMatching(after []string, replacing bool) []string {
 	var values []string
 	if len(after) == 0 {
 		values = append(values, c.actions...)
 	}
 	for _, rule := range c.completions {
-		if completionPathMatches(rule.after, after) {
+		if (!replacing || !rule.onlyEmpty) && completionPathMatches(rule.after, after) {
 			values = append(values, rule.values...)
 		}
 	}

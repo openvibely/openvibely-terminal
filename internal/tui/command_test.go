@@ -253,9 +253,9 @@ func TestRegistryCompletionAtEveryDepth(t *testing.T) {
 		{input: "/tasks attachments", want: "/tasks attachments "},
 		{input: "/tasks attachments de", want: "/tasks attachments delete "},
 		{input: "/tasks reviews a", want: "/tasks reviews add "},
-		{input: "/tasks move api ac", want: "/tasks move api active "},
-		{input: "/tasks show api chang", want: "/tasks show api changes "},
-		{input: "/schedule add report 2026-01-20T09:00 mon", want: "/schedule add report 2026-01-20T09:00 monthly "},
+		{input: "/tasks move api ac", want: "/tasks move api ac"},
+		{input: "/tasks show api chang", want: "/tasks show api chang"},
+		{input: "/schedule add report 2026-01-20T09:00 mon", want: "/schedule add report 2026-01-20T09:00 mon"},
 		{input: "/workers limit 0", want: "/workers limit 0 "},
 		{input: "/task attachments rem extra", want: "/tasks attachments remove extra"},
 	}
@@ -267,6 +267,56 @@ func TestRegistryCompletionAtEveryDepth(t *testing.T) {
 			}
 			if got := completeSlashInput(tc.input, *cmd); got != tc.want {
 				t.Fatalf("completion = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRegistryCompletionPreservesRequiredOperands(t *testing.T) {
+	cases := []string{
+		"/tasks move ac",
+		"/tasks move Fix ac",
+		"/tasks show rev",
+		"/tasks show Fix rev",
+		"/schedule add mon",
+		"/schedule add Daily report mon",
+	}
+	for _, input := range cases {
+		t.Run(input, func(t *testing.T) {
+			cmd := lookupCommand(strings.Fields(input)[0])
+			if cmd == nil {
+				t.Fatalf("command missing for %q", input)
+			}
+			if got := completeSlashInput(input, *cmd); got != input {
+				t.Fatalf("completion changed required operand to %q", got)
+			}
+		})
+	}
+}
+
+func TestRegistryCompletionPreservesRequiredOperandAtCursorAndSuffix(t *testing.T) {
+	cases := []struct {
+		command string
+		input   string
+	}{
+		{command: "tasks", input: "/tasks move ac | keep  spacing"},
+		{command: "tasks", input: "/tasks move Fix ac | keep  spacing"},
+		{command: "tasks", input: "/tasks show Fix rev | keep  spacing"},
+		{command: "schedule", input: "/schedule add Daily report mon | keep  spacing"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			cmd := lookupCommand(tc.command)
+			if cmd == nil {
+				t.Fatalf("%s command missing", tc.command)
+			}
+			cursor := strings.Index(tc.input, " |")
+			got, gotCursor := completeSlashInputAt(tc.input, cursor, *cmd)
+			if got != tc.input {
+				t.Fatalf("completion changed required operand to %q", got)
+			}
+			if gotCursor != cursor {
+				t.Fatalf("cursor = %d, want %d", gotCursor, cursor)
 			}
 		})
 	}
@@ -284,7 +334,7 @@ func TestRegistryCompletionPreservesAmbiguousInput(t *testing.T) {
 func TestRegistryCompletionPreservesQuotedAndPipeDelimitedArguments(t *testing.T) {
 	cmd := lookupCommand("tasks")
 	cases := map[string]string{
-		`/tasks move "Fix login bug" ac`:         `/tasks move "Fix login bug" active `,
+		`/tasks move "Fix login bug" ac`:         `/tasks move "Fix login bug" ac`,
 		`/tasks goal "Fix login bug" | clear`:    `/tasks goal "Fix login bug" | clear`,
 		`/tasks reviews add "Fix bug" file.go:2`: `/tasks reviews add "Fix bug" file.go:2`,
 	}
@@ -309,6 +359,16 @@ func TestRegistryCompletionPreservesCursorAndSuffix(t *testing.T) {
 	}
 	if gotCursor != strings.Index(want, " --force") {
 		t.Fatalf("cursor = %d, want %d", gotCursor, strings.Index(want, " --force"))
+	}
+}
+
+func TestWorksAliasCompletesCanonicalCommandAtDepth(t *testing.T) {
+	cmd := lookupCommand("works")
+	if cmd == nil {
+		t.Fatal("works alias missing")
+	}
+	if got := completeSlashInput("/works li", *cmd); got != "/workers limit " {
+		t.Fatalf("completion = %q, want %q", got, "/workers limit ")
 	}
 }
 
