@@ -228,7 +228,13 @@ func taskDetailCompletionValues() []string {
 	var values []string
 	for _, tab := range client.TaskDetailTabs() {
 		values = append(values, tab.Name)
-		values = append(values, tab.Aliases...)
+		for _, alias := range tab.Aliases {
+			// An alias that only extends its canonical name makes every useful
+			// canonical prefix ambiguous (for example review/reviews).
+			if !strings.HasPrefix(alias, tab.Name) {
+				values = append(values, alias)
+			}
+		}
 	}
 	return values
 }
@@ -245,9 +251,9 @@ func tasksCommand() command {
 			{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
 			{after: []string{"attach"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
 			{after: []string{"attachment"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
-			{after: []string{"move", "**"}, onlyEmpty: true, values: []string{"backlog", "active", "completed"}},
+			{after: []string{"move", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"backlog", "active", "completed"}},
 			{after: []string{"clear"}, values: []string{"backlog", "completed"}},
-			{after: []string{"show", "**"}, onlyEmpty: true, values: taskDetailCompletionValues()},
+			{after: []string{"show", "**"}, partialAfter: completionAfterQuotedOperand, values: taskDetailCompletionValues()},
 		},
 		selectorPaths: [][]string{
 			{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
@@ -1224,7 +1230,7 @@ func scheduleCommand() command {
 		args:    "[args]",
 		actions: actions,
 		completions: []commandCompletion{
-			{after: []string{"add", "*", "**"}, onlyEmpty: true, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
+			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
 		},
 		selectorPaths: [][]string{{"add"}, {"delete"}, {"toggle"}},
 		desc:          "scheduled/recurring task runs",

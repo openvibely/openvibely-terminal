@@ -86,6 +86,22 @@ func optionSelector(m Model, title, command, usage string, values []string) (Mod
 		}))
 }
 
+func optionSelectorWithFilter(m Model, title, command, usage string, values []string, filter string) (Model, tea.Cmd) {
+	next, cmd := optionSelector(m, title, command, usage, values)
+	if cmd == nil {
+		return next, nil
+	}
+	return next, func() tea.Msg {
+		msg := cmd()
+		if active, ok := msg.(selectorActiveMsg); ok {
+			active.initialFilter = filter
+			active.forcePicker = true
+			return active
+		}
+		return msg
+	}
+}
+
 // handleSelector applies a selectorActiveMsg: error, empty hint, single-item
 // auto-select, or open the interactive picker.
 func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {

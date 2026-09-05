@@ -17,8 +17,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -54,14 +54,23 @@ func (u commandActionUsage) helpLine(commandName string) string {
 	return fmt.Sprintf("%-*s%s", descriptionColumn, syntax, u.description)
 }
 
+type completionBoundary uint8
+
+const (
+	completionBoundaryNone completionBoundary = iota
+	completionAfterQuotedOperand
+	completionAfterScheduleTimestamp
+)
+
 type commandCompletion struct {
 	// after describes the already-complete argument path. Literal words match
 	// themselves; "*" matches one operand and "**" matches one or more.
 	after []string
-	// onlyEmpty prevents a partial token from being rewritten where a preceding
-	// free-form resource reference has no syntactic boundary.
-	onlyEmpty bool
-	values    []string
+	// partialAfter permits partial-token replacement only when the completed
+	// operands expose this structural boundary. A zero value permits replacement
+	// unconditionally.
+	partialAfter completionBoundary
+	values       []string
 }
 
 // command is one entry in the registry.
@@ -205,6 +214,11 @@ func suggest(word string) []command {
 // input is one shell-like line, so quoted arguments are grouped and their
 // matching delimiters are removed before command dispatch.
 func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
+	if !cliMode {
+		if next, cmd, ok := m.partialOperandOptionSelector(line); ok {
+			return next, cmd
+		}
+	}
 	fields, err := tokenizeCommand(line)
 	if err != nil {
 		m.busy = false
@@ -212,6 +226,62 @@ func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m.runCommandFields(fields)
+}
+
+func (m Model) partialOperandOptionSelector(line string) (Model, tea.Cmd, bool) {
+	lineRunes := []rune(line)
+	if len(lineRunes) == 0 || unicode.IsSpace(lineRunes[len(lineRunes)-1]) {
+		return m, nil, false
+	}
+	runes := []rune(strings.TrimSpace(line))
+	start := len(runes)
+	for start > 0 && !unicode.IsSpace(runes[start-1]) {
+		start--
+	}
+	prefix := string(runes[start:])
+	completedLine := strings.TrimSpace(string(runes[:start]))
+	tokens, err := tokenizeCommandTokens(completedLine)
+	if err != nil || len(tokens) < 2 {
+		return m, nil, false
+	}
+	c := lookupCommand(tokens[0].value)
+	if c == nil {
+		return m, nil, false
+	}
+	after := make([]string, len(tokens)-1)
+	for i, token := range tokens[1:] {
+		after[i] = token.value
+	}
+	values := c.partialOperandValues(after, tokens[1:])
+	for _, value := range values {
+		if strings.EqualFold(value, prefix) {
+			return m, nil, false
+		}
+	}
+	matches := matchingActions(values, strings.ToLower(prefix))
+	if len(matches) == 0 {
+		return m, nil, false
+	}
+	canonical := canonicalizeCompletedRoot(completedLine, c.name)
+	pending := strings.TrimSpace(strings.TrimPrefix(canonical, "/"))
+	usage := "usage: " + cmdPrefix + pending + " <option>"
+	if len(after) > 0 {
+		usage = c.usageMessage(after[0])
+	}
+	next, cmd := optionSelectorWithFilter(m, "Options", pending, usage, values, prefix)
+	return next, cmd, true
+}
+
+func (c command) partialOperandValues(after []string, tokens []commandToken) []string {
+	var values []string
+	for _, rule := range c.completions {
+		if rule.partialAfter != completionBoundaryNone &&
+			completionPathMatches(rule.after, after) &&
+			completionBoundaryMatches(rule.partialAfter, tokens) {
+			values = append(values, rule.values...)
+		}
+	}
+	return values
 }
 
 // runCommandFields dispatches already-tokenized arguments. RunCLI uses this
@@ -236,21 +306,42 @@ func (m Model) runCommandFields(fields []string) (tea.Model, tea.Cmd) {
 // tokenizeCommand groups whitespace inside matching single or double quotes,
 // removes those delimiters, and preserves empty quoted arguments. A dangling
 // quote is rejected before command lookup or any command side effect.
+type commandToken struct {
+	value  string
+	quoted bool
+}
+
 func tokenizeCommand(line string) ([]string, error) {
+	tokens, err := tokenizeCommandTokens(line)
+	if err != nil {
+		return nil, err
+	}
+	fields := make([]string, len(tokens))
+	for i, token := range tokens {
+		fields[i] = token.value
+	}
+	return fields, nil
+}
+
+// tokenizeCommandTokens additionally retains whether a token used an explicit
+// quote boundary. Completion uses that boundary without changing dispatch args.
+func tokenizeCommandTokens(line string) ([]commandToken, error) {
 	line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "/"))
 	var (
-		fields       []string
+		tokens       []commandToken
 		current      strings.Builder
 		quoted       rune
 		tokenStarted bool
+		tokenQuoted  bool
 	)
 	flush := func() {
 		if !tokenStarted {
 			return
 		}
-		fields = append(fields, current.String())
+		tokens = append(tokens, commandToken{value: current.String(), quoted: tokenQuoted})
 		current.Reset()
 		tokenStarted = false
+		tokenQuoted = false
 	}
 
 	for _, r := range line {
@@ -266,6 +357,7 @@ func tokenizeCommand(line string) ([]string, error) {
 		case r == '\'' || r == '"':
 			quoted = r
 			tokenStarted = true
+			tokenQuoted = true
 		case unicode.IsSpace(r):
 			flush()
 		default:
@@ -281,7 +373,7 @@ func tokenizeCommand(line string) ([]string, error) {
 		return nil, fmt.Errorf("unmatched %s quote", name)
 	}
 	flush()
-	return fields, nil
+	return tokens, nil
 }
 
 // refreshMenu recomputes the inline command menu from the current input.
@@ -345,10 +437,14 @@ func completeSlashInputAt(value string, cursor int, selected command) (string, i
 		end++
 	}
 	prefix := string(runes[start:cursor])
-	before := strings.TrimSpace(string(runes[:start]))
-	fields, err := tokenizeCommand(before)
+	completed := strings.TrimSpace(string(runes[:start]))
+	tokens, err := tokenizeCommandTokens(completed)
 	if err != nil {
 		return value, cursor
+	}
+	fields := make([]string, len(tokens))
+	for i, token := range tokens {
+		fields[i] = token.value
 	}
 
 	var candidates []string
@@ -361,7 +457,7 @@ func completeSlashInputAt(value string, cursor int, selected command) (string, i
 			return value, cursor
 		}
 		selected = *c
-		candidates = selected.completionValuesForTab(fields[1:], prefix)
+		candidates = selected.completionValuesForTab(fields[1:], tokens[1:], prefix)
 	}
 	matches := matchingActions(candidates, strings.ToLower(prefix))
 	if len(matches) != 1 {
@@ -408,24 +504,41 @@ func registryCompletionValues(commandName string, after ...string) []string {
 }
 
 func (c command) completionValues(after []string) []string {
-	return c.completionValuesMatching(after, false)
+	return c.completionValuesMatching(after, nil, false)
 }
 
-func (c command) completionValuesForTab(after []string, prefix string) []string {
-	return c.completionValuesMatching(after, prefix != "")
+func (c command) completionValuesForTab(after []string, tokens []commandToken, prefix string) []string {
+	return c.completionValuesMatching(after, tokens, prefix != "")
 }
 
-func (c command) completionValuesMatching(after []string, replacing bool) []string {
+func (c command) completionValuesMatching(after []string, tokens []commandToken, replacing bool) []string {
 	var values []string
 	if len(after) == 0 {
 		values = append(values, c.actions...)
 	}
 	for _, rule := range c.completions {
-		if (!replacing || !rule.onlyEmpty) && completionPathMatches(rule.after, after) {
+		if completionPathMatches(rule.after, after) && (!replacing || completionBoundaryMatches(rule.partialAfter, tokens)) {
 			values = append(values, rule.values...)
 		}
 	}
 	return values
+}
+
+func completionBoundaryMatches(boundary completionBoundary, tokens []commandToken) bool {
+	switch boundary {
+	case completionBoundaryNone:
+		return true
+	case completionAfterQuotedOperand:
+		return len(tokens) == 2 && tokens[1].quoted
+	case completionAfterScheduleTimestamp:
+		if len(tokens) == 0 {
+			return false
+		}
+		_, err := time.Parse("2006-01-02T15:04", tokens[len(tokens)-1].value)
+		return err == nil
+	default:
+		return false
+	}
 }
 
 func completionPathMatches(pattern, words []string) bool {

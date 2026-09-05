@@ -918,7 +918,7 @@ func TestSlashCommandDeepCompletionFromRegistry(t *testing.T) {
 		"/tasks attachments de":                  "/tasks attachments delete ",
 		"/tasks reviews a":                       "/tasks reviews add ",
 		"/tasks move api ac":                     "/tasks move api ac",
-		"/schedule add api 2026-01-20T09:00 mon": "/schedule add api 2026-01-20T09:00 mon",
+		"/schedule add api 2026-01-20T09:00 mon": "/schedule add api 2026-01-20T09:00 monthly ",
 		"/events fal":                            "/events false ",
 	}
 	for input, want := range cases {

@@ -204,6 +204,82 @@ func TestOmittedTypedOperandsOpenRegistryOptionSelectors(t *testing.T) {
 	}
 }
 
+func TestStructurallyBoundedPartialOperandsOpenFilteredOptionPickers(t *testing.T) {
+	cases := []struct {
+		name        string
+		line        string
+		wantPending string
+		wantFilter  string
+		wantOption  string
+	}{
+		{
+			name:        "task detail through root alias",
+			line:        `/task show "Refactor the API" rev`,
+			wantPending: `tasks show "Refactor the API"`,
+			wantFilter:  "rev",
+			wantOption:  "review",
+		},
+		{
+			name:        "schedule repeat through root alias",
+			line:        `/schedules add "Refactor the API" 2026-01-20T09:00 mon`,
+			wantPending: `schedule add "Refactor the API" 2026-01-20T09:00`,
+			wantFilter:  "mon",
+			wantOption:  "monthly",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, selFixtures())
+			m = runLine(t, m, tc.line)
+			if !m.selectorActive || m.pendingCommand != tc.wantPending {
+				t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+			}
+			if m.selectorFilter != tc.wantFilter {
+				t.Fatalf("selector filter = %q, want %q", m.selectorFilter, tc.wantFilter)
+			}
+			if len(m.selectorFiltered) != 1 || m.selectorFiltered[0].ref != tc.wantOption {
+				t.Fatalf("filtered options = %+v, want %q", m.selectorFiltered, tc.wantOption)
+			}
+		})
+	}
+}
+
+func TestExactStructurallyBoundedOperandsDispatchNormally(t *testing.T) {
+	for _, line := range []string{
+		`/tasks show "Refactor the API" review`,
+		`/tasks move "Refactor the API" active`,
+		`/schedule add "Refactor the API" 2026-01-20T09:00 monthly`,
+	} {
+		t.Run(line, func(t *testing.T) {
+			m, _ := dispatchModel(t, selFixtures())
+			next, cmd := m.runCommand(line)
+			got := next.(Model)
+			if cmd == nil {
+				t.Fatal("valid exact operand did not dispatch")
+			}
+			if got.selectorActive {
+				t.Fatal("valid exact operand reopened an option picker")
+			}
+		})
+	}
+}
+
+func TestAmbiguousUnquotedPartialOperandsDoNotOpenOptionPickers(t *testing.T) {
+	for _, line := range []string{
+		`/tasks show Fix rev`,
+		`/schedule add Daily report mon`,
+		`/schedule add Daily report not-a-date mon`,
+	} {
+		t.Run(line, func(t *testing.T) {
+			m, _ := dispatchModel(t, selFixtures())
+			m = runLine(t, m, line)
+			if m.selectorActive && m.selectorTitle == "Options" {
+				t.Fatalf("ambiguous input opened an operand option picker: pending=%q", m.pendingCommand)
+			}
+		})
+	}
+}
+
 func TestPartialTaskMoveOptionSelectionReplacesEnumPrefix(t *testing.T) {
 	m, rec := dispatchModel(t, selFixtures())
 	m = runLine(t, m, "/tasks move t-1 ac")

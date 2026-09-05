@@ -253,9 +253,11 @@ func TestRegistryCompletionAtEveryDepth(t *testing.T) {
 		{input: "/tasks attachments", want: "/tasks attachments "},
 		{input: "/tasks attachments de", want: "/tasks attachments delete "},
 		{input: "/tasks reviews a", want: "/tasks reviews add "},
-		{input: "/tasks move api ac", want: "/tasks move api ac"},
-		{input: "/tasks show api chang", want: "/tasks show api chang"},
-		{input: "/schedule add report 2026-01-20T09:00 mon", want: "/schedule add report 2026-01-20T09:00 mon"},
+		{input: `/tasks move "Fix login" ac`, want: `/tasks move "Fix login" active `},
+		{input: `/task show "Fix login" rev`, want: `/tasks show "Fix login" review `},
+		{input: `/tasks show "Fix login" dif`, want: `/tasks show "Fix login" diff `},
+		{input: `/schedule add Daily report 2026-01-20T09:00 mon`, want: `/schedule add Daily report 2026-01-20T09:00 monthly `},
+		{input: `/schedules add "Daily report" 2026-01-20T09:00 wee`, want: `/schedule add "Daily report" 2026-01-20T09:00 weekly `},
 		{input: "/workers limit 0", want: "/workers limit 0 "},
 		{input: "/task attachments rem extra", want: "/tasks attachments remove extra"},
 	}
@@ -280,6 +282,7 @@ func TestRegistryCompletionPreservesRequiredOperands(t *testing.T) {
 		"/tasks show Fix rev",
 		"/schedule add mon",
 		"/schedule add Daily report mon",
+		"/schedule add Daily report not-a-date mon",
 	}
 	for _, input := range cases {
 		t.Run(input, func(t *testing.T) {
@@ -334,7 +337,7 @@ func TestRegistryCompletionPreservesAmbiguousInput(t *testing.T) {
 func TestRegistryCompletionPreservesQuotedAndPipeDelimitedArguments(t *testing.T) {
 	cmd := lookupCommand("tasks")
 	cases := map[string]string{
-		`/tasks move "Fix login bug" ac`:         `/tasks move "Fix login bug" ac`,
+		`/tasks move "Fix login bug" ac`:         `/tasks move "Fix login bug" active `,
 		`/tasks goal "Fix login bug" | clear`:    `/tasks goal "Fix login bug" | clear`,
 		`/tasks reviews add "Fix bug" file.go:2`: `/tasks reviews add "Fix bug" file.go:2`,
 	}
@@ -359,6 +362,38 @@ func TestRegistryCompletionPreservesCursorAndSuffix(t *testing.T) {
 	}
 	if gotCursor != strings.Index(want, " --force") {
 		t.Fatalf("cursor = %d, want %d", gotCursor, strings.Index(want, " --force"))
+	}
+}
+
+func TestStructuralOperandCompletionPreservesCursorAndSuffix(t *testing.T) {
+	cases := []struct {
+		command string
+		input   string
+		want    string
+	}{
+		{command: "tasks", input: `/tasks move "Fix login" ac | keep  spacing`, want: `/tasks move "Fix login" active | keep  spacing`},
+		{command: "tasks", input: `/tasks show "Fix login" rev --json`, want: `/tasks show "Fix login" review --json`},
+		{command: "schedule", input: `/schedule add Daily report 2026-01-20T09:00 mon | keep`, want: `/schedule add Daily report 2026-01-20T09:00 monthly | keep`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			cmd := lookupCommand(tc.command)
+			cursor := strings.Index(tc.input, " |")
+			if cursor < 0 {
+				cursor = strings.Index(tc.input, " --")
+			}
+			got, gotCursor := completeSlashInputAt(tc.input, cursor, *cmd)
+			if got != tc.want {
+				t.Fatalf("completion = %q, want %q", got, tc.want)
+			}
+			wantCursor := strings.Index(tc.want, " |")
+			if wantCursor < 0 {
+				wantCursor = strings.Index(tc.want, " --")
+			}
+			if gotCursor != wantCursor {
+				t.Fatalf("cursor = %d, want %d", gotCursor, wantCursor)
+			}
+		})
 	}
 }
 
