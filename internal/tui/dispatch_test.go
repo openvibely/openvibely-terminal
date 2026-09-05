@@ -1069,25 +1069,103 @@ func TestAlertsShowLoadsFullDetailWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestAlertsCommandChainsDelete(t *testing.T) {
-	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
-  data-search-text="build failed">
-  <p class="font-semibold">Build failed</p>
-</div>`
-	m, rec := dispatchModel(t, map[string]string{"/alerts": alertsHTML})
-
-	m = runLine(t, m, "/alerts")
-	if !rec.saw("GET", "/alerts") {
-		t.Fatalf("expected an alerts fetch:\n%s", rec.all())
+func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
+	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build failed"><p class="font-semibold">Build failed</p></div>
+		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="duplicate one"><p class="font-semibold">Duplicate</p></div>
+		<div data-alert-id="a-3" data-alert-scroll-anchor="a-3" data-search-text="duplicate two"><p class="font-semibold">Duplicate</p></div>`
+	const refreshedAlerts = `<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="duplicate one"><p class="font-semibold">Remaining alert</p></div>`
+	var mu sync.Mutex
+	var gets, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.Header().Set("Content-Type", "text/html")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			gets++
+			_, _ = io.WriteString(w, initialAlerts)
+		case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-1":
+			deletes++
+			if r.URL.Query().Get("project_id") != "p1" || r.Header.Get("HX-Request") != "true" {
+				t.Errorf("delete request lost project scope or HTMX header: %s", r.URL.RequestURI())
+			}
+			_, _ = io.WriteString(w, refreshedAlerts)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(transcript(m), "Build failed") {
-		t.Errorf("alerts missing:\n%s", transcript(m))
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+
+	m = runLine(t, m, "/alerts delete a-1")
+	if m.pendingConfirmation == nil || gets != 0 || deletes != 0 {
+		t.Fatalf("delete was not parked before confirmation: pending=%v gets=%d deletes=%d", m.pendingConfirmation != nil, gets, deletes)
+	}
+	m = runLine(t, m, "no")
+	if m.pendingConfirmation != nil || gets != 0 || deletes != 0 {
+		t.Fatalf("cancelled delete performed work: pending=%v gets=%d deletes=%d", m.pendingConfirmation != nil, gets, deletes)
 	}
 
-	m = runLine(t, m, "/alerts delete a-1") // sets pendingConfirmation
-	runLine(t, m, "yes")                    // confirms and executes
-	if !rec.saw("DELETE", "/alerts/a-1") {
-		t.Errorf("expected a delete call:\n%s", rec.all())
+	m = confirmDestructive(t, m, "/alerts delete missing")
+	m = confirmDestructive(t, m, "/alerts delete Duplicate")
+	if deletes != 0 {
+		t.Fatalf("missing or ambiguous references deleted an alert: deletes=%d", deletes)
+	}
+	plain := stripANSI(transcript(m))
+	if !strings.Contains(plain, `nothing matches "missing"`) || !strings.Contains(plain, `"Duplicate" is ambiguous:`) ||
+		!strings.Contains(plain, "Duplicate duplicate one") || !strings.Contains(plain, "Duplicate duplicate two") {
+		t.Fatalf("resolution errors not reported:\n%s", plain)
+	}
+
+	beforeSuccessGets := gets
+	m = confirmDestructive(t, m, "/alerts delete a-1")
+	if deletes != 1 {
+		t.Fatalf("confirmed delete count = %d, want 1", deletes)
+	}
+	if gets != beforeSuccessGets+1 {
+		t.Fatalf("successful delete made %d list GETs, want one reference-resolution GET and no post-delete GET", gets-beforeSuccessGets)
+	}
+	plain = stripANSI(transcript(m))
+	if !strings.Contains(plain, "delete: Build failed") || !strings.Contains(plain, "Remaining alert") || strings.Contains(plain, "delete: Build failed\n\nAlerts\n3 unread") {
+		t.Fatalf("delete did not render the backend-refreshed list:\n%s", plain)
+	}
+}
+
+func TestAlertsDeleteReportsBackendFailure(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build"><p class="font-semibold">Build failed</p></div>`
+	var deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, alertsHTML)
+		case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-1":
+			deletes++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"alert deletion unavailable"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, "/alerts delete a-1")
+	if deletes != 1 {
+		t.Fatalf("delete requests = %d, want 1", deletes)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "alert deletion unavailable") || strings.Contains(out, "delete: Build failed") {
+		t.Fatalf("backend deletion failure was not reported correctly:\n%s", out)
 	}
 }
 

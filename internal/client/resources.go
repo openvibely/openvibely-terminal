@@ -86,6 +86,10 @@ func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, err
 	if err != nil {
 		return nil, err
 	}
+	return parseAlerts(root, projectID), nil
+}
+
+func parseAlerts(root *html.Node, projectID string) []Alert {
 	nodes := findAll(root, func(e *html.Node) bool { return attr(e, "data-alert-id") != "" })
 
 	seen := map[string]bool{}
@@ -161,7 +165,7 @@ func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, err
 		}
 		out = append(out, a)
 	}
-	return out, nil
+	return out
 }
 
 func firstAlertAttribute(node *html.Node, names ...string) string {
@@ -365,8 +369,19 @@ func (c *Client) AlertAction(ctx context.Context, alertID, action, projectID str
 
 // DeleteAlert removes one alert.
 func (c *Client) DeleteAlert(ctx context.Context, alertID, projectID string) error {
-	return c.doForm(ctx, http.MethodDelete,
+	_, err := c.DeleteAlertAndList(ctx, alertID, projectID)
+	return err
+}
+
+// DeleteAlertAndList removes one alert and parses the refreshed alert list from
+// the backend's HTMX response.
+func (c *Client) DeleteAlertAndList(ctx context.Context, alertID, projectID string) ([]Alert, error) {
+	root, err := c.doFormHTML(ctx, http.MethodDelete,
 		"/alerts/"+url.PathEscape(alertID)+query("project_id", projectID), nil)
+	if err != nil {
+		return nil, err
+	}
+	return parseAlerts(root, projectID), nil
 }
 
 // MarkAllAlertsRead marks every alert read.

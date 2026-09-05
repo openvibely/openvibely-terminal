@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -2037,6 +2038,121 @@ func TestCLIJSONTasksList(t *testing.T) {
 	if tasks[0].ID != "t-1" {
 		t.Errorf("unexpected task ID: %s", tasks[0].ID)
 	}
+}
+
+func TestCLIJSONAlertsDeleteUsesForceAndRefreshedResponse(t *testing.T) {
+	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build"><p class="font-semibold">Build failed</p></div>`
+	const refreshedAlerts = `<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="remaining"><p class="font-semibold">Remaining</p></div>`
+	var gets, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			gets++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, initialAlerts)
+		case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-1":
+			deletes++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, refreshedAlerts)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"/alerts", "delete", "a-1"}, false, true); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("unforced delete error = %v", err)
+	}
+	if gets != 0 || deletes != 0 {
+		t.Fatalf("unforced delete performed work: gets=%d deletes=%d", gets, deletes)
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"/alerts", "delete", "a-1"}, true, true); err != nil {
+		t.Fatalf("forced JSON delete: %v", err)
+	}
+	var got []client.Alert
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &got); err != nil {
+		t.Fatalf("delete JSON is invalid: %v\n%s", err, out.String())
+	}
+	if len(got) != 1 || got[0].ID != "a-2" || got[0].Title != "Remaining" {
+		t.Fatalf("delete JSON = %#v", got)
+	}
+	if gets != 1 || deletes != 1 {
+		t.Fatalf("forced delete requests: gets=%d deletes=%d, want 1 each", gets, deletes)
+	}
+}
+
+func TestCLIAlertsDeleteResolutionAndBackendErrors(t *testing.T) {
+	const duplicateAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="first"><p class="font-semibold">Duplicate</p></div>
+		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="second"><p class="font-semibold">Duplicate</p></div>`
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "missing", ref: "missing", want: `nothing matches "missing"`},
+		{name: "ambiguous", ref: "Duplicate", want: `"Duplicate" is ambiguous:`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/alerts":       duplicateAlerts,
+			})
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", []string{"alerts", "delete", tc.ref}, true, false)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("delete error = %v, want %q", err, tc.want)
+			}
+			if rec.count(http.MethodDelete, "/alerts/a-1") != 0 || rec.count(http.MethodDelete, "/alerts/a-2") != 0 {
+				t.Fatalf("unresolved reference performed deletion:\n%s", rec.all())
+			}
+		})
+	}
+
+	t.Run("backend failure", func(t *testing.T) {
+		const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build"><p class="font-semibold">Build failed</p></div>`
+		var deletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, alertsHTML)
+			case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-1":
+				deletes++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = io.WriteString(w, `{"error":"alert deletion unavailable"}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "demo", []string{"alerts", "delete", "a-1"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "alert deletion unavailable") {
+			t.Fatalf("backend error = %v", err)
+		}
+		if deletes != 1 || strings.Contains(stripANSI(out.String()), "delete: Build failed") {
+			t.Fatalf("backend failure reported success or wrong delete count: deletes=%d output=%q", deletes, out.String())
+		}
+	})
 }
 
 func TestCLIJSONAlertsList(t *testing.T) {

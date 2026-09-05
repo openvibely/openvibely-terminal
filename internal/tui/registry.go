@@ -1348,6 +1348,13 @@ func alertInspectionOutput(ctx context.Context, c *client.Client, projectID stri
 	return renderAlertInspection(inspection), nil
 }
 
+func alertDeleteOutput(status string, alerts []client.Alert) (string, error) {
+	if jsonMode {
+		return marshalJSON(alerts)
+	}
+	return status + "\n\n" + renderAlerts(alerts, ""), nil
+}
+
 func alertsCommand() command {
 	actions := []string{"list", "show", "read", "approve", "reject", "dismiss", "delete", "read-all", "clear"}
 	return command{
@@ -1476,13 +1483,14 @@ func alertsCommand() command {
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
-											var err error
 											if action == "delete" {
-												err = c.DeleteAlert(ctx, a.ID, pid)
-											} else {
-												err = c.AlertAction(ctx, a.ID, action, pid)
+												alerts, err := c.DeleteAlertAndList(ctx, a.ID, pid)
+												if err != nil {
+													return "", err
+												}
+												return alertDeleteOutput("delete: "+a.Title, alerts)
 											}
-											if err != nil {
+											if err := c.AlertAction(ctx, a.ID, action, pid); err != nil {
 												return "", err
 											}
 											return refreshAndRender(action+": "+a.Title,
@@ -1515,11 +1523,13 @@ func alertsCommand() command {
 						return "", err
 					}
 					if action == "delete" {
-						err = c.DeleteAlert(ctx, a.ID, pid)
-					} else {
-						err = c.AlertAction(ctx, a.ID, action, pid)
+						refreshed, err := c.DeleteAlertAndList(ctx, a.ID, pid)
+						if err != nil {
+							return "", err
+						}
+						return alertDeleteOutput("delete: "+a.Title, refreshed)
 					}
-					if err != nil {
+					if err := c.AlertAction(ctx, a.ID, action, pid); err != nil {
 						return "", err
 					}
 					return refreshAndRender(action+": "+a.Title,
