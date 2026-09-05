@@ -876,7 +876,8 @@ func TestRenderWorkersTable(t *testing.T) {
 	unlimited := 0
 	limited := 2
 	overview := workersOverview{
-		Global: &client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 2, QueueSize: 3},
+		Global:          &client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 2, QueueSize: 3},
+		ModelsAvailable: true,
 		Projects: []client.ProjectCapacity{
 			{ID: "p-z", Name: "Zulu", Running: 2, QueueSize: 1, MaxWorkers: &limited},
 			{ID: "p-a", Name: "Alpha", Running: 0, MaxWorkers: &unlimited},
@@ -905,16 +906,17 @@ func TestRenderWorkersEmptyAndLongValues(t *testing.T) {
 	longName := strings.Repeat("project-name-", 8)
 	longModel := strings.Repeat("model-id-", 10)
 	overview := workersOverview{
-		Global:   &client.GlobalCapacity{},
-		Projects: []client.ProjectCapacity{{Name: longName}},
-		Models:   []client.ModelCapacity{{Name: "Long model", Model: longModel, MaxWorkers: 1}},
+		Global:          &client.GlobalCapacity{},
+		Projects:        []client.ProjectCapacity{{Name: longName}},
+		Models:          []client.ModelCapacity{{Name: "Long model", Model: longModel, MaxWorkers: 1}},
+		ModelsAvailable: true,
 	}
 	out := stripANSI(renderWorkers(overview))
 	if strings.Contains(out, longName) || strings.Contains(out, longModel) || !strings.Contains(out, "…") {
 		t.Fatalf("long worker values were not bounded:\n%s", out)
 	}
 
-	empty := stripANSI(renderWorkers(workersOverview{Global: &client.GlobalCapacity{}, Projects: []client.ProjectCapacity{}, Models: []client.ModelCapacity{}}))
+	empty := stripANSI(renderWorkers(workersOverview{Global: &client.GlobalCapacity{}, Projects: []client.ProjectCapacity{}, Models: []client.ModelCapacity{}, ModelsAvailable: true}))
 	if !strings.Contains(empty, "Global") || !strings.Contains(empty, "All Projects") {
 		t.Fatalf("empty project result lost the canonical global row:\n%s", empty)
 	}
@@ -923,17 +925,41 @@ func TestRenderWorkersEmptyAndLongValues(t *testing.T) {
 	}
 }
 
+func TestRenderWorkersUnavailableModels(t *testing.T) {
+	overview := newWorkersOverview(
+		&client.GlobalCapacity{MaxWorkers: 4},
+		[]client.ProjectCapacity{}, nil,
+		[]string{"model worker capacity unavailable"}, false,
+	)
+	out := stripANSI(renderWorkers(overview))
+	if !strings.Contains(out, "model worker capacity unavailable") {
+		t.Fatalf("unavailable model result missing explicit state:\n%s", out)
+	}
+	if strings.Contains(out, "no dedicated model worker pools") {
+		t.Fatalf("unavailable model result was misrepresented as empty:\n%s", out)
+	}
+
+	encoded, err := json.Marshal(overview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(encoded)
+	if !strings.Contains(got, `"models":[]`) || !strings.Contains(got, `"models_available":false`) {
+		t.Fatalf("unavailable model JSON lost availability state: %s", got)
+	}
+}
+
 func TestWorkersOverviewJSONCompatibility(t *testing.T) {
 	overview := newWorkersOverview(
 		&client.GlobalCapacity{MaxWorkers: 5, TotalRunning: 1, QueueSize: 2, AvailableSlots: 4, HasCapacity: true},
-		[]client.ProjectCapacity{}, []client.ModelCapacity{}, []string{},
+		[]client.ProjectCapacity{}, []client.ModelCapacity{}, []string{}, true,
 	)
 	encoded, err := json.Marshal(overview)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := string(encoded)
-	for _, want := range []string{`"workers":[`, `"scope":"global"`, `"name":"All Projects"`, `"running":1`, `"queue":2`, `"limit":5`, `"status":"active"`, `"models":[]`, `"warnings":[]`} {
+	for _, want := range []string{`"workers":[`, `"scope":"global"`, `"name":"All Projects"`, `"running":1`, `"queue":2`, `"limit":5`, `"status":"active"`, `"models":[]`, `"models_available":true`, `"warnings":[]`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("workers JSON missing %s: %s", want, got)
 		}

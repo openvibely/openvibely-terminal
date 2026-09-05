@@ -220,22 +220,22 @@ func TestCLIAgentsVotesErrorsAndUnresolvedReferences(t *testing.T) {
 	})
 }
 
-func TestCLIWorkersShowJSON(t *testing.T) {
+func TestCLIWorkersShowJSONWithoutProject(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
-		"/api/projects":          cliProjects,
 		"/api/capacity/global":   `{"total_running":1,"max_workers":4,"queue_size":2}`,
 		"/api/capacity/projects": `[{"id":"p1","name":"Demo","running":1,"queue_size":2,"max_workers":2}]`,
 		"/api/capacity/models":   `[{"name":"Sonnet","model":"claude-sonnet","running":1,"max_workers":3}]`,
 	})
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"works", "show"}, false, true); err != nil {
+	if err := RunCLI(c, &out, "", []string{"works", "show"}, false, true); err != nil {
 		t.Fatalf("workers show JSON failed: %v", err)
 	}
 
 	var got struct {
-		Workers  []workerCapacityRow      `json:"workers"`
-		Models   []modelWorkerCapacityRow `json:"models"`
-		Warnings []string                 `json:"warnings"`
+		Workers         []workerCapacityRow      `json:"workers"`
+		Models          []modelWorkerCapacityRow `json:"models"`
+		ModelsAvailable bool                     `json:"models_available"`
+		Warnings        []string                 `json:"warnings"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
 		t.Fatalf("workers JSON is invalid: %v\n%s", err, out.String())
@@ -243,13 +243,16 @@ func TestCLIWorkersShowJSON(t *testing.T) {
 	if len(got.Workers) != 2 || got.Workers[0].Scope != "global" || got.Workers[1].Name != "Demo" {
 		t.Fatalf("workers JSON rows = %+v", got.Workers)
 	}
-	if len(got.Models) != 1 || got.Models[0].Model != "claude-sonnet" || got.Warnings == nil {
-		t.Fatalf("workers JSON model/warnings = %+v/%#v", got.Models, got.Warnings)
+	if len(got.Models) != 1 || got.Models[0].Model != "claude-sonnet" || !got.ModelsAvailable || got.Warnings == nil {
+		t.Fatalf("workers JSON model availability/warnings = %+v/%t/%#v", got.Models, got.ModelsAvailable, got.Warnings)
 	}
 	for _, path := range []string{"/api/capacity/global", "/api/capacity/projects", "/api/capacity/models"} {
 		if count := rec.count("GET", path); count != 1 {
 			t.Errorf("%s request count = %d, want 1", path, count)
 		}
+	}
+	if count := rec.count("GET", "/api/projects"); count != 0 {
+		t.Errorf("project-independent workers show made %d project-list requests, want 0", count)
 	}
 	if strings.Contains(out.String(), "Worker capacity") || strings.Contains(out.String(), "available_slots") {
 		t.Fatalf("workers JSON contains presentation or unrelated data: %s", out.String())

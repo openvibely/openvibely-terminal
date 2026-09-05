@@ -1861,20 +1861,22 @@ type modelWorkerCapacityRow struct {
 }
 
 type workersOverview struct {
-	Global    *client.GlobalCapacity   `json:"-"`
-	Projects  []client.ProjectCapacity `json:"-"`
-	Models    []client.ModelCapacity   `json:"-"`
-	Workers   []workerCapacityRow      `json:"workers"`
-	ModelRows []modelWorkerCapacityRow `json:"models"`
-	Warnings  []string                 `json:"warnings"`
+	Global          *client.GlobalCapacity   `json:"-"`
+	Projects        []client.ProjectCapacity `json:"-"`
+	Models          []client.ModelCapacity   `json:"-"`
+	Workers         []workerCapacityRow      `json:"workers"`
+	ModelRows       []modelWorkerCapacityRow `json:"models"`
+	ModelsAvailable bool                     `json:"models_available"`
+	Warnings        []string                 `json:"warnings"`
 }
 
-func newWorkersOverview(global *client.GlobalCapacity, projects []client.ProjectCapacity, models []client.ModelCapacity, warnings []string) workersOverview {
+func newWorkersOverview(global *client.GlobalCapacity, projects []client.ProjectCapacity, models []client.ModelCapacity, warnings []string, modelsAvailable bool) workersOverview {
 	overview := workersOverview{
 		Global: global, Projects: projects, Models: models,
-		Workers:   make([]workerCapacityRow, 0, len(projects)+1),
-		ModelRows: make([]modelWorkerCapacityRow, 0, len(models)),
-		Warnings:  append([]string(nil), warnings...),
+		Workers:         make([]workerCapacityRow, 0, len(projects)+1),
+		ModelRows:       make([]modelWorkerCapacityRow, 0, len(models)),
+		ModelsAvailable: modelsAvailable,
+		Warnings:        append([]string(nil), warnings...),
 	}
 	if overview.Warnings == nil {
 		overview.Warnings = []string{}
@@ -1944,7 +1946,7 @@ func workerLimitLabel(scope string, limit *int) string {
 
 func renderWorkers(overview workersOverview) string {
 	if overview.Workers == nil || overview.ModelRows == nil || overview.Warnings == nil {
-		overview = newWorkersOverview(overview.Global, overview.Projects, overview.Models, overview.Warnings)
+		overview = newWorkersOverview(overview.Global, overview.Projects, overview.Models, overview.Warnings, overview.ModelsAvailable)
 	}
 
 	rows := [][]string{{"SCOPE", "NAME", "RUNNING", "QUEUE", "LIMIT", "STATUS"}}
@@ -1963,7 +1965,9 @@ func renderWorkers(overview workersOverview) string {
 	b.WriteString(sectionStyle.Render("Worker capacity") + "\n")
 	b.WriteString(table(rows))
 	b.WriteString("\n\n" + sectionStyle.Render("Per-model worker pools") + "\n")
-	if len(overview.ModelRows) == 0 {
+	if !overview.ModelsAvailable {
+		b.WriteString("  " + dimStyle.Render("model worker capacity unavailable"))
+	} else if len(overview.ModelRows) == 0 {
 		b.WriteString("  " + dimStyle.Render("no dedicated model worker pools"))
 	} else {
 		modelRows := [][]string{{"MODEL", "RUNNING", "LIMIT", "STATUS"}}

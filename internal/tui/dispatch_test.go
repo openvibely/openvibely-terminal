@@ -1951,6 +1951,20 @@ func TestWorkersProjectLimit(t *testing.T) {
 	}
 }
 
+func TestWorkersProjectLimitRequiresProject(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	m.selectedID = ""
+	m.selectedName = ""
+
+	m = runLine(t, m, "/works project 3")
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "no project selected") {
+		t.Fatalf("missing project-limit selection error:\n%s", out)
+	}
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("project limit made requests without a selected project:\n%s", calls)
+	}
+}
+
 func TestWorkersProjectLimitZeroMeansNoLimit(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	m = runLine(t, m, "/workers project 0")
@@ -5375,6 +5389,30 @@ func TestWorkersShowFetchesConcurrently(t *testing.T) {
 		}
 	})
 
+	t.Run("show works without a selected project", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/api/capacity/global":   capacityJSON,
+			"/api/capacity/projects": `[]`,
+			"/api/capacity/models":   `[]`,
+		})
+		m.selectedID = ""
+		m.selectedName = ""
+
+		m = runLine(t, m, "/works show")
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "All Projects") || strings.Contains(out, "no project selected") {
+			t.Fatalf("no-project workers show did not render global capacity:\n%s", out)
+		}
+		for _, path := range []string{"/api/capacity/global", "/api/capacity/projects", "/api/capacity/models"} {
+			if got := rec.count("GET", path); got != 1 {
+				t.Errorf("GET %s count = %d, want 1; calls:\n%s", path, got, rec.all())
+			}
+		}
+		if got := len(rec.urlsSnapshot()); got != 3 {
+			t.Errorf("workers show made %d requests, want exactly 3; calls:\n%s", got, rec.all())
+		}
+	})
+
 	t.Run("secondary failures render partial table", func(t *testing.T) {
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/capacity/global" {
@@ -5390,6 +5428,9 @@ func TestWorkersShowFetchesConcurrently(t *testing.T) {
 			if !strings.Contains(out, want) {
 				t.Errorf("partial workers output missing %q:\n%s", want, out)
 			}
+		}
+		if strings.Contains(out, "no dedicated model worker pools") {
+			t.Errorf("failed model source was misrepresented as an empty result:\n%s", out)
 		}
 		if strings.Contains(out, "error::") {
 			t.Errorf("secondary failure incorrectly failed command:\n%s", out)

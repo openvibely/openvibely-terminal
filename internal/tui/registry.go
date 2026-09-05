@@ -2231,9 +2231,6 @@ func workersCommand() command {
 					return fmt.Sprintf("global worker limit set to %d", n), nil
 				})
 			}
-			if mm, cmd, ok := m.needProject(); !ok {
-				return mm, cmd
-			}
 			return m, run("Workers", cmdTimeout, func(ctx context.Context) (string, error) {
 				var (
 					wg          sync.WaitGroup
@@ -2261,7 +2258,7 @@ func workersCommand() command {
 					models = []client.ModelCapacity{}
 					warnings = append(warnings, "model worker capacity unavailable")
 				}
-				overview := newWorkersOverview(capacity, projects, models, warnings)
+				overview := newWorkersOverview(capacity, projects, models, warnings, modelsErr == nil)
 				if jsonMode {
 					return marshalJSON(overview)
 				}

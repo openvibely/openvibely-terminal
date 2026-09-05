@@ -440,7 +440,7 @@ func (c command) cliProjectScoped(args []string) bool {
 		return action == "capacity" || action == "default" || action == "delete"
 	case "workers":
 		action, _ := splitAction(c.actions, args)
-		return action != "limit"
+		return action == "project"
 	default:
 		return true
 	}
@@ -497,6 +497,12 @@ func (c command) needsProjectLoad(args []string) bool {
 	}
 	if c.name == "models" && len(args) > 0 && !c.cliProjectScoped(args[1:]) {
 		return false
+	}
+	if c.name == "workers" {
+		action, _ := splitAction(c.actions, args[1:])
+		if action == "" || action == "show" || action == "limit" {
+			return false
+		}
 	}
 	return c.needsBackend()
 }
