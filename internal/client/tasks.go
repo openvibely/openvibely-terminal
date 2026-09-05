@@ -594,6 +594,53 @@ func (c *Client) ReorderTask(ctx context.Context, taskID string, position int) e
 	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/reorder", v)
 }
 
+// GetTaskThread fetches only the task conversation fragment used by the web
+// task view. Interactive controls in that fragment are intentionally excluded
+// from terminal output.
+func (c *Client) GetTaskThread(ctx context.Context, taskID, projectID string) (string, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return "", fmt.Errorf("project ID is required for task thread")
+	}
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/thread"+query("project_id", projectID))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(nodeConversationText(root)), nil
+}
+
+func nodeConversationText(root *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "form", "button":
+				return
+			}
+			if skippedTags[n.Data] {
+				return
+			}
+			if blockTags[n.Data] {
+				b.WriteByte('\n')
+			}
+		}
+		if n.Type == html.TextNode {
+			if text := strings.Join(strings.Fields(n.Data), " "); text != "" {
+				b.WriteString(text)
+				b.WriteByte(' ')
+			}
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+		if n.Type == html.ElementNode && blockTags[n.Data] {
+			b.WriteByte('\n')
+		}
+	}
+	walk(root)
+	return tidyText(b.String())
+}
+
 // SendTaskThreadMessage posts a follow-up message into a task's thread.
 func (c *Client) SendTaskThreadMessage(ctx context.Context, taskID, message string) error {
 	v := url.Values{}

@@ -839,3 +839,34 @@ func TestAddTaskReviewCommentPostsFormAndParsesHTMLFragment(t *testing.T) {
 		t.Fatalf("reviews = %+v", reviews)
 	}
 }
+
+func TestGetTaskThreadIsProjectScopedAndOmitsControls(t *testing.T) {
+	var requestURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestURI = r.URL.RequestURI()
+		_, _ = w.Write([]byte(`<div data-task-thread><div class="chat-message">user: investigate</div><div class="chat-message">agent: fixed</div><form><label>Model</label><select><option>Claude</option></select><button>Send</button></form></div>`))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := c.GetTaskThread(context.Background(), "task/one", "project one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestURI != "/tasks/task%2Fone/thread?project_id=project+one" && requestURI != "/tasks/task%2Fone/thread?project_id=project%20one" {
+		t.Errorf("request URI = %q", requestURI)
+	}
+	for _, want := range []string{"user: investigate", "agent: fixed"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("thread body missing %q: %q", want, body)
+		}
+	}
+	for _, unwanted := range []string{"Model", "Claude", "Send"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("thread body contains control text %q: %q", unwanted, body)
+		}
+	}
+}

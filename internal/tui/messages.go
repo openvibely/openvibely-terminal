@@ -134,7 +134,20 @@ type threadOpenedMsg struct {
 	projectID         string
 	taskID            string
 	title             string
+	status            string
 	body              string // rendered thread to show on entry
+	err               error
+}
+
+// threadUpdatedMsg refreshes the currently open running task conversation after
+// a matching project-scoped live event.
+type threadUpdatedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	taskID            string
+	status            string
+	body              string
 	err               error
 }
 

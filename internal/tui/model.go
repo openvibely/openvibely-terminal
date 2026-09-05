@@ -137,8 +137,9 @@ type Model struct {
 
 	// task thread focus: when set, typed messages go to this task's thread
 	// instead of the project agent ("/tasks open <ref>" enters, "/chat" exits).
-	threadID    string
-	threadTitle string
+	threadID     string
+	threadTitle  string
+	threadStatus string
 
 	// in-flight chat
 	pendingMsgID                string
@@ -578,7 +579,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 			*m = m.clearSelector()
 		}
 		*m = (*m).clearReviewPrefill()
-		m.threadID, m.threadTitle = "", ""
+		m.threadID, m.threadTitle, m.threadStatus = "", "", ""
 		m.input.Placeholder = defaultPlaceholder
 		m.invalidateSSE()
 	}
@@ -924,6 +925,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.projectGeneration = projectGeneration
 		return typed
 	case threadOpenedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case threadUpdatedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
@@ -1449,9 +1454,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.threadID = msg.taskID
 		m.threadTitle = msg.title
+		m.threadStatus = strings.ToLower(msg.status)
 		m.append(entry{role: "result", head: "Thread · " + msg.title, text: msg.body})
 		m.append(entry{role: "system", text: "in task thread — messages go to this task. /chat returns to project chat."})
 		m.input.Placeholder = "Reply to " + truncate(msg.title, 40) + " (/chat to exit)"
+		return m, nil
+
+	case threadUpdatedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != m.selectedID || msg.taskID != m.threadID {
+			return m, nil
+		}
+		if msg.err != nil {
+			if m.handleAuthError(msg.err) || m.handleTransportError(msg.err) {
+				return m, nil
+			}
+			return m, nil // live refresh is best effort; the open thread remains usable
+		}
+		if msg.status != "" {
+			m.threadStatus = strings.ToLower(msg.status)
+		}
+		if strings.TrimSpace(msg.body) != "" {
+			head := "Thread · " + m.threadTitle
+			updated := false
+			for i := len(m.log) - 1; i >= 0; i-- {
+				if m.log[i].role == "result" && m.log[i].head == head {
+					m.log[i].text = msg.body
+					updated = true
+					break
+				}
+			}
+			if updated {
+				m.refreshTranscript()
+			} else {
+				m.append(entry{role: "result", head: head, text: msg.body})
+			}
+		}
 		return m, nil
 
 	case loginResultMsg:
@@ -1518,6 +1558,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.waitForCurrentSSE(msg.generation)
 		}
 		m.handleSSEEvent(msg.event)
+		if refresh := m.handleOpenThreadSSE(msg.event); refresh != nil {
+			return m, tea.Batch(m.waitForCurrentSSE(msg.generation), refresh)
+		}
 		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
 			var ce client.ChatEvent
 			if err := json.Unmarshal(msg.event.Data, &ce); err != nil || !m.matchesPendingChatExecution(ce.ExecID) {
@@ -1865,19 +1908,84 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	return m, m.sendChat(m.selectedID, text, submissionID)
 }
 
+func (m Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {
+	c := m.client
+	return withMessageGeneration(func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		body, err := c.GetTaskThread(ctx, taskID, projectID)
+		return threadUpdatedMsg{
+			projectID: projectID,
+			taskID:    taskID,
+			status:    status,
+			body:      body,
+			err:       err,
+		}
+	}, sessionGenerationOf(m), projectGenerationOf(m))
+}
+
+// handleOpenThreadSSE mirrors the web task view's live behavior for the one task
+// currently in follow-up context. Project and stream ownership have already
+// been checked by Update; task identity and running state are checked here.
+func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
+	if m.threadID == "" || m.threadStatus != "running" {
+		return nil
+	}
+
+	var taskEvent client.TaskEvent
+	if json.Unmarshal(ev.Data, &taskEvent) == nil && taskEvent.TaskID == m.threadID && taskEvent.Status != "" &&
+		(taskEvent.ProjectID == "" || taskEvent.ProjectID == m.selectedID) {
+		status := strings.ToLower(taskEvent.Status)
+		if status != "" {
+			m.threadStatus = status
+		}
+		if status == "completed" || status == "failed" || status == "cancelled" {
+			text := status
+			if taskEvent.Message != "" {
+				text += ": " + taskEvent.Message
+			}
+			role := "system"
+			if status == "failed" || status == "cancelled" {
+				role = "error"
+			}
+			m.append(entry{role: role, text: text})
+		}
+		return m.refreshTaskThread(m.threadID, m.selectedID, status)
+	}
+
+	// chat_response_done has separate project-chat correlation semantics below;
+	// task status events provide the terminal task-thread refresh.
+	if ev.Name == "chat_response_done" {
+		return nil
+	}
+	var chatEvent client.ChatEvent
+	if json.Unmarshal(ev.Data, &chatEvent) == nil && chatEvent.TaskID == m.threadID &&
+		(chatEvent.ProjectID == "" || chatEvent.ProjectID == m.selectedID) {
+		if text := strings.TrimSpace(chatEvent.Message); text != "" {
+			m.append(entry{role: "agent", text: text})
+		}
+		return nil
+	}
+	return nil
+}
+
 // sendThreadMessage posts a follow-up into a task thread and echoes the
 // refreshed thread back into the transcript.
 func (m Model) sendThreadMessage(taskID, title, text string) tea.Cmd {
 	c := m.client
+	projectID := m.selectedID
 	return withMessageGeneration(run("Thread · "+title, cmdTimeout, func(ctx context.Context) (string, error) {
 		if err := c.SendTaskThreadMessage(ctx, taskID, text); err != nil {
 			return "", err
 		}
-		d, err := c.GetTaskForProject(ctx, taskID, m.selectedID)
+		body, err := c.GetTaskThread(ctx, taskID, projectID)
 		if err != nil {
 			return "sent", nil
 		}
-		return renderThread(d), nil
+		if strings.TrimSpace(body) == "" {
+			return dimStyle.Render("(no messages yet)"), nil
+		}
+		return body, nil
 	}), sessionGenerationOf(m), projectGenerationOf(m))
 }
 

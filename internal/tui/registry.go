@@ -307,15 +307,19 @@ func tasksCommand() command {
 					if err != nil {
 						return threadOpenedMsg{projectID: pid, err: err}
 					}
-					d, err := c.GetTaskForProject(ctx, t.ID, pid)
+					body, err := c.GetTaskThread(ctx, t.ID, pid)
 					if err != nil {
 						return threadOpenedMsg{projectID: pid, err: err}
+					}
+					if body == "" {
+						body = dimStyle.Render("(no messages yet)")
 					}
 					return threadOpenedMsg{
 						projectID: pid,
 						taskID:    t.ID,
-						title:     firstNonEmpty(d.Task.Title, t.Title, shortID(t.ID)),
-						body:      renderThread(d),
+						title:     firstNonEmpty(t.Title, shortID(t.ID)),
+						status:    t.Status,
+						body:      body,
 					}
 				}
 
@@ -3250,7 +3254,7 @@ func chatCommand() command {
 			m.busy = false
 			if m.threadID != "" {
 				title := m.threadTitle
-				m.threadID, m.threadTitle = "", ""
+				m.threadID, m.threadTitle, m.threadStatus = "", "", ""
 				m.input.Placeholder = defaultPlaceholder
 				m.append(entry{role: "system", text: "left thread " + title + " — back to project chat"})
 			} else if len(args) == 0 {

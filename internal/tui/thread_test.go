@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,7 +22,7 @@ const taskDetailHTML = `<div data-task-status="running" data-task-category="acti
 func threadModel(t *testing.T) (Model, *recorder) {
 	t.Helper()
 	return dispatchModel(t, map[string]string{
-		"/tasks":                              taskBoardHTML,
+		"/tasks":                              strings.Replace(taskBoardHTML, `data-task-status="pending"`, `data-task-status="running"`, 1),
 		"/tasks/t-1":                          taskDetailHTML,
 		"/tasks/t-1/thread":                   `<div>agent: working on it</div>`,
 		"/tasks/t-1/changes":                  `<div>2 files changed</div>`,
@@ -47,6 +48,126 @@ func TestTasksOpenEntersThreadMode(t *testing.T) {
 	if !strings.Contains(m.View(), "Refactor the API") {
 		t.Error("header should show the open thread")
 	}
+}
+
+func TestTasksOpenLoadsOnlyConversationAndSuppressesModelControls(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":            `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor</a></div>`,
+		"/tasks/t-1/thread": `<div data-task-thread><div class="chat-message">agent: existing answer</div><form><label>Model</label><select name="model"><option>Claude Sonnet</option><option>GPT-5</option></select></form></div>`,
+	})
+
+	m = runLine(t, m, "/tasks open Refactor")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "existing answer") {
+		t.Fatalf("task conversation missing:\n%s", out)
+	}
+	for _, unwanted := range []string{"Claude Sonnet", "GPT-5", "Model"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("opening task rendered unrelated model control %q:\n%s", unwanted, out)
+		}
+	}
+	for _, unwantedRequest := range []string{"GET /tasks/t-1?project_id=p1", "GET /tasks/t-1/changes", "GET /api/tasks/t-1/lifecycle-executions", "GET /models"} {
+		if rec.sawQuery(unwantedRequest) {
+			t.Errorf("opening task made unrelated request %q:\n%v", unwantedRequest, rec.urlsSnapshot())
+		}
+	}
+	if !rec.sawQuery("GET /tasks/t-1/thread?project_id=p1") {
+		t.Fatalf("task thread request was not project scoped:\n%v", rec.urlsSnapshot())
+	}
+}
+
+func TestRunningOpenTaskRefreshesFromMatchingSSEAndCompletes(t *testing.T) {
+	m, rec := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	m.sseGeneration = 7
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, cmd := m.Update(sseEventMsg{generation: 7, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","status":"completed","message":"finished"}`),
+	}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("matching task completion did not schedule a final thread refresh")
+	}
+	executeThreadRefreshFromBatch(t, &m, cmd)
+
+	if m.threadStatus != "completed" {
+		t.Errorf("threadStatus = %q, want completed", m.threadStatus)
+	}
+	if got := rec.count("GET", "/tasks/t-1/thread"); got != 2 {
+		t.Errorf("thread requests = %d, want open plus final refresh; calls:\n%s", got, rec.all())
+	}
+	if !strings.Contains(stripANSI(transcript(m)), "completed") {
+		t.Errorf("terminal task state missing:\n%s", transcript(m))
+	}
+}
+
+func TestRunningOpenTaskShowsLiveMessageAndFailure(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	m.sseGeneration = 8
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, _ := m.Update(sseEventMsg{generation: 8, event: client.Event{
+		Name: "chat_new_message",
+		Data: json.RawMessage(`{"type":"chat_new_message","project_id":"p1","task_id":"t-1","message":"streamed worker output"}`),
+	}})
+	m = updated.(Model)
+	if !strings.Contains(stripANSI(transcript(m)), "streamed worker output") {
+		t.Fatalf("live task output missing:\n%s", transcript(m))
+	}
+
+	updated, cmd := m.Update(sseEventMsg{generation: 8, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","status":"failed","message":"tests failed"}`),
+	}})
+	m = updated.(Model)
+	executeThreadRefreshFromBatch(t, &m, cmd)
+	if m.threadStatus != "failed" {
+		t.Errorf("threadStatus = %q, want failed", m.threadStatus)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "failed: tests failed") {
+		t.Errorf("failure state missing:\n%s", out)
+	}
+}
+
+func TestOpenTaskNotRunningIgnoresLiveTaskOutput(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":            `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Finished task">Finished task</a></div>`,
+		"/tasks/t-1/thread": `<div>final answer</div>`,
+	})
+	m = runLine(t, m, "/tasks open Finished")
+	m.sseGeneration = 9
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, _ := m.Update(sseEventMsg{generation: 9, event: client.Event{
+		Name: "chat_new_message",
+		Data: json.RawMessage(`{"type":"chat_new_message","project_id":"p1","task_id":"t-1","message":"late unrelated output"}`),
+	}})
+	m = updated.(Model)
+	if strings.Contains(stripANSI(transcript(m)), "late unrelated output") {
+		t.Errorf("inactive task consumed live output:\n%s", transcript(m))
+	}
+	if got := rec.count("GET", "/tasks/t-1/thread"); got != 1 {
+		t.Errorf("inactive task triggered refresh; calls:\n%s", rec.all())
+	}
+}
+
+func executeThreadRefreshFromBatch(t *testing.T, m *Model, cmd tea.Cmd) {
+	t.Helper()
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok || len(batch) < 2 {
+		t.Fatalf("refresh command = %T, want batch containing SSE wait and refresh", msg)
+	}
+	refreshMsg := batch[len(batch)-1]()
+	updated, _ := m.Update(refreshMsg)
+	*m = updated.(Model)
 }
 
 // While in a thread, plain text posts to that task's thread endpoint rather
