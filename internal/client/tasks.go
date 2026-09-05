@@ -641,11 +641,51 @@ func nodeConversationText(root *html.Node) string {
 	return tidyText(b.String())
 }
 
-// SendTaskThreadMessage posts a follow-up message into a task's thread.
-func (c *Client) SendTaskThreadMessage(ctx context.Context, taskID, message string) error {
+// TaskFollowupAccepted identifies the execution started by a thread message or
+// the queued input that will later be promoted to an execution. Both IDs are
+// empty when the backend accepted a swarm-parent orchestration follow-up that
+// does not map the submission to one directly streamable execution.
+type TaskFollowupAccepted struct {
+	ExecID         string `json:"exec_id,omitempty"`
+	PendingInputID string `json:"pending_input_id,omitempty"`
+	Queued         bool   `json:"queued"`
+}
+
+// SendTaskThreadMessageForProject posts a follow-up and retains the backend's
+// structured HTML identity so headless callers can attach to its output stream.
+func (c *Client) SendTaskThreadMessageForProject(ctx context.Context, taskID, projectID, message string) (*TaskFollowupAccepted, error) {
 	v := url.Values{}
 	v.Set("message", message)
-	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/thread", v)
+	doc, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/thread"+query("project_id", projectID), v)
+	if err != nil {
+		return nil, err
+	}
+	accepted := &TaskFollowupAccepted{}
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if accepted.ExecID == "" {
+			if execID := attr(n, "data-exec-id"); execID != "" && attr(n, "data-execution-pair") == "true" {
+				accepted.ExecID = execID
+			}
+		}
+		if accepted.PendingInputID == "" {
+			if inputID := attr(n, "data-thread-input-id"); inputID != "" && attr(n, "data-input-mode") == "queued" {
+				accepted.PendingInputID = inputID
+				accepted.Queued = true
+			}
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(doc)
+	return accepted, nil
+}
+
+// SendTaskThreadMessage posts a follow-up message into a task's thread.
+func (c *Client) SendTaskThreadMessage(ctx context.Context, taskID, message string) error {
+	_, err := c.SendTaskThreadMessageForProject(ctx, taskID, "", message)
+	return err
 }
 
 // SetTaskGoal sets a task's completion goal.

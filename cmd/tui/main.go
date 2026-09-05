@@ -167,21 +167,21 @@ func flagToken(arg string) (name string, hasValue, ok bool) {
 }
 
 func runCLI(c *client.Client, project string, args []string, force, jsonOutput bool) error {
-	if !isForegroundEventsCommand(args) {
-		// Preserve the original CLI behavior for ordinary commands: Ctrl-C keeps
+	if !isForegroundCLICommand(args) {
+		// Preserve the original CLI behavior for short-lived commands: Ctrl-C keeps
 		// its normal process-interrupt semantics instead of being consumed by a
 		// context that those commands do not use.
 		return tui.RunCLI(c, os.Stdout, project, args, force, jsonOutput)
 	}
 
-	// Foreground events is the one CLI command with a caller-owned lifetime.
-	// Let Ctrl-C cancel its stream so the SSE request and response body close.
+	// Live events, chat, and task follow-ups own long-lived streaming requests.
+	// Let Ctrl-C cancel them so active SSE response bodies close promptly.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	return tui.RunCLIContext(ctx, c, os.Stdout, project, args, force, jsonOutput)
 }
 
-func isForegroundEventsCommand(args []string) bool {
+func isForegroundCLICommand(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
@@ -189,6 +189,10 @@ func isForegroundEventsCommand(args []string) bool {
 	switch name {
 	case "events", "stream", "log":
 		return true
+	case "chat", "back", "leave":
+		return len(args) > 1
+	case "tasks", "task":
+		return len(args) > 1 && strings.EqualFold(strings.TrimSpace(args[1]), "reply")
 	default:
 		return false
 	}

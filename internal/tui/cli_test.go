@@ -1569,6 +1569,287 @@ func TestCLIChatSendsAndPrintsReply(t *testing.T) {
 	}
 }
 
+func TestCLIChatFlushesIncrementalOutputBeforeCompletion(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, cliProjects)
+		case "/api/chat/message":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"message_id":"exec-1","status":"processing"}`)
+		case "/events/chat/exec-1":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: hello\n\n")
+			w.(http.Flusher).Flush()
+			<-release
+			fmt.Fprint(w, "data:  world\n\nevent: done\ndata: completed\n\n")
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	reader, writer := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		err := RunCLIContext(context.Background(), c, writer, "demo", []string{"chat", "go"}, false, false)
+		_ = writer.Close()
+		done <- err
+	}()
+
+	first := make([]byte, 5)
+	if _, err := io.ReadFull(reader, first); err != nil || string(first) != "hello" {
+		t.Fatalf("first output = %q, err=%v", first, err)
+	}
+	close(release)
+	rest, _ := io.ReadAll(reader)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	if got := string(first) + string(rest); got != "hello world\n" {
+		t.Fatalf("output = %q", got)
+	}
+}
+
+func TestCLIChatReconnectsByOffsetWithoutDuplicateOutput(t *testing.T) {
+	var streams int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, cliProjects)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/chat/message":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"message_id":"exec-1","status":"processing"}`)
+		case r.URL.Path == "/api/chat/message/exec-1":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"message_id":"exec-1","status":"processing"}`)
+		case r.URL.Path == "/events/chat/exec-1":
+			streams++
+			w.Header().Set("Content-Type", "text/event-stream")
+			if streams == 1 {
+				if r.URL.Query().Get("offset") != "0" {
+					t.Fatalf("first offset = %s", r.URL.Query().Get("offset"))
+				}
+				fmt.Fprint(w, "data: hel\n\n")
+				return
+			}
+			if r.URL.Query().Get("offset") != "3" {
+				t.Fatalf("resume offset = %s", r.URL.Query().Get("offset"))
+			}
+			fmt.Fprint(w, "data: lo\n\nevent: done\ndata: completed\n\n")
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	var out bytes.Buffer
+	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "hello\n" || streams != 2 {
+		t.Fatalf("output=%q streams=%d", out.String(), streams)
+	}
+}
+
+func TestCLIChatStreamingJSONAndFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, terminal string
+		wantErr        bool
+	}{
+		{name: "completed", terminal: "event: done\ndata: completed\n\n"},
+		{name: "failed", terminal: "event: error\ndata: model failed\n\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					fmt.Fprint(w, cliProjects)
+				case "/api/chat/message":
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{"message_id":"exec","status":"processing"}`)
+				case "/events/chat/exec":
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: chunk\n\n"+tc.terminal)
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			var out bytes.Buffer
+			err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, true)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+			lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("JSON lines = %q", lines)
+			}
+			for _, line := range lines {
+				var record cliExecutionRecord
+				if err := json.Unmarshal([]byte(line), &record); err != nil {
+					t.Fatalf("invalid JSON %q: %v", line, err)
+				}
+				if record.ProjectID != "p1" || record.ExecID != "exec" {
+					t.Fatalf("record = %#v", record)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIChatCancellationClosesExecutionStream(t *testing.T) {
+	streamClosed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			fmt.Fprint(w, cliProjects)
+		case "/api/chat/message":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"message_id":"exec","status":"processing"}`)
+		case "/events/chat/exec":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			close(streamClosed)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunCLIContext(ctx, c, io.Discard, "demo", []string{"chat", "go"}, false, false) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-streamClosed:
+	case <-time.After(time.Second):
+		t.Fatal("stream request was not cancelled")
+	}
+}
+
+func TestCLITaskReplyStreamsScopedExecution(t *testing.T) {
+	const board = `<div data-task-id="task-1" data-task-status="running" data-task-category="active"><a href="/tasks/task-1">Fix stream</a></div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			fmt.Fprint(w, cliProjects)
+		case "/tasks":
+			fmt.Fprint(w, board)
+		case "/events/live":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Fatalf("live project = %q", r.URL.Query().Get("project_id"))
+			}
+			<-r.Context().Done()
+		case "/tasks/task-1/thread":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Fatalf("thread project = %q", r.URL.Query().Get("project_id"))
+			}
+			fmt.Fprint(w, `<div data-execution-pair="true" data-exec-id="follow-1" data-exec-status="running"></div>`)
+		case "/events/chat/follow-1":
+			fmt.Fprint(w, "data: task output\n\nevent: done\ndata: completed\n\n")
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	var out bytes.Buffer
+	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "task output\n" {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestCLIChatQueuedPromotionStreamsPromotedExecution(t *testing.T) {
+	var statusCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			fmt.Fprint(w, cliProjects)
+		case "/api/chat/message":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"message_id":"input-1","status":"queued","queued":true}`)
+		case "/api/chat/message/input-1":
+			statusCalls++
+			w.Header().Set("Content-Type", "application/json")
+			if statusCalls == 1 {
+				fmt.Fprint(w, `{"message_id":"input-1","status":"queued"}`)
+			} else {
+				fmt.Fprint(w, `{"message_id":"exec-2","status":"processing"}`)
+			}
+		case "/events/chat/exec-2":
+			fmt.Fprint(w, "data: promoted\n\nevent: done\ndata: completed\n\n")
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	var out bytes.Buffer
+	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "promoted\n" || statusCalls != 2 {
+		t.Fatalf("output=%q status calls=%d", out.String(), statusCalls)
+	}
+}
+
+func TestCLITaskReplyQueuedPromotionUsesMatchingProjectEvent(t *testing.T) {
+	const board = `<div data-task-id="task-1" data-task-status="running" data-task-category="active"><a href="/tasks/task-1">Fix stream</a></div>`
+	liveReady := make(chan struct{})
+	posted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			fmt.Fprint(w, cliProjects)
+		case "/tasks":
+			fmt.Fprint(w, board)
+		case "/events/live":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			close(liveReady)
+			<-posted
+			fmt.Fprint(w, "event: task_thread_execution_started\n")
+			fmt.Fprint(w, `data: {"type":"task_thread_execution_started","project_id":"p2","task_id":"task-1","exec_id":"foreign","pending_input_id":"input-1"}`+"\n\n")
+			fmt.Fprint(w, "event: task_thread_execution_started\n")
+			fmt.Fprint(w, `data: {"type":"task_thread_execution_started","project_id":"p1","task_id":"task-1","exec_id":"exec-2","pending_input_id":"input-1"}`+"\n\n")
+		case "/tasks/task-1/thread":
+			<-liveReady
+			fmt.Fprint(w, `<div data-thread-input-id="input-1" data-task-id="task-1" data-input-mode="queued"></div>`)
+			close(posted)
+		case "/events/chat/exec-2":
+			fmt.Fprint(w, "data: queued output\n\nevent: done\ndata: completed\n\n")
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	var out bytes.Buffer
+	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != "queued output\n" {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
 // Mutating commands work headlessly too.
 func TestCLIRunsTaskMutation(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog">

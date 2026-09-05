@@ -406,7 +406,12 @@ openvibely-tui --help                             # commands + flags
 ```
 
 The leading `/` is optional, so a line copied from the TUI works as-is
-(`openvibely-tui /tasks`). Output is plain text suitable for piping.
+(`openvibely-tui /tasks`). Output is plain text suitable for piping. One-shot
+`chat <message>` and `tasks reply <task> | <message>` write model output as it
+arrives and remain attached through completion; Ctrl-C cancels the active
+stream. With `--json`, these two commands emit newline-delimited records with
+`type`, `project_id`, `exec_id`, byte `offset`, and delta or terminal fields.
+List/show JSON shapes are unchanged.
 When the backend has exactly one project, project-scoped commands use it when
 `-project` is omitted. When more than one project exists, those commands fail
 before making a project request and require `-project <name|id>` (a full ID,

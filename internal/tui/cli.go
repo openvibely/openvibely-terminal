@@ -143,6 +143,12 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 		return runCLIEvents(ctx, c, out, m.selectedID, eventsOn, json)
 	}
 
+	// Streaming commands own their output directly so each model delta is visible
+	// immediately instead of being buffered in the Bubble Tea transcript.
+	if handled, err := runCLIStreamingCommand(ctx, c, out, m, *cmdDef, fields, json, implicitProject, hasImplicitProject); handled {
+		return err
+	}
+
 	if cmdDef.needsStatus() {
 		m = drain(m, m.checkConnection())
 		m = drain(m, m.fetchStatusCounts())
@@ -169,6 +175,371 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 }
 
 const cliEventsOffMessage = "events off cannot disable a foreground stream owned by another process; press Ctrl-C in that monitoring process (interactive /events off only hides events in that TUI)"
+
+const cliStreamReconnectLimit = 8
+
+// cliExecutionRecord is emitted as NDJSON for streaming commands. One record is
+// written per incremental delta and one terminal record closes the stream.
+type cliExecutionRecord struct {
+	Type      string `json:"type"`
+	ProjectID string `json:"project_id"`
+	TaskID    string `json:"task_id,omitempty"`
+	ExecID    string `json:"exec_id"`
+	Offset    int    `json:"offset"`
+	Delta     string `json:"delta,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+func runCLIStreamingCommand(ctx context.Context, c *client.Client, out io.Writer, m Model, def command, fields []string, jsonOutput bool, implicit client.Project, hasImplicit bool) (bool, error) {
+	if def.name == "chat" && len(fields) > 1 {
+		if hasImplicit && !jsonOutput {
+			writeScopedEntries(out, nil, implicit)
+		}
+		streamCtx, cancel := context.WithTimeout(ctx, cliDeadline)
+		defer cancel()
+		accepted, err := c.SendChatMessage(streamCtx, m.selectedID, strings.Join(fields[1:], " "))
+		if err != nil {
+			return true, cliStreamDiagnostic(c, err)
+		}
+		if accepted == nil || strings.TrimSpace(accepted.MessageID) == "" {
+			return true, errors.New("send failed: empty acknowledgement")
+		}
+		originalID := accepted.MessageID
+		execID := originalID
+		status := func() (*client.ChatStatus, error) { return c.GetChatStatus(streamCtx, originalID) }
+		if accepted.Queued {
+			execID, err = waitForCLIChatExecution(streamCtx, status, originalID)
+			if err != nil {
+				return true, cliStreamDiagnostic(c, err)
+			}
+		}
+		return true, streamCLIExecution(streamCtx, c, out, m.selectedID, "", execID, jsonOutput, status)
+	}
+
+	if def.name != "tasks" || len(fields) < 2 || !strings.EqualFold(fields[1], "reply") {
+		return false, nil
+	}
+	if len(fields) < 3 {
+		return false, nil // retain registry usage errors for malformed invocations
+	}
+	target, message := splitPipe(strings.Join(fields[2:], " "))
+	if target == "" || message == "" {
+		return false, nil
+	}
+	streamCtx, cancel := context.WithTimeout(ctx, cliDeadline)
+	defer cancel()
+	task, err := resolveTask(streamCtx, c, m.selectedID, target)
+	if err != nil {
+		return true, cliStreamDiagnostic(c, err)
+	}
+	liveCtx, stopLive := context.WithCancel(streamCtx)
+	liveEvents, liveErrs := c.StreamEvents(liveCtx, m.selectedID)
+	accepted, err := c.SendTaskThreadMessageForProject(streamCtx, task.ID, m.selectedID, message)
+	if err != nil {
+		stopLive()
+		return true, cliStreamDiagnostic(c, err)
+	}
+	execID := strings.TrimSpace(accepted.ExecID)
+	if execID == "" {
+		execID, err = waitForCLITaskExecution(streamCtx, c, m.selectedID, task.ID, message, accepted.PendingInputID, liveEvents, liveErrs)
+		if err != nil {
+			stopLive()
+			return true, cliStreamDiagnostic(c, err)
+		}
+	}
+	stopLive()
+	if hasImplicit && !jsonOutput {
+		writeScopedEntries(out, nil, implicit)
+	}
+	return true, streamCLIExecution(streamCtx, c, out, m.selectedID, task.ID, execID, jsonOutput, nil)
+}
+
+func waitForCLIChatExecution(ctx context.Context, status func() (*client.ChatStatus, error), originalID string) (string, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return "", nil
+			}
+			return "", err
+		}
+		current, err := status()
+		if err != nil {
+			return "", err
+		}
+		if current != nil {
+			switch current.Status {
+			case "completed":
+				return firstNonEmpty(current.MessageID, originalID), nil
+			case "failed", "cancelled":
+				return "", cliTerminalError(current.Status, current.Error)
+			}
+			if id := strings.TrimSpace(current.MessageID); id != "" && id != originalID {
+				return id, nil
+			}
+		}
+		if !waitCLIStreamRetry(ctx, 1) {
+			return "", nil
+		}
+	}
+}
+
+func waitForCLITaskExecution(ctx context.Context, c *client.Client, projectID, taskID, message, pendingInputID string, events <-chan client.Event, errs <-chan error) (string, error) {
+	reconnects := 0
+	for {
+		if events == nil && errs == nil {
+			if reconnects >= cliStreamReconnectLimit {
+				return "", client.ErrEventStreamClosed
+			}
+			reconnects++
+			if !waitCLIStreamRetry(ctx, reconnects) {
+				return "", nil
+			}
+			events, errs = c.StreamEvents(ctx, projectID)
+		}
+		select {
+		case <-ctx.Done():
+			return "", nil
+		case ev, ok := <-events:
+			if !ok {
+				events = nil
+				continue
+			}
+			var taskEvent client.TaskEvent
+			if json.Unmarshal(ev.Data, &taskEvent) != nil || taskEvent.ProjectID != projectID || taskEvent.TaskID != taskID || taskEvent.ExecID == "" {
+				continue
+			}
+			if taskEvent.Type != "task_thread_execution_started" && taskEvent.Type != "task_thread_input_applied" {
+				continue
+			}
+			if pendingInputID != "" && taskEvent.PendingInputID != pendingInputID {
+				continue
+			}
+			if pendingInputID == "" && strings.TrimSpace(taskEvent.Message) != strings.TrimSpace(message) {
+				continue
+			}
+			return taskEvent.ExecID, nil
+		case streamErr, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			errs = nil
+			if streamErr != nil && !errors.Is(streamErr, client.ErrEventStreamClosed) {
+				return "", streamErr
+			}
+		}
+	}
+}
+
+func streamCLIExecution(ctx context.Context, c *client.Client, out io.Writer, projectID, taskID, execID string, jsonOutput bool, status func() (*client.ChatStatus, error)) error {
+	if strings.TrimSpace(execID) == "" {
+		return nil
+	}
+	offset := 0
+	reconnects := 0
+	plainWrote := false
+	plainEndsNewline := false
+	finishPlain := func() error {
+		if jsonOutput || !plainWrote || plainEndsNewline {
+			return nil
+		}
+		if _, err := io.WriteString(out, "\n"); err != nil {
+			return fmt.Errorf("writing streamed output: %w", err)
+		}
+		plainEndsNewline = true
+		return nil
+	}
+	for {
+		if ctx.Err() != nil {
+			return finishPlain()
+		}
+		events, errs := c.StreamExecution(ctx, execID, offset)
+		terminal := false
+		var streamErr error
+		for events != nil || errs != nil {
+			select {
+			case <-ctx.Done():
+				return finishPlain()
+			case event, ok := <-events:
+				if !ok {
+					events = nil
+					continue
+				}
+				switch event.Type {
+				case client.ExecutionDelta:
+					if event.Offset <= offset {
+						continue
+					}
+					delta := event.Data
+					start := event.Offset - len([]byte(delta))
+					if start < offset {
+						delta = string([]byte(delta)[offset-start:])
+					}
+					if err := writeCLIExecutionRecord(out, cliExecutionRecord{Type: client.ExecutionDelta, ProjectID: projectID, TaskID: taskID, ExecID: execID, Offset: event.Offset, Delta: delta}, jsonOutput); err != nil {
+						return err
+					}
+					if !jsonOutput && delta != "" {
+						plainWrote = true
+						plainEndsNewline = strings.HasSuffix(delta, "\n")
+					}
+					offset = event.Offset
+					reconnects = 0
+				case client.ExecutionDone:
+					terminal = true
+					terminalStatus := firstNonEmpty(strings.TrimSpace(event.Data), "completed")
+					if err := writeCLIExecutionRecord(out, cliExecutionRecord{Type: client.ExecutionDone, ProjectID: projectID, TaskID: taskID, ExecID: execID, Offset: offset, Status: terminalStatus}, jsonOutput); err != nil {
+						return err
+					}
+					if terminalStatus == "failed" || terminalStatus == "cancelled" {
+						if err := finishPlain(); err != nil {
+							return err
+						}
+						return cliTerminalError(terminalStatus, "")
+					}
+					return finishPlain()
+				case client.ExecutionError:
+					streamErr = errors.New(event.Data)
+					terminal = true
+				}
+			case err, ok := <-errs:
+				if !ok {
+					errs = nil
+					continue
+				}
+				errs = nil
+				streamErr = err
+			}
+		}
+		if terminal && streamErr != nil && streamErr.Error() != "timeout" && streamErr.Error() != "execution not found" {
+			_ = writeCLIExecutionRecord(out, cliExecutionRecord{Type: client.ExecutionError, ProjectID: projectID, TaskID: taskID, ExecID: execID, Offset: offset, Status: "failed", Error: streamErr.Error()}, jsonOutput)
+			if err := finishPlain(); err != nil {
+				return err
+			}
+			return cliTerminalError("failed", streamErr.Error())
+		}
+		if status != nil {
+			current, err := status()
+			if err == nil && current != nil {
+				resolved := strings.TrimSpace(current.MessageID)
+				if resolved != "" && resolved != execID && current.Status != "completed" {
+					execID = resolved
+					offset = 0
+				}
+				if current.Status == "completed" {
+					previousOffset := offset
+					if err := writeAuthoritativeCLISuffix(out, projectID, taskID, execID, &offset, current.Response, jsonOutput); err != nil {
+						return err
+					}
+					if !jsonOutput && offset > previousOffset {
+						plainWrote = true
+						plainEndsNewline = strings.HasSuffix(current.Response, "\n")
+					}
+					if err := writeCLIExecutionRecord(out, cliExecutionRecord{Type: client.ExecutionDone, ProjectID: projectID, TaskID: taskID, ExecID: execID, Offset: offset, Status: "completed"}, jsonOutput); err != nil {
+						return err
+					}
+					return finishPlain()
+				}
+				if current.Status == "failed" || current.Status == "cancelled" {
+					_ = writeCLIExecutionRecord(out, cliExecutionRecord{Type: client.ExecutionError, ProjectID: projectID, TaskID: taskID, ExecID: execID, Offset: offset, Status: current.Status, Error: current.Error}, jsonOutput)
+					if err := finishPlain(); err != nil {
+						return err
+					}
+					return cliTerminalError(current.Status, current.Error)
+				}
+			} else if err != nil && (client.IsAuthRequired(err) || client.IsTransportError(err)) {
+				streamErr = err
+			}
+		}
+		if streamErr != nil && (client.IsAuthRequired(streamErr) || (!errors.Is(streamErr, client.ErrEventStreamClosed) && !client.IsTransportError(streamErr) && streamErr.Error() != "timeout" && streamErr.Error() != "execution not found")) {
+			if err := finishPlain(); err != nil {
+				return err
+			}
+			return cliStreamDiagnostic(c, streamErr)
+		}
+		reconnects++
+		if reconnects > cliStreamReconnectLimit {
+			if err := finishPlain(); err != nil {
+				return err
+			}
+			return cliStreamDiagnostic(c, firstNonNil(streamErr, client.ErrEventStreamClosed))
+		}
+		if !waitCLIStreamRetry(ctx, reconnects) {
+			return finishPlain()
+		}
+	}
+}
+
+func writeAuthoritativeCLISuffix(out io.Writer, projectID, taskID, execID string, offset *int, response string, jsonOutput bool) error {
+	responseBytes := []byte(response)
+	if len(responseBytes) <= *offset {
+		return nil
+	}
+	delta := string(responseBytes[*offset:])
+	*offset = len(responseBytes)
+	return writeCLIExecutionRecord(out, cliExecutionRecord{Type: client.ExecutionDelta, ProjectID: projectID, TaskID: taskID, ExecID: execID, Offset: *offset, Delta: delta}, jsonOutput)
+}
+
+func writeCLIExecutionRecord(out io.Writer, record cliExecutionRecord, jsonOutput bool) error {
+	if !jsonOutput {
+		if record.Type != client.ExecutionDelta || record.Delta == "" {
+			return nil
+		}
+		if _, err := io.WriteString(out, record.Delta); err != nil {
+			return fmt.Errorf("writing streamed output: %w", err)
+		}
+		return nil
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("encoding streamed output: %w", err)
+	}
+	if _, err := fmt.Fprintln(out, string(encoded)); err != nil {
+		return fmt.Errorf("writing streamed output: %w", err)
+	}
+	return nil
+}
+
+func waitCLIStreamRetry(ctx context.Context, attempt int) bool {
+	delay := time.Duration(attempt) * 25 * time.Millisecond
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func cliTerminalError(status, detail string) error {
+	if strings.TrimSpace(detail) == "" {
+		return errors.New(status)
+	}
+	return fmt.Errorf("%s: %s", status, detail)
+}
+
+func cliStreamDiagnostic(c *client.Client, err error) error {
+	if err == nil {
+		return nil
+	}
+	if client.IsAuthRequired(err) {
+		return errors.New(authRecoveryMessage(c.BaseURL()))
+	}
+	if client.IsTransportError(err) {
+		return errors.New(OfflineRecoveryMessage(c.BaseURL(), err))
+	}
+	return err
+}
+
+func firstNonNil(values ...error) error {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
 
 // cliEventRecord is the stable machine-readable envelope for one foreground
 // event. The raw payload is retained in data so newer backend fields remain

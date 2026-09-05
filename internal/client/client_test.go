@@ -548,6 +548,95 @@ func TestStreamChatOutputParsesChunksAndTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestStreamExecutionResumesFromByteOffsetAndParsesTerminalEvents(t *testing.T) {
+	var gotOffset string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events/chat/exec-1" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		gotOffset = r.URL.Query().Get("offset")
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprint(w, "data: 世界\n\n")
+		flusher.Flush()
+		fmt.Fprint(w, "event: done\ndata: completed\n\n")
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, errs := c.StreamExecution(context.Background(), "exec-1", 5)
+	var got []ExecutionEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("stream error: %v", err)
+	}
+	if gotOffset != "5" {
+		t.Fatalf("offset = %q, want 5", gotOffset)
+	}
+	if len(got) != 2 || got[0].Type != ExecutionDelta || got[0].Data != "世界" || got[0].Offset != 11 || got[1].Type != ExecutionDone || got[1].Data != "completed" {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
+func TestStreamExecutionReportsDisconnectCancellationAndAuthentication(t *testing.T) {
+	t.Run("disconnect", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, "data: partial\n\n")
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		events, errs := c.StreamExecution(context.Background(), "exec", 0)
+		for range events {
+		}
+		if err := <-errs; !errors.Is(err, ErrEventStreamClosed) {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("cancel", func(t *testing.T) {
+		started := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			close(started)
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		ctx, cancel := context.WithCancel(context.Background())
+		events, errs := c.StreamExecution(ctx, "exec", 0)
+		<-started
+		cancel()
+		for range events {
+		}
+		if err := <-errs; err != nil {
+			t.Fatalf("cancel error = %v", err)
+		}
+	})
+
+	t.Run("auth", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", "/login")
+			w.WriteHeader(http.StatusFound)
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		events, errs := c.StreamExecution(context.Background(), "exec", 0)
+		for range events {
+		}
+		if err := <-errs; !IsAuthRequired(err) {
+			t.Fatalf("error = %v, want auth required", err)
+		}
+	})
+}
+
 func TestStreamEvents(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/events/live" {

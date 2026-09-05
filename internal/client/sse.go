@@ -24,13 +24,15 @@ type Event struct {
 
 // TaskEvent is the payload for task-scoped events (mirrors events.TaskEvent).
 type TaskEvent struct {
-	Type      string `json:"type"`
-	TaskID    string `json:"task_id"`
-	TaskName  string `json:"task_name,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
-	Status    string `json:"status,omitempty"`
-	Category  string `json:"category,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Type           string `json:"type"`
+	TaskID         string `json:"task_id"`
+	TaskName       string `json:"task_name,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
+	ExecID         string `json:"exec_id,omitempty"`
+	PendingInputID string `json:"pending_input_id,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Category       string `json:"category,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 // ChatEvent is the payload for chat-scoped events (mirrors events.ChatEvent).
@@ -52,6 +54,20 @@ type ChatEvent struct {
 type ChatOutputEvent struct {
 	Name string
 	Data string
+}
+
+const (
+	ExecutionDelta = "delta"
+	ExecutionDone  = "done"
+	ExecutionError = "error"
+)
+
+// ExecutionEvent is one incremental or terminal frame from an execution stream.
+// Offset is the cumulative UTF-8 byte offset after Data for delta events.
+type ExecutionEvent struct {
+	Type   string `json:"type"`
+	Data   string `json:"data,omitempty"`
+	Offset int    `json:"offset"`
 }
 
 // StreamChatOutput connects to the backend's execution-specific output stream.
@@ -130,6 +146,60 @@ func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int
 		}
 	}()
 
+	return events, errCh
+}
+
+// StreamExecution adapts the shared chat-output transport for headless callers,
+// adding cumulative UTF-8 byte offsets and explicit clean-disconnect errors.
+func (c *Client) StreamExecution(ctx context.Context, execID string, offset int) (<-chan ExecutionEvent, <-chan error) {
+	outputEvents, outputErrs := c.StreamChatOutput(ctx, execID, offset)
+	events := make(chan ExecutionEvent, 32)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(events)
+		defer close(errCh)
+		currentOffset := offset
+		terminal := false
+		for outputEvents != nil || outputErrs != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-outputEvents:
+				if !ok {
+					outputEvents = nil
+					continue
+				}
+				typeName := event.Name
+				if typeName == "" {
+					typeName = ExecutionDelta
+					currentOffset += len([]byte(event.Data))
+				}
+				if typeName == ExecutionDone || typeName == ExecutionError {
+					terminal = true
+				}
+				select {
+				case events <- ExecutionEvent{Type: typeName, Data: event.Data, Offset: currentOffset}:
+				case <-ctx.Done():
+					return
+				}
+			case err, ok := <-outputErrs:
+				if !ok {
+					outputErrs = nil
+					continue
+				}
+				if err != nil {
+					select {
+					case errCh <- err:
+					case <-ctx.Done():
+					}
+					return
+				}
+			}
+		}
+		if !terminal && ctx.Err() == nil {
+			errCh <- ErrEventStreamClosed
+		}
+	}()
 	return events, errCh
 }
 

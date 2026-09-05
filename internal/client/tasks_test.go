@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -280,6 +281,36 @@ func TestTaskDetailTabMetadataAliasesMatchTabText(t *testing.T) {
 		if got := tab.Text(&d); got == "" {
 			t.Errorf("tab %s did not read its TaskDetail field", tab.Name)
 		}
+	}
+}
+
+func TestSendTaskThreadMessageForProjectReturnsExecutionOrQueueIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want TaskFollowupAccepted
+	}{
+		{name: "direct", body: `<div data-execution-pair="true" data-exec-id="exec-1" data-exec-status="running"></div>`, want: TaskFollowupAccepted{ExecID: "exec-1"}},
+		{name: "queued", body: `<div data-task-id="task-1"><div data-thread-input-id="input-1" data-task-id="task-1" data-input-mode="queued"></div></div>`, want: TaskFollowupAccepted{PendingInputID: "input-1", Queued: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/tasks/task-1/thread" || r.URL.Query().Get("project_id") != "project-2" {
+					t.Fatalf("request = %s %s", r.Method, r.URL.String())
+				}
+				if r.Header.Get("HX-Request") != "true" || r.FormValue("message") != "continue" {
+					t.Fatalf("headers/form = %q %q", r.Header.Get("HX-Request"), r.FormValue("message"))
+				}
+				fmt.Fprint(w, tc.body)
+			}))
+			got, err := c.SendTaskThreadMessageForProject(context.Background(), "task-1", "project-2", "continue")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if *got != tc.want {
+				t.Fatalf("accepted = %#v, want %#v", *got, tc.want)
+			}
+		})
 	}
 }
 
