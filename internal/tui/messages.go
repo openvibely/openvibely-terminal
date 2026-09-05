@@ -81,6 +81,30 @@ type chatStatusMsg struct {
 	err               error
 }
 
+type chatStreamEventMsg struct {
+	generation   int
+	submissionID uint64
+	projectID    string
+	execID       string
+	event        client.ChatOutputEvent
+}
+
+type chatStreamDisconnectedMsg struct {
+	generation   int
+	submissionID uint64
+	projectID    string
+	execID       string
+	err          error
+}
+
+type chatStreamReconnectMsg struct {
+	generation   int
+	submissionID uint64
+	projectID    string
+	execID       string
+	offset       int
+}
+
 // resultMsg is the generic outcome of a slash command: a rendered block to
 // append to the transcript, or an error.
 type resultMsg struct {

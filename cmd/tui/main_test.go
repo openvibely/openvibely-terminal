@@ -10,12 +10,124 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
 	"github.com/openvibely/openvibely-tui/internal/tui"
 )
+
+func TestParseInterspersedFlags(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantProject string
+		wantJSON    bool
+		wantArgs    []string
+		wantErr     string
+	}{
+		{name: "globals before command", args: []string{"--project", "openvibely", "chat", "tell me a story about a deer"}, wantProject: "openvibely", wantArgs: []string{"chat", "tell me a story about a deer"}},
+		{name: "globals after command", args: []string{"chat", "--project", "openvibely", "tell me a story about a deer"}, wantProject: "openvibely", wantArgs: []string{"chat", "tell me a story about a deer"}},
+		{name: "globals around subcommand", args: []string{"tasks", "--project=openvibely", "show", "--json", "Task with spaces"}, wantProject: "openvibely", wantJSON: true, wantArgs: []string{"tasks", "show", "Task with spaces"}},
+		{name: "single dash json after operands", args: []string{"tasks", "show", "Task with spaces", "-json"}, wantJSON: true, wantArgs: []string{"tasks", "show", "Task with spaces"}},
+		{name: "post-command flag belongs to command", args: []string{"chat", "--command-local", "quoted argument"}, wantArgs: []string{"chat", "--command-local", "quoted argument"}},
+		{name: "option boundary", args: []string{"chat", "--", "--json", "literal"}, wantArgs: []string{"chat", "--json", "literal"}},
+		{name: "unknown global", args: []string{"--unknown", "chat", "hello"}, wantErr: "flag provided but not defined"},
+		{name: "malformed global", args: []string{"--=value", "chat", "hello"}, wantErr: "bad flag syntax"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			project := fs.String("project", "", "")
+			jsonOutput := fs.Bool("json", false, "")
+
+			err := parseInterspersedFlags(fs, tc.args)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("parseInterspersedFlags() error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseInterspersedFlags() error = %v", err)
+			}
+			if *project != tc.wantProject || *jsonOutput != tc.wantJSON {
+				t.Fatalf("flags = project %q, json %v; want project %q, json %v", *project, *jsonOutput, tc.wantProject, tc.wantJSON)
+			}
+			if got := fs.Args(); !slices.Equal(got, tc.wantArgs) {
+				t.Fatalf("arguments = %#v, want %#v", got, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestInterspersedGlobalFlagsDispatch(t *testing.T) {
+	var chatRequests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/api/projects":
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"openvibely","path":"/tmp/openvibely"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/chat/message":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+			}
+			chatRequests = append(chatRequests, r.FormValue("project_id")+"|"+r.FormValue("message"))
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"message_id":"m1","status":"processing"}`)
+		case strings.HasPrefix(r.URL.Path, "/api/chat/message/"):
+			_, _ = io.WriteString(w, `{"status":"completed","response":"a deer story"}`)
+		case r.URL.Path == "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-1?from=tasks" title="Task with spaces">Task with spaces</a></div>`)
+		default:
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dispatch := func(t *testing.T, rawArgs []string) string {
+		t.Helper()
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		project := fs.String("project", "", "")
+		jsonOutput := fs.Bool("json", false, "")
+		if err := parseInterspersedFlags(fs, rawArgs); err != nil {
+			t.Fatalf("parseInterspersedFlags: %v", err)
+		}
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := tui.RunCLI(c, &out, *project, fs.Args(), false, *jsonOutput); err != nil {
+			t.Fatalf("RunCLI(%#v): %v", rawArgs, err)
+		}
+		return out.String()
+	}
+
+	message := "tell me a story about a deer"
+	for _, args := range [][]string{
+		{"--project", "openvibely", "chat", message},
+		{"chat", "--project", "openvibely", message},
+		{"chat", message, "--project=openvibely"},
+	} {
+		if out := dispatch(t, args); !strings.Contains(out, "a deer story") {
+			t.Fatalf("chat output = %q", out)
+		}
+	}
+	if want := []string{"p1|" + message, "p1|" + message, "p1|" + message}; !slices.Equal(chatRequests, want) {
+		t.Fatalf("chat requests = %#v, want %#v", chatRequests, want)
+	}
+
+	out := dispatch(t, []string{"tasks", "--project", "openvibely", "--json"})
+	if !json.Valid([]byte(out)) || !strings.Contains(out, `"title":"Task with spaces"`) {
+		t.Fatalf("interspersed task JSON output = %q", out)
+	}
+}
 
 func TestLoginWithConfiguredCredentialsReusesCookieSession(t *testing.T) {
 	const password = "cli-password-that-must-not-be-printed"
