@@ -467,6 +467,65 @@ func TestDeleteAlertAndListParsesProjectScopedHTMXRefresh(t *testing.T) {
 	}
 }
 
+func TestDeleteAlertAndListLoadsPaginatedHTMXRefresh(t *testing.T) {
+	var deleteRequests, continuationRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.Method {
+		case http.MethodDelete:
+			deleteRequests++
+			if r.URL.Path != "/alerts/delete-me" || r.URL.Query().Get("project_id") != "project-2" {
+				t.Errorf("delete request = %s?%s", r.URL.Path, r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true">
+				<div data-alert-id="a1" data-alert-scroll-anchor="a1"><p class="font-semibold">First alert</p></div>
+				<div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Second alert</p></div>
+			</div>`)
+		case http.MethodGet:
+			continuationRequests++
+			q := r.URL.Query()
+			if r.URL.Path != "/alerts" || q.Get("project_id") != "project-2" || q.Get("card_page") != "1" || q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "2" {
+				t.Errorf("continuation request = %s?%s", r.URL.Path, r.URL.RawQuery)
+			}
+			w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false">
+				<div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Second alert duplicate</p></div>
+				<div data-alert-id="a3" data-alert-scroll-anchor="a3"><p class="font-semibold">Later alert</p></div>
+			</div>`)
+		default:
+			t.Errorf("unexpected method %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := c.DeleteAlertAndList(context.Background(), "delete-me", "project-2")
+	if err != nil {
+		t.Fatalf("DeleteAlertAndList: %v", err)
+	}
+	if deleteRequests != 1 || continuationRequests != 1 {
+		t.Fatalf("requests = DELETE %d continuation GET %d, want 1 each", deleteRequests, continuationRequests)
+	}
+	gotIDs := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		gotIDs = append(gotIDs, alert.ID)
+	}
+	if want := []string{"a1", "a2", "a3"}; !reflect.DeepEqual(gotIDs, want) {
+		t.Fatalf("alert IDs = %#v, want %#v", gotIDs, want)
+	}
+	if alerts[1].Title != "Second alert" {
+		t.Fatalf("overlapping alert title = %q, want first-page value", alerts[1].Title)
+	}
+	for _, alert := range alerts {
+		if alert.ProjectID != "project-2" {
+			t.Fatalf("alert %s project = %q", alert.ID, alert.ProjectID)
+		}
+	}
+}
+
 func TestDeleteAlertAndListReportsBackendFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)

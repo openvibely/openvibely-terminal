@@ -385,14 +385,34 @@ func (c *Client) DeleteAlert(ctx context.Context, alertID, projectID string) err
 }
 
 // DeleteAlertAndList removes one alert and parses the refreshed alert list from
-// the backend's HTMX response.
+// the backend's HTMX response, following any card-page continuations without
+// repeating the mutation or reloading its first page.
 func (c *Client) DeleteAlertAndList(ctx context.Context, alertID, projectID string) ([]Alert, error) {
 	root, err := c.doFormHTML(ctx, http.MethodDelete,
 		"/alerts/"+url.PathEscape(alertID)+query("project_id", projectID), nil)
 	if err != nil {
 		return nil, err
 	}
-	return parseAlerts(root, projectID), nil
+	paginationRoot := findNode(root, func(n *html.Node) bool {
+		return hasHTMLAttr(n, "data-card-pagination-root")
+	})
+	hasMore := paginationRoot != nil && attr(paginationRoot, "data-card-pagination-has-more") == "true"
+	pages, err := c.getCardPagesFromInitial(ctx, "/alerts"+query("project_id", projectID), root, hasMore)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	alerts := make([]Alert, 0)
+	for _, page := range pages {
+		for _, alert := range parseAlerts(page.root, projectID) {
+			if seen[alert.ID] {
+				continue
+			}
+			seen[alert.ID] = true
+			alerts = append(alerts, alert)
+		}
+	}
+	return alerts, nil
 }
 
 // MarkAllAlertsRead marks every alert read.

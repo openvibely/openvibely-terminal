@@ -103,15 +103,20 @@ func (c *Client) getHTMLPage(ctx context.Context, path string) (*html.Node, bool
 // response remains the normal full page so non-paginated cards and empty-state
 // markup are preserved; later requests ask for the largest supported fragment.
 func (c *Client) getCardPages(ctx context.Context, path string) ([]htmlPage, error) {
-	root, headerHasMore, err := c.getHTMLPage(ctx, path)
+	root, hasMore, err := c.getHTMLPage(ctx, path)
 	if err != nil {
 		return nil, err
 	}
+	return c.getCardPagesFromInitial(ctx, path, root, hasMore)
+}
+
+// getCardPagesFromInitial follows card continuations after an already-loaded
+// first page, such as the refreshed list returned by an HTMX mutation.
+func (c *Client) getCardPagesFromInitial(ctx context.Context, path string, root *html.Node, hasMore bool) ([]htmlPage, error) {
 	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
 	if paginationRoot == nil {
 		return []htmlPage{{root: root}}, nil
 	}
-	hasMore := headerHasMore
 	pages := []htmlPage{{root: root}}
 	selector := attr(paginationRoot, "data-card-pagination-card-selector")
 	keyAttr := attr(paginationRoot, "data-card-pagination-key")
