@@ -1092,38 +1092,66 @@ func TestCLIGlobalModelsListWorksAcrossProjectStates(t *testing.T) {
 		{name: "single project", projects: `{"projects":[{"id":"p1","name":"solo"}]}`},
 		{name: "multiple projects", projects: cliProjects},
 	}
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{name: "bare", args: []string{"models"}},
+		{name: "list", args: []string{"models", "list"}},
+		{name: "filtered", args: []string{"models", "Sonnet"}},
+	}
 	for _, state := range states {
 		state := state
-		for _, jsonOutput := range []bool{false, true} {
-			name := state.name + " plain"
-			if jsonOutput {
-				name = state.name + " JSON"
-			}
-			t.Run(name, func(t *testing.T) {
-				c, rec := cliServer(t, map[string]string{
-					"/api/projects": state.projects,
-					"/models":       modelsHTML,
-				})
-				var out bytes.Buffer
-				if err := RunCLI(c, &out, "", []string{"models"}, false, jsonOutput); err != nil {
-					t.Fatalf("global models list failed: %v", err)
-				}
-				if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
-					t.Fatalf("models list was not requested globally; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
-				}
+		for _, command := range commands {
+			command := command
+			for _, jsonOutput := range []bool{false, true} {
+				name := state.name + " " + command.name + " plain"
 				if jsonOutput {
-					var models []client.LLMModel
-					if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &models); err != nil {
-						t.Fatalf("global JSON output is not a raw model array: %v\n%s", err, out.String())
-					}
-					if len(models) != 1 || models[0].ID != "m-1" {
-						t.Fatalf("models = %+v", models)
-					}
-				} else if !strings.Contains(out.String(), "Sonnet") {
-					t.Fatalf("plain global output missing model:\n%s", out.String())
+					name = state.name + " " + command.name + " JSON"
 				}
-			})
+				t.Run(name, func(t *testing.T) {
+					c, rec := cliServer(t, map[string]string{
+						"/api/projects": state.projects,
+						"/models":       modelsHTML,
+					})
+					var out bytes.Buffer
+					if err := RunCLI(c, &out, "", command.args, false, jsonOutput); err != nil {
+						t.Fatalf("global models list failed: %v", err)
+					}
+					if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
+						t.Fatalf("models list was not requested globally; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
+					}
+					if jsonOutput {
+						var models []client.LLMModel
+						if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &models); err != nil {
+							t.Fatalf("global JSON output is not a raw model array: %v\n%s", err, out.String())
+						}
+						if len(models) != 1 || models[0].ID != "m-1" {
+							t.Fatalf("models = %+v", models)
+						}
+					} else if !strings.Contains(out.String(), "Sonnet") {
+						t.Fatalf("plain global output missing model:\n%s", out.String())
+					}
+				})
+			}
 		}
+	}
+}
+
+func TestCLIGlobalModelsEmptyJSONIsRawArray(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/models":       `<div></div>`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"models", "list"}, false, true); err != nil {
+		t.Fatalf("empty global models list failed: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "[]" {
+		t.Fatalf("empty global models JSON = %q, want raw []", got)
+	}
+	if !rec.sawQuery("GET /models") || rec.sawQuery("GET /models?") {
+		t.Fatalf("empty models list was not requested globally; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
 	}
 }
 
@@ -1149,16 +1177,26 @@ func TestCLIProjectScopedModelsActionsRejectMissingOrAmbiguousProject(t *testing
 		state := state
 		for _, action := range actions {
 			action := action
-			t.Run(state.name+" "+action.name, func(t *testing.T) {
-				c, rec := cliServer(t, map[string]string{"/api/projects": state.projects})
-				err := RunCLI(c, &bytes.Buffer{}, "", action.args, action.force, false)
-				if err == nil || !strings.Contains(err.Error(), state.want) {
-					t.Fatalf("err = %v, want %q", err, state.want)
+			for _, jsonOutput := range []bool{false, true} {
+				mode := "plain"
+				if jsonOutput {
+					mode = "JSON"
 				}
-				if rec.saw("GET", "/models") || rec.saw("GET", "/api/capacity/models") || rec.saw("GET", "/api/analytics/usage") || rec.saw("POST", "/models/m-1/set-default") || rec.saw("DELETE", "/models/m-1") {
-					t.Fatalf("guarded models action made an unscoped request:\n%s", rec.all())
-				}
-			})
+				t.Run(state.name+" "+action.name+" "+mode, func(t *testing.T) {
+					c, rec := cliServer(t, map[string]string{"/api/projects": state.projects})
+					var out bytes.Buffer
+					err := RunCLI(c, &out, "", action.args, action.force, jsonOutput)
+					if err == nil || !strings.Contains(err.Error(), state.want) {
+						t.Fatalf("err = %v, want %q", err, state.want)
+					}
+					if rec.saw("GET", "/models") || rec.saw("GET", "/api/capacity/models") || rec.saw("GET", "/api/analytics/usage") || rec.saw("POST", "/models/m-1/set-default") || rec.saw("DELETE", "/models/m-1") {
+						t.Fatalf("guarded models action made an unscoped request:\n%s", rec.all())
+					}
+					if out.Len() != 0 {
+						t.Fatalf("guarded models action wrote output before failing: %q", out.String())
+					}
+				})
+			}
 		}
 	}
 }
@@ -1179,27 +1217,45 @@ func TestCLISingleProjectModelsActionsRemainScoped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			c, rec := cliServer(t, map[string]string{
-				"/api/projects":        `{"projects":[{"id":"p1","name":"solo"}]}`,
-				"/models":              modelsHTML,
-				"/api/capacity/models": `[]`,
-				"/api/analytics/usage": `{}`,
-			})
-			if err := RunCLI(c, &bytes.Buffer{}, "", tc.args, tc.force, false); err != nil {
-				t.Fatalf("scoped models action failed: %v\n%s", err, rec.all())
+		for _, jsonOutput := range []bool{false, true} {
+			mode := "plain"
+			if jsonOutput {
+				mode = "JSON"
 			}
-			if tc.wantPath == "/api/analytics/usage?project_id=p1" {
-				if !rec.sawQuery("GET " + tc.wantPath) {
-					t.Fatalf("capacity usage request lost implicit scope:\n%s", rec.all())
+			t.Run(tc.name+" "+mode, func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{
+					"/api/projects":        `{"projects":[{"id":"p1","name":"solo"}]}`,
+					"/models":              modelsHTML,
+					"/api/capacity/models": `[]`,
+					"/api/analytics/usage": `{}`,
+				})
+				var out bytes.Buffer
+				if err := RunCLI(c, &out, "", tc.args, tc.force, jsonOutput); err != nil {
+					t.Fatalf("scoped models action failed: %v\n%s", err, rec.all())
 				}
-			} else if !rec.saw(tc.wantMethod, tc.wantPath) {
-				t.Fatalf("missing %s %s:\n%s", tc.wantMethod, tc.wantPath, rec.all())
-			}
-			if tc.name != "capacity" && !rec.sawQuery("GET /models?project_id=p1") {
-				t.Fatalf("model mutation lookup was not scoped to the implicit project:\n%s", rec.all())
-			}
-		})
+				if tc.wantPath == "/api/analytics/usage?project_id=p1" {
+					if !rec.sawQuery("GET " + tc.wantPath) {
+						t.Fatalf("capacity usage request lost implicit scope; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
+					}
+				} else if !rec.saw(tc.wantMethod, tc.wantPath) {
+					t.Fatalf("missing %s %s:\n%s", tc.wantMethod, tc.wantPath, rec.all())
+				}
+				if tc.name != "capacity" && !rec.sawQuery("GET /models?project_id=p1") {
+					t.Fatalf("model mutation lookup was not scoped to the implicit project; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
+				}
+				if jsonOutput {
+					var scoped cliScopedJSONOutput
+					if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &scoped); err != nil {
+						t.Fatalf("scoped model JSON is not a valid scope envelope: %v\n%s", err, out.String())
+					}
+					if scoped.ProjectID != "p1" || scoped.ProjectName != "solo" || len(scoped.Data) == 0 {
+						t.Fatalf("scoped model JSON = %+v", scoped)
+					}
+				} else if !strings.Contains(out.String(), "project: solo (project_id=p1)") {
+					t.Fatalf("plain scoped output omitted implicit project identity:\n%s", out.String())
+				}
+			})
+		}
 	}
 }
 

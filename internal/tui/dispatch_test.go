@@ -3104,27 +3104,41 @@ func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
 func TestModelsListDoesNotRequireSelectedProject(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
-	for _, line := range []string{"/models", "/models list", "/models Sonnet"} {
-		t.Run(line, func(t *testing.T) {
-			m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
-			m.selectedID = ""
-			m.selectedName = ""
+	states := []struct {
+		name     string
+		projects []client.Project
+	}{
+		{name: "zero projects", projects: []client.Project{}},
+		{name: "single project", projects: []client.Project{{ID: "p1", Name: "solo"}}},
+		{name: "multiple projects", projects: []client.Project{{ID: "p1", Name: "demo"}, {ID: "p2", Name: "other"}}},
+	}
+	for _, state := range states {
+		state := state
+		for _, line := range []string{"/models", "/models list", "/models Sonnet"} {
+			line := line
+			t.Run(state.name+" "+line, func(t *testing.T) {
+				m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
+				m.projects = state.projects
+				m.projectsLoaded = true
+				m.selectedID = ""
+				m.selectedName = ""
 
-			m = runLine(t, m, line)
-			out := stripANSI(transcript(m))
-			if !strings.Contains(out, "Sonnet") {
-				t.Fatalf("expected global model listing for %s:\n%s", line, out)
-			}
-			if strings.Contains(out, "no project selected") {
-				t.Fatalf("global model listing required a project for %s:\n%s", line, out)
-			}
-			if !rec.saw("GET", "/models") {
-				t.Fatalf("%s did not request the global model list:\n%s", line, rec.all())
-			}
-			if rec.sawQuery("GET /models?") {
-				t.Fatalf("%s sent query parameters on a global model request; request URLs:\n%s", line, strings.Join(rec.urlsSnapshot(), "\n"))
-			}
-		})
+				m = runLine(t, m, line)
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, "Sonnet") {
+					t.Fatalf("expected global model listing for %s:\n%s", line, out)
+				}
+				if strings.Contains(out, "no project selected") || strings.Contains(out, "multiple projects") {
+					t.Fatalf("global model listing required a project for %s:\n%s", line, out)
+				}
+				if !rec.saw("GET", "/models") {
+					t.Fatalf("%s did not request the global model list:\n%s", line, rec.all())
+				}
+				if rec.sawQuery("GET /models?") {
+					t.Fatalf("%s sent query parameters on a global model request; request URLs:\n%s", line, strings.Join(rec.urlsSnapshot(), "\n"))
+				}
+			})
+		}
 	}
 }
 
