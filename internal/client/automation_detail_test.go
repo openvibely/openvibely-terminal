@@ -233,22 +233,18 @@ func TestParseAutomationDetailDoesNotMergeDuplicateEndpointEdgesWithoutUniqueIde
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 4 {
-		t.Fatalf("duplicate endpoint edges were merged: %+v", detail.Edges)
+	if len(detail.Edges) != 2 || len(detail.UnmatchedEdgeDetails) != 2 {
+		t.Fatalf("duplicate endpoint edges were not separated by provenance: graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
 	}
-	graphRecords, detailRecords := 0, 0
 	for _, edge := range detail.Edges {
-		if edge.EdgeKey == "" {
-			graphRecords++
-			continue
+		if edge.EdgeKey != "" || !edge.TransitionCountAvailable {
+			t.Errorf("graph edge changed during ambiguous correlation: %+v", edge)
 		}
-		detailRecords++
-		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
+	}
+	for _, edge := range detail.UnmatchedEdgeDetails {
+		if edge.EdgeKey == "" || edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
 			t.Errorf("detail edge received counts without a unique join: %+v", edge)
 		}
-	}
-	if graphRecords != 2 || detailRecords != 2 {
-		t.Fatalf("graph records=%d detail records=%d, edges=%+v", graphRecords, detailRecords, detail.Edges)
 	}
 }
 
@@ -263,11 +259,11 @@ func TestParseAutomationDetailDoesNotMergeWhenDetailEndpointIsDuplicated(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 3 {
-		t.Fatalf("duplicate detail endpoint was merged with the graph edge: %+v", detail.Edges)
+	if len(detail.Edges) != 1 || len(detail.UnmatchedEdgeDetails) != 2 {
+		t.Fatalf("duplicate detail endpoints were not retained separately: graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
 	}
-	for _, edge := range detail.Edges {
-		if edge.EdgeKey != "" && (edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable) {
+	for _, edge := range detail.UnmatchedEdgeDetails {
+		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
 			t.Errorf("detail edge received an ambiguous graph count: %+v", edge)
 		}
 	}
@@ -290,22 +286,21 @@ func TestParseAutomationDetailPreservesDistinctAndUnlabelledEdges(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 7 || !detail.EdgeCountsAvailable {
-		t.Fatalf("edges = %+v, available=%t", detail.Edges, detail.EdgeCountsAvailable)
+	if len(detail.Edges) != 4 || len(detail.UnmatchedEdgeDetails) != 3 || !detail.EdgeCountsAvailable {
+		t.Fatalf("edges = %+v, unmatched=%+v, available=%t", detail.Edges, detail.UnmatchedEdgeDetails, detail.EdgeCountsAvailable)
 	}
 	graphTransitions := []int{}
-	detailKeys := map[string]bool{}
 	for _, edge := range detail.Edges {
-		if edge.EdgeKey == "" {
-			if edge.SourceName != "" || edge.TargetName != "" {
-				t.Errorf("uncorrelated graph edge was assigned endpoints: %+v", edge)
-			}
-			if !edge.TransitionCountAvailable {
-				t.Errorf("graph edge lost transition count: %+v", edge)
-			}
-			graphTransitions = append(graphTransitions, edge.TransitionCount)
-			continue
+		if edge.SourceName != "" || edge.TargetName != "" {
+			t.Errorf("uncorrelated graph edge was assigned endpoints: %+v", edge)
 		}
+		if !edge.TransitionCountAvailable {
+			t.Errorf("graph edge lost transition count: %+v", edge)
+		}
+		graphTransitions = append(graphTransitions, edge.TransitionCount)
+	}
+	detailKeys := map[string]bool{}
+	for _, edge := range detail.UnmatchedEdgeDetails {
 		detailKeys[edge.EdgeKey] = true
 		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
 			t.Errorf("detail edge received unverified graph counts: %+v", edge)
@@ -344,8 +339,25 @@ func TestParseActualAutomationLiveRouteMarksOmittedSectionsUnavailable(t *testin
 	if detail.Automation.ID != "au-actual" || detail.Automation.ProjectID != "p1" || detail.Automation.Name != "Actual automation" || detail.Automation.LifecycleState != "active" || detail.Automation.HealthState != "healthy" {
 		t.Fatalf("metadata = %+v", detail.Automation)
 	}
-	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 2 || len(detail.Edges) != 2 {
+	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 2 || len(detail.Edges) != 1 {
 		t.Fatalf("actual graph = %+v", detail)
+	}
+	if len(detail.UnmatchedEdgeDetails) != 1 || detail.UnmatchedEdgeDetails[0].EdgeKey != "e1" || detail.UnmatchedEdgeDetails[0].SourceName != "Start" || detail.UnmatchedEdgeDetails[0].TargetName != "Review" {
+		t.Fatalf("unmatched edge details = %+v, want topology retained without inflating graph edge count", detail.UnmatchedEdgeDetails)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Edges                []AutomationLiveEdge `json:"edges"`
+		UnmatchedEdgeDetails []AutomationLiveEdge `json:"unmatched_edge_details"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Edges) != 1 || len(wire.UnmatchedEdgeDetails) != 1 {
+		t.Fatalf("edge JSON provenance = %s", encoded)
 	}
 	if len(detail.UnmatchedNodeDetails) != 2 || detail.UnmatchedNodeDetails[0].Name != "Start" || detail.UnmatchedNodeDetails[1].Name != "Review" {
 		t.Fatalf("unmatched node details = %+v, want both detail records retained separately", detail.UnmatchedNodeDetails)
@@ -455,25 +467,18 @@ func TestParseAutomationDetailDoesNotGuessGraphDetailEdgeCorrelation(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 4 {
-		t.Fatalf("edges = %+v, want separate graph and detail records", detail.Edges)
+	if len(detail.Edges) != 2 || len(detail.UnmatchedEdgeDetails) != 2 {
+		t.Fatalf("edge provenance = graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
 	}
-	graphRecords, detailRecords := 0, 0
 	for _, edge := range detail.Edges {
-		if edge.EdgeKey == "" {
-			graphRecords++
-			if !edge.TransitionCountAvailable {
-				t.Errorf("graph edge lost its count: %+v", edge)
-			}
-			continue
+		if !edge.TransitionCountAvailable {
+			t.Errorf("graph edge lost its count: %+v", edge)
 		}
-		detailRecords++
+	}
+	for _, edge := range detail.UnmatchedEdgeDetails {
 		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
 			t.Errorf("unverified graph/detail join supplied counts to %q: %+v", edge.EdgeKey, edge)
 		}
-	}
-	if graphRecords != 2 || detailRecords != 2 {
-		t.Fatalf("graph records=%d detail records=%d, edges=%+v", graphRecords, detailRecords, detail.Edges)
 	}
 	if !strings.Contains(strings.Join(detail.Warnings, "\n"), "edge") {
 		t.Fatalf("missing edge-correlation warning: %v", detail.Warnings)
@@ -957,10 +962,10 @@ func TestParseAutomationDetailRejectsSharedEdgeIdentityWithConflictingEndpoints(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 2 {
-		t.Fatalf("conflicting edge endpoints were merged: %+v", detail.Edges)
+	if len(detail.Edges) != 1 || len(detail.UnmatchedEdgeDetails) != 1 {
+		t.Fatalf("conflicting edge provenance was not retained: graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
 	}
-	graph, retained := detail.Edges[0], detail.Edges[1]
+	graph, retained := detail.Edges[0], detail.UnmatchedEdgeDetails[0]
 	if graph.SourceNodeID != "n1" || graph.TargetNodeID != "n2" || !graph.TransitionCountAvailable {
 		t.Fatalf("graph edge changed by conflicting detail identity: %+v", graph)
 	}
@@ -998,11 +1003,11 @@ func TestParseAutomationDetailRejectsSharedEdgeKeyWithConflictingEndpoints(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 2 {
-		t.Fatalf("shared edge key with conflicting endpoints was merged: %+v", detail.Edges)
+	if len(detail.Edges) != 1 || len(detail.UnmatchedEdgeDetails) != 1 {
+		t.Fatalf("shared edge key conflict was not retained: graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
 	}
-	if detail.Edges[0].SourceNodeID != "n1" || detail.Edges[1].SourceNodeID != "n3" {
-		t.Fatalf("conflicting edge endpoint records were changed: %+v", detail.Edges)
+	if detail.Edges[0].SourceNodeID != "n1" || detail.UnmatchedEdgeDetails[0].SourceNodeID != "n3" {
+		t.Fatalf("conflicting edge endpoint records were changed: graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
 	}
 	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "correlated") {
 		t.Fatalf("shared edge-key conflict lacked partial warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
@@ -1133,13 +1138,13 @@ func TestParseAutomationDetailRequiresUniqueCompatibleEdgeCandidate(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Edges) != 3 {
-		t.Fatalf("incomplete edge candidate was merged into the first conflicting edge: %+v", detail.Edges)
+	if len(detail.Edges) != 2 || len(detail.UnmatchedEdgeDetails) != 1 {
+		t.Fatalf("incomplete edge candidate was not retained separately: graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
 	}
 	if detail.Edges[0].SourceNodeID != "n1" || detail.Edges[0].TargetNodeID != "n2" || detail.Edges[1].SourceNodeID != "n3" || detail.Edges[1].TargetNodeID != "n4" {
 		t.Fatalf("conflicting graph edge endpoints changed: %+v", detail.Edges)
 	}
-	retained := detail.Edges[2]
+	retained := detail.UnmatchedEdgeDetails[0]
 	if retained.SourceNodeID != "" || retained.TargetNodeID != "" || retained.TransitionCountAvailable || retained.RecentTransitionCountAvailable {
 		t.Fatalf("ambiguous incomplete detail edge received graph data: %+v", retained)
 	}
@@ -1225,8 +1230,8 @@ func TestParseAutomationDetailRetainsDuplicateDetailEdgesBeforeCorrelation(t *te
 	higher := `<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1" data-source-node-id="n1" data-target-node-id="n2" data-transition-count="7"><div>Start → Review</div><p>approved</p></div>`
 	first := parse(lower + higher)
 	second := parse(higher + lower)
-	if len(first.Edges) != 3 || len(second.Edges) != 3 {
-		t.Fatalf("duplicate detail edges were correlated before ambiguity was known: first=%+v second=%+v", first.Edges, second.Edges)
+	if len(first.Edges) != 1 || len(second.Edges) != 1 || len(first.UnmatchedEdgeDetails) != 2 || len(second.UnmatchedEdgeDetails) != 2 {
+		t.Fatalf("duplicate detail edges were not retained separately: first=%+v second=%+v", first, second)
 	}
 	firstJSON, err := json.Marshal(first)
 	if err != nil {
@@ -1239,8 +1244,8 @@ func TestParseAutomationDetailRetainsDuplicateDetailEdgesBeforeCorrelation(t *te
 	if string(firstJSON) != string(secondJSON) {
 		t.Fatalf("duplicate detail edge JSON depends on input order:\nfirst: %s\nsecond: %s", firstJSON, secondJSON)
 	}
-	if first.Edges[0].TransitionCount != 1 || first.Edges[1].TransitionCount != 5 || first.Edges[2].TransitionCount != 7 {
-		t.Fatalf("ambiguous detail metrics changed the graph edge or were not retained: %+v", first.Edges)
+	if first.Edges[0].TransitionCount != 1 || first.UnmatchedEdgeDetails[0].TransitionCount != 5 || first.UnmatchedEdgeDetails[1].TransitionCount != 7 {
+		t.Fatalf("ambiguous detail metrics changed the graph edge or were not retained: graph=%+v unmatched=%+v", first.Edges, first.UnmatchedEdgeDetails)
 	}
 	if !first.Partial || !strings.Contains(strings.Join(first.Warnings, "\n"), "duplicate edge") {
 		t.Fatalf("duplicate detail edges lacked warning: partial=%t warnings=%v", first.Partial, first.Warnings)
@@ -1264,8 +1269,8 @@ func TestParseAutomationDetailRequiresGloballyUniqueEdgeCorrelation(t *testing.T
 	rejected := `<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1" data-source-node-id="n3" data-target-node-id="n4" data-transition-count="7"><div>Other → Destination</div><p>rejected</p></div>`
 	first := parse(approved + rejected)
 	second := parse(rejected + approved)
-	if len(first.Edges) != 3 || len(second.Edges) != 3 {
-		t.Fatalf("ambiguous detail edges were merged into an incomplete graph edge: first=%+v second=%+v", first.Edges, second.Edges)
+	if len(first.Edges) != 1 || len(second.Edges) != 1 || len(first.UnmatchedEdgeDetails) != 2 || len(second.UnmatchedEdgeDetails) != 2 {
+		t.Fatalf("ambiguous detail edges were not retained separately: first=%+v second=%+v", first, second)
 	}
 	firstJSON, err := json.Marshal(first)
 	if err != nil {

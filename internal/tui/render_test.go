@@ -633,6 +633,66 @@ func TestRenderAutomationDetailShowsGraphRuntimeResourcesAndExternalState(t *tes
 	}
 }
 
+func TestRenderAutomationDetailSanitizesBackendFieldsWithoutMutatingJSONData(t *testing.T) {
+	const hostile = "safe\x1b[2J\nFORGED\tROW\u202e"
+	detail := client.AutomationDetail{
+		Automation: client.AutomationMetadata{
+			ID: hostile, ProjectID: hostile, Name: hostile, Description: hostile,
+			LifecycleState: "active", HealthState: hostile,
+		},
+		Version: client.AutomationVersion{ID: hostile, State: "published", Source: hostile},
+		Nodes: []client.AutomationLiveNode{{
+			AutomationNode: client.AutomationNode{ID: hostile, Name: hostile}, DisplayState: hostile,
+		}},
+		Edges: []client.AutomationLiveEdge{{
+			AutomationEdge: client.AutomationEdge{SourceNodeID: hostile, TargetNodeID: hostile, Label: hostile},
+		}},
+		Resources:      []client.AutomationResourceSummary{{NodeKey: hostile, ResourceType: hostile, Name: hostile, Relation: hostile, Status: hostile}},
+		ExternalState:  client.AutomationExternalState{Status: hostile, LastUpdatedAt: hostile},
+		GraphAvailable: true, NodesAvailable: true, EdgesAvailable: true,
+		ResourcesAvailable: true, ExternalStateAvailable: true,
+		Warnings: []string{hostile},
+	}
+
+	out := renderAutomationDetail(detail)
+	plain := stripANSI(out)
+	if strings.Contains(out, "\x1b[2J") || strings.Contains(plain, "\nFORGED") || strings.ContainsAny(plain, "\t\r") || strings.ContainsRune(plain, '\u202e') {
+		t.Fatalf("automation detail contains backend terminal controls: %q", out)
+	}
+	if !strings.Contains(plain, "safe FORGED ROW") {
+		t.Fatalf("sanitized automation detail lost readable text: %q", plain)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `safe\u001b[2J\nFORGED\tROW`) {
+		t.Fatalf("terminal rendering changed machine-readable data: %s", encoded)
+	}
+}
+
+func TestRenderAutomationDetailSeparatesUnmatchedEdgeEvidence(t *testing.T) {
+	detail := client.AutomationDetail{
+		Automation:     client.AutomationMetadata{ID: "au-edge", Name: "Edge evidence", LifecycleState: "active"},
+		GraphAvailable: true,
+		NodesAvailable: true,
+		EdgesAvailable: true,
+		Edges: []client.AutomationLiveEdge{{
+			AutomationEdge: client.AutomationEdge{Label: "approved"}, TransitionCount: 2, TransitionCountAvailable: true,
+		}},
+		UnmatchedEdgeDetails: []client.AutomationLiveEdge{{
+			AutomationEdge: client.AutomationEdge{EdgeKey: "e1"}, SourceName: "Start", TargetName: "Review",
+		}},
+		Partial: true,
+	}
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"0 nodes · 1 edges", "Unmatched edge details", "correlation unavailable", "Start", "Review"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("edge evidence output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderAutomationDetailDoesNotClaimDraftGraphWasLoaded(t *testing.T) {
 	detail := client.AutomationDetail{
 		Automation:     client.AutomationMetadata{ID: "au-draft", ProjectID: "p1", Name: "Draft flow", LifecycleState: "draft"},

@@ -182,8 +182,12 @@ type AutomationDetail struct {
 	// UnmatchedNodeDetails retains detail-panel records that cannot be safely
 	// correlated with graph nodes. Keeping them separate prevents lost config
 	// data without inflating the authoritative graph-node count.
-	UnmatchedNodeDetails []AutomationLiveNode        `json:"unmatched_node_details,omitempty"`
-	Edges                []AutomationLiveEdge        `json:"edges"`
+	UnmatchedNodeDetails []AutomationLiveNode `json:"unmatched_node_details,omitempty"`
+	Edges                []AutomationLiveEdge `json:"edges"`
+	// UnmatchedEdgeDetails retains detail-panel records that cannot be safely
+	// correlated with graph edges. Keeping them separate prevents topology
+	// evidence from inflating the authoritative graph-edge count.
+	UnmatchedEdgeDetails []AutomationLiveEdge        `json:"unmatched_edge_details,omitempty"`
 	Resources            []AutomationResourceSummary `json:"resources"`
 	ActiveInvocations    int                         `json:"active_invocations"`
 	ActiveWorkItems      int                         `json:"active_work_items"`
@@ -1017,20 +1021,25 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 			mergeAutomationLiveEdge(&out, parsed, detailAllowEndpointMerge[detailIndex])
 			continue
 		}
+		if len(explicit) > 0 {
+			detail.UnmatchedEdgeDetails = append(detail.UnmatchedEdgeDetails, parsed)
+			continue
+		}
+		// Without graph edge markers, detail records are the complete edge
+		// representation and therefore belong in the authoritative collection.
 		out = append(out, parsed)
 	}
-	if len(explicit) > 0 && len(detailEdges) > 0 {
-		for _, edge := range out {
-			if edge.edgeSource != automationEdgeSourceGraph|automationEdgeSourceDetails {
-				detail.Warnings = append(detail.Warnings, "edge records could not be correlated safely")
-				break
-			}
-		}
+	if len(explicit) > 0 && len(detail.UnmatchedEdgeDetails) > 0 {
+		detail.Warnings = append(detail.Warnings, "edge records could not be correlated safely")
 	}
 	for i := range out {
 		resolveAutomationEdgeNames(&out[i], nodes)
 	}
+	for i := range detail.UnmatchedEdgeDetails {
+		resolveAutomationEdgeNames(&detail.UnmatchedEdgeDetails[i], nodes)
+	}
 	sortAutomationDuplicateEdges(out)
+	sortAutomationDuplicateEdges(detail.UnmatchedEdgeDetails)
 	return out, present, len(explicit) > 0, countsPresent
 }
 

@@ -764,7 +764,71 @@ func renderAutomations(automations []client.Automation, filter string) string {
 		dimStyle.Render("/automations run|pause|resume|delete <id|name>")
 }
 
+func sanitizeAutomationDetailForTerminal(detail client.AutomationDetail) client.AutomationDetail {
+	sanitize := sanitizeAutomationDetailText
+	a := &detail.Automation
+	a.ID, a.ProjectID, a.StableKey = sanitize(a.ID), sanitize(a.ProjectID), sanitize(a.StableKey)
+	a.Name, a.Description, a.AutomationType = sanitize(a.Name), sanitize(a.Description), sanitize(a.AutomationType)
+	a.LifecycleState, a.HealthState, a.HealthReason = sanitize(a.LifecycleState), sanitize(a.HealthState), sanitize(a.HealthReason)
+
+	v := &detail.Version
+	v.ID, v.State, v.Source, v.AdapterKey = sanitize(v.ID), sanitize(v.State), sanitize(v.Source), sanitize(v.AdapterKey)
+
+	detail.Nodes = append([]client.AutomationLiveNode(nil), detail.Nodes...)
+	detail.UnmatchedNodeDetails = append([]client.AutomationLiveNode(nil), detail.UnmatchedNodeDetails...)
+	for _, nodes := range [][]client.AutomationLiveNode{detail.Nodes, detail.UnmatchedNodeDetails} {
+		for i := range nodes {
+			n := &nodes[i]
+			n.ID, n.NodeKey, n.Name = sanitize(n.ID), sanitize(n.NodeKey), sanitize(n.Name)
+			n.NodeType, n.Role, n.DisplayState = sanitize(n.NodeType), sanitize(n.Role), sanitize(n.DisplayState)
+		}
+	}
+
+	detail.Edges = append([]client.AutomationLiveEdge(nil), detail.Edges...)
+	detail.UnmatchedEdgeDetails = append([]client.AutomationLiveEdge(nil), detail.UnmatchedEdgeDetails...)
+	for _, edges := range [][]client.AutomationLiveEdge{detail.Edges, detail.UnmatchedEdgeDetails} {
+		for i := range edges {
+			e := &edges[i]
+			e.ID, e.EdgeKey, e.SourceNodeID = sanitize(e.ID), sanitize(e.EdgeKey), sanitize(e.SourceNodeID)
+			e.TargetNodeID, e.Label = sanitize(e.TargetNodeID), sanitize(e.Label)
+			e.SourceName, e.TargetName = sanitize(e.SourceName), sanitize(e.TargetName)
+		}
+	}
+
+	detail.Resources = append([]client.AutomationResourceSummary(nil), detail.Resources...)
+	for i := range detail.Resources {
+		r := &detail.Resources[i]
+		r.NodeID, r.NodeKey, r.ResourceType = sanitize(r.NodeID), sanitize(r.NodeKey), sanitize(r.ResourceType)
+		r.ResourceID, r.Relation, r.Name, r.Status = sanitize(r.ResourceID), sanitize(r.Relation), sanitize(r.Name), sanitize(r.Status)
+	}
+	detail.ExternalState.Status = sanitize(detail.ExternalState.Status)
+	detail.ExternalState.LastUpdatedAt = sanitize(detail.ExternalState.LastUpdatedAt)
+	detail.Warnings = append([]string(nil), detail.Warnings...)
+	for i := range detail.Warnings {
+		detail.Warnings[i] = sanitize(detail.Warnings[i])
+	}
+	return detail
+}
+
+func sanitizeAutomationDetailText(value string) string {
+	value = ansi.Strip(value)
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, r := range value {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case unicode.IsControl(r) || unicode.In(r, unicode.Cf):
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func renderAutomationDetail(detail client.AutomationDetail) string {
+	detail = sanitizeAutomationDetailForTerminal(detail)
 	var b strings.Builder
 	name := firstNonEmpty(detail.Automation.Name, detail.Automation.ID, "(unnamed automation)")
 	fmt.Fprintf(&b, "%s\n", sectionStyle.Render("Automation: "+name))
@@ -817,7 +881,7 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		if (detail.NodesAvailable && len(detail.Nodes) > 0) || len(detail.UnmatchedNodeDetails) > 0 {
 			renderAutomationDetailOnlyNodes(&b, detail)
 		}
-		if len(detail.Edges) > 0 {
+		if len(detail.Edges) > 0 || len(detail.UnmatchedEdgeDetails) > 0 {
 			renderAutomationDetailRetainedEdges(&b, detail)
 		}
 	} else {
@@ -975,12 +1039,25 @@ func renderAutomationDetailUnmatchedNodeDetails(b *strings.Builder, detail clien
 
 func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDetail) {
 	renderAutomationDetailEdgeTable(b, detail, "Edges", true)
+	renderAutomationDetailUnmatchedEdgeDetails(b, detail)
 }
 
 func renderAutomationDetailRetainedEdges(b *strings.Builder, detail client.AutomationDetail) {
-	b.WriteString("  " + sectionStyle.Render("Retained edge records") + "\n")
-	b.WriteString(dimStyle.Render("    graph unavailable; records retained for diagnostics") + "\n")
-	renderAutomationDetailEdgeRows(b, detail)
+	if len(detail.Edges) > 0 {
+		b.WriteString("  " + sectionStyle.Render("Retained edge records") + "\n")
+		b.WriteString(dimStyle.Render("    graph unavailable; records retained for diagnostics") + "\n")
+		renderAutomationDetailEdgeRows(b, detail.Edges, detail.EdgeCountsAvailable)
+	}
+	renderAutomationDetailUnmatchedEdgeDetails(b, detail)
+}
+
+func renderAutomationDetailUnmatchedEdgeDetails(b *strings.Builder, detail client.AutomationDetail) {
+	if len(detail.UnmatchedEdgeDetails) == 0 {
+		return
+	}
+	b.WriteString("  " + sectionStyle.Render("Unmatched edge details") + "\n")
+	b.WriteString(dimStyle.Render("    correlation unavailable; topology records retained separately") + "\n")
+	renderAutomationDetailEdgeRows(b, detail.UnmatchedEdgeDetails, false)
 }
 
 func renderAutomationDetailEdgeTable(b *strings.Builder, detail client.AutomationDetail, title string, requireAvailable bool) {
@@ -993,16 +1070,16 @@ func renderAutomationDetailEdgeTable(b *strings.Builder, detail client.Automatio
 		b.WriteString(dimStyle.Render("    (empty)") + "\n")
 		return
 	}
-	renderAutomationDetailEdgeRows(b, detail)
+	renderAutomationDetailEdgeRows(b, detail.Edges, detail.EdgeCountsAvailable)
 }
 
-func renderAutomationDetailEdgeRows(b *strings.Builder, detail client.AutomationDetail) {
-	edges := append([]client.AutomationLiveEdge(nil), detail.Edges...)
+func renderAutomationDetailEdgeRows(b *strings.Builder, edges []client.AutomationLiveEdge, legacyCountsAvailable bool) {
+	edges = append([]client.AutomationLiveEdge(nil), edges...)
 	sort.SliceStable(edges, func(i, j int) bool {
 		return automationDetailEdgeSortKey(edges[i]) < automationDetailEdgeSortKey(edges[j])
 	})
 	rows := [][]string{{"FROM", "TO", "LABEL", "TRANSITIONS", "RECENT"}}
-	legacyEdgeCounts := detail.EdgeCountsAvailable && !automationDetailHasEdgeCountAvailability(detail)
+	legacyEdgeCounts := legacyCountsAvailable && !automationEdgesHaveCountAvailability(edges)
 	for _, edge := range edges {
 		transitions := automationDetailTableCount(edge.TransitionCount, edge.TransitionCountAvailable || legacyEdgeCounts)
 		recent := automationDetailTableCount(edge.RecentTransitionCount, edge.RecentTransitionCountAvailable || legacyEdgeCounts)
@@ -1050,8 +1127,8 @@ func automationDetailHasNodeCountAvailability(detail client.AutomationDetail) bo
 	return false
 }
 
-func automationDetailHasEdgeCountAvailability(detail client.AutomationDetail) bool {
-	for _, edge := range detail.Edges {
+func automationEdgesHaveCountAvailability(edges []client.AutomationLiveEdge) bool {
+	for _, edge := range edges {
 		if edge.TransitionCountAvailable || edge.RecentTransitionCountAvailable {
 			return true
 		}
