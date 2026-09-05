@@ -2843,7 +2843,7 @@ func automationsCommand() command {
 		aliases:       []string{"automation"},
 		args:          "[filter]",
 		actions:       actions,
-		selectorPaths: [][]string{{"show"}, {"open"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
+		selectorPaths: [][]string{{"show"}, {"open"}, {"run"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
 		desc:          "recurring automations and workflow rules",
 		usage: []string{
 			"automations [filter]                       list automations",

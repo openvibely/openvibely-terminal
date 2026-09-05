@@ -345,20 +345,33 @@ func containsString(values []string, want string) bool {
 }
 
 func TestTabOnOmittedResourceOpensRegistrySelector(t *testing.T) {
-	m, _ := dispatchModel(t, selFixtures())
-	m.input.SetValue("/models default ")
-	m.input.CursorEnd()
-	m.refreshMenu()
-
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = next.(Model)
-	if cmd == nil {
-		t.Fatal("Tab did not request the model selector")
+	cases := []struct {
+		name           string
+		line           string
+		pendingCommand string
+	}{
+		{name: "model default", line: "/models default ", pendingCommand: "models default"},
+		{name: "canonical automation run", line: "/automations run ", pendingCommand: "automations run"},
+		{name: "legacy automation run-now", line: "/automations run-now ", pendingCommand: "automations run"},
 	}
-	next, _ = m.Update(cmd())
-	m = next.(Model)
-	if !m.selectorActive || m.pendingCommand != "models default" {
-		t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, selFixtures())
+			m.input.SetValue(tc.line)
+			m.input.CursorEnd()
+			m.refreshMenu()
+
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+			m = next.(Model)
+			if cmd == nil {
+				t.Fatalf("Tab did not request the resource selector for %q", tc.line)
+			}
+			next, _ = m.Update(cmd())
+			m = next.(Model)
+			if !m.selectorActive || m.pendingCommand != tc.pendingCommand {
+				t.Fatalf("selector state = active:%v pending:%q, want pending %q\n%s", m.selectorActive, m.pendingCommand, tc.pendingCommand, transcript(m))
+			}
+		})
 	}
 }
 
