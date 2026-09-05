@@ -2183,7 +2183,8 @@ func workersCommand() command {
 	actions := []string{"show", "limit", "project"}
 	return command{
 		name:    "workers",
-		args:    "[limit <n>|project <n>]",
+		aliases: []string{"works"},
+		args:    "[show|limit <n>|project <n>]",
 		actions: actions,
 		desc:    "worker pool stats and concurrency caps",
 		usage: []string{
@@ -2230,21 +2231,41 @@ func workersCommand() command {
 					return fmt.Sprintf("global worker limit set to %d", n), nil
 				})
 			}
+			if mm, cmd, ok := m.needProject(); !ok {
+				return mm, cmd
+			}
 			return m, run("Workers", cmdTimeout, func(ctx context.Context) (string, error) {
 				var (
-					wg       sync.WaitGroup
-					text     string
-					textErr  error
-					capacity *client.GlobalCapacity
+					wg          sync.WaitGroup
+					capacity    *client.GlobalCapacity
+					capacityErr error
+					projects    []client.ProjectCapacity
+					projectsErr error
+					models      []client.ModelCapacity
+					modelsErr   error
 				)
-				wg.Add(2)
-				go func() { defer wg.Done(); text, textErr = c.GetWorkerSettings(ctx, pid) }()
-				go func() { defer wg.Done(); capacity, _ = c.GetGlobalCapacity(ctx) }()
+				wg.Add(3)
+				go func() { defer wg.Done(); capacity, capacityErr = c.GetGlobalCapacity(ctx) }()
+				go func() { defer wg.Done(); projects, projectsErr = c.GetProjectCapacities(ctx) }()
+				go func() { defer wg.Done(); models, modelsErr = c.GetModelCapacities(ctx) }()
 				wg.Wait()
-				if textErr != nil {
-					return "", textErr
+				if capacityErr != nil {
+					return "", capacityErr
 				}
-				return renderWorkers(capacity, text), nil
+				warnings := make([]string, 0, 2)
+				if projectsErr != nil {
+					projects = []client.ProjectCapacity{}
+					warnings = append(warnings, "project worker capacity unavailable")
+				}
+				if modelsErr != nil {
+					models = []client.ModelCapacity{}
+					warnings = append(warnings, "model worker capacity unavailable")
+				}
+				overview := newWorkersOverview(capacity, projects, models, warnings)
+				if jsonMode {
+					return marshalJSON(overview)
+				}
+				return renderWorkers(overview), nil
 			})
 		},
 	}

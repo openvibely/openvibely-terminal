@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -1842,18 +1843,146 @@ func compactProviderText(s string) string {
 
 // --- workers ---
 
-func renderWorkers(capacity *client.GlobalCapacity, page string) string {
+type workerCapacityRow struct {
+	Scope   string `json:"scope"`
+	Name    string `json:"name"`
+	Running int    `json:"running"`
+	Queue   int    `json:"queue"`
+	Limit   *int   `json:"limit"`
+	Status  string `json:"status"`
+}
+
+type modelWorkerCapacityRow struct {
+	Name    string `json:"name"`
+	Model   string `json:"model"`
+	Running int    `json:"running"`
+	Limit   int    `json:"limit"`
+	Status  string `json:"status"`
+}
+
+type workersOverview struct {
+	Global    *client.GlobalCapacity   `json:"-"`
+	Projects  []client.ProjectCapacity `json:"-"`
+	Models    []client.ModelCapacity   `json:"-"`
+	Workers   []workerCapacityRow      `json:"workers"`
+	ModelRows []modelWorkerCapacityRow `json:"models"`
+	Warnings  []string                 `json:"warnings"`
+}
+
+func newWorkersOverview(global *client.GlobalCapacity, projects []client.ProjectCapacity, models []client.ModelCapacity, warnings []string) workersOverview {
+	overview := workersOverview{
+		Global: global, Projects: projects, Models: models,
+		Workers:   make([]workerCapacityRow, 0, len(projects)+1),
+		ModelRows: make([]modelWorkerCapacityRow, 0, len(models)),
+		Warnings:  append([]string(nil), warnings...),
+	}
+	if overview.Warnings == nil {
+		overview.Warnings = []string{}
+	}
+	if global != nil {
+		limit := global.MaxWorkers
+		overview.Workers = append(overview.Workers, workerCapacityRow{
+			Scope: "global", Name: "All Projects", Running: global.TotalRunning,
+			Queue: global.QueueSize, Limit: &limit, Status: workerCapacityStatus(global.TotalRunning, &limit),
+		})
+	}
+	for _, project := range projects {
+		overview.Workers = append(overview.Workers, workerCapacityRow{
+			Scope: "project", Name: project.Name, Running: project.Running,
+			Queue: project.QueueSize, Limit: project.MaxWorkers, Status: workerCapacityStatus(project.Running, project.MaxWorkers),
+		})
+	}
+	for _, model := range models {
+		overview.ModelRows = append(overview.ModelRows, modelWorkerCapacityRow{
+			Name: model.Name, Model: model.Model, Running: model.Running,
+			Limit: model.MaxWorkers, Status: modelWorkerCapacityStatus(model.Running, model.MaxWorkers),
+		})
+	}
+	return overview
+}
+
+func workerCapacityStatus(running int, limit *int) string {
+	if limit != nil && *limit > 0 && running >= *limit {
+		return "at_capacity"
+	}
+	if running > 0 {
+		return "active"
+	}
+	return "idle"
+}
+
+func modelWorkerCapacityStatus(running, limit int) string {
+	if running >= limit {
+		return "at_capacity"
+	}
+	if running > 0 {
+		return "active"
+	}
+	return "idle"
+}
+
+func workerStatusLabel(status string) string {
+	switch status {
+	case "at_capacity":
+		return "At capacity"
+	case "active":
+		return "Active"
+	default:
+		return "Idle"
+	}
+}
+
+func workerLimitLabel(scope string, limit *int) string {
+	if limit == nil || *limit == 0 {
+		if scope == "global" {
+			return "Unlimited"
+		}
+		return "No limit"
+	}
+	return strconv.Itoa(*limit)
+}
+
+func renderWorkers(overview workersOverview) string {
+	if overview.Workers == nil || overview.ModelRows == nil || overview.Warnings == nil {
+		overview = newWorkersOverview(overview.Global, overview.Projects, overview.Models, overview.Warnings)
+	}
+
+	rows := [][]string{{"SCOPE", "NAME", "RUNNING", "QUEUE", "LIMIT", "STATUS"}}
+	for _, worker := range overview.Workers {
+		running := strconv.Itoa(worker.Running)
+		if worker.Limit != nil && *worker.Limit > 0 {
+			running = fmt.Sprintf("%d / %d", worker.Running, *worker.Limit)
+		}
+		rows = append(rows, []string{
+			strings.Title(worker.Scope), truncate(worker.Name, 32), running,
+			strconv.Itoa(worker.Queue), workerLimitLabel(worker.Scope, worker.Limit), workerStatusLabel(worker.Status),
+		})
+	}
+
 	var b strings.Builder
-	if capacity != nil {
-		fmt.Fprintf(&b, "%s\n", sectionStyle.Render("Pool"))
-		fmt.Fprintf(&b, "  %d running / %d max · %d queued · %d free\n  %s\n\n",
-			capacity.TotalRunning, capacity.MaxWorkers, capacity.QueueSize, capacity.AvailableSlots,
-			bar(float64(capacity.TotalRunning), float64(capacity.MaxWorkers), 30))
+	b.WriteString(sectionStyle.Render("Worker capacity") + "\n")
+	b.WriteString(table(rows))
+	b.WriteString("\n\n" + sectionStyle.Render("Per-model worker pools") + "\n")
+	if len(overview.ModelRows) == 0 {
+		b.WriteString("  " + dimStyle.Render("no dedicated model worker pools"))
+	} else {
+		modelRows := [][]string{{"MODEL", "RUNNING", "LIMIT", "STATUS"}}
+		for _, model := range overview.ModelRows {
+			name := model.Name
+			if model.Model != "" && model.Model != model.Name {
+				name += " (" + model.Model + ")"
+			}
+			modelRows = append(modelRows, []string{
+				truncate(name, 40), fmt.Sprintf("%d / %d", model.Running, model.Limit),
+				strconv.Itoa(model.Limit), workerStatusLabel(model.Status),
+			})
+		}
+		b.WriteString(table(modelRows))
 	}
-	if s := strings.TrimSpace(page); s != "" {
-		b.WriteString(clamp(s, 40) + "\n\n")
+	for _, warning := range overview.Warnings {
+		b.WriteString("\n" + dimStyle.Render("warning: "+warning))
 	}
-	b.WriteString(dimStyle.Render("/workers limit <n> sets the global cap"))
+	b.WriteString("\n\n" + dimStyle.Render("/workers limit <n> sets the global cap"))
 	return b.String()
 }
 

@@ -872,6 +872,79 @@ func TestRenderVoteRecordsIsDeterministicAndExplicit(t *testing.T) {
 	}
 }
 
+func TestRenderWorkersTable(t *testing.T) {
+	unlimited := 0
+	limited := 2
+	overview := workersOverview{
+		Global: &client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 2, QueueSize: 3},
+		Projects: []client.ProjectCapacity{
+			{ID: "p-z", Name: "Zulu", Running: 2, QueueSize: 1, MaxWorkers: &limited},
+			{ID: "p-a", Name: "Alpha", Running: 0, MaxWorkers: &unlimited},
+		},
+		Models: []client.ModelCapacity{
+			{Name: "Sonnet", Model: "claude-sonnet", Running: 1, MaxWorkers: 3},
+		},
+	}
+
+	out := stripANSI(renderWorkers(overview))
+	for _, want := range []string{
+		"Worker capacity", "SCOPE", "NAME", "RUNNING", "QUEUE", "LIMIT", "STATUS",
+		"Global", "All Projects", "2 / 4", "3", "At capacity", "Zulu", "2 / 2",
+		"Alpha", "No limit", "Idle", "Per-model worker pools", "MODEL", "Sonnet (claude-sonnet)", "1 / 3", "Active",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("worker table missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Index(out, "All Projects") > strings.Index(out, "Zulu") || strings.Index(out, "Zulu") > strings.Index(out, "Alpha") {
+		t.Fatalf("worker rows did not preserve global-first backend order:\n%s", out)
+	}
+}
+
+func TestRenderWorkersEmptyAndLongValues(t *testing.T) {
+	longName := strings.Repeat("project-name-", 8)
+	longModel := strings.Repeat("model-id-", 10)
+	overview := workersOverview{
+		Global:   &client.GlobalCapacity{},
+		Projects: []client.ProjectCapacity{{Name: longName}},
+		Models:   []client.ModelCapacity{{Name: "Long model", Model: longModel, MaxWorkers: 1}},
+	}
+	out := stripANSI(renderWorkers(overview))
+	if strings.Contains(out, longName) || strings.Contains(out, longModel) || !strings.Contains(out, "…") {
+		t.Fatalf("long worker values were not bounded:\n%s", out)
+	}
+
+	empty := stripANSI(renderWorkers(workersOverview{Global: &client.GlobalCapacity{}, Projects: []client.ProjectCapacity{}, Models: []client.ModelCapacity{}}))
+	if !strings.Contains(empty, "Global") || !strings.Contains(empty, "All Projects") {
+		t.Fatalf("empty project result lost the canonical global row:\n%s", empty)
+	}
+	if !strings.Contains(empty, "no dedicated model worker pools") {
+		t.Fatalf("empty model result missing explicit state:\n%s", empty)
+	}
+}
+
+func TestWorkersOverviewJSONCompatibility(t *testing.T) {
+	overview := newWorkersOverview(
+		&client.GlobalCapacity{MaxWorkers: 5, TotalRunning: 1, QueueSize: 2, AvailableSlots: 4, HasCapacity: true},
+		[]client.ProjectCapacity{}, []client.ModelCapacity{}, []string{},
+	)
+	encoded, err := json.Marshal(overview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(encoded)
+	for _, want := range []string{`"workers":[`, `"scope":"global"`, `"name":"All Projects"`, `"running":1`, `"queue":2`, `"limit":5`, `"status":"active"`, `"models":[]`, `"warnings":[]`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("workers JSON missing %s: %s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"available_slots", "has_capacity", "MaxWorkers"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("workers JSON exposed unrelated field %q: %s", unwanted, got)
+		}
+	}
+}
+
 func TestRenderModelCapacityWithoutProviderLimits(t *testing.T) {
 	caps := []client.ModelCapacity{{Name: "Sonnet", Running: 1, MaxWorkers: 4, AvailableSlots: 3}}
 	base := stripANSI(renderModelCapacity(caps))

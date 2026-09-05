@@ -1349,7 +1349,7 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 		{"/schedule", "GET", "/schedule"},
 		{"/models", "GET", "/models"},
 		{"/agents", "GET", "/agents"},
-		{"/workers", "GET", "/workers"},
+		{"/workers", "GET", "/api/capacity/global"},
 		{"/channels", "GET", "/channels"},
 		{"/personality", "GET", "/personality"},
 		{"/pulse", "GET", "/upcoming"},
@@ -5325,24 +5325,26 @@ func TestDestructiveCommandsRequireConfirmation(t *testing.T) {
 	})
 }
 
-// TestWorkersShowFetchesConcurrently verifies that the default "workers" show path
-// launches GetWorkerSettings and GetGlobalCapacity concurrently instead of sequentially.
+// TestWorkersShowFetchesConcurrently verifies that the workers table uses the
+// three structured capacity sources concurrently and applies the documented
+// primary/partial failure behavior.
 func TestWorkersShowFetchesConcurrently(t *testing.T) {
 	const delay = 150 * time.Millisecond
-
 	const capacityJSON = `{"total_running":2,"max_workers":8,"queue_size":0,"available_slots":6}`
 
-	// Timing subtest: both handlers sleep delay; total should be < 2*delay.
-	t.Run("both fetches run concurrently", func(t *testing.T) {
+	t.Run("all structured fetches run concurrently", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/workers":
-				time.Sleep(delay)
-				_, _ = w.Write([]byte("<html><body>worker settings page</body></html>"))
-			case r.URL.Path == "/api/capacity/global":
-				w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/capacity/global":
 				time.Sleep(delay)
 				_, _ = w.Write([]byte(capacityJSON))
+			case "/api/capacity/projects":
+				time.Sleep(delay)
+				_, _ = w.Write([]byte(`[{"id":"p1","name":"Demo","running":1,"queue_size":2,"max_workers":3}]`))
+			case "/api/capacity/models":
+				time.Sleep(delay)
+				_, _ = w.Write([]byte(`[{"name":"Sonnet","model":"claude-sonnet","running":1,"max_workers":4}]`))
 			default:
 				w.WriteHeader(http.StatusNotFound)
 			}
@@ -5360,53 +5362,52 @@ func TestWorkersShowFetchesConcurrently(t *testing.T) {
 		m.selectedName = "demo"
 
 		start := time.Now()
-		m = runLine(t, m, "/workers")
+		m = runLine(t, m, "/works show")
 		elapsed := time.Since(start)
-
 		if elapsed >= 2*delay {
-			t.Errorf("workers show took %v, want well under %v (fetches must run concurrently)", elapsed, 2*delay)
+			t.Errorf("workers show took %v, want well under %v", elapsed, 2*delay)
 		}
-		if strings.Contains(transcript(m), "error:") {
-			t.Errorf("unexpected error:\n%s", transcript(m))
+		out := stripANSI(transcript(m))
+		for _, want := range []string{"SCOPE", "All Projects", "Demo", "MODEL", "Sonnet (claude-sonnet)"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("workers alias output missing %q:\n%s", want, out)
+			}
 		}
 	})
 
-	// GetWorkerSettings failure propagates as an error.
-	t.Run("GetWorkerSettings failure propagates", func(t *testing.T) {
+	t.Run("secondary failures render partial table", func(t *testing.T) {
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/workers":
-				w.WriteHeader(http.StatusInternalServerError)
-			case r.URL.Path == "/api/capacity/global":
+			if r.URL.Path == "/api/capacity/global" {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(capacityJSON))
-			default:
-				w.WriteHeader(http.StatusNotFound)
+				return
 			}
+			w.WriteHeader(http.StatusInternalServerError)
 		})
-		m = runLine(t, m, "/workers")
-		out := transcript(m)
-		if !strings.Contains(out, "error:") {
-			t.Errorf("expected error when GetWorkerSettings fails; got:\n%s", out)
+		m = runLine(t, m, "/workers show")
+		out := stripANSI(transcript(m))
+		for _, want := range []string{"All Projects", "project worker capacity unavailable", "model worker capacity unavailable"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("partial workers output missing %q:\n%s", want, out)
+			}
+		}
+		if strings.Contains(out, "error::") {
+			t.Errorf("secondary failure incorrectly failed command:\n%s", out)
 		}
 	})
 
-	// GetGlobalCapacity failure is silently ignored; nil capacity still renders.
-	t.Run("GetGlobalCapacity failure ignored", func(t *testing.T) {
+	t.Run("global failure propagates", func(t *testing.T) {
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/workers":
-				_, _ = w.Write([]byte("<html><body>worker settings page</body></html>"))
-			case r.URL.Path == "/api/capacity/global":
+			if r.URL.Path == "/api/capacity/global" {
 				w.WriteHeader(http.StatusInternalServerError)
-			default:
-				w.WriteHeader(http.StatusNotFound)
+				return
 			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
 		})
-		m = runLine(t, m, "/workers")
-		out := transcript(m)
-		if strings.Contains(out, "error:") {
-			t.Errorf("GetGlobalCapacity failure must not surface as an error; got:\n%s", out)
+		m = runLine(t, m, "/workers show")
+		if out := transcript(m); !strings.Contains(out, "error:") {
+			t.Errorf("expected global capacity error; got:\n%s", out)
 		}
 	})
 }
