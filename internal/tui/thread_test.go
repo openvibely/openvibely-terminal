@@ -386,6 +386,61 @@ func TestOpenTaskLiveEventsRequireExactCurrentOwnership(t *testing.T) {
 	}
 }
 
+func TestTaskLiveEventsWithoutProjectAreRejectedBeforeEventsDisplay(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		eventName string
+		payload   string
+	}{
+		{name: "message", eventName: "chat_new_message", payload: `{"type":"chat_new_message","task_id":"t-1","message":"unowned output"}`},
+		{name: "status", eventName: "task_status_changed", payload: `{"type":"task_status_changed","task_id":"t-1","status":"completed","message":"unowned status"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, rec := threadModel(t)
+			m = runLine(t, m, "/tasks open Refactor")
+			m.showEvents = true
+			m.sseGeneration = 13
+			m.sseEvents = make(chan client.Event)
+			m.sseErrs = make(chan error)
+			before := transcript(m)
+
+			updated, _ := m.Update(sseEventMsg{generation: 13, event: client.Event{
+				Name: tt.eventName,
+				Data: json.RawMessage(tt.payload),
+			}})
+			m = updated.(Model)
+
+			if got := transcript(m); got != before {
+				t.Fatalf("unowned task event reached /events display:\nbefore:\n%s\nafter:\n%s", before, got)
+			}
+			if m.threadStatus != "running" {
+				t.Fatalf("unowned task event changed status to %q", m.threadStatus)
+			}
+			if got := rec.count("GET", "/tasks/t-1/thread"); got != 1 {
+				t.Fatalf("unowned task event triggered refresh; requests = %d", got)
+			}
+		})
+	}
+}
+
+func TestProjectChatEventWithoutProjectRetainsEventsDisplayCompatibility(t *testing.T) {
+	m, _ := threadModel(t)
+	m.showEvents = true
+	m.sseGeneration = 14
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, _ := m.Update(sseEventMsg{generation: 14, event: client.Event{
+		Name: "chat_new_message",
+		Data: json.RawMessage(`{"type":"chat_new_message","message":"compatible project chat"}`),
+	}})
+	m = updated.(Model)
+
+	if !strings.Contains(transcript(m), "compatible project chat") {
+		t.Fatalf("project-chat compatibility event was suppressed:\n%s", transcript(m))
+	}
+}
+
 // While in a thread, plain text posts to that task's thread endpoint rather
 // than to the project chat endpoint.
 func TestThreadMessageGoesToTaskNotProjectChat(t *testing.T) {

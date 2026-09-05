@@ -621,9 +621,21 @@ func (m *Model) acceptsSSEGeneration(generation int) bool {
 }
 
 func (m Model) acceptsSSEEvent(ev client.Event) bool {
-	projectID := sseEventProjectID(ev)
+	var scope struct {
+		ProjectID string `json:"project_id"`
+		TaskID    string `json:"task_id"`
+	}
+	if json.Unmarshal(ev.Data, &scope) != nil {
+		return true
+	}
+	projectID := strings.TrimSpace(scope.ProjectID)
+	if strings.TrimSpace(scope.TaskID) != "" {
+		// Task-scoped events must prove exact project ownership before they can
+		// reach either the generic /events renderer or active-thread handling.
+		return projectID != "" && m.selectedID != "" && projectID == m.selectedID
+	}
 	if projectID == "" {
-		return true // older/single-project event payloads may omit their scope
+		return true // older/single-project project-chat payloads may omit scope
 	}
 	return m.selectedID != "" && projectID == m.selectedID
 }
