@@ -158,14 +158,107 @@ func TestOpenTaskNotRunningIgnoresLiveTaskOutput(t *testing.T) {
 	}
 }
 
-func executeThreadRefreshFromBatch(t *testing.T, m *Model, cmd tea.Cmd) {
+func TestChatInvalidatesPendingTaskOpen(t *testing.T) {
+	m, _ := threadModel(t)
+	opened, openCmd := m.runCommand("/tasks open Refactor")
+	m = opened.(Model)
+	left, _ := m.runCommand("/chat")
+	m = left.(Model)
+
+	updated, _ := m.Update(openCmd())
+	m = updated.(Model)
+	if m.threadID != "" {
+		t.Fatalf("delayed open entered thread %q after /chat", m.threadID)
+	}
+	if strings.Contains(stripANSI(transcript(m)), "working on it") {
+		t.Fatalf("delayed open rendered after /chat:\n%s", transcript(m))
+	}
+}
+
+func TestNewerTaskOpenSupersedesOlderOpenInSameProject(t *testing.T) {
+	const board = `<div>
+		<div class="card" data-task-id="t-a" data-task-status="running" data-task-category="active" data-display-order="0"><a href="/tasks/t-a" title="Alpha">Alpha</a></div>
+		<div class="card" data-task-id="t-b" data-task-status="running" data-task-category="active" data-display-order="1"><a href="/tasks/t-b" title="Beta">Beta</a></div>
+	</div>`
+	m, _ := dispatchModel(t, map[string]string{
+		"/tasks":            board,
+		"/tasks/t-a/thread": `<div>alpha thread</div>`,
+		"/tasks/t-b/thread": `<div>beta thread</div>`,
+	})
+
+	first, firstCmd := m.runCommand("/tasks open Alpha")
+	m = first.(Model)
+	second, secondCmd := m.runCommand("/tasks open Beta")
+	m = second.(Model)
+
+	updated, _ := m.Update(secondCmd())
+	m = updated.(Model)
+	updated, _ = m.Update(firstCmd())
+	m = updated.(Model)
+
+	if m.threadID != "t-b" || m.threadTitle != "Beta" {
+		t.Fatalf("older open replaced newer thread: id=%q title=%q", m.threadID, m.threadTitle)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "beta thread") || strings.Contains(out, "alpha thread") {
+		t.Fatalf("stale open changed transcript:\n%s", out)
+	}
+}
+
+func TestOlderRunningRefreshCannotRegressTerminalThread(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	m.sseGeneration = 10
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, runningCmd := m.Update(sseEventMsg{generation: 10, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","status":"running"}`),
+	}})
+	m = updated.(Model)
+	updated, terminalCmd := m.Update(sseEventMsg{generation: 10, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","status":"completed"}`),
+	}})
+	m = updated.(Model)
+
+	terminal := threadRefreshMessageFromBatch(t, terminalCmd)
+	terminal.body = "terminal thread"
+	updated, _ = m.Update(terminal)
+	m = updated.(Model)
+
+	older := threadRefreshMessageFromBatch(t, runningCmd)
+	older.body = "older running thread"
+	updated, _ = m.Update(older)
+	m = updated.(Model)
+
+	if m.threadStatus != "completed" {
+		t.Fatalf("older refresh regressed status to %q", m.threadStatus)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "terminal thread") || strings.Contains(out, "older running thread") {
+		t.Fatalf("older refresh regressed thread content:\n%s", out)
+	}
+}
+
+func threadRefreshMessageFromBatch(t *testing.T, cmd tea.Cmd) threadUpdatedMsg {
 	t.Helper()
 	msg := cmd()
 	batch, ok := msg.(tea.BatchMsg)
 	if !ok || len(batch) < 2 {
 		t.Fatalf("refresh command = %T, want batch containing SSE wait and refresh", msg)
 	}
-	refreshMsg := batch[len(batch)-1]()
+	refresh, ok := batch[len(batch)-1]().(threadUpdatedMsg)
+	if !ok {
+		t.Fatalf("refresh message = %T, want threadUpdatedMsg", batch[len(batch)-1]())
+	}
+	return refresh
+}
+
+func executeThreadRefreshFromBatch(t *testing.T, m *Model, cmd tea.Cmd) {
+	t.Helper()
+	refreshMsg := threadRefreshMessageFromBatch(t, cmd)
 	updated, _ := m.Update(refreshMsg)
 	*m = updated.(Model)
 }

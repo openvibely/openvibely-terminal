@@ -137,9 +137,13 @@ type Model struct {
 
 	// task thread focus: when set, typed messages go to this task's thread
 	// instead of the project agent ("/tasks open <ref>" enters, "/chat" exits).
-	threadID     string
-	threadTitle  string
-	threadStatus string
+	// Request IDs order same-project open and live-refresh results that share the
+	// broader session/project generations.
+	threadID               string
+	threadTitle            string
+	threadStatus           string
+	threadOpenRequestID    uint64
+	threadRefreshRequestID uint64
 
 	// in-flight chat
 	pendingMsgID                string
@@ -1438,6 +1442,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale thread response from an older session or project
 		}
+		if msg.requestID != 0 && msg.requestID != m.threadOpenRequestID {
+			return m, nil // superseded by a newer open or an explicit thread exit
+		}
 		m.busy = false
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
@@ -1455,6 +1462,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.threadID = msg.taskID
 		m.threadTitle = msg.title
 		m.threadStatus = strings.ToLower(msg.status)
+		m.threadRefreshRequestID++ // invalidate refreshes launched for the prior view
 		m.append(entry{role: "result", head: "Thread · " + msg.title, text: msg.body})
 		m.append(entry{role: "system", text: "in task thread — messages go to this task. /chat returns to project chat."})
 		m.input.Placeholder = "Reply to " + truncate(msg.title, 40) + " (/chat to exit)"
@@ -1463,6 +1471,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case threadUpdatedMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil
+		}
+		if msg.requestID != 0 && msg.requestID != m.threadRefreshRequestID {
+			return m, nil // a newer live refresh owns the thread state
 		}
 		if msg.projectID != m.selectedID || msg.taskID != m.threadID {
 			return m, nil
@@ -1908,20 +1919,23 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	return m, m.sendChat(m.selectedID, text, submissionID)
 }
 
-func (m Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {
+func (m *Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {
+	m.threadRefreshRequestID++
+	requestID := m.threadRefreshRequestID
 	c := m.client
 	return withMessageGeneration(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
 		body, err := c.GetTaskThread(ctx, taskID, projectID)
 		return threadUpdatedMsg{
+			requestID: requestID,
 			projectID: projectID,
 			taskID:    taskID,
 			status:    status,
 			body:      body,
 			err:       err,
 		}
-	}, sessionGenerationOf(m), projectGenerationOf(m))
+	}, sessionGenerationOf(*m), projectGenerationOf(*m))
 }
 
 // handleOpenThreadSSE mirrors the web task view's live behavior for the one task

@@ -131,6 +131,7 @@ type attachmentDeleteTargetMsg struct {
 type threadOpenedMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
+	requestID         uint64
 	projectID         string
 	taskID            string
 	title             string
@@ -144,6 +145,7 @@ type threadOpenedMsg struct {
 type threadUpdatedMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
+	requestID         uint64
 	projectID         string
 	taskID            string
 	status            string

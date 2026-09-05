@@ -297,24 +297,28 @@ func tasksCommand() command {
 				})
 
 			case "open":
+				m.threadOpenRequestID++
+				m.threadRefreshRequestID++
 				if ref == "" {
 					return taskSelector(m, "usage: /tasks open <id|title>", "tasks open", false)
 				}
+				requestID := m.threadOpenRequestID
 				return m, func() tea.Msg {
 					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 					defer cancel()
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
-						return threadOpenedMsg{projectID: pid, err: err}
+						return threadOpenedMsg{requestID: requestID, projectID: pid, err: err}
 					}
 					body, err := c.GetTaskThread(ctx, t.ID, pid)
 					if err != nil {
-						return threadOpenedMsg{projectID: pid, err: err}
+						return threadOpenedMsg{requestID: requestID, projectID: pid, err: err}
 					}
 					if body == "" {
 						body = dimStyle.Render("(no messages yet)")
 					}
 					return threadOpenedMsg{
+						requestID: requestID,
 						projectID: pid,
 						taskID:    t.ID,
 						title:     firstNonEmpty(t.Title, shortID(t.ID)),
@@ -3247,6 +3251,10 @@ func chatCommand() command {
 		args:    "[message]",
 		desc:    "return to project chat, or send a message",
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			// Even before a thread has finished opening, /chat owns the user's
+			// navigation intent and invalidates delayed open/live-refresh results.
+			m.threadOpenRequestID++
+			m.threadRefreshRequestID++
 			if len(args) > 0 && m.hasPendingChat() {
 				m.append(entry{role: "system", text: chatStillProcessingMessage})
 				return m, nil
