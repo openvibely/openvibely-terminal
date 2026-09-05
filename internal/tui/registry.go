@@ -224,6 +224,15 @@ func taskSelectorWithSuffix(m Model, usage, command, prefillSuffix string) (Mode
 		}))
 }
 
+func taskDetailCompletionValues() []string {
+	var values []string
+	for _, tab := range client.TaskDetailTabs() {
+		values = append(values, tab.Name)
+		values = append(values, tab.Aliases...)
+	}
+	return values
+}
+
 func tasksCommand() command {
 	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
 	return command{
@@ -231,7 +240,23 @@ func tasksCommand() command {
 		aliases: []string{"task", "t", "board"},
 		args:    "[filter|id]",
 		actions: actions,
-		desc:    "the task board and task threads",
+		completions: []commandCompletion{
+			{after: []string{"reviews"}, values: []string{"list", "add"}},
+			{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
+			{after: []string{"attach"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
+			{after: []string{"attachment"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
+			{after: []string{"move", "**"}, values: []string{"backlog", "active", "completed"}},
+			{after: []string{"clear"}, values: []string{"backlog", "completed"}},
+			{after: []string{"show", "**"}, values: taskDetailCompletionValues()},
+		},
+		selectorPaths: [][]string{
+			{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
+			{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
+			{"order"}, {"goal"}, {"reply"}, {"attachments"}, {"attachments", "add"},
+			{"attachments", "upload"}, {"attachments", "list"}, {"attachments", "show"},
+			{"attachments", "delete"}, {"attachments", "remove"}, {"attach"}, {"attachment"},
+		},
+		desc: "the task board and task threads",
 		usage: []string{
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
@@ -545,9 +570,20 @@ func tasksCommand() command {
 					return taskSelectorWithSuffix(m, "usage: /tasks move <task> <backlog|active|completed>", "tasks move", " ")
 				}
 				if len(rest) < 2 {
+					if !cliMode {
+						return optionSelector(m, "Task column", "tasks move "+strings.Join(rest, " "),
+							"usage: /tasks move <task> <backlog|active|completed>", registryCompletionValues("tasks", "move", rest[0]))
+					}
 					return m, errCmd("usage: /tasks move <task> <backlog|active|completed>")
 				}
 				category := strings.ToLower(rest[len(rest)-1])
+				if category != "backlog" && category != "active" && category != "completed" {
+					if !cliMode {
+						return optionSelector(m, "Task column", "tasks move "+strings.Join(rest, " "),
+							"usage: /tasks move <task> <backlog|active|completed>", registryCompletionValues("tasks", append([]string{"move"}, rest...)...))
+					}
+					return m, errCmd("usage: /tasks move <task> <backlog|active|completed>")
+				}
 				target := strings.Join(rest[:len(rest)-1], " ")
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)
@@ -627,6 +663,10 @@ func tasksCommand() command {
 				})
 
 			case "clear":
+				if len(rest) == 0 && !cliMode {
+					return optionSelector(m, "Task column", "tasks clear", "clear which column? backlog or completed",
+						registryCompletionValues("tasks", "clear"))
+				}
 				column := "completed"
 				if len(rest) > 0 {
 					column = strings.ToLower(rest[0])
@@ -1177,7 +1217,11 @@ func scheduleCommand() command {
 		aliases: []string{"schedules"},
 		args:    "[args]",
 		actions: actions,
-		desc:    "scheduled/recurring task runs",
+		completions: []commandCompletion{
+			{after: []string{"add", "**"}, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
+		},
+		selectorPaths: [][]string{{"add"}, {"delete"}, {"toggle"}},
+		desc:          "scheduled/recurring task runs",
 		usage: []string{
 			"schedule                                   list schedules",
 			"omit <task> on add → interactive selector",
@@ -1367,11 +1411,12 @@ func alertDeleteOutput(status string, alerts []client.Alert) (string, error) {
 func alertsCommand() command {
 	actions := []string{"list", "show", "read", "approve", "reject", "dismiss", "delete", "read-all", "clear"}
 	return command{
-		name:    "alerts",
-		aliases: []string{"alert"},
-		args:    "[id]",
-		actions: actions,
-		desc:    "notifications awaiting review",
+		name:          "alerts",
+		aliases:       []string{"alert"},
+		args:          "[id]",
+		actions:       actions,
+		selectorPaths: [][]string{{"show"}, {"read"}, {"approve"}, {"reject"}, {"dismiss"}, {"delete"}},
+		desc:          "notifications awaiting review",
 		usage: []string{
 			"alerts [filter]                            list alerts",
 			"alerts show <alert>                         inspect full body and metadata",
@@ -1584,11 +1629,12 @@ func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd
 func skillsCommand() command {
 	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always", "load"}
 	return command{
-		name:    "skills",
-		aliases: []string{"skill"},
-		args:    "[handle]",
-		actions: actions,
-		desc:    "reusable skills the agents can load",
+		name:          "skills",
+		aliases:       []string{"skill"},
+		args:          "[handle]",
+		actions:       actions,
+		selectorPaths: [][]string{{"show"}, {"edit"}, {"delete"}, {"enable"}, {"disable"}, {"always"}, {"load"}},
+		desc:          "reusable skills the agents can load",
 		usage: []string{
 			"skills [filter]                            list skills",
 			"skills show <skill>                        show one skill's body",
@@ -1760,11 +1806,12 @@ func memorySelector(m Model, usage string) (Model, tea.Cmd) {
 func memoryCommand() command {
 	actions := []string{"list", "show", "search"}
 	return command{
-		name:    "memory",
-		aliases: []string{"memories"},
-		args:    "[file|query]",
-		actions: actions,
-		desc:    "read-only durable memory for the selected project",
+		name:          "memory",
+		aliases:       []string{"memories"},
+		args:          "[file|query]",
+		actions:       actions,
+		selectorPaths: [][]string{{"show"}},
+		desc:          "read-only durable memory for the selected project",
 		usage: []string{
 			"memory [filter]                            list indexed memory files",
 			"memory is read-only; curation remains owned by the backend lifecycle tools",
@@ -1857,11 +1904,12 @@ func filterMemoryList(list client.MemoryList, filter string) client.MemoryList {
 func agentsCommand() command {
 	actions := []string{"list", "delete", "generate", "metrics", "votes"}
 	return command{
-		name:    "agents",
-		aliases: []string{"agent"},
-		args:    "[name]",
-		actions: actions,
-		desc:    "agent definitions, workflow metrics and vote audits",
+		name:          "agents",
+		aliases:       []string{"agent"},
+		args:          "[name]",
+		actions:       actions,
+		selectorPaths: [][]string{{"delete"}},
+		desc:          "agent definitions, workflow metrics and vote audits",
 		usage: []string{
 			"agents [filter]                            list agent definitions",
 			"agents generate <description>              create an agent from a description",
@@ -2045,11 +2093,12 @@ func fetchModelCapacityWithUsage(ctx context.Context, c *client.Client, projectI
 func modelsCommand() command {
 	actions := []string{"list", "default", "delete", "capacity"}
 	return command{
-		name:    "models",
-		aliases: []string{"model"},
-		args:    "[name]",
-		actions: actions,
-		desc:    "configured LLM models, worker capacity and provider health",
+		name:          "models",
+		aliases:       []string{"model"},
+		args:          "[name]",
+		actions:       actions,
+		selectorPaths: [][]string{{"default"}, {"delete"}},
+		desc:          "configured LLM models, worker capacity and provider health",
 		usage: []string{
 			"models [filter]                            list configured models",
 			"models default <model>                     set the default model",
@@ -2186,7 +2235,11 @@ func workersCommand() command {
 		aliases: []string{"works"},
 		args:    "[show|limit <n>|project <n>]",
 		actions: actions,
-		desc:    "worker pool stats and concurrency caps",
+		completions: []commandCompletion{
+			{after: []string{"limit"}, values: []string{"0", "1", "2", "4", "8", "16", "32"}},
+			{after: []string{"project"}, values: []string{"0", "1", "2", "4", "8", "16", "32"}},
+		},
+		desc: "worker pool stats and concurrency caps",
 		usage: []string{
 			"workers                                    show pool stats and settings",
 			"workers limit <n>                          set the global worker cap (0 = unlimited)",
@@ -2200,6 +2253,17 @@ func workersCommand() command {
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
+			if action == "project" && len(rest) == 0 && !cliMode {
+				mm, cmd, ok := m.needProject()
+				if !ok {
+					return mm, cmd
+				}
+				m = mm
+			}
+			if (action == "limit" || action == "project") && len(rest) == 0 && !cliMode {
+				return optionSelector(m, "Worker limit", "workers "+action,
+					fmt.Sprintf("usage: /workers %s <n>", action), registryCompletionValues("workers", action))
+			}
 			if action == "limit" || action == "project" {
 				n, err := parseWorkerLimit(action, rest)
 				if err != nil {
@@ -2273,11 +2337,12 @@ func workersCommand() command {
 func channelsCommand() command {
 	actions := []string{"list", "test", "remove"}
 	return command{
-		name:    "channels",
-		aliases: []string{"integrations"},
-		args:    "[action] [channel]",
-		actions: actions,
-		desc:    "integrations: Telegram, Slack, Discord, GitHub, email, webhooks",
+		name:          "channels",
+		aliases:       []string{"integrations"},
+		args:          "[action] [channel]",
+		actions:       actions,
+		selectorPaths: [][]string{{"test"}, {"remove"}},
+		desc:          "integrations: Telegram, Slack, Discord, GitHub, email, webhooks",
 		usage: []string{
 			"channels list                              list configured integrations",
 			"channels test <channel>                    send a test message (telegram, slack, discord, email)",
@@ -2480,10 +2545,11 @@ func personalityDeleteCommand(c *client.Client, projectID string, personality cl
 func personalityCommand() command {
 	actions := []string{"list", "show", "add", "edit", "set", "delete"}
 	return command{
-		name:    "personality",
-		args:    "[key|name]",
-		actions: actions,
-		desc:    "built-in and custom assistant personalities",
+		name:          "personality",
+		args:          "[key|name]",
+		actions:       actions,
+		selectorPaths: [][]string{{"show"}, {"edit"}, {"set"}, {"delete"}},
+		desc:          "built-in and custom assistant personalities",
 		usage: []string{
 			"personality                                show the current personality",
 			"personality list                           list built-in and custom personalities",
@@ -2761,11 +2827,12 @@ func insightsCommand() command {
 func automationsCommand() command {
 	actions := []string{"list", "show", "open", "run", "pause", "resume", "delete"}
 	return command{
-		name:    "automations",
-		aliases: []string{"automation"},
-		args:    "[filter]",
-		actions: actions,
-		desc:    "recurring automations and workflow rules",
+		name:          "automations",
+		aliases:       []string{"automation"},
+		args:          "[filter]",
+		actions:       actions,
+		selectorPaths: [][]string{{"show"}, {"open"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
+		desc:          "recurring automations and workflow rules",
 		usage: []string{
 			"automations [filter]                       list automations",
 			"automations show <automation>              show live graph, runtime and resources",
@@ -3026,9 +3093,10 @@ func analyticsCommand() command {
 
 func projectCommand() command {
 	return command{
-		name: "project",
-		args: "<name>",
-		desc: "select the active project",
+		name:          "project",
+		args:          "<name>",
+		selectorPaths: [][]string{{}},
+		desc:          "select the active project",
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
 			if len(args) == 0 {
@@ -3217,10 +3285,11 @@ func statusCommand() command {
 
 func eventsCommand() command {
 	return command{
-		name:    "events",
-		aliases: []string{"stream", "log"},
-		args:    "[on|off]",
-		desc:    "stream live task/chat events (interactive toggle or CLI foreground monitor)",
+		name:        "events",
+		aliases:     []string{"stream", "log"},
+		args:        "[on|off]",
+		completions: []commandCompletion{{values: []string{"on", "off", "true", "false"}}},
+		desc:        "stream live task/chat events (interactive toggle or CLI foreground monitor)",
 		usage: []string{
 			"events [on]                                interactive: show events from the TUI stream",
 			"events off                                 interactive: hide events; CLI off cannot stop another process",

@@ -1852,9 +1852,49 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "tab":
 		if len(m.menu) > 0 {
 			c := m.menu[m.menuSel]
-			m.input.SetValue(completeSlashInput(m.input.Value(), c))
-			m.input.CursorEnd()
+			original := m.input.Value()
+			value, cursor := completeSlashInputAt(original, m.input.Position(), c)
+			if value == original && cursor == len([]rune(original)) {
+				value = completeSlashInput(original, c)
+				if value != original {
+					cursor = len([]rune(value))
+				}
+			}
+			m.input.SetValue(value)
+			m.input.SetCursor(cursor)
 			m.refreshMenu()
+			if value == original && cursor == len([]rune(original)) {
+				if fields, err := tokenizeCommand(original); err == nil && len(fields) > 0 {
+					args := fields[1:]
+					selectorArgs := args
+					selectorLine := original
+					initialFilter := ""
+					if !strings.HasSuffix(original, " ") && len(args) > 0 {
+						selectorArgs = args[:len(args)-1]
+						initialFilter = args[len(args)-1]
+						selectorLine = "/" + c.name
+						if len(selectorArgs) > 0 {
+							selectorLine += " " + strings.Join(selectorArgs, " ")
+						}
+					}
+					if c.offersSelector(selectorArgs) {
+						next, cmd := m.runCommand(selectorLine)
+						if cmd != nil {
+							base := cmd
+							cmd = func() tea.Msg {
+								msg := base()
+								if active, ok := msg.(selectorActiveMsg); ok {
+									active.initialFilter = initialFilter
+									active.forcePicker = true
+									return active
+								}
+								return msg
+							}
+						}
+						return next, cmd
+					}
+				}
+			}
 		}
 		return m, nil
 

@@ -75,6 +75,17 @@ func selectorForWithWarningsSuffix(title, command, emptyHint, prefillSuffix stri
 	}
 }
 
+func optionSelector(m Model, title, command, usage string, values []string) (Model, tea.Cmd) {
+	return selectorOr(m, usage, selectorFor(title, command, "no options available", false,
+		func(context.Context) ([]selectorItem, error) {
+			items := make([]selectorItem, 0, len(values))
+			for _, value := range values {
+				items = append(items, selectorItem{ref: value, label: value})
+			}
+			return items, nil
+		}))
+}
+
 // handleSelector applies a selectorActiveMsg: error, empty hint, single-item
 // auto-select, or open the interactive picker.
 func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
@@ -105,11 +116,22 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 		m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: text})
 		return m, nil
 	}
-	if len(msg.items) == 1 {
+	matchingItems := msg.items
+	if msg.initialFilter != "" {
+		search := selectorSearchTexts(msg.items)
+		needle := strings.ToLower(msg.initialFilter)
+		matchingItems = nil
+		for i, item := range msg.items {
+			if strings.Contains(search[i], needle) {
+				matchingItems = append(matchingItems, item)
+			}
+		}
+	}
+	if len(matchingItems) == 1 && !msg.forcePicker {
 		if len(warnings) > 0 {
 			m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: renderMemoryWarnings(warnings)})
 		}
-		it := msg.items[0]
+		it := matchingItems[0]
 		m.append(entry{role: "system", text: "only one match — selected " + selectorDisplay(it.label, selectorLabelDisplayWidth)})
 		return m.selectorDispatch(msg.command, msg.prefill, msg.prefillSuffix, it)
 	}
@@ -118,9 +140,9 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.selectorItems = msg.items
 	m.selectorWarnings = warnings
 	m.selectorSearch = selectorSearchTexts(msg.items)
-	m.selectorFilter = ""
-	m.selectorFiltered = msg.items
-	m.selectorFilteredFor = ""
+	m.selectorFilter = msg.initialFilter
+	m.selectorFiltered = matchingItems
+	m.selectorFilteredFor = msg.initialFilter
 	m.selectorCursor = 0
 	m.pendingCommand = msg.command
 	m.selectorPrefill = msg.prefill

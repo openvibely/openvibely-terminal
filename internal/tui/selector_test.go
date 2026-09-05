@@ -170,6 +170,103 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 	}
 }
 
+func TestOmittedTypedOperandsOpenRegistryOptionSelectors(t *testing.T) {
+	cases := []struct {
+		name       string
+		line       string
+		pending    string
+		wantValues []string
+	}{
+		{name: "worker numeric", line: "/workers limit", pending: "workers limit", wantValues: []string{"0", "1", "2", "4"}},
+		{name: "task enum", line: "/tasks move t-1", pending: "tasks move t-1", wantValues: []string{"backlog", "active", "completed"}},
+		{name: "destructive enum", line: "/tasks clear", pending: "tasks clear", wantValues: []string{"backlog", "completed"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, selFixtures())
+			m = runLine(t, m, tc.line)
+			if !m.selectorActive || m.pendingCommand != tc.pending {
+				t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+			}
+			var got []string
+			for _, item := range m.selectorItems {
+				got = append(got, item.ref)
+			}
+			for _, want := range tc.wantValues {
+				if !containsString(got, want) {
+					t.Fatalf("options = %v, missing %q", got, want)
+				}
+			}
+			if m.pendingConfirmation != nil {
+				t.Fatal("confirmation opened before an option was selected")
+			}
+		})
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestTabOnOmittedResourceOpensRegistrySelector(t *testing.T) {
+	m, _ := dispatchModel(t, selFixtures())
+	m.input.SetValue("/models default ")
+	m.input.CursorEnd()
+	m.refreshMenu()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("Tab did not request the model selector")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if !m.selectorActive || m.pendingCommand != "models default" {
+		t.Fatalf("selector state = active:%v pending:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+	}
+}
+
+func TestTabOnPartialResourceOpensFilteredSelectorWithoutMutation(t *testing.T) {
+	m, rec := dispatchModel(t, selFixtures())
+	m.input.SetValue("/models default clau")
+	m.input.CursorEnd()
+	m.refreshMenu()
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("Tab did not request the filtered model selector")
+	}
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+	if !m.selectorActive || m.selectorFilter != "clau" || len(m.filteredSelectorItems()) != 1 {
+		t.Fatalf("filtered selector = active:%v filter:%q items:%d\n%s", m.selectorActive, m.selectorFilter, len(m.filteredSelectorItems()), transcript(m))
+	}
+	if rec.count(http.MethodPost, "/models/default") != 0 {
+		t.Fatalf("Tab completion mutated the model selection:\n%s", rec.all())
+	}
+}
+
+func TestDestructiveOptionSelectionStillRequiresConfirmation(t *testing.T) {
+	m, rec := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/tasks clear")
+	if !m.selectorActive {
+		t.Fatalf("expected task-column selector:\n%s", transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.pendingConfirmation == nil {
+		t.Fatalf("selecting a destructive option bypassed confirmation:\n%s", transcript(m))
+	}
+	if rec.count(http.MethodDelete, "/tasks/clear") != 0 {
+		t.Fatalf("clear request occurred before confirmation:\n%s", rec.all())
+	}
+}
+
 func TestAutomationShowSelectorDispatchesResolvedItemWithoutSecondList(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/automations":      selAutomationsHTML,

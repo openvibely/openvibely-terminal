@@ -245,6 +245,73 @@ func TestParseProjectCreateArgs(t *testing.T) {
 	}
 }
 
+func TestRegistryCompletionAtEveryDepth(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{input: "/tasks attachments", want: "/tasks attachments "},
+		{input: "/tasks attachments de", want: "/tasks attachments delete "},
+		{input: "/tasks reviews a", want: "/tasks reviews add "},
+		{input: "/tasks move api ac", want: "/tasks move api active "},
+		{input: "/tasks show api chang", want: "/tasks show api changes "},
+		{input: "/schedule add report 2026-01-20T09:00 mon", want: "/schedule add report 2026-01-20T09:00 monthly "},
+		{input: "/workers limit 0", want: "/workers limit 0 "},
+		{input: "/task attachments rem extra", want: "/tasks attachments remove extra"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			cmd := lookupCommand(strings.Fields(tc.input)[0])
+			if cmd == nil {
+				t.Fatalf("command missing for %q", tc.input)
+			}
+			if got := completeSlashInput(tc.input, *cmd); got != tc.want {
+				t.Fatalf("completion = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRegistryCompletionPreservesAmbiguousInput(t *testing.T) {
+	cmd := lookupCommand("tasks")
+	for _, input := range []string{"/tasks att", "/tasks show api cha"} {
+		if got := completeSlashInput(input, *cmd); got != input {
+			t.Fatalf("ambiguous completion changed %q to %q", input, got)
+		}
+	}
+}
+
+func TestRegistryCompletionPreservesQuotedAndPipeDelimitedArguments(t *testing.T) {
+	cmd := lookupCommand("tasks")
+	cases := map[string]string{
+		`/tasks move "Fix login bug" ac`:         `/tasks move "Fix login bug" active `,
+		`/tasks goal "Fix login bug" | clear`:    `/tasks goal "Fix login bug" | clear`,
+		`/tasks reviews add "Fix bug" file.go:2`: `/tasks reviews add "Fix bug" file.go:2`,
+	}
+	for input, want := range cases {
+		if got := completeSlashInput(input, *cmd); got != want {
+			t.Fatalf("completion = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestRegistryCompletionPreservesCursorAndSuffix(t *testing.T) {
+	cmd := lookupCommand("tasks")
+	if cmd == nil {
+		t.Fatal("tasks command missing")
+	}
+	input := "/tasks attachments de --force"
+	cursor := strings.Index(input, " --force")
+	got, gotCursor := completeSlashInputAt(input, cursor, *cmd)
+	want := "/tasks attachments delete --force"
+	if got != want {
+		t.Fatalf("completion = %q, want %q", got, want)
+	}
+	if gotCursor != strings.Index(want, " --force") {
+		t.Fatalf("cursor = %d, want %d", gotCursor, strings.Index(want, " --force"))
+	}
+}
+
 func TestProjectsCreateCompletionAndHelp(t *testing.T) {
 	cmd := lookupCommand("projects")
 	if cmd == nil {

@@ -54,12 +54,21 @@ func (u commandActionUsage) helpLine(commandName string) string {
 	return fmt.Sprintf("%-*s%s", descriptionColumn, syntax, u.description)
 }
 
+type commandCompletion struct {
+	// after describes the already-complete argument path. Literal words match
+	// themselves; "*" matches one operand and "**" matches any operands.
+	after  []string
+	values []string
+}
+
 // command is one entry in the registry.
 type command struct {
-	name    string
-	aliases []string
-	args    string   // argument hint, e.g. "<name>"
-	actions []string // sub-actions for completion/help
+	name          string
+	aliases       []string
+	args          string   // argument hint, e.g. "<name>"
+	actions       []string // sub-actions for completion/help
+	completions   []commandCompletion
+	selectorPaths [][]string // exact argument paths whose next operand is a resource ref
 	// usage holds static usage/help lines. Action-specific syntax shared with
 	// runtime validation lives in actionUsages below.
 	usage []string
@@ -298,78 +307,156 @@ func (m *Model) refreshMenu() {
 }
 
 func completeSlashInput(value string, selected command) string {
-	trimmed := strings.TrimSpace(value)
-	if !strings.HasPrefix(trimmed, "/") {
-		return value
-	}
-
-	type tokenSpan struct{ start, end int }
-	var spans []tokenSpan
-	for i := strings.Index(value, "/") + 1; i < len(value) && len(spans) < 2; {
-		for i < len(value) {
-			r, size := utf8.DecodeRuneInString(value[i:])
-			if !unicode.IsSpace(r) {
-				break
-			}
-			i += size
+	// Keep helper compatibility for tests and callers that do not expose a
+	// cursor. Prefer the deepest completable token, while retaining arguments
+	// that follow it.
+	for _, pos := range completionTokenEnds(value) {
+		if out, _ := completeSlashInputAt(value, pos, selected); out != value {
+			return out
 		}
-		if i >= len(value) {
-			break
-		}
-		start := i
-		for i < len(value) {
-			r, size := utf8.DecodeRuneInString(value[i:])
-			if unicode.IsSpace(r) {
-				break
-			}
-			i += size
-		}
-		spans = append(spans, tokenSpan{start: start, end: i})
 	}
-
-	if len(spans) == 0 {
-		out := "/" + selected.name
-		if selected.args != "" || len(selected.actions) > 0 {
-			out += " "
-		}
-		return out
-	}
-
-	// With only the root token present, complete the highlighted menu item. A
-	// trailing space means root completion has already happened and Tab should be
-	// idempotent while the action menu remains visible.
-	if len(spans) == 1 {
-		if spans[0].end != len(value) {
-			return value
-		}
-		out := "/" + selected.name
-		if selected.args != "" || len(selected.actions) > 0 {
-			out += " "
-		}
-		return out
-	}
-
-	commandToken := value[spans[0].start:spans[0].end]
-	c := lookupCommand(commandToken)
-	if c == nil || len(c.actions) == 0 {
-		return value
-	}
-
-	actionToken := value[spans[1].start:spans[1].end]
-	matches := matchingActions(c.actions, strings.ToLower(actionToken))
-	if len(matches) != 1 {
-		return value
-	}
-
-	// Replace only the canonical command and action tokens. Everything after the
-	// action can contain quoted refs, pipes, or intentional whitespace and must
-	// remain untouched for the interactive tokenizer and command-specific parser.
-	out := value[:spans[0].start] + c.name +
-		value[spans[0].end:spans[1].start] + matches[0] + value[spans[1].end:]
-	if spans[1].end == len(value) {
-		out += " "
-	}
+	out, _ := completeSlashInputAt(value, len([]rune(value)), selected)
 	return out
+}
+
+// completeSlashInputAt completes the token at the rune cursor and returns its
+// new cursor. It never rebuilds the full line, so quotes, pipes, whitespace and
+// suffix arguments retain their original spelling.
+func completeSlashInputAt(value string, cursor int, selected command) (string, int) {
+	runes := []rune(value)
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(value), "/") {
+		return value, cursor
+	}
+
+	start, end := cursor, cursor
+	for start > 0 && !unicode.IsSpace(runes[start-1]) {
+		start--
+	}
+	for end < len(runes) && !unicode.IsSpace(runes[end]) {
+		end++
+	}
+	prefix := string(runes[start:cursor])
+	before := strings.TrimSpace(string(runes[:start]))
+	fields, err := tokenizeCommand(before)
+	if err != nil {
+		return value, cursor
+	}
+
+	var candidates []string
+	if len(fields) == 0 {
+		candidates = []string{selected.name}
+		prefix = strings.TrimPrefix(prefix, "/")
+	} else {
+		c := lookupCommand(fields[0])
+		if c == nil {
+			return value, cursor
+		}
+		selected = *c
+		candidates = selected.completionValues(fields[1:])
+	}
+	matches := matchingActions(candidates, strings.ToLower(prefix))
+	if len(matches) != 1 {
+		return value, cursor
+	}
+
+	replacement := matches[0]
+	if start == 0 {
+		replacement = "/" + replacement
+	}
+	outRunes := make([]rune, 0, len(runes)+len([]rune(replacement)))
+	outRunes = append(outRunes, runes[:start]...)
+	outRunes = append(outRunes, []rune(replacement)...)
+	newCursor := start + len([]rune(replacement))
+	outRunes = append(outRunes, runes[end:]...)
+	if end == len(runes) && (len(outRunes) == 0 || !unicode.IsSpace(outRunes[len(outRunes)-1])) {
+		outRunes = append(outRunes, ' ')
+		newCursor++
+	}
+	out := string(outRunes)
+	// Completing an alias always presents the canonical root command. Account
+	// for its width when the edited token and cursor are later in the line.
+	canonical := canonicalizeCompletedRoot(out, selected.name)
+	if start > 0 {
+		newCursor += len([]rune(canonical)) - len([]rune(out))
+	}
+	return canonical, newCursor
+}
+
+func (c command) offersSelector(after []string) bool {
+	for _, path := range c.selectorPaths {
+		if completionPathMatches(path, after) {
+			return true
+		}
+	}
+	return false
+}
+
+func registryCompletionValues(commandName string, after ...string) []string {
+	if c := lookupCommand(commandName); c != nil {
+		return c.completionValues(after)
+	}
+	return nil
+}
+
+func (c command) completionValues(after []string) []string {
+	var values []string
+	if len(after) == 0 {
+		values = append(values, c.actions...)
+	}
+	for _, rule := range c.completions {
+		if completionPathMatches(rule.after, after) {
+			values = append(values, rule.values...)
+		}
+	}
+	return values
+}
+
+func completionPathMatches(pattern, words []string) bool {
+	if len(pattern) > 0 && pattern[len(pattern)-1] == "**" {
+		if len(words) < len(pattern)-1 {
+			return false
+		}
+		pattern = pattern[:len(pattern)-1]
+	} else if len(pattern) != len(words) {
+		return false
+	}
+	for i, part := range pattern {
+		if part != "*" && !strings.EqualFold(part, words[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func completionTokenEnds(value string) []int {
+	runes := []rune(value)
+	var ends []int
+	for i := len(runes); i > 0; i-- {
+		if i == len(runes) || unicode.IsSpace(runes[i]) {
+			if i > 0 && !unicode.IsSpace(runes[i-1]) {
+				ends = append(ends, i)
+			}
+		}
+	}
+	return ends
+}
+
+func canonicalizeCompletedRoot(value, name string) string {
+	runes := []rune(value)
+	end := 0
+	for end < len(runes) && !unicode.IsSpace(runes[end]) {
+		end++
+	}
+	if end == 0 {
+		return value
+	}
+	return "/" + name + string(runes[end:])
 }
 
 func matchingActions(actions []string, prefix string) []string {

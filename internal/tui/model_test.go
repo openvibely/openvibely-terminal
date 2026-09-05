@@ -913,6 +913,34 @@ func TestSlashCommandSubcommandCompletesFromRegistry(t *testing.T) {
 	}
 }
 
+func TestSlashCommandDeepCompletionFromRegistry(t *testing.T) {
+	cases := map[string]string{
+		"/tasks attachments de":                  "/tasks attachments delete ",
+		"/tasks reviews a":                       "/tasks reviews add ",
+		"/tasks move api ac":                     "/tasks move api active ",
+		"/schedule add api 2026-01-20T09:00 mon": "/schedule add api 2026-01-20T09:00 monthly ",
+		"/events fal":                            "/events false ",
+	}
+	for input, want := range cases {
+		m := pressTab(t, typeInput(t, newTestModel(t), input))
+		if got := m.input.Value(); got != want {
+			t.Fatalf("input after Tab = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestSlashCompletionAtCursorPreservesSuffix(t *testing.T) {
+	m := typeInput(t, newTestModel(t), "/tasks attachments de --force")
+	m.input.SetCursor(strings.Index(m.input.Value(), " --force"))
+	m = pressTab(t, m)
+	if got := m.input.Value(); got != "/tasks attachments delete --force" {
+		t.Fatalf("input after Tab = %q", got)
+	}
+	if got, want := m.input.Position(), strings.Index(m.input.Value(), " --force"); got != want {
+		t.Fatalf("cursor after Tab = %d, want %d", got, want)
+	}
+}
+
 func TestSlashCommandSubcommandTabDoesNotErasePartialToken(t *testing.T) {
 	m := pressTab(t, typeInput(t, newTestModel(t), "/skills zz"))
 	if got := m.input.Value(); got != "/skills zz" {

@@ -208,6 +208,8 @@ type selectorActiveMsg struct {
 	// arguments after the selected ref.
 	prefill       bool
 	prefillSuffix string
+	initialFilter string
+	forcePicker   bool // Tab completion must never auto-execute a unique resource
 	items         []selectorItem
 	warnings      []string
 	err           error
