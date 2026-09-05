@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -297,16 +298,36 @@ func (m *Model) refreshMenu() {
 }
 
 func completeSlashInput(value string, selected command) string {
-	if !strings.HasPrefix(strings.TrimSpace(value), "/") {
+	trimmed := strings.TrimSpace(value)
+	if !strings.HasPrefix(trimmed, "/") {
 		return value
 	}
 
-	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(value), "/"))
-	if len(fields) == 0 {
-		return value
+	type tokenSpan struct{ start, end int }
+	var spans []tokenSpan
+	for i := strings.Index(value, "/") + 1; i < len(value) && len(spans) < 2; {
+		for i < len(value) {
+			r, size := utf8.DecodeRuneInString(value[i:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			i += size
+		}
+		if i >= len(value) {
+			break
+		}
+		start := i
+		for i < len(value) {
+			r, size := utf8.DecodeRuneInString(value[i:])
+			if unicode.IsSpace(r) {
+				break
+			}
+			i += size
+		}
+		spans = append(spans, tokenSpan{start: start, end: i})
 	}
 
-	if len(fields) == 1 && !strings.Contains(strings.TrimSpace(value), " ") {
+	if len(spans) == 0 {
 		out := "/" + selected.name
 		if selected.args != "" || len(selected.actions) > 0 {
 			out += " "
@@ -314,26 +335,38 @@ func completeSlashInput(value string, selected command) string {
 		return out
 	}
 
-	c := lookupCommand(fields[0])
+	// With only the root token present, complete the highlighted menu item. A
+	// trailing space means root completion has already happened and Tab should be
+	// idempotent while the action menu remains visible.
+	if len(spans) == 1 {
+		if spans[0].end != len(value) {
+			return value
+		}
+		out := "/" + selected.name
+		if selected.args != "" || len(selected.actions) > 0 {
+			out += " "
+		}
+		return out
+	}
+
+	commandToken := value[spans[0].start:spans[0].end]
+	c := lookupCommand(commandToken)
 	if c == nil || len(c.actions) == 0 {
 		return value
 	}
 
-	trailingSpace := strings.HasSuffix(value, " ")
-	if len(fields) == 1 {
-		return value
-	}
-
-	prefix := strings.ToLower(fields[1])
-	matches := matchingActions(c.actions, prefix)
+	actionToken := value[spans[1].start:spans[1].end]
+	matches := matchingActions(c.actions, strings.ToLower(actionToken))
 	if len(matches) != 1 {
 		return value
 	}
 
-	fields[0] = c.name
-	fields[1] = matches[0]
-	out := "/" + strings.Join(fields, " ")
-	if trailingSpace || len(fields) == 2 {
+	// Replace only the canonical command and action tokens. Everything after the
+	// action can contain quoted refs, pipes, or intentional whitespace and must
+	// remain untouched for the interactive tokenizer and command-specific parser.
+	out := value[:spans[0].start] + c.name +
+		value[spans[0].end:spans[1].start] + matches[0] + value[spans[1].end:]
+	if spans[1].end == len(value) {
 		out += " "
 	}
 	return out

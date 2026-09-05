@@ -838,6 +838,61 @@ func TestSlashCommandMenuAppearsAndCompletes(t *testing.T) {
 	}
 }
 
+func TestSlashCommandMenuSelectionCompletesCanonicalCommand(t *testing.T) {
+	m := typeInput(t, newTestModel(t), "/")
+	for range 4 {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = next.(Model)
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = next.(Model)
+	if got := m.menu[m.menuSel].name; got != "skills" {
+		t.Fatalf("selected command = %q, want skills", got)
+	}
+
+	m = pressTab(t, m)
+	if got := m.input.Value(); got != "/skills " {
+		t.Fatalf("input after selected tab completion = %q, want /skills ", got)
+	}
+	if got, want := m.input.Position(), len([]rune(m.input.Value())); got != want {
+		t.Fatalf("cursor after selected tab completion = %d, want %d", got, want)
+	}
+}
+
+func TestSlashCommandCompletionCancellationAndRepeat(t *testing.T) {
+	t.Run("direct partial and repeated completion", func(t *testing.T) {
+		m := pressTab(t, typeInput(t, newTestModel(t), "/sk"))
+		if got := m.input.Value(); got != "/skills " {
+			t.Fatalf("direct completion = %q, want /skills ", got)
+		}
+		m = pressTab(t, m)
+		if got := m.input.Value(); got != "/skills " {
+			t.Fatalf("repeated completion = %q, want /skills ", got)
+		}
+	})
+
+	t.Run("escape cancels menu completion", func(t *testing.T) {
+		m := typeInput(t, newTestModel(t), "/")
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if len(m.menu) != 0 {
+			t.Fatalf("menu remained active after escape: %+v", m.menu)
+		}
+		m = pressTab(t, m)
+		if got := m.input.Value(); got != "/" {
+			t.Fatalf("cancelled completion changed input to %q", got)
+		}
+	})
+}
+
+func TestSlashCommandCompletionPreservesQuotedAndPipeArguments(t *testing.T) {
+	const input = `/tasks ru "quoted task" | keep  spacing`
+	m := pressTab(t, typeInput(t, newTestModel(t), input))
+	if got, want := m.input.Value(), `/tasks run "quoted task" | keep  spacing`; got != want {
+		t.Fatalf("input after tab = %q, want %q", got, want)
+	}
+}
+
 func TestSlashCommandSubcommandCompletesFromRegistry(t *testing.T) {
 	cases := []struct {
 		name  string
