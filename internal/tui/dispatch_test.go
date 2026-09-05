@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1781,6 +1782,7 @@ func TestCommandsRequiringProjectReportMissingSelection(t *testing.T) {
 func TestAutomationsCommandsRequireSelectedProject(t *testing.T) {
 	cases := []string{
 		"/automations",
+		"/automations run au-1",
 		"/automations run-now au-1",
 		"/automations pause au-1",
 		"/automations resume au-1",
@@ -2123,7 +2125,7 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 			failure := failure
 			t.Run(tc.name+"/"+failure.name, func(t *testing.T) {
 				rec := &recorder{}
-				scheduleGETs := 0
+				var scheduleGETs atomic.Int32
 				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 					rec.recordURL(r.Method, r.URL.RequestURI())
 					switch {
@@ -2131,11 +2133,11 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 						w.Header().Set("Content-Type", "text/html")
 						_, _ = w.Write([]byte(taskBoardHTML))
 					case r.Method == http.MethodGet && r.URL.Path == "/schedule":
-						scheduleGETs++
+						scheduleGET := scheduleGETs.Add(1)
 						if got := r.URL.Query().Get("project_id"); got != "p1" {
 							t.Errorf("schedule GET project_id = %q, want p1", got)
 						}
-						if scheduleGETs <= tc.initialGETs {
+						if scheduleGET <= int32(tc.initialGETs) {
 							w.Header().Set("Content-Type", "text/html")
 							_, _ = w.Write([]byte(selScheduleHTML))
 							return
@@ -2177,7 +2179,7 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 				if got := rec.count(tc.method, tc.path); got != 1 {
 					t.Fatalf("%s mutation count = %d, want 1; calls:\n%s", tc.name, got, rec.all())
 				}
-				if got, want := scheduleGETs, tc.initialGETs+1; got < want {
+				if got, want := scheduleGETs.Load(), int32(tc.initialGETs+1); got < want {
 					t.Fatalf("%s schedule GET count = %d, want at least %d; calls:\n%s", tc.name, got, want, rec.all())
 				}
 				out := stripANSI(transcript(m))
@@ -3480,9 +3482,23 @@ func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 
 	t.Run("unique name prefix match", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+		m = runLine(t, m, "/automations run Native")
+		if !rec.saw("POST", "/automations/au-1/run-now") {
+			t.Errorf("calls:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "run: Native SDLC") {
+			t.Errorf("expected canonical run status:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("run-now compatibility alias", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
 		m = runLine(t, m, "/automations run-now Native")
 		if !rec.saw("POST", "/automations/au-1/run-now") {
 			t.Errorf("calls:\n%s", rec.all())
+		}
+		if !strings.Contains(transcript(m), "run: Native SDLC") {
+			t.Errorf("legacy alias must use canonical status wording:\n%s", transcript(m))
 		}
 	})
 
@@ -3593,7 +3609,7 @@ func TestAutomationsCommandBackendFailures(t *testing.T) {
 		action string
 		path   string
 	}{
-		{"run-now", "/automations/au-1/run-now"},
+		{"run", "/automations/au-1/run-now"},
 		{"pause", "/automations/au-1/pause"},
 		{"resume", "/automations/au-1/resume"},
 		{"delete", "/automations/au-1/delete"},

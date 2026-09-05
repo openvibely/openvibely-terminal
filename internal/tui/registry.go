@@ -2732,7 +2732,7 @@ func insightsCommand() command {
 }
 
 func automationsCommand() command {
-	actions := []string{"list", "show", "open", "run-now", "pause", "resume", "delete"}
+	actions := []string{"list", "show", "open", "run", "pause", "resume", "delete"}
 	return command{
 		name:    "automations",
 		aliases: []string{"automation"},
@@ -2743,11 +2743,12 @@ func automationsCommand() command {
 			"automations [filter]                       list automations",
 			"automations show <automation>              show live graph, runtime and resources",
 			"automations open <automation>              alias for show",
-			"automations run-now <automation>           trigger an immediate run",
+			"automations run <automation>               trigger an immediate run",
 			"automations pause <automation>              pause an active automation",
 			"automations resume <automation>             resume a paused automation",
 			"automations delete <automation>             remove an automation (interactive: type 'yes'; CLI: use --force/-f before the command)",
-			"omit <automation> on show/open/run-now/pause/resume/delete → interactive selector",
+			"automations run-now <automation>           compatibility alias for run",
+			"omit <automation> on show/open/run/pause/resume/delete → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<automation>", description: "show live graph, runtime and resources"},
@@ -2757,7 +2758,7 @@ func automationsCommand() command {
 			`automations list`,
 			`automations show "Nightly sweep"`,
 			`automations open automation-id`,
-			`automations run-now "Nightly sweep"`,
+			`automations run "Nightly sweep"`,
 			`automations pause "Nightly sweep"`,
 			`automations resume "Nightly sweep"`,
 			`automations delete "Nightly sweep"`,
@@ -2768,8 +2769,15 @@ func automationsCommand() command {
 				return mm, cmd
 			}
 			action, rest := splitAction(actions, args)
+			if action == "" && len(args) > 0 && strings.EqualFold(args[0], "run-now") {
+				action, rest = "run", args[1:]
+			}
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
+			backendAction := action
+			if backendAction == "run" {
+				backendAction = "run-now"
+			}
 
 			switch action {
 			case "", "list":
@@ -2831,7 +2839,7 @@ func automationsCommand() command {
 
 			default:
 				if ref == "" {
-					return selectorOr(m, fmt.Sprintf("usage: /automations %s <automation>", action),
+					return selectorOr(m, fmt.Sprintf("usage: %sautomations %s <automation>", cmdPrefix, action),
 						selectorFor("Automations", "automations "+action,
 							automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
@@ -2851,7 +2859,7 @@ func automationsCommand() command {
 										cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
 											status := action + ": " + firstNonEmpty(a.Name, a.ID)
 											return actAndReloadText(status,
-												func() error { return c.AutomationAction(ctx, a.ID, action, pid) },
+												func() error { return c.AutomationAction(ctx, a.ID, backendAction, pid) },
 												func() (string, error) { return c.GetAutomations(ctx, pid) })
 										})
 										if action == "delete" {
@@ -2880,7 +2888,7 @@ func automationsCommand() command {
 						return "", err
 					}
 					status := action + ": " + firstNonEmpty(a.Name, a.ID)
-					if err := c.AutomationAction(ctx, a.ID, action, pid); err != nil {
+					if err := c.AutomationAction(ctx, a.ID, backendAction, pid); err != nil {
 						return "", err
 					}
 					return refreshAndRender(status,

@@ -901,7 +901,7 @@ func TestSlashCommandSubcommandCompletesFromRegistry(t *testing.T) {
 	}{
 		{"tasks", "/tasks ru", "/tasks run "},
 		{"models", "/models cap model-x", "/models capacity model-x"},
-		{"automations", "/automations run- job", "/automations run-now job"},
+		{"automations", "/automations ru job", "/automations run job"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

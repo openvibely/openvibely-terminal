@@ -151,7 +151,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/reflection` | `history` | `show`, `summary` |
 | `/grades` | | — |
 | `/insights` | `suggestions` | `show`, `analyze` |
-| `/automations` | `automation` | `list`, `show`, `open`, `run-now`, `pause`, `resume`, `delete` |
+| `/automations` | `automation` | `list`, `show`, `open`, `run`, `pause`, `resume`, `delete` |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
 | `/projects` | | `list`, `create <name> <path>` |
 | `/project <name>` | | select the active project |
@@ -294,9 +294,9 @@ callback flows still require a browser.
 
 `/automations` (also `/automation`) exposes the selected project's recurring
 automation inspection and lifecycle controls. The supported actions are `list`,
-`show`, `open`, `run-now`, `pause`, `resume`, and `delete`; `open` is an alias
-for `show`. Automation creation is not exposed by this command and remains
-handled elsewhere.
+`show`, `open`, `run`, `pause`, `resume`, and `delete`; `open` is an alias
+for `show`. `run-now` remains accepted as a compatibility alias for `run`.
+Automation creation is not exposed by this command and remains handled elsewhere.
 
 In the interactive TUI:
 
@@ -304,7 +304,7 @@ In the interactive TUI:
 /automations list
 /automations show "Nightly sweep"
 /automations open automation-id
-/automations run-now "Nightly sweep"
+/automations run "Nightly sweep"
 /automations pause "Nightly sweep"
 /automations resume "Nightly sweep"
 /automations delete "Nightly sweep"
@@ -317,7 +317,7 @@ command:
 openvibely-tui -project demo automations list
 openvibely-tui -project demo automations show "Nightly sweep"
 openvibely-tui -project demo automations open automation-id
-openvibely-tui -project demo automations run-now "Nightly sweep"
+openvibely-tui -project demo automations run "Nightly sweep"
 openvibely-tui -project demo automations pause "Nightly sweep"
 openvibely-tui -project demo automations resume "Nightly sweep"
 openvibely-tui -project demo --force automations delete "Nightly sweep"
