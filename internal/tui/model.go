@@ -139,11 +139,12 @@ type Model struct {
 	// instead of the project agent ("/tasks open <ref>" enters, "/chat" exits).
 	// Request IDs order same-project open and live-refresh results that share the
 	// broader session/project generations.
-	threadID               string
-	threadTitle            string
-	threadStatus           string
-	threadOpenRequestID    uint64
-	threadRefreshRequestID uint64
+	threadID                    string
+	threadTitle                 string
+	threadStatus                string
+	threadOpenRequestID         uint64
+	threadRefreshRequestID      uint64
+	threadReplyPendingRequestID uint64
 
 	// in-flight chat
 	pendingMsgID                string
@@ -584,6 +585,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		}
 		*m = (*m).clearReviewPrefill()
 		m.threadID, m.threadTitle, m.threadStatus = "", "", ""
+		m.threadReplyPendingRequestID = 0
 		m.input.Placeholder = defaultPlaceholder
 		m.invalidateSSE()
 	}
@@ -933,6 +935,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.projectGeneration = projectGeneration
 		return typed
 	case threadUpdatedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case threadReplyMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
@@ -1463,6 +1469,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.threadTitle = msg.title
 		m.threadStatus = strings.ToLower(msg.status)
 		m.threadRefreshRequestID++ // invalidate refreshes launched for the prior view
+		m.threadReplyPendingRequestID = 0
 		m.append(entry{role: "result", head: "Thread · " + msg.title, text: msg.body})
 		m.append(entry{role: "system", text: "in task thread — messages go to this task. /chat returns to project chat."})
 		m.input.Placeholder = "Reply to " + truncate(msg.title, 40) + " (/chat to exit)"
@@ -1478,6 +1485,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.projectID != m.selectedID || msg.taskID != m.threadID {
 			return m, nil
 		}
+		if m.threadReplyPendingRequestID != 0 && msg.requestID > m.threadReplyPendingRequestID {
+			m.threadReplyPendingRequestID = 0
+			m.busy = false
+		}
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) || m.handleTransportError(msg.err) {
 				return m, nil
@@ -1487,21 +1498,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.status != "" {
 			m.threadStatus = strings.ToLower(msg.status)
 		}
-		if strings.TrimSpace(msg.body) != "" {
-			head := "Thread · " + m.threadTitle
-			updated := false
-			for i := len(m.log) - 1; i >= 0; i-- {
-				if m.log[i].role == "result" && m.log[i].head == head {
-					m.log[i].text = msg.body
-					updated = true
-					break
-				}
+		m.replaceOpenThreadBody(msg.body)
+		return m, nil
+
+	case threadReplyMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.requestID != m.threadRefreshRequestID || msg.projectID != m.selectedID || msg.taskID != m.threadID {
+			return m, nil // reply belongs to a thread view or refresh that is no longer active
+		}
+		m.busy = false
+		m.threadReplyPendingRequestID = 0
+		if msg.err != nil {
+			if m.handleAuthError(msg.err) || m.handleTransportError(msg.err) {
+				return m, nil
 			}
-			if updated {
-				m.refreshTranscript()
-			} else {
-				m.append(entry{role: "result", head: head, text: msg.body})
-			}
+			m.append(entry{role: "error", text: msg.err.Error()})
+			return m, nil
+		}
+		if msg.refreshed {
+			m.replaceOpenThreadBody(msg.body)
+		} else {
+			m.append(entry{role: "result", head: "Thread · " + m.threadTitle, text: msg.body})
 		}
 		return m, nil
 
@@ -1901,7 +1920,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	// Inside a task thread, plain text is a follow-up on that task.
 	if m.threadID != "" {
 		m.busy = true
-		return m, m.sendThreadMessage(m.threadID, m.threadTitle, text)
+		return m, m.sendThreadMessage(m.threadID, text)
 	}
 
 	if m.selectedID == "" {
@@ -1917,6 +1936,21 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, m.sendChat(m.selectedID, text, submissionID)
+}
+
+func (m *Model) replaceOpenThreadBody(body string) {
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	head := "Thread · " + m.threadTitle
+	for i := len(m.log) - 1; i >= 0; i-- {
+		if m.log[i].role == "result" && m.log[i].head == head {
+			m.log[i].text = body
+			m.refreshTranscript()
+			return
+		}
+	}
+	m.append(entry{role: "result", head: head, text: body})
 }
 
 func (m *Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {
@@ -1948,7 +1982,7 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 
 	var taskEvent client.TaskEvent
 	if json.Unmarshal(ev.Data, &taskEvent) == nil && taskEvent.TaskID == m.threadID && taskEvent.Status != "" &&
-		(taskEvent.ProjectID == "" || taskEvent.ProjectID == m.selectedID) {
+		taskEvent.ProjectID != "" && taskEvent.ProjectID == m.selectedID {
 		status := strings.ToLower(taskEvent.Status)
 		if status != "" {
 			m.threadStatus = status
@@ -1974,7 +2008,7 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	}
 	var chatEvent client.ChatEvent
 	if json.Unmarshal(ev.Data, &chatEvent) == nil && chatEvent.TaskID == m.threadID &&
-		(chatEvent.ProjectID == "" || chatEvent.ProjectID == m.selectedID) {
+		chatEvent.ProjectID != "" && chatEvent.ProjectID == m.selectedID {
 		if text := strings.TrimSpace(chatEvent.Message); text != "" {
 			m.append(entry{role: "agent", text: text})
 		}
@@ -1983,24 +2017,29 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	return nil
 }
 
-// sendThreadMessage posts a follow-up into a task thread and echoes the
-// refreshed thread back into the transcript.
-func (m Model) sendThreadMessage(taskID, title, text string) tea.Cmd {
+// sendThreadMessage posts a follow-up into a task thread and returns a result
+// owned by that exact active thread view and refresh sequence.
+func (m *Model) sendThreadMessage(taskID, text string) tea.Cmd {
+	m.threadRefreshRequestID++
+	requestID := m.threadRefreshRequestID
+	m.threadReplyPendingRequestID = requestID
 	c := m.client
 	projectID := m.selectedID
-	return withMessageGeneration(run("Thread · "+title, cmdTimeout, func(ctx context.Context) (string, error) {
+	return withMessageGeneration(func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
 		if err := c.SendTaskThreadMessage(ctx, taskID, text); err != nil {
-			return "", err
+			return threadReplyMsg{requestID: requestID, projectID: projectID, taskID: taskID, err: err}
 		}
 		body, err := c.GetTaskThread(ctx, taskID, projectID)
 		if err != nil {
-			return "sent", nil
+			return threadReplyMsg{requestID: requestID, projectID: projectID, taskID: taskID, body: "sent"}
 		}
 		if strings.TrimSpace(body) == "" {
-			return dimStyle.Render("(no messages yet)"), nil
+			body = dimStyle.Render("(no messages yet)")
 		}
-		return body, nil
-	}), sessionGenerationOf(m), projectGenerationOf(m))
+		return threadReplyMsg{requestID: requestID, projectID: projectID, taskID: taskID, body: body, refreshed: true}
+	}, sessionGenerationOf(*m), projectGenerationOf(*m))
 }
 
 // --- history ---

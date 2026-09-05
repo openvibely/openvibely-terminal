@@ -263,6 +263,129 @@ func executeThreadRefreshFromBatch(t *testing.T, m *Model, cmd tea.Cmd) {
 	*m = updated.(Model)
 }
 
+func TestDelayedThreadReplyIgnoredAfterChat(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	m.input.SetValue("please add tests")
+	submitted, replyCmd := m.submit()
+	m = submitted.(Model)
+
+	left, _ := m.runCommand("/chat")
+	m = left.(Model)
+	before := transcript(m)
+
+	updated, _ := m.Update(replyCmd())
+	m = updated.(Model)
+	if m.threadID != "" {
+		t.Fatalf("delayed reply re-entered thread %q", m.threadID)
+	}
+	if got := transcript(m); got != before {
+		t.Fatalf("delayed reply changed project-chat transcript:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+}
+
+func TestDelayedThreadReplyIgnoredAfterNewerOpen(t *testing.T) {
+	const board = `<div>
+		<div class="card" data-task-id="t-a" data-task-status="running" data-task-category="active"><a href="/tasks/t-a" title="Alpha">Alpha</a></div>
+		<div class="card" data-task-id="t-b" data-task-status="running" data-task-category="active"><a href="/tasks/t-b" title="Beta">Beta</a></div>
+	</div>`
+	m, _ := dispatchModel(t, map[string]string{
+		"/tasks":            board,
+		"/tasks/t-a/thread": `<div>alpha thread</div>`,
+		"/tasks/t-b/thread": `<div>beta thread</div>`,
+	})
+	m = runLine(t, m, "/tasks open Alpha")
+	m.input.SetValue("alpha follow-up")
+	submitted, replyCmd := m.submit()
+	m = submitted.(Model)
+	m = runLine(t, m, "/tasks open Beta")
+	before := transcript(m)
+
+	updated, _ := m.Update(replyCmd())
+	m = updated.(Model)
+	if m.threadID != "t-b" || m.threadTitle != "Beta" {
+		t.Fatalf("delayed reply replaced newer thread: id=%q title=%q", m.threadID, m.threadTitle)
+	}
+	if got := transcript(m); got != before {
+		t.Fatalf("delayed reply changed newer thread transcript:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+}
+
+func TestDelayedThreadReplyCannotRegressTerminalRefresh(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	m.input.SetValue("please add tests")
+	submitted, replyCmd := m.submit()
+	m = submitted.(Model)
+
+	m.sseGeneration = 11
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+	updated, terminalCmd := m.Update(sseEventMsg{generation: 11, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","status":"completed"}`),
+	}})
+	m = updated.(Model)
+	terminal := threadRefreshMessageFromBatch(t, terminalCmd)
+	terminal.body = "terminal thread"
+	updated, _ = m.Update(terminal)
+	m = updated.(Model)
+	before := transcript(m)
+
+	updated, _ = m.Update(replyCmd())
+	m = updated.(Model)
+	if m.threadStatus != "completed" {
+		t.Fatalf("delayed reply regressed terminal status to %q", m.threadStatus)
+	}
+	if m.busy {
+		t.Fatal("terminal refresh left superseded thread reply busy")
+	}
+	if got := transcript(m); got != before {
+		t.Fatalf("delayed reply replaced terminal transcript:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+}
+
+func TestOpenTaskLiveEventsRequireExactCurrentOwnership(t *testing.T) {
+	tests := []struct {
+		name       string
+		generation int
+		eventName  string
+		payload    string
+	}{
+		{name: "message without project", generation: 12, eventName: "chat_new_message", payload: `{"type":"chat_new_message","task_id":"t-1","message":"unowned"}`},
+		{name: "status without project", generation: 12, eventName: "task_status_changed", payload: `{"type":"task_status_changed","task_id":"t-1","status":"completed","message":"unowned status"}`},
+		{name: "foreign project", generation: 12, eventName: "chat_new_message", payload: `{"type":"chat_new_message","project_id":"p2","task_id":"t-1","message":"foreign project"}`},
+		{name: "foreign task", generation: 12, eventName: "chat_new_message", payload: `{"type":"chat_new_message","project_id":"p1","task_id":"t-2","message":"foreign task"}`},
+		{name: "stale stream", generation: 11, eventName: "chat_new_message", payload: `{"type":"chat_new_message","project_id":"p1","task_id":"t-1","message":"stale stream"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, rec := threadModel(t)
+			m = runLine(t, m, "/tasks open Refactor")
+			m.sseGeneration = 12
+			m.sseEvents = make(chan client.Event)
+			m.sseErrs = make(chan error)
+			before := transcript(m)
+
+			updated, _ := m.Update(sseEventMsg{generation: tt.generation, event: client.Event{
+				Name: tt.eventName,
+				Data: json.RawMessage(tt.payload),
+			}})
+			m = updated.(Model)
+
+			if got := transcript(m); got != before {
+				t.Fatalf("unowned live event changed transcript:\nbefore:\n%s\nafter:\n%s", before, got)
+			}
+			if m.threadStatus != "running" {
+				t.Fatalf("unowned live event changed status to %q", m.threadStatus)
+			}
+			if got := rec.count("GET", "/tasks/t-1/thread"); got != 1 {
+				t.Fatalf("unowned live event triggered refresh; requests = %d", got)
+			}
+		})
+	}
+}
+
 // While in a thread, plain text posts to that task's thread endpoint rather
 // than to the project chat endpoint.
 func TestThreadMessageGoesToTaskNotProjectChat(t *testing.T) {

@@ -153,6 +153,19 @@ type threadUpdatedMsg struct {
 	err               error
 }
 
+// threadReplyMsg carries the mutation and refreshed conversation produced by a
+// plain-text follow-up while a task thread is active.
+type threadReplyMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	requestID         uint64
+	projectID         string
+	taskID            string
+	body              string
+	refreshed         bool
+	err               error
+}
+
 // sseEventMsg delivers one live event from the SSE stream.
 type sseEventMsg struct {
 	generation int

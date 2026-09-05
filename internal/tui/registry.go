@@ -299,6 +299,7 @@ func tasksCommand() command {
 			case "open":
 				m.threadOpenRequestID++
 				m.threadRefreshRequestID++
+				m.threadReplyPendingRequestID = 0
 				if ref == "" {
 					return taskSelector(m, "usage: /tasks open <id|title>", "tasks open", false)
 				}
@@ -3255,6 +3256,7 @@ func chatCommand() command {
 			// navigation intent and invalidates delayed open/live-refresh results.
 			m.threadOpenRequestID++
 			m.threadRefreshRequestID++
+			m.threadReplyPendingRequestID = 0
 			if len(args) > 0 && m.hasPendingChat() {
 				m.append(entry{role: "system", text: chatStillProcessingMessage})
 				return m, nil
