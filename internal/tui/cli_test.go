@@ -1107,8 +1107,8 @@ func TestCLIGlobalModelsListWorksAcrossProjectStates(t *testing.T) {
 				if err := RunCLI(c, &out, "", []string{"models"}, false, jsonOutput); err != nil {
 					t.Fatalf("global models list failed: %v", err)
 				}
-				if !rec.saw("GET", "/models") || strings.Contains(rec.all(), "/models?project_id=") {
-					t.Fatalf("models list was not requested globally:\n%s", rec.all())
+				if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
+					t.Fatalf("models list was not requested globally; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
 				}
 				if jsonOutput {
 					var models []client.LLMModel

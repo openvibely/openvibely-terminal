@@ -3043,8 +3043,8 @@ func TestModelsListDoesNotRequireSelectedProject(t *testing.T) {
 			if !rec.saw("GET", "/models") {
 				t.Fatalf("%s did not request the global model list:\n%s", line, rec.all())
 			}
-			if strings.Contains(rec.all(), "project_id=") {
-				t.Fatalf("%s sent project scope on a global model request:\n%s", line, rec.all())
+			if rec.sawQuery("GET /models?") {
+				t.Fatalf("%s sent query parameters on a global model request; request URLs:\n%s", line, strings.Join(rec.urlsSnapshot(), "\n"))
 			}
 		})
 	}
