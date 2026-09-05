@@ -1457,26 +1457,102 @@ func TestOtherPaginatedCardSurfacesLoadLaterPages(t *testing.T) {
 	}
 }
 
-func TestGetChannelsLoadsPaginatedWebhookText(t *testing.T) {
-	requests := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
-		w.Header().Set("Content-Type", "text/html")
-		w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(requests == 1))
-		if requests == 1 {
-			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true"><div data-webhook-id="w1">First webhook</div></div>`)
-			return
-		}
-		_, _ = io.WriteString(w, `<div data-webhook-id="w2">Later webhook</div>`)
-	}))
-	defer srv.Close()
-	c, _ := New(srv.URL)
-	text, err := c.GetChannels(context.Background(), "p1")
-	if err != nil {
-		t.Fatal(err)
+func TestPaginatedPageTextAppendsOnlyUniqueContinuationCards(t *testing.T) {
+	tests := []struct {
+		name, path, firstBody, nextBody string
+		load                            func(*Client) (string, error)
+		fixed                           []string
+		orderedCards                    []string
+	}{
+		{
+			name: "channels", path: "/channels",
+			firstBody: `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true">
+				<h1>Channels heading</h1><button>Add channel control</button><div data-channel-type="telegram">Telegram fixed card</div>
+				<div id="webhook-card-list"><div data-webhook-id="w1">First webhook</div><div data-webhook-id="shared">Shared webhook</div></div>
+			</div>`,
+			nextBody: `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="false">
+				<h1>Channels heading</h1><button>Add channel control</button><div data-channel-type="telegram">Telegram fixed card</div>
+				<div id="webhook-card-list"><div data-webhook-id="shared">Shared webhook duplicate</div><div data-webhook-id="w2">Later webhook</div></div>
+			</div>`,
+			load:         func(c *Client) (string, error) { return c.GetChannels(context.Background(), "p1") },
+			fixed:        []string{"Channels heading", "Add channel control", "Telegram fixed card"},
+			orderedCards: []string{"First webhook", "Shared webhook", "Later webhook"},
+		},
+		{
+			name: "automations", path: "/automations",
+			firstBody: `<div id="automations-container" data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true">
+				<h1>Automations heading</h1><button>New automation control</button><div id="automations-card-list"><div data-automation-url="/automations/a1">First automation</div><div data-automation-url="/automations/shared">Shared automation</div></div>
+			</div>`,
+			nextBody: `<div id="automations-container" data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="false">
+				<h1>Automations heading</h1><button>New automation control</button><div id="automations-card-list"><div data-automation-url="/automations/shared">Shared automation duplicate</div><div data-automation-url="/automations/a2">Later automation</div></div>
+			</div>`,
+			load:         func(c *Client) (string, error) { return c.GetAutomations(context.Background(), "p1") },
+			fixed:        []string{"Automations heading", "New automation control"},
+			orderedCards: []string{"First automation", "Shared automation", "Later automation"},
+		},
+		{
+			name: "personality", path: "/personality",
+			firstBody: `<div id="personality-container"><h1>Personality heading</h1><div id="personality-section" data-card-pagination-root data-card-pagination-card-selector="[data-personality-pagination-card='true']" data-card-pagination-key="data-personality-key" data-card-pagination-has-more="true">
+				<button>Add personality control</button><div data-personality-key="base" data-personality-pagination-card="false">Base fixed card</div><div data-personality-key="custom-one" data-personality-pagination-card="true">First custom personality</div><div data-personality-key="shared" data-personality-pagination-card="true">Shared custom personality</div>
+			</div></div>`,
+			nextBody: `<div id="personality-container"><h1>Personality heading</h1><div id="personality-section" data-card-pagination-root data-card-pagination-card-selector="[data-personality-pagination-card='true']" data-card-pagination-key="data-personality-key" data-card-pagination-has-more="false">
+				<button>Add personality control</button><div data-personality-key="base" data-personality-pagination-card="false">Base fixed card</div><div data-personality-key="shared" data-personality-pagination-card="true">Shared custom personality duplicate</div><div data-personality-key="custom-two" data-personality-pagination-card="true">Later custom personality</div>
+			</div></div>`,
+			load:         func(c *Client) (string, error) { return c.GetPersonality(context.Background(), "p1") },
+			fixed:        []string{"Personality heading", "Add personality control", "Base fixed card"},
+			orderedCards: []string{"First custom personality", "Shared custom personality", "Later custom personality"},
+		},
 	}
-	if !strings.Contains(text, "First webhook") || !strings.Contains(text, "Later webhook") {
-		t.Fatalf("channels text = %q", text)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != tt.path || r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request = %s?%s", r.URL.Path, r.URL.RawQuery)
+				}
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(requests == 1))
+				if requests == 1 {
+					_, _ = io.WriteString(w, tt.firstBody)
+					return
+				}
+				_, _ = io.WriteString(w, tt.nextBody)
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text, err := tt.load(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if requests != 2 {
+				t.Fatalf("requests = %d, want 2", requests)
+			}
+			for _, fixed := range tt.fixed {
+				if count := strings.Count(text, fixed); count != 1 {
+					t.Errorf("%q count = %d, want 1 in %q", fixed, count, text)
+				}
+			}
+			last := -1
+			for _, card := range tt.orderedCards {
+				if count := strings.Count(text, card); count != 1 {
+					t.Errorf("%q count = %d, want 1 in %q", card, count, text)
+				}
+				index := strings.Index(text, card)
+				if index <= last {
+					t.Errorf("card %q index = %d after %d in %q", card, index, last, text)
+				}
+				last = index
+			}
+			if strings.Contains(text, "duplicate") {
+				t.Errorf("duplicate continuation card leaked into text: %q", text)
+			}
+		})
 	}
 }
 

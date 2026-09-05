@@ -158,18 +158,9 @@ func cardContinuationPath(path string, page, offset int) (string, error) {
 }
 
 func countPaginationCards(root *html.Node, selector, keyAttr string) int {
-	marker, value := paginationSelector(selector)
-	if marker == "" {
-		return 0
-	}
 	seen := make(map[string]struct{})
 	count := 0
-	for _, node := range findAll(root, func(n *html.Node) bool {
-		if !hasHTMLAttr(n, marker) {
-			return false
-		}
-		return value == "" || attr(n, marker) == value
-	}) {
+	for _, node := range paginationCardNodes(root, selector) {
 		key := attr(node, keyAttr)
 		if key != "" {
 			if _, ok := seen[key]; ok {
@@ -180,6 +171,19 @@ func countPaginationCards(root *html.Node, selector, keyAttr string) int {
 		count++
 	}
 	return count
+}
+
+func paginationCardNodes(root *html.Node, selector string) []*html.Node {
+	marker, value := paginationSelector(selector)
+	if marker == "" {
+		return nil
+	}
+	return findAll(root, func(n *html.Node) bool {
+		if !hasHTMLAttr(n, marker) {
+			return false
+		}
+		return value == "" || attr(n, marker) == value
+	})
 }
 
 func paginationSelector(selector string) (marker, value string) {

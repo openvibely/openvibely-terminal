@@ -1074,16 +1074,45 @@ func (c *Client) paginatedPageText(ctx context.Context, path, elementID string) 
 	if err != nil {
 		return "", err
 	}
-	parts := make([]string, 0, len(pages))
-	for i, page := range pages {
-		node := page.root
-		if i == 0 && elementID != "" {
-			if selected := findByID(page.root, elementID); selected != nil {
-				node = selected
-			}
+
+	firstRoot := pages[0].root
+	paginationRoot := findNode(firstRoot, func(n *html.Node) bool {
+		return hasHTMLAttr(n, "data-card-pagination-root")
+	})
+	selector, keyAttr := "", ""
+	if paginationRoot != nil {
+		selector = attr(paginationRoot, "data-card-pagination-card-selector")
+		keyAttr = attr(paginationRoot, "data-card-pagination-key")
+	}
+	seen := make(map[string]struct{})
+	for _, card := range paginationCardNodes(firstRoot, selector) {
+		if key := attr(card, keyAttr); key != "" {
+			seen[key] = struct{}{}
 		}
-		if text := strings.TrimSpace(NodeText(node)); text != "" {
-			parts = append(parts, text)
+	}
+
+	firstNode := firstRoot
+	if elementID != "" {
+		if selected := findByID(firstRoot, elementID); selected != nil {
+			firstNode = selected
+		}
+	}
+	parts := make([]string, 0, len(pages))
+	if text := strings.TrimSpace(NodeText(firstNode)); text != "" {
+		parts = append(parts, text)
+	}
+	for _, page := range pages[1:] {
+		for _, card := range paginationCardNodes(page.root, selector) {
+			key := attr(card, keyAttr)
+			if key != "" {
+				if _, duplicate := seen[key]; duplicate {
+					continue
+				}
+				seen[key] = struct{}{}
+			}
+			if text := strings.TrimSpace(NodeText(card)); text != "" {
+				parts = append(parts, text)
+			}
 		}
 	}
 	return strings.Join(parts, "\n"), nil
