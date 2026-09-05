@@ -1080,6 +1080,128 @@ func TestCLIRequiresExplicitProjectWhenMultipleProjectsExist(t *testing.T) {
 	}
 }
 
+func TestCLIGlobalModelsListWorksAcrossProjectStates(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+	states := []struct {
+		name     string
+		projects string
+	}{
+		{name: "zero projects", projects: `{"projects":[]}`},
+		{name: "single project", projects: `{"projects":[{"id":"p1","name":"solo"}]}`},
+		{name: "multiple projects", projects: cliProjects},
+	}
+	for _, state := range states {
+		state := state
+		for _, jsonOutput := range []bool{false, true} {
+			name := state.name + " plain"
+			if jsonOutput {
+				name = state.name + " JSON"
+			}
+			t.Run(name, func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{
+					"/api/projects": state.projects,
+					"/models":       modelsHTML,
+				})
+				var out bytes.Buffer
+				if err := RunCLI(c, &out, "", []string{"models"}, false, jsonOutput); err != nil {
+					t.Fatalf("global models list failed: %v", err)
+				}
+				if !rec.saw("GET", "/models") || strings.Contains(rec.all(), "/models?project_id=") {
+					t.Fatalf("models list was not requested globally:\n%s", rec.all())
+				}
+				if jsonOutput {
+					var models []client.LLMModel
+					if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &models); err != nil {
+						t.Fatalf("global JSON output is not a raw model array: %v\n%s", err, out.String())
+					}
+					if len(models) != 1 || models[0].ID != "m-1" {
+						t.Fatalf("models = %+v", models)
+					}
+				} else if !strings.Contains(out.String(), "Sonnet") {
+					t.Fatalf("plain global output missing model:\n%s", out.String())
+				}
+			})
+		}
+	}
+}
+
+func TestCLIProjectScopedModelsActionsRejectMissingOrAmbiguousProject(t *testing.T) {
+	states := []struct {
+		name     string
+		projects string
+		want     string
+	}{
+		{name: "zero projects", projects: `{"projects":[]}`, want: "-project <name|id>"},
+		{name: "multiple projects", projects: cliProjects, want: "multiple projects"},
+	}
+	actions := []struct {
+		name  string
+		args  []string
+		force bool
+	}{
+		{name: "capacity", args: []string{"models", "capacity"}},
+		{name: "default", args: []string{"models", "default", "Sonnet"}},
+		{name: "delete", args: []string{"models", "delete", "Sonnet"}, force: true},
+	}
+	for _, state := range states {
+		state := state
+		for _, action := range actions {
+			action := action
+			t.Run(state.name+" "+action.name, func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{"/api/projects": state.projects})
+				err := RunCLI(c, &bytes.Buffer{}, "", action.args, action.force, false)
+				if err == nil || !strings.Contains(err.Error(), state.want) {
+					t.Fatalf("err = %v, want %q", err, state.want)
+				}
+				if rec.saw("GET", "/models") || rec.saw("GET", "/api/capacity/models") || rec.saw("GET", "/api/analytics/usage") || rec.saw("POST", "/models/m-1/set-default") || rec.saw("DELETE", "/models/m-1") {
+					t.Fatalf("guarded models action made an unscoped request:\n%s", rec.all())
+				}
+			})
+		}
+	}
+}
+
+func TestCLISingleProjectModelsActionsRemainScoped(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+	cases := []struct {
+		name       string
+		args       []string
+		force      bool
+		wantMethod string
+		wantPath   string
+	}{
+		{name: "capacity", args: []string{"models", "capacity"}, wantMethod: "GET", wantPath: "/api/analytics/usage?project_id=p1"},
+		{name: "default", args: []string{"models", "default", "Sonnet"}, wantMethod: "POST", wantPath: "/models/m-1/set-default"},
+		{name: "delete", args: []string{"models", "delete", "Sonnet"}, force: true, wantMethod: "DELETE", wantPath: "/models/m-1"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":        `{"projects":[{"id":"p1","name":"solo"}]}`,
+				"/models":              modelsHTML,
+				"/api/capacity/models": `[]`,
+				"/api/analytics/usage": `{}`,
+			})
+			if err := RunCLI(c, &bytes.Buffer{}, "", tc.args, tc.force, false); err != nil {
+				t.Fatalf("scoped models action failed: %v\n%s", err, rec.all())
+			}
+			if tc.wantPath == "/api/analytics/usage?project_id=p1" {
+				if !rec.sawQuery("GET " + tc.wantPath) {
+					t.Fatalf("capacity usage request lost implicit scope:\n%s", rec.all())
+				}
+			} else if !rec.saw(tc.wantMethod, tc.wantPath) {
+				t.Fatalf("missing %s %s:\n%s", tc.wantMethod, tc.wantPath, rec.all())
+			}
+			if tc.name != "capacity" && !rec.sawQuery("GET /models?project_id=p1") {
+				t.Fatalf("model mutation lookup was not scoped to the implicit project:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIGlobalProjectListRemainsUsableWithoutProject(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

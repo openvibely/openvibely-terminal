@@ -3024,10 +3024,35 @@ func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
 	}
 }
 
-func TestModelsCommandsRequireSelectedProject(t *testing.T) {
+func TestModelsListDoesNotRequireSelectedProject(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+	for _, line := range []string{"/models", "/models list", "/models Sonnet"} {
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
+			m.selectedID = ""
+			m.selectedName = ""
+
+			m = runLine(t, m, line)
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "Sonnet") {
+				t.Fatalf("expected global model listing for %s:\n%s", line, out)
+			}
+			if strings.Contains(out, "no project selected") {
+				t.Fatalf("global model listing required a project for %s:\n%s", line, out)
+			}
+			if !rec.saw("GET", "/models") {
+				t.Fatalf("%s did not request the global model list:\n%s", line, rec.all())
+			}
+			if strings.Contains(rec.all(), "project_id=") {
+				t.Fatalf("%s sent project scope on a global model request:\n%s", line, rec.all())
+			}
+		})
+	}
+}
+
+func TestProjectScopedModelsCommandsRequireSelectedProject(t *testing.T) {
 	cases := []string{
-		"/models",
-		"/models list",
 		"/models capacity",
 		"/models default Sonnet",
 		"/models delete Sonnet",

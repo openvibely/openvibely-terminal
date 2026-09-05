@@ -2045,18 +2045,13 @@ func modelsCommand() command {
 			`models delete claude-haiku`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			mm, cmd, ok := m.needProject()
-			if !ok {
-				return mm, cmd
-			}
 			action, rest := splitAction(actions, args)
-			c, pid := m.client, m.selectedID
+			c := m.client
 			ref := strings.Join(rest, " ")
 
-			switch action {
-			case "", "list":
+			if action == "" || action == "list" {
 				return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
-					list, err := c.ListModels(ctx, pid)
+					list, err := c.ListModels(ctx, "")
 					if err != nil {
 						return "", err
 					}
@@ -2065,6 +2060,15 @@ func modelsCommand() command {
 					}
 					return renderModels(list, ref), nil
 				})
+			}
+
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
+			pid := m.selectedID
+
+			switch action {
 			case "capacity":
 				return m, run("Model capacity", cmdTimeout, func(ctx context.Context) (string, error) {
 					caps, usage, err := fetchModelCapacityWithUsage(ctx, c, pid)

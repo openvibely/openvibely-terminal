@@ -435,6 +435,9 @@ func (c command) cliProjectScoped(args []string) bool {
 	case "agents":
 		action, _ := splitAction(c.actions, args)
 		return action != "metrics"
+	case "models":
+		action, _ := splitAction(c.actions, args)
+		return action == "capacity" || action == "default" || action == "delete"
 	case "workers":
 		action, _ := splitAction(c.actions, args)
 		return action != "limit"
@@ -453,6 +456,9 @@ func cliProjectPreflight(c command, args []string, projectRef string, m Model) e
 		return fmt.Errorf("multiple projects found; choose one with -project <name|id> before running %s", c.name)
 	}
 	if m.selectedID == "" {
+		if c.name == "models" {
+			return errors.New("no project selected — models capacity, default, and delete require -project <name|id>; create one first with projects create <name> <path>")
+		}
 		return errors.New("no project selected — use /project <name>")
 	}
 	return nil
@@ -487,6 +493,9 @@ func (c command) needsBackend() bool {
 // when the backend has no projects yet.
 func (c command) needsProjectLoad(args []string) bool {
 	if c.name == "projects" && len(args) > 1 && strings.EqualFold(args[1], "create") {
+		return false
+	}
+	if c.name == "models" && len(args) > 0 && !c.cliProjectScoped(args[1:]) {
 		return false
 	}
 	return c.needsBackend()
