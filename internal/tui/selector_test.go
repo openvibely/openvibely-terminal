@@ -475,17 +475,18 @@ func TestSelectorEscCancels(t *testing.T) {
 
 // TestPickerActionsUseSelectedResourceWithoutResolutionFetch verifies that
 // picker selections execute against the resource parsed for the selected row.
-// The initial list fetch and post-action refresh remain, but the old second
-// resolution list fetch must not occur.
+// Most actions retain an initial list fetch and post-action refresh. Alert delete
+// parses its refreshed list directly from the DELETE response instead.
 func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 	cases := []struct {
-		name        string
-		command     string
-		method      string
-		path        string
-		listPath    string
-		destructive bool
-		wantOutput  string
+		name          string
+		command       string
+		method        string
+		path          string
+		listPath      string
+		destructive   bool
+		wantOutput    string
+		wantListCalls int
 	}{
 		{
 			name:       "alerts approve",
@@ -496,13 +497,14 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 			wantOutput: "approve: Add retry logic",
 		},
 		{
-			name:        "alerts delete",
-			command:     "/alerts delete",
-			method:      "DELETE",
-			path:        "/alerts/a-1",
-			listPath:    "/alerts",
-			destructive: true,
-			wantOutput:  "delete: Add retry logic",
+			name:          "alerts delete",
+			command:       "/alerts delete",
+			method:        "DELETE",
+			path:          "/alerts/a-1",
+			listPath:      "/alerts",
+			destructive:   true,
+			wantOutput:    "delete: Add retry logic",
+			wantListCalls: 1,
 		},
 		{
 			name:       "schedule toggle",
@@ -602,8 +604,12 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 			if !rec.saw(tc.method, tc.path) {
 				t.Errorf("expected selected resource action %s %s, calls:\n%s", tc.method, tc.path, rec.all())
 			}
-			if got := selectorCallCount(rec, "GET", tc.listPath); got != 2 {
-				t.Errorf("%s list calls = %d, want 2 (picker load + refresh); calls:\n%s", tc.command, got, rec.all())
+			wantListCalls := tc.wantListCalls
+			if wantListCalls == 0 {
+				wantListCalls = 2
+			}
+			if got := selectorCallCount(rec, "GET", tc.listPath); got != wantListCalls {
+				t.Errorf("%s list calls = %d, want %d; calls:\n%s", tc.command, got, wantListCalls, rec.all())
 			}
 			if out := transcript(m); strings.Contains(out, "error:") {
 				t.Fatalf("unexpected error after %s:\n%s", tc.command, out)

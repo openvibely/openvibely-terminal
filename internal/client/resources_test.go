@@ -438,6 +438,51 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	}
 }
 
+func TestDeleteAlertAndListParsesProjectScopedHTMXRefresh(t *testing.T) {
+	var gotMethod, gotQuery, gotHX string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotQuery = r.URL.Query().Get("project_id")
+		gotHX = r.Header.Get("HX-Request")
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<div data-alert-id="remaining" data-alert-scroll-anchor="remaining" data-search-text="warning pending">
+			<p class="font-semibold">Remaining alert</p>
+		</div>`)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := c.DeleteAlertAndList(context.Background(), "delete/me", "project-2")
+	if err != nil {
+		t.Fatalf("DeleteAlertAndList: %v", err)
+	}
+	if gotMethod != http.MethodDelete || gotQuery != "project-2" || gotHX != "true" {
+		t.Fatalf("request = method %q project %q HX %q", gotMethod, gotQuery, gotHX)
+	}
+	if len(alerts) != 1 || alerts[0].ID != "remaining" || alerts[0].Title != "Remaining alert" || alerts[0].ProjectID != "project-2" {
+		t.Fatalf("parsed alerts = %#v", alerts)
+	}
+}
+
+func TestDeleteAlertAndListReportsBackendFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = io.WriteString(w, `{"error":"alert deletion unavailable"}`)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteAlertAndList(context.Background(), "a1", "p1"); err == nil || !strings.Contains(err.Error(), "alert deletion unavailable") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestResourceMutationRoutes(t *testing.T) {
 	var gotMethod, gotPath string
 	var gotForm url.Values
