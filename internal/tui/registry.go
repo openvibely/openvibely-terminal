@@ -42,7 +42,6 @@ func init() {
 		projectsCommand(),
 		statusCommand(),
 		loginCommand(),
-		buildCommand(),
 		eventsCommand(),
 		chatCommand(),
 		clearCommand(),
@@ -2974,7 +2973,7 @@ func analyticsCommand() command {
 	}
 }
 
-// --- projects / status / build / events / misc ---
+// --- projects / status / events / misc ---
 
 func projectCommand() command {
 	return command{
@@ -3163,26 +3162,6 @@ func statusCommand() command {
 				return m, nil
 			}
 			return m, m.fetchStatusCounts()
-		},
-	}
-}
-
-func buildCommand() command {
-	return command{
-		name: "build",
-		desc: "trigger an autonomous build for the selected project",
-		run: func(m Model, _ []string) (Model, tea.Cmd) {
-			mm, cmd, ok := m.needProject()
-			if !ok {
-				return mm, cmd
-			}
-			c, pid, name := m.client, m.selectedID, m.selectedName
-			return m, run("Build", cmdTimeout, func(ctx context.Context) (string, error) {
-				if err := c.TriggerAutonomousBuild(ctx, pid); err != nil {
-					return "", err
-				}
-				return "autonomous build triggered for " + name + " (use /events to watch)", nil
-			})
 		},
 	}
 }

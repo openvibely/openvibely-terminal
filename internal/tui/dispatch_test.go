@@ -1278,7 +1278,6 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 		{"/insights", "GET", "/insights"},
 		{"/automations", "GET", "/automations"},
 		{"/grades", "GET", "/history"},
-		{"/build", "POST", "/api/autonomous/trigger"},
 		{"/models capacity", "GET", "/api/capacity/models"},
 		{"/agents metrics", "GET", "/api/workflows/metrics"},
 		{"/analytics usage", "GET", "/api/analytics/usage"},
