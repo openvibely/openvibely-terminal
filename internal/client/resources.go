@@ -82,11 +82,22 @@ type AlertInspection struct {
 // the following muted paragraph, and marks read rows with an "opacity-60" card
 // class.
 func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, error) {
-	root, err := c.getHTML(ctx, "/alerts"+query("project_id", projectID))
+	pages, err := c.getCardPages(ctx, "/alerts"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	return parseAlerts(root, projectID), nil
+	seen := make(map[string]bool)
+	out := make([]Alert, 0)
+	for _, page := range pages {
+		for _, alert := range parseAlerts(page.root, projectID) {
+			if seen[alert.ID] {
+				continue
+			}
+			seen[alert.ID] = true
+			out = append(out, alert)
+		}
+	}
+	return out, nil
 }
 
 func parseAlerts(root *html.Node, projectID string) []Alert {
@@ -410,13 +421,21 @@ type Skill struct {
 
 // ListSkills scrapes the skills screen.
 func (c *Client) ListSkills(ctx context.Context, projectID string) ([]Skill, error) {
-	root, err := c.getHTML(ctx, "/skills"+query("project_id", projectID))
+	pages, err := c.getCardPages(ctx, "/skills"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupedCardsWithoutText(root, "data-skill-handle")
+	cards := make([]Card, 0)
+	for _, page := range pages {
+		cards = append(cards, dedupedCardsWithoutText(page.root, "data-skill-handle")...)
+	}
+	seen := make(map[string]bool)
 	out := make([]Skill, 0, len(cards))
 	for _, card := range cards {
+		if seen[card.Get("skill-handle")] {
+			continue
+		}
+		seen[card.Get("skill-handle")] = true
 		out = append(out, Skill{
 			Handle:      card.Get("skill-handle"),
 			Name:        card.Get("skill-name"),
@@ -514,16 +533,21 @@ type LLMModel struct {
 
 // ListModels scrapes the models screen.
 func (c *Client) ListModels(ctx context.Context, projectID string) ([]LLMModel, error) {
-	root, err := c.getHTML(ctx, "/models"+query("project_id", projectID))
+	pages, err := c.getCardPages(ctx, "/models"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupedCards(root, "data-model-id")
+	cards := make([]Card, 0)
+	for _, page := range pages {
+		cards = append(cards, dedupedCards(page.root, "data-model-id")...)
+	}
+	seen := make(map[string]bool)
 	out := make([]LLMModel, 0, len(cards))
 	for _, card := range cards {
-		if card.Get("model-name") == "" {
+		if card.Get("model-name") == "" || seen[card.Get("model-id")] {
 			continue
 		}
+		seen[card.Get("model-id")] = true
 		out = append(out, LLMModel{
 			ID:       card.Get("model-id"),
 			Name:     card.Get("model-name"),
@@ -559,16 +583,21 @@ type AgentDef struct {
 
 // ListAgents scrapes the agents screen.
 func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, error) {
-	root, err := c.getHTML(ctx, "/agents"+query("project_id", projectID))
+	pages, err := c.getCardPages(ctx, "/agents"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	cards := dedupedCardsWithoutText(root, "data-agent-id")
+	cards := make([]Card, 0)
+	for _, page := range pages {
+		cards = append(cards, dedupedCardsWithoutText(page.root, "data-agent-id")...)
+	}
+	seen := make(map[string]bool)
 	out := make([]AgentDef, 0, len(cards))
 	for _, card := range cards {
-		if card.Get("agent-name") == "" {
+		if card.Get("agent-name") == "" || seen[card.Get("agent-id")] {
 			continue
 		}
+		seen[card.Get("agent-id")] = true
 		out = append(out, AgentDef{
 			ID:          card.Get("agent-id"),
 			Key:         card.Get("agent-key"),
@@ -698,7 +727,7 @@ var KnownChannels = []Channel{
 
 // GetChannels returns the Channels (integrations) screen as text.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
-	return c.pageText(ctx, "/channels"+query("project_id", projectID), "")
+	return c.paginatedPageText(ctx, "/channels"+query("project_id", projectID), "")
 }
 
 // ChannelAction runs test or remove on a channel integration.
@@ -738,26 +767,35 @@ type CustomPersonality = Personality
 // built-in presets and non-preset custom entries as structured cards, including
 // effective metadata for built-in overrides.
 func (c *Client) ListPersonalities(ctx context.Context, projectID string) ([]Personality, error) {
-	root, err := c.getHTML(ctx, "/personality"+query("project_id", projectID))
+	pages, err := c.getCardPages(ctx, "/personality"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
 
 	selectedKey := ""
 	sectionFound := false
-	if section := findByID(root, "personality-section"); section != nil {
+	if section := findByID(pages[0].root, "personality-section"); section != nil {
 		sectionFound = true
 		selectedKey = attr(section, "data-selected-personality")
 	}
 
-	cards := findAll(root, func(n *html.Node) bool {
-		// data-personality-key is intentionally checked for presence because the
-		// Base card carries the empty key as an explicit attribute.
-		return hasHTMLAttr(n, "data-personality-key") &&
-			attr(n, "data-personality-is-preset") != ""
-	})
+	cards := make([]*html.Node, 0)
+	for _, page := range pages {
+		cards = append(cards, findAll(page.root, func(n *html.Node) bool {
+			// data-personality-key is intentionally checked for presence because the
+			// Base card carries the empty key as an explicit attribute.
+			return hasHTMLAttr(n, "data-personality-key") &&
+				attr(n, "data-personality-is-preset") != ""
+		})...)
+	}
+	seen := make(map[string]bool)
 	out := make([]Personality, 0, len(cards))
 	for _, card := range cards {
+		identity := attr(card, "data-personality-key")
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
 		p := Personality{
 			ID:                  attr(card, "data-personality-id"),
 			Name:                strings.TrimSpace(attr(card, "data-personality-name")),
@@ -858,7 +896,7 @@ func (c *Client) DeleteCustomPersonality(ctx context.Context, projectID, key str
 
 // GetPersonality returns the Personality screen as text.
 func (c *Client) GetPersonality(ctx context.Context, projectID string) (string, error) {
-	return c.pageText(ctx, "/personality"+query("project_id", projectID), "personality-container")
+	return c.paginatedPageText(ctx, "/personality"+query("project_id", projectID), "personality-container")
 }
 
 // SavePersonality sets the active personality preset or custom key.
@@ -912,7 +950,7 @@ func (c *Client) RunInsightsAnalysis(ctx context.Context, projectID string) erro
 
 // GetAutomations returns the automations screen as text.
 func (c *Client) GetAutomations(ctx context.Context, projectID string) (string, error) {
-	return c.pageText(ctx, "/automations"+query("project_id", projectID), "")
+	return c.paginatedPageText(ctx, "/automations"+query("project_id", projectID), "")
 }
 
 // Automation is one card on the Automations screen.
@@ -927,11 +965,22 @@ type Automation struct {
 // data-automation-card-delete/data-automation-name attributes; lifecycle
 // state comes from the card's own badge row.
 func (c *Client) ListAutomations(ctx context.Context, projectID string) ([]Automation, error) {
-	root, err := c.getHTML(ctx, "/automations"+query("project_id", projectID))
+	pages, err := c.getCardPages(ctx, "/automations"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	return parseAutomations(root), nil
+	out := make([]Automation, 0)
+	seen := make(map[string]bool)
+	for _, page := range pages {
+		for _, automation := range parseAutomations(page.root) {
+			if seen[automation.ID] {
+				continue
+			}
+			seen[automation.ID] = true
+			out = append(out, automation)
+		}
+	}
+	return out, nil
 }
 
 func parseAutomations(root *html.Node) []Automation {
@@ -1018,6 +1067,26 @@ func automationBadgeText(n *html.Node) string {
 func (c *Client) AutomationAction(ctx context.Context, automationID, action, projectID string) error {
 	return c.doForm(ctx, http.MethodPost,
 		"/automations/"+url.PathEscape(automationID)+"/"+action+query("project_id", projectID), nil)
+}
+
+func (c *Client) paginatedPageText(ctx context.Context, path, elementID string) (string, error) {
+	pages, err := c.getCardPages(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(pages))
+	for i, page := range pages {
+		node := page.root
+		if i == 0 && elementID != "" {
+			if selected := findByID(page.root, elementID); selected != nil {
+				node = selected
+			}
+		}
+		if text := strings.TrimSpace(NodeText(node)); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 // pageText fetches a page and returns the text of elementID (or the whole

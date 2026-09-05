@@ -51,26 +51,149 @@ func (c Card) Bool(name string) bool {
 
 // getHTML fetches path and parses the response as HTML.
 func (c *Client) getHTML(ctx context.Context, path string) (*html.Node, error) {
+	root, _, err := c.getHTMLPage(ctx, path)
+	return root, err
+}
+
+const (
+	cardPageSize       = 50
+	maxCardPages       = 200
+	maxPaginatedCards  = 10000
+	cardPageMoreHeader = "X-OpenVibely-Card-Page-Has-More"
+)
+
+type htmlPage struct {
+	root *html.Node
+}
+
+func (c *Client) getHTMLPage(ctx context.Context, path string) (*html.Node, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	req.Header.Set("Accept", "text/html")
 	req.Header.Set("HX-Request", "true")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", path, err)
+		return nil, false, fmt.Errorf("GET %s: %w", path, err)
 	}
 	defer drainAndClose(resp.Body)
 
 	if isReadAuthResponse(resp) {
-		return nil, newAuthRequiredError(http.MethodGet, path, resp)
+		return nil, false, newAuthRequiredError(http.MethodGet, path, resp)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, apiError(resp)
+		return nil, false, apiError(resp)
 	}
-	return html.Parse(io.LimitReader(resp.Body, 8<<20))
+	root, err := html.Parse(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, false, err
+	}
+	rawHasMore := strings.TrimSpace(resp.Header.Get(cardPageMoreHeader))
+	if rawHasMore != "" {
+		hasMore, _ := strconv.ParseBool(rawHasMore)
+		return root, hasMore, nil
+	}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	return root, paginationRoot != nil && attr(paginationRoot, "data-card-pagination-has-more") == "true", nil
+}
+
+// getCardPages follows the backend's card-page continuation contract. The first
+// response remains the normal full page so non-paginated cards and empty-state
+// markup are preserved; later requests ask for the largest supported fragment.
+func (c *Client) getCardPages(ctx context.Context, path string) ([]htmlPage, error) {
+	root, headerHasMore, err := c.getHTMLPage(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	if paginationRoot == nil {
+		return []htmlPage{{root: root}}, nil
+	}
+	hasMore := headerHasMore
+	pages := []htmlPage{{root: root}}
+	selector := attr(paginationRoot, "data-card-pagination-card-selector")
+	keyAttr := attr(paginationRoot, "data-card-pagination-key")
+	offset := countPaginationCards(root, selector, keyAttr)
+
+	for page := 1; hasMore; page++ {
+		if page >= maxCardPages || offset >= maxPaginatedCards {
+			return nil, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
+		}
+		continuation, err := cardContinuationPath(path, page, offset)
+		if err != nil {
+			return nil, err
+		}
+		next, nextHasMore, err := c.getHTMLPage(ctx, continuation)
+		if err != nil {
+			return nil, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
+		}
+		count := countPaginationCards(next, selector, keyAttr)
+		if count == 0 && nextHasMore {
+			return nil, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
+		}
+		if offset+count > maxPaginatedCards {
+			return nil, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
+		}
+		pages = append(pages, htmlPage{root: next})
+		offset += count
+		hasMore = nextHasMore
+	}
+	return pages, nil
+}
+
+func cardContinuationPath(path string, page, offset int) (string, error) {
+	u, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("parsing card pagination path: %w", err)
+	}
+	q := u.Query()
+	q.Set("card_page", "1")
+	q.Set("page", strconv.Itoa(page))
+	q.Set("page_size", strconv.Itoa(cardPageSize))
+	q.Set("offset", strconv.Itoa(offset))
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func countPaginationCards(root *html.Node, selector, keyAttr string) int {
+	marker, value := paginationSelector(selector)
+	if marker == "" {
+		return 0
+	}
+	seen := make(map[string]struct{})
+	count := 0
+	for _, node := range findAll(root, func(n *html.Node) bool {
+		if !hasHTMLAttr(n, marker) {
+			return false
+		}
+		return value == "" || attr(n, marker) == value
+	}) {
+		key := attr(node, keyAttr)
+		if key != "" {
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		count++
+	}
+	return count
+}
+
+func paginationSelector(selector string) (marker, value string) {
+	selector = strings.TrimSpace(selector)
+	if len(selector) < 3 || selector[0] != '[' || selector[len(selector)-1] != ']' {
+		return "", ""
+	}
+	body := selector[1 : len(selector)-1]
+	parts := strings.SplitN(body, "=", 2)
+	marker = strings.TrimSpace(parts[0])
+	if len(parts) == 2 {
+		value = strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+	}
+	return marker, value
 }
 
 // doForm performs a form-encoded mutation. The backend answers HTMX requests

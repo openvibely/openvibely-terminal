@@ -1289,6 +1289,217 @@ func TestGetChannelsReturnsPageText(t *testing.T) {
 	}
 }
 
+func TestPaginatedCardListsLoadAllPages(t *testing.T) {
+	tests := []struct {
+		name, path, firstBody, nextBody string
+		list                            func(*Client) ([]string, error)
+		want                            []string
+	}{
+		{
+			name: "skills preserve order and deduplicate overlap", path: "/skills",
+			firstBody: `<div data-card-pagination-root data-card-pagination-card-selector="[data-skill-handle]" data-card-pagination-key="data-skill-handle" data-card-pagination-has-more="true"><div data-skill-handle="first" data-skill-name="First"></div><div data-skill-handle="shared" data-skill-name="Shared"></div></div>`,
+			nextBody:  `<div data-skill-handle="shared" data-skill-name="Duplicate"></div><div data-skill-handle="later" data-skill-name="Later"></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListSkills(context.Background(), "project-two")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.Handle)
+				}
+				return out, err
+			}, want: []string{"first", "shared", "later"},
+		},
+		{
+			name: "automations include later structural cards", path: "/automations",
+			firstBody: `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true"><div data-automation-url="/automations/a1"><span class="badge">active</span><button data-automation-card-delete="a1" data-automation-name="First"></button></div></div>`,
+			nextBody:  `<div data-automation-url="/automations/a2"><span class="badge">paused</span><button data-automation-card-delete="a2" data-automation-name="Later"></button></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListAutomations(context.Background(), "project-two")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.ID)
+				}
+				return out, err
+			}, want: []string{"a1", "a2"},
+		},
+		{
+			name: "personality offset excludes built-in cards", path: "/personality",
+			firstBody: `<div id="personality-section" data-selected-personality="base" data-card-pagination-root data-card-pagination-card-selector="[data-personality-pagination-card='true']" data-card-pagination-key="data-personality-key" data-card-pagination-has-more="true"><div data-personality-key="base" data-personality-name="Base" data-personality-is-preset="true" data-personality-pagination-card="false"></div><div data-personality-key="custom-one" data-personality-name="Custom One" data-personality-is-preset="false" data-personality-pagination-card="true"></div></div>`,
+			nextBody:  `<div data-personality-key="custom-two" data-personality-name="Custom Two" data-personality-is-preset="false" data-personality-pagination-card="true"></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListPersonalities(context.Background(), "project-two")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.Key)
+				}
+				return out, err
+			}, want: []string{"base", "custom-one", "custom-two"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != tt.path {
+					t.Errorf("path = %q, want %q", r.URL.Path, tt.path)
+				}
+				if got := r.URL.Query().Get("project_id"); got != "project-two" {
+					t.Errorf("project_id = %q", got)
+				}
+				w.Header().Set("Content-Type", "text/html")
+				if requests == 1 {
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
+					_, _ = io.WriteString(w, tt.firstBody)
+					return
+				}
+				q := r.URL.Query()
+				if q.Get("card_page") != "1" || q.Get("page_size") != "50" || q.Get("page") != "1" {
+					t.Errorf("continuation query = %q", r.URL.RawQuery)
+				}
+				if tt.path == "/personality" && q.Get("offset") != "1" {
+					t.Errorf("personality offset = %q, want 1", q.Get("offset"))
+				}
+				w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+				_, _ = io.WriteString(w, tt.nextBody)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := tt.list(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("items = %#v, want %#v", got, tt.want)
+			}
+			if requests != 2 {
+				t.Fatalf("requests = %d, want 2", requests)
+			}
+		})
+	}
+}
+
+func TestOtherPaginatedCardSurfacesLoadLaterPages(t *testing.T) {
+	tests := []struct {
+		name, path, marker, first, later string
+		list                             func(*Client) ([]string, error)
+		want                             []string
+	}{
+		{
+			name: "alerts", path: "/alerts", marker: "data-alert-id",
+			first: `<div data-alert-id="a1" data-alert-scroll-anchor="a1"><p class="font-semibold">First</p></div>`,
+			later: `<div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Later</p></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListAlerts(context.Background(), "p1")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.ID)
+				}
+				return out, err
+			},
+			want: []string{"a1", "a2"},
+		},
+		{
+			name: "models", path: "/models", marker: "data-model-id",
+			first: `<div data-model-id="m1" data-model-name="First"></div>`, later: `<div data-model-id="m2" data-model-name="Later"></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListModels(context.Background(), "p1")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.ID)
+				}
+				return out, err
+			},
+			want: []string{"m1", "m2"},
+		},
+		{
+			name: "agents", path: "/agents", marker: "data-agent-id",
+			first: `<div data-agent-id="g1" data-agent-name="First"></div>`, later: `<div data-agent-id="g2" data-agent-name="Later"></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListAgents(context.Background(), "p1")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.ID)
+				}
+				return out, err
+			},
+			want: []string{"g1", "g2"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(requests == 1))
+				if requests == 1 {
+					_, _ = fmt.Fprintf(w, `<div data-card-pagination-root data-card-pagination-card-selector="[%s]" data-card-pagination-key="%s" data-card-pagination-has-more="true">%s</div>`, tt.marker, tt.marker, tt.first)
+					return
+				}
+				_, _ = io.WriteString(w, tt.later)
+			}))
+			defer srv.Close()
+			c, _ := New(srv.URL)
+			got, err := tt.list(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("items = %#v, want %#v", got, tt.want)
+			}
+			if requests != 2 {
+				t.Fatalf("requests = %d, want 2", requests)
+			}
+		})
+	}
+}
+
+func TestGetChannelsLoadsPaginatedWebhookText(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(requests == 1))
+		if requests == 1 {
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true"><div data-webhook-id="w1">First webhook</div></div>`)
+			return
+		}
+		_, _ = io.WriteString(w, `<div data-webhook-id="w2">Later webhook</div>`)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	text, err := c.GetChannels(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "First webhook") || !strings.Contains(text, "Later webhook") {
+		t.Fatalf("channels text = %q", text)
+	}
+}
+
+func TestPaginatedCardContinuationFailureIsReported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("card_page") == "1" {
+			http.Error(w, "failed", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
+		_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-skill-handle]" data-card-pagination-key="data-skill-handle" data-card-pagination-has-more="true"><div data-skill-handle="first" data-skill-name="First"></div></div>`)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	items, err := c.ListSkills(context.Background(), "p1")
+	if err == nil || !strings.Contains(err.Error(), "loading card page 2 after 1 cards") {
+		t.Fatalf("error = %v", err)
+	}
+	if items != nil {
+		t.Fatalf("partial items = %#v, want nil on reported failure", items)
+	}
+}
+
 // TestChannelActionSlackRemoteTranslatesToDisconnect verifies that "remove" for
 // Slack routes to /channels/slack/disconnect (not /channels/slack/remove),
 // matching the backend's OAuth disconnect route.
