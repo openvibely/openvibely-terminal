@@ -46,6 +46,93 @@ type ChatEvent struct {
 	Queued          bool   `json:"queued,omitempty"`
 }
 
+// ChatOutputEvent is one frame from GET /events/chat/:exec_id. Unnamed
+// events carry an output chunk; named "done" and "error" events are terminal
+// signals whose Data contains the status or error text.
+type ChatOutputEvent struct {
+	Name string
+	Data string
+}
+
+// StreamChatOutput connects to the backend's execution-specific output stream.
+// offset is the number of UTF-8 bytes already received and lets reconnects ask
+// the backend to replay only missing durable output.
+func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int) (<-chan ChatOutputEvent, <-chan error) {
+	events := make(chan ChatOutputEvent, 32)
+	errCh := make(chan error, 1)
+
+	go func() {
+		defer close(events)
+		defer close(errCh)
+		endpoint := c.baseURL + "/events/chat/" + url.PathEscape(execID) + "?offset=" + fmt.Sprint(offset)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		req.Header.Set("Cache-Control", "no-cache")
+		transport := &http.Transport{ResponseHeaderTimeout: 15 * time.Second}
+		defer transport.CloseIdleConnections()
+		streamClient := &http.Client{
+			Jar:       c.http.Jar,
+			Transport: transport,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		resp, err := streamClient.Do(req)
+		if err != nil {
+			if ctx.Err() == nil {
+				errCh <- fmt.Errorf("connecting to chat output stream: %w", err)
+			}
+			return
+		}
+		defer resp.Body.Close()
+		if isReadAuthResponse(resp) {
+			errCh <- newAuthRequiredError(http.MethodGet, "/events/chat/:exec_id", resp)
+			return
+		}
+		if resp.StatusCode != http.StatusOK {
+			errCh <- fmt.Errorf("chat output stream returned status %d", resp.StatusCode)
+			return
+		}
+
+		scanner := bufio.NewScanner(resp.Body)
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		var eventName string
+		var dataLines []string
+		for scanner.Scan() {
+			line := scanner.Text()
+			switch {
+			case line == "":
+				if len(dataLines) > 0 {
+					event := ChatOutputEvent{Name: eventName, Data: strings.Join(dataLines, "\n")}
+					select {
+					case events <- event:
+					case <-ctx.Done():
+						return
+					}
+				}
+				eventName = ""
+				dataLines = nil
+			case strings.HasPrefix(line, "event:"):
+				eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			case strings.HasPrefix(line, "data:"):
+				dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+			case strings.HasPrefix(line, ":"):
+			}
+		}
+		if ctx.Err() == nil {
+			if err := scanner.Err(); err != nil {
+				errCh <- fmt.Errorf("chat output stream read: %w", err)
+			}
+		}
+	}()
+
+	return events, errCh
+}
+
 // StreamEvents connects to /events/live and delivers parsed SSE events on the
 // returned channel until ctx is cancelled or the connection drops. The channel
 // is closed when the stream ends; the returned error channel receives at most

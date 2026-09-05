@@ -150,6 +150,14 @@ type Model struct {
 	// an older turn from replacing a newer active submission.
 	chatSubmissionPending bool
 	chatSubmissionID      uint64
+	chatStreamGeneration  int
+	chatStreamCancel      context.CancelFunc
+	chatStreamEvents      <-chan client.ChatOutputEvent
+	chatStreamErrs        <-chan error
+	chatStreamExecID      string
+	chatStreamOffset      int
+	chatStreamOutput      string
+	chatStreamLogIndex    int
 	busy                  bool
 
 	// operational counts cached by /status
@@ -211,12 +219,13 @@ func New(c *client.Client) Model {
 	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
 
 	m := Model{
-		client:     c,
-		input:      ti,
-		spin:       sp,
-		transcript: viewport.New(0, 0),
-		sseBackoff: time.Second,
-		histPos:    -1,
+		client:             c,
+		input:              ti,
+		spin:               sp,
+		transcript:         viewport.New(0, 0),
+		sseBackoff:         time.Second,
+		chatStreamLogIndex: -1,
+		histPos:            -1,
 		// Generation one is the initial cookie/session epoch. Login and accepted
 		// auth transitions advance it so older asynchronous command results cannot
 		// mutate the new session's state.
@@ -556,6 +565,8 @@ func (m *Model) setActiveProject(project client.Project) bool {
 	changed := m.selectedID != project.ID
 	if changed {
 		m.advanceProjectGeneration()
+		m.invalidateChatStream()
+		m.resetChatStreamOutput()
 		m.pendingMsgID = ""
 		m.pendingMsgExecutionID = ""
 		m.pendingMsgProjectID = ""
@@ -646,24 +657,93 @@ func (m *Model) beginChatSubmission(projectID string) (uint64, bool) {
 	return m.chatSubmissionID, true
 }
 
+func (m *Model) invalidateChatStream() {
+	if m.chatStreamCancel != nil {
+		m.chatStreamCancel()
+	}
+	m.chatStreamCancel = nil
+	m.chatStreamEvents = nil
+	m.chatStreamErrs = nil
+	m.chatStreamExecID = ""
+	m.chatStreamGeneration++
+}
+
+func (m *Model) resetChatStreamOutput() {
+	m.chatStreamOffset = 0
+	m.chatStreamOutput = ""
+	m.chatStreamLogIndex = -1
+}
+
 func (m *Model) clearPendingChat() {
+	m.invalidateChatStream()
 	m.pendingMsgID = ""
 	m.pendingMsgExecutionID = ""
 	m.pendingMsgProjectID = ""
 	m.pendingMsgProjectGeneration = 0
 	m.chatSubmissionPending = false
+	m.resetChatStreamOutput()
 }
 
 func (m Model) matchesPendingChatExecution(id string) bool {
 	return id != "" && (id == m.pendingMsgID || id == m.pendingMsgExecutionID)
 }
 
+func (m *Model) updateChatStreamOutput(delta string) {
+	if delta == "" {
+		return
+	}
+	m.chatStreamOutput += delta
+	m.chatStreamOffset += len([]byte(delta))
+	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
+		m.log[m.chatStreamLogIndex].text = m.chatStreamOutput
+		m.refreshTranscript()
+		return
+	}
+	m.append(entry{role: "agent", text: m.chatStreamOutput})
+	m.chatStreamLogIndex = len(m.log) - 1
+}
+
+func (m *Model) updateChatStreamSnapshot(snapshot string) {
+	if snapshot == "" || snapshot == m.chatStreamOutput {
+		return
+	}
+	if strings.HasPrefix(m.chatStreamOutput, snapshot) {
+		return // the durable status snapshot has not caught up to live output yet
+	}
+	if strings.HasPrefix(snapshot, m.chatStreamOutput) {
+		m.updateChatStreamOutput(strings.TrimPrefix(snapshot, m.chatStreamOutput))
+		return
+	}
+	m.chatStreamOutput = snapshot
+	m.chatStreamOffset = len([]byte(snapshot))
+	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
+		m.log[m.chatStreamLogIndex].text = snapshot
+		m.refreshTranscript()
+		return
+	}
+	m.append(entry{role: "agent", text: snapshot})
+	m.chatStreamLogIndex = len(m.log) - 1
+}
+
+func (m *Model) reconcileChatStreamOutput(response string) {
+	if m.chatStreamLogIndex < 0 || m.chatStreamLogIndex >= len(m.log) || m.log[m.chatStreamLogIndex].role != "agent" {
+		m.append(entry{role: "agent", text: response})
+		return
+	}
+	m.log[m.chatStreamLogIndex].text = response
+	m.refreshTranscript()
+}
+
 // completeChat settles a successful project-chat response. Task IDs are
 // optional because only polling status responses include them.
 func (m *Model) completeChat(response string, taskIDs []string) {
+	if m.chatStreamLogIndex >= 0 {
+		m.reconcileChatStreamOutput(response)
+	} else {
+		m.append(entry{role: "agent", text: response})
+	}
 	m.clearPendingChat()
 	m.busy = false
-	m.append(entry{role: "agent", text: response})
 	if len(taskIDs) > 0 {
 		m.append(entry{role: "system", text: "created tasks: " + strings.Join(taskIDs, ", ")})
 	}
@@ -734,6 +814,60 @@ func (m Model) fetchChatStatus(messageID string) tea.Cmd {
 		projectGeneration = projectGenerationOf(m)
 	}
 	return func() tea.Msg { return m.doChatStatus(messageID, projectID, projectGeneration) }
+}
+
+func (m *Model) connectChatStream(execID string, offset int) tea.Cmd {
+	m.invalidateChatStream()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.chatStreamCancel = cancel
+	m.chatStreamExecID = execID
+	generation := m.chatStreamGeneration
+	events, errs := m.client.StreamChatOutput(ctx, execID, offset)
+	m.chatStreamEvents = events
+	m.chatStreamErrs = errs
+	return m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, execID, events, errs)
+}
+
+func (m Model) waitForChatStream(generation int, submissionID uint64, projectID, execID string, events <-chan client.ChatOutputEvent, errs <-chan error) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case event, ok := <-events:
+			if !ok {
+				var err error
+				select {
+				case err = <-errs:
+				default:
+				}
+				return chatStreamDisconnectedMsg{generation: generation, submissionID: submissionID, projectID: projectID, execID: execID, err: err}
+			}
+			return chatStreamEventMsg{generation: generation, submissionID: submissionID, projectID: projectID, execID: execID, event: event}
+		case err, ok := <-errs:
+			if !ok {
+				select {
+				case event, eventOK := <-events:
+					if eventOK {
+						return chatStreamEventMsg{generation: generation, submissionID: submissionID, projectID: projectID, execID: execID, event: event}
+					}
+				default:
+				}
+			}
+			return chatStreamDisconnectedMsg{generation: generation, submissionID: submissionID, projectID: projectID, execID: execID, err: err}
+		}
+	}
+}
+
+func (m Model) waitForCurrentChatStream(generation int) tea.Cmd {
+	return m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, m.chatStreamExecID, m.chatStreamEvents, m.chatStreamErrs)
+}
+
+func (m Model) scheduleChatStreamReconnect(generation int) tea.Cmd {
+	submissionID := m.chatSubmissionID
+	projectID := m.pendingMsgProjectID
+	execID := m.chatStreamExecID
+	offset := m.chatStreamOffset
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+		return chatStreamReconnectMsg{generation: generation, submissionID: submissionID, projectID: projectID, execID: execID, offset: offset}
+	})
 }
 
 // withMessageGeneration tags asynchronous messages produced by a command. The
@@ -869,6 +1003,7 @@ func (m Model) scheduleReconnect(generation int) tea.Cmd {
 
 // Cleanup releases the SSE stream; called on shutdown.
 func (m *Model) Cleanup() {
+	m.invalidateChatStream()
 	if m.sseCancel != nil {
 		m.sseCancel()
 	}
@@ -1170,6 +1305,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chatSubmissionPending = true
 		m.pendingMsgID = msg.accepted.MessageID
 		m.pendingMsgExecutionID = ""
+		if !msg.accepted.Queued {
+			m.pendingMsgExecutionID = msg.accepted.MessageID
+		}
 		if m.pendingMsgProjectID == "" {
 			m.pendingMsgProjectID = msg.projectID
 			if m.pendingMsgProjectID == "" {
@@ -1184,8 +1322,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.accepted.Queued {
 			m.append(entry{role: "system", text: "queued behind an active chat turn…"})
+			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
 		}
-		return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+		return m, tea.Batch(
+			m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration),
+			m.connectChatStream(m.pendingMsgID, 0),
+		)
 
 	case chatStatusMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
@@ -1203,6 +1345,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.messageID != "" && msg.messageID != m.pendingMsgID {
 			return m, nil // status for a different message cannot settle this chat
 		}
+		promoted := false
 		if msg.resolvedMessageID != "" && msg.resolvedMessageID != m.pendingMsgID {
 			if m.pendingMsgExecutionID != "" && msg.resolvedMessageID != m.pendingMsgExecutionID {
 				return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
@@ -1212,6 +1355,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Record that authoritative alias so the promoted SSE completion can
 			// settle the same chat without weakening epoch/project guards above.
 			m.pendingMsgExecutionID = msg.resolvedMessageID
+			promoted = true
 		}
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
@@ -1227,6 +1371,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.status == nil {
 			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
 		}
+		if m.chatStreamCancel == nil {
+			m.updateChatStreamSnapshot(msg.status.Response)
+		}
 		switch msg.status.Status {
 		case "completed":
 			m.completeChat(msg.status.Response, msg.status.TaskIDs)
@@ -1241,8 +1388,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: text})
 			return m, nil
 		default:
-			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+			poll := m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+			if promoted || (m.pendingMsgExecutionID != "" && m.chatStreamCancel == nil) {
+				return m, tea.Batch(poll, m.connectChatStream(m.pendingMsgExecutionID, m.chatStreamOffset))
+			}
+			return m, poll
 		}
+
+	case chatStreamEventMsg:
+		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
+			return m, nil
+		}
+		switch msg.event.Name {
+		case "":
+			m.updateChatStreamOutput(msg.event.Data)
+			return m, m.waitForCurrentChatStream(msg.generation)
+		case "done", "error":
+			m.invalidateChatStream()
+			return m, m.fetchChatStatus(m.pendingMsgID)
+		default:
+			return m, m.waitForCurrentChatStream(msg.generation)
+		}
+
+	case chatStreamDisconnectedMsg:
+		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
+			return m, nil
+		}
+		if client.IsAuthRequired(msg.err) {
+			m.markAuthRequired()
+			return m, nil
+		}
+		execID := msg.execID
+		m.invalidateChatStream()
+		m.chatStreamExecID = execID
+		return m, m.scheduleChatStreamReconnect(m.chatStreamGeneration)
+
+	case chatStreamReconnectMsg:
+		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || m.authRequired || m.loginActive {
+			return m, nil
+		}
+		return m, m.connectChatStream(msg.execID, m.chatStreamOffset)
 
 	case threadOpenedMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
@@ -1416,6 +1601,8 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	// and are refreshed after login below.
 	if m.chatSubmissionPending && m.pendingMsgID == "" {
 		m.clearPendingChat()
+	} else {
+		m.invalidateChatStream()
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
@@ -1750,6 +1937,13 @@ func (m *Model) append(e entry) {
 	if len(m.log) > maxTranscript {
 		dropped = len(m.log) - maxTranscript
 		m.log = m.log[dropped:]
+		if m.chatStreamLogIndex >= 0 {
+			if dropped > m.chatStreamLogIndex {
+				m.chatStreamLogIndex = -1
+			} else {
+				m.chatStreamLogIndex -= dropped
+			}
+		}
 	}
 	if !canAppend || dropped > len(m.transcriptBlocks) {
 		m.refreshTranscript()
@@ -1983,6 +2177,8 @@ func (m *Model) markAuthRequired() {
 	// epoch changes. An accepted turn remains resumable through its polling ID.
 	if m.chatSubmissionPending && m.pendingMsgID == "" {
 		m.clearPendingChat()
+	} else if m.pendingMsgID != "" {
+		m.invalidateChatStream()
 	}
 	// An accepted auth failure starts a new session epoch. This invalidates
 	// project, command, chat, selector, and thread results launched before the

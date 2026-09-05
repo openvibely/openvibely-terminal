@@ -522,6 +522,32 @@ func TestAuthMe(t *testing.T) {
 	}
 }
 
+func TestStreamChatOutputParsesChunksAndTerminalEvents(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events/chat/exec-1" || r.URL.Query().Get("offset") != "7" {
+			t.Fatalf("unexpected stream request: %s", r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: hello\ndata:  world\n\n")
+		fmt.Fprint(w, "event: done\ndata: completed\n\n")
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events, errs := c.StreamChatOutput(ctx, "exec-1", 7)
+	if got := <-events; got.Name != "" || got.Data != "hello\n world" {
+		t.Fatalf("chunk = %#v", got)
+	}
+	if got := <-events; got.Name != "done" || got.Data != "completed" {
+		t.Fatalf("done = %#v", got)
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("unexpected stream error: %v", err)
+		}
+	}
+}
+
 func TestStreamEvents(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/events/live" {

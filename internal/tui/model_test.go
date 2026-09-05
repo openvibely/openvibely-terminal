@@ -3142,6 +3142,129 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 	}
 }
 
+func TestChatOutputStreamIncrementalTerminalStaleAndRecovery(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "project-A"
+	m.pendingMsgID = "exec-1"
+	m.pendingMsgProjectID = "project-A"
+	m.pendingMsgProjectGeneration = m.projectGeneration
+	m.chatSubmissionPending = true
+	m.chatSubmissionID = 9
+	m.busy = true
+	m.chatStreamGeneration = 3
+
+	next, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: "Hello"}})
+	m = next.(Model)
+	if got := transcript(m); !strings.Contains(got, "agent::Hello") {
+		t.Fatalf("first incremental output not visible: %q", got)
+	}
+	next, _ = m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: " world"}})
+	m = next.(Model)
+	if got := transcript(m); strings.Count(got, "agent::") != 1 || !strings.Contains(got, "agent::Hello world") {
+		t.Fatalf("incremental output should update one transcript entry: %q", got)
+	}
+
+	before := transcript(m)
+	next, _ = m.Update(chatStreamEventMsg{generation: 2, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: " stale"}})
+	m = next.(Model)
+	if got := transcript(m); got != before {
+		t.Fatalf("stale stream changed transcript: %q", got)
+	}
+
+	m.chatStreamOffset = len([]byte("Hello world"))
+	next, cmd := m.Update(chatStreamDisconnectedMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("disconnected pending stream did not schedule recovery")
+	}
+	msg := cmd()
+	reconnect, ok := msg.(chatStreamReconnectMsg)
+	if !ok || reconnect.offset != len([]byte("Hello world")) {
+		t.Fatalf("recovery = %#v, want byte offset 11", msg)
+	}
+
+	next, _ = m.Update(chatStatusMsg{projectGeneration: m.projectGeneration, messageID: "exec-1", submissionID: 9, projectID: "project-A", status: &client.ChatStatus{MessageID: "exec-1", Status: "completed", Response: "Hello world!"}})
+	m = next.(Model)
+	if m.busy || m.pendingMsgID != "" || m.chatStreamCancel != nil {
+		t.Fatalf("completion did not clean up chat state: busy=%t pending=%q cancel=%v", m.busy, m.pendingMsgID, m.chatStreamCancel != nil)
+	}
+	if got := transcript(m); strings.Count(got, "agent::") != 1 || !strings.Contains(got, "agent::Hello world!") {
+		t.Fatalf("terminal response did not reconcile streamed entry: %q", got)
+	}
+}
+
+func TestChatOutputTerminalEventsFetchAuthoritativeStatus(t *testing.T) {
+	for _, eventName := range []string{"done", "error"} {
+		t.Run(eventName, func(t *testing.T) {
+			m := newTestModel(t)
+			m.selectedID = "project-A"
+			m.pendingMsgID = "exec-1"
+			m.pendingMsgExecutionID = "exec-1"
+			m.pendingMsgProjectID = "project-A"
+			m.pendingMsgProjectGeneration = m.projectGeneration
+			m.chatSubmissionPending = true
+			m.chatSubmissionID = 6
+			m.busy = true
+			m.chatStreamGeneration = 2
+
+			next, cmd := m.Update(chatStreamEventMsg{generation: 2, submissionID: 6, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Name: eventName, Data: "terminal signal"}})
+			m = next.(Model)
+			if cmd == nil {
+				t.Fatal("terminal stream event did not fetch status")
+			}
+			status, ok := cmd().(chatStatusMsg)
+			if !ok || status.messageID != "exec-1" {
+				t.Fatalf("terminal command returned %#v", status)
+			}
+			if m.pendingMsgID != "exec-1" || !m.busy {
+				t.Fatalf("stream signal settled chat before status: pending=%q busy=%t", m.pendingMsgID, m.busy)
+			}
+		})
+	}
+}
+
+func TestChatStatusPartialVisibleWhenOutputStreamDisconnected(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "project-A"
+	m.pendingMsgID = "exec-1"
+	m.pendingMsgExecutionID = "exec-1"
+	m.pendingMsgProjectID = "project-A"
+	m.pendingMsgProjectGeneration = m.projectGeneration
+	m.chatSubmissionPending = true
+	m.chatSubmissionID = 5
+	m.busy = true
+
+	next, cmd := m.Update(chatStatusMsg{projectGeneration: m.projectGeneration, messageID: "exec-1", submissionID: 5, projectID: "project-A", status: &client.ChatStatus{MessageID: "exec-1", Status: "processing", Response: "durable partial"}})
+	m = next.(Model)
+	if got := transcript(m); !strings.Contains(got, "agent::durable partial") {
+		t.Fatalf("polling partial output not visible: %q", got)
+	}
+	if cmd == nil || m.chatStreamOffset != len([]byte("durable partial")) {
+		t.Fatalf("processing status did not preserve polling/recovery offset: cmd=%v offset=%d", cmd != nil, m.chatStreamOffset)
+	}
+}
+
+func TestChatOutputStreamFailureKeepsPartialAndCleansUp(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "project-A"
+	m.pendingMsgID = "exec-1"
+	m.pendingMsgProjectID = "project-A"
+	m.pendingMsgProjectGeneration = m.projectGeneration
+	m.chatSubmissionPending = true
+	m.chatSubmissionID = 4
+	m.busy = true
+	m.chatStreamGeneration = 1
+
+	next, _ := m.Update(chatStreamEventMsg{generation: 1, submissionID: 4, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: "partial"}})
+	m = next.(Model)
+	next, _ = m.Update(chatStatusMsg{projectGeneration: m.projectGeneration, messageID: "exec-1", submissionID: 4, projectID: "project-A", status: &client.ChatStatus{MessageID: "exec-1", Status: "failed", Error: "boom"}})
+	m = next.(Model)
+	got := transcript(m)
+	if !strings.Contains(got, "agent::partial") || !strings.Contains(got, "error::failed: boom") || m.busy || m.pendingMsgID != "" {
+		t.Fatalf("failure cleanup/transcript mismatch: %q busy=%t pending=%q", got, m.busy, m.pendingMsgID)
+	}
+}
+
 // TestSSEChatResponseDoneCompletedOutputFastPath verifies that when the
 // chat_response_done event carries a non-empty CompletedOutput, the model
 // displays the reply immediately without an extra HTTP round-trip.
