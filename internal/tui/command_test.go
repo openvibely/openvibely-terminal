@@ -376,6 +376,18 @@ func TestSuggestFiltersByPrefix(t *testing.T) {
 	}
 }
 
+func TestUnsupportedBuildCommandIsNotDiscoverable(t *testing.T) {
+	if cmd := lookupCommand("build"); cmd != nil {
+		t.Fatalf("unsupported build command is registered: %+v", cmd)
+	}
+	if got := suggest("build"); len(got) != 0 {
+		t.Fatalf("unsupported build command is suggested: %v", got)
+	}
+	if help := renderHelp(); strings.Contains(help, cmdPrefix+"build ") {
+		t.Fatalf("unsupported build command appears in help:\n%s", help)
+	}
+}
+
 func TestEveryCommandHasDescriptionAndRunner(t *testing.T) {
 	seen := map[string]bool{}
 	for _, c := range commands {

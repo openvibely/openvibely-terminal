@@ -2,8 +2,8 @@ package client
 
 // This file covers the remainder of the backend's swagger-documented JSON API
 // (docs/swagger.json in the openvibely repo): analytics, skill analytics,
-// capacity by model, workflow agent metrics, collision detection, autonomous
-// builds, lifecycle executions, and schedule toggling. Struct fields mirror
+// capacity by model, workflow agent metrics, collision detection, lifecycle
+// executions, and schedule toggling. Struct fields mirror
 // the swagger definitions (handler.*, models.*, repository.*, viewmodels.*).
 
 import (
@@ -294,15 +294,6 @@ func (c *Client) GetVoteRecords(ctx context.Context, stepExecID string) ([]VoteR
 		out = make([]VoteRecord, 0)
 	}
 	return out, nil
-}
-
-// --- Autonomous builds (/api/autonomous/*) ---
-
-// TriggerAutonomousBuild kicks off an autonomous build for a project. The
-// backend responds with an HTML fragment, so only success/failure is reported;
-// progress arrives on the live event stream.
-func (c *Client) TriggerAutonomousBuild(ctx context.Context, projectID string) error {
-	return c.postJSON(ctx, "/api/autonomous/trigger?project_id="+url.QueryEscape(projectID), nil, nil)
 }
 
 // --- Lifecycle executions (/api/tasks/:id/lifecycle-executions) ---

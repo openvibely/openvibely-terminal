@@ -1385,12 +1385,19 @@ func TestCLIBriefingCommandsRequireProjectWhenProjectListIsEmpty(t *testing.T) {
 }
 
 func TestCLIUnknownCommandFails(t *testing.T) {
-	c, _ := cliServer(t, nil)
+	for _, name := range []string{"frobnicate", "build", "/build"} {
+		t.Run(name, func(t *testing.T) {
+			c, rec := cliServer(t, nil)
 
-	var out bytes.Buffer
-	err := RunCLI(c, &out, "", []string{"frobnicate"}, false, false)
-	if err == nil || !strings.Contains(err.Error(), "unknown command") {
-		t.Fatalf("err = %v, want unknown command", err)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "", []string{name}, false, false)
+			if err == nil || !strings.Contains(err.Error(), "unknown command") {
+				t.Fatalf("err = %v, want unknown command", err)
+			}
+			if rec.saw("POST", "/api/autonomous/trigger") {
+				t.Fatalf("unsupported command made a backend request:\n%s", rec.all())
+			}
+		})
 	}
 }
 

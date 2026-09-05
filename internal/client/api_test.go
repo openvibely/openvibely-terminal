@@ -208,47 +208,31 @@ func TestGetVoteRecordsNormalizesEmptyJSONCollection(t *testing.T) {
 	}
 }
 
-func TestTriggerAutonomousBuild(t *testing.T) {
-	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/autonomous/trigger" {
-			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-		if got := r.URL.Query().Get("project_id"); got != "p1" {
-			t.Errorf("project_id = %q", got)
-		}
-		w.Write([]byte("<div>ok</div>")) // backend responds with HTML
-	}))
-
-	if err := c.TriggerAutonomousBuild(context.Background(), "p1"); err != nil {
-		t.Fatalf("TriggerAutonomousBuild: %v", err)
-	}
-}
-
 func TestPostJSONServerError(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]string{"error": "autonomous build service not available"})
+		json.NewEncoder(w).Encode(map[string]string{"error": "mutation service not available"})
 	}))
 
-	err := c.TriggerAutonomousBuild(context.Background(), "p1")
+	err := c.postJSON(context.Background(), "/test-mutation", nil, nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !contains(err.Error(), "autonomous build service not available") {
+	if !contains(err.Error(), "mutation service not available") {
 		t.Errorf("error = %v", err)
 	}
 }
 
 func TestPostJSONNonLoginRedirectIsNotAuthentication(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/autonomous/trigger" {
+		if r.Method != http.MethodPost || r.URL.Path != "/test-mutation" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
 		w.Header().Set("Location", "/after-mutation")
 		w.WriteHeader(http.StatusFound)
 	}))
 
-	err := c.TriggerAutonomousBuild(context.Background(), "p1")
+	err := c.postJSON(context.Background(), "/test-mutation", nil, nil)
 	if err == nil {
 		t.Fatal("expected non-login redirect error")
 	}
@@ -269,12 +253,12 @@ func TestPostJSONLoginResponsesAreAuthentication(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if tc.loginRedirect {
-					w.Header().Set("Location", "/login?next=%2Fapi%2Fautonomous%2Ftrigger")
+					w.Header().Set("Location", "/login?next=%2Ftest-mutation")
 				}
 				w.WriteHeader(tc.status)
 			}))
 
-			err := c.TriggerAutonomousBuild(context.Background(), "p1")
+			err := c.postJSON(context.Background(), "/test-mutation", nil, nil)
 			if err == nil || !IsAuthRequired(err) {
 				t.Fatalf("error = %v, want authentication-required", err)
 			}
@@ -291,7 +275,7 @@ func TestPostJSONNearLoginRedirectsAreNotAuthentication(t *testing.T) {
 				w.WriteHeader(http.StatusFound)
 			}))
 
-			err := c.TriggerAutonomousBuild(context.Background(), "p1")
+			err := c.postJSON(context.Background(), "/test-mutation", nil, nil)
 			if err == nil || IsAuthRequired(err) {
 				t.Fatalf("redirect %q error = %v, want ordinary mutation error", location, err)
 			}

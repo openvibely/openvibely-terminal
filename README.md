@@ -157,7 +157,6 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/project <name>` | | select the active project |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
 | `/login` | `signin`, `auth` | enter username and masked password; retry the session without restarting |
-| `/build` | | trigger an autonomous build |
 | `/events` | `stream`, `log` | interactive `on` / `off` display toggle; one-shot `events on` foreground monitor |
 | `/clear` | | clear the transcript |
 | `/help` | `?`, `commands` | `/help <command>` details one |
@@ -491,7 +490,6 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks`, `failed-task-patterns`, `skills` |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
-| Autonomous | `POST /api/autonomous/trigger` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |
 | Personality | `POST /personality/custom`, `GET/PUT/DELETE /personality/custom/:key` (JSON custom CRUD); `/personality` remains the scoped HTML list |
