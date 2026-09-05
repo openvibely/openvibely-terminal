@@ -243,7 +243,21 @@ func runCLIStreamingCommand(ctx context.Context, c *client.Client, out io.Writer
 	execID := strings.TrimSpace(accepted.ExecID)
 	acceptedID := firstNonEmpty(strings.TrimSpace(accepted.PendingInputID), execID)
 	if acceptedID == "" {
-		return true, errors.New("task reply failed: empty acknowledgement")
+		if hasImplicit && !jsonOutput {
+			writeScopedEntries(out, nil, implicit)
+		}
+		if jsonOutput {
+			return true, writeCLIExecutionRecord(out, cliExecutionRecord{
+				Type:      "accepted",
+				ProjectID: m.selectedID,
+				TaskID:    task.ID,
+				Status:    "accepted",
+			}, true)
+		}
+		if _, err := fmt.Fprintf(out, "sent to thread of %s\n", task.Title); err != nil {
+			return true, fmt.Errorf("writing task reply confirmation: %w", err)
+		}
+		return true, nil
 	}
 	status := func() (*client.ChatStatus, error) { return c.GetChatStatus(streamCtx, acceptedID) }
 	if execID == "" {

@@ -1906,6 +1906,61 @@ func TestCLIChatCancellationClosesExecutionStream(t *testing.T) {
 	}
 }
 
+func TestCLITaskReplySwarmParentAcceptedWithoutExecutionIdentity(t *testing.T) {
+	const board = `<div data-task-id="swarm-1" data-task-status="running" data-task-category="active"><a href="/tasks/swarm-1">Coordinate release</a></div>`
+	for _, jsonOutput := range []bool{false, true} {
+		name := "plain"
+		if jsonOutput {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			var posts, statusCalls, streamCalls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					fmt.Fprint(w, cliProjects)
+				case "/tasks":
+					fmt.Fprint(w, board)
+				case "/tasks/swarm-1/thread":
+					posts++
+					if r.URL.Query().Get("project_id") != "p1" || r.FormValue("message") != "continue coordination" {
+						t.Fatalf("thread request = %s form=%q", r.URL.String(), r.FormValue("message"))
+					}
+					fmt.Fprint(w, `<div><div>User: continue coordination</div><div>Assistant: Queued. This message will be sent to the model after the active response finishes.</div></div>`)
+				case "/api/chat/message/swarm-1":
+					statusCalls++
+				case "/events/chat/swarm-1":
+					streamCalls++
+				default:
+					t.Fatalf("unexpected request %s", r.URL.String())
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			var out bytes.Buffer
+			if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"tasks", "reply", "Coordinate release", "|", "continue coordination"}, false, jsonOutput); err != nil {
+				t.Fatalf("swarm parent reply failed after acceptance: %v", err)
+			}
+			if posts != 1 || statusCalls != 0 || streamCalls != 0 {
+				t.Fatalf("posts=%d status=%d streams=%d", posts, statusCalls, streamCalls)
+			}
+			if !jsonOutput {
+				if got := out.String(); got != "sent to thread of Coordinate release\n" {
+					t.Fatalf("plain output = %q", got)
+				}
+				return
+			}
+			var record cliExecutionRecord
+			if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &record); err != nil {
+				t.Fatalf("JSON output = %q: %v", out.String(), err)
+			}
+			if record.Type != "accepted" || record.ProjectID != "p1" || record.TaskID != "swarm-1" || record.ExecID != "" || record.Status != "accepted" {
+				t.Fatalf("record = %#v", record)
+			}
+		})
+	}
+}
+
 func TestCLITaskReplyStreamsScopedExecution(t *testing.T) {
 	const board = `<div data-task-id="task-1" data-task-status="running" data-task-category="active"><a href="/tasks/task-1">Fix stream</a></div>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
