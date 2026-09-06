@@ -1050,7 +1050,7 @@ func (p *lifecycleJSONPreview) appendStruct(value reflect.Value, depth int) erro
 			p.appendJSONString(field.name)
 			p.append(":")
 		}
-		if field.quoted {
+		if field.quoted && lifecycleJSONShouldQuote(fieldValue) {
 			if err := p.appendQuotedReflectValue(fieldValue); err != nil {
 				return err
 			}
@@ -1098,7 +1098,7 @@ func lifecycleStructFields(typeOf reflect.Type) []lifecycleStructField {
 			}
 			index := append(append([]int(nil), current.index...), i)
 			if name != "" || !field.Anonymous || fieldType.Kind() != reflect.Struct {
-				if field.IsExported() {
+				if field.IsExported() || (field.Anonymous && fieldType.Kind() == reflect.Struct) {
 					if name == "" {
 						name = field.Name
 					}
@@ -1216,14 +1216,29 @@ func lifecycleJSONCanQuote(typeOf reflect.Type) bool {
 	for typeOf.Kind() == reflect.Pointer {
 		typeOf = typeOf.Elem()
 	}
-	if typeOf.Implements(reflect.TypeFor[json.Marshaler]()) || typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
-		reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
-		return false
-	}
 	return typeOf.Kind() == reflect.Bool || typeOf.Kind() == reflect.String ||
 		(typeOf.Kind() >= reflect.Int && typeOf.Kind() <= reflect.Int64) ||
 		(typeOf.Kind() >= reflect.Uint && typeOf.Kind() <= reflect.Uintptr) ||
 		typeOf.Kind() == reflect.Float32 || typeOf.Kind() == reflect.Float64
+}
+
+func lifecycleJSONShouldQuote(value reflect.Value) bool {
+	jsonMarshalerType := reflect.TypeFor[json.Marshaler]()
+	textMarshalerType := reflect.TypeFor[encoding.TextMarshaler]()
+	for {
+		if value.CanAddr() && value.Addr().CanInterface() &&
+			(value.Addr().Type().Implements(jsonMarshalerType) || value.Addr().Type().Implements(textMarshalerType)) {
+			return false
+		}
+		if value.CanInterface() &&
+			(value.Type().Implements(jsonMarshalerType) || value.Type().Implements(textMarshalerType)) {
+			return false
+		}
+		if value.Kind() != reflect.Pointer || value.IsNil() {
+			return true
+		}
+		value = value.Elem()
+	}
 }
 
 func lifecycleJSONEmptyValue(value reflect.Value) bool {

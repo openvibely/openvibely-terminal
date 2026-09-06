@@ -727,6 +727,26 @@ type lifecyclePreviewOuterWithUnexportedEmbedded struct {
 	lifecyclePreviewUnexportedEmbedded
 }
 
+type lifecyclePreviewTaggedUnexported struct {
+	Visible int `json:"visible"`
+}
+
+type lifecyclePreviewOuterWithTaggedUnexported struct {
+	lifecyclePreviewTaggedUnexported `json:"named"`
+}
+
+type lifecyclePreviewPointerJSONInt int
+
+func (*lifecyclePreviewPointerJSONInt) MarshalJSON() ([]byte, error) {
+	return []byte(`"json-method"`), nil
+}
+
+type lifecyclePreviewPointerTextInt int
+
+func (*lifecyclePreviewPointerTextInt) MarshalText() ([]byte, error) {
+	return []byte("text-method"), nil
+}
+
 type lifecyclePreviewCustomZero struct {
 	Empty bool
 	Value string
@@ -900,6 +920,38 @@ func TestLifecyclePayloadSummaryCopiesSharedTextKeyStorage(t *testing.T) {
 	}
 	if calls != len(values) {
 		t.Fatalf("shared-key-storage MarshalText calls = %d, want %d", calls, len(values))
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesTaggedUnexportedAnonymousField(t *testing.T) {
+	payload := map[string]any{"value": lifecyclePreviewOuterWithTaggedUnexported{
+		lifecyclePreviewTaggedUnexported: lifecyclePreviewTaggedUnexported{Visible: 7},
+	}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal tagged unexported anonymous fixture: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("tagged unexported anonymous preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesNonAddressableQuotedPointerMethodFields(t *testing.T) {
+	type fields struct {
+		JSON lifecyclePreviewPointerJSONInt `json:"json,string"`
+		Text lifecyclePreviewPointerTextInt `json:"text,string"`
+	}
+	for _, payload := range []map[string]any{
+		{"value": fields{JSON: 7, Text: 8}},
+		{"items": []fields{{JSON: 7, Text: 8}}},
+	} {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal quoted pointer-method fixture: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Fatalf("quoted pointer-method preview = %q, want %q", got, want)
+		}
 	}
 }
 
