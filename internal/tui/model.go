@@ -1566,7 +1566,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.invalidateSSE()
 		m.advanceSessionGeneration()
-		m.finishLogin()
+		m.resetLoginForm()
 		m.busy = false
 		m.authRequired = false
 		m.connected = false
@@ -1712,7 +1712,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) finishLogin() {
+func (m *Model) resetLoginForm() {
 	m.loginActive = false
 	m.loginPassword = false
 	m.loginSubmitting = false
@@ -1728,18 +1728,8 @@ func (m *Model) finishLogin() {
 
 func (m *Model) cancelLogin() tea.Cmd {
 	resumeSSE := m.loginResumeSSE
-	m.loginActive = false
-	m.loginPassword = false
-	m.loginSubmitting = false
-	m.loginUsername = ""
-	m.loginResumeSSE = false
+	m.resetLoginForm()
 	m.busy = false
-	m.input.SetValue("")
-	m.input.Prompt = m.loginRestorePrompt
-	m.input.Placeholder = m.loginRestorePlaceholder
-	m.input.EchoMode = m.loginRestoreEchoMode
-	m.input.Focus()
-	m.menu = nil
 	m.append(entry{role: "system", text: "sign-in cancelled"})
 	if resumeSSE {
 		return m.connectSSE()
