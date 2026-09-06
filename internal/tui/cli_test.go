@@ -3309,6 +3309,86 @@ func TestCLIJSONTaskReviewsList(t *testing.T) {
 	}
 }
 
+func TestCLITaskReviewsPreserveMultilineOutput(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	</div>`
+	const reviews = `<div id="review-comments-list" data-task-id="t-1" data-comment-count="1">
+		<div class="review-comment-item" data-comment-id="rc-1" data-file-path="internal/client/tasks.go" data-line-number="42" data-line-type="new" data-state="open">
+			<div><span>alice</span><p>
+First &amp; second
+
+Third<br>Fourth &#27;[31mred&#27;[0m
+			</p></div>
+		</div>
+	</div>`
+	wantComment := "First & second\n\nThird\nFourth \x1b[31mred\x1b[0m"
+
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		jsonMode bool
+		want     string
+	}{
+		{
+			name:     "list JSON",
+			args:     []string{"tasks", "reviews", "t-1"},
+			jsonMode: true,
+			want:     `[{"id":"rc-1","task_id":"t-1","file_path":"internal/client/tasks.go","line_number":42,"line_type":"new","comment_text":"First \u0026 second\n\nThird\nFourth \u001b[31mred\u001b[0m","reviewed_by":"alice","state":"open"}]`,
+		},
+		{
+			name:     "add JSON",
+			args:     []string{"tasks", "reviews", "add", "t-1", "internal/client/tasks.go:42", wantComment},
+			jsonMode: true,
+			want:     `{"id":"rc-1","task_id":"t-1","file_path":"internal/client/tasks.go","line_number":42,"line_type":"new","comment_text":"First \u0026 second\n\nThird\nFourth \u001b[31mred\u001b[0m","reviewed_by":"alice","state":"open"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := cliServer(t, map[string]string{
+				"/api/projects":      cliProjects,
+				"/tasks":             board,
+				"/tasks/t-1/reviews": reviews,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, tc.jsonMode); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(out.String()); got != tc.want {
+				t.Errorf("output = %q\nwant   = %q", got, tc.want)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "list plain", args: []string{"tasks", "reviews", "t-1"}},
+		{name: "add plain", args: []string{"tasks", "reviews", "add", "t-1", "internal/client/tasks.go:42", wantComment}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := cliServer(t, map[string]string{
+				"/api/projects":      cliProjects,
+				"/tasks":             board,
+				"/tasks/t-1/reviews": reviews,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			plain := stripANSI(out.String())
+			for _, want := range []string{"alice: First & second", "\n\n", "Third", "Fourth red"} {
+				if !strings.Contains(plain, want) {
+					t.Errorf("plain output missing %q:\n%s", want, plain)
+				}
+			}
+			if strings.ContainsRune(plain, '\x1b') {
+				t.Errorf("plain output retained backend terminal escape: %q", plain)
+			}
+		})
+	}
+}
+
 func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing.T) {
 	paths := []struct {
 		name string

@@ -542,9 +542,9 @@ func renderTaskDetailLoadFailure(label string, err error) string {
 
 func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
 	var b strings.Builder
-	title := firstNonEmpty(t.Title, shortID(t.ID))
-	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(t.Status))
-	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · review", t.ID)))
+	title := sanitizeMemoryText(firstNonEmpty(t.Title, shortID(t.ID)))
+	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(sanitizeMemoryText(t.Status)))
+	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · review", sanitizeMemoryText(t.ID))))
 	if len(reviews) == 0 {
 		b.WriteString(dimStyle.Render("no review comments yet — /tasks reviews add <task> <file>:<line> <comment>"))
 		return b.String()
@@ -556,29 +556,35 @@ func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
 		if r.LineNumber > 0 {
 			line = fmt.Sprintf("%d", r.LineNumber)
 		}
-		if r.LineType != "" {
-			line += " " + r.LineType
+		if lineType := sanitizeMemoryText(r.LineType); lineType != "" {
+			line += " " + lineType
 		}
 		state := reviewState(r)
-		comment := r.CommentText
-		if r.ReviewedBy != "" {
-			comment = r.ReviewedBy + ": " + comment
+		comment := sanitizeMemoryText(r.CommentText)
+		if reviewedBy := sanitizeMemoryText(r.ReviewedBy); reviewedBy != "" {
+			comment = reviewedBy + ": " + comment
 		}
-		rows = append(rows, []string{truncate(r.FilePath, 32), line, state, truncate(comment, 72)})
+		commentLines := strings.Split(comment, "\n")
+		for i := range commentLines {
+			commentLines[i] = truncate(commentLines[i], 72)
+		}
+		comment = strings.Join(commentLines, "\n")
+		rows = append(rows, []string{truncate(sanitizeMemoryText(r.FilePath), 32), line, state, comment})
 	}
 	b.WriteString(table(rows))
 	return b.String()
 }
 
 func reviewState(r client.ReviewComment) string {
+	state := sanitizeMemoryText(r.State)
 	if r.Resolved {
-		if r.State != "" {
-			return statusOKStyle.Render("resolved " + r.State)
+		if state != "" {
+			return statusOKStyle.Render("resolved " + state)
 		}
 		return statusOKStyle.Render("resolved")
 	}
-	if r.State != "" {
-		return statusMark(r.State)
+	if state != "" {
+		return statusMark(state)
 	}
 	return dimStyle.Render("—")
 }

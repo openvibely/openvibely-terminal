@@ -367,6 +367,37 @@ func cardBadges(card *html.Node) []string {
 	return out
 }
 
+// reviewCommentText preserves the author's formatting while ignoring HTML that
+// cannot contribute visible review text. Unlike NodeText, it deliberately keeps
+// text-node whitespace and emits one newline for each explicit br boundary.
+func reviewCommentText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		switch node.Type {
+		case html.TextNode:
+			b.WriteString(node.Data)
+			return
+		case html.ElementNode:
+			if skippedTags[node.Data] {
+				return
+			}
+			if node.Data == "br" {
+				b.WriteByte('\n')
+				return
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(n)
+	return strings.TrimSpace(b.String())
+}
+
 // parseReviewComments extracts review comments from the backend's HTMX fragment.
 func parseReviewComments(root *html.Node, taskID string) []ReviewComment {
 	nodes := findAll(root, func(e *html.Node) bool {
@@ -377,7 +408,7 @@ func parseReviewComments(root *html.Node, taskID string) []ReviewComment {
 		lineNumber, _ := strconv.Atoi(attr(n, "data-line-number"))
 		text := ""
 		if p := findNode(n, func(e *html.Node) bool { return e.Data == "p" }); p != nil {
-			text = strings.TrimSpace(NodeText(p))
+			text = reviewCommentText(p)
 		}
 		reviewedBy := attr(n, "data-reviewed-by")
 		if reviewedBy == "" {
