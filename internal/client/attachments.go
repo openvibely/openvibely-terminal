@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -95,18 +96,9 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 		return nil, fmt.Errorf("at least one attachment file is required")
 	}
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
 	requestedNames := make([]string, 0, len(filePaths))
 	for _, path := range filePaths {
 		requestedNames = append(requestedNames, filepath.Base(strings.TrimSpace(path)))
-		if err := appendMultipartFile(writer, path); err != nil {
-			_ = writer.Close()
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("closing attachment upload: %w", err)
 	}
 
 	before, err := c.ListTaskAttachments(ctx, taskID, projectID)
@@ -114,10 +106,18 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 		return nil, fmt.Errorf("checking existing task attachments: %w", err)
 	}
 
-	path := "/tasks/" + url.PathEscape(taskID) + "/attachments" + query("project_id", projectID)
-	root, err := c.doMultipartHTML(ctx, http.MethodPost, path, &body, writer.FormDataContentType())
+	body, err := newAttachmentMultipartBody(filePaths)
 	if err != nil {
 		return nil, err
+	}
+	path := "/tasks/" + url.PathEscape(taskID) + "/attachments" + query("project_id", projectID)
+	root, requestErr := c.doMultipartHTML(ctx, http.MethodPost, path, body, body.ContentType())
+	closeErr := body.Close()
+	if requestErr != nil {
+		return nil, requestErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
 	}
 	attachments, err := parseAttachmentMutationResponse(root, "upload attachments", projectID)
 	if err != nil {
@@ -198,37 +198,146 @@ func (c *Client) DeleteAttachment(ctx context.Context, attachmentID, projectID s
 	return c.DeleteTaskAttachment(ctx, attachmentID, projectID)
 }
 
-func appendMultipartFile(writer *multipart.Writer, path string) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fmt.Errorf("attachment file path is required")
+type attachmentFile interface {
+	io.Reader
+	io.Closer
+	Stat() (os.FileInfo, error)
+}
+
+var openAttachmentFile = func(path string) (attachmentFile, error) {
+	return os.Open(path)
+}
+
+type attachmentMultipartBody struct {
+	paths         []string
+	files         []attachmentFile
+	headers       [][]byte
+	trailer       []byte
+	contentType   string
+	contentLength int64
+	index         int
+	headerOffset  int
+	trailerOffset int
+	closed        bool
+}
+
+func newAttachmentMultipartBody(paths []string) (*attachmentMultipartBody, error) {
+	body := &attachmentMultipartBody{
+		paths: append([]string(nil), paths...),
+		files: make([]attachmentFile, len(paths)),
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open attachment %q: %w", path, err)
-	}
-	info, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return fmt.Errorf("stat attachment %q: %w", path, err)
-	}
-	if info.IsDir() {
-		_ = file.Close()
-		return fmt.Errorf("attachment %q is a directory", path)
+	fileSizes := make([]int64, len(paths))
+	for i, rawPath := range paths {
+		path := strings.TrimSpace(rawPath)
+		if path == "" {
+			_ = body.Close()
+			return nil, fmt.Errorf("attachment file path is required")
+		}
+		file, err := openAttachmentFile(path)
+		if err != nil {
+			_ = body.Close()
+			return nil, fmt.Errorf("open attachment %q: %w", path, err)
+		}
+		info, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			_ = body.Close()
+			return nil, fmt.Errorf("stat attachment %q: %w", path, err)
+		}
+		if info.IsDir() {
+			_ = file.Close()
+			_ = body.Close()
+			return nil, fmt.Errorf("attachment %q is a directory", path)
+		}
+		body.files[i] = file
+		fileSizes[i] = info.Size()
 	}
 
-	part, err := writer.CreateFormFile("files", filepath.Base(path))
-	if err == nil {
-		_, err = io.Copy(part, file)
+	var encoded bytes.Buffer
+	writer := multipart.NewWriter(&encoded)
+	body.headers = make([][]byte, 0, len(paths))
+	body.contentType = writer.FormDataContentType()
+	previous := 0
+	for i, path := range paths {
+		if _, err := writer.CreateFormFile("files", filepath.Base(strings.TrimSpace(path))); err != nil {
+			_ = body.Close()
+			return nil, err
+		}
+		header := append([]byte(nil), encoded.Bytes()[previous:]...)
+		body.headers = append(body.headers, header)
+		body.contentLength += int64(len(header)) + fileSizes[i]
+		previous = encoded.Len()
 	}
-	closeErr := file.Close()
-	if err != nil {
-		return fmt.Errorf("read attachment %q: %w", path, err)
+	if err := writer.Close(); err != nil {
+		_ = body.Close()
+		return nil, fmt.Errorf("closing attachment upload: %w", err)
 	}
-	if closeErr != nil {
-		return fmt.Errorf("close attachment %q: %w", path, closeErr)
+	body.trailer = append([]byte(nil), encoded.Bytes()[previous:]...)
+	body.contentLength += int64(len(body.trailer))
+	return body, nil
+}
+
+func (b *attachmentMultipartBody) ContentType() string  { return b.contentType }
+func (b *attachmentMultipartBody) ContentLength() int64 { return b.contentLength }
+
+func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
+	if b.closed {
+		return 0, io.EOF
 	}
-	return nil
+	for b.index < len(b.paths) {
+		path := strings.TrimSpace(b.paths[b.index])
+		if b.headerOffset < len(b.headers[b.index]) {
+			n := copy(p, b.headers[b.index][b.headerOffset:])
+			b.headerOffset += n
+			return n, nil
+		}
+
+		n, readErr := b.files[b.index].Read(p)
+		if readErr == nil {
+			if n == 0 {
+				continue
+			}
+			return n, nil
+		}
+		closeErr := b.files[b.index].Close()
+		b.files[b.index] = nil
+		if !errors.Is(readErr, io.EOF) {
+			return n, fmt.Errorf("read attachment %q: %w", path, readErr)
+		}
+		if closeErr != nil {
+			return n, fmt.Errorf("close attachment %q: %w", path, closeErr)
+		}
+		b.index++
+		b.headerOffset = 0
+		if n > 0 {
+			return n, nil
+		}
+	}
+	if b.trailerOffset < len(b.trailer) {
+		n := copy(p, b.trailer[b.trailerOffset:])
+		b.trailerOffset += n
+		return n, nil
+	}
+	b.closed = true
+	return 0, io.EOF
+}
+
+func (b *attachmentMultipartBody) Close() error {
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	var firstErr error
+	for i, file := range b.files {
+		if file == nil {
+			continue
+		}
+		if err := file.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("close attachment %q: %w", strings.TrimSpace(b.paths[i]), err)
+		}
+		b.files[i] = nil
+	}
+	return firstErr
 }
 
 func (c *Client) doMultipartHTML(ctx context.Context, method, path string, body io.Reader, contentType string) (*html.Node, error) {
