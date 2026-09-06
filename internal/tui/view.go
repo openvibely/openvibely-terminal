@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -683,11 +684,172 @@ func lifecyclePayloadSummary(payload map[string]any) string {
 	if len(payload) == 0 {
 		return "—"
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
+	preview := lifecycleJSONPreview{limit: 96}
+	if err := preview.appendValue(payload, 0); err != nil {
 		return "<unavailable>"
 	}
-	return truncate(string(encoded), 96)
+	return truncate(preview.buf.String(), preview.limit)
+}
+
+const (
+	lifecyclePreviewMaxObjectKeys = 256
+	lifecyclePreviewMaxKeyBytes   = 4096
+	lifecyclePreviewMaxDepth      = 128
+)
+
+// lifecycleJSONPreview emits the same bytes as encoding/json for decoded JSON
+// values, but stops as soon as the visible preview is known to be truncated.
+// This keeps large scalar and deeply nested payload work independent of their
+// full size while retaining canonical map-key order and escaping.
+type lifecycleJSONPreview struct {
+	buf     strings.Builder
+	limit   int
+	stopped bool
+}
+
+func (p *lifecycleJSONPreview) append(s string) {
+	if p.stopped || s == "" {
+		return
+	}
+	p.buf.WriteString(s)
+	p.stopped, _ = displayWidthExceeds(p.buf.String(), p.limit)
+}
+
+func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
+	if p.stopped {
+		return nil
+	}
+	if depth > lifecyclePreviewMaxDepth {
+		return fmt.Errorf("lifecycle payload nesting exceeds preview limit")
+	}
+
+	switch value := value.(type) {
+	case nil:
+		p.append("null")
+	case bool:
+		if value {
+			p.append("true")
+		} else {
+			p.append("false")
+		}
+	case string:
+		p.appendJSONString(value)
+	case map[string]any:
+		if len(value) > lifecyclePreviewMaxObjectKeys {
+			return fmt.Errorf("lifecycle payload object exceeds preview limit")
+		}
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			if len(key) > lifecyclePreviewMaxKeyBytes {
+				return fmt.Errorf("lifecycle payload key exceeds preview limit")
+			}
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		p.append("{")
+		for i, key := range keys {
+			if p.stopped {
+				break
+			}
+			if i > 0 {
+				p.append(",")
+			}
+			p.appendJSONString(key)
+			p.append(":")
+			if err := p.appendValue(value[key], depth+1); err != nil {
+				return err
+			}
+		}
+		p.append("}")
+	case []any:
+		p.append("[")
+		for i, item := range value {
+			if p.stopped {
+				break
+			}
+			if i > 0 {
+				p.append(",")
+			}
+			if err := p.appendValue(item, depth+1); err != nil {
+				return err
+			}
+		}
+		p.append("]")
+	case float64, float32,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64, uintptr,
+		json.Number:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		p.append(string(encoded))
+	default:
+		return fmt.Errorf("unsupported lifecycle payload value %T", value)
+	}
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendJSONString(value string) {
+	p.append(`"`)
+	for len(value) > 0 && !p.stopped {
+		plain := 0
+		for plain < len(value) && plain <= p.limit {
+			char := value[plain]
+			if char >= utf8.RuneSelf || char < 0x20 || char == '\\' || char == '"' || char == '<' || char == '>' || char == '&' {
+				break
+			}
+			plain++
+		}
+		if plain > 0 {
+			// An ASCII run needs at most limit+1 bytes to prove truncation.
+			emit := min(plain, p.limit+1)
+			p.append(value[:emit])
+			value = value[plain:]
+			continue
+		}
+		if value[0] < utf8.RuneSelf {
+			char := value[0]
+			value = value[1:]
+			switch char {
+			case '\\', '"':
+				p.append("\\" + string(char))
+			case '\b':
+				p.append(`\b`)
+			case '\f':
+				p.append(`\f`)
+			case '\n':
+				p.append(`\n`)
+			case '\r':
+				p.append(`\r`)
+			case '\t':
+				p.append(`\t`)
+			case '<', '>', '&':
+				p.append(fmt.Sprintf(`\u%04x`, char))
+			default:
+				if char < 0x20 {
+					p.append(fmt.Sprintf(`\u%04x`, char))
+				} else {
+					p.append(string(char))
+				}
+			}
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 {
+			p.append(`\ufffd`)
+			value = value[1:]
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			p.append(fmt.Sprintf(`\u%04x`, r))
+		} else {
+			p.append(value[:size])
+		}
+		value = value[size:]
+	}
+	p.append(`"`)
 }
 
 // renderThread shows a task's conversation, falling back to the details tab

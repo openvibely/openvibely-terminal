@@ -3154,6 +3154,40 @@ func TestCLILifecycleJSONExecutionsPreserveFieldsAndOrder(t *testing.T) {
 	}
 }
 
+func TestCLILifecycleJSONLargePayloadIsComplete(t *testing.T) {
+	message := strings.Repeat("日本語<&", 1<<15)
+	events, err := json.Marshal([]client.LifecycleEvent{{
+		ID:        "event-1",
+		Seq:       1,
+		EventType: "completed",
+		Payload:   map[string]any{"message": message, "nested": map[string]any{"ok": true}},
+	}})
+	if err != nil {
+		t.Fatalf("marshal lifecycle fixture: %v", err)
+	}
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":                           cliProjects,
+		"/tasks":                                  `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions":     `[{"id":"exec-1","status":"completed"}]`,
+		"/api/lifecycle-executions/exec-1/events": string(events),
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1", "exec-1"}, false, true); err != nil {
+		t.Fatalf("large lifecycle --json failed: %v", err)
+	}
+	var decoded []client.LifecycleEvent
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &decoded); err != nil {
+		t.Fatalf("decode lifecycle JSON: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("raw lifecycle JSON event count = %d, want 1", len(decoded))
+	}
+	if got := fmt.Sprint(decoded[0].Payload["message"]); got != message {
+		t.Fatalf("raw lifecycle JSON payload was truncated: message length=%d, want %d", len(got), len(message))
+	}
+}
+
 func TestCLILifecycleJSONEmptyEventsIsArray(t *testing.T) {
 	c, _ := cliServer(t, map[string]string{
 		"/api/projects":                           cliProjects,
