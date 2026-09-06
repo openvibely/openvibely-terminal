@@ -341,13 +341,27 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 			strings.Repeat("k", size) + "a": float64(1),
 			strings.Repeat("k", size) + "b": float64(2),
 		}
+	case "decoded_wide_map":
+		values := make(map[string]any, max(1, size/16))
+		for i := 0; i < max(1, size/16); i++ {
+			values[fmt.Sprintf("key-%08d", i)] = float64(i)
+		}
+		return values
+	case "many_text_keys":
+		keyCount := 128
+		keySize := max(1, size/keyCount)
+		values := make(map[lifecyclePreviewTextKey]bool, keyCount)
+		for i := range keyCount {
+			values[lifecyclePreviewTextKey(fmt.Sprintf("%s-%03d", strings.Repeat("k", keySize), i))] = i%2 == 0
+		}
+		return map[string]any{"value": values}
 	default:
 		return map[string]any{"message": value, "status": "completed"}
 	}
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "decoded_wide_map", "many_text_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -633,6 +647,20 @@ func (value lifecyclePreviewTextIntKey) MarshalText() ([]byte, error) {
 	return []byte(fmt.Sprintf("key-%d", value)), nil
 }
 
+type lifecyclePreviewCycleNode struct {
+	Next *lifecyclePreviewCycleNode `json:"next,omitempty"`
+	Text string                     `json:"text,omitempty"`
+}
+
+type lifecyclePreviewCustomZero struct {
+	Empty bool
+	Value string
+}
+
+func (value lifecyclePreviewCustomZero) IsZero() bool {
+	return value.Empty
+}
+
 func (value lifecyclePreviewCountingMarshaler) MarshalJSON() ([]byte, error) {
 	*value.Calls++
 	return json.Marshal(map[string]string{"custom": value.Value})
@@ -640,6 +668,76 @@ func (value lifecyclePreviewCountingMarshaler) MarshalJSON() ([]byte, error) {
 
 func (value lifecyclePreviewMarshaler) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]string{"custom": string(value)})
+}
+
+func TestLifecyclePayloadSummaryBoundsDecodedWideMaps(t *testing.T) {
+	wide := make(map[string]any, 1<<16)
+	for i := range 1 << 16 {
+		wide[fmt.Sprintf("key-%08d", i)] = float64(i)
+	}
+	encoded, err := json.Marshal(wide)
+	if err != nil {
+		t.Fatalf("marshal decoded wide map: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(wide), truncate(string(encoded), 96); got != want {
+		t.Fatalf("decoded wide-map preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryValidatesLateCycles(t *testing.T) {
+	cycle := &lifecyclePreviewCycleNode{}
+	cycle.Next = cycle
+	cycleSlice := make([]any, 1)
+	cycleSlice[0] = cycleSlice
+	for _, items := range []any{
+		[]*lifecyclePreviewCycleNode{{Text: strings.Repeat("x", 1<<20)}, cycle},
+		[]any{strings.Repeat("x", 1<<20), cycleSlice},
+	} {
+		payload := map[string]any{"items": items}
+		if _, err := json.Marshal(payload); err == nil {
+			t.Fatal("cyclic fixture unexpectedly marshaled")
+		}
+		if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+			t.Fatalf("late cyclic value preview = %q, want unavailable", got)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesOmitZeroAndIndirectQuotedPointers(t *testing.T) {
+	var inner *int
+	outer := &inner
+	payload := map[string]any{"value": struct {
+		Omitted lifecyclePreviewCustomZero `json:"omitted,omitzero"`
+		Kept    lifecyclePreviewCustomZero `json:"kept,omitzero"`
+		Quoted  **int                      `json:"quoted,string"`
+	}{
+		Omitted: lifecyclePreviewCustomZero{Empty: true, Value: "ignored"},
+		Kept:    lifecyclePreviewCustomZero{Value: "visible"},
+		Quoted:  outer,
+	}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal omitzero fixture: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("omitzero/indirect quoted preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesManyOversizedTextKeys(t *testing.T) {
+	keys := make(map[lifecyclePreviewTextKey]bool, 256)
+	prefix := strings.Repeat("k", 1<<16)
+	for i := range 256 {
+		keys[lifecyclePreviewTextKey(fmt.Sprintf("%s-%03d", prefix, i))] = i%2 == 0
+	}
+	payload := map[string]any{"value": keys}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal oversized text-key fixture: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("oversized text-key preview = %q, want %q", got, want)
+	}
 }
 
 func TestLifecyclePayloadSummaryPreservesPointerReceiverSliceMarshalers(t *testing.T) {

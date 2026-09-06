@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -711,11 +712,18 @@ const (
 // lifecycleJSONPreview emits the same bytes as encoding/json for ordinary
 // values, but retains only a bounded canonical prefix for oversized values.
 type lifecycleJSONPreview struct {
-	buf        strings.Builder
-	limit      int
-	asciiCells int
-	stopped    bool
-	byteCapped bool
+	buf          strings.Builder
+	limit        int
+	asciiCells   int
+	stopped      bool
+	byteCapped   bool
+	indirections int
+	active       map[lifecyclePreviewVisit]bool
+}
+
+type lifecyclePreviewVisit struct {
+	typeOf  reflect.Type
+	pointer uintptr
 }
 
 // append tracks printable JSON ASCII incrementally. Non-ASCII text is retained
@@ -756,9 +764,72 @@ func (p *lifecycleJSONPreview) result() string {
 	return truncate(result, p.limit)
 }
 
+func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth int) error {
+	if value == nil {
+		p.append("null")
+		return nil
+	}
+	mapValue := reflect.ValueOf(value)
+	leave, err := p.enterReference(mapValue)
+	if err != nil {
+		return err
+	}
+	if leave != nil {
+		defer leave()
+	}
+
+	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
+	for key := range value {
+		keys = lifecycleInsertPreviewMapKey(keys, lifecyclePreviewMapKey{textString: key}, p.limit+1)
+	}
+	p.append("{")
+	selected := make(map[string]struct{}, len(keys))
+	for i, key := range keys {
+		selected[key.textString] = struct{}{}
+		if !p.stopped {
+			if i > 0 {
+				p.append(",")
+			}
+			p.appendJSONString(key.textString)
+			p.append(":")
+		}
+		if err := p.appendValue(value[key.textString], depth+1); err != nil {
+			return err
+		}
+	}
+	for key, item := range value {
+		if _, ok := selected[key]; ok {
+			continue
+		}
+		if err := p.appendValue(item, depth+1); err != nil {
+			return err
+		}
+	}
+	p.append("}")
+	return nil
+}
+
 func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
 	if depth >= lifecyclePreviewMaxDepth {
 		return fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
+	}
+	if p.stopped {
+		switch value := value.(type) {
+		case nil, bool, string,
+			int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64, uintptr:
+			return nil
+		case float64:
+			if math.IsInf(value, 0) || math.IsNaN(value) {
+				return fmt.Errorf("unsupported lifecycle payload float value")
+			}
+			return nil
+		case float32:
+			if math.IsInf(float64(value), 0) || math.IsNaN(float64(value)) {
+				return fmt.Errorf("unsupported lifecycle payload float value")
+			}
+			return nil
+		}
 	}
 
 	switch value := value.(type) {
@@ -773,46 +844,9 @@ func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
 	case string:
 		p.appendJSONString(value)
 	case map[string]any:
-		if value == nil {
-			p.append("null")
-			return nil
-		}
-		keys := make([]string, 0, len(value))
-		for key := range value {
-			keys = append(keys, key)
-		}
-		sort.Slice(keys, func(i, j int) bool {
-			return boundedLifecycleKeyLess(keys[i], keys[j])
-		})
-		p.append("{")
-		for i, key := range keys {
-			if !p.stopped {
-				if i > 0 {
-					p.append(",")
-				}
-				p.appendJSONString(key)
-				p.append(":")
-			}
-			if err := p.appendValue(value[key], depth+1); err != nil {
-				return err
-			}
-		}
-		p.append("}")
+		return p.appendStringAnyMap(value, depth)
 	case []any:
-		if value == nil {
-			p.append("null")
-			return nil
-		}
-		p.append("[")
-		for i, item := range value {
-			if !p.stopped && i > 0 {
-				p.append(",")
-			}
-			if err := p.appendValue(item, depth+1); err != nil {
-				return err
-			}
-		}
-		p.append("]")
+		return p.appendReflectValue(reflect.ValueOf(value), depth)
 	case float64, float32,
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64, uintptr,
@@ -844,30 +878,68 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 		p.append("null")
 		return nil
 	}
+	if value.Kind() == reflect.Interface {
+		if p.indirections >= lifecyclePreviewMaxDepth {
+			return fmt.Errorf("lifecycle payload indirection exceeds preview limit")
+		}
+		p.indirections++
+		defer func() { p.indirections-- }()
+		return p.appendReflectValue(value.Elem(), depth)
+	}
+	if value.Type() == reflect.TypeFor[json.Number]() {
+		return p.appendMarshaled(value.Interface())
+	}
 
 	marshalValue := value
 	if value.CanAddr() && value.Addr().CanInterface() {
-		address := value.Addr().Interface()
-		if _, ok := address.(json.Marshaler); ok {
-			return p.appendJSONMarshaler(address.(json.Marshaler))
+		addressType := value.Addr().Type()
+		if addressType.Implements(reflect.TypeFor[json.Marshaler]()) {
+			return p.appendJSONMarshaler(value.Addr().Interface().(json.Marshaler))
 		}
-		if _, ok := address.(encoding.TextMarshaler); ok {
-			return p.appendTextMarshaler(address.(encoding.TextMarshaler))
+		if addressType.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+			return p.appendTextMarshaler(value.Addr().Interface().(encoding.TextMarshaler))
 		}
 	}
 	if value.CanInterface() {
-		concrete := value.Interface()
-		if marshaler, ok := concrete.(json.Marshaler); ok {
-			return p.appendJSONMarshaler(marshaler)
+		if value.Type().Implements(reflect.TypeFor[json.Marshaler]()) {
+			return p.appendJSONMarshaler(value.Interface().(json.Marshaler))
 		}
-		if marshaler, ok := concrete.(encoding.TextMarshaler); ok {
-			return p.appendTextMarshaler(marshaler)
+		if value.Type().Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+			return p.appendTextMarshaler(value.Interface().(encoding.TextMarshaler))
 		}
+	}
+
+	if p.stopped {
+		switch value.Kind() {
+		case reflect.String, reflect.Bool,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			return nil
+		case reflect.Float32, reflect.Float64:
+			float := value.Float()
+			if math.IsInf(float, 0) || math.IsNaN(float) {
+				return fmt.Errorf("unsupported lifecycle payload float value")
+			}
+			return nil
+		}
+	}
+
+	leave, err := p.enterReference(value)
+	if err != nil {
+		return err
+	}
+	if leave != nil {
+		defer leave()
 	}
 
 	switch value.Kind() {
 	case reflect.Interface, reflect.Pointer:
-		return p.appendReflectValue(value.Elem(), depth+1)
+		if p.indirections >= lifecyclePreviewMaxDepth {
+			return fmt.Errorf("lifecycle payload indirection exceeds preview limit")
+		}
+		p.indirections++
+		defer func() { p.indirections-- }()
+		return p.appendReflectValue(value.Elem(), depth)
 	case reflect.String:
 		p.appendJSONString(value.String())
 		return nil
@@ -917,10 +989,32 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 	}
 }
 
+func (p *lifecycleJSONPreview) enterReference(value reflect.Value) (func(), error) {
+	switch value.Kind() {
+	case reflect.Map, reflect.Pointer, reflect.Slice:
+	default:
+		return nil, nil
+	}
+	pointer := uintptr(value.UnsafePointer())
+	if pointer == 0 {
+		return nil, nil
+	}
+	visit := lifecyclePreviewVisit{typeOf: value.Type(), pointer: pointer}
+	if p.active[visit] {
+		return nil, fmt.Errorf("lifecycle payload contains a cycle")
+	}
+	if p.active == nil {
+		p.active = make(map[lifecyclePreviewVisit]bool)
+	}
+	p.active[visit] = true
+	return func() { delete(p.active, visit) }, nil
+}
+
 type lifecycleStructField struct {
 	name      string
 	index     []int
 	omitEmpty bool
+	omitZero  bool
 	quoted    bool
 	tagged    bool
 }
@@ -932,7 +1026,8 @@ func (p *lifecycleJSONPreview) appendStruct(value reflect.Value, depth int) erro
 	written := 0
 	for _, field := range lifecycleStructFields(value.Type()) {
 		fieldValue, ok := lifecycleFieldByIndex(value, field.index)
-		if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) {
+		if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) ||
+			(field.omitZero && lifecycleJSONZeroValue(fieldValue)) {
 			continue
 		}
 		if !p.stopped {
@@ -997,6 +1092,7 @@ func lifecycleStructFields(typeOf reflect.Type) []lifecycleStructField {
 					candidates = append(candidates, lifecycleStructField{
 						name: name, index: index, tagged: validTaggedName,
 						omitEmpty: lifecycleJSONTagOption(options, "omitempty"),
+						omitZero:  lifecycleJSONTagOption(options, "omitzero"),
 						quoted:    lifecycleJSONTagOption(options, "string") && lifecycleJSONCanQuote(field.Type),
 					})
 				}
@@ -1131,8 +1227,36 @@ func lifecycleJSONEmptyValue(value reflect.Value) bool {
 	return false
 }
 
+type lifecycleJSONIsZeroer interface {
+	IsZero() bool
+}
+
+func lifecycleJSONZeroValue(value reflect.Value) bool {
+	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
+	typeOf := value.Type()
+	switch {
+	case typeOf.Kind() == reflect.Interface && typeOf.Implements(isZeroerType):
+		return value.IsNil() ||
+			(value.Elem().Kind() == reflect.Pointer && value.Elem().IsNil()) ||
+			value.Interface().(lifecycleJSONIsZeroer).IsZero()
+	case typeOf.Kind() == reflect.Pointer && typeOf.Implements(isZeroerType):
+		return value.IsNil() || value.Interface().(lifecycleJSONIsZeroer).IsZero()
+	case typeOf.Implements(isZeroerType):
+		return value.Interface().(lifecycleJSONIsZeroer).IsZero()
+	case reflect.PointerTo(typeOf).Implements(isZeroerType):
+		if !value.CanAddr() {
+			boxed := reflect.New(typeOf).Elem()
+			boxed.Set(value)
+			value = boxed
+		}
+		return value.Addr().Interface().(lifecycleJSONIsZeroer).IsZero()
+	default:
+		return value.IsZero()
+	}
+}
+
 func (p *lifecycleJSONPreview) appendQuotedReflectValue(value reflect.Value) error {
-	if value.Kind() == reflect.Pointer {
+	for value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			p.append("null")
 			return nil
@@ -1243,9 +1367,11 @@ func lifecycleInsertPreviewMapKey(keys []lifecyclePreviewMapKey, key lifecyclePr
 }
 
 type lifecyclePreviewMapKey struct {
-	value      reflect.Value
-	text       []byte
-	textString string
+	value         reflect.Value
+	text          []byte
+	textLength    int
+	textMarshaled bool
+	textString    string
 }
 
 func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
@@ -1258,7 +1384,8 @@ func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 			if err != nil {
 				return lifecyclePreviewMapKey{}, err
 			}
-			return lifecyclePreviewMapKey{text: text}, nil
+			prefix := append([]byte(nil), text[:min(len(text), lifecyclePreviewMaxKeyBytes)]...)
+			return lifecyclePreviewMapKey{text: prefix, textLength: len(text), textMarshaled: true}, nil
 		}
 	}
 	switch value.Kind() {
@@ -1271,7 +1398,7 @@ func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 }
 
 func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
-	if key.text != nil {
+	if key.textMarshaled {
 		preview.appendJSONStringBytes(key.text)
 	} else {
 		preview.appendJSONString(key.textString)
@@ -1297,22 +1424,17 @@ func boundedLifecycleMapKeyLess(left, right lifecyclePreviewMapKey) bool {
 }
 
 func (key lifecyclePreviewMapKey) length() int {
-	if key.text != nil {
-		return len(key.text)
+	if key.textMarshaled {
+		return key.textLength
 	}
 	return len(key.textString)
 }
 
 func (key lifecyclePreviewMapKey) byteAt(index int) byte {
-	if key.text != nil {
+	if key.textMarshaled {
 		return key.text[index]
 	}
 	return key.textString[index]
-}
-
-func boundedLifecycleKeyLess(left, right string) bool {
-	limit := min(max(len(left), len(right)), lifecyclePreviewMaxKeyBytes)
-	return strings.Compare(left[:min(len(left), limit)], right[:min(len(right), limit)]) < 0
 }
 
 func lifecycleUsesByteSliceEncoding(typeOf reflect.Type) bool {
@@ -1333,7 +1455,9 @@ func lifecycleTypeMayMarshalError(typeOf reflect.Type) bool {
 
 func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, seen map[reflect.Type]bool) bool {
 	if seen[typeOf] {
-		return false
+		// Recursive pointer/container types may contain runtime cycles even when
+		// their scalar leaves cannot otherwise fail JSON encoding.
+		return true
 	}
 	seen[typeOf] = true
 	if typeOf == reflect.TypeFor[json.Number]() ||
