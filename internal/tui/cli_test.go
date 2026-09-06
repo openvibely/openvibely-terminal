@@ -1262,6 +1262,46 @@ func TestCLIRequiresExplicitProjectWhenMultipleProjectsExist(t *testing.T) {
 	}
 }
 
+func TestCLIModelsFilterOutputDistinguishesMatchesFromNoMatches(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="Anthropic" data-model-model="claude-sonnet-4"></div>`
+	cases := []struct {
+		name      string
+		filter    string
+		want      string
+		forbidden []string
+	}{
+		{name: "name match", filter: "sonNET", want: "Sonnet"},
+		{name: "model match", filter: "CLAUDE-SONNET", want: "Sonnet"},
+		{name: "provider match", filter: "anthROPIC", want: "Sonnet"},
+		{name: "no match", filter: "Missing", want: `no models match "Missing"`, forbidden: []string{"no models configured", "web UI", "API"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": `{"projects":[]}`,
+				"/models":       modelsHTML,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "", []string{"models", tc.filter}, false, false); err != nil {
+				t.Fatalf("filtered model list failed: %v", err)
+			}
+			got := stripANSI(out.String())
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, got)
+			}
+			for _, forbidden := range tc.forbidden {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("output unexpectedly contains %q:\n%s", forbidden, got)
+				}
+			}
+			if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
+				t.Fatalf("filtered model list was not requested globally:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIGlobalModelsListWorksAcrossProjectStates(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`

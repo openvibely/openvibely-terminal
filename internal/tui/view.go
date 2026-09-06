@@ -1734,7 +1734,11 @@ func renderModels(list []client.LLMModel, filter string) string {
 		rows = append(rows, []string{truncate(mo.Name, 26), mo.Provider, truncate(mo.Model, 30)})
 	}
 	if len(rows) == 0 {
-		return dimStyle.Render("no models configured — add a model via the web UI or API")
+		if len(list) == 0 {
+			return dimStyle.Render("no models configured — add a model via the web UI or API")
+		}
+		safeFilter := truncate(compactProviderText(sanitizeMemoryText(filter)), 80)
+		return dimStyle.Render(fmt.Sprintf("no models match %q", safeFilter))
 	}
 	return table(append([][]string{{"NAME", "PROVIDER", "MODEL"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/models default <name> · /models delete <name> · /models capacity")

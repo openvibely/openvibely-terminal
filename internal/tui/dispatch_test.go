@@ -3210,6 +3210,41 @@ func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
 	}
 }
 
+func TestModelsListFilterOutputDistinguishesMatchesFromNoMatches(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="Anthropic" data-model-model="claude-sonnet-4"></div>`
+	cases := []struct {
+		name      string
+		line      string
+		want      string
+		forbidden []string
+	}{
+		{name: "name match", line: "/models sonNET", want: "Sonnet"},
+		{name: "model match", line: "/models CLAUDE-SONNET", want: "Sonnet"},
+		{name: "provider match", line: "/models anthROPIC", want: "Sonnet"},
+		{name: "no match", line: "/models Missing", want: `no models match "Missing"`, forbidden: []string{"no models configured", "web UI", "API"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
+			m.selectedID = ""
+			m = runLine(t, m, tc.line)
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+			for _, forbidden := range tc.forbidden {
+				if strings.Contains(out, forbidden) {
+					t.Errorf("output unexpectedly contains %q:\n%s", forbidden, out)
+				}
+			}
+			if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
+				t.Fatalf("filtered model list was not requested globally:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 func TestModelsListDoesNotRequireSelectedProject(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
