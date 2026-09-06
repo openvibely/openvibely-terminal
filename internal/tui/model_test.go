@@ -3546,6 +3546,66 @@ func TestNonStreamAuthInvalidationFlushesQueuedChatOutput(t *testing.T) {
 	}
 }
 
+func TestManualLoginFlushesQueuedChatOutputBeforeInvalidation(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	const partial = "queued λ before login"
+	m.updateChatStreamOutput(partial)
+	m.chatStreamRenderQueued = true
+	streamGeneration := m.chatStreamGeneration
+
+	m, cmd := typeLine(t, m, "/login")
+	if cmd != nil {
+		t.Fatalf("/login command = %v, want nil", cmd)
+	}
+	if !m.loginActive || m.chatStreamRenderQueued || m.chatStreamGeneration == streamGeneration {
+		t.Fatalf("login transition state: active=%t queued=%t generation=%d, want active, flushed, and generation > %d", m.loginActive, m.chatStreamRenderQueued, m.chatStreamGeneration, streamGeneration)
+	}
+	if !m.chatSubmissionPending || m.pendingMsgID != "exec-1" {
+		t.Fatalf("accepted pending chat was cleared: pending=%t id=%q", m.chatSubmissionPending, m.pendingMsgID)
+	}
+	out := transcript(m)
+	partialAt := strings.Index(out, "agent::"+partial)
+	commandAt := strings.Index(out, "you::/login")
+	loginAt := strings.Index(out, "sign-in: enter username")
+	if partialAt < 0 || commandAt < 0 || loginAt < 0 || partialAt >= commandAt || commandAt >= loginAt || strings.Count(out, "agent::"+partial) != 1 {
+		t.Fatalf("queued output, login command, and guidance are out of order: %q", out)
+	}
+}
+
+func TestProjectSwitchFlushesQueuedChatOutputBeforeReset(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.projects = []client.Project{
+		{ID: "project-A", Name: "alpha"},
+		{ID: "project-B", Name: "beta"},
+	}
+	const partial = "queued λ before project switch"
+	m.updateChatStreamOutput(partial)
+	m.chatStreamRenderQueued = true
+	streamGeneration := m.chatStreamGeneration
+	projectGeneration := m.projectGeneration
+
+	m, cmd := typeLine(t, m, "/project beta")
+	if cmd != nil {
+		t.Fatalf("/project command = %v, want nil without an active SSE stream", cmd)
+	}
+	if m.selectedID != "project-B" || m.selectedName != "beta" {
+		t.Fatalf("selected project = %q (%q), want project-B (beta)", m.selectedID, m.selectedName)
+	}
+	if m.chatStreamRenderQueued || m.chatStreamGeneration == streamGeneration || m.projectGeneration == projectGeneration {
+		t.Fatalf("project transition generations: queued=%t stream=%d project=%d, want flushed and advanced from stream=%d project=%d", m.chatStreamRenderQueued, m.chatStreamGeneration, m.projectGeneration, streamGeneration, projectGeneration)
+	}
+	if m.chatSubmissionPending || m.pendingMsgID != "" || m.pendingMsgProjectID != "" || m.busy {
+		t.Fatalf("old-project pending chat survived switch: pending=%t id=%q project=%q busy=%t", m.chatSubmissionPending, m.pendingMsgID, m.pendingMsgProjectID, m.busy)
+	}
+	out := transcript(m)
+	partialAt := strings.Index(out, "agent::"+partial)
+	commandAt := strings.Index(out, "you::/project beta")
+	projectAt := strings.Index(out, "active project: beta")
+	if partialAt < 0 || commandAt < 0 || projectAt < 0 || partialAt >= commandAt || commandAt >= projectAt || strings.Count(out, "agent::"+partial) != 1 {
+		t.Fatalf("queued output, project command, and selection output are out of order: %q", out)
+	}
+}
+
 func TestChatStreamTerminalEventFlushesQueuedOutput(t *testing.T) {
 	for _, eventName := range []string{"done", "error"} {
 		t.Run(eventName, func(t *testing.T) {

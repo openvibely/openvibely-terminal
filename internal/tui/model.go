@@ -575,6 +575,9 @@ func (m *Model) advanceProjectGeneration() uint64 {
 func (m *Model) setActiveProject(project client.Project) bool {
 	changed := m.selectedID != project.ID
 	if changed {
+		// Preserve accepted bytes before project invalidation makes a queued
+		// cadence render stale and resets the old project's stream state.
+		m.flushChatStreamOutput()
 		m.advanceProjectGeneration()
 		m.invalidateChatStream()
 		m.resetChatStreamOutput()
@@ -1720,6 +1723,10 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	if m.loginActive {
 		return m, nil
 	}
+	// Preserve accepted bytes before the login/session transition invalidates
+	// the queued cadence render. Unaccepted sends retain the clearing behavior
+	// below because they cannot be correlated after the session epoch changes.
+	m.flushChatStreamOutput()
 	// A send that has not received an accepted message ID cannot be resumed
 	// after the session epoch changes. Accepted turns retain their polling ID
 	// and are refreshed after login below.
@@ -1987,6 +1994,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.pushHistory(text)
 
 	if strings.HasPrefix(text, "/") {
+		// Stream bytes were accepted before this command was submitted. Render them
+		// before recording the command so cadence batching cannot reorder the
+		// assistant output behind a later user action.
+		m.flushChatStreamOutput()
 		m.append(entry{role: "you", text: text})
 		newModel, cmd := m.runCommand(text)
 		return newModel.(Model).clearReviewPrefill(), cmd
