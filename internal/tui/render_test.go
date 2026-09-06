@@ -302,6 +302,20 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 		return map[string]any{"value": root}
 	case "struct_map":
 		return map[string]any{"value": lifecyclePreviewStructContainers{Values: map[string]string{"message": value}}}
+	case "wide_struct_map":
+		values := make(map[string]string, size/16)
+		for i := 0; i < size/16; i++ {
+			values[fmt.Sprintf("key-%08d", i)] = "v"
+		}
+		return map[string]any{"value": lifecyclePreviewStructContainers{Values: values}}
+	case "wide_struct_array":
+		var values lifecyclePreviewWideContainers
+		for i := range values.Array {
+			values.Array[i] = value[:min(len(value), 16)]
+		}
+		return map[string]any{"value": values}
+	case "struct_long_keys":
+		return map[string]any{"value": lifecyclePreviewStructLongKeys{Values: map[string]string{value + "a": "one", value + "b": "two"}}}
 	case "struct_slice":
 		return map[string]any{"value": lifecyclePreviewStructContainers{Items: []string{value}}}
 	case "wide_struct_slice":
@@ -333,7 +347,7 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -572,6 +586,32 @@ type lifecyclePreviewStructContainers struct {
 	Array  [1]string         `json:"array"`
 }
 
+type lifecyclePreviewIgnoredBudget struct {
+	Ignored string `json:"-"`
+	Visible string `json:"visible"`
+}
+
+type lifecyclePreviewEmbeddedFields struct {
+	EmbeddedVisible string `json:"embedded_visible"`
+}
+
+type lifecyclePreviewStructSemantics struct {
+	lifecyclePreviewEmbeddedFields
+	EmptyArray [1]int `json:"empty_array,omitempty"`
+	Hidden     string `json:"-"`
+	Optional   string `json:"optional,omitempty"`
+	Quoted     string `json:"quoted,string,omitempty"`
+}
+
+type lifecyclePreviewWideContainers struct {
+	Map   map[string]string `json:"map"`
+	Array [1024]string      `json:"array"`
+}
+
+type lifecyclePreviewStructLongKeys struct {
+	Values map[string]string `json:"values"`
+}
+
 type lifecyclePreviewStructCustomContainers struct {
 	Custom []lifecyclePreviewCountingMarshaler           `json:"custom"`
 	Text   map[string]lifecyclePreviewLargeTextMarshaler `json:"text"`
@@ -706,6 +746,59 @@ func TestLifecyclePayloadSummaryBoundsStructContainerScalars(t *testing.T) {
 		}
 		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
 			t.Fatalf("struct-container preview = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesStructFieldSemantics(t *testing.T) {
+	large := strings.Repeat("ignored", 1<<17)
+	payloads := []map[string]any{
+		{"value": lifecyclePreviewIgnoredBudget{Ignored: large, Visible: "ok"}},
+		{"value": lifecyclePreviewStructSemantics{
+			lifecyclePreviewEmbeddedFields: lifecyclePreviewEmbeddedFields{EmbeddedVisible: "shown"},
+			Hidden:                         large,
+			Quoted:                         "quoted <value>",
+		}},
+		{"value": struct {
+			Quoted string `json:"quoted,string"`
+		}{Quoted: strings.Repeat("x", 1<<20)}},
+		{"value": struct {
+			Float  float64                   `json:"float,string"`
+			Number json.Number               `json:"number,string"`
+			Custom lifecyclePreviewMarshaler `json:"custom,string"`
+		}{Float: 1.25, Number: json.Number("42"), Custom: "method"}},
+	}
+	for _, payload := range payloads {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal struct semantics fixture: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Fatalf("struct semantics preview = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryBoundsWideStructContainersAndKeys(t *testing.T) {
+	wide := lifecyclePreviewWideContainers{Map: make(map[string]string, 1<<16)}
+	for i := range 1 << 16 {
+		wide.Map[fmt.Sprintf("key-%08d", i)] = "value"
+	}
+	for i := range wide.Array {
+		wide.Array[i] = "value"
+	}
+	prefix := strings.Repeat("k", 1<<20)
+	payloads := []map[string]any{
+		{"value": wide},
+		{"value": lifecyclePreviewStructLongKeys{Values: map[string]string{prefix + "a": "one", prefix + "b": "two"}}},
+	}
+	for _, payload := range payloads {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal wide struct fixture: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Fatalf("wide struct preview = %q, want %q", got, want)
 		}
 	}
 }
