@@ -31,6 +31,44 @@ func htmlServer(t *testing.T, body string) *Client {
 	return c
 }
 
+func TestAggregateAlertPagesPreservesFirstSeenAndEmptyShape(t *testing.T) {
+	parsePage := func(body string) htmlPage {
+		root, err := html.Parse(strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("parse page: %v", err)
+		}
+		return htmlPage{root: root}
+	}
+
+	pages := []htmlPage{
+		parsePage(`<div data-alert-id="a1" data-alert-scroll-anchor="a1" data-alert-scope="global" data-alert-type="custom" data-alert-severity="warning" data-alert-source="first-source" data-alert-decision-state="approved" data-alert-processing-state="claimed" data-search-text="first text"><p class="font-semibold">First title</p></div>`),
+		parsePage(`<div data-alert-id="a1" data-alert-scroll-anchor="a1" data-alert-source="later-source"><p class="font-semibold">Later title</p></div><div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Second title</p></div>`),
+	}
+	alerts := aggregateAlertPages(pages, "project-2")
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %#v, want two unique alerts", alerts)
+	}
+	first := alerts[0]
+	if first.ID != "a1" || first.Title != "First title" || first.ProjectID != "project-2" || first.Scope != "global" || first.Type != "custom" || first.Severity != "warning" || first.Source != "first-source" || first.DecisionState != "approved" || first.ProcessingState != "claimed" || first.Text != "first text" {
+		t.Fatalf("first alert = %#v, want first-page fields", first)
+	}
+	if alerts[1].ID != "a2" {
+		t.Fatalf("second alert = %#v, want a2", alerts[1])
+	}
+
+	empty := aggregateAlertPages(nil, "project-2")
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("empty alerts = %#v, want non-nil empty slice", empty)
+	}
+	encoded, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty alerts: %v", err)
+	}
+	if string(encoded) != "[]" {
+		t.Fatalf("empty JSON = %s, want []", encoded)
+	}
+}
+
 func TestListAlertsScrapesCards(t *testing.T) {
 	// Mirrors the real alertRow markup.
 	const page = `<div>
@@ -75,6 +113,164 @@ func TestListAlertsScrapesCards(t *testing.T) {
 	}
 	if got := strings.Join(alerts[0].Badges, ","); !strings.Contains(got, "task_failed") {
 		t.Errorf("badges = %q", got)
+	}
+}
+
+func alertListPage(ids []string, hasMore bool) string {
+	var body strings.Builder
+	fmt.Fprintf(&body, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-page-size="20" data-card-pagination-has-more="%t">`, hasMore)
+	for _, id := range ids {
+		fmt.Fprintf(&body, `<div data-alert-id="%s" data-alert-scroll-anchor="%s"><p class="font-semibold">Alert %s</p></div>`, id, id, id)
+	}
+	body.WriteString(`</div>`)
+	return body.String()
+}
+
+func TestListAlertsTraversesPagesInStableScopedOrder(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/alerts" || r.URL.Query().Get("project_id") != "project-2" {
+			t.Errorf("request was not project scoped: %s", r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if requests == 1 {
+			if r.URL.Query().Get("card_page") != "" {
+				t.Errorf("initial request unexpectedly used continuation parameters: %s", r.URL.RequestURI())
+			}
+			_, _ = io.WriteString(w, alertListPage([]string{"a-1", "shared"}, true))
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("card_page") != "1" || q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "2" {
+			t.Errorf("continuation query = %s", r.URL.RawQuery)
+		}
+		w.Header().Set(cardPageMoreHeader, "false")
+		_, _ = io.WriteString(w, alertListPage([]string{"shared", "a-3"}, false))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := c.ListAlerts(context.Background(), "project-2")
+	if err != nil {
+		t.Fatalf("ListAlerts: %v", err)
+	}
+	got := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		got = append(got, alert.ID)
+		if alert.ProjectID != "project-2" {
+			t.Fatalf("alert %s project = %q", alert.ID, alert.ProjectID)
+		}
+	}
+	if want := []string{"a-1", "shared", "a-3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("alert order = %#v, want %#v", got, want)
+	}
+}
+
+func TestListAlertsExactlyTwentyDoesNotContinue(t *testing.T) {
+	ids := make([]string, 20)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("a-%02d", i)
+	}
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = io.WriteString(w, alertListPage(ids, false))
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	alerts, err := c.ListAlerts(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("ListAlerts: %v", err)
+	}
+	if len(alerts) != 20 || requests != 1 {
+		t.Fatalf("alerts = %d, requests = %d; want 20 and 1", len(alerts), requests)
+	}
+}
+
+func TestListAlertsReportsInvalidContinuations(t *testing.T) {
+	tests := []struct {
+		name       string
+		first      func(http.ResponseWriter)
+		continuing func(http.ResponseWriter)
+		want       string
+	}{
+		{
+			name: "missing pagination metadata",
+			first: func(w http.ResponseWriter) {
+				w.Header().Set(cardPageMoreHeader, "true")
+				_, _ = io.WriteString(w, `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"></div>`)
+			},
+			want: "pagination metadata",
+		},
+		{
+			name: "malformed continuation header",
+			first: func(w http.ResponseWriter) {
+				_, _ = io.WriteString(w, alertListPage([]string{"a-1"}, true))
+			},
+			continuing: func(w http.ResponseWriter) {
+				w.Header().Set(cardPageMoreHeader, "later")
+				_, _ = io.WriteString(w, alertListPage([]string{"a-2"}, false))
+			},
+			want: cardPageMoreHeader,
+		},
+		{
+			name: "continuation backend error",
+			first: func(w http.ResponseWriter) {
+				_, _ = io.WriteString(w, alertListPage([]string{"a-1"}, true))
+			},
+			continuing: func(w http.ResponseWriter) {
+				http.Error(w, "continuation unavailable", http.StatusBadGateway)
+			},
+			want: "loading card page 2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests++
+				if requests == 1 {
+					tt.first(w)
+					return
+				}
+				tt.continuing(w)
+			}))
+			defer srv.Close()
+			c, _ := New(srv.URL)
+			alerts, err := c.ListAlerts(context.Background(), "p1")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("alerts = %#v, error = %v; want error containing %q", alerts, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestListAlertsEnforcesTraversalPageBound(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("request lost project scope: %s", r.URL.RequestURI())
+		}
+		if requests > 1 {
+			w.Header().Set(cardPageMoreHeader, "true")
+		}
+		_, _ = io.WriteString(w, alertListPage([]string{fmt.Sprintf("a-%03d", requests)}, true))
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	alerts, err := c.ListAlerts(context.Background(), "p1")
+	if err == nil || !strings.Contains(err.Error(), "card pagination exceeded safety limit") {
+		t.Fatalf("alerts = %#v, error = %v", alerts, err)
+	}
+	if requests != maxCardPages {
+		t.Fatalf("requests = %d, want bounded traversal of %d pages", requests, maxCardPages)
 	}
 }
 

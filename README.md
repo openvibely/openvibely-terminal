@@ -479,7 +479,10 @@ Notes:
   other global commands do not require it.
 - Chat and long-running commands block until the backend finishes, then print
   the result.
-- Errors go to stderr with a non-zero exit status; results go to stdout.
+- Errors go to stderr with a non-zero exit status; results go to stdout. `status`
+  still prints available global health, auth, and capacity rows when project
+  discovery fails, marks the result partial, and exits non-zero. With multiple
+  projects it does not choose one implicitly or fetch project-scoped counts.
 - `help` works with no server running.
 
 ## How it talks to the backend

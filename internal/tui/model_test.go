@@ -2377,6 +2377,92 @@ func TestCurrentForeignSSEEventIsIgnored(t *testing.T) {
 	}
 }
 
+func TestLoginCompletionRestoresCommonFormState(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		passwordStage bool
+		success       bool
+	}{
+		{name: "success", passwordStage: true, success: true},
+		{name: "cancel username stage"},
+		{name: "cancel password stage", passwordStage: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(t)
+			m.input.Prompt = "chat: "
+			m.input.Placeholder = "restored placeholder"
+			m.input.EchoMode = textinput.EchoNone
+			m.input.Blur()
+
+			m, _ = m.beginLogin()
+			m.loginPassword = tc.passwordStage
+			m.loginSubmitting = tc.success
+			m.loginUsername = "admin"
+			m.loginResumeSSE = !tc.success
+			m.input.SetValue("secret")
+			m.input.EchoMode = textinput.EchoPassword
+			m.input.Prompt = "password: "
+			m.input.Placeholder = "password"
+			m.input.Blur()
+			m.menu = []command{{name: "stale"}}
+			m.busy = true
+
+			var cmd tea.Cmd
+			if tc.success {
+				var next tea.Model
+				next, cmd = m.Update(loginResultMsg{sessionGeneration: m.sessionGeneration})
+				m = next.(Model)
+			} else {
+				var next tea.Model
+				next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+				m = next.(Model)
+			}
+
+			if tc.success && cmd == nil {
+				t.Fatal("successful login did not start recovery")
+			}
+			if m.loginActive || m.loginPassword || m.loginSubmitting || m.loginUsername != "" || m.loginResumeSSE {
+				t.Fatalf("login state not reset: active=%t password=%t submitting=%t username=%q resume=%t", m.loginActive, m.loginPassword, m.loginSubmitting, m.loginUsername, m.loginResumeSSE)
+			}
+			if m.input.Value() != "" || m.input.Prompt != "chat: " || m.input.Placeholder != "restored placeholder" || m.input.EchoMode != textinput.EchoNone || !m.input.Focused() {
+				t.Fatalf("input state not restored: value=%q prompt=%q placeholder=%q echo=%v focused=%t", m.input.Value(), m.input.Prompt, m.input.Placeholder, m.input.EchoMode, m.input.Focused())
+			}
+			if m.menu != nil || m.busy {
+				t.Fatalf("menu/busy state not reset: menu=%v busy=%t", m.menu, m.busy)
+			}
+			if !tc.success && !strings.Contains(transcript(m), "sign-in cancelled") {
+				t.Fatal("cancellation message missing")
+			}
+		})
+	}
+}
+
+func TestStaleLoginResultDoesNotResetCurrentForm(t *testing.T) {
+	m := newTestModel(t)
+	m, _ = m.beginLogin()
+	m.loginPassword = true
+	m.loginSubmitting = true
+	m.loginUsername = "current-user"
+	m.input.Prompt = "password: "
+	m.input.Placeholder = "password"
+	m.input.EchoMode = textinput.EchoPassword
+	m.input.Blur()
+	m.menu = []command{{name: "current"}}
+	m.busy = true
+
+	next, cmd := m.Update(loginResultMsg{sessionGeneration: m.sessionGeneration - 1})
+	m = next.(Model)
+	if cmd != nil {
+		t.Fatalf("stale login result returned command %v", cmd)
+	}
+	if !m.loginActive || !m.loginPassword || !m.loginSubmitting || m.loginUsername != "current-user" || !m.busy {
+		t.Fatalf("stale login result changed current attempt: active=%t password=%t submitting=%t username=%q busy=%t", m.loginActive, m.loginPassword, m.loginSubmitting, m.loginUsername, m.busy)
+	}
+	if m.input.Prompt != "password: " || m.input.Placeholder != "password" || m.input.EchoMode != textinput.EchoPassword || m.input.Focused() || len(m.menu) != 1 {
+		t.Fatalf("stale login result changed form: prompt=%q placeholder=%q echo=%v focused=%t menu=%v", m.input.Prompt, m.input.Placeholder, m.input.EchoMode, m.input.Focused(), m.menu)
+	}
+}
+
 func TestSuccessfulLoginInvalidatesPreviousSSEStream(t *testing.T) {
 	m := newTestModel(t)
 	m.loginActive = true

@@ -265,7 +265,9 @@ func (m Model) renderStatus() string {
 	default:
 		row("auth", dimStyle.Render("disabled or anonymous"))
 	}
-	if m.selectedName != "" {
+	if m.statusProjectsUnavailable {
+		row("projects", statusErrStyle.Render("unavailable")+dimStyle.Render(" (partial failure)"))
+	} else if m.selectedName != "" {
 		row("project", m.selectedName)
 	}
 	if c := m.capacity; c != nil {
@@ -546,9 +548,9 @@ func renderTaskDetailLoadFailure(label string, err error) string {
 
 func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
 	var b strings.Builder
-	title := firstNonEmpty(t.Title, shortID(t.ID))
-	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(t.Status))
-	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · review", t.ID)))
+	title := sanitizeAutomationDetailText(firstNonEmpty(t.Title, shortID(t.ID)))
+	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(sanitizeAutomationDetailText(t.Status)))
+	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · review", sanitizeAutomationDetailText(t.ID))))
 	if len(reviews) == 0 {
 		b.WriteString(dimStyle.Render("no review comments yet — /tasks reviews add <task> <file>:<line> <comment>"))
 		return b.String()
@@ -560,29 +562,35 @@ func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
 		if r.LineNumber > 0 {
 			line = fmt.Sprintf("%d", r.LineNumber)
 		}
-		if r.LineType != "" {
-			line += " " + r.LineType
+		if lineType := sanitizeAutomationDetailText(r.LineType); lineType != "" {
+			line += " " + lineType
 		}
 		state := reviewState(r)
-		comment := r.CommentText
-		if r.ReviewedBy != "" {
-			comment = r.ReviewedBy + ": " + comment
+		comment := sanitizeMemoryText(r.CommentText)
+		if reviewedBy := sanitizeAutomationDetailText(r.ReviewedBy); reviewedBy != "" {
+			comment = reviewedBy + ": " + comment
 		}
-		rows = append(rows, []string{truncate(r.FilePath, 32), line, state, truncate(comment, 72)})
+		commentLines := strings.Split(comment, "\n")
+		for i := range commentLines {
+			commentLines[i] = truncate(commentLines[i], 72)
+		}
+		comment = strings.Join(commentLines, "\n")
+		rows = append(rows, []string{truncate(sanitizeAutomationDetailText(r.FilePath), 32), line, state, comment})
 	}
 	b.WriteString(table(rows))
 	return b.String()
 }
 
 func reviewState(r client.ReviewComment) string {
+	state := sanitizeAutomationDetailText(r.State)
 	if r.Resolved {
-		if r.State != "" {
-			return statusOKStyle.Render("resolved " + r.State)
+		if state != "" {
+			return statusOKStyle.Render("resolved " + state)
 		}
 		return statusOKStyle.Render("resolved")
 	}
-	if r.State != "" {
-		return statusMark(r.State)
+	if state != "" {
+		return statusMark(state)
 	}
 	return dimStyle.Render("—")
 }
@@ -2101,7 +2109,11 @@ func renderModels(list []client.LLMModel, filter string) string {
 		rows = append(rows, []string{truncate(mo.Name, 26), mo.Provider, truncate(mo.Model, 30)})
 	}
 	if len(rows) == 0 {
-		return dimStyle.Render("no models configured — add a model via the web UI or API")
+		if len(list) == 0 {
+			return dimStyle.Render("no models configured — add a model via the web UI or API")
+		}
+		safeFilter := truncate(compactProviderText(sanitizeMemoryText(filter)), 80)
+		return dimStyle.Render(fmt.Sprintf("no models match %q", safeFilter))
 	}
 	return table(append([][]string{{"NAME", "PROVIDER", "MODEL"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/models default <name> · /models delete <name> · /models capacity")

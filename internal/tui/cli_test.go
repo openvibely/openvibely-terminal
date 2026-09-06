@@ -982,6 +982,148 @@ func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	}
 }
 
+func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		projectList func(http.ResponseWriter)
+		wantError   string
+	}{
+		{
+			name: "service unavailable",
+			projectList: func(w http.ResponseWriter) {
+				http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+			},
+			wantError: "503",
+		},
+		{
+			name: "connection dropped",
+			projectList: func(w http.ResponseWriter) {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					panic("response writer cannot hijack connection")
+				}
+				conn, _, err := hijacker.Hijack()
+				if err != nil {
+					panic(err)
+				}
+				_ = conn.Close()
+			},
+			wantError: "loading projects",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.recordURL(r.Method, r.URL.RequestURI())
+				switch r.URL.Path {
+				case "/api/projects":
+					tc.projectList(w)
+				case "/api/capacity/global":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"total_running":2,"max_workers":5,"queue_size":1,"available_slots":3}`)
+				case "/auth/me":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "", []string{"status"}, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("status error = %v, want substring %q", err, tc.wantError)
+			}
+			got := stripANSI(out.String())
+			for _, want := range []string{"Status", "connected", "signed in as operator", "2 running / 5 max, 1 queued, 3 free", "projects", "unavailable", "partial failure"} {
+				if !strings.Contains(strings.ToLower(got), strings.ToLower(want)) {
+					t.Errorf("partial status missing %q:\n%s", want, got)
+				}
+			}
+			if rec.count("GET", "/api/capacity/global") != 1 || rec.count("GET", "/auth/me") != 1 {
+				t.Errorf("global status checks did not run exactly once:\n%s", rec.all())
+			}
+		})
+	}
+}
+
+func TestCLIStatusMultipleProjectsIsGlobalAndUnambiguous(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        cliProjects,
+		"/api/capacity/global": `{"total_running":1,"max_workers":4,"queue_size":0,"available_slots":3}`,
+		"/auth/me":             `{"authenticated":false}`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	got := stripANSI(out.String())
+	for _, forbidden := range []string{"project         demo", "project         other", "alerts", "tasks"} {
+		if strings.Contains(strings.ToLower(got), strings.ToLower(forbidden)) {
+			t.Errorf("multi-project status used ambiguous scope %q:\n%s", forbidden, got)
+		}
+	}
+	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
+		t.Fatalf("multi-project status made scoped requests:\n%s", rec.all())
+	}
+	if !strings.Contains(got, "1 running / 4 max") || !strings.Contains(got, "disabled or anonymous") {
+		t.Fatalf("multi-project status omitted global rows:\n%s", got)
+	}
+}
+
+func TestCLIStatusPreservesAuthRequiredAndOfflineOutput(t *testing.T) {
+	t.Run("auth required", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/projects" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"projects":[]}`)
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "", []string{"status"}, false, false)
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "requires sign-in") {
+			t.Fatalf("auth-required status error = %v, want sign-in requirement", err)
+		}
+		got := strings.ToLower(stripANSI(out.String()))
+		if !strings.Contains(got, "sign-in required") || strings.Contains(got, "offline") {
+			t.Fatalf("auth-required status output is wrong:\n%s", got)
+		}
+	})
+
+	t.Run("fully offline", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		baseURL := srv.URL
+		srv.Close()
+		c, err := client.New(baseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "", []string{"status"}, false, false)
+		if err == nil {
+			t.Fatal("offline status unexpectedly succeeded")
+		}
+		got := strings.ToLower(stripANSI(out.String()))
+		for _, want := range []string{"status", "offline", "projects", "unavailable", "partial failure"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("offline status missing %q:\n%s", want, got)
+			}
+		}
+	})
+}
+
 func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1">
 		<p class="font-semibold">Needs approval</p>
@@ -1115,6 +1257,46 @@ func TestCLIRequiresExplicitProjectWhenMultipleProjectsExist(t *testing.T) {
 			}
 			if out.Len() != 0 {
 				t.Errorf("failed preflight wrote output: %q", out.String())
+			}
+		})
+	}
+}
+
+func TestCLIModelsFilterOutputDistinguishesMatchesFromNoMatches(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="Anthropic" data-model-model="claude-sonnet-4"></div>`
+	cases := []struct {
+		name      string
+		filter    string
+		want      string
+		forbidden []string
+	}{
+		{name: "name match", filter: "sonNET", want: "Sonnet"},
+		{name: "model match", filter: "CLAUDE-SONNET", want: "Sonnet"},
+		{name: "provider match", filter: "anthROPIC", want: "Sonnet"},
+		{name: "no match", filter: "Missing", want: `no models match "Missing"`, forbidden: []string{"no models configured", "web UI", "API"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": `{"projects":[]}`,
+				"/models":       modelsHTML,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "", []string{"models", tc.filter}, false, false); err != nil {
+				t.Fatalf("filtered model list failed: %v", err)
+			}
+			got := stripANSI(out.String())
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, got)
+			}
+			for _, forbidden := range tc.forbidden {
+				if strings.Contains(got, forbidden) {
+					t.Errorf("output unexpectedly contains %q:\n%s", forbidden, got)
+				}
+			}
+			if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
+				t.Fatalf("filtered model list was not requested globally:\n%s", rec.all())
 			}
 		})
 	}
@@ -1490,8 +1672,8 @@ func TestCLIUnknownCommandFails(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "unknown command") {
 				t.Fatalf("err = %v, want unknown command", err)
 			}
-			if rec.saw("POST", "/api/autonomous/trigger") {
-				t.Fatalf("unsupported command made a backend request:\n%s", rec.all())
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("unsupported command made a backend request:\n%s", calls)
 			}
 		})
 	}
@@ -2221,6 +2403,51 @@ func TestCLIAutomationsRunMissingReferenceUsesCanonicalUsageWithoutList(t *testi
 	}
 }
 
+func TestCLIChannelsRejectMalformedArgumentsBeforeRequests(t *testing.T) {
+	cases := []struct {
+		args      []string
+		wantUsage string
+	}{
+		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|test <channel>|remove <channel>]"},
+		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels list"},
+		{args: []string{"channels", "test", "telegram", "extra"}, wantUsage: "usage: channels test <channel>"},
+		{args: []string{"channels", "remove", "slack", "extra"}, wantUsage: "usage: channels remove <channel>"},
+	}
+
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.args[1:], "_"), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, true, false)
+			if err == nil {
+				t.Fatal("malformed channels command returned success")
+			}
+			if !strings.Contains(err.Error(), tc.wantUsage) {
+				t.Fatalf("malformed command error = %v, want canonical usage", err)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("malformed CLI command made backend requests:\n%s", calls)
+			}
+		})
+	}
+}
+
+func TestCLIChannelsBareAndListRemainValid(t *testing.T) {
+	for _, args := range [][]string{{"channels"}, {"channels", "list"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels":     `<html><body>channels</body></html>`,
+			})
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err != nil {
+				t.Fatalf("valid channels command failed: %v", err)
+			}
+			if !rec.saw("GET", "/channels") {
+				t.Fatalf("valid channels command did not list channels:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 // One-shot CLI mode works headlessly for the new channels actions,
 // exiting cleanly on success and nonzero on a backend failure.
 func TestCLIRunsChannelsTest(t *testing.T) {
@@ -2680,6 +2907,78 @@ func TestCLIJSONTasksList(t *testing.T) {
 	}
 	if tasks[0].ID != "t-1" {
 		t.Errorf("unexpected task ID: %s", tasks[0].ID)
+	}
+}
+
+func TestCLILaterPageAlertCommands(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		jsonMode   bool
+		force      bool
+		wantMethod string
+		wantPath   string
+	}{
+		{name: "json list", args: []string{"alerts"}, jsonMode: true},
+		{name: "json show", args: []string{"alerts", "show", "a-later"}, jsonMode: true, wantMethod: http.MethodGet, wantPath: "/alerts/a-later/details"},
+		{name: "approve", args: []string{"alerts", "approve", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/approve"},
+		{name: "reject", args: []string{"alerts", "reject", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/reject"},
+		{name: "dismiss", args: []string{"alerts", "dismiss", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/dismiss"},
+		{name: "read", args: []string{"alerts", "read", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/read"},
+		{name: "delete", args: []string{"alerts", "delete", "a-later"}, force: true, wantMethod: http.MethodDelete, wantPath: "/alerts/a-later"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mutation string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/projects" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+					return
+				}
+				if r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request lost project scope: %s", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts" && r.URL.Query().Get("card_page") == "1":
+					q := r.URL.Query()
+					if q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "1" {
+						t.Errorf("bad continuation query: %s", r.URL.RawQuery)
+					}
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="a-later" data-alert-scroll-anchor="a-later"><p class="font-semibold">Later CLI alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true"><div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts/a-later/details":
+					mutation = r.Method + " " + r.URL.Path
+					_, _ = io.WriteString(w, `<div data-alert-detail-loaded><div data-alert-markdown data-raw-content="Later CLI detail"></div></div>`)
+				case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-later":
+					mutation = r.Method + " " + r.URL.Path
+					_, _ = io.WriteString(w, `<div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div>`)
+				case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/alerts/a-later/"):
+					mutation = r.Method + " " + r.URL.Path
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tt.args, tt.force, tt.jsonMode); err != nil {
+				t.Fatalf("RunCLI: %v", err)
+			}
+			if tt.wantPath != "" && mutation != tt.wantMethod+" "+tt.wantPath {
+				t.Fatalf("mutation/detail request = %q, want %s %s", mutation, tt.wantMethod, tt.wantPath)
+			}
+			if !strings.Contains(out.String(), "Later CLI alert") && !strings.Contains(out.String(), "Later CLI detail") {
+				t.Fatalf("CLI output omitted later-page alert:\n%s", out.String())
+			}
+		})
 	}
 }
 
@@ -3343,6 +3642,98 @@ func TestCLIJSONTaskReviewsList(t *testing.T) {
 	}
 }
 
+func TestCLITaskReviewsPreserveMultilineOutput(t *testing.T) {
+	const unsafeTitle = "Refactor \x1b[31mred\x1b[0m\a\ninjected API"
+	const unsafeFilePath = "internal/\x1b[31mred\x1b[0m\a\ninjected.go"
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-1?from=tasks" title="` + unsafeTitle + `">` + unsafeTitle + `</a>
+	</div>`
+	const reviews = `<div id="review-comments-list" data-task-id="t-1" data-comment-count="1">
+		<div class="review-comment-item" data-comment-id="rc-1" data-file-path="internal/client/tasks.go" data-line-number="42" data-line-type="new" data-state="open">
+			<div><span>alice</span><p>
+First &amp; second
+
+Third<br>Fourth &#27;[31mred&#27;[0m
+			</p></div>
+		</div>
+	</div>`
+	wantComment := "First & second\n\nThird\nFourth \x1b[31mred\x1b[0m"
+
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		jsonMode bool
+		want     string
+	}{
+		{
+			name:     "list JSON",
+			args:     []string{"tasks", "reviews", "t-1"},
+			jsonMode: true,
+			want:     `[{"id":"rc-1","task_id":"t-1","file_path":"internal/client/tasks.go","line_number":42,"line_type":"new","comment_text":"First \u0026 second\n\nThird\nFourth \u001b[31mred\u001b[0m","reviewed_by":"alice","state":"open"}]`,
+		},
+		{
+			name:     "add JSON",
+			args:     []string{"tasks", "reviews", "add", "t-1", "internal/client/tasks.go:42", wantComment},
+			jsonMode: true,
+			want:     `{"id":"rc-1","task_id":"t-1","file_path":"internal/client/tasks.go","line_number":42,"line_type":"new","comment_text":"First \u0026 second\n\nThird\nFourth \u001b[31mred\u001b[0m","reviewed_by":"alice","state":"open"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := cliServer(t, map[string]string{
+				"/api/projects":      cliProjects,
+				"/tasks":             board,
+				"/tasks/t-1/reviews": reviews,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, tc.jsonMode); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(out.String()); got != tc.want {
+				t.Errorf("output = %q\nwant   = %q", got, tc.want)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "list plain", args: []string{"tasks", "reviews", "t-1"}},
+		{name: "add plain", args: []string{"tasks", "reviews", "add", "t-1", unsafeFilePath + ":42", wantComment}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := cliServer(t, map[string]string{
+				"/api/projects":      cliProjects,
+				"/tasks":             board,
+				"/tasks/t-1/reviews": reviews,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			raw := out.String()
+			for _, unsafe := range []string{"\x1b[31m", "\a", "\ninjected"} {
+				if strings.Contains(raw, unsafe) {
+					t.Errorf("plain output retained injected terminal control %q: %q", unsafe, raw)
+				}
+			}
+			plain := stripANSI(raw)
+			for _, want := range []string{"alice: First & second", "\n\n", "Third", "Fourth red"} {
+				if !strings.Contains(plain, want) {
+					t.Errorf("plain output missing %q:\n%s", want, plain)
+				}
+			}
+			if tc.name == "add plain" {
+				for _, want := range []string{"added review comment on internal/red injected.go:42", "for Refactor red injected API"} {
+					if !strings.Contains(plain, want) {
+						t.Errorf("plain add output missing sanitized confirmation %q:\n%s", want, plain)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing.T) {
 	paths := []struct {
 		name string
@@ -3581,6 +3972,104 @@ func (w *cliEventWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func TestFormatCLIEventPreservesOutputAndFiltering(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      client.Event
+		projectID  string
+		jsonOutput bool
+		want       string
+		wantOK     bool
+	}{
+		{
+			name: "recognized plain event",
+			event: client.Event{
+				Name: " task_status_changed ",
+				Data: json.RawMessage(` { "type": "task_status_changed", "project_id": "p1", "task_id": "t1", "task_name": "Deploy API", "status": "running", "queued": true, "ignored": [ 1, 2 ] } `),
+			},
+			projectID: "p1",
+			want:      `event="task_status_changed" type="task_status_changed" project_id="p1" task_id="t1" task_name="Deploy API" status="running" queued=true`,
+			wantOK:    true,
+		},
+		{
+			name: "JSON event retains compact data",
+			event: client.Event{
+				Name: "task_status_changed",
+				Data: json.RawMessage(` { "type": "task_status_changed", "project_id": "p1", "task_id": "t1", "ignored": [ 1, 2 ] } `),
+			},
+			projectID:  "p1",
+			jsonOutput: true,
+			want:       `{"event":"task_status_changed","type":"task_status_changed","project_id":"p1","task_id":"t1","task_name":"","status":"","category":"","message":"","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false,"data":{"type":"task_status_changed","project_id":"p1","task_id":"t1","ignored":[1,2]}}`,
+			wantOK:     true,
+		},
+		{
+			name:      "valid raw plain fallback is compact",
+			event:     client.Event{Name: "future_event", Data: json.RawMessage(` { "ignored": [ 1, 2 ] } `)},
+			projectID: "",
+			want:      `event="future_event" type="future_event" data="{\"ignored\":[1,2]}"`,
+			wantOK:    true,
+		},
+		{
+			name:      "invalid raw plain fallback is byte identical",
+			event:     client.Event{Name: "future_event", Data: json.RawMessage("  not-json \n")},
+			projectID: "",
+			want:      "event=\"future_event\" type=\"future_event\" data=\"  not-json \\n\"",
+			wantOK:    true,
+		},
+		{
+			name:      "foreign project is filtered",
+			event:     client.Event{Name: "task_status_changed", Data: json.RawMessage(`{"type":"task_status_changed","project_id":"other","task_id":"t1"}`)},
+			projectID: "p1",
+			wantOK:    false,
+		},
+		{
+			name:      "omitted project retains selected ownership",
+			event:     client.Event{Name: "chat_new_message", Data: json.RawMessage(`{"type":"chat_new_message","message":"hello"}`)},
+			projectID: "p1",
+			want:      `event="chat_new_message" type="chat_new_message" project_id="p1" message="hello"`,
+			wantOK:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok, err := formatCLIEvent(tc.event, tc.projectID, tc.jsonOutput)
+			if err != nil {
+				t.Fatalf("formatCLIEvent() error = %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("formatCLIEvent() include = %t, want %t", ok, tc.wantOK)
+			}
+			if got != tc.want {
+				t.Fatalf("formatCLIEvent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func BenchmarkFormatCLIEventRecognizedPlain(b *testing.B) {
+	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
+		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
+			prefix := []byte(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"running","padding":"`)
+			suffix := []byte(`"}`)
+			raw := make([]byte, 0, size)
+			raw = append(raw, prefix...)
+			raw = append(raw, bytes.Repeat([]byte{'x'}, size-len(prefix)-len(suffix))...)
+			raw = append(raw, suffix...)
+			event := client.Event{Name: "task_status_changed", Data: raw}
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(raw)))
+			b.ResetTimer()
+			for b.Loop() {
+				if _, ok, err := formatCLIEvent(event, "p1", false); err != nil || !ok {
+					b.Fatalf("formatCLIEvent() include = %t, error = %v", ok, err)
+				}
+			}
+		})
+	}
+}
+
 func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 	var mu sync.Mutex
 	var eventRequests []string
@@ -3637,6 +4126,77 @@ func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 	}
 	if strings.Count(strings.TrimSpace(joined), "\n") != 1 {
 		t.Fatalf("event output was not exactly two line-oriented records: %q", joined)
+	}
+}
+
+func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		jsonOutput bool
+	}{
+		{name: "plain"},
+		{name: "JSON", jsonOutput: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var eventRequest string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+				case "/events/live":
+					eventRequest = r.URL.RequestURI()
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","task_id":"unscoped-task","status":"running"}`+"\n\n")
+					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p2","task_id":"foreign-task","status":"running"}`+"\n\n")
+					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p1","task_id":"valid-task","status":"completed"}`+"\n\n")
+					_, _ = fmt.Fprint(w, `data: {"type":"chat_new_message","exec_id":"legacy-chat","message":"compatible chat"}`+"\n\n")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"events", "on"}, false, tc.jsonOutput); err != nil {
+				t.Fatalf("events on failed: %v", err)
+			}
+
+			if eventRequest != "/events/live?project_id=p1" {
+				t.Fatalf("event request = %q, want selected-project query", eventRequest)
+			}
+			output := out.String()
+			for _, excluded := range []string{"unscoped-task", "foreign-task"} {
+				if strings.Contains(output, excluded) {
+					t.Errorf("output includes unowned task %q:\n%s", excluded, output)
+				}
+			}
+			for _, included := range []string{"valid-task", "legacy-chat", "compatible chat"} {
+				if !strings.Contains(output, included) {
+					t.Errorf("output missing compatible event field %q:\n%s", included, output)
+				}
+			}
+
+			lines := strings.Split(strings.TrimSpace(output), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("output lines = %d, want valid task and unscoped chat only: %q", len(lines), output)
+			}
+			if tc.jsonOutput {
+				for _, line := range lines {
+					var record cliEventRecord
+					if err := json.Unmarshal([]byte(line), &record); err != nil {
+						t.Fatalf("invalid JSON event line: %v\n%s", err, line)
+					}
+					if record.ProjectID != "p1" {
+						t.Errorf("project_id = %q, want synthesized selected project", record.ProjectID)
+					}
+				}
+			}
+		})
 	}
 }
 

@@ -111,6 +111,163 @@ func TestMemoryListShowAndSearchUseCanonicalProjectFiles(t *testing.T) {
 	}
 }
 
+func TestMemorySearchPreservesResultsAndSnippets(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, `# Memory Index
+- [Indexed Metadata](mixed.md) - INDEX ONLY SUMMARY
+- [Fallback](fallback.md) - metadata needle
+- [Missing Metadata](missing.md) - metadata needle
+- [No Match](none.md) - unrelated
+`, map[string]string{
+		"mixed.md":    "---\r\ntitle: Front Matter Title\r\ndescription: Front Matter Description\r\nbroken front matter\r\n---\r\n\r\nFirst line\r\n  İstanbul has a MiXeD ÜNICODE Needle  \r\nLast line\r\n",
+		"fallback.md": "# Heading\n\nFirst fallback paragraph.\n\nAnother paragraph.\n",
+		"none.md":     "# Nothing\n\nThere is no relevant text here.\n",
+	})
+
+	client := &Client{}
+	project := Project{Path: repo}
+	tests := []struct {
+		name          string
+		query         string
+		wantFiles     []string
+		wantTitles    []string
+		wantSummaries []string
+		wantSnippets  []string
+	}{
+		{
+			name:          "mixed case unicode body match",
+			query:         "ünicode needle",
+			wantFiles:     []string{"mixed.md"},
+			wantTitles:    []string{"Front Matter Title"},
+			wantSummaries: []string{"Front Matter Description"},
+			wantSnippets:  []string{"İstanbul has a MiXeD ÜNICODE Needle"},
+		},
+		{
+			name:          "indexed metadata match uses first paragraph fallback",
+			query:         "METADATA NEEDLE",
+			wantFiles:     []string{"fallback.md", "missing.md"},
+			wantTitles:    []string{"Fallback", "Missing Metadata"},
+			wantSummaries: []string{"metadata needle", "metadata needle"},
+			wantSnippets:  []string{"First fallback paragraph.", ""},
+		},
+		{
+			name:          "front matter is not treated as body",
+			query:         "front matter description",
+			wantFiles:     []string{},
+			wantTitles:    []string{},
+			wantSummaries: []string{},
+			wantSnippets:  []string{},
+		},
+		{
+			name:          "no match",
+			query:         "absent everywhere",
+			wantFiles:     []string{},
+			wantTitles:    []string{},
+			wantSummaries: []string{},
+			wantSnippets:  []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := client.SearchMemories(context.Background(), project, tt.query)
+			if err != nil {
+				t.Fatalf("SearchMemories: %v", err)
+			}
+			if len(result.Memories) != len(tt.wantFiles) {
+				t.Fatalf("matches = %#v, want files %#v", result.Memories, tt.wantFiles)
+			}
+			for i, memory := range result.Memories {
+				if memory.File != tt.wantFiles[i] || memory.Title != tt.wantTitles[i] || memory.Summary != tt.wantSummaries[i] ||
+					memory.Snippet != tt.wantSnippets[i] || memory.Body != "" {
+					t.Errorf("match %d = %#v, want file %q title %q summary %q snippet %q and empty body", i, memory,
+						tt.wantFiles[i], tt.wantTitles[i], tt.wantSummaries[i], tt.wantSnippets[i])
+				}
+			}
+			if got := strings.Join(result.Warnings, "\n"); !strings.Contains(got, "front matter line 4 is malformed") ||
+				!strings.Contains(got, `memory file "missing.md" is missing`) {
+				t.Fatalf("warnings = %#v, want front matter and missing-file warnings", result.Warnings)
+			}
+		})
+	}
+}
+
+func TestMemorySearchPreservesEightMiBReadBound(t *testing.T) {
+	repo := t.TempDir()
+	const needle = "BOUNDARY NEEDLE"
+	atLimit := strings.Repeat("x", maxMemoryFileBytes-len(needle)-1) + "\n" + needle
+	tooLarge := strings.Repeat("x", maxMemoryFileBytes+1)
+	writeProjectMemory(t, repo, "- [At Limit](at-limit.md)\n- [Too Large](too-large.md)\n", map[string]string{
+		"at-limit.md":  atLimit,
+		"too-large.md": tooLarge,
+	})
+
+	result, err := (&Client{}).SearchMemories(context.Background(), Project{Path: repo}, "boundary needle")
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(result.Memories) != 1 || result.Memories[0].File != "at-limit.md" || result.Memories[0].Snippet != needle {
+		t.Fatalf("boundary search result = %#v", result.Memories)
+	}
+	if got := strings.Join(result.Warnings, "\n"); !strings.Contains(got, `memory file "too-large.md" could not be read`) {
+		t.Fatalf("boundary search warnings = %#v", result.Warnings)
+	}
+}
+
+func TestMemorySearchHonorsCancellation(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Known](known.md)\n", map[string]string{"known.md": "known"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := (&Client{}).SearchMemories(ctx, Project{Path: repo}, "known")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SearchMemories error = %v, want context cancellation", err)
+	}
+	if result.Memories == nil || result.Warnings == nil {
+		t.Fatalf("canceled result collections must remain non-nil: %#v", result)
+	}
+}
+
+var (
+	benchmarkMemorySearchFound   bool
+	benchmarkMemorySearchSnippet string
+)
+
+func BenchmarkMemorySearchText(b *testing.B) {
+	const (
+		target = "mixed ünicode needle"
+		marker = "MiXeD ÜNICODE Needle"
+	)
+	fillerSource := strings.Repeat("Ordinary project memory content without the requested phrase\n", (maxMemoryFileBytes/59)+1)
+	noMatch := fillerSource[:maxMemoryFileBytes]
+	matchedFiller := fillerSource[:maxMemoryFileBytes-len(marker)-1]
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "no-match", content: noMatch},
+		{name: "start", content: marker + "\n" + matchedFiller},
+		{name: "end", content: matchedFiller + "\n" + marker},
+	}
+
+	for _, tt := range tests {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(tt.content)))
+			for i := 0; i < b.N; i++ {
+				text := newMemorySearchText(tt.content)
+				found := text.contains(target)
+				snippet := ""
+				if found {
+					snippet = text.snippet(target)
+				}
+				benchmarkMemorySearchFound = found
+				benchmarkMemorySearchSnippet = snippet
+			}
+		})
+	}
+}
+
 func TestMemoryEmptyAndMalformedStatesStayMachineReadable(t *testing.T) {
 	c := &Client{}
 	empty, err := c.ListMemories(context.Background(), Project{ID: "empty", Path: t.TempDir()})

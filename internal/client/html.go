@@ -92,7 +92,10 @@ func (c *Client) getHTMLPage(ctx context.Context, path string) (*html.Node, bool
 	}
 	rawHasMore := strings.TrimSpace(resp.Header.Get(cardPageMoreHeader))
 	if rawHasMore != "" {
-		hasMore, _ := strconv.ParseBool(rawHasMore)
+		hasMore, parseErr := strconv.ParseBool(rawHasMore)
+		if parseErr != nil {
+			return nil, false, fmt.Errorf("invalid %s header %q: %w", cardPageMoreHeader, rawHasMore, parseErr)
+		}
 		return root, hasMore, nil
 	}
 	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
@@ -115,11 +118,20 @@ func (c *Client) getCardPages(ctx context.Context, path string) ([]htmlPage, err
 func (c *Client) getCardPagesFromInitial(ctx context.Context, path string, root *html.Node, hasMore bool) ([]htmlPage, error) {
 	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
 	if paginationRoot == nil {
+		if hasMore {
+			return nil, fmt.Errorf("card pagination reported more cards without pagination metadata")
+		}
 		return []htmlPage{{root: root}}, nil
 	}
 	pages := []htmlPage{{root: root}}
 	selector := attr(paginationRoot, "data-card-pagination-card-selector")
 	keyAttr := attr(paginationRoot, "data-card-pagination-key")
+	if hasMore {
+		marker, _ := paginationSelector(selector)
+		if marker == "" || strings.TrimSpace(keyAttr) == "" {
+			return nil, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
+		}
+	}
 	offset := countPaginationCards(root, selector, keyAttr)
 
 	for page := 1; hasMore; page++ {

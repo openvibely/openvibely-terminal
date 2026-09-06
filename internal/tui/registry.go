@@ -453,7 +453,7 @@ func tasksCommand() command {
 						if jsonMode {
 							return marshalJSON(added)
 						}
-						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", location.filePath, location.lineNumber, firstNonEmpty(t.Title, shortID(t.ID)), renderTaskReviews(t, reviews)), nil
+						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", sanitizeAutomationDetailText(location.filePath), location.lineNumber, sanitizeAutomationDetailText(firstNonEmpty(t.Title, shortID(t.ID))), renderTaskReviews(t, reviews)), nil
 					})
 				}
 
@@ -2346,6 +2346,26 @@ func workersCommand() command {
 
 // --- channels / personality ---
 
+func validateChannelsArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	action := strings.ToLower(args[0])
+	switch action {
+	case "list":
+		if len(args) == 1 {
+			return nil
+		}
+	case "test", "remove":
+		if len(args) <= 2 {
+			return nil
+		}
+	default:
+		action = ""
+	}
+	return errors.New(commandUsage("channels", action))
+}
+
 func channelsCommand() command {
 	actions := []string{"list", "test", "remove"}
 	return command{
@@ -2355,10 +2375,13 @@ func channelsCommand() command {
 		actions:       actions,
 		selectorPaths: [][]string{{"test"}, {"remove"}},
 		desc:          "integrations: Telegram, Slack, Discord, GitHub, email, webhooks",
+		actionUsages: []commandActionUsage{
+			{action: "", args: "[list|test <channel>|remove <channel>]"},
+			{action: "list", description: "list configured integrations"},
+			{action: "test", args: "<channel>", description: "send a test message (telegram, slack, discord, email)"},
+			{action: "remove", args: "<channel>", description: "disconnect an integration (telegram, slack, discord, email)"},
+		},
 		usage: []string{
-			"channels list                              list configured integrations",
-			"channels test <channel>                    send a test message (telegram, slack, discord, email)",
-			"channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)",
 			"omit <channel> on test/remove → interactive selector",
 			"Note: GitHub and Slack OAuth connect/callback require a browser (known parity gap).",
 		},
@@ -2367,10 +2390,14 @@ func channelsCommand() command {
 			`channels test email`,
 			`channels remove discord`,
 		},
+		validateArgs: validateChannelsArgs,
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
 			if !ok {
 				return mm, cmd
+			}
+			if err := validateChannelsArgs(args); err != nil {
+				return m, errCmd(err.Error())
 			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -2383,7 +2410,7 @@ func channelsCommand() command {
 				})
 			default:
 				if ref == "" {
-					return selectorOr(m, fmt.Sprintf("usage: /channels %s <channel>", action),
+					return selectorOr(m, commandUsage("channels", action),
 						selectorFor("Channels", "channels "+action, "no channels available", false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								items := make([]selectorItem, 0, len(client.KnownChannels))
@@ -3311,8 +3338,8 @@ func eventsCommand() command {
 			`events on`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			m.busy = false
 			if cliMode {
+				m.busy = false
 				on, err := parseCLIEventsAction(args)
 				if err != nil {
 					return m, errCmd(err.Error())
@@ -3322,15 +3349,21 @@ func eventsCommand() command {
 				}
 				return m, errCmd("events on must run through the foreground CLI stream; use the openvibely-tui events command")
 			}
+			if len(args) > 1 {
+				return m, errCmd("usage: /events [on|off]")
+			}
 			on := !m.showEvents
-			if len(args) > 0 {
+			if len(args) == 1 {
 				switch strings.ToLower(args[0]) {
 				case "on", "true":
 					on = true
 				case "off", "false":
 					on = false
+				default:
+					return m, errCmd("usage: /events [on|off]")
 				}
 			}
+			m.busy = false
 			m.showEvents = on
 			state := "off"
 			if on {

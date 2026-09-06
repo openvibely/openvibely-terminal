@@ -89,6 +89,11 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 	if cmdDef == nil {
 		return fmt.Errorf("unknown command %q — run \"help\" to list commands", name)
 	}
+	if cmdDef.validateArgs != nil {
+		if err := cmdDef.validateArgs(fields[1:]); err != nil {
+			return err
+		}
+	}
 
 	m := New(c)
 	m.cliContext = ctx
@@ -108,6 +113,7 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 		}
 	}
 
+	var statusProjectLoadErr error
 	// Only commands that talk to the backend need a project or connection
 	// state; /help and friends should stay instant and work offline.
 	if cmdDef.needsProjectLoad(args) {
@@ -118,15 +124,21 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 			return cliContextResult(ctx)
 		}
 		// An unknown or ambiguous project must fail loudly rather than run the
-		// command against whichever project happened to be selected.
+		// command against whichever project happened to be selected. Status is
+		// global-first, so a failed project listing becomes a visible partial
+		// failure while health, auth, and capacity checks still run.
 		if err := firstError(m); err != nil {
-			if m.connErr != "" {
+			if cmdDef.needsStatus() {
+				statusProjectLoadErr = err
+				m.statusProjectsUnavailable = true
+			} else if m.connErr != "" {
 				if m.connReachableError {
 					return errors.New(ReachableBackendErrorMessage(c.BaseURL(), errors.New(m.connErr)))
 				}
 				return errors.New(OfflineRecoveryMessage(c.BaseURL(), errors.New(m.connErr)))
+			} else {
+				return err
 			}
-			return err
 		}
 	}
 
@@ -170,6 +182,9 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 		writeJSONEntries(out, m.log[start:])
 	} else {
 		writeEntries(out, m.log[start:])
+	}
+	if statusProjectLoadErr != nil {
+		return fmt.Errorf("status partial failure: %w", statusProjectLoadErr)
 	}
 	return commandErr
 }
@@ -656,6 +671,9 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	var payload cliEventPayload
 	payloadErr := json.Unmarshal(ev.Data, &payload)
 	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
+	if strings.TrimSpace(payload.TaskID) != "" && payload.ProjectID == "" {
+		return "", false, nil
+	}
 	if payload.ProjectID != "" && payload.ProjectID != projectID {
 		return "", false, nil
 	}
@@ -684,11 +702,10 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	if record.Type == "" {
 		record.Type = record.Event
 	}
-	if compact := compactJSON(ev.Data); compact != nil {
-		record.Data = compact
-	}
-
 	if jsonOutput {
+		if compact := compactJSON(ev.Data); compact != nil {
+			record.Data = compact
+		}
 		encoded, err := json.Marshal(record)
 		if err != nil {
 			return "", false, fmt.Errorf("encoding live event: %w", err)
@@ -717,8 +734,8 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	}
 	add("completed_output", record.CompletedOutput)
 	if len(parts) == 1 || (len(parts) == 2 && record.Type == record.Event) {
-		if record.Data != nil {
-			parts = append(parts, "data="+strconv.Quote(string(record.Data)))
+		if compact := compactJSON(ev.Data); compact != nil {
+			parts = append(parts, "data="+strconv.Quote(string(compact)))
 		} else if payloadErr != nil && strings.TrimSpace(string(ev.Data)) != "" {
 			parts = append(parts, "data="+strconv.Quote(string(ev.Data)))
 		}

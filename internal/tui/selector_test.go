@@ -639,6 +639,31 @@ func TestSelectorFilterNarrowsItems(t *testing.T) {
 	}
 }
 
+func TestSelectorCachedAndFallbackFilteringEquivalent(t *testing.T) {
+	items := []selectorItem{
+		{ref: "task-label", label: "Mixed CASE Label", detail: "unrelated"},
+		{ref: "task-detail", label: "unrelated", detail: "Mixed Case Detail"},
+		{ref: "MIXED CASE ref", label: "unrelated", detail: "unrelated"},
+		{ref: "task-no-match", label: "other", detail: "other"},
+	}
+	m := Model{
+		selectorItems:  items,
+		selectorSearch: selectorSearchTexts(items),
+	}
+	m = m.setSelectorFilter("mIxEd CaSe")
+	cached := m.filteredSelectorItems()
+
+	m.selectorFilteredFor = "stale"
+	fallback := m.filteredSelectorItems()
+
+	if !reflect.DeepEqual(cached, fallback) {
+		t.Fatalf("cached selector results differ from fallback:\ncached:   %+v\nfallback: %+v", cached, fallback)
+	}
+	if !reflect.DeepEqual(cached, items[:3]) {
+		t.Fatalf("matching items = %+v, want %+v", cached, items[:3])
+	}
+}
+
 // TestSelectorFilterSpaceTypesExactlyOneSpace verifies that pressing the spacebar
 // while typing a filter appends a single space, not two. Multi-word resource
 // names (e.g. "Refactor the API") must be findable when the user types a space

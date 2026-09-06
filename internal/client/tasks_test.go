@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 // boardHTML mirrors the real kanban markup: every card opens with a kebab menu
@@ -828,6 +830,66 @@ func TestListTaskReviewsParsesHTMLFragment(t *testing.T) {
 	}
 	if !reviews[1].Resolved {
 		t.Errorf("second review should be resolved: %+v", reviews[1])
+	}
+}
+
+func TestReviewCommentResponsesPreserveMultilineText(t *testing.T) {
+	const fragment = `<div id="review-comments-list" data-task-id="t-1" data-comment-count="2">
+		<div class="review-comment-item" data-comment-id="rc-1" data-file-path="internal/client/tasks.go" data-line-number="42" data-line-type="new" data-state="open">
+			<div><span data-author>alice</span><p>
+First &amp; second
+
+Third<br>Fourth
+			</p></div>
+		</div>
+		<div class="review-comment-item" data-comment-id="rc-2" data-file-path="empty.go" data-line-number="7"><p>
+	 </p></div>
+	</div>`
+
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		method := method
+		t.Run(method, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != method {
+					t.Fatalf("method = %s, want %s", r.Method, method)
+				}
+				_, _ = w.Write([]byte(fragment))
+			}))
+			defer srv.Close()
+
+			c, _ := New(srv.URL)
+			var (
+				reviews []ReviewComment
+				err     error
+			)
+			if method == http.MethodGet {
+				reviews, err = c.ListTaskReviews(context.Background(), "t-1")
+			} else {
+				reviews, err = c.AddTaskReviewComment(context.Background(), "t-1", ReviewCommentForm{})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, want := reviews[0].CommentText, "First & second\n\nThird\nFourth"; got != want {
+				t.Errorf("comment text = %q, want %q", got, want)
+			}
+			if got := reviews[1].CommentText; got != "" {
+				t.Errorf("empty comment text = %q, want empty", got)
+			}
+			if got := reviews[0]; got.ID != "rc-1" || got.TaskID != "t-1" || got.FilePath != "internal/client/tasks.go" || got.LineNumber != 42 || got.LineType != "new" || got.State != "open" || got.ReviewedBy != "alice" {
+				t.Errorf("review metadata changed: %+v", got)
+			}
+		})
+	}
+
+	root, err := html.Parse(strings.NewReader(`<p>First
+
+Second<br>Third</p>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := NodeText(findNode(root, func(n *html.Node) bool { return n.Data == "p" })), "First Second\n\nThird"; got != want {
+		t.Errorf("generic NodeText = %q, want unchanged %q", got, want)
 	}
 }
 

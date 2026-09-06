@@ -649,15 +649,24 @@ func automationLiveNodeMatchIndex(nodes []AutomationLiveNode, parsed AutomationL
 	return -1, false, false
 }
 
-func parseAutomationLiveNode(detail *AutomationDetail, node *html.Node) (AutomationLiveNode, bool) {
+func parseAutomationNodeCommon(detail *AutomationDetail, node *html.Node, idAttrs, keyAttrs, stateAttrs []string) (AutomationLiveNode, bool) {
 	parsed := AutomationLiveNode{}
-	parsed.ID = strings.TrimSpace(firstAutomationAttr(node, "data-automation-live-node", "data-automation-node", "data-automation-node-id", "data-node-id"))
-	parsed.NodeKey = strings.TrimSpace(firstAutomationAttr(node, "data-automation-node-key", "data-node-key"))
+	parsed.ID = strings.TrimSpace(firstAutomationAttr(node, idAttrs...))
+	parsed.NodeKey = strings.TrimSpace(firstAutomationAttr(node, keyAttrs...))
 	parsed.Name = strings.TrimSpace(firstAutomationAttr(node, "data-automation-node-name", "data-node-name"))
 	parsed.NodeType = strings.TrimSpace(firstAutomationAttr(node, "data-automation-node-type", "data-node-type"))
 	parsed.Role = strings.TrimSpace(firstAutomationAttr(node, "data-automation-node-role", "data-node-role"))
-	parsed.DisplayState = normalizeAutomationDisplayState(firstAutomationAttr(node,
-		"data-automation-live-node-state", "data-automation-node-state", "data-display-state", "data-state", "data-status"))
+	parsed.DisplayState = normalizeAutomationDisplayState(firstAutomationAttr(node, stateAttrs...))
+	countsPresent := parseAutomationNodeCounts(detail, node, &parsed.Counts)
+	return parsed, countsPresent
+}
+
+func parseAutomationLiveNode(detail *AutomationDetail, node *html.Node) (AutomationLiveNode, bool) {
+	parsed, countsPresent := parseAutomationNodeCommon(detail, node,
+		[]string{"data-automation-live-node", "data-automation-node", "data-automation-node-id", "data-node-id"},
+		[]string{"data-automation-node-key", "data-node-key"},
+		[]string{"data-automation-live-node-state", "data-automation-node-state", "data-display-state", "data-state", "data-status"},
+	)
 	if parsed.Name == "" {
 		if strong := findNode(node, func(n *html.Node) bool { return n.Data == "strong" }); strong != nil {
 			parsed.Name = strings.TrimSpace(NodeText(strong))
@@ -674,7 +683,6 @@ func parseAutomationLiveNode(detail *AutomationDetail, node *html.Node) (Automat
 	if parsed.Name == "" {
 		parsed.Name = firstLine(NodeText(node))
 	}
-	countsPresent := parseAutomationNodeCounts(detail, node, &parsed.Counts)
 	if label := automationParentTaskLinkCountLabel(node); label != "" {
 		if mergeAutomationCountText(detail, &parsed.Counts, label) {
 			countsPresent = true
@@ -700,13 +708,11 @@ func automationParentTaskLinkCountLabel(node *html.Node) string {
 }
 
 func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (AutomationLiveNode, bool) {
-	parsed := AutomationLiveNode{}
-	parsed.ID = strings.TrimSpace(firstAutomationAttr(section, "data-automation-live-node-id", "data-automation-node-id", "data-node-id"))
-	parsed.NodeKey = strings.TrimSpace(firstAutomationAttr(section, "data-automation-live-node-detail", "data-automation-node-detail", "data-automation-node-key", "data-node-key"))
-	parsed.Name = strings.TrimSpace(firstAutomationAttr(section, "data-automation-node-name", "data-node-name"))
-	parsed.NodeType = strings.TrimSpace(firstAutomationAttr(section, "data-automation-node-type", "data-node-type"))
-	parsed.Role = strings.TrimSpace(firstAutomationAttr(section, "data-automation-node-role", "data-node-role"))
-	parsed.DisplayState = normalizeAutomationDisplayState(firstAutomationAttr(section, "data-automation-node-state", "data-display-state"))
+	parsed, countsPresent := parseAutomationNodeCommon(detail, section,
+		[]string{"data-automation-live-node-id", "data-automation-node-id", "data-node-id"},
+		[]string{"data-automation-live-node-detail", "data-automation-node-detail", "data-automation-node-key", "data-node-key"},
+		[]string{"data-automation-node-state", "data-display-state"},
+	)
 	if heading := findNode(section, func(n *html.Node) bool { return n.Data == "h3" || n.Data == "h4" || n.Data == "strong" }); heading != nil {
 		if parsed.Name == "" {
 			parsed.Name = strings.TrimSpace(NodeText(heading))
@@ -726,7 +732,6 @@ func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (Au
 			parsed.NodeType = strings.TrimSpace(NodeText(badge))
 		}
 	}
-	countsPresent := parseAutomationNodeCounts(detail, section, &parsed.Counts)
 	return parsed, countsPresent
 }
 

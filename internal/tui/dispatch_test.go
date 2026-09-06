@@ -172,6 +172,99 @@ func dispatchVoteModel(t *testing.T, status int, body string) (Model, *recorder)
 	return m, rec
 }
 
+func TestEventsInteractiveDispatchValidatesOperands(t *testing.T) {
+	cases := []struct {
+		name       string
+		line       string
+		valid      bool
+		wantForOff bool
+		wantForOn  bool
+	}{
+		{name: "bare toggles", line: "/events", valid: true, wantForOff: true, wantForOn: false},
+		{name: "on enables", line: "/events on", valid: true, wantForOff: true, wantForOn: true},
+		{name: "off disables", line: "/events off", valid: true, wantForOff: false, wantForOn: false},
+		{name: "true enables", line: "/events true", valid: true, wantForOff: true, wantForOn: true},
+		{name: "false disables", line: "/events false", valid: true, wantForOff: false, wantForOn: false},
+		{name: "unknown mode", line: "/events typo"},
+		{name: "extra operand", line: "/events off extra"},
+		{name: "extra operand after unknown", line: "/events typo extra"},
+	}
+
+	for _, initial := range []bool{false, true} {
+		for _, tc := range cases {
+			initial, tc := initial, tc
+			t.Run(fmt.Sprintf("initial_%t/%s", initial, tc.name), func(t *testing.T) {
+				m, rec := dispatchModel(t, nil)
+				m.showEvents = initial
+				m.busy = true
+				sseCanceled := false
+				m.sseCancel = func() { sseCanceled = true }
+				beforeLogLen := len(m.log)
+				beforeGeneration := m.sseGeneration
+
+				m, cmd := typeLine(t, m, tc.line)
+				if tc.valid {
+					if cmd != nil {
+						t.Fatal("valid interactive /events should not return a command")
+					}
+				} else {
+					if cmd == nil {
+						t.Fatal("invalid interactive /events should return a usage message command")
+					}
+					if !m.busy {
+						t.Fatal("invalid command changed busy state during dispatch")
+					}
+					next, followup := m.Update(cmd())
+					m = next.(Model)
+					if followup != nil {
+						t.Fatal("invalid interactive /events returned an unexpected follow-up command")
+					}
+				}
+				if got := rec.all(); got != "" {
+					t.Fatalf("interactive /events made backend requests:\n%s", got)
+				}
+				if m.sseGeneration != beforeGeneration || m.sseCancel == nil || sseCanceled {
+					t.Fatal("interactive /events changed SSE lifecycle state")
+				}
+
+				out := stripANSI(transcript(m))
+				if !tc.valid {
+					if m.showEvents != initial {
+						t.Fatalf("showEvents = %t, want unchanged %t", m.showEvents, initial)
+					}
+					if !strings.Contains(out, "usage: /events [on|off]") {
+						t.Fatalf("canonical usage missing:\n%s", out)
+					}
+					for _, success := range []string{"live events on", "live events off"} {
+						if strings.Contains(out, success) {
+							t.Fatalf("invalid command reported success %q:\n%s", success, out)
+						}
+					}
+					return
+				}
+
+				want := tc.wantForOff
+				if initial {
+					want = tc.wantForOn
+				}
+				if m.showEvents != want {
+					t.Fatalf("showEvents = %t, want %t", m.showEvents, want)
+				}
+				if len(m.log) != beforeLogLen+2 {
+					t.Fatalf("valid command appended %d entries, want command and result", len(m.log)-beforeLogLen)
+				}
+				wantText := "live events off"
+				if want {
+					wantText = "live events on"
+				}
+				if !strings.Contains(out, wantText) || strings.Contains(out, "usage: /events") {
+					t.Fatalf("valid command output mismatch:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
 func TestAgentsVotesInteractiveDispatchAndErrors(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -3117,6 +3210,41 @@ func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
 	}
 }
 
+func TestModelsListFilterOutputDistinguishesMatchesFromNoMatches(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
+		data-model-provider="Anthropic" data-model-model="claude-sonnet-4"></div>`
+	cases := []struct {
+		name      string
+		line      string
+		want      string
+		forbidden []string
+	}{
+		{name: "name match", line: "/models sonNET", want: "Sonnet"},
+		{name: "model match", line: "/models CLAUDE-SONNET", want: "Sonnet"},
+		{name: "provider match", line: "/models anthROPIC", want: "Sonnet"},
+		{name: "no match", line: "/models Missing", want: `no models match "Missing"`, forbidden: []string{"no models configured", "web UI", "API"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
+			m.selectedID = ""
+			m = runLine(t, m, tc.line)
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+			for _, forbidden := range tc.forbidden {
+				if strings.Contains(out, forbidden) {
+					t.Errorf("output unexpectedly contains %q:\n%s", forbidden, out)
+				}
+			}
+			if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
+				t.Fatalf("filtered model list was not requested globally:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 func TestModelsListDoesNotRequireSelectedProject(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
@@ -3712,6 +3840,84 @@ func TestTasksActivateSweepClear(t *testing.T) {
 			t.Errorf("expected refreshed board:\n%s", out)
 		}
 	})
+}
+
+func TestAlertsLaterPageInteractiveCommands(t *testing.T) {
+	tests := []struct {
+		name        string
+		command     string
+		wantMethod  string
+		wantPath    string
+		wantOutput  string
+		destructive bool
+	}{
+		{name: "list filter", command: "/alerts Later", wantOutput: "Later page alert"},
+		{name: "show", command: "/alerts show a-later", wantMethod: http.MethodGet, wantPath: "/alerts/a-later/details", wantOutput: "Later page detail"},
+		{name: "approve", command: "/alerts approve a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/approve", wantOutput: "approve: Later page alert"},
+		{name: "reject", command: "/alerts reject a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/reject", wantOutput: "reject: Later page alert"},
+		{name: "dismiss", command: "/alerts dismiss a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/dismiss", wantOutput: "dismiss: Later page alert"},
+		{name: "read", command: "/alerts read a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/read", wantOutput: "read: Later page alert"},
+		{name: "delete", command: "/alerts delete a-later", wantMethod: http.MethodDelete, wantPath: "/alerts/a-later", wantOutput: "delete: Later page alert", destructive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				if r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request lost project scope: %s", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts" && r.URL.Query().Get("card_page") == "1":
+					q := r.URL.Query()
+					if q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "1" {
+						t.Errorf("bad continuation query: %s", r.URL.RawQuery)
+					}
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="a-later" data-alert-scroll-anchor="a-later" data-search-text="later page"><p class="font-semibold">Later page alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true"><div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts/a-later/details":
+					_, _ = io.WriteString(w, `<div data-alert-detail-loaded><div data-alert-markdown data-raw-content="Later page detail"></div></div>`)
+				case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-later":
+					_, _ = io.WriteString(w, `<div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div>`)
+				case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/alerts/a-later/"):
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			if tt.destructive {
+				m = confirmDestructive(t, m, tt.command)
+			} else {
+				m = runLine(t, m, tt.command)
+			}
+			if !strings.Contains(stripANSI(transcript(m)), tt.wantOutput) {
+				t.Fatalf("output missing %q:\n%s", tt.wantOutput, stripANSI(transcript(m)))
+			}
+			if tt.wantPath != "" {
+				want := tt.wantMethod + " " + tt.wantPath
+				found := false
+				for _, request := range requests {
+					if request == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("requests = %#v, want %q", requests, want)
+				}
+			}
+		})
+	}
 }
 
 func TestAlertsApproveRejectDismiss(t *testing.T) {
@@ -4510,6 +4716,39 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 }
 
 // --- channels ---
+
+func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
+	cases := []struct {
+		line      string
+		wantUsage string
+	}{
+		{line: "/channels nonsense", wantUsage: "usage: /channels [list|test <channel>|remove <channel>]"},
+		{line: "/channels list extra", wantUsage: "usage: /channels list"},
+		{line: "/channels test telegram extra", wantUsage: "usage: /channels test <channel>"},
+		{line: "/channels remove slack extra", wantUsage: "usage: /channels remove <channel>"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": `<html><body>channels</body></html>`})
+			m = runLine(t, m, tc.line)
+
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.wantUsage) {
+				t.Fatalf("malformed command output = %q, want canonical usage", out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("malformed command made backend requests:\n%s", calls)
+			}
+			if m.selectorActive {
+				t.Fatal("malformed command opened a selector")
+			}
+			if m.pendingConfirmation != nil {
+				t.Fatal("malformed command opened a confirmation")
+			}
+		})
+	}
+}
 
 func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
 	const channelsPage = `<html><body>Telegram: connected  Slack: disconnected</body></html>`

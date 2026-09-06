@@ -922,6 +922,38 @@ func TestRenderAutomationDetailPreservesFieldAvailabilityAndRecentState(t *testi
 	}
 }
 
+func TestRenderModelsDistinguishesEmptyFromNoFilterMatches(t *testing.T) {
+	models := []client.LLMModel{{
+		ID:       "m-1",
+		Name:     "Sonnet",
+		Provider: "Anthropic",
+		Model:    "claude-sonnet-4",
+	}}
+
+	empty := stripANSI(renderModels(nil, ""))
+	if !strings.Contains(empty, "no models configured") {
+		t.Fatalf("empty model list missing configuration guidance: %q", empty)
+	}
+
+	for _, filter := range []string{"sonNET", "CLAUDE-SONNET", "anthROPIC"} {
+		out := stripANSI(renderModels(models, filter))
+		if !strings.Contains(out, "Sonnet") || !strings.Contains(out, "Anthropic") || !strings.Contains(out, "claude-sonnet-4") {
+			t.Errorf("case-insensitive filter %q did not render matching model:\n%s", filter, out)
+		}
+	}
+
+	noMatch := stripANSI(renderModels(models, "missing\x1b[31m\nfilter"))
+	if !strings.Contains(noMatch, `no models match "missing filter"`) {
+		t.Fatalf("no-match output did not contain the sanitized filter: %q", noMatch)
+	}
+	if strings.Contains(noMatch, "no models configured") || strings.Contains(noMatch, "web UI") || strings.Contains(noMatch, "API") {
+		t.Fatalf("no-match output included false configuration guidance: %q", noMatch)
+	}
+	if strings.Contains(noMatch, "\x1b") || strings.Contains(noMatch, "\n") {
+		t.Fatalf("no-match output was not terminal-safe: %q", noMatch)
+	}
+}
+
 func TestEmptyStateHints(t *testing.T) {
 	cases := []struct {
 		name string

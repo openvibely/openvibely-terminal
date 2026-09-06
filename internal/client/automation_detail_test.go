@@ -397,6 +397,61 @@ func TestParseAutomationDetailUsesPerMetricCountProvenance(t *testing.T) {
 	}
 }
 
+func TestParseAutomationDetailNodeRepresentationsPreserveExtractionAndCorrelation(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-common-node-fields" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel>
+			<g data-automation-live-node="n1" data-automation-node-key="structured" data-automation-node-name="Structured graph" data-automation-node-type="trigger" data-automation-node-role="source" data-automation-live-node-state="running" data-counts='{"running":2}'></g>
+			<a data-automation-task-link aria-label="Fallback, Waiting, 6 blocked"><g data-automation-live-node="n2"><strong>Fallback graph</strong><span class="automation-node-state--waiting">Waiting</span><small>4 waiting</small></g></a>
+		</div>
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="structured" data-automation-live-node-id="n1" data-automation-node-name="Structured detail" data-automation-node-type="task" data-automation-node-role="implementation" data-automation-node-state="failed" data-automation-node-count-failed="3"></section>
+			<section data-automation-live-node-detail="fallback" data-automation-live-node-id="n2" data-count-label="5 recent"><h3>Fallback detail</h3><p>fallback · reviewer</p><span class="badge">approval</span></section>
+			<section data-automation-live-node-detail="other" data-automation-live-node-id="n3" data-counts='{"running":9}'><h3>Uncorrelated detail</h3><p>other · worker</p></section>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 2 || len(detail.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("node provenance = graph=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+	}
+	structured := detail.Nodes[0]
+	if structured.ID != "n1" || structured.NodeKey != "structured" || structured.Name != "Structured graph" || structured.NodeType != "trigger" || structured.Role != "source" || structured.DisplayState != "running" {
+		t.Fatalf("structured node fields changed during correlation: %+v", structured)
+	}
+	if !structured.Counts.RunningAvailable || structured.Counts.Running != 2 || !structured.Counts.FailedAvailable || structured.Counts.Failed != 3 {
+		t.Fatalf("structured correlated counts = %+v", structured.Counts)
+	}
+	fallback := detail.Nodes[1]
+	if fallback.ID != "n2" || fallback.NodeKey != "fallback" || fallback.Name != "Fallback graph" || fallback.NodeType != "approval" || fallback.Role != "reviewer" || fallback.DisplayState != "waiting_human" {
+		t.Fatalf("fallback node fields changed during correlation: %+v", fallback)
+	}
+	if !fallback.Counts.WaitingAvailable || fallback.Counts.Waiting != 4 || !fallback.Counts.BlockedAvailable || fallback.Counts.Blocked != 6 || !fallback.Counts.CompletedRecentlyAvailable || fallback.Counts.CompletedRecently != 5 {
+		t.Fatalf("fallback correlated counts = %+v", fallback.Counts)
+	}
+	unmatched := detail.UnmatchedNodeDetails[0]
+	if unmatched.ID != "n3" || unmatched.NodeKey != "other" || unmatched.Name != "Uncorrelated detail" || unmatched.Role != "worker" || !unmatched.Counts.RunningAvailable || unmatched.Counts.Running != 9 {
+		t.Fatalf("uncorrelated detail fields = %+v", unmatched)
+	}
+	if !detail.NodesAvailable || !detail.NodeCountsAvailable || !detail.CountsAvailable || !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "node detail records could not be correlated") {
+		t.Fatalf("availability/warnings changed: nodes=%t node_counts=%t counts=%t partial=%t warnings=%v", detail.NodesAvailable, detail.NodeCountsAvailable, detail.CountsAvailable, detail.Partial, detail.Warnings)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Nodes                []AutomationLiveNode `json:"nodes"`
+		UnmatchedNodeDetails []AutomationLiveNode `json:"unmatched_node_details"`
+	}
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire.Nodes) != 2 || len(wire.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("node JSON provenance = %s", encoded)
+	}
+}
+
 func TestParseAutomationDetailUnknownExternalFreshnessIsUnavailable(t *testing.T) {
 	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-external" data-project-id="p1" data-automation-lifecycle-state="active">
 		<div data-automation-graph-panel></div>
