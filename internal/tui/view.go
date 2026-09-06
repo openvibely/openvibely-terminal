@@ -261,7 +261,9 @@ func (m Model) renderStatus() string {
 	default:
 		row("auth", dimStyle.Render("disabled or anonymous"))
 	}
-	if m.selectedName != "" {
+	if m.statusProjectsUnavailable {
+		row("projects", statusErrStyle.Render("unavailable")+dimStyle.Render(" (partial failure)"))
+	} else if m.selectedName != "" {
 		row("project", m.selectedName)
 	}
 	if c := m.capacity; c != nil {

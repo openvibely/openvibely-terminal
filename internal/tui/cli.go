@@ -108,6 +108,7 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 		}
 	}
 
+	var statusProjectLoadErr error
 	// Only commands that talk to the backend need a project or connection
 	// state; /help and friends should stay instant and work offline.
 	if cmdDef.needsProjectLoad(args) {
@@ -118,15 +119,21 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 			return cliContextResult(ctx)
 		}
 		// An unknown or ambiguous project must fail loudly rather than run the
-		// command against whichever project happened to be selected.
+		// command against whichever project happened to be selected. Status is
+		// global-first, so a failed project listing becomes a visible partial
+		// failure while health, auth, and capacity checks still run.
 		if err := firstError(m); err != nil {
-			if m.connErr != "" {
+			if cmdDef.needsStatus() {
+				statusProjectLoadErr = err
+				m.statusProjectsUnavailable = true
+			} else if m.connErr != "" {
 				if m.connReachableError {
 					return errors.New(ReachableBackendErrorMessage(c.BaseURL(), errors.New(m.connErr)))
 				}
 				return errors.New(OfflineRecoveryMessage(c.BaseURL(), errors.New(m.connErr)))
+			} else {
+				return err
 			}
-			return err
 		}
 	}
 
@@ -170,6 +177,9 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 		writeJSONEntries(out, m.log[start:])
 	} else {
 		writeEntries(out, m.log[start:])
+	}
+	if statusProjectLoadErr != nil {
+		return fmt.Errorf("status partial failure: %w", statusProjectLoadErr)
 	}
 	return commandErr
 }

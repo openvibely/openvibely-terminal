@@ -95,16 +95,17 @@ type Model struct {
 	histPos int
 
 	// connection state
-	connected            bool
-	connChecked          bool
-	authRequired         bool
-	connectionGeneration int
-	sessionGeneration    uint64
-	projectGeneration    uint64
-	connErr              string
-	connReachableError   bool // connErr came from a responding but unhealthy backend
-	capacity             *client.GlobalCapacity
-	auth                 *client.AuthStatus
+	connected                 bool
+	connChecked               bool
+	authRequired              bool
+	connectionGeneration      int
+	sessionGeneration         uint64
+	projectGeneration         uint64
+	connErr                   string
+	connReachableError        bool // connErr came from a responding but unhealthy backend
+	statusProjectsUnavailable bool // one-shot status could not list projects; global rows remain useful
+	capacity                  *client.GlobalCapacity
+	auth                      *client.AuthStatus
 
 	// interactive cookie-session sign-in. Password text is held only while the
 	// form is active and is cleared from the input before the request starts.

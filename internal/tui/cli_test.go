@@ -982,6 +982,148 @@ func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	}
 }
 
+func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		projectList func(http.ResponseWriter)
+		wantError   string
+	}{
+		{
+			name: "service unavailable",
+			projectList: func(w http.ResponseWriter) {
+				http.Error(w, "projects unavailable", http.StatusServiceUnavailable)
+			},
+			wantError: "503",
+		},
+		{
+			name: "connection dropped",
+			projectList: func(w http.ResponseWriter) {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					panic("response writer cannot hijack connection")
+				}
+				conn, _, err := hijacker.Hijack()
+				if err != nil {
+					panic(err)
+				}
+				_ = conn.Close()
+			},
+			wantError: "loading projects",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.recordURL(r.Method, r.URL.RequestURI())
+				switch r.URL.Path {
+				case "/api/projects":
+					tc.projectList(w)
+				case "/api/capacity/global":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"total_running":2,"max_workers":5,"queue_size":1,"available_slots":3}`)
+				case "/auth/me":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "", []string{"status"}, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("status error = %v, want substring %q", err, tc.wantError)
+			}
+			got := stripANSI(out.String())
+			for _, want := range []string{"Status", "connected", "signed in as operator", "2 running / 5 max, 1 queued, 3 free", "projects", "unavailable", "partial failure"} {
+				if !strings.Contains(strings.ToLower(got), strings.ToLower(want)) {
+					t.Errorf("partial status missing %q:\n%s", want, got)
+				}
+			}
+			if rec.count("GET", "/api/capacity/global") != 1 || rec.count("GET", "/auth/me") != 1 {
+				t.Errorf("global status checks did not run exactly once:\n%s", rec.all())
+			}
+		})
+	}
+}
+
+func TestCLIStatusMultipleProjectsIsGlobalAndUnambiguous(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        cliProjects,
+		"/api/capacity/global": `{"total_running":1,"max_workers":4,"queue_size":0,"available_slots":3}`,
+		"/auth/me":             `{"authenticated":false}`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	got := stripANSI(out.String())
+	for _, forbidden := range []string{"project         demo", "project         other", "alerts", "tasks"} {
+		if strings.Contains(strings.ToLower(got), strings.ToLower(forbidden)) {
+			t.Errorf("multi-project status used ambiguous scope %q:\n%s", forbidden, got)
+		}
+	}
+	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
+		t.Fatalf("multi-project status made scoped requests:\n%s", rec.all())
+	}
+	if !strings.Contains(got, "1 running / 4 max") || !strings.Contains(got, "disabled or anonymous") {
+		t.Fatalf("multi-project status omitted global rows:\n%s", got)
+	}
+}
+
+func TestCLIStatusPreservesAuthRequiredAndOfflineOutput(t *testing.T) {
+	t.Run("auth required", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/projects" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"projects":[]}`)
+				return
+			}
+			w.WriteHeader(http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "", []string{"status"}, false, false)
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "requires sign-in") {
+			t.Fatalf("auth-required status error = %v, want sign-in requirement", err)
+		}
+		got := strings.ToLower(stripANSI(out.String()))
+		if !strings.Contains(got, "sign-in required") || strings.Contains(got, "offline") {
+			t.Fatalf("auth-required status output is wrong:\n%s", got)
+		}
+	})
+
+	t.Run("fully offline", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		baseURL := srv.URL
+		srv.Close()
+		c, err := client.New(baseURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "", []string{"status"}, false, false)
+		if err == nil {
+			t.Fatal("offline status unexpectedly succeeded")
+		}
+		got := strings.ToLower(stripANSI(out.String()))
+		for _, want := range []string{"status", "offline", "projects", "unavailable", "partial failure"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("offline status missing %q:\n%s", want, got)
+			}
+		}
+	})
+}
+
 func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1">
 		<p class="font-semibold">Needs approval</p>
