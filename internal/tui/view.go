@@ -5,13 +5,18 @@ package tui
 
 import (
 	"context"
+	"encoding"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
@@ -691,11 +696,1358 @@ func lifecyclePayloadSummary(payload map[string]any) string {
 	if len(payload) == 0 {
 		return "—"
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
+	preview := lifecycleJSONPreview{limit: 96}
+	if err := preview.appendValue(payload, 0); err != nil {
 		return "<unavailable>"
 	}
-	return truncate(string(encoded), 96)
+	return preview.result()
+}
+
+const (
+	lifecyclePreviewMaxDepth             = 10_000
+	lifecyclePreviewMaxBytes             = 512
+	lifecyclePreviewMaxKeyBytes          = 512
+	lifecyclePreviewMaxRetainedKeyBytes  = 128 << 10
+	lifecyclePreviewMaxValidationMapKeys = 512
+)
+
+// lifecycleJSONPreview emits the same bytes as encoding/json for ordinary
+// values, but retains only a bounded canonical prefix for oversized values.
+type lifecycleJSONPreview struct {
+	buf          strings.Builder
+	limit        int
+	asciiCells   int
+	stopped      bool
+	byteCapped   bool
+	indirections int
+	active       map[lifecyclePreviewVisit]bool
+}
+
+type lifecyclePreviewVisit struct {
+	typeOf  reflect.Type
+	pointer uintptr
+	length  int
+}
+
+// append tracks printable JSON ASCII incrementally. Non-ASCII text is retained
+// only up to a fixed byte ceiling; final display-width truncation handles wide
+// and combining clusters exactly once.
+func (p *lifecycleJSONPreview) append(s string) {
+	for len(s) > 0 && !p.stopped {
+		if p.buf.Len() >= lifecyclePreviewMaxBytes {
+			p.stopped = true
+			p.byteCapped = true
+			return
+		}
+		if s[0] < utf8.RuneSelf {
+			p.buf.WriteByte(s[0])
+			p.asciiCells++
+			s = s[1:]
+			if p.asciiCells > p.limit {
+				p.stopped = true
+			}
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(s)
+		if p.buf.Len()+size > lifecyclePreviewMaxBytes {
+			p.stopped = true
+			p.byteCapped = true
+			return
+		}
+		p.buf.WriteString(s[:size])
+		s = s[size:]
+	}
+}
+
+func (p *lifecycleJSONPreview) result() string {
+	result := p.buf.String()
+	if p.byteCapped {
+		result += "…"
+	}
+	return truncate(result, p.limit)
+}
+
+func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth int) error {
+	if value == nil {
+		p.append("null")
+		return nil
+	}
+	mapValue := reflect.ValueOf(value)
+	leave, err := p.enterReference(mapValue)
+	if err != nil {
+		return err
+	}
+	if leave != nil {
+		defer leave()
+	}
+
+	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
+	var validationKeys []lifecyclePreviewMapKey
+	sourceOrder := 0
+	for key, item := range value {
+		candidate := lifecyclePreviewNativeStringKey(key)
+		candidate.sourceOrder = sourceOrder
+		sourceOrder++
+		candidate.nativeValue = item
+		for _, retained := range keys {
+			if lifecyclePreviewMapKeyOrderAmbiguous(retained, candidate) {
+				return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+			}
+		}
+		keys = lifecycleInsertPreviewMapKey(keys, candidate, p.limit+1)
+		if lifecycleAnyMayMarshalError(item) {
+			for _, retained := range validationKeys {
+				if lifecyclePreviewMapKeyOrderAmbiguous(retained, candidate) {
+					return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+				}
+			}
+			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
+				return fmt.Errorf("lifecycle payload map validation exceeds preview bounds")
+			}
+			validationKeys = append(validationKeys, candidate)
+		}
+	}
+	p.append("{")
+	for i, key := range keys {
+		if !p.stopped {
+			if i > 0 {
+				p.append(",")
+			}
+			key.appendTo(p)
+			p.append(":")
+		}
+		if err := p.appendValue(key.nativeValue, depth+1); err != nil {
+			return err
+		}
+	}
+	if len(keys) > 0 && len(validationKeys) > 0 {
+		cursor := keys[len(keys)-1]
+		sort.Slice(validationKeys, func(i, j int) bool {
+			return lifecyclePreviewMapKeyLess(validationKeys[i], validationKeys[j])
+		})
+		for _, key := range validationKeys {
+			if !lifecyclePreviewMapKeyLess(cursor, key) {
+				continue
+			}
+			if err := p.appendValue(key.nativeValue, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	p.append("}")
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
+	if depth >= lifecyclePreviewMaxDepth {
+		return fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
+	}
+	if p.stopped {
+		switch value := value.(type) {
+		case nil, bool, string,
+			int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64, uintptr:
+			return nil
+		case float64:
+			if math.IsInf(value, 0) || math.IsNaN(value) {
+				return fmt.Errorf("unsupported lifecycle payload float value")
+			}
+			return nil
+		case float32:
+			if math.IsInf(float64(value), 0) || math.IsNaN(float64(value)) {
+				return fmt.Errorf("unsupported lifecycle payload float value")
+			}
+			return nil
+		}
+	}
+
+	switch value := value.(type) {
+	case nil:
+		p.append("null")
+	case bool:
+		if value {
+			p.append("true")
+		} else {
+			p.append("false")
+		}
+	case string:
+		p.appendJSONString(value)
+	case map[string]any:
+		return p.appendStringAnyMap(value, depth)
+	case []any:
+		return p.appendReflectValue(reflect.ValueOf(value), depth)
+	case float64, float32,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64, uintptr,
+		json.Number:
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		p.append(string(encoded))
+	default:
+		return p.appendReflected(value, depth)
+	}
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendReflected(value any, depth int) error {
+	return p.appendReflectValue(reflect.ValueOf(value), depth)
+}
+
+func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int) error {
+	if !value.IsValid() {
+		p.append("null")
+		return nil
+	}
+	if depth >= lifecyclePreviewMaxDepth {
+		return fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
+	}
+	if (value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) && value.IsNil() {
+		p.append("null")
+		return nil
+	}
+	if value.Kind() == reflect.Interface {
+		if p.indirections >= lifecyclePreviewMaxDepth {
+			return fmt.Errorf("lifecycle payload indirection exceeds preview limit")
+		}
+		p.indirections++
+		defer func() { p.indirections-- }()
+		return p.appendReflectValue(value.Elem(), depth)
+	}
+	if value.Type() == reflect.TypeFor[json.Number]() {
+		return p.appendMarshaled(value.Interface())
+	}
+
+	marshalValue := value
+	if value.CanAddr() && value.Addr().CanInterface() {
+		addressType := value.Addr().Type()
+		if addressType.Implements(reflect.TypeFor[json.Marshaler]()) {
+			return p.appendJSONMarshaler(value.Addr().Interface().(json.Marshaler))
+		}
+		if addressType.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+			return p.appendTextMarshaler(value.Addr().Interface().(encoding.TextMarshaler))
+		}
+	}
+	if value.CanInterface() {
+		if value.Type().Implements(reflect.TypeFor[json.Marshaler]()) {
+			return p.appendJSONMarshaler(value.Interface().(json.Marshaler))
+		}
+		if value.Type().Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+			return p.appendTextMarshaler(value.Interface().(encoding.TextMarshaler))
+		}
+	}
+
+	if p.stopped {
+		switch value.Kind() {
+		case reflect.String, reflect.Bool,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+			return nil
+		case reflect.Float32, reflect.Float64:
+			float := value.Float()
+			if math.IsInf(float, 0) || math.IsNaN(float) {
+				return fmt.Errorf("unsupported lifecycle payload float value")
+			}
+			return nil
+		}
+	}
+
+	leave, err := p.enterReference(value)
+	if err != nil {
+		return err
+	}
+	if leave != nil {
+		defer leave()
+	}
+
+	switch value.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if p.indirections >= lifecyclePreviewMaxDepth {
+			return fmt.Errorf("lifecycle payload indirection exceeds preview limit")
+		}
+		p.indirections++
+		defer func() { p.indirections-- }()
+		return p.appendReflectValue(value.Elem(), depth)
+	case reflect.String:
+		p.appendJSONString(value.String())
+		return nil
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		if !value.CanInterface() {
+			return fmt.Errorf("unsupported lifecycle payload value %s", value.Type())
+		}
+		return p.appendMarshaled(value.Interface())
+	case reflect.Array, reflect.Slice:
+		if value.Kind() == reflect.Slice && lifecycleUsesByteSliceEncoding(value.Type()) {
+			if value.IsNil() {
+				p.append("null")
+				return nil
+			}
+			return p.appendBytes(value.Bytes())
+		}
+		if value.Kind() == reflect.Slice && value.IsNil() {
+			p.append("null")
+			return nil
+		}
+		p.append("[")
+		elementAddressable := value.Kind() == reflect.Slice || value.CanAddr()
+		mayError := lifecycleTypeMayMarshalErrorAddressable(value.Type().Elem(), elementAddressable)
+		for i := 0; i < value.Len(); i++ {
+			if p.stopped && !mayError {
+				break
+			}
+			if !p.stopped && i > 0 {
+				p.append(",")
+			}
+			if err := p.appendReflectValue(value.Index(i), depth+1); err != nil {
+				return err
+			}
+		}
+		p.append("]")
+		return nil
+	case reflect.Map:
+		return p.appendReflectMap(value, depth)
+	case reflect.Struct:
+		return p.appendStruct(value, depth)
+	default:
+		if !marshalValue.CanInterface() {
+			return fmt.Errorf("unsupported lifecycle payload value %s", value.Type())
+		}
+		return p.appendMarshaled(marshalValue.Interface())
+	}
+}
+
+func (p *lifecycleJSONPreview) enterReference(value reflect.Value) (func(), error) {
+	switch value.Kind() {
+	case reflect.Map, reflect.Pointer, reflect.Slice:
+	default:
+		return nil, nil
+	}
+	pointer := uintptr(value.UnsafePointer())
+	if pointer == 0 {
+		return nil, nil
+	}
+	visit := lifecyclePreviewVisit{typeOf: value.Type(), pointer: pointer}
+	if value.Kind() == reflect.Slice {
+		visit.length = value.Len()
+	}
+	if p.active[visit] {
+		return nil, fmt.Errorf("lifecycle payload contains a cycle")
+	}
+	if p.active == nil {
+		p.active = make(map[lifecyclePreviewVisit]bool)
+	}
+	p.active[visit] = true
+	return func() { delete(p.active, visit) }, nil
+}
+
+type lifecycleStructField struct {
+	name      string
+	index     []int
+	omitEmpty bool
+	omitZero  bool
+	quoted    bool
+	tagged    bool
+}
+
+var lifecycleStructFieldsCache sync.Map // map[reflect.Type][]lifecycleStructField
+
+func (p *lifecycleJSONPreview) appendStruct(value reflect.Value, depth int) error {
+	p.append("{")
+	written := 0
+	for _, field := range lifecycleStructFields(value.Type()) {
+		fieldValue, ok := lifecycleFieldByIndex(value, field.index)
+		if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) ||
+			(field.omitZero && lifecycleJSONZeroValue(fieldValue)) {
+			continue
+		}
+		if !p.stopped {
+			if written > 0 {
+				p.append(",")
+			}
+			p.appendJSONString(field.name)
+			p.append(":")
+		}
+		if field.quoted && lifecycleJSONShouldQuote(fieldValue) {
+			if err := p.appendQuotedReflectValue(fieldValue); err != nil {
+				return err
+			}
+		} else if err := p.appendReflectValue(fieldValue, depth+1); err != nil {
+			return err
+		}
+		written++
+	}
+	p.append("}")
+	return nil
+}
+
+func lifecycleStructFields(typeOf reflect.Type) []lifecycleStructField {
+	if cached, ok := lifecycleStructFieldsCache.Load(typeOf); ok {
+		return cached.([]lifecycleStructField)
+	}
+	type queued struct {
+		typeOf reflect.Type
+		index  []int
+		seen   map[reflect.Type]bool
+	}
+	queue := []queued{{typeOf: typeOf, seen: map[reflect.Type]bool{typeOf: true}}}
+	var candidates []lifecycleStructField
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for i := 0; i < current.typeOf.NumField(); i++ {
+			field := current.typeOf.Field(i)
+			if !field.IsExported() && !field.Anonymous {
+				continue
+			}
+			tag := field.Tag.Get("json")
+			if tag == "-" {
+				continue
+			}
+			name, options, _ := strings.Cut(tag, ",")
+			validTaggedName := name != ""
+			if name != "" && !lifecycleJSONTagNameValid(name) {
+				name = ""
+				validTaggedName = false
+			}
+			fieldType := field.Type
+			if fieldType.Kind() == reflect.Pointer {
+				fieldType = fieldType.Elem()
+			}
+			index := append(append([]int(nil), current.index...), i)
+			if name != "" || !field.Anonymous || fieldType.Kind() != reflect.Struct {
+				if field.IsExported() || (field.Anonymous && fieldType.Kind() == reflect.Struct) {
+					if name == "" {
+						name = field.Name
+					}
+					candidates = append(candidates, lifecycleStructField{
+						name: name, index: index, tagged: validTaggedName,
+						omitEmpty: lifecycleJSONTagOption(options, "omitempty"),
+						omitZero:  lifecycleJSONTagOption(options, "omitzero"),
+						quoted:    lifecycleJSONTagOption(options, "string") && lifecycleJSONCanQuote(field.Type),
+					})
+				}
+				continue
+			}
+			if !current.seen[fieldType] {
+				seen := make(map[reflect.Type]bool, len(current.seen)+1)
+				for seenType := range current.seen {
+					seen[seenType] = true
+				}
+				seen[fieldType] = true
+				queue = append(queue, queued{typeOf: fieldType, index: index, seen: seen})
+			}
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.name != right.name {
+			return left.name < right.name
+		}
+		if len(left.index) != len(right.index) {
+			return len(left.index) < len(right.index)
+		}
+		if left.tagged != right.tagged {
+			return left.tagged
+		}
+		return lifecycleIndexLess(left.index, right.index)
+	})
+	selected := make([]lifecycleStructField, 0, len(candidates))
+	for start := 0; start < len(candidates); {
+		end := start + 1
+		for end < len(candidates) && candidates[end].name == candidates[start].name {
+			end++
+		}
+		minimumDepth := len(candidates[start].index)
+		atDepth := candidates[start:end]
+		count := 0
+		taggedIndex, taggedCount := -1, 0
+		for i, candidate := range atDepth {
+			if len(candidate.index) != minimumDepth {
+				break
+			}
+			count++
+			if candidate.tagged {
+				taggedIndex = i
+				taggedCount++
+			}
+		}
+		if taggedCount == 1 {
+			selected = append(selected, atDepth[taggedIndex])
+		} else if taggedCount == 0 && count == 1 {
+			selected = append(selected, atDepth[0])
+		}
+		start = end
+	}
+	sort.Slice(selected, func(i, j int) bool { return lifecycleIndexLess(selected[i].index, selected[j].index) })
+	lifecycleStructFieldsCache.Store(typeOf, selected)
+	return selected
+}
+
+func lifecycleFieldByIndex(value reflect.Value, index []int) (reflect.Value, bool) {
+	for _, fieldIndex := range index {
+		if value.Kind() == reflect.Pointer {
+			if value.IsNil() {
+				return reflect.Value{}, false
+			}
+			value = value.Elem()
+		}
+		value = value.Field(fieldIndex)
+	}
+	return value, true
+}
+
+func lifecycleIndexLess(left, right []int) bool {
+	for i := 0; i < min(len(left), len(right)); i++ {
+		if left[i] != right[i] {
+			return left[i] < right[i]
+		}
+	}
+	return len(left) < len(right)
+}
+
+func lifecycleJSONTagOption(options, wanted string) bool {
+	for options != "" {
+		option, rest, _ := strings.Cut(options, ",")
+		if option == wanted {
+			return true
+		}
+		options = rest
+	}
+	return false
+}
+
+func lifecycleJSONTagNameValid(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, char := range name {
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) && !strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", char) {
+			return false
+		}
+	}
+	return true
+}
+
+func lifecycleJSONCanQuote(typeOf reflect.Type) bool {
+	// Match encoding/json's field planning: only one unnamed pointer layer is
+	// stripped before deciding whether the ,string option applies.
+	if typeOf.Name() == "" && typeOf.Kind() == reflect.Pointer {
+		typeOf = typeOf.Elem()
+	}
+	return typeOf.Kind() == reflect.Bool || typeOf.Kind() == reflect.String ||
+		(typeOf.Kind() >= reflect.Int && typeOf.Kind() <= reflect.Int64) ||
+		(typeOf.Kind() >= reflect.Uint && typeOf.Kind() <= reflect.Uintptr) ||
+		typeOf.Kind() == reflect.Float32 || typeOf.Kind() == reflect.Float64
+}
+
+func lifecycleJSONShouldQuote(value reflect.Value) bool {
+	jsonMarshalerType := reflect.TypeFor[json.Marshaler]()
+	textMarshalerType := reflect.TypeFor[encoding.TextMarshaler]()
+	for {
+		if value.CanAddr() && value.Addr().CanInterface() &&
+			(value.Addr().Type().Implements(jsonMarshalerType) || value.Addr().Type().Implements(textMarshalerType)) {
+			return false
+		}
+		if value.CanInterface() &&
+			(value.Type().Implements(jsonMarshalerType) || value.Type().Implements(textMarshalerType)) {
+			return false
+		}
+		if value.Kind() != reflect.Pointer || value.IsNil() {
+			return true
+		}
+		value = value.Elem()
+	}
+}
+
+func lifecycleJSONEmptyValue(value reflect.Value) bool {
+	switch value.Kind() {
+	case reflect.Array, reflect.Map, reflect.Slice, reflect.String:
+		return value.Len() == 0
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64,
+		reflect.Interface, reflect.Pointer:
+		return value.IsZero()
+	}
+	return false
+}
+
+type lifecycleJSONIsZeroer interface {
+	IsZero() bool
+}
+
+func lifecycleJSONZeroValueUsesMethod(value reflect.Value) bool {
+	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
+	typeOf := value.Type()
+	switch {
+	case typeOf.Kind() == reflect.Interface && typeOf.Implements(isZeroerType):
+		return !value.IsNil() &&
+			!(value.Elem().Kind() == reflect.Pointer && value.Elem().IsNil())
+	case typeOf.Kind() == reflect.Pointer && typeOf.Implements(isZeroerType):
+		return !value.IsNil()
+	default:
+		return typeOf.Implements(isZeroerType) || reflect.PointerTo(typeOf).Implements(isZeroerType)
+	}
+}
+
+func lifecycleJSONZeroValue(value reflect.Value) bool {
+	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
+	typeOf := value.Type()
+	switch {
+	case typeOf.Kind() == reflect.Interface && typeOf.Implements(isZeroerType):
+		return value.IsNil() ||
+			(value.Elem().Kind() == reflect.Pointer && value.Elem().IsNil()) ||
+			value.Interface().(lifecycleJSONIsZeroer).IsZero()
+	case typeOf.Kind() == reflect.Pointer && typeOf.Implements(isZeroerType):
+		return value.IsNil() || value.Interface().(lifecycleJSONIsZeroer).IsZero()
+	case typeOf.Implements(isZeroerType):
+		return value.Interface().(lifecycleJSONIsZeroer).IsZero()
+	case reflect.PointerTo(typeOf).Implements(isZeroerType):
+		if !value.CanAddr() {
+			boxed := reflect.New(typeOf).Elem()
+			boxed.Set(value)
+			value = boxed
+		}
+		return value.Addr().Interface().(lifecycleJSONIsZeroer).IsZero()
+	default:
+		return value.IsZero()
+	}
+}
+
+func (p *lifecycleJSONPreview) appendQuotedReflectValue(value reflect.Value) error {
+	for value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			p.append("null")
+			return nil
+		}
+		value = value.Elem()
+	}
+	if value.Type() == reflect.TypeFor[json.Number]() {
+		if _, err := json.Marshal(value.Interface()); err != nil {
+			return err
+		}
+		p.appendJSONString(value.String())
+		return nil
+	}
+	if value.Kind() == reflect.String {
+		inner := lifecycleJSONPreview{limit: lifecyclePreviewMaxBytes}
+		inner.appendJSONString(value.String())
+		p.appendJSONString(inner.buf.String())
+		return nil
+	}
+	if !value.CanInterface() {
+		return fmt.Errorf("unsupported lifecycle quoted value %s", value.Type())
+	}
+	encoded, err := json.Marshal(value.Interface())
+	if err != nil {
+		return err
+	}
+	p.appendJSONString(string(encoded))
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) error {
+	if value.IsNil() {
+		p.append("null")
+		return nil
+	}
+	keyType := value.Type().Key()
+	switch keyType.Kind() {
+	case reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+	default:
+		if !keyType.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+			return fmt.Errorf("unsupported lifecycle payload map key %s", keyType)
+		}
+	}
+	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
+	var validationKeys []lifecyclePreviewMapKey
+	orderingUnavailable := false
+	iterator := value.MapRange()
+	sourceOrder := 0
+	retainedKeyBytes := 0
+	for iterator.Next() {
+		if orderingUnavailable {
+			// Continue the single key-method pass so key call cardinality and errors
+			// remain compatible, but retain nothing once fallback is certain.
+			if _, err := lifecyclePreviewKey(iterator.Key(), -1); err != nil {
+				return err
+			}
+			continue
+		}
+		key, err := lifecyclePreviewKey(iterator.Key(), max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes))
+		if err != nil {
+			return err
+		}
+		retainedKeyBytes += len(key.text)
+		key.sourceOrder = sourceOrder
+		sourceOrder++
+		key.mapValue = iterator.Value()
+		mayError := lifecycleReflectValueMayMarshalError(key.mapValue)
+		for _, retained := range keys {
+			if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+				// These keys may differ only beyond a discarded suffix, so their
+				// canonical output order cannot be determined within the bound.
+				orderingUnavailable = true
+				break
+			}
+		}
+		if orderingUnavailable {
+			// Do not insert the ambiguity-triggering key: its unrestricted source
+			// value must never reach the comparator after bounded ordering fails.
+			continue
+		}
+		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
+		if mayError {
+			for _, retained := range validationKeys {
+				if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+					// Error-capable values must be invoked in exact canonical key
+					// order. Distinct retained prefixes establish that order without
+					// requiring the discarded suffixes.
+					orderingUnavailable = true
+					break
+				}
+			}
+			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
+				orderingUnavailable = true
+				continue
+			}
+			validationKeys = append(validationKeys, key)
+		}
+	}
+	if orderingUnavailable {
+		return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+	}
+	p.append("{")
+	for i, key := range keys {
+		if !p.stopped {
+			if i > 0 {
+				p.append(",")
+			}
+			key.appendTo(p)
+			p.append(":")
+		}
+		if err := p.appendReflectValue(key.mapValue, depth+1); err != nil {
+			return err
+		}
+	}
+	if len(keys) > 0 && len(validationKeys) > 0 {
+		cursor := keys[len(keys)-1]
+		sort.Slice(validationKeys, func(i, j int) bool {
+			return lifecyclePreviewMapKeyLess(validationKeys[i], validationKeys[j])
+		})
+		for _, key := range validationKeys {
+			if !lifecyclePreviewMapKeyLess(cursor, key) {
+				continue
+			}
+			if err := p.appendReflectValue(key.mapValue, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	p.append("}")
+	return nil
+}
+
+func lifecycleInsertPreviewMapKey(keys []lifecyclePreviewMapKey, key lifecyclePreviewMapKey, limit int) []lifecyclePreviewMapKey {
+	index := sort.Search(len(keys), func(i int) bool { return lifecyclePreviewMapKeyLess(key, keys[i]) })
+	if len(keys) >= limit && index >= limit {
+		return keys
+	}
+	if len(keys) < limit {
+		keys = append(keys, lifecyclePreviewMapKey{})
+	}
+	copy(keys[index+1:], keys[index:len(keys)-1])
+	keys[index] = key
+	return keys
+}
+
+type lifecyclePreviewMapKey struct {
+	sourceKey     reflect.Value
+	sourceOrder   int
+	mapValue      reflect.Value
+	nativeValue   any
+	text          []byte
+	textLength    int
+	retainedText  bool
+	textTruncated bool
+	textString    string
+}
+
+func lifecyclePreviewNativeStringKey(text string) lifecyclePreviewMapKey {
+	if len(text) <= lifecyclePreviewMaxKeyBytes+1 {
+		return lifecyclePreviewMapKey{textString: text}
+	}
+	retained := append([]byte(nil), text[:lifecyclePreviewMaxKeyBytes+1]...)
+	return lifecyclePreviewMapKey{
+		text: retained, textLength: len(retained), retainedText: true, textTruncated: true,
+	}
+}
+
+func lifecyclePreviewKey(value reflect.Value, retainedBudget int) (lifecyclePreviewMapKey, error) {
+	if value.Kind() == reflect.String {
+		if retainedBudget < 0 {
+			return lifecyclePreviewMapKey{}, nil
+		}
+		key := lifecyclePreviewNativeStringKey(value.String())
+		key.sourceKey = value
+		return key, nil
+	}
+	if value.Kind() == reflect.Pointer && value.IsNil() && value.Type().Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+		// Match encoding/json: nil pointer TextMarshaler map keys encode as
+		// the empty key without invoking MarshalText on the nil receiver.
+		return lifecyclePreviewMapKey{sourceKey: value, textString: ""}, nil
+	}
+	if value.CanInterface() {
+		if marshaler, ok := value.Interface().(encoding.TextMarshaler); ok {
+			text, err := marshaler.MarshalText()
+			if err != nil {
+				return lifecyclePreviewMapKey{}, err
+			}
+			// MarshalText implementations may reuse mutable scratch storage. Keep
+			// complete output only while the map-wide retention budget permits exact
+			// sorting; otherwise copy just enough prefix to render or detect that the
+			// discarded suffix makes canonical ordering unknowable. A negative budget
+			// means fallback is already certain, so invoke the method but retain none.
+			if retainedBudget < 0 {
+				return lifecyclePreviewMapKey{}, nil
+			}
+			textLength := len(text)
+			if textLength > retainedBudget {
+				textLength = min(textLength, lifecyclePreviewMaxKeyBytes+1)
+			}
+			retained := append([]byte(nil), text[:textLength]...)
+			return lifecyclePreviewMapKey{
+				sourceKey: value, text: retained, textLength: len(retained),
+				retainedText: true, textTruncated: len(text) > len(retained),
+			}, nil
+		}
+	}
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return lifecyclePreviewMapKey{sourceKey: value, textString: strconv.FormatInt(value.Int(), 10)}, nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return lifecyclePreviewMapKey{sourceKey: value, textString: strconv.FormatUint(value.Uint(), 10)}, nil
+	}
+	return lifecyclePreviewMapKey{}, fmt.Errorf("unsupported lifecycle payload map key %s", value.Type())
+}
+
+func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
+	if key.retainedText {
+		preview.appendJSONStringBytes(key.text)
+	} else {
+		preview.appendJSONString(key.textString)
+	}
+}
+
+func lifecyclePreviewMapKeyOrderAmbiguous(left, right lifecyclePreviewMapKey) bool {
+	leftLength, rightLength := left.length(), right.length()
+	for i := 0; i < min(leftLength, rightLength); i++ {
+		if left.byteAt(i) != right.byteAt(i) {
+			return false
+		}
+	}
+	if !left.textTruncated && !right.textTruncated {
+		return false
+	}
+	if left.textTruncated && right.textTruncated {
+		return true
+	}
+	if left.textTruncated {
+		return rightLength > leftLength
+	}
+	return leftLength > rightLength
+}
+
+func lifecyclePreviewMapKeyLess(left, right lifecyclePreviewMapKey) bool {
+	leftLength, rightLength := left.length(), right.length()
+	for i := 0; i < min(leftLength, rightLength); i++ {
+		leftByte, rightByte := left.byteAt(i), right.byteAt(i)
+		if leftByte != rightByte {
+			return leftByte < rightByte
+		}
+	}
+	if leftLength != rightLength {
+		return leftLength < rightLength
+	}
+	if left.textTruncated != right.textTruncated {
+		// Equal retained bytes represent an exact prefix relationship when only
+		// one key is truncated. The complete key is canonically shorter and must
+		// sort first, regardless of source-key or map iteration order.
+		return !left.textTruncated
+	}
+	if lifecyclePreviewSourceKeyLess(left.sourceKey, right.sourceKey) {
+		return true
+	}
+	if lifecyclePreviewSourceKeyLess(right.sourceKey, left.sourceKey) {
+		return false
+	}
+	return left.sourceOrder < right.sourceOrder
+}
+
+func lifecyclePreviewSourceKeyLess(left, right reflect.Value) bool {
+	if !left.IsValid() || !right.IsValid() || left.Kind() != right.Kind() {
+		return false
+	}
+	switch left.Kind() {
+	case reflect.String:
+		return left.String() < right.String()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return left.Int() < right.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return left.Uint() < right.Uint()
+	}
+	return false
+}
+
+func lifecycleAnyMayMarshalError(value any) bool {
+	if value == nil {
+		return false
+	}
+	return lifecycleReflectValueMayMarshalError(reflect.ValueOf(value))
+}
+
+func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
+	return lifecycleReflectValueMayMarshalErrorSeen(value, make(map[lifecyclePreviewVisit]bool), 0)
+}
+
+func lifecycleReflectValueMayMarshalErrorSeen(value reflect.Value, active map[lifecyclePreviewVisit]bool, indirections int) bool {
+	for value.IsValid() && value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return false
+		}
+		if indirections >= lifecyclePreviewMaxDepth {
+			return true
+		}
+		indirections++
+		value = value.Elem()
+	}
+	if !value.IsValid() {
+		return false
+	}
+	typeOf := value.Type()
+	if typeOf == reflect.TypeFor[json.Number]() {
+		return true
+	}
+	// encoding/json emits nil pointer marshalers as null without invoking their
+	// methods, so they cannot introduce a late marshaling error.
+	if value.Kind() == reflect.Pointer && value.IsNil() {
+		return false
+	}
+	if typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
+		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+		return true
+	}
+	if value.CanAddr() && value.Addr().CanInterface() &&
+		(value.Addr().Type().Implements(reflect.TypeFor[json.Marshaler]()) ||
+			value.Addr().Type().Implements(reflect.TypeFor[encoding.TextMarshaler]())) {
+		return true
+	}
+	switch value.Kind() {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return false
+	case reflect.Float32, reflect.Float64:
+		float := value.Float()
+		return math.IsInf(float, 0) || math.IsNaN(float)
+	case reflect.Pointer:
+		if indirections >= lifecyclePreviewMaxDepth {
+			return true
+		}
+		visit := lifecyclePreviewVisit{typeOf: typeOf, pointer: value.Pointer()}
+		if active[visit] {
+			return true
+		}
+		active[visit] = true
+		defer delete(active, visit)
+		return lifecycleReflectValueMayMarshalErrorSeen(value.Elem(), active, indirections+1)
+	case reflect.Array:
+		for index := 0; index < value.Len(); index++ {
+			if lifecycleReflectValueMayMarshalErrorSeen(value.Index(index), active, indirections) {
+				return true
+			}
+		}
+		return false
+	case reflect.Slice:
+		if lifecycleUsesByteSliceEncoding(typeOf) || value.IsNil() {
+			return false
+		}
+		visit := lifecyclePreviewVisit{typeOf: typeOf, pointer: value.Pointer(), length: value.Len()}
+		if active[visit] {
+			return true
+		}
+		active[visit] = true
+		defer delete(active, visit)
+		for index := 0; index < value.Len(); index++ {
+			if lifecycleReflectValueMayMarshalErrorSeen(value.Index(index), active, indirections) {
+				return true
+			}
+		}
+		return false
+	case reflect.Map:
+		if value.IsNil() {
+			return false
+		}
+		visit := lifecyclePreviewVisit{typeOf: typeOf, pointer: value.Pointer()}
+		if active[visit] {
+			return true
+		}
+		active[visit] = true
+		defer delete(active, visit)
+
+		keyType := typeOf.Key()
+		keyUsesTextMarshaler := false
+		switch keyType.Kind() {
+		case reflect.String,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		default:
+			if !keyType.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+				return true
+			}
+			keyUsesTextMarshaler = true
+		}
+		iterator := value.MapRange()
+		for iterator.Next() {
+			key := iterator.Key()
+			if keyUsesTextMarshaler && !(key.Kind() == reflect.Pointer && key.IsNil()) {
+				return true
+			}
+			if lifecycleReflectValueMayMarshalErrorSeen(iterator.Value(), active, indirections) {
+				return true
+			}
+		}
+		return false
+	case reflect.Struct:
+		for _, field := range lifecycleStructFields(typeOf) {
+			fieldValue, ok := lifecycleFieldByIndex(value, field.index)
+			if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) {
+				continue
+			}
+			if field.omitZero {
+				if lifecycleJSONZeroValueUsesMethod(fieldValue) {
+					// IsZero is user code whose result and side effects must occur once in
+					// canonical output order, never during unsorted map classification.
+					return true
+				}
+				if fieldValue.IsZero() {
+					continue
+				}
+			}
+			if lifecycleReflectValueMayMarshalErrorSeen(fieldValue, active, indirections) {
+				return true
+			}
+		}
+		return false
+	default:
+		return lifecycleTypeMayMarshalErrorAddressable(typeOf, value.CanAddr() && value.Addr().CanInterface())
+	}
+}
+
+func (key lifecyclePreviewMapKey) length() int {
+	if key.retainedText {
+		return key.textLength
+	}
+	return len(key.textString)
+}
+
+func (key lifecyclePreviewMapKey) byteAt(index int) byte {
+	if key.retainedText {
+		return key.text[index]
+	}
+	return key.textString[index]
+}
+
+func lifecycleUsesByteSliceEncoding(typeOf reflect.Type) bool {
+	if typeOf.Kind() != reflect.Slice || typeOf.Elem().Kind() != reflect.Uint8 {
+		return false
+	}
+	element := typeOf.Elem()
+	pointer := reflect.PointerTo(element)
+	return !element.Implements(reflect.TypeFor[json.Marshaler]()) &&
+		!element.Implements(reflect.TypeFor[encoding.TextMarshaler]()) &&
+		!pointer.Implements(reflect.TypeFor[json.Marshaler]()) &&
+		!pointer.Implements(reflect.TypeFor[encoding.TextMarshaler]())
+}
+
+type lifecycleMarshalErrorVisit struct {
+	typeOf      reflect.Type
+	addressable bool
+}
+
+func lifecycleTypeMayMarshalError(typeOf reflect.Type) bool {
+	return lifecycleTypeMayMarshalErrorAddressable(typeOf, false)
+}
+
+func lifecycleTypeMayMarshalErrorAddressable(typeOf reflect.Type, addressable bool) bool {
+	return lifecycleTypeMayMarshalErrorSeen(typeOf, addressable, make(map[lifecycleMarshalErrorVisit]bool))
+}
+
+func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, addressable bool, seen map[lifecycleMarshalErrorVisit]bool) bool {
+	visit := lifecycleMarshalErrorVisit{typeOf: typeOf, addressable: addressable}
+	if seen[visit] {
+		// Recursive pointer/container types may contain runtime cycles even when
+		// their scalar leaves cannot otherwise fail JSON encoding.
+		return true
+	}
+	seen[visit] = true
+	defer delete(seen, visit)
+	if typeOf == reflect.TypeFor[json.Number]() ||
+		typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
+		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
+		(addressable && typeOf.Kind() != reflect.Pointer && (reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()))) {
+		return true
+	}
+	switch typeOf.Kind() {
+	case reflect.Interface, reflect.Float32, reflect.Float64, reflect.Chan, reflect.Complex64, reflect.Complex128, reflect.Func, reflect.UnsafePointer:
+		return true
+	case reflect.Pointer:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), true, seen)
+	case reflect.Array:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), addressable, seen)
+	case reflect.Slice:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), true, seen)
+	case reflect.Map:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Key(), false, seen) || lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), false, seen)
+	case reflect.Struct:
+		for _, field := range lifecycleStructFields(typeOf) {
+			fieldType := typeOf
+			fieldAddressable := addressable
+			for _, fieldIndex := range field.index {
+				if fieldType.Kind() == reflect.Pointer {
+					fieldType = fieldType.Elem()
+					fieldAddressable = true
+				}
+				fieldType = fieldType.Field(fieldIndex).Type
+			}
+			if lifecycleTypeMayMarshalErrorSeen(fieldType, fieldAddressable, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (p *lifecycleJSONPreview) appendBytes(value []byte) error {
+	p.append(`"`)
+	const sourceLimit = lifecyclePreviewMaxBytes / 4 * 3
+	prefix := value
+	if len(prefix) > sourceLimit {
+		prefix = prefix[:sourceLimit]
+	}
+	var encoded [lifecyclePreviewMaxBytes]byte
+	written := base64.StdEncoding.EncodedLen(len(prefix))
+	base64.StdEncoding.Encode(encoded[:written], prefix)
+	p.append(string(encoded[:written]))
+	p.append(`"`)
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendJSONMarshaler(marshaler json.Marshaler) error {
+	encoded, err := marshaler.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	if !json.Valid(encoded) {
+		return fmt.Errorf("invalid JSON from lifecycle payload marshaler")
+	}
+	p.appendCompactJSON(encoded)
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendTextMarshaler(marshaler encoding.TextMarshaler) error {
+	text, err := marshaler.MarshalText()
+	if err != nil {
+		return err
+	}
+	p.appendJSONStringBytes(text)
+	return nil
+}
+
+// appendCompactJSON mirrors encoding/json's compaction for the retained prefix.
+// The complete input is validated once above; after the prefix closes, no more
+// output processing is needed.
+func (p *lifecycleJSONPreview) appendCompactJSON(encoded []byte) {
+	inString, escaped := false, false
+	for i := 0; i < len(encoded) && !p.stopped; i++ {
+		char := encoded[i]
+		if !inString {
+			if char == ' ' || char == '\t' || char == '\r' || char == '\n' {
+				continue
+			}
+			p.append(string(char))
+			if char == '"' {
+				inString = true
+			}
+			continue
+		}
+		if escaped {
+			p.append(string(char))
+			escaped = false
+			continue
+		}
+		if char == '\\' {
+			p.append(`\`)
+			escaped = true
+			continue
+		}
+		if char == '"' {
+			p.append(`"`)
+			inString = false
+			continue
+		}
+		switch char {
+		case '<', '>', '&':
+			p.append(fmt.Sprintf(`\u%04x`, char))
+		default:
+			if i+2 < len(encoded) && char == 0xe2 && encoded[i+1] == 0x80 && (encoded[i+2] == 0xa8 || encoded[i+2] == 0xa9) {
+				p.append(fmt.Sprintf(`\u202%c`, '8'+encoded[i+2]-0xa8))
+				i += 2
+			} else if char >= utf8.RuneSelf {
+				_, size := utf8.DecodeRune(encoded[i:])
+				p.append(string(encoded[i : i+size]))
+				i += size - 1
+			} else {
+				p.append(string(char))
+			}
+		}
+	}
+}
+
+func (p *lifecycleJSONPreview) appendMarshaled(value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	p.append(string(encoded))
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendJSONStringBytes(value []byte) {
+	p.append(`"`)
+	for len(value) > 0 && !p.stopped {
+		plain := 0
+		for plain < len(value) && plain <= p.limit {
+			char := value[plain]
+			if char >= utf8.RuneSelf || char < 0x20 || char == '\\' || char == '"' || char == '<' || char == '>' || char == '&' {
+				break
+			}
+			plain++
+		}
+		if plain > 0 {
+			p.append(string(value[:plain]))
+			value = value[plain:]
+			continue
+		}
+		if value[0] < utf8.RuneSelf {
+			char := value[0]
+			value = value[1:]
+			switch char {
+			case '\\', '"':
+				p.append("\\" + string(char))
+			case '\b':
+				p.append(`\b`)
+			case '\f':
+				p.append(`\f`)
+			case '\n':
+				p.append(`\n`)
+			case '\r':
+				p.append(`\r`)
+			case '\t':
+				p.append(`\t`)
+			case '<', '>', '&':
+				p.append(fmt.Sprintf(`\u%04x`, char))
+			default:
+				if char < 0x20 {
+					p.append(fmt.Sprintf(`\u%04x`, char))
+				} else {
+					p.append(string(char))
+				}
+			}
+			continue
+		}
+
+		r, size := utf8.DecodeRune(value)
+		if r == utf8.RuneError && size == 1 {
+			p.append(`\ufffd`)
+			value = value[1:]
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			p.append(fmt.Sprintf(`\u%04x`, r))
+		} else {
+			p.append(string(value[:size]))
+		}
+		value = value[size:]
+	}
+	p.append(`"`)
+}
+
+func (p *lifecycleJSONPreview) appendJSONString(value string) {
+	p.append(`"`)
+	for len(value) > 0 && !p.stopped {
+		plain := 0
+		for plain < len(value) && plain <= p.limit {
+			char := value[plain]
+			if char >= utf8.RuneSelf || char < 0x20 || char == '\\' || char == '"' || char == '<' || char == '>' || char == '&' {
+				break
+			}
+			plain++
+		}
+		if plain > 0 {
+			p.append(value[:plain])
+			value = value[plain:]
+			continue
+		}
+		if value[0] < utf8.RuneSelf {
+			char := value[0]
+			value = value[1:]
+			switch char {
+			case '\\', '"':
+				p.append("\\" + string(char))
+			case '\b':
+				p.append(`\b`)
+			case '\f':
+				p.append(`\f`)
+			case '\n':
+				p.append(`\n`)
+			case '\r':
+				p.append(`\r`)
+			case '\t':
+				p.append(`\t`)
+			case '<', '>', '&':
+				p.append(fmt.Sprintf(`\u%04x`, char))
+			default:
+				if char < 0x20 {
+					p.append(fmt.Sprintf(`\u%04x`, char))
+				} else {
+					p.append(string(char))
+				}
+			}
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(value)
+		if r == utf8.RuneError && size == 1 {
+			p.append(`\ufffd`)
+			value = value[1:]
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			p.append(fmt.Sprintf(`\u%04x`, r))
+		} else {
+			p.append(value[:size])
+		}
+		value = value[size:]
+	}
+	p.append(`"`)
 }
 
 // renderThread shows a task's conversation, falling back to the details tab
