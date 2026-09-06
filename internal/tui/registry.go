@@ -453,7 +453,7 @@ func tasksCommand() command {
 						if jsonMode {
 							return marshalJSON(added)
 						}
-						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", location.filePath, location.lineNumber, firstNonEmpty(t.Title, shortID(t.ID)), renderTaskReviews(t, reviews)), nil
+						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", sanitizeMemoryText(location.filePath), location.lineNumber, sanitizeMemoryText(firstNonEmpty(t.Title, shortID(t.ID))), renderTaskReviews(t, reviews)), nil
 					})
 				}
 
