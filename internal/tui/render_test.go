@@ -369,13 +369,21 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 			values[lifecyclePreviewCountingTextKey{ID: i, Suffix: strings.Repeat("k", prefixSize-lifecyclePreviewMaxKeyBytes) + suffix, Calls: &calls}] = lifecyclePreviewOrderMarshaler{Name: suffix, Calls: &[]string{}}
 		}
 		return map[string]any{"value": values}
+	case "many_oversized_colliding_text_keys":
+		calls := 0
+		text := bytes.Repeat([]byte{'k'}, size)
+		values := make(map[lifecyclePreviewOversizedCollidingTextKey]lifecyclePreviewBenchmarkMarshaler, 128)
+		for i := range 128 {
+			values[lifecyclePreviewOversizedCollidingTextKey{ID: i, Text: &text, Calls: &calls}] = lifecyclePreviewBenchmarkMarshaler(`null`)
+		}
+		return map[string]any{"value": values}
 	default:
 		return map[string]any{"message": value, "status": "completed"}
 	}
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "many_text_keys", "text_key_validation"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -736,6 +744,17 @@ func (value lifecyclePreviewCollidingTextKey) MarshalText() ([]byte, error) {
 	return []byte("same-name"), nil
 }
 
+type lifecyclePreviewOversizedCollidingTextKey struct {
+	ID    int
+	Text  *[]byte
+	Calls *int
+}
+
+func (value lifecyclePreviewOversizedCollidingTextKey) MarshalText() ([]byte, error) {
+	*value.Calls++
+	return *value.Text, nil
+}
+
 type lifecyclePreviewNthCallMarshaler struct {
 	Calls  *int
 	FailAt int
@@ -1023,6 +1042,64 @@ func TestLifecyclePayloadSummaryValidatesCollidingTextMapKeys(t *testing.T) {
 	}
 	if *valueCalls != 120 {
 		t.Fatalf("colliding text-key value calls = %d, want 120", *valueCalls)
+	}
+}
+
+func TestLifecyclePreviewKeyCapsOversizedTextRetention(t *testing.T) {
+	calls := 0
+	text := bytes.Repeat([]byte{'k'}, 1<<20)
+	value := lifecyclePreviewOversizedCollidingTextKey{ID: 1, Text: &text, Calls: &calls}
+	key, err := lifecyclePreviewKey(reflect.ValueOf(value), 0)
+	if err != nil {
+		t.Fatalf("preview oversized text key: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("oversized TextMarshaler key calls = %d, want 1", calls)
+	}
+	if !key.textTruncated || len(key.text) != lifecyclePreviewMaxKeyBytes+1 {
+		t.Fatalf("retained oversized key = %d bytes, truncated %t; want %d bytes and truncated", len(key.text), key.textTruncated, lifecyclePreviewMaxKeyBytes+1)
+	}
+	text[0] = 'z'
+	if key.text[0] != 'k' {
+		t.Fatal("retained oversized key aliases caller-owned storage")
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesBoundedDistinctOversizedTextKeys(t *testing.T) {
+	calls := 0
+	values := make(map[lifecyclePreviewOversizedCollidingTextKey]bool, 100)
+	texts := make([][]byte, 100)
+	for i := range texts {
+		texts[i] = []byte(fmt.Sprintf("%03d-%s", i, strings.Repeat("k", 2048)))
+		values[lifecyclePreviewOversizedCollidingTextKey{ID: i, Text: &texts[i], Calls: &calls}] = i%2 == 0
+	}
+	payload := map[string]any{"value": values}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal distinct oversized text-key fixture: %v", err)
+	}
+	calls = 0
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("distinct oversized text-key preview = %q, want %q", got, want)
+	}
+	if calls != len(values) {
+		t.Fatalf("distinct oversized TextMarshaler key calls = %d, want %d", calls, len(values))
+	}
+}
+
+func TestLifecyclePayloadSummaryBoundsOversizedCollidingTextMapKeys(t *testing.T) {
+	calls := 0
+	text := bytes.Repeat([]byte{'k'}, 1<<20)
+	values := make(map[lifecyclePreviewOversizedCollidingTextKey]lifecyclePreviewBenchmarkMarshaler, 128)
+	for i := range 128 {
+		values[lifecyclePreviewOversizedCollidingTextKey{ID: i, Text: &text, Calls: &calls}] = lifecyclePreviewBenchmarkMarshaler(`null`)
+	}
+
+	if got := lifecyclePayloadSummary(map[string]any{"value": values}); got != "<unavailable>" {
+		t.Fatalf("oversized colliding text-key preview = %q, want unavailable", got)
+	}
+	if calls != len(values) {
+		t.Fatalf("oversized colliding TextMarshaler key calls = %d, want %d", calls, len(values))
 	}
 }
 

@@ -4,6 +4,7 @@ package tui
 // commands emit into the transcript.
 
 import (
+	"bytes"
 	"context"
 	"encoding"
 	"encoding/base64"
@@ -704,9 +705,11 @@ func lifecyclePayloadSummary(payload map[string]any) string {
 }
 
 const (
-	lifecyclePreviewMaxDepth    = 10_000
-	lifecyclePreviewMaxBytes    = 512
-	lifecyclePreviewMaxKeyBytes = 512
+	lifecyclePreviewMaxDepth             = 10_000
+	lifecyclePreviewMaxBytes             = 512
+	lifecyclePreviewMaxKeyBytes          = 512
+	lifecyclePreviewMaxRetainedKeyBytes  = 128 << 10
+	lifecyclePreviewMaxValidationMapKeys = 512
 )
 
 // lifecycleJSONPreview emits the same bytes as encoding/json for ordinary
@@ -1334,20 +1337,55 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	}
 	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
 	var validationKeys []lifecyclePreviewMapKey
+	orderingUnavailable := false
 	iterator := value.MapRange()
 	sourceOrder := 0
+	retainedKeyBytes := 0
 	for iterator.Next() {
-		key, err := lifecyclePreviewKey(iterator.Key())
+		if orderingUnavailable {
+			// Continue the single key-method pass so key call cardinality and errors
+			// remain compatible, but retain nothing once fallback is certain.
+			if _, err := lifecyclePreviewKey(iterator.Key(), -1); err != nil {
+				return err
+			}
+			continue
+		}
+		key, err := lifecyclePreviewKey(iterator.Key(), max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes))
 		if err != nil {
 			return err
 		}
+		retainedKeyBytes += len(key.text)
 		key.sourceOrder = sourceOrder
 		sourceOrder++
 		key.mapValue = iterator.Value()
+		mayError := lifecycleReflectValueMayMarshalError(key.mapValue)
+		if key.textTruncated {
+			if mayError {
+				// Exact canonical validation order cannot be recovered after dropping
+				// an arbitrary marshaled-key suffix. Fail safely rather than retaining
+				// payload-sized key data or invoking the key method again.
+				orderingUnavailable = true
+			}
+			for _, retained := range keys {
+				if retained.textTruncated && bytes.Equal(retained.text, key.text) {
+					// These keys may differ only beyond the retained prefix, so their
+					// canonical output order cannot be determined within the bound.
+					orderingUnavailable = true
+					break
+				}
+			}
+		}
 		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
-		if lifecycleReflectValueMayMarshalError(key.mapValue) {
+		if mayError {
+			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
+				orderingUnavailable = true
+				continue
+			}
 			validationKeys = append(validationKeys, key)
 		}
+	}
+	if orderingUnavailable {
+		return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
 	}
 	p.append("{")
 	for i, key := range keys {
@@ -1401,10 +1439,11 @@ type lifecyclePreviewMapKey struct {
 	text          []byte
 	textLength    int
 	textMarshaled bool
+	textTruncated bool
 	textString    string
 }
 
-func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
+func lifecyclePreviewKey(value reflect.Value, retainedBudget int) (lifecyclePreviewMapKey, error) {
 	if value.Kind() == reflect.String {
 		return lifecyclePreviewMapKey{sourceKey: value, textString: value.String()}, nil
 	}
@@ -1419,11 +1458,23 @@ func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 			if err != nil {
 				return lifecyclePreviewMapKey{}, err
 			}
-			// MarshalText implementations may reuse mutable scratch storage. Match
-			// encoding/json's ownership semantics so later calls cannot mutate a
-			// key already retained for canonical sorting or validation.
-			text = append([]byte(nil), text...)
-			return lifecyclePreviewMapKey{sourceKey: value, text: text, textLength: len(text), textMarshaled: true}, nil
+			// MarshalText implementations may reuse mutable scratch storage. Keep
+			// complete output only while the map-wide retention budget permits exact
+			// sorting; otherwise copy just enough prefix to render or detect that the
+			// discarded suffix makes canonical ordering unknowable. A negative budget
+			// means fallback is already certain, so invoke the method but retain none.
+			if retainedBudget < 0 {
+				return lifecyclePreviewMapKey{}, nil
+			}
+			textLength := len(text)
+			if textLength > retainedBudget {
+				textLength = min(textLength, lifecyclePreviewMaxKeyBytes+1)
+			}
+			retained := append([]byte(nil), text[:textLength]...)
+			return lifecyclePreviewMapKey{
+				sourceKey: value, text: retained, textLength: len(retained),
+				textMarshaled: true, textTruncated: len(text) > len(retained),
+			}, nil
 		}
 	}
 	switch value.Kind() {
