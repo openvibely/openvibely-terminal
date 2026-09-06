@@ -4,7 +4,6 @@ package tui
 // commands emit into the transcript.
 
 import (
-	"bytes"
 	"context"
 	"encoding"
 	"encoding/base64"
@@ -1360,15 +1359,9 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 		key.mapValue = iterator.Value()
 		mayError := lifecycleReflectValueMayMarshalError(key.mapValue)
 		if key.textTruncated {
-			if mayError {
-				// Exact canonical validation order cannot be recovered after dropping
-				// an arbitrary marshaled-key suffix. Fail safely rather than retaining
-				// payload-sized key data or invoking the key method again.
-				orderingUnavailable = true
-			}
 			for _, retained := range keys {
-				if retained.textTruncated && bytes.Equal(retained.text, key.text) {
-					// These keys may differ only beyond the retained prefix, so their
+				if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+					// These keys may differ only beyond a discarded suffix, so their
 					// canonical output order cannot be determined within the bound.
 					orderingUnavailable = true
 					break
@@ -1377,6 +1370,15 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 		}
 		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
 		if mayError {
+			for _, retained := range validationKeys {
+				if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+					// Error-capable values must be invoked in exact canonical key
+					// order. Distinct retained prefixes establish that order without
+					// requiring the discarded suffixes.
+					orderingUnavailable = true
+					break
+				}
+			}
 			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
 				orderingUnavailable = true
 				continue
@@ -1492,6 +1494,25 @@ func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
 	} else {
 		preview.appendJSONString(key.textString)
 	}
+}
+
+func lifecyclePreviewMapKeyOrderAmbiguous(left, right lifecyclePreviewMapKey) bool {
+	leftLength, rightLength := left.length(), right.length()
+	for i := 0; i < min(leftLength, rightLength); i++ {
+		if left.byteAt(i) != right.byteAt(i) {
+			return false
+		}
+	}
+	if !left.textTruncated && !right.textTruncated {
+		return false
+	}
+	if left.textTruncated && right.textTruncated {
+		return true
+	}
+	if left.textTruncated {
+		return rightLength > leftLength
+	}
+	return leftLength > rightLength
 }
 
 func lifecyclePreviewMapKeyLess(left, right lifecyclePreviewMapKey) bool {

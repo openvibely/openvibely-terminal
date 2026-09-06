@@ -1087,6 +1087,47 @@ func TestLifecyclePayloadSummaryPreservesBoundedDistinctOversizedTextKeys(t *tes
 	}
 }
 
+func TestLifecyclePayloadSummaryPreservesUnambiguousOversizedTextKeysWithMarshalers(t *testing.T) {
+	tests := []struct {
+		name  string
+		texts [][]byte
+	}{
+		{
+			name:  "single",
+			texts: [][]byte{bytes.Repeat([]byte{'k'}, 1<<20)},
+		},
+		{
+			name: "distinct retained prefixes",
+			texts: [][]byte{
+				append([]byte("a-"), bytes.Repeat([]byte{'k'}, 1<<20)...),
+				append([]byte("m-"), bytes.Repeat([]byte{'k'}, 1<<20)...),
+				append([]byte("z-"), bytes.Repeat([]byte{'k'}, 1<<20)...),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			values := make(map[lifecyclePreviewOversizedCollidingTextKey]lifecyclePreviewBenchmarkMarshaler, len(test.texts))
+			for i := range test.texts {
+				values[lifecyclePreviewOversizedCollidingTextKey{ID: i, Text: &test.texts[i], Calls: &calls}] = lifecyclePreviewBenchmarkMarshaler(`null`)
+			}
+			payload := map[string]any{"value": values}
+			encoded, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal unambiguous oversized text-key fixture: %v", err)
+			}
+			calls = 0
+			if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+				t.Fatalf("unambiguous oversized text-key preview = %q, want %q", got, want)
+			}
+			if calls != len(values) {
+				t.Fatalf("oversized TextMarshaler key calls = %d, want %d", calls, len(values))
+			}
+		})
+	}
+}
+
 func TestLifecyclePayloadSummaryBoundsOversizedCollidingTextMapKeys(t *testing.T) {
 	calls := 0
 	text := bytes.Repeat([]byte{'k'}, 1<<20)
