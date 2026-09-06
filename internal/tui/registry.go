@@ -3311,8 +3311,8 @@ func eventsCommand() command {
 			`events on`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			m.busy = false
 			if cliMode {
+				m.busy = false
 				on, err := parseCLIEventsAction(args)
 				if err != nil {
 					return m, errCmd(err.Error())
@@ -3322,15 +3322,21 @@ func eventsCommand() command {
 				}
 				return m, errCmd("events on must run through the foreground CLI stream; use the openvibely-tui events command")
 			}
+			if len(args) > 1 {
+				return m, errCmd("usage: /events [on|off]")
+			}
 			on := !m.showEvents
-			if len(args) > 0 {
+			if len(args) == 1 {
 				switch strings.ToLower(args[0]) {
 				case "on", "true":
 					on = true
 				case "off", "false":
 					on = false
+				default:
+					return m, errCmd("usage: /events [on|off]")
 				}
 			}
+			m.busy = false
 			m.showEvents = on
 			state := "off"
 			if on {

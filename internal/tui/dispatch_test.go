@@ -172,6 +172,99 @@ func dispatchVoteModel(t *testing.T, status int, body string) (Model, *recorder)
 	return m, rec
 }
 
+func TestEventsInteractiveDispatchValidatesOperands(t *testing.T) {
+	cases := []struct {
+		name       string
+		line       string
+		valid      bool
+		wantForOff bool
+		wantForOn  bool
+	}{
+		{name: "bare toggles", line: "/events", valid: true, wantForOff: true, wantForOn: false},
+		{name: "on enables", line: "/events on", valid: true, wantForOff: true, wantForOn: true},
+		{name: "off disables", line: "/events off", valid: true, wantForOff: false, wantForOn: false},
+		{name: "true enables", line: "/events true", valid: true, wantForOff: true, wantForOn: true},
+		{name: "false disables", line: "/events false", valid: true, wantForOff: false, wantForOn: false},
+		{name: "unknown mode", line: "/events typo"},
+		{name: "extra operand", line: "/events off extra"},
+		{name: "extra operand after unknown", line: "/events typo extra"},
+	}
+
+	for _, initial := range []bool{false, true} {
+		for _, tc := range cases {
+			initial, tc := initial, tc
+			t.Run(fmt.Sprintf("initial_%t/%s", initial, tc.name), func(t *testing.T) {
+				m, rec := dispatchModel(t, nil)
+				m.showEvents = initial
+				m.busy = true
+				sseCanceled := false
+				m.sseCancel = func() { sseCanceled = true }
+				beforeLogLen := len(m.log)
+				beforeGeneration := m.sseGeneration
+
+				m, cmd := typeLine(t, m, tc.line)
+				if tc.valid {
+					if cmd != nil {
+						t.Fatal("valid interactive /events should not return a command")
+					}
+				} else {
+					if cmd == nil {
+						t.Fatal("invalid interactive /events should return a usage message command")
+					}
+					if !m.busy {
+						t.Fatal("invalid command changed busy state during dispatch")
+					}
+					next, followup := m.Update(cmd())
+					m = next.(Model)
+					if followup != nil {
+						t.Fatal("invalid interactive /events returned an unexpected follow-up command")
+					}
+				}
+				if got := rec.all(); got != "" {
+					t.Fatalf("interactive /events made backend requests:\n%s", got)
+				}
+				if m.sseGeneration != beforeGeneration || m.sseCancel == nil || sseCanceled {
+					t.Fatal("interactive /events changed SSE lifecycle state")
+				}
+
+				out := stripANSI(transcript(m))
+				if !tc.valid {
+					if m.showEvents != initial {
+						t.Fatalf("showEvents = %t, want unchanged %t", m.showEvents, initial)
+					}
+					if !strings.Contains(out, "usage: /events [on|off]") {
+						t.Fatalf("canonical usage missing:\n%s", out)
+					}
+					for _, success := range []string{"live events on", "live events off"} {
+						if strings.Contains(out, success) {
+							t.Fatalf("invalid command reported success %q:\n%s", success, out)
+						}
+					}
+					return
+				}
+
+				want := tc.wantForOff
+				if initial {
+					want = tc.wantForOn
+				}
+				if m.showEvents != want {
+					t.Fatalf("showEvents = %t, want %t", m.showEvents, want)
+				}
+				if len(m.log) != beforeLogLen+2 {
+					t.Fatalf("valid command appended %d entries, want command and result", len(m.log)-beforeLogLen)
+				}
+				wantText := "live events off"
+				if want {
+					wantText = "live events on"
+				}
+				if !strings.Contains(out, wantText) || strings.Contains(out, "usage: /events") {
+					t.Fatalf("valid command output mismatch:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
 func TestAgentsVotesInteractiveDispatchAndErrors(t *testing.T) {
 	cases := []struct {
 		name       string
