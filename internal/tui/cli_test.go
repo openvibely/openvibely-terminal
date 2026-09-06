@@ -3310,8 +3310,8 @@ func TestCLIJSONTaskReviewsList(t *testing.T) {
 }
 
 func TestCLITaskReviewsPreserveMultilineOutput(t *testing.T) {
-	const unsafeTitle = "Refactor \x1b[31mred\x1b[0m\a API"
-	const unsafeFilePath = "internal/\x1b[31mred\x1b[0m\a.go"
+	const unsafeTitle = "Refactor \x1b[31mred\x1b[0m\a\ninjected API"
+	const unsafeFilePath = "internal/\x1b[31mred\x1b[0m\a\ninjected.go"
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="` + unsafeTitle + `">` + unsafeTitle + `</a>
 	</div>`
@@ -3379,7 +3379,7 @@ Third<br>Fourth &#27;[31mred&#27;[0m
 				t.Fatal(err)
 			}
 			raw := out.String()
-			for _, unsafe := range []string{"\x1b[31m", "\a"} {
+			for _, unsafe := range []string{"\x1b[31m", "\a", "\ninjected"} {
 				if strings.Contains(raw, unsafe) {
 					t.Errorf("plain output retained injected terminal control %q: %q", unsafe, raw)
 				}
@@ -3391,7 +3391,7 @@ Third<br>Fourth &#27;[31mred&#27;[0m
 				}
 			}
 			if tc.name == "add plain" {
-				for _, want := range []string{"added review comment on internal/red.go:42", "for Refactor red API"} {
+				for _, want := range []string{"added review comment on internal/red injected.go:42", "for Refactor red injected API"} {
 					if !strings.Contains(plain, want) {
 						t.Errorf("plain add output missing sanitized confirmation %q:\n%s", want, plain)
 					}

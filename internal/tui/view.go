@@ -542,9 +542,9 @@ func renderTaskDetailLoadFailure(label string, err error) string {
 
 func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
 	var b strings.Builder
-	title := sanitizeMemoryText(firstNonEmpty(t.Title, shortID(t.ID)))
-	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(sanitizeMemoryText(t.Status)))
-	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · review", sanitizeMemoryText(t.ID))))
+	title := sanitizeAutomationDetailText(firstNonEmpty(t.Title, shortID(t.ID)))
+	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(sanitizeAutomationDetailText(t.Status)))
+	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · review", sanitizeAutomationDetailText(t.ID))))
 	if len(reviews) == 0 {
 		b.WriteString(dimStyle.Render("no review comments yet — /tasks reviews add <task> <file>:<line> <comment>"))
 		return b.String()
@@ -556,12 +556,12 @@ func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
 		if r.LineNumber > 0 {
 			line = fmt.Sprintf("%d", r.LineNumber)
 		}
-		if lineType := sanitizeMemoryText(r.LineType); lineType != "" {
+		if lineType := sanitizeAutomationDetailText(r.LineType); lineType != "" {
 			line += " " + lineType
 		}
 		state := reviewState(r)
 		comment := sanitizeMemoryText(r.CommentText)
-		if reviewedBy := sanitizeMemoryText(r.ReviewedBy); reviewedBy != "" {
+		if reviewedBy := sanitizeAutomationDetailText(r.ReviewedBy); reviewedBy != "" {
 			comment = reviewedBy + ": " + comment
 		}
 		commentLines := strings.Split(comment, "\n")
@@ -569,14 +569,14 @@ func renderTaskReviews(t client.Task, reviews []client.ReviewComment) string {
 			commentLines[i] = truncate(commentLines[i], 72)
 		}
 		comment = strings.Join(commentLines, "\n")
-		rows = append(rows, []string{truncate(sanitizeMemoryText(r.FilePath), 32), line, state, comment})
+		rows = append(rows, []string{truncate(sanitizeAutomationDetailText(r.FilePath), 32), line, state, comment})
 	}
 	b.WriteString(table(rows))
 	return b.String()
 }
 
 func reviewState(r client.ReviewComment) string {
-	state := sanitizeMemoryText(r.State)
+	state := sanitizeAutomationDetailText(r.State)
 	if r.Resolved {
 		if state != "" {
 			return statusOKStyle.Render("resolved " + state)
