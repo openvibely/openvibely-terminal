@@ -548,6 +548,39 @@ func chatAckClient(t *testing.T) (*client.Client, *atomic.Int32) {
 	return c, &posts
 }
 
+func TestBufferedChatOutputPrecedesRejectedOverlappingPlainSubmission(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("accepted partial reply")
+	if !m.chatStreamRenderQueued {
+		m.chatStreamRenderQueued = true
+	}
+
+	m, cmd := typeLine(t, m, "second message")
+	if cmd != nil {
+		t.Fatal("overlapping plain submission returned a command")
+	}
+	if len(m.log) < 2 {
+		t.Fatalf("expected assistant output and rejection, got %#v", m.log)
+	}
+	assistant := m.log[len(m.log)-2]
+	warning := m.log[len(m.log)-1]
+	if assistant.role != "agent" || assistant.text != "accepted partial reply" {
+		t.Fatalf("entry before rejection = %#v, want accepted assistant output", assistant)
+	}
+	if warning.role != "system" || warning.text != chatStillProcessingMessage {
+		t.Fatalf("final entry = %#v, want pending-chat warning", warning)
+	}
+	if got := strings.Count(transcript(m), "agent::accepted partial reply"); got != 1 {
+		t.Fatalf("accepted output rendered %d times; transcript:\n%s", got, transcript(m))
+	}
+	if m.chatStreamRenderQueued {
+		t.Fatal("forced ordering flush left cadence render queued")
+	}
+	if m.pendingMsgID != "exec-1" || !m.chatSubmissionPending {
+		t.Fatalf("rejection changed pending chat: pending=%t id=%q", m.chatSubmissionPending, m.pendingMsgID)
+	}
+}
+
 func TestRapidPlainChatSubmissionsAreSerialized(t *testing.T) {
 	c, posts := chatAckClient(t)
 	m := New(c)
@@ -3863,6 +3896,49 @@ func pendingChatStreamTestModel(t *testing.T) Model {
 	m.chatStreamGeneration = 3
 	m.chatStreamExecID = "exec-1"
 	return m
+}
+
+func TestBufferedChatOutputPrecedesVisibleSSECompletionEvent(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.showEvents = true
+	m.chatStreamRenderQueued = true
+	m.updateChatStreamOutput("partial reply")
+
+	payload, err := json.Marshal(client.ChatEvent{
+		Type:            "chat_response_done",
+		ProjectID:       "project-A",
+		ExecID:          "exec-1",
+		CompletedOutput: "final reply",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(sseEventMsg{event: client.Event{
+		Name: "chat_response_done",
+		Data: payload,
+	}})
+	m = next.(Model)
+
+	if len(m.log) < 2 {
+		t.Fatalf("expected assistant output and visible event, got %#v", m.log)
+	}
+	assistant := m.log[len(m.log)-2]
+	visibleEvent := m.log[len(m.log)-1]
+	if assistant.role != "agent" || assistant.text != "final reply" {
+		t.Fatalf("entry before event = %#v, want reconciled assistant output", assistant)
+	}
+	if visibleEvent.role != "event" || !strings.Contains(visibleEvent.text, "chat_response_done") {
+		t.Fatalf("final entry = %#v, want visible completion event", visibleEvent)
+	}
+	if got := strings.Count(transcript(m), "agent::final reply"); got != 1 {
+		t.Fatalf("final output rendered %d times; transcript:\n%s", got, transcript(m))
+	}
+	if strings.Contains(transcript(m), "partial reply") {
+		t.Fatalf("partial output was not authoritatively reconciled:\n%s", transcript(m))
+	}
+	if m.busy || m.pendingMsgID != "" || m.chatStreamRenderQueued {
+		t.Fatalf("completion left pending state: busy=%t id=%q queued=%t", m.busy, m.pendingMsgID, m.chatStreamRenderQueued)
+	}
 }
 
 // TestSSEChatResponseDoneCompletedOutputFastPath verifies that when the

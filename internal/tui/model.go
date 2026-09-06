@@ -668,6 +668,10 @@ func (m *Model) rejectPendingChat() bool {
 	if !m.hasPendingChat() {
 		return false
 	}
+	// Preserve the order in which output and user actions were accepted. A first
+	// assistant block may still be waiting for its cadence render when the user
+	// submits another message.
+	m.flushChatStreamOutput()
 	m.append(entry{role: "system", text: chatStillProcessingMessage})
 	return true
 }
@@ -1640,6 +1644,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.acceptsSSEEvent(msg.event) {
 			return m, m.waitForCurrentSSE(msg.generation)
+		}
+		// A matching completion is terminal for the pending turn. If its visible
+		// /events entry is appended before a queued first assistant render, the
+		// transcript order is reversed. Flush only completions that can settle this
+		// chat; malformed, unrelated, and foreign events retain existing behavior.
+		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
+			var completion client.ChatEvent
+			if json.Unmarshal(msg.event.Data, &completion) == nil &&
+				m.matchesPendingChatExecution(completion.ExecID) &&
+				(completion.ProjectID == "" || completion.ProjectID == m.selectedID) {
+				m.flushChatStreamOutput()
+			}
 		}
 		m.handleSSEEvent(msg.event)
 		if refresh := m.handleOpenThreadSSE(msg.event); refresh != nil {
