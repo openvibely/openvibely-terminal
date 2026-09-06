@@ -36,10 +36,11 @@ import (
 )
 
 const (
-	refreshInterval  = 30 * time.Second
-	chatPollInterval = 1500 * time.Millisecond
-	maxTranscript    = 500
-	maxHistory       = 200
+	refreshInterval          = 30 * time.Second
+	chatPollInterval         = 1500 * time.Millisecond
+	chatStreamRenderInterval = 33 * time.Millisecond
+	maxTranscript            = 500
+	maxHistory               = 200
 
 	defaultPlaceholder = "Message the agent, or / for a command"
 )
@@ -155,17 +156,21 @@ type Model struct {
 	// chatSubmissionPending covers the window before the backend returns the
 	// accepted message ID. chatSubmissionID keeps delayed acknowledgements from
 	// an older turn from replacing a newer active submission.
-	chatSubmissionPending bool
-	chatSubmissionID      uint64
-	chatStreamGeneration  int
-	chatStreamCancel      context.CancelFunc
-	chatStreamEvents      <-chan client.ChatOutputEvent
-	chatStreamErrs        <-chan error
-	chatStreamExecID      string
-	chatStreamOffset      int
-	chatStreamOutput      string
-	chatStreamLogIndex    int
-	busy                  bool
+	chatSubmissionPending      bool
+	chatSubmissionID           uint64
+	chatStreamGeneration       int
+	chatStreamCancel           context.CancelFunc
+	chatStreamEvents           <-chan client.ChatOutputEvent
+	chatStreamErrs             <-chan error
+	chatStreamExecID           string
+	chatStreamOffset           int
+	chatStreamOutput           string
+	chatStreamBuffer           []byte
+	chatStreamLogIndex         int
+	chatStreamRenderQueued     bool
+	chatStreamRenderGeneration uint64
+	chatStreamRedraws          int
+	busy                       bool
 
 	// operational counts cached by /status
 	pendingAlertCount int
@@ -571,6 +576,9 @@ func (m *Model) advanceProjectGeneration() uint64 {
 func (m *Model) setActiveProject(project client.Project) bool {
 	changed := m.selectedID != project.ID
 	if changed {
+		// Preserve accepted bytes before project invalidation makes a queued
+		// cadence render stale and resets the old project's stream state.
+		m.flushChatStreamOutput()
 		m.advanceProjectGeneration()
 		m.invalidateChatStream()
 		m.resetChatStreamOutput()
@@ -661,6 +669,10 @@ func (m *Model) rejectPendingChat() bool {
 	if !m.hasPendingChat() {
 		return false
 	}
+	// Preserve the order in which output and user actions were accepted. A first
+	// assistant block may still be waiting for its cadence render when the user
+	// submits another message.
+	m.flushChatStreamOutput()
 	m.append(entry{role: "system", text: chatStillProcessingMessage})
 	return true
 }
@@ -685,13 +697,17 @@ func (m *Model) invalidateChatStream() {
 	m.chatStreamEvents = nil
 	m.chatStreamErrs = nil
 	m.chatStreamExecID = ""
+	m.chatStreamRenderQueued = false
 	m.chatStreamGeneration++
 }
 
 func (m *Model) resetChatStreamOutput() {
 	m.chatStreamOffset = 0
 	m.chatStreamOutput = ""
+	m.chatStreamBuffer = nil
 	m.chatStreamLogIndex = -1
+	m.chatStreamRenderQueued = false
+	m.chatStreamRedraws = 0
 }
 
 func (m *Model) clearPendingChat() {
@@ -712,51 +728,103 @@ func (m *Model) updateChatStreamOutput(delta string) {
 	if delta == "" {
 		return
 	}
-	m.chatStreamOutput += delta
-	m.chatStreamOffset += len([]byte(delta))
-	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
-		m.log[m.chatStreamLogIndex].text = m.chatStreamOutput
-		m.refreshTranscript()
+	if len(m.chatStreamBuffer) == 0 && m.chatStreamOutput != "" {
+		m.chatStreamBuffer = append(m.chatStreamBuffer, m.chatStreamOutput...)
+	}
+	m.chatStreamBuffer = append(m.chatStreamBuffer, delta...)
+	m.chatStreamOffset += len(delta)
+}
+
+func (m *Model) currentChatStreamOutput() string {
+	if len(m.chatStreamBuffer) == 0 {
+		return m.chatStreamOutput
+	}
+	return string(m.chatStreamBuffer)
+}
+
+func (m *Model) flushChatStreamOutput() {
+	output := m.currentChatStreamOutput()
+	if m.chatStreamRenderQueued {
+		// A forced flush cannot cancel tea.Tick, so advance the render epoch to
+		// make that queued tick stale before another delta schedules a new one.
+		m.chatStreamRenderGeneration++
+	}
+	m.chatStreamRenderQueued = false
+	if output == "" && m.chatStreamLogIndex < 0 {
 		return
 	}
-	m.append(entry{role: "agent", text: m.chatStreamOutput})
-	m.chatStreamLogIndex = len(m.log) - 1
+	if output == m.chatStreamOutput && m.chatStreamLogIndex >= 0 {
+		return
+	}
+	m.chatStreamOutput = output
+	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
+		m.log[m.chatStreamLogIndex].text = output
+		m.replaceTranscriptBlock(m.chatStreamLogIndex)
+	} else {
+		m.appendTranscriptEntry(entry{role: "agent", text: output})
+		m.chatStreamLogIndex = len(m.log) - 1
+	}
+	m.chatStreamRedraws++
+}
+
+func (m *Model) scheduleChatStreamRender() tea.Cmd {
+	if m.chatStreamRenderQueued {
+		return nil
+	}
+	m.chatStreamRenderQueued = true
+	m.chatStreamRenderGeneration++
+	renderGeneration := m.chatStreamRenderGeneration
+	return tea.Tick(chatStreamRenderInterval, func(time.Time) tea.Msg {
+		return chatStreamRenderMsg{
+			generation:       m.chatStreamGeneration,
+			renderGeneration: renderGeneration,
+			submissionID:     m.chatSubmissionID,
+			projectID:        m.pendingMsgProjectID,
+			execID:           m.chatStreamExecID,
+		}
+	})
 }
 
 func (m *Model) updateChatStreamSnapshot(snapshot string) {
-	if snapshot == "" || snapshot == m.chatStreamOutput {
+	current := m.currentChatStreamOutput()
+	if snapshot == "" {
 		return
 	}
-	if strings.HasPrefix(m.chatStreamOutput, snapshot) {
+	if snapshot == current {
+		if snapshot != m.chatStreamOutput || m.chatStreamLogIndex < 0 {
+			m.flushChatStreamOutput()
+		}
+		return
+	}
+	if strings.HasPrefix(current, snapshot) {
 		return // the durable status snapshot has not caught up to live output yet
 	}
-	if strings.HasPrefix(snapshot, m.chatStreamOutput) {
-		m.updateChatStreamOutput(strings.TrimPrefix(snapshot, m.chatStreamOutput))
+	if strings.HasPrefix(snapshot, current) {
+		m.updateChatStreamOutput(strings.TrimPrefix(snapshot, current))
+		m.flushChatStreamOutput()
 		return
 	}
-	m.chatStreamOutput = snapshot
-	m.chatStreamOffset = len([]byte(snapshot))
-	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
-		m.log[m.chatStreamLogIndex].text = snapshot
-		m.refreshTranscript()
-		return
-	}
-	m.append(entry{role: "agent", text: snapshot})
-	m.chatStreamLogIndex = len(m.log) - 1
+	m.chatStreamBuffer = append(m.chatStreamBuffer[:0], snapshot...)
+	m.chatStreamOffset = len(snapshot)
+	m.flushChatStreamOutput()
 }
 
 func (m *Model) reconcileChatStreamOutput(response string) {
+	m.chatStreamRenderQueued = false
 	if m.chatStreamLogIndex < 0 || m.chatStreamLogIndex >= len(m.log) || m.log[m.chatStreamLogIndex].role != "agent" {
 		m.append(entry{role: "agent", text: response})
 		return
 	}
 	m.log[m.chatStreamLogIndex].text = response
-	m.refreshTranscript()
+	m.replaceTranscriptBlock(m.chatStreamLogIndex)
 }
 
 // completeChat settles a successful project-chat response. Task IDs are
 // optional because only polling status responses include them.
 func (m *Model) completeChat(response string, taskIDs []string) {
+	// Authoritative completion can race the first cadence tick. Materialize any
+	// accepted bytes first so the final response reconciles one assistant entry.
+	m.flushChatStreamOutput()
 	if m.chatStreamLogIndex >= 0 {
 		m.reconcileChatStreamOutput(response)
 	} else {
@@ -1393,6 +1461,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.completeChat(msg.status.Response, msg.status.TaskIDs)
 			return m, nil
 		case "failed", "cancelled":
+			m.flushChatStreamOutput()
 			m.clearPendingChat()
 			m.busy = false
 			text := msg.status.Status
@@ -1416,13 +1485,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.event.Name {
 		case "":
 			m.updateChatStreamOutput(msg.event.Data)
-			return m, m.waitForCurrentChatStream(msg.generation)
+			return m, tea.Batch(m.waitForCurrentChatStream(msg.generation), m.scheduleChatStreamRender())
 		case "done", "error":
+			m.flushChatStreamOutput()
 			m.invalidateChatStream()
 			return m, m.fetchChatStatus(m.pendingMsgID)
 		default:
 			return m, m.waitForCurrentChatStream(msg.generation)
 		}
+
+	case chatStreamRenderMsg:
+		if msg.generation != m.chatStreamGeneration || msg.renderGeneration != m.chatStreamRenderGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
+			return m, nil
+		}
+		m.flushChatStreamOutput()
+		return m, nil
 
 	case chatStreamDisconnectedMsg:
 		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
@@ -1433,6 +1510,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		execID := msg.execID
+		m.flushChatStreamOutput()
 		m.invalidateChatStream()
 		m.chatStreamExecID = execID
 		return m, m.scheduleChatStreamReconnect(m.chatStreamGeneration)
@@ -1579,6 +1657,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.acceptsSSEEvent(msg.event) {
 			return m, m.waitForCurrentSSE(msg.generation)
 		}
+		// A matching completion is terminal for the pending turn. If its visible
+		// /events entry is appended before a queued first assistant render, the
+		// transcript order is reversed. Flush only completions that can settle this
+		// chat; malformed, unrelated, and foreign events retain existing behavior.
+		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
+			var completion client.ChatEvent
+			if json.Unmarshal(msg.event.Data, &completion) == nil &&
+				m.matchesPendingChatExecution(completion.ExecID) &&
+				(completion.ProjectID == "" || completion.ProjectID == m.selectedID) {
+				m.flushChatStreamOutput()
+			}
+		}
 		m.handleSSEEvent(msg.event)
 		if refresh := m.handleOpenThreadSSE(msg.event); refresh != nil {
 			return m, tea.Batch(m.waitForCurrentSSE(msg.generation), refresh)
@@ -1661,6 +1751,10 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	if m.loginActive {
 		return m, nil
 	}
+	// Preserve accepted bytes before the login/session transition invalidates
+	// the queued cadence render. Unaccepted sends retain the clearing behavior
+	// below because they cannot be correlated after the session epoch changes.
+	m.flushChatStreamOutput()
 	// A send that has not received an accepted message ID cannot be resumed
 	// after the session epoch changes. Accepted turns retain their polling ID
 	// and are refreshed after login below.
@@ -1928,6 +2022,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.pushHistory(text)
 
 	if strings.HasPrefix(text, "/") {
+		// Stream bytes were accepted before this command was submitted. Render them
+		// before recording the command so cadence batching cannot reorder the
+		// assistant output behind a later user action.
+		m.flushChatStreamOutput()
 		m.append(entry{role: "you", text: text})
 		newModel, cmd := m.runCommand(text)
 		return newModel.(Model).clearReviewPrefill(), cmd
@@ -2108,6 +2206,16 @@ func (m Model) historyNext() Model {
 // --- transcript ---
 
 func (m *Model) append(e entry) {
+	output := m.currentChatStreamOutput()
+	if output != "" && (m.chatStreamLogIndex < 0 || output != m.chatStreamOutput) {
+		// Any later transcript entry must follow bytes already accepted from the
+		// assistant, even when their normal cadence render has not fired yet.
+		m.flushChatStreamOutput()
+	}
+	m.appendTranscriptEntry(e)
+}
+
+func (m *Model) appendTranscriptEntry(e entry) {
 	width := m.effectiveTranscriptWidth()
 	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log)
 	block := ""
@@ -2188,6 +2296,38 @@ func (m *Model) refreshTranscript() {
 	m.transcriptBlocks = blocks
 	m.transcriptRenderWidth = width
 	m.transcriptReady = true
+	m.transcript.SetContent(m.transcriptContent)
+	m.transcript.GotoBottom()
+}
+
+// replaceTranscriptBlock re-renders one mutable entry when the transcript cache
+// still describes the current log and width. Any mismatch retains the existing
+// full-invalidation behavior.
+func (m *Model) replaceTranscriptBlock(index int) {
+	width := m.effectiveTranscriptWidth()
+	if !m.transcriptReady || m.transcriptRenderWidth != width || len(m.transcriptBlocks) != len(m.log) || index < 0 || index >= len(m.log) {
+		m.refreshTranscript()
+		return
+	}
+
+	start := 0
+	for _, block := range m.transcriptBlocks[:index] {
+		start += len(block)
+	}
+	old := m.transcriptBlocks[index]
+	end := start + len(old)
+	if end > len(m.transcriptContent) {
+		m.refreshTranscript()
+		return
+	}
+	block := renderTranscriptEntry(m.log[index], transcriptWrap(width))
+	var b strings.Builder
+	b.Grow(len(m.transcriptContent) - len(old) + len(block))
+	b.WriteString(m.transcriptContent[:start])
+	b.WriteString(block)
+	b.WriteString(m.transcriptContent[end:])
+	m.transcriptContent = b.String()
+	m.transcriptBlocks[index] = block
 	m.transcript.SetContent(m.transcriptContent)
 	m.transcript.GotoBottom()
 }
@@ -2350,6 +2490,9 @@ func truncatePrefix(s string, n int) string {
 }
 
 func (m *Model) markAuthRequired() {
+	// Preserve any accepted stream bytes before auth invalidation advances the
+	// stream generation and makes its queued cadence render stale.
+	m.flushChatStreamOutput()
 	wasRequired := m.authRequired
 	m.authRequired = true
 	m.connected = false

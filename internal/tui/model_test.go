@@ -548,6 +548,39 @@ func chatAckClient(t *testing.T) (*client.Client, *atomic.Int32) {
 	return c, &posts
 }
 
+func TestBufferedChatOutputPrecedesRejectedOverlappingPlainSubmission(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("accepted partial reply")
+	if !m.chatStreamRenderQueued {
+		m.chatStreamRenderQueued = true
+	}
+
+	m, cmd := typeLine(t, m, "second message")
+	if cmd != nil {
+		t.Fatal("overlapping plain submission returned a command")
+	}
+	if len(m.log) < 2 {
+		t.Fatalf("expected assistant output and rejection, got %#v", m.log)
+	}
+	assistant := m.log[len(m.log)-2]
+	warning := m.log[len(m.log)-1]
+	if assistant.role != "agent" || assistant.text != "accepted partial reply" {
+		t.Fatalf("entry before rejection = %#v, want accepted assistant output", assistant)
+	}
+	if warning.role != "system" || warning.text != chatStillProcessingMessage {
+		t.Fatalf("final entry = %#v, want pending-chat warning", warning)
+	}
+	if got := strings.Count(transcript(m), "agent::accepted partial reply"); got != 1 {
+		t.Fatalf("accepted output rendered %d times; transcript:\n%s", got, transcript(m))
+	}
+	if m.chatStreamRenderQueued {
+		t.Fatal("forced ordering flush left cadence render queued")
+	}
+	if m.pendingMsgID != "exec-1" || !m.chatSubmissionPending {
+		t.Fatalf("rejection changed pending chat: pending=%t id=%q", m.chatSubmissionPending, m.pendingMsgID)
+	}
+}
+
 func TestRapidPlainChatSubmissionsAreSerialized(t *testing.T) {
 	c, posts := chatAckClient(t)
 	m := New(c)
@@ -3426,6 +3459,209 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 	}
 }
 
+func TestChatStreamForcedFlushPreservesBytesCacheAndTruncation(t *testing.T) {
+	m := newTestModel(t)
+	m.log = nil
+	for i := 0; i < maxTranscript; i++ {
+		m.log = append(m.log, entry{role: "system", text: fmt.Sprintf("history-%03d", i)})
+	}
+	m.refreshTranscript()
+	unchanged := append([]string(nil), m.transcriptBlocks[1:]...)
+
+	want := "prefix λ🙂\nwrapped suffix"
+	for _, chunk := range []string{want[:8], want[8:11], want[11:]} {
+		m.updateChatStreamOutput(chunk)
+	}
+	if m.chatStreamOffset != len([]byte(want)) {
+		t.Fatalf("UTF-8 byte offset = %d, want %d", m.chatStreamOffset, len([]byte(want)))
+	}
+	m.flushChatStreamOutput()
+	if len(m.log) != maxTranscript || m.chatStreamLogIndex != maxTranscript-1 || m.log[m.chatStreamLogIndex].text != want {
+		t.Fatalf("flush/truncation mismatch: entries=%d index=%d text=%q", len(m.log), m.chatStreamLogIndex, m.log[m.chatStreamLogIndex].text)
+	}
+	for i, block := range unchanged {
+		if m.transcriptBlocks[i] != block {
+			t.Fatalf("immutable cached block %d changed", i)
+		}
+	}
+	wantBlock := renderTranscriptEntry(entry{role: "agent", text: want}, transcriptWrap(m.effectiveTranscriptWidth()))
+	if m.transcriptBlocks[m.chatStreamLogIndex] != wantBlock || !strings.HasSuffix(m.transcriptContent, wantBlock) {
+		t.Fatalf("forced output differs from canonical rendering:\ngot  %q\nwant %q", m.transcriptBlocks[m.chatStreamLogIndex], wantBlock)
+	}
+
+	m.transcriptReady = false
+	m.updateChatStreamOutput(" authoritative")
+	m.flushChatStreamOutput()
+	incremental := m.transcriptContent
+	m.refreshTranscript()
+	if m.transcriptContent != incremental {
+		t.Fatalf("cache-invalidated fallback differs from full refresh\ngot  %q\nwant %q", incremental, m.transcriptContent)
+	}
+}
+
+func TestChatStreamSnapshotFlushesMatchingBufferedOutput(t *testing.T) {
+	m := newTestModel(t)
+	m.updateChatStreamOutput("matching durable snapshot")
+	m.chatStreamRenderQueued = true
+	m.updateChatStreamSnapshot("matching durable snapshot")
+	if m.chatStreamRenderQueued || m.chatStreamLogIndex < 0 || !strings.Contains(transcript(m), "agent::matching durable snapshot") {
+		t.Fatalf("matching durable snapshot did not flush buffered output: queued=%t index=%d transcript=%q", m.chatStreamRenderQueued, m.chatStreamLogIndex, transcript(m))
+	}
+}
+
+func TestChatStreamRedrawsAreCadenceBoundedAndFinalOutputMatches(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	chunk := strings.Repeat("λ", 16) // 32 UTF-8 bytes per chunk.
+	cadenceChunks := int(chatStreamRenderInterval / time.Millisecond)
+	var want strings.Builder
+	for i := 1; i <= 100; i++ {
+		want.WriteString(chunk)
+		next, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: chunk}})
+		m = next.(Model)
+		if i%cadenceChunks == 0 {
+			next, _ = m.Update(chatStreamRenderMsg{generation: 3, renderGeneration: m.chatStreamRenderGeneration, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+			m = next.(Model)
+		}
+	}
+	next, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Name: "done"}})
+	m = next.(Model)
+	if m.chatStreamRedraws != 4 {
+		t.Fatalf("redraws = %d, want 3 cadence redraws and 1 terminal flush", m.chatStreamRedraws)
+	}
+	if len(m.log) == 0 || m.log[len(m.log)-1].role != "agent" || m.log[len(m.log)-1].text != want.String() {
+		t.Fatal("cadence/terminal rendering changed final output bytes")
+	}
+}
+
+func TestNonStreamAuthInvalidationFlushesQueuedChatOutput(t *testing.T) {
+	authErr := &client.AuthRequiredError{
+		Method:     http.MethodGet,
+		Path:       "/api/protected",
+		StatusCode: http.StatusUnauthorized,
+	}
+	for _, tc := range []struct {
+		name string
+		msg  func(Model) tea.Msg
+	}{
+		{
+			name: "health check",
+			msg: func(m Model) tea.Msg {
+				return connCheckedMsg{generation: m.connectionGeneration, err: authErr}
+			},
+		},
+		{
+			name: "status counts",
+			msg: func(m Model) tea.Msg {
+				return statusCountsMsg{sessionGeneration: m.sessionGeneration, projectGeneration: m.projectGeneration, err: authErr}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			const partial = "queued λ output"
+			m.updateChatStreamOutput(partial)
+			m.chatStreamRenderQueued = true
+			generation := m.chatStreamGeneration
+
+			next, _ := m.Update(tc.msg(m))
+			m = next.(Model)
+
+			if !m.authRequired || m.chatStreamRenderQueued || m.chatStreamGeneration == generation {
+				t.Fatalf("auth invalidation state: required=%t queued=%t generation=%d, want required, flushed, and generation > %d", m.authRequired, m.chatStreamRenderQueued, m.chatStreamGeneration, generation)
+			}
+			out := transcript(m)
+			partialAt := strings.Index(out, "agent::"+partial)
+			authAt := strings.Index(out, authRecoveryMessage(m.client.BaseURL()))
+			if partialAt < 0 || authAt < 0 || partialAt >= authAt {
+				t.Fatalf("queued output was not preserved before auth recovery message: %q", out)
+			}
+		})
+	}
+}
+
+func TestManualLoginFlushesQueuedChatOutputBeforeInvalidation(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	const partial = "queued λ before login"
+	m.updateChatStreamOutput(partial)
+	m.chatStreamRenderQueued = true
+	streamGeneration := m.chatStreamGeneration
+
+	m, cmd := typeLine(t, m, "/login")
+	if cmd != nil {
+		t.Fatalf("/login command = %v, want nil", cmd)
+	}
+	if !m.loginActive || m.chatStreamRenderQueued || m.chatStreamGeneration == streamGeneration {
+		t.Fatalf("login transition state: active=%t queued=%t generation=%d, want active, flushed, and generation > %d", m.loginActive, m.chatStreamRenderQueued, m.chatStreamGeneration, streamGeneration)
+	}
+	if !m.chatSubmissionPending || m.pendingMsgID != "exec-1" {
+		t.Fatalf("accepted pending chat was cleared: pending=%t id=%q", m.chatSubmissionPending, m.pendingMsgID)
+	}
+	out := transcript(m)
+	partialAt := strings.Index(out, "agent::"+partial)
+	commandAt := strings.Index(out, "you::/login")
+	loginAt := strings.Index(out, "sign-in: enter username")
+	if partialAt < 0 || commandAt < 0 || loginAt < 0 || partialAt >= commandAt || commandAt >= loginAt || strings.Count(out, "agent::"+partial) != 1 {
+		t.Fatalf("queued output, login command, and guidance are out of order: %q", out)
+	}
+}
+
+func TestProjectSwitchFlushesQueuedChatOutputBeforeReset(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.projects = []client.Project{
+		{ID: "project-A", Name: "alpha"},
+		{ID: "project-B", Name: "beta"},
+	}
+	const partial = "queued λ before project switch"
+	m.updateChatStreamOutput(partial)
+	m.chatStreamRenderQueued = true
+	streamGeneration := m.chatStreamGeneration
+	projectGeneration := m.projectGeneration
+
+	m, cmd := typeLine(t, m, "/project beta")
+	if cmd != nil {
+		t.Fatalf("/project command = %v, want nil without an active SSE stream", cmd)
+	}
+	if m.selectedID != "project-B" || m.selectedName != "beta" {
+		t.Fatalf("selected project = %q (%q), want project-B (beta)", m.selectedID, m.selectedName)
+	}
+	if m.chatStreamRenderQueued || m.chatStreamGeneration == streamGeneration || m.projectGeneration == projectGeneration {
+		t.Fatalf("project transition generations: queued=%t stream=%d project=%d, want flushed and advanced from stream=%d project=%d", m.chatStreamRenderQueued, m.chatStreamGeneration, m.projectGeneration, streamGeneration, projectGeneration)
+	}
+	if m.chatSubmissionPending || m.pendingMsgID != "" || m.pendingMsgProjectID != "" || m.busy {
+		t.Fatalf("old-project pending chat survived switch: pending=%t id=%q project=%q busy=%t", m.chatSubmissionPending, m.pendingMsgID, m.pendingMsgProjectID, m.busy)
+	}
+	out := transcript(m)
+	partialAt := strings.Index(out, "agent::"+partial)
+	commandAt := strings.Index(out, "you::/project beta")
+	projectAt := strings.Index(out, "active project: beta")
+	if partialAt < 0 || commandAt < 0 || projectAt < 0 || partialAt >= commandAt || commandAt >= projectAt || strings.Count(out, "agent::"+partial) != 1 {
+		t.Fatalf("queued output, project command, and selection output are out of order: %q", out)
+	}
+}
+
+func TestChatStreamTerminalEventFlushesQueuedOutput(t *testing.T) {
+	for _, eventName := range []string{"done", "error"} {
+		t.Run(eventName, func(t *testing.T) {
+			m := newTestModel(t)
+			m.selectedID = "project-A"
+			m.pendingMsgID = "exec-1"
+			m.pendingMsgProjectID = "project-A"
+			m.chatSubmissionPending = true
+			m.chatSubmissionID = 7
+			m.chatStreamGeneration = 4
+			m.chatStreamExecID = "exec-1"
+			m.updateChatStreamOutput("queued λ output")
+			m.chatStreamRenderQueued = true
+
+			next, cmd := m.Update(chatStreamEventMsg{generation: 4, submissionID: 7, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Name: eventName}})
+			m = next.(Model)
+			if cmd == nil || m.chatStreamRenderQueued || !strings.Contains(transcript(m), "agent::queued λ output") {
+				t.Fatalf("terminal %s did not force queued output: cmd=%v queued=%t transcript=%q", eventName, cmd != nil, m.chatStreamRenderQueued, transcript(m))
+			}
+		})
+	}
+}
+
 func TestChatOutputStreamIncrementalTerminalStaleAndRecovery(t *testing.T) {
 	m := newTestModel(t)
 	m.selectedID = "project-A"
@@ -3439,13 +3675,18 @@ func TestChatOutputStreamIncrementalTerminalStaleAndRecovery(t *testing.T) {
 
 	next, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: "Hello"}})
 	m = next.(Model)
-	if got := transcript(m); !strings.Contains(got, "agent::Hello") {
-		t.Fatalf("first incremental output not visible: %q", got)
+	if got := transcript(m); strings.Contains(got, "agent::Hello") || !m.chatStreamRenderQueued || m.chatStreamRedraws != 0 {
+		t.Fatalf("first delta should queue rather than redraw immediately: transcript=%q queued=%t redraws=%d", got, m.chatStreamRenderQueued, m.chatStreamRedraws)
 	}
 	next, _ = m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: " world"}})
 	m = next.(Model)
-	if got := transcript(m); strings.Count(got, "agent::") != 1 || !strings.Contains(got, "agent::Hello world") {
-		t.Fatalf("incremental output should update one transcript entry: %q", got)
+	if !m.chatStreamRenderQueued || m.chatStreamRedraws != 0 {
+		t.Fatalf("additional delta should share the queued redraw: queued=%t redraws=%d", m.chatStreamRenderQueued, m.chatStreamRedraws)
+	}
+	next, _ = m.Update(chatStreamRenderMsg{generation: 3, renderGeneration: m.chatStreamRenderGeneration, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+	m = next.(Model)
+	if got := transcript(m); strings.Count(got, "agent::") != 1 || !strings.Contains(got, "agent::Hello world") || m.chatStreamRedraws != 1 {
+		t.Fatalf("cadence flush should update one transcript entry once: transcript=%q redraws=%d", got, m.chatStreamRedraws)
 	}
 
 	before := transcript(m)
@@ -3529,23 +3770,298 @@ func TestChatStatusPartialVisibleWhenOutputStreamDisconnected(t *testing.T) {
 }
 
 func TestChatOutputStreamFailureKeepsPartialAndCleansUp(t *testing.T) {
+	for _, status := range []string{"failed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			m := newTestModel(t)
+			m.selectedID = "project-A"
+			m.pendingMsgID = "exec-1"
+			m.pendingMsgProjectID = "project-A"
+			m.pendingMsgProjectGeneration = m.projectGeneration
+			m.chatSubmissionPending = true
+			m.chatSubmissionID = 4
+			m.busy = true
+			m.chatStreamGeneration = 1
+
+			next, _ := m.Update(chatStreamEventMsg{generation: 1, submissionID: 4, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: "partial"}})
+			m = next.(Model)
+			next, _ = m.Update(chatStatusMsg{projectGeneration: m.projectGeneration, messageID: "exec-1", submissionID: 4, projectID: "project-A", status: &client.ChatStatus{MessageID: "exec-1", Status: status, Error: "boom"}})
+			m = next.(Model)
+			got := transcript(m)
+			if !strings.Contains(got, "agent::partial") || !strings.Contains(got, "error::"+status+": boom") || m.busy || m.pendingMsgID != "" {
+				t.Fatalf("%s cleanup/transcript mismatch: %q busy=%t pending=%q", status, got, m.busy, m.pendingMsgID)
+			}
+		})
+	}
+}
+
+func TestChatStreamDisconnectFlushesBeforeReconnect(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("buffered λ")
+	m.chatStreamRenderQueued = true
+
+	next, cmd := m.Update(chatStreamDisconnectedMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+	m = next.(Model)
+	if cmd == nil || m.chatStreamRenderQueued || !strings.Contains(transcript(m), "agent::buffered λ") {
+		t.Fatalf("disconnect did not flush before reconnect: cmd=%v queued=%t transcript=%q", cmd != nil, m.chatStreamRenderQueued, transcript(m))
+	}
+	reconnect, ok := cmd().(chatStreamReconnectMsg)
+	if !ok || reconnect.offset != len([]byte("buffered λ")) {
+		t.Fatalf("reconnect = %#v, want UTF-8 byte offset %d", reconnect, len([]byte("buffered λ")))
+	}
+}
+
+func TestChatStreamAuthDisconnectFlushesBeforeInvalidation(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("visible before sign-in")
+	m.chatStreamRenderQueued = true
+	authErr := &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/chat/exec-1", StatusCode: http.StatusUnauthorized}
+
+	next, cmd := m.Update(chatStreamDisconnectedMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", err: authErr})
+	m = next.(Model)
+	if cmd != nil || !m.authRequired || m.chatStreamRenderQueued || !strings.Contains(transcript(m), "agent::visible before sign-in") {
+		t.Fatalf("auth disconnect lost buffered output: cmd=%v auth=%t queued=%t transcript=%q", cmd != nil, m.authRequired, m.chatStreamRenderQueued, transcript(m))
+	}
+}
+
+func TestChatStreamEmptyTerminalFramesDoNotCreateAgentEntry(t *testing.T) {
+	for _, eventName := range []string{"done", "error"} {
+		t.Run(eventName, func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			before := len(m.log)
+			next, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Name: eventName}})
+			m = next.(Model)
+			if len(m.log) != before || m.chatStreamLogIndex >= 0 || strings.Contains(transcript(m), "agent::") {
+				t.Fatalf("empty %s frame created agent output: entries=%d index=%d transcript=%q", eventName, len(m.log), m.chatStreamLogIndex, transcript(m))
+			}
+		})
+	}
+}
+
+func TestChatStreamMutableReplacementKeepsViewportAtBottom(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.log = nil
+	for i := 0; i < 80; i++ {
+		m.log = append(m.log, entry{role: "system", text: fmt.Sprintf("line-%03d", i)})
+	}
+	m.refreshTranscript()
+	m.updateChatStreamOutput("first")
+	m.flushChatStreamOutput()
+	m.transcript.GotoTop()
+	if m.transcript.AtBottom() {
+		t.Fatal("fixture did not scroll away from bottom")
+	}
+	m.updateChatStreamOutput(" second")
+	m.flushChatStreamOutput()
+	if !m.transcript.AtBottom() {
+		t.Fatal("mutable transcript replacement did not return viewport to bottom")
+	}
+}
+
+func TestChatStreamReplacementFallsBackAfterCacheInvalidation(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		invalidate func(*Model)
+	}{
+		{name: "resize width", invalidate: func(m *Model) { m.transcript.Width = 44 }},
+		{name: "cache shape", invalidate: func(m *Model) { m.transcriptBlocks = m.transcriptBlocks[:len(m.transcriptBlocks)-1] }},
+		{name: "history mutation", invalidate: func(m *Model) { m.log = append(m.log, entry{role: "system", text: "intervening history"}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			m.updateChatStreamOutput("first")
+			m.flushChatStreamOutput()
+			tc.invalidate(&m)
+			m.updateChatStreamOutput(" second")
+			m.flushChatStreamOutput()
+			got := m.transcriptContent
+			m.refreshTranscript()
+			if got != m.transcriptContent || m.log[m.chatStreamLogIndex].text != "first second" {
+				t.Fatalf("fallback differs from canonical refresh\ngot  %q\nwant %q", got, m.transcriptContent)
+			}
+		})
+	}
+}
+
+func pendingChatStreamTestModel(t *testing.T) Model {
+	t.Helper()
 	m := newTestModel(t)
 	m.selectedID = "project-A"
 	m.pendingMsgID = "exec-1"
+	m.pendingMsgExecutionID = "exec-1"
 	m.pendingMsgProjectID = "project-A"
 	m.pendingMsgProjectGeneration = m.projectGeneration
 	m.chatSubmissionPending = true
-	m.chatSubmissionID = 4
+	m.chatSubmissionID = 9
 	m.busy = true
-	m.chatStreamGeneration = 1
+	m.chatStreamGeneration = 3
+	m.chatStreamExecID = "exec-1"
+	return m
+}
 
-	next, _ := m.Update(chatStreamEventMsg{generation: 1, submissionID: 4, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: "partial"}})
+func TestAuthoritativeCompletionReconcilesBufferedFirstBlockOnce(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("partial reply")
+	m.chatStreamRenderQueued = true
+
+	m.completeChat("final reply", nil)
+
+	if got := strings.Count(transcript(m), "agent::"); got != 1 {
+		t.Fatalf("completion rendered %d assistant entries; transcript:\n%s", got, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "agent::final reply") || strings.Contains(transcript(m), "partial reply") {
+		t.Fatalf("completion did not reconcile buffered output exactly: %s", transcript(m))
+	}
+	if m.busy || m.pendingMsgID != "" || m.chatStreamRenderQueued {
+		t.Fatalf("completion left pending state: busy=%t id=%q queued=%t", m.busy, m.pendingMsgID, m.chatStreamRenderQueued)
+	}
+}
+
+func TestForcedChatStreamFlushInvalidatesOldCadenceTimer(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("first")
+	if cmd := m.scheduleChatStreamRender(); cmd == nil {
+		t.Fatal("first delta did not schedule render")
+	}
+	oldRenderGeneration := m.chatStreamRenderGeneration
+
+	m.append(entry{role: "system", text: "later entry"})
+	if m.chatStreamRenderQueued || m.chatStreamRedraws != 1 {
+		t.Fatalf("forced append flush state: queued=%t redraws=%d, want false/1", m.chatStreamRenderQueued, m.chatStreamRedraws)
+	}
+	m.updateChatStreamOutput(" second")
+	if cmd := m.scheduleChatStreamRender(); cmd == nil {
+		t.Fatal("second delta did not schedule replacement render")
+	}
+	newRenderGeneration := m.chatStreamRenderGeneration
+	if newRenderGeneration == oldRenderGeneration {
+		t.Fatalf("replacement timer reused render generation %d", newRenderGeneration)
+	}
+
+	next, _ := m.Update(chatStreamRenderMsg{
+		generation:       3,
+		renderGeneration: oldRenderGeneration,
+		submissionID:     9,
+		projectID:        "project-A",
+		execID:           "exec-1",
+	})
 	m = next.(Model)
-	next, _ = m.Update(chatStatusMsg{projectGeneration: m.projectGeneration, messageID: "exec-1", submissionID: 4, projectID: "project-A", status: &client.ChatStatus{MessageID: "exec-1", Status: "failed", Error: "boom"}})
+	if !m.chatStreamRenderQueued || m.chatStreamRedraws != 1 || strings.Contains(transcript(m), "first second") {
+		t.Fatalf("old timer affected replacement render: queued=%t redraws=%d transcript=%q", m.chatStreamRenderQueued, m.chatStreamRedraws, transcript(m))
+	}
+
+	next, _ = m.Update(chatStreamRenderMsg{
+		generation:       3,
+		renderGeneration: newRenderGeneration,
+		submissionID:     9,
+		projectID:        "project-A",
+		execID:           "exec-1",
+	})
 	m = next.(Model)
-	got := transcript(m)
-	if !strings.Contains(got, "agent::partial") || !strings.Contains(got, "error::failed: boom") || m.busy || m.pendingMsgID != "" {
-		t.Fatalf("failure cleanup/transcript mismatch: %q busy=%t pending=%q", got, m.busy, m.pendingMsgID)
+	if m.chatStreamRenderQueued || m.chatStreamRedraws != 2 || !strings.Contains(transcript(m), "agent::first second") {
+		t.Fatalf("replacement timer did not render: queued=%t redraws=%d transcript=%q", m.chatStreamRenderQueued, m.chatStreamRedraws, transcript(m))
+	}
+}
+
+func TestBufferedChatOutputPrecedesEveryLaterTranscriptAppend(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		update func(Model) Model
+		role   string
+		text   string
+	}{
+		{
+			name: "unrelated visible SSE event",
+			update: func(m Model) Model {
+				m.showEvents = true
+				next, _ := m.Update(sseEventMsg{event: client.Event{
+					Name: "task_updated",
+					Data: json.RawMessage(`{"type":"task_updated","project_id":"project-A","task_name":"later task"}`),
+				}})
+				return next.(Model)
+			},
+			role: "event",
+			text: "task_updated",
+		},
+		{
+			name: "asynchronous command result",
+			update: func(m Model) Model {
+				next, _ := m.Update(resultMsg{
+					sessionGeneration: sessionGenerationOf(m),
+					projectGeneration: projectGenerationOf(m),
+					title:             "Later result",
+					body:              "command finished",
+				})
+				return next.(Model)
+			},
+			role: "result",
+			text: "command finished",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			m.updateChatStreamOutput("accepted assistant bytes")
+			m.chatStreamRenderQueued = true
+
+			m = tc.update(m)
+
+			if len(m.log) < 2 {
+				t.Fatalf("expected assistant and later entry, got %#v", m.log)
+			}
+			assistant := m.log[len(m.log)-2]
+			later := m.log[len(m.log)-1]
+			if assistant.role != "agent" || assistant.text != "accepted assistant bytes" {
+				t.Fatalf("entry before later append = %#v, want buffered assistant", assistant)
+			}
+			if later.role != tc.role || !strings.Contains(later.text, tc.text) {
+				t.Fatalf("later entry = %#v, want role=%q containing %q", later, tc.role, tc.text)
+			}
+			if got := strings.Count(transcript(m), "agent::accepted assistant bytes"); got != 1 {
+				t.Fatalf("assistant rendered %d times; transcript:\n%s", got, transcript(m))
+			}
+		})
+	}
+}
+
+func TestBufferedChatOutputPrecedesVisibleSSECompletionEvent(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.showEvents = true
+	m.chatStreamRenderQueued = true
+	m.updateChatStreamOutput("partial reply")
+
+	payload, err := json.Marshal(client.ChatEvent{
+		Type:            "chat_response_done",
+		ProjectID:       "project-A",
+		ExecID:          "exec-1",
+		CompletedOutput: "final reply",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _ := m.Update(sseEventMsg{event: client.Event{
+		Name: "chat_response_done",
+		Data: payload,
+	}})
+	m = next.(Model)
+
+	if len(m.log) < 2 {
+		t.Fatalf("expected assistant output and visible event, got %#v", m.log)
+	}
+	assistant := m.log[len(m.log)-2]
+	visibleEvent := m.log[len(m.log)-1]
+	if assistant.role != "agent" || assistant.text != "final reply" {
+		t.Fatalf("entry before event = %#v, want reconciled assistant output", assistant)
+	}
+	if visibleEvent.role != "event" || !strings.Contains(visibleEvent.text, "chat_response_done") {
+		t.Fatalf("final entry = %#v, want visible completion event", visibleEvent)
+	}
+	if got := strings.Count(transcript(m), "agent::final reply"); got != 1 {
+		t.Fatalf("final output rendered %d times; transcript:\n%s", got, transcript(m))
+	}
+	if strings.Contains(transcript(m), "partial reply") {
+		t.Fatalf("partial output was not authoritatively reconciled:\n%s", transcript(m))
+	}
+	if m.busy || m.pendingMsgID != "" || m.chatStreamRenderQueued {
+		t.Fatalf("completion left pending state: busy=%t id=%q queued=%t", m.busy, m.pendingMsgID, m.chatStreamRenderQueued)
 	}
 }
 

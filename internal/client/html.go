@@ -272,10 +272,17 @@ const (
 // response is returned to the caller, which owns its body; failed responses are
 // consumed and closed here. Form mutations retain their specific unexpected
 // redirect error while JSON and multipart mutations use the generic API error.
+type contentLengthReader interface {
+	ContentLength() int64
+}
+
 func (c *Client) doHTMXMutation(ctx context.Context, method, path string, body io.Reader, contentType string, redirectPolicy mutationRedirectPolicy) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return nil, err
+	}
+	if bodyWithLength, ok := body.(contentLengthReader); ok {
+		req.ContentLength = bodyWithLength.ContentLength()
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
