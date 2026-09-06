@@ -2420,15 +2420,15 @@ func TestCLIScheduleEditReservedWordReference(t *testing.T) {
 	}
 }
 
-func TestCLIScheduleEditValidSettingPairReference(t *testing.T) {
+func TestCLIScheduleEditQuotedValidSettingPairReference(t *testing.T) {
 	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Run repeat daily report</div></div>`
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,
 		"/schedule":     scheduleHTML,
 		"/tasks/t-1":    scheduleEditDetailForIDs("p1", "s-1"),
 	})
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "Run", "repeat", "daily", "report", "interval", "4"}, false, false); err != nil {
-		t.Fatalf("headless valid-setting-pair schedule edit: %v", err)
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "Run repeat daily report", "interval", "4"}, false, false); err != nil {
+		t.Fatalf("headless quoted valid-setting-pair schedule edit: %v", err)
 	}
 	if !rec.saw(http.MethodPut, "/schedules/s-1") || !rec.sawForm("repeat_interval=4") {
 		t.Fatalf("headless valid-setting-pair edit requests/forms:\n%s\n%v", rec.all(), rec.forms)
@@ -2446,7 +2446,7 @@ func TestCLIScheduleEditMalformedEarlierOptionFailsBeforeRequests(t *testing.T) 
 	}
 }
 
-func TestCLIScheduleEditMalformedEarlierTitleOptionsFailBeforeDetailOrMutation(t *testing.T) {
+func TestCLIScheduleEditMalformedTitleOptionsFailBeforeRequests(t *testing.T) {
 	cases := []struct {
 		name string
 		args []string
@@ -2459,16 +2459,15 @@ func TestCLIScheduleEditMalformedEarlierTitleOptionsFailBeforeDetailOrMutation(t
 		{name: "duplicate", args: []string{"schedule", "edit", "Nightly", "repeat", "daily", "repeat", "weekly", "interval", "5"}, want: "usage"},
 		{name: "surplus", args: []string{"schedule", "edit", "Nightly", "repeat", "daily", "surplus", "interval", "5"}, want: "usage"},
 	}
-	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Nightly</div></div>`
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": scheduleHTML})
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
 			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
-			if rec.saw(http.MethodGet, "/tasks/") || rec.saw(http.MethodPut, "/schedules/") {
-				t.Fatalf("malformed title edit dispatched detail or mutation:\n%s", rec.all())
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("malformed title edit dispatched requests:\n%s", calls)
 			}
 		})
 	}

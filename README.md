@@ -126,6 +126,7 @@ Commands take a resource, an optional action, and arguments:
 /memory show managed_memory.md           read one memory file
 /memory search "project scoped"         search memory files
 /schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false
+/schedule edit "Daily repeat report" repeat daily interval 5
 ```
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID

@@ -2507,14 +2507,14 @@ func scheduleEditDetail(projectID string) string {
 		<div data-schedule-id="s-2"><form hx-put="/schedules/s-2?project_id=` + projectID + `"><input name="run_at" value="2026-02-03T10:30"><select name="repeat_type"><option value="daily">Daily</option><option value="weekly" selected>Weekly</option></select><input name="repeat_interval" value="3"><input type="hidden" name="clear_context_on_start" value="false"><input type="checkbox" name="clear_context_on_start" value="true"></form></div></div>`
 }
 
-func TestScheduleEditReferencesMayContainSettingWords(t *testing.T) {
+func TestScheduleEditReferencesMayContainSettingWordsWhenQuoted(t *testing.T) {
 	cases := []struct {
 		name       string
 		line       string
 		scheduleID string
 	}{
-		{name: "quoted exact reserved word", line: `/schedule edit "repeat" interval 4`, scheduleID: "s-1"},
-		{name: "unquoted multiword", line: `/schedule edit run-at repeat interval clear-context report interval 4`, scheduleID: "s-2"},
+		{name: "exact reserved word", line: `/schedule edit "repeat" interval 4`, scheduleID: "s-1"},
+		{name: "multiword", line: `/schedule edit "run-at repeat interval clear-context report" interval 4`, scheduleID: "s-2"},
 	}
 	const scheduleHTML = `<div id="schedule-content">
 		<div data-task-id="t-1" data-schedule-id="s-1">repeat</div>
@@ -2557,24 +2557,24 @@ func TestScheduleEditSettingWordReferencePreservesAmbiguity(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, scheduleHTML)
 	})
-	m = runLine(t, m, "/schedule edit Weekly repeat report interval 4")
+	m = runLine(t, m, `/schedule edit "Weekly repeat report" interval 4`)
 	out := stripANSI(transcript(m))
 	if puts != 0 || !strings.Contains(out, `"Weekly repeat report" is ambiguous`) {
 		t.Fatalf("ambiguous edit puts=%d:\n%s", puts, out)
 	}
 }
 
-func TestScheduleEditReferencesMayContainValidSettingPairs(t *testing.T) {
+func TestScheduleEditReferencesMayContainValidSettingPairsWhenQuoted(t *testing.T) {
 	cases := []struct {
 		name       string
 		line       string
 		scheduleID string
 	}{
-		{name: "run-at", line: `/schedule edit Run run-at 2026-01-02T09:00 report interval 5`, scheduleID: "s-run-at"},
-		{name: "repeat", line: `/schedule edit Run repeat daily report interval 5`, scheduleID: "s-repeat"},
-		{name: "interval", line: `/schedule edit Run interval 4 report interval 5`, scheduleID: "s-interval"},
-		{name: "clear-context", line: `/schedule edit Run clear-context true report interval 5`, scheduleID: "s-clear"},
-		{name: "exact title ending in valid pair", line: `/schedule edit Weekly repeat daily interval 5`, scheduleID: "s-ending"},
+		{name: "run-at", line: `/schedule edit "Run run-at 2026-01-02T09:00 report" interval 5`, scheduleID: "s-run-at"},
+		{name: "repeat", line: `/schedule edit "Run repeat daily report" interval 5`, scheduleID: "s-repeat"},
+		{name: "interval", line: `/schedule edit "Run interval 4 report" interval 5`, scheduleID: "s-interval"},
+		{name: "clear-context", line: `/schedule edit "Run clear-context true report" interval 5`, scheduleID: "s-clear"},
+		{name: "exact title ending in valid pair", line: `/schedule edit "Weekly repeat daily" interval 5`, scheduleID: "s-ending"},
 	}
 	const scheduleHTML = `<div id="schedule-content">
 		<div data-task-id="t-1" data-schedule-id="s-run-at">Run run-at 2026-01-02T09:00 report</div>
@@ -2617,7 +2617,7 @@ func scheduleEditDetailForIDs(projectID string, scheduleIDs ...string) string {
 	return `<div id="task-detail-content"><div data-project-id="` + projectID + `"></div>` + forms.String() + `</div>`
 }
 
-func TestScheduleEditValidSettingPairReferencePreservesAmbiguity(t *testing.T) {
+func TestScheduleEditQuotedValidSettingPairReferencePreservesAmbiguity(t *testing.T) {
 	const scheduleHTML = `<div id="schedule-content">
 		<div data-task-id="t-1" data-schedule-id="s-1">Weekly repeat daily report alpha</div>
 		<div data-task-id="t-2" data-schedule-id="s-2">Weekly repeat daily report beta</div>
@@ -2629,33 +2629,40 @@ func TestScheduleEditValidSettingPairReferencePreservesAmbiguity(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, scheduleHTML)
 	})
-	m = runLine(t, m, "/schedule edit Weekly repeat daily report interval 5")
+	m = runLine(t, m, `/schedule edit "Weekly repeat daily report" interval 5`)
 	out := stripANSI(transcript(m))
 	if puts != 0 || !strings.Contains(out, `"Weekly repeat daily report" is ambiguous`) {
 		t.Fatalf("ambiguous edit puts=%d:\n%s", puts, out)
 	}
 }
 
-func TestScheduleEditValidBoundariesResolvingDifferentSchedulesAreAmbiguous(t *testing.T) {
+func TestScheduleEditSettingsTakePrecedenceOverUnquotedTitleText(t *testing.T) {
 	const scheduleHTML = `<div id="schedule-content">
 		<div data-task-id="t-1" data-schedule-id="s-1">Weekly</div>
 		<div data-task-id="t-2" data-schedule-id="s-2">Weekly repeat daily</div>
 	</div>`
-	var detailGets, puts int
+	var detailPath, putPath string
+	var gotForm url.Values
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
 			_, _ = io.WriteString(w, scheduleHTML)
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/tasks/"):
-			detailGets++
+			detailPath = r.URL.Path
+			_, _ = io.WriteString(w, scheduleEditDetailForIDs("p1", "s-1"))
 		case r.Method == http.MethodPut:
-			puts++
+			putPath = r.URL.Path
+			_ = r.ParseForm()
+			gotForm = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
 		}
 	})
 	m = runLine(t, m, "/schedule edit Weekly repeat daily interval 5")
-	out := stripANSI(transcript(m))
-	if detailGets != 0 || puts != 0 || !strings.Contains(out, "schedule edit reference is ambiguous") {
-		t.Fatalf("boundary ambiguity detail GETs=%d puts=%d:\n%s", detailGets, puts, out)
+	if detailPath != "/tasks/t-1" || putPath != "/schedules/s-1" {
+		t.Fatalf("setting precedence detail=%q put=%q:\n%s", detailPath, putPath, stripANSI(transcript(m)))
+	}
+	if gotForm.Get("repeat_type") != "daily" || gotForm.Get("repeat_interval") != "5" {
+		t.Fatalf("repeat form = %v, want every 5 days", gotForm)
 	}
 }
 
@@ -2737,24 +2744,12 @@ func TestScheduleEditRejectsMalformedEarlierOptionsForTitleBeforeDetailOrMutatio
 		{name: "duplicate", line: "/schedule edit Nightly repeat daily repeat weekly interval 5", want: "usage"},
 		{name: "surplus", line: "/schedule edit Nightly repeat daily surplus interval 5", want: "usage"},
 	}
-	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Nightly</div></div>`
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var scheduleGets, detailGets, puts int
-			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
-					scheduleGets++
-					_, _ = io.WriteString(w, scheduleHTML)
-				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/tasks/"):
-					detailGets++
-				case r.Method == http.MethodPut:
-					puts++
-				}
-			})
+			m, rec := dispatchModel(t, nil)
 			m = runLine(t, m, tc.line)
-			if scheduleGets != 1 || detailGets != 0 || puts != 0 {
-				t.Fatalf("requests = schedule GETs %d detail GETs %d PUTs %d", scheduleGets, detailGets, puts)
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("malformed title edit made requests:\n%s", calls)
 			}
 			if out := stripANSI(transcript(m)); !strings.Contains(out, tc.want) {
 				t.Fatalf("validation output missing %q:\n%s", tc.want, out)
