@@ -1128,6 +1128,44 @@ func TestLifecyclePayloadSummaryPreservesUnambiguousOversizedTextKeysWithMarshal
 	}
 }
 
+func TestLifecyclePayloadSummaryPreservesCompleteKeyBeforeMatchingTruncatedPrefix(t *testing.T) {
+	prefix := bytes.Repeat([]byte{'k'}, lifecyclePreviewMaxKeyBytes+1)
+	complete := append([]byte(nil), prefix...)
+	truncated := append(append([]byte(nil), prefix...), bytes.Repeat([]byte{'z'}, lifecyclePreviewMaxRetainedKeyBytes)...)
+
+	fixture := func() (map[string]any, *int, *[]string) {
+		keyCalls := new(int)
+		valueCalls := new([]string)
+		values := map[lifecyclePreviewOversizedCollidingTextKey]lifecyclePreviewOrderMarshaler{
+			{ID: 1, Text: &complete, Calls: keyCalls}: {
+				Name: "complete", Calls: valueCalls,
+			},
+			{ID: 2, Text: &truncated, Calls: keyCalls}: {
+				Name: "truncated", Calls: valueCalls, Fail: true,
+			},
+		}
+		return map[string]any{"a-prefix": strings.Repeat("x", 1<<20), "z-values": values}, keyCalls, valueCalls
+	}
+
+	standardPayload, standardKeyCalls, standardValueCalls := fixture()
+	if _, err := json.Marshal(standardPayload); err == nil {
+		t.Fatal("encoding/json accepted complete-prefix late failure")
+	}
+	if *standardKeyCalls != 2 || !reflect.DeepEqual(*standardValueCalls, []string{"complete", "truncated"}) {
+		t.Fatalf("encoding/json calls = keys %d, values %v; want 2 and [complete truncated]", *standardKeyCalls, *standardValueCalls)
+	}
+
+	for range 20 {
+		payload, keyCalls, valueCalls := fixture()
+		if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+			t.Fatalf("complete-prefix late failure preview = %q, want unavailable", got)
+		}
+		if *keyCalls != 2 || !reflect.DeepEqual(*valueCalls, []string{"complete", "truncated"}) {
+			t.Fatalf("preview calls = keys %d, values %v; want 2 and [complete truncated]", *keyCalls, *valueCalls)
+		}
+	}
+}
+
 func TestLifecyclePayloadSummaryBoundsOversizedCollidingTextMapKeys(t *testing.T) {
 	calls := 0
 	text := bytes.Repeat([]byte{'k'}, 1<<20)

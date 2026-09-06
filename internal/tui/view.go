@@ -1526,6 +1526,12 @@ func lifecyclePreviewMapKeyLess(left, right lifecyclePreviewMapKey) bool {
 	if leftLength != rightLength {
 		return leftLength < rightLength
 	}
+	if left.textTruncated != right.textTruncated {
+		// Equal retained bytes represent an exact prefix relationship when only
+		// one key is truncated. The complete key is canonically shorter and must
+		// sort first, regardless of source-key or map iteration order.
+		return !left.textTruncated
+	}
 	if lifecyclePreviewSourceKeyLess(left.sourceKey, right.sourceKey) {
 		return true
 	}
