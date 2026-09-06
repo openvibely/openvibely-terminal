@@ -1222,29 +1222,67 @@ func nonNilSlice[T any](items []T) []T {
 
 // --- schedule ---
 
-func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
+type scheduleEditCandidate struct {
+	ref    string
+	update client.ScheduleUpdate
+}
+
+func parseScheduleEdit(args []string) ([]scheduleEditCandidate, error) {
 	usage := commandUsage("schedule", "edit")
+	var candidates []scheduleEditCandidate
 	var candidateErr error
 	for optionAt := 1; optionAt < len(args); optionAt++ {
 		if !isScheduleEditSetting(args[optionAt]) {
 			continue
 		}
-		update, parsedPairs, err := parseScheduleEditOptions(args[optionAt:], usage)
-		if err == nil {
-			return strings.Join(args[:optionAt], " "), update, nil
+		update, err := parseScheduleEditOptions(args[optionAt:], usage)
+		if err != nil {
+			candidateErr = err
+			continue
 		}
-		candidateErr = err
-		// Once a suffix has consumed a valid setting/value pair, malformed
-		// trailing input belongs to the option list rather than the reference.
-		// Reject it locally instead of reinterpreting that valid pair as title text.
-		if parsedPairs > 0 {
-			return "", client.ScheduleUpdate{}, err
-		}
+		candidates = append(candidates, scheduleEditCandidate{
+			ref:    strings.Join(args[:optionAt], " "),
+			update: update,
+		})
+	}
+	if len(candidates) > 0 {
+		return candidates, nil
 	}
 	if candidateErr != nil {
-		return "", client.ScheduleUpdate{}, candidateErr
+		return nil, candidateErr
 	}
-	return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+	return nil, fmt.Errorf("%s", usage)
+}
+
+func resolveScheduleEdit(entries []client.ScheduleEntry, candidates []scheduleEditCandidate) (client.ScheduleEntry, client.ScheduleUpdate, error) {
+	var matched client.ScheduleEntry
+	var update client.ScheduleUpdate
+	var matchErr error
+	for _, candidate := range candidates {
+		entry, err := matchRef(entries, candidate.ref,
+			func(s client.ScheduleEntry) string { return s.ScheduleID },
+			func(s client.ScheduleEntry) string { return s.Text })
+		if err != nil {
+			matchErr = err
+			continue
+		}
+		if matched.ScheduleID != "" && !strings.EqualFold(matched.ScheduleID, entry.ScheduleID) {
+			return client.ScheduleEntry{}, client.ScheduleUpdate{}, fmt.Errorf(
+				"schedule edit reference is ambiguous: %s, %s — use the full name or ID",
+				matched.Text, entry.Text)
+		}
+		// Candidates are ordered from shortest to longest reference. When several
+		// boundaries resolve to the same schedule, the longest reference preserves
+		// the most title text and therefore determines the intended update suffix.
+		matched, update = entry, candidate.update
+	}
+	if matched.ScheduleID != "" {
+		return matched, update, nil
+	}
+	if matchErr != nil {
+		return client.ScheduleEntry{}, client.ScheduleUpdate{}, matchErr
+	}
+	return client.ScheduleEntry{}, client.ScheduleUpdate{}, fmt.Errorf("missing id or name")
 }
 
 func isScheduleEditSetting(value string) bool {
@@ -1256,36 +1294,35 @@ func isScheduleEditSetting(value string) bool {
 	}
 }
 
-func parseScheduleEditOptions(args []string, usage string) (client.ScheduleUpdate, int, error) {
+func parseScheduleEditOptions(args []string, usage string) (client.ScheduleUpdate, error) {
 	var update client.ScheduleUpdate
 	seen := make(map[string]bool)
-	parsedPairs := 0
 	for i := 0; i < len(args); i += 2 {
 		if i+1 >= len(args) {
-			return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("%s", usage)
+			return client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
 		}
 		key, value := strings.ToLower(args[i]), args[i+1]
 		if seen[key] || !isScheduleEditSetting(key) {
-			return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("%s", usage)
+			return client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
 		}
 		seen[key] = true
 		switch key {
 		case "run-at":
 			if _, err := time.Parse("2006-01-02T15:04", value); err != nil {
-				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("run time must use 2006-01-02T15:04")
+				return client.ScheduleUpdate{}, fmt.Errorf("run time must use 2006-01-02T15:04")
 			}
 			update.RunAt = &value
 		case "repeat":
 			value = strings.ToLower(value)
 			if !isRepeat(value) {
-				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("unknown repeat type %q", value)
+				return client.ScheduleUpdate{}, fmt.Errorf("unknown repeat type %q", value)
 			}
 			value = client.NormalizeScheduleRepeat(value)
 			update.RepeatType = &value
 		case "interval":
 			interval, err := strconv.Atoi(value)
 			if err != nil || interval < 1 || interval > 365 {
-				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("repeat interval must be between 1 and 365")
+				return client.ScheduleUpdate{}, fmt.Errorf("repeat interval must be between 1 and 365")
 			}
 			update.RepeatInterval = &interval
 		case "clear-context":
@@ -1296,13 +1333,12 @@ func parseScheduleEditOptions(args []string, usage string) (client.ScheduleUpdat
 			case "false":
 				clear = false
 			default:
-				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("clear-context must be true or false")
+				return client.ScheduleUpdate{}, fmt.Errorf("clear-context must be true or false")
 			}
 			update.ClearContextOnStart = &clear
 		}
-		parsedPairs++
 	}
-	return update, parsedPairs, nil
+	return update, nil
 }
 
 func applyScheduleUpdate(config client.ScheduleConfig, update client.ScheduleUpdate) client.ScheduleConfig {
@@ -1427,7 +1463,7 @@ func scheduleCommand() command {
 							return items, nil
 						}))
 				}
-				ref, update, err := parseScheduleEdit(rest)
+				candidates, err := parseScheduleEdit(rest)
 				if err != nil {
 					return m, errCmd(err.Error())
 				}
@@ -1436,9 +1472,7 @@ func scheduleCommand() command {
 					if err != nil {
 						return "", err
 					}
-					entry, err := matchRef(entries, ref,
-						func(s client.ScheduleEntry) string { return s.ScheduleID },
-						func(s client.ScheduleEntry) string { return s.Text })
+					entry, update, err := resolveScheduleEdit(entries, candidates)
 					if err != nil {
 						return "", err
 					}

@@ -2420,6 +2420,21 @@ func TestCLIScheduleEditReservedWordReference(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleEditValidSettingPairReference(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Run repeat daily report</div></div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/schedule":     scheduleHTML,
+		"/tasks/t-1":    scheduleEditDetailForIDs("p1", "s-1"),
+	})
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "Run", "repeat", "daily", "report", "interval", "4"}, false, false); err != nil {
+		t.Fatalf("headless valid-setting-pair schedule edit: %v", err)
+	}
+	if !rec.saw(http.MethodPut, "/schedules/s-1") || !rec.sawForm("repeat_interval=4") {
+		t.Fatalf("headless valid-setting-pair edit requests/forms:\n%s\n%v", rec.all(), rec.forms)
+	}
+}
+
 func TestCLIScheduleEditAmbiguousReferenceDoesNotMutate(t *testing.T) {
 	const ambiguous = `<div id="schedule-content"><div data-task-id="t1" data-schedule-id="s1">Weekly report</div><div data-task-id="t2" data-schedule-id="s2">Weekly report</div></div>`
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": ambiguous})

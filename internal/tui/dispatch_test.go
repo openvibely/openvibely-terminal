@@ -2564,6 +2564,101 @@ func TestScheduleEditSettingWordReferencePreservesAmbiguity(t *testing.T) {
 	}
 }
 
+func TestScheduleEditReferencesMayContainValidSettingPairs(t *testing.T) {
+	cases := []struct {
+		name       string
+		line       string
+		scheduleID string
+	}{
+		{name: "run-at", line: `/schedule edit Run run-at 2026-01-02T09:00 report interval 5`, scheduleID: "s-run-at"},
+		{name: "repeat", line: `/schedule edit Run repeat daily report interval 5`, scheduleID: "s-repeat"},
+		{name: "interval", line: `/schedule edit Run interval 4 report interval 5`, scheduleID: "s-interval"},
+		{name: "clear-context", line: `/schedule edit Run clear-context true report interval 5`, scheduleID: "s-clear"},
+		{name: "exact title ending in valid pair", line: `/schedule edit Weekly repeat daily interval 5`, scheduleID: "s-ending"},
+	}
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-run-at">Run run-at 2026-01-02T09:00 report</div>
+		<div data-task-id="t-1" data-schedule-id="s-repeat">Run repeat daily report</div>
+		<div data-task-id="t-1" data-schedule-id="s-interval">Run interval 4 report</div>
+		<div data-task-id="t-1" data-schedule-id="s-clear">Run clear-context true report</div>
+		<div data-task-id="t-1" data-schedule-id="s-ending">Weekly repeat daily</div>
+		<div data-task-id="t-2" data-schedule-id="s-other">Weekly summary</div>
+	</div>`
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var putPath string
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					_, _ = io.WriteString(w, scheduleHTML)
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+					_, _ = io.WriteString(w, scheduleEditDetailForIDs("p1", tc.scheduleID))
+				case r.Method == http.MethodPut:
+					putPath = r.URL.Path
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, tc.line)
+			if want := "/schedules/" + tc.scheduleID; putPath != want {
+				t.Fatalf("PUT path = %q, want %q; transcript:\n%s", putPath, want, stripANSI(transcript(m)))
+			}
+		})
+	}
+}
+
+func scheduleEditDetailForIDs(projectID string, scheduleIDs ...string) string {
+	var forms strings.Builder
+	for _, scheduleID := range scheduleIDs {
+		fmt.Fprintf(&forms, `<div data-schedule-id="%s"><form hx-put="/schedules/%s?project_id=%s"><input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select><input name="repeat_interval" value="1"><input type="checkbox" name="clear_context_on_start" value="true" checked></form></div>`, scheduleID, scheduleID, projectID)
+	}
+	return `<div id="task-detail-content"><div data-project-id="` + projectID + `"></div>` + forms.String() + `</div>`
+}
+
+func TestScheduleEditValidSettingPairReferencePreservesAmbiguity(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-1">Weekly repeat daily report alpha</div>
+		<div data-task-id="t-2" data-schedule-id="s-2">Weekly repeat daily report beta</div>
+	</div>`
+	var puts int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+		}
+		_, _ = io.WriteString(w, scheduleHTML)
+	})
+	m = runLine(t, m, "/schedule edit Weekly repeat daily report interval 5")
+	out := stripANSI(transcript(m))
+	if puts != 0 || !strings.Contains(out, `"Weekly repeat daily report" is ambiguous`) {
+		t.Fatalf("ambiguous edit puts=%d:\n%s", puts, out)
+	}
+}
+
+func TestScheduleEditValidBoundariesResolvingDifferentSchedulesAreAmbiguous(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-1">Weekly</div>
+		<div data-task-id="t-2" data-schedule-id="s-2">Weekly repeat daily</div>
+	</div>`
+	var detailGets, puts int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			_, _ = io.WriteString(w, scheduleHTML)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/tasks/"):
+			detailGets++
+		case r.Method == http.MethodPut:
+			puts++
+		}
+	})
+	m = runLine(t, m, "/schedule edit Weekly repeat daily interval 5")
+	out := stripANSI(transcript(m))
+	if detailGets != 0 || puts != 0 || !strings.Contains(out, "schedule edit reference is ambiguous") {
+		t.Fatalf("boundary ambiguity detail GETs=%d puts=%d:\n%s", detailGets, puts, out)
+	}
+}
+
 func TestScheduleEditResolvesNonFirstCardAndPreservesOmittedSettings(t *testing.T) {
 	var gotForm url.Values
 	var scheduleGETs int
