@@ -6,9 +6,9 @@ package tui
 import (
 	"context"
 	"encoding"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -695,9 +695,6 @@ func lifecyclePayloadSummary(payload map[string]any) string {
 	if len(payload) == 0 {
 		return "—"
 	}
-	if err := validateLifecycleJSON(payload, 0); err != nil {
-		return "<unavailable>"
-	}
 	preview := lifecycleJSONPreview{limit: 96}
 	if err := preview.appendValue(payload, 0); err != nil {
 		return "<unavailable>"
@@ -706,106 +703,12 @@ func lifecyclePayloadSummary(payload map[string]any) string {
 }
 
 const (
-	lifecyclePreviewMaxDepth = 10_000
-	lifecyclePreviewMaxBytes = 512
+	lifecyclePreviewMaxDepth       = 10_000
+	lifecyclePreviewMaxCloneDepth  = 128
+	lifecyclePreviewMaxBytes       = 512
+	lifecyclePreviewMaxKeyBytes    = 512
+	lifecyclePreviewMaxCustomBytes = 512
 )
-
-// validateLifecycleJSON checks the complete payload before previewing it. Large
-// strings are O(1), while every container value is still checked so an invalid
-// value after the visible prefix retains encoding/json's unavailable behavior.
-func validateLifecycleJSON(value any, depth int) error {
-	if depth >= lifecyclePreviewMaxDepth {
-		return fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
-	}
-	switch value := value.(type) {
-	case nil, bool, string,
-		int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64, uintptr:
-		return nil
-	case json.Number:
-		_, err := json.Marshal(value)
-		return err
-	case float32:
-		if math.IsInf(float64(value), 0) || math.IsNaN(float64(value)) {
-			return fmt.Errorf("unsupported float value")
-		}
-		return nil
-	case float64:
-		if math.IsInf(value, 0) || math.IsNaN(value) {
-			return fmt.Errorf("unsupported float value")
-		}
-		return nil
-	case map[string]any:
-		for _, item := range value {
-			if err := validateLifecycleJSON(item, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	case []any:
-		for _, item := range value {
-			if err := validateLifecycleJSON(item, depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	if _, ok := value.(json.Marshaler); ok {
-		_, err := json.Marshal(value)
-		return err
-	}
-	if _, ok := value.(encoding.TextMarshaler); ok {
-		_, err := json.Marshal(value)
-		return err
-	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.String, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return nil
-	case reflect.Float32, reflect.Float64:
-		floating := reflected.Float()
-		if math.IsInf(floating, 0) || math.IsNaN(floating) {
-			return fmt.Errorf("unsupported float value")
-		}
-		return nil
-	case reflect.Array, reflect.Slice:
-		if reflected.Kind() == reflect.Slice && reflected.Type().Elem().Kind() == reflect.Uint8 {
-			_, err := json.Marshal(value)
-			return err
-		}
-		if reflected.Kind() == reflect.Slice && reflected.IsNil() {
-			return nil
-		}
-		for i := 0; i < reflected.Len(); i++ {
-			if err := validateLifecycleJSON(reflected.Index(i).Interface(), depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	case reflect.Map:
-		if reflected.Type().Key().Kind() != reflect.String {
-			_, err := json.Marshal(value)
-			return err
-		}
-		iter := reflected.MapRange()
-		for iter.Next() {
-			if err := validateLifecycleJSON(iter.Value().Interface(), depth+1); err != nil {
-				return err
-			}
-		}
-		return nil
-	case reflect.Interface, reflect.Pointer:
-		if reflected.IsNil() {
-			return nil
-		}
-		return validateLifecycleJSON(reflected.Elem().Interface(), depth+1)
-	default:
-		_, err := json.Marshal(value)
-		return err
-	}
-}
 
 // lifecycleJSONPreview emits the same bytes as encoding/json for ordinary
 // values, but retains only a bounded canonical prefix for oversized values.
@@ -856,9 +759,6 @@ func (p *lifecycleJSONPreview) result() string {
 }
 
 func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
-	if p.stopped {
-		return nil
-	}
 	if depth >= lifecyclePreviewMaxDepth {
 		return fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
 	}
@@ -881,19 +781,21 @@ func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
 		}
 		keys := make([]string, 0, len(value))
 		for key := range value {
+			if len(key) > lifecyclePreviewMaxKeyBytes {
+				return fmt.Errorf("lifecycle payload key exceeds preview limit")
+			}
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
 		p.append("{")
 		for i, key := range keys {
-			if p.stopped {
-				break
+			if !p.stopped {
+				if i > 0 {
+					p.append(",")
+				}
+				p.appendJSONString(key)
+				p.append(":")
 			}
-			if i > 0 {
-				p.append(",")
-			}
-			p.appendJSONString(key)
-			p.append(":")
 			if err := p.appendValue(value[key], depth+1); err != nil {
 				return err
 			}
@@ -906,10 +808,7 @@ func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
 		}
 		p.append("[")
 		for i, item := range value {
-			if p.stopped {
-				break
-			}
-			if i > 0 {
+			if !p.stopped && i > 0 {
 				p.append(",")
 			}
 			if err := p.appendValue(item, depth+1); err != nil {
@@ -933,74 +832,273 @@ func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
 }
 
 func (p *lifecycleJSONPreview) appendReflected(value any, depth int) error {
-	if _, ok := value.(json.Marshaler); ok {
-		return p.appendMarshaled(value)
+	return p.appendReflectValue(reflect.ValueOf(value), depth)
+}
+
+func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int) error {
+	if !value.IsValid() {
+		p.append("null")
+		return nil
 	}
-	if _, ok := value.(encoding.TextMarshaler); ok {
-		return p.appendMarshaled(value)
+	if depth >= lifecyclePreviewMaxDepth {
+		return fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
 	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
+	if (value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) && value.IsNil() {
+		p.append("null")
+		return nil
+	}
+
+	marshalValue := value
+	if value.CanAddr() && value.Addr().CanInterface() {
+		address := value.Addr().Interface()
+		if _, ok := address.(json.Marshaler); ok {
+			return p.appendJSONMarshaler(address.(json.Marshaler))
+		}
+		if _, ok := address.(encoding.TextMarshaler); ok {
+			return p.appendTextMarshaler(address.(encoding.TextMarshaler))
+		}
+	}
+	if value.CanInterface() {
+		concrete := value.Interface()
+		if marshaler, ok := concrete.(json.Marshaler); ok {
+			return p.appendJSONMarshaler(marshaler)
+		}
+		if marshaler, ok := concrete.(encoding.TextMarshaler); ok {
+			return p.appendTextMarshaler(marshaler)
+		}
+	}
+
+	switch value.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		return p.appendReflectValue(value.Elem(), depth+1)
 	case reflect.String:
-		p.appendJSONString(reflected.String())
+		p.appendJSONString(value.String())
 		return nil
 	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
 		reflect.Float32, reflect.Float64:
-		return p.appendMarshaled(value)
-	case reflect.Array, reflect.Slice:
-		if reflected.Kind() == reflect.Slice && reflected.Type().Elem().Kind() == reflect.Uint8 {
-			return p.appendMarshaled(value)
+		if !value.CanInterface() {
+			return fmt.Errorf("unsupported lifecycle payload value %s", value.Type())
 		}
-		if reflected.Kind() == reflect.Slice && reflected.IsNil() {
+		return p.appendMarshaled(value.Interface())
+	case reflect.Array, reflect.Slice:
+		if value.Kind() == reflect.Slice && value.Type().Elem().Kind() == reflect.Uint8 {
+			if value.IsNil() {
+				p.append("null")
+				return nil
+			}
+			return p.appendBytes(value.Bytes())
+		}
+		if value.Kind() == reflect.Slice && value.IsNil() {
 			p.append("null")
 			return nil
 		}
 		p.append("[")
-		for i := 0; i < reflected.Len() && !p.stopped; i++ {
-			if i > 0 {
+		for i := 0; i < value.Len(); i++ {
+			if !p.stopped && i > 0 {
 				p.append(",")
 			}
-			if err := p.appendValue(reflected.Index(i).Interface(), depth+1); err != nil {
+			if err := p.appendReflectValue(value.Index(i), depth+1); err != nil {
 				return err
 			}
 		}
 		p.append("]")
 		return nil
 	case reflect.Map:
-		if reflected.IsNil() {
+		if value.IsNil() {
 			p.append("null")
 			return nil
 		}
-		if reflected.Type().Key().Kind() != reflect.String {
-			return p.appendMarshaled(value)
+		if value.Type().Key().Kind() != reflect.String {
+			return p.appendMarshaled(value.Interface())
 		}
-		keys := reflected.MapKeys()
+		keys := value.MapKeys()
+		for _, key := range keys {
+			if len(key.String()) > lifecyclePreviewMaxKeyBytes {
+				return fmt.Errorf("lifecycle payload key exceeds preview limit")
+			}
+		}
 		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
 		p.append("{")
 		for i, key := range keys {
-			if p.stopped {
-				break
+			if !p.stopped {
+				if i > 0 {
+					p.append(",")
+				}
+				p.appendJSONString(key.String())
+				p.append(":")
 			}
-			if i > 0 {
-				p.append(",")
-			}
-			p.appendJSONString(key.String())
-			p.append(":")
-			if err := p.appendValue(reflected.MapIndex(key).Interface(), depth+1); err != nil {
+			if err := p.appendReflectValue(value.MapIndex(key), depth+1); err != nil {
 				return err
 			}
 		}
 		p.append("}")
 		return nil
-	case reflect.Interface, reflect.Pointer:
-		if reflected.IsNil() {
-			p.append("null")
-			return nil
-		}
-		return p.appendValue(reflected.Elem().Interface(), depth+1)
+	case reflect.Struct:
+		bounded := boundedLifecycleValue(value, lifecyclePreviewMaxBytes, depth)
+		return p.appendMarshaled(bounded.Interface())
 	default:
-		return p.appendMarshaled(value)
+		if !marshalValue.CanInterface() {
+			return fmt.Errorf("unsupported lifecycle payload value %s", value.Type())
+		}
+		return p.appendMarshaled(marshalValue.Interface())
+	}
+}
+
+func boundedLifecycleValue(value reflect.Value, limit, depth int) reflect.Value {
+	if !value.IsValid() || depth >= lifecyclePreviewMaxCloneDepth {
+		return value
+	}
+	typeOf := value.Type()
+	if typeOf.Implements(reflect.TypeFor[json.Marshaler]()) || typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
+		(value.Kind() != reflect.Pointer && (reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()))) {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.String:
+		if value.Len() <= limit {
+			return value
+		}
+		prefix := value.String()[:limit]
+		for !utf8.ValidString(prefix) {
+			prefix = prefix[:len(prefix)-1]
+		}
+		clone := reflect.New(typeOf).Elem()
+		clone.SetString(prefix)
+		return clone
+	case reflect.Slice:
+		if value.IsNil() {
+			return value
+		}
+		length := value.Len()
+		if typeOf.Elem().Kind() == reflect.Uint8 && length > limit {
+			length = limit
+		}
+		clone := reflect.MakeSlice(typeOf, length, length)
+		for i := 0; i < length; i++ {
+			clone.Index(i).Set(boundedLifecycleValue(value.Index(i), limit, depth+1))
+		}
+		return clone
+	case reflect.Array:
+		clone := reflect.New(typeOf).Elem()
+		for i := 0; i < value.Len(); i++ {
+			clone.Index(i).Set(boundedLifecycleValue(value.Index(i), limit, depth+1))
+		}
+		return clone
+	case reflect.Struct:
+		clone := reflect.New(typeOf).Elem()
+		clone.Set(value)
+		for i := 0; i < value.NumField(); i++ {
+			if clone.Field(i).CanSet() && value.Field(i).CanInterface() {
+				clone.Field(i).Set(boundedLifecycleValue(value.Field(i), limit, depth+1))
+			}
+		}
+		return clone
+	case reflect.Interface:
+		if value.IsNil() {
+			return value
+		}
+		item := boundedLifecycleValue(value.Elem(), limit, depth+1)
+		clone := reflect.New(typeOf).Elem()
+		clone.Set(item)
+		return clone
+	case reflect.Pointer:
+		if value.IsNil() {
+			return value
+		}
+		clone := reflect.New(typeOf.Elem())
+		clone.Elem().Set(boundedLifecycleValue(value.Elem(), limit, depth+1))
+		return clone
+	}
+	return value
+}
+
+func (p *lifecycleJSONPreview) appendBytes(value []byte) error {
+	p.append(`"`)
+	const sourceLimit = lifecyclePreviewMaxBytes / 4 * 3
+	prefix := value
+	if len(prefix) > sourceLimit {
+		prefix = prefix[:sourceLimit]
+	}
+	var encoded [lifecyclePreviewMaxBytes]byte
+	written := base64.StdEncoding.EncodedLen(len(prefix))
+	base64.StdEncoding.Encode(encoded[:written], prefix)
+	p.append(string(encoded[:written]))
+	p.append(`"`)
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendJSONMarshaler(marshaler json.Marshaler) error {
+	encoded, err := marshaler.MarshalJSON()
+	if err != nil {
+		return err
+	}
+	if len(encoded) > lifecyclePreviewMaxCustomBytes {
+		return fmt.Errorf("lifecycle payload marshaler output exceeds preview limit")
+	}
+	if !json.Valid(encoded) {
+		return fmt.Errorf("invalid JSON from lifecycle payload marshaler")
+	}
+	p.appendCompactJSON(encoded)
+	return nil
+}
+
+func (p *lifecycleJSONPreview) appendTextMarshaler(marshaler encoding.TextMarshaler) error {
+	text, err := marshaler.MarshalText()
+	if err != nil {
+		return err
+	}
+	p.appendJSONString(string(text))
+	return nil
+}
+
+// appendCompactJSON mirrors encoding/json's compaction for the retained prefix.
+// The complete input is validated once above; after the prefix closes, no more
+// output processing is needed.
+func (p *lifecycleJSONPreview) appendCompactJSON(encoded []byte) {
+	inString, escaped := false, false
+	for i := 0; i < len(encoded) && !p.stopped; i++ {
+		char := encoded[i]
+		if !inString {
+			if char == ' ' || char == '\t' || char == '\r' || char == '\n' {
+				continue
+			}
+			p.append(string(char))
+			if char == '"' {
+				inString = true
+			}
+			continue
+		}
+		if escaped {
+			p.append(string(char))
+			escaped = false
+			continue
+		}
+		if char == '\\' {
+			p.append(`\`)
+			escaped = true
+			continue
+		}
+		if char == '"' {
+			p.append(`"`)
+			inString = false
+			continue
+		}
+		switch char {
+		case '<', '>', '&':
+			p.append(fmt.Sprintf(`\u%04x`, char))
+		default:
+			if i+2 < len(encoded) && char == 0xe2 && encoded[i+1] == 0x80 && (encoded[i+2] == 0xa8 || encoded[i+2] == 0xa9) {
+				p.append(fmt.Sprintf(`\u202%c`, '8'+encoded[i+2]-0xa8))
+				i += 2
+			} else if char >= utf8.RuneSelf {
+				_, size := utf8.DecodeRune(encoded[i:])
+				p.append(string(encoded[i : i+size]))
+				i += size - 1
+			} else {
+				p.append(string(char))
+			}
+		}
 	}
 }
 
