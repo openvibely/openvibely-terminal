@@ -1213,7 +1213,9 @@ func lifecycleJSONTagNameValid(name string) bool {
 }
 
 func lifecycleJSONCanQuote(typeOf reflect.Type) bool {
-	for typeOf.Kind() == reflect.Pointer {
+	// Match encoding/json's field planning: only one unnamed pointer layer is
+	// stripped before deciding whether the ,string option applies.
+	if typeOf.Name() == "" && typeOf.Kind() == reflect.Pointer {
 		typeOf = typeOf.Elem()
 	}
 	return typeOf.Kind() == reflect.Bool || typeOf.Kind() == reflect.String ||
@@ -1319,6 +1321,16 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	if value.IsNil() {
 		p.append("null")
 		return nil
+	}
+	keyType := value.Type().Key()
+	switch keyType.Kind() {
+	case reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+	default:
+		if !keyType.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+			return fmt.Errorf("unsupported lifecycle payload map key %s", keyType)
+		}
 	}
 	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
 	var validationKeys []lifecyclePreviewMapKey

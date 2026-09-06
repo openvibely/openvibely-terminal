@@ -800,6 +800,39 @@ func TestLifecyclePayloadSummaryBoundsDecodedWideMaps(t *testing.T) {
 	}
 }
 
+func TestLifecyclePayloadSummaryRejectsUnsupportedDeclaredMapKeyType(t *testing.T) {
+	calls := 0
+	values := map[any]int{lifecyclePreviewCountingTextKey{ID: 1, Suffix: "dynamic", Calls: &calls}: 7}
+	payload := map[string]any{"value": values}
+	if _, err := json.Marshal(payload); err == nil {
+		t.Fatal("map with unsupported declared key type unexpectedly marshaled")
+	}
+	if calls != 0 {
+		t.Fatalf("encoding/json called dynamic TextMarshaler key %d times", calls)
+	}
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("unsupported declared map key preview = %q, want unavailable", got)
+	}
+	if calls != 0 {
+		t.Fatalf("preview called dynamic TextMarshaler key %d times", calls)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesNonNilMultiplyIndirectStringField(t *testing.T) {
+	value := 7
+	inner := &value
+	payload := map[string]any{"value": struct {
+		Quoted **int `json:"quoted,string"`
+	}{Quoted: &inner}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal multiply indirect string fixture: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("multiply indirect string preview = %q, want %q", got, want)
+	}
+}
+
 func TestLifecyclePayloadSummaryPreservesNilPointerTextMarshalerMapKey(t *testing.T) {
 	values := map[*lifecyclePreviewNilTextKey]int{nil: 7}
 	payload := map[string]any{"value": values}
