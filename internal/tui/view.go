@@ -787,6 +787,9 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 		candidate := lifecyclePreviewMapKey{textString: key, nativeValue: item}
 		keys = lifecycleInsertPreviewMapKey(keys, candidate, p.limit+1)
 		if lifecycleAnyMayMarshalError(item) {
+			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
+				return fmt.Errorf("lifecycle payload map validation exceeds preview bounds")
+			}
 			validationKeys = append(validationKeys, candidate)
 		}
 	}
@@ -1574,8 +1577,15 @@ func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
 		return false
 	}
 	typeOf := value.Type()
-	if typeOf == reflect.TypeFor[json.Number]() ||
-		typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
+	if typeOf == reflect.TypeFor[json.Number]() {
+		return true
+	}
+	// encoding/json emits nil pointer marshalers as null without invoking their
+	// methods, so they cannot introduce a late marshaling error.
+	if value.Kind() == reflect.Pointer && value.IsNil() {
+		return false
+	}
+	if typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
 		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
 		return true
 	}

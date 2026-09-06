@@ -352,6 +352,13 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 			values[fmt.Sprintf("key-%08d", i)] = float64(i)
 		}
 		return values
+	case "wide_error_capable_map":
+		value := lifecyclePreviewBenchmarkMarshaler(`null`)
+		values := make(map[string]any, max(lifecyclePreviewMaxValidationMapKeys+1, size/16))
+		for i := 0; i < max(lifecyclePreviewMaxValidationMapKeys+1, size/16); i++ {
+			values[fmt.Sprintf("key-%08d", i)] = value
+		}
+		return values
 	case "many_text_keys":
 		keyCount := 128
 		keySize := max(1, size/keyCount)
@@ -383,7 +390,7 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "wide_error_capable_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -582,6 +589,25 @@ func (value *lifecyclePreviewPointerTextMarshaler) MarshalText() ([]byte, error)
 type lifecyclePreviewCountingMarshaler struct {
 	Calls *int
 	Value string
+}
+
+var (
+	lifecyclePreviewNilJSONValueCalls int
+	lifecyclePreviewNilTextValueCalls int
+)
+
+type lifecyclePreviewNilJSONValue struct{}
+
+func (*lifecyclePreviewNilJSONValue) MarshalJSON() ([]byte, error) {
+	lifecyclePreviewNilJSONValueCalls++
+	return nil, errors.New("nil JSON marshaler value method must not be called")
+}
+
+type lifecyclePreviewNilTextValue struct{}
+
+func (*lifecyclePreviewNilTextValue) MarshalText() ([]byte, error) {
+	lifecyclePreviewNilTextValueCalls++
+	return nil, errors.New("nil text marshaler value method must not be called")
 }
 
 type lifecyclePreviewLargeTextMarshaler string
@@ -848,6 +874,64 @@ func TestLifecyclePayloadSummaryBoundsDecodedWideMaps(t *testing.T) {
 	}
 	if got, want := lifecyclePayloadSummary(wide), truncate(string(encoded), 96); got != want {
 		t.Fatalf("decoded wide-map preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryBoundsStringAnyMapValidationCandidates(t *testing.T) {
+	calls := 0
+	wide := make(map[string]any, lifecyclePreviewMaxValidationMapKeys+1)
+	for i := range lifecyclePreviewMaxValidationMapKeys + 1 {
+		wide[fmt.Sprintf("key-%04d", i)] = lifecyclePreviewCountingMarshaler{Calls: &calls, Value: "ok"}
+	}
+	if _, err := json.Marshal(wide); err != nil {
+		t.Fatalf("marshal wide error-capable map: %v", err)
+	}
+	if calls != len(wide) {
+		t.Fatalf("encoding/json marshaler calls = %d, want %d", calls, len(wide))
+	}
+
+	calls = 0
+	if got := lifecyclePayloadSummary(wide); got != "<unavailable>" {
+		t.Fatalf("over-cap validation preview = %q, want unavailable", got)
+	}
+	if calls != 0 {
+		t.Fatalf("preview invoked %d values after validation bound was exceeded, want 0", calls)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesWideNilPointerMarshalerMaps(t *testing.T) {
+	jsonValues := make(map[string]*lifecyclePreviewNilJSONValue, lifecyclePreviewMaxValidationMapKeys+1)
+	textValues := make(map[string]*lifecyclePreviewNilTextValue, lifecyclePreviewMaxValidationMapKeys+1)
+	for i := range lifecyclePreviewMaxValidationMapKeys + 1 {
+		key := fmt.Sprintf("key-%04d", i)
+		jsonValues[key] = nil
+		textValues[key] = nil
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+		calls   *int
+	}{
+		{name: "json", payload: map[string]any{"values": jsonValues}, calls: &lifecyclePreviewNilJSONValueCalls},
+		{name: "text", payload: map[string]any{"values": textValues}, calls: &lifecyclePreviewNilTextValueCalls},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			*test.calls = 0
+			encoded, err := json.Marshal(test.payload)
+			if err != nil {
+				t.Fatalf("marshal nil pointer values: %v", err)
+			}
+			if *test.calls != 0 {
+				t.Fatalf("encoding/json invoked nil pointer method %d times", *test.calls)
+			}
+			if got, want := lifecyclePayloadSummary(test.payload), truncate(string(encoded), 96); got != want {
+				t.Fatalf("nil pointer map preview = %q, want %q", got, want)
+			}
+			if *test.calls != 0 {
+				t.Fatalf("preview invoked nil pointer method %d times", *test.calls)
+			}
+		})
 	}
 }
 
