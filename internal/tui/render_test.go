@@ -341,6 +341,11 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 			strings.Repeat("k", size) + "a": float64(1),
 			strings.Repeat("k", size) + "b": float64(2),
 		}
+	case "long_key_validation":
+		return map[string]any{"value": map[string]lifecyclePreviewBenchmarkMarshaler{
+			strings.Repeat("k", size) + "a": []byte(`null`),
+			strings.Repeat("k", size) + "b": []byte(`null`),
+		}}
 	case "decoded_wide_map":
 		values := make(map[string]any, max(1, size/16))
 		for i := 0; i < max(1, size/16); i++ {
@@ -361,7 +366,7 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "decoded_wide_map", "many_text_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "many_text_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -652,6 +657,16 @@ type lifecyclePreviewCycleNode struct {
 	Text string                     `json:"text,omitempty"`
 }
 
+type lifecyclePreviewOrderMarshaler struct {
+	Name  string
+	Calls *[]string
+}
+
+func (value lifecyclePreviewOrderMarshaler) MarshalJSON() ([]byte, error) {
+	*value.Calls = append(*value.Calls, value.Name)
+	return []byte(`null`), nil
+}
+
 type lifecyclePreviewCustomZero struct {
 	Empty bool
 	Value string
@@ -681,6 +696,47 @@ func TestLifecyclePayloadSummaryBoundsDecodedWideMaps(t *testing.T) {
 	}
 	if got, want := lifecyclePayloadSummary(wide), truncate(string(encoded), 96); got != want {
 		t.Fatalf("decoded wide-map preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesSharedBackingSlices(t *testing.T) {
+	items := make([]any, 1)
+	items[0] = items[:0]
+	payload := map[string]any{"items": items}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal shared-backing fixture: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("shared-backing slice preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryValidatesLateMapValuesInCanonicalOrder(t *testing.T) {
+	for _, reflected := range []bool{false, true} {
+		for range 100 {
+			var calls []string
+			var values any = map[string]any{
+				"z": lifecyclePreviewOrderMarshaler{Name: "z", Calls: &calls},
+				"a": lifecyclePreviewOrderMarshaler{Name: "a", Calls: &calls},
+				"m": lifecyclePreviewOrderMarshaler{Name: "m", Calls: &calls},
+			}
+			if reflected {
+				values = map[string]lifecyclePreviewOrderMarshaler{
+					"z": {Name: "z", Calls: &calls},
+					"a": {Name: "a", Calls: &calls},
+					"m": {Name: "m", Calls: &calls},
+				}
+			}
+			payload := map[string]any{
+				"a-prefix": strings.Repeat("x", 1<<20),
+				"z-values": values,
+			}
+			_ = lifecyclePayloadSummary(payload)
+			if want := []string{"a", "m", "z"}; !reflect.DeepEqual(calls, want) {
+				t.Fatalf("reflected=%t late map marshaler order = %v, want %v", reflected, calls, want)
+			}
+		}
 	}
 }
 

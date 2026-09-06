@@ -724,6 +724,7 @@ type lifecycleJSONPreview struct {
 type lifecyclePreviewVisit struct {
 	typeOf  reflect.Type
 	pointer uintptr
+	length  int
 }
 
 // append tracks printable JSON ASCII incrementally. Non-ASCII text is retained
@@ -779,13 +780,11 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 	}
 
 	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
-	for key := range value {
-		keys = lifecycleInsertPreviewMapKey(keys, lifecyclePreviewMapKey{textString: key}, p.limit+1)
+	for key, item := range value {
+		keys = lifecycleInsertPreviewMapKey(keys, lifecyclePreviewMapKey{textString: key, nativeValue: item}, p.limit+1)
 	}
 	p.append("{")
-	selected := make(map[string]struct{}, len(keys))
 	for i, key := range keys {
-		selected[key.textString] = struct{}{}
 		if !p.stopped {
 			if i > 0 {
 				p.append(",")
@@ -793,16 +792,30 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 			p.appendJSONString(key.textString)
 			p.append(":")
 		}
-		if err := p.appendValue(value[key.textString], depth+1); err != nil {
+		if err := p.appendValue(key.nativeValue, depth+1); err != nil {
 			return err
 		}
 	}
-	for key, item := range value {
-		if _, ok := selected[key]; ok {
-			continue
-		}
-		if err := p.appendValue(item, depth+1); err != nil {
-			return err
+	if len(keys) > 0 {
+		cursor := keys[len(keys)-1]
+		for {
+			batch := make([]lifecyclePreviewMapKey, 0, p.limit+1)
+			for key, item := range value {
+				candidate := lifecyclePreviewMapKey{textString: key, nativeValue: item}
+				if !lifecyclePreviewMapKeyLess(cursor, candidate) || !lifecycleAnyMayMarshalError(item) {
+					continue
+				}
+				batch = lifecycleInsertPreviewMapKey(batch, candidate, p.limit+1)
+			}
+			if len(batch) == 0 {
+				break
+			}
+			for _, key := range batch {
+				if err := p.appendValue(key.nativeValue, depth+1); err != nil {
+					return err
+				}
+			}
+			cursor = batch[len(batch)-1]
 		}
 	}
 	p.append("}")
@@ -1000,6 +1013,9 @@ func (p *lifecycleJSONPreview) enterReference(value reflect.Value) (func(), erro
 		return nil, nil
 	}
 	visit := lifecyclePreviewVisit{typeOf: value.Type(), pointer: pointer}
+	if value.Kind() == reflect.Slice {
+		visit.length = value.Len()
+	}
 	if p.active[visit] {
 		return nil, fmt.Errorf("lifecycle payload contains a cycle")
 	}
@@ -1296,28 +1312,15 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
 	iterator := value.MapRange()
 	for iterator.Next() {
-		valueKey := iterator.Key()
-		key, err := lifecyclePreviewKey(valueKey)
+		key, err := lifecyclePreviewKey(iterator.Key())
 		if err != nil {
 			return err
 		}
-		if valueKey.Kind() != reflect.String {
-			key.value = valueKey
-		}
+		key.mapValue = iterator.Value()
 		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
 	}
 	p.append("{")
-	selectedStrings := make(map[string]struct{}, len(keys))
-	selectedValues := make(map[any]struct{}, len(keys))
 	for i, key := range keys {
-		if value.Type().Key().Kind() == reflect.String {
-			selectedStrings[key.textString] = struct{}{}
-		} else {
-			selectedValues[key.value.Interface()] = struct{}{}
-		}
-		if p.stopped && !mayError {
-			break
-		}
 		if !p.stopped {
 			if i > 0 {
 				p.append(",")
@@ -1325,28 +1328,35 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 			key.appendTo(p)
 			p.append(":")
 		}
-		mapKey := key.value
-		if !mapKey.IsValid() {
-			mapKey = reflect.New(value.Type().Key()).Elem()
-			mapKey.SetString(key.textString)
-		}
-		if err := p.appendReflectValue(value.MapIndex(mapKey), depth+1); err != nil {
+		if err := p.appendReflectValue(key.mapValue, depth+1); err != nil {
 			return err
 		}
 	}
-	if mayError {
-		iterator := value.MapRange()
-		for iterator.Next() {
-			if iterator.Key().Kind() == reflect.String {
-				if _, ok := selectedStrings[iterator.Key().String()]; ok {
+	if mayError && len(keys) > 0 {
+		cursor := keys[len(keys)-1]
+		for {
+			batch := make([]lifecyclePreviewMapKey, 0, p.limit+1)
+			iterator := value.MapRange()
+			for iterator.Next() {
+				key, err := lifecyclePreviewKey(iterator.Key())
+				if err != nil {
+					return err
+				}
+				if !lifecyclePreviewMapKeyLess(cursor, key) {
 					continue
 				}
-			} else if _, ok := selectedValues[iterator.Key().Interface()]; ok {
-				continue
+				key.mapValue = iterator.Value()
+				batch = lifecycleInsertPreviewMapKey(batch, key, p.limit+1)
 			}
-			if err := validateLifecycleValue(iterator.Value(), depth+1); err != nil {
-				return err
+			if len(batch) == 0 {
+				break
 			}
+			for _, key := range batch {
+				if err := validateLifecycleValue(key.mapValue, depth+1); err != nil {
+					return err
+				}
+			}
+			cursor = batch[len(batch)-1]
 		}
 	}
 	p.append("}")
@@ -1354,7 +1364,7 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 }
 
 func lifecycleInsertPreviewMapKey(keys []lifecyclePreviewMapKey, key lifecyclePreviewMapKey, limit int) []lifecyclePreviewMapKey {
-	index := sort.Search(len(keys), func(i int) bool { return boundedLifecycleMapKeyLess(key, keys[i]) })
+	index := sort.Search(len(keys), func(i int) bool { return lifecyclePreviewMapKeyLess(key, keys[i]) })
 	if len(keys) >= limit && index >= limit {
 		return keys
 	}
@@ -1367,7 +1377,9 @@ func lifecycleInsertPreviewMapKey(keys []lifecyclePreviewMapKey, key lifecyclePr
 }
 
 type lifecyclePreviewMapKey struct {
-	value         reflect.Value
+	sourceKey     reflect.Value
+	mapValue      reflect.Value
+	nativeValue   any
 	text          []byte
 	textLength    int
 	textMarshaled bool
@@ -1376,7 +1388,7 @@ type lifecyclePreviewMapKey struct {
 
 func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 	if value.Kind() == reflect.String {
-		return lifecyclePreviewMapKey{textString: value.String()}, nil
+		return lifecyclePreviewMapKey{sourceKey: value, textString: value.String()}, nil
 	}
 	if value.CanInterface() {
 		if marshaler, ok := value.Interface().(encoding.TextMarshaler); ok {
@@ -1385,14 +1397,14 @@ func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 				return lifecyclePreviewMapKey{}, err
 			}
 			prefix := append([]byte(nil), text[:min(len(text), lifecyclePreviewMaxKeyBytes)]...)
-			return lifecyclePreviewMapKey{text: prefix, textLength: len(text), textMarshaled: true}, nil
+			return lifecyclePreviewMapKey{sourceKey: value, text: prefix, textLength: len(text), textMarshaled: true}, nil
 		}
 	}
 	switch value.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return lifecyclePreviewMapKey{textString: strconv.FormatInt(value.Int(), 10)}, nil
+		return lifecyclePreviewMapKey{sourceKey: value, textString: strconv.FormatInt(value.Int(), 10)}, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		return lifecyclePreviewMapKey{textString: strconv.FormatUint(value.Uint(), 10)}, nil
+		return lifecyclePreviewMapKey{sourceKey: value, textString: strconv.FormatUint(value.Uint(), 10)}, nil
 	}
 	return lifecyclePreviewMapKey{}, fmt.Errorf("unsupported lifecycle payload map key %s", value.Type())
 }
@@ -1403,6 +1415,44 @@ func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
 	} else {
 		preview.appendJSONString(key.textString)
 	}
+}
+
+func lifecyclePreviewMapKeyLess(left, right lifecyclePreviewMapKey) bool {
+	if !left.textMarshaled && !right.textMarshaled {
+		return left.textString < right.textString
+	}
+	if boundedLifecycleMapKeyLess(left, right) {
+		return true
+	}
+	if boundedLifecycleMapKeyLess(right, left) {
+		return false
+	}
+	// Oversized TextMarshaler keys with an identical retained prefix cannot be
+	// compared further without retaining the complete method output. Use the
+	// original comparable key only as a deterministic validation-order tie-break.
+	return lifecyclePreviewSourceKeyLess(left.sourceKey, right.sourceKey)
+}
+
+func lifecyclePreviewSourceKeyLess(left, right reflect.Value) bool {
+	if !left.IsValid() || !right.IsValid() || left.Kind() != right.Kind() {
+		return false
+	}
+	switch left.Kind() {
+	case reflect.String:
+		return left.String() < right.String()
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return left.Int() < right.Int()
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return left.Uint() < right.Uint()
+	}
+	return false
+}
+
+func lifecycleAnyMayMarshalError(value any) bool {
+	if value == nil {
+		return false
+	}
+	return lifecycleTypeMayMarshalError(reflect.TypeOf(value))
 }
 
 func boundedLifecycleMapKeyLess(left, right lifecyclePreviewMapKey) bool {
