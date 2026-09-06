@@ -388,6 +388,180 @@ func TestAddTaskAttachmentsHTTPCancellationClosesBlockedBodyRead(t *testing.T) {
 	}
 }
 
+func TestAttachmentMultipartBodyConcurrentClosesWaitForFailure(t *testing.T) {
+	stubAttachmentStat(t, 2)
+	originalOpen := openAttachmentFile
+	defer func() { openAttachmentFile = originalOpen }()
+
+	closeStarted := make(chan struct{})
+	allowClose := make(chan struct{})
+	closeErr := errors.New("close sentinel")
+	file := &attachmentTestFile{
+		size: 1,
+		read: func(p []byte) (int, error) {
+			p[0] = 'x'
+			return 1, nil
+		},
+		close: func() error {
+			close(closeStarted)
+			<-allowClose
+			return closeErr
+		},
+	}
+	openAttachmentFile = func(string) (attachmentFile, error) { return file, nil }
+
+	body, err := newAttachmentMultipartBody([]string{"fixture.bin"})
+	if err != nil {
+		t.Fatalf("newAttachmentMultipartBody: %v", err)
+	}
+	if _, err := io.ReadFull(body, make([]byte, len(body.headers[0])+1)); err != nil {
+		t.Fatalf("start multipart body: %v", err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- body.Close() }()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first Close did not start underlying close")
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- body.Close() }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second Close returned before cleanup completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowClose)
+	for i, done := range []<-chan error{firstDone, secondDone} {
+		select {
+		case err := <-done:
+			if !errors.Is(err, closeErr) {
+				t.Fatalf("Close %d error = %v, want %v", i+1, err, closeErr)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("Close %d did not finish", i+1)
+		}
+	}
+	if got := file.closeCall.Load(); got != 1 {
+		t.Fatalf("underlying close calls = %d, want 1", got)
+	}
+}
+
+func TestAddTaskAttachmentsWaitsForAsynchronousTransportBodyClose(t *testing.T) {
+	stubAttachmentStat(t, 2)
+	originalOpen := openAttachmentFile
+	defer func() { openAttachmentFile = originalOpen }()
+
+	closeStarted := make(chan struct{})
+	allowClose := make(chan struct{})
+	closeErr := errors.New("close sentinel")
+	file := &attachmentTestFile{
+		size: 1,
+		read: func(p []byte) (int, error) {
+			p[0] = 'x'
+			return 1, nil
+		},
+		close: func() error {
+			close(closeStarted)
+			<-allowClose
+			return closeErr
+		},
+	}
+	openAttachmentFile = func(string) (attachmentFile, error) { return file, nil }
+
+	c, _ := New("http://attachments.test")
+	c.http.Transport = htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodGet {
+			resp := attachmentHTMLResponse(http.StatusOK)
+			resp.Body = io.NopCloser(strings.NewReader(attachmentListMarkup("p1", "")))
+			return resp, nil
+		}
+		if _, err := io.ReadFull(r.Body, make([]byte, len(r.Body.(*attachmentMultipartBody).headers[0])+1)); err != nil {
+			return nil, err
+		}
+		go func() { _ = r.Body.Close() }()
+		return attachmentHTMLResponse(http.StatusOK), nil
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.AddTaskAttachments(context.Background(), "t-1", "p1", []string{"fixture.bin"})
+		done <- err
+	}()
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("transport did not start asynchronous body close")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("AddTaskAttachments returned before transport cleanup completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowClose)
+	select {
+	case err := <-done:
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("AddTaskAttachments error = %v, want %v", err, closeErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AddTaskAttachments did not finish after body close")
+	}
+}
+
+func TestAttachmentMultipartBodyMissingFilePreservesOpenError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing.bin")
+	body, err := newAttachmentMultipartBody([]string{path})
+	if err != nil {
+		t.Fatalf("newAttachmentMultipartBody returned early error: %v", err)
+	}
+	_, err = io.Copy(io.Discard, body)
+	want := fmt.Sprintf(`open attachment %q: open %s:`, path, path)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("body error = %v, want %q", err, want)
+	}
+}
+
+func TestAttachmentMultipartBodyLaterPathDoesNotPreemptEarlierLocalError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		file *attachmentTestFile
+		open error
+		want string
+	}{
+		{name: "open", open: errors.New("first open sentinel"), want: "first open sentinel"},
+		{name: "read", file: &attachmentTestFile{size: 1, read: func([]byte) (int, error) { return 0, errors.New("first read sentinel") }}, want: "first read sentinel"},
+		{name: "close", file: &attachmentTestFile{size: 1, read: func(p []byte) (int, error) { p[0] = 'x'; return 1, io.EOF }, close: func() error { return errors.New("first close sentinel") }}, want: "first close sentinel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			firstPath := filepath.Join(dir, "first.bin")
+			if err := os.WriteFile(firstPath, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			missingPath := filepath.Join(dir, "missing.bin")
+			originalOpen := openAttachmentFile
+			defer func() { openAttachmentFile = originalOpen }()
+			openAttachmentFile = func(path string) (attachmentFile, error) {
+				if path == firstPath {
+					return tc.file, tc.open
+				}
+				return os.Open(path)
+			}
+
+			body, err := newAttachmentMultipartBody([]string{firstPath, missingPath})
+			if err != nil {
+				t.Fatalf("later path preempted body processing: %v", err)
+			}
+			_, err = io.Copy(io.Discard, body)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("body error = %v, want earlier %s error %q", err, tc.name, tc.want)
+			}
+		})
+	}
+}
+
 func TestAttachmentMultipartBodyConcurrentReadClose(t *testing.T) {
 	stubAttachmentStat(t, 1<<20)
 	originalOpen := openAttachmentFile

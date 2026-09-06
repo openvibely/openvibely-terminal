@@ -222,6 +222,7 @@ var statAttachmentFile = os.Stat
 type attachmentMultipartBody struct {
 	paths         []string
 	fileSizes     []int64
+	preflightErrs []error
 	headers       [][]byte
 	trailer       []byte
 	contentType   string
@@ -233,28 +234,41 @@ type attachmentMultipartBody struct {
 	trailerOffset int
 	remaining     int64
 	current       attachmentFile
+	openingDone   chan struct{}
+	fileCloseDone chan struct{}
+	closeDone     chan struct{}
 	closed        bool
 	terminalErr   error
 }
 
 func newAttachmentMultipartBody(paths []string) (*attachmentMultipartBody, error) {
 	body := &attachmentMultipartBody{
-		paths:     make([]string, len(paths)),
-		fileSizes: make([]int64, len(paths)),
+		paths:         make([]string, len(paths)),
+		fileSizes:     make([]int64, len(paths)),
+		preflightErrs: make([]error, len(paths)),
+		closeDone:     make(chan struct{}),
 	}
 	for i, rawPath := range paths {
 		path := strings.TrimSpace(rawPath)
 		if path == "" {
 			return nil, fmt.Errorf("attachment file path is required")
 		}
+		body.paths[i] = path
 		info, err := statAttachmentFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("stat attachment %q: %w", path, err)
+			var pathErr *os.PathError
+			if errors.As(err, &pathErr) {
+				openPathErr := *pathErr
+				openPathErr.Op = "open"
+				err = &openPathErr
+			}
+			body.preflightErrs[i] = fmt.Errorf("open attachment %q: %w", path, err)
+			continue
 		}
 		if info.IsDir() {
-			return nil, fmt.Errorf("attachment %q is a directory", path)
+			body.preflightErrs[i] = fmt.Errorf("attachment %q is a directory", path)
+			continue
 		}
-		body.paths[i] = path
 		body.fileSizes[i] = info.Size()
 	}
 
@@ -321,8 +335,15 @@ func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
 
 		path := b.paths[b.index]
 		index := b.index
+		if err := b.preflightErrs[index]; err != nil {
+			b.terminalErr = err
+			b.mu.Unlock()
+			return 0, err
+		}
 		file := b.current
 		if file == nil {
+			openingDone := make(chan struct{})
+			b.openingDone = openingDone
 			b.mu.Unlock()
 			opened, err := openAttachmentFile(path)
 			b.mu.Lock()
@@ -331,19 +352,34 @@ func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
 				if opened != nil {
 					_ = opened.Close()
 				}
-				if b.closed {
+				b.mu.Lock()
+				if b.openingDone == openingDone {
+					b.openingDone = nil
+					close(openingDone)
+				}
+				closed := b.closed
+				terminalErr := b.terminalErr
+				b.mu.Unlock()
+				if closed {
+					if terminalErr != nil {
+						return 0, terminalErr
+					}
 					return 0, io.EOF
 				}
 				continue
 			}
 			if err != nil {
 				b.terminalErr = fmt.Errorf("open attachment %q: %w", path, err)
+				b.openingDone = nil
+				close(openingDone)
 				err = b.terminalErr
 				b.mu.Unlock()
 				return 0, err
 			}
 			b.current = opened
 			b.remaining = b.fileSizes[index]
+			b.openingDone = nil
+			close(openingDone)
 			file = opened
 		}
 		remaining := b.remaining
@@ -351,9 +387,20 @@ func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
 			b.current = nil
 			b.index++
 			b.headerOffset = 0
+			fileCloseDone := make(chan struct{})
+			b.fileCloseDone = fileCloseDone
 			b.mu.Unlock()
-			if err := file.Close(); err != nil {
-				return 0, b.recordTerminalError(fmt.Errorf("close attachment %q: %w", path, err))
+			closeErr := file.Close()
+			b.mu.Lock()
+			if closeErr != nil {
+				b.recordTerminalErrorLocked(fmt.Errorf("close attachment %q: %w", path, closeErr))
+			}
+			err := b.terminalErr
+			b.fileCloseDone = nil
+			close(fileCloseDone)
+			b.mu.Unlock()
+			if err != nil {
+				return 0, err
 			}
 			continue
 		}
@@ -387,17 +434,25 @@ func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
 		b.current = nil
 		b.index++
 		b.headerOffset = 0
+		fileCloseDone := make(chan struct{})
+		b.fileCloseDone = fileCloseDone
 		b.mu.Unlock()
 
 		closeErr := file.Close()
+		b.mu.Lock()
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return n, b.recordTerminalError(fmt.Errorf("read attachment %q: %w", path, readErr))
+			b.recordTerminalErrorLocked(fmt.Errorf("read attachment %q: %w", path, readErr))
+		} else if errors.Is(readErr, io.EOF) && remaining > 0 {
+			b.recordTerminalErrorLocked(fmt.Errorf("read attachment %q: %w", path, io.ErrUnexpectedEOF))
+		} else if closeErr != nil {
+			b.recordTerminalErrorLocked(fmt.Errorf("close attachment %q: %w", path, closeErr))
 		}
-		if errors.Is(readErr, io.EOF) && remaining > 0 {
-			return n, b.recordTerminalError(fmt.Errorf("read attachment %q: %w", path, io.ErrUnexpectedEOF))
-		}
-		if closeErr != nil {
-			return n, b.recordTerminalError(fmt.Errorf("close attachment %q: %w", path, closeErr))
+		err := b.terminalErr
+		b.fileCloseDone = nil
+		close(fileCloseDone)
+		b.mu.Unlock()
+		if err != nil {
+			return n, err
 		}
 		if n > 0 {
 			return n, nil
@@ -405,9 +460,7 @@ func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
 	}
 }
 
-func (b *attachmentMultipartBody) recordTerminalError(err error) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+func (b *attachmentMultipartBody) recordTerminalErrorLocked(err error) error {
 	if b.terminalErr == nil {
 		b.terminalErr = err
 	}
@@ -426,33 +479,53 @@ func (b *attachmentMultipartBody) closeWithError(err error) error {
 func (b *attachmentMultipartBody) Close() error {
 	b.mu.Lock()
 	if b.closed {
+		done := b.closeDone
+		b.mu.Unlock()
+		<-done
+		b.mu.Lock()
 		err := b.terminalErr
 		b.mu.Unlock()
 		return err
 	}
 	b.closed = true
-	file := b.current
-	path := ""
-	if b.index < len(b.paths) {
-		path = b.paths[b.index]
-	}
-	b.current = nil
-	err := b.terminalErr
 	b.mu.Unlock()
 
-	if file != nil {
-		if closeErr := file.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("close attachment %q: %w", path, closeErr)
-			b.mu.Lock()
-			if b.terminalErr == nil {
-				b.terminalErr = err
-			} else {
-				err = b.terminalErr
-			}
+	for {
+		b.mu.Lock()
+		if b.openingDone != nil {
+			done := b.openingDone
 			b.mu.Unlock()
+			<-done
+			continue
 		}
+		if b.fileCloseDone != nil {
+			done := b.fileCloseDone
+			b.mu.Unlock()
+			<-done
+			continue
+		}
+		file := b.current
+		path := ""
+		if b.index < len(b.paths) {
+			path = b.paths[b.index]
+		}
+		b.current = nil
+		b.mu.Unlock()
+
+		var closeErr error
+		if file != nil {
+			closeErr = file.Close()
+		}
+
+		b.mu.Lock()
+		if closeErr != nil {
+			b.recordTerminalErrorLocked(fmt.Errorf("close attachment %q: %w", path, closeErr))
+		}
+		err := b.terminalErr
+		close(b.closeDone)
+		b.mu.Unlock()
+		return err
 	}
-	return err
 }
 
 func (c *Client) doMultipartHTML(ctx context.Context, method, path string, body io.Reader, contentType string) (*html.Node, error) {
