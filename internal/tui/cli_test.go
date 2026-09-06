@@ -2435,6 +2435,17 @@ func TestCLIScheduleEditValidSettingPairReference(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleEditMalformedEarlierOptionFailsBeforeRequests(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "s-1", "repeat", "yearly", "interval", "5"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), `unknown repeat type "yearly"`) {
+		t.Fatalf("malformed earlier option error = %v", err)
+	}
+	if rec.saw(http.MethodGet, "/schedule") || rec.saw(http.MethodGet, "/tasks/") || rec.saw(http.MethodPut, "/schedules/") {
+		t.Fatalf("malformed headless edit dispatched schedule work:\n%s", rec.all())
+	}
+}
+
 func TestCLIScheduleEditAmbiguousReferenceDoesNotMutate(t *testing.T) {
 	const ambiguous = `<div id="schedule-content"><div data-task-id="t1" data-schedule-id="s1">Weekly report</div><div data-task-id="t2" data-schedule-id="s2">Weekly report</div></div>`
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": ambiguous})

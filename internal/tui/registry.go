@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -1235,9 +1236,15 @@ func parseScheduleEdit(args []string) ([]scheduleEditCandidate, error) {
 		if !isScheduleEditSetting(args[optionAt]) {
 			continue
 		}
-		update, err := parseScheduleEditOptions(args[optionAt:], usage)
+		update, _, err := parseScheduleEditOptions(args[optionAt:], usage)
 		if err != nil {
 			candidateErr = err
+			// Once an ID-shaped reference is followed by a setting, a malformed
+			// remainder is command syntax rather than a free-form title collision.
+			// Reject it before schedule discovery.
+			if optionAt == 1 && looksLikeScheduleID(args[0]) {
+				return nil, err
+			}
 			continue
 		}
 		candidates = append(candidates, scheduleEditCandidate{
@@ -1254,16 +1261,32 @@ func parseScheduleEdit(args []string) ([]scheduleEditCandidate, error) {
 	return nil, fmt.Errorf("%s", usage)
 }
 
+func looksLikeScheduleID(value string) bool {
+	if isScheduleEditSetting(value) {
+		return false
+	}
+	for _, r := range value {
+		if r == '-' || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func resolveScheduleEdit(entries []client.ScheduleEntry, candidates []scheduleEditCandidate) (client.ScheduleEntry, client.ScheduleUpdate, error) {
 	var matched client.ScheduleEntry
 	var update client.ScheduleUpdate
-	var matchErr error
+	var ambiguityErr, matchErr error
 	for _, candidate := range candidates {
 		entry, err := matchRef(entries, candidate.ref,
 			func(s client.ScheduleEntry) string { return s.ScheduleID },
 			func(s client.ScheduleEntry) string { return s.Text })
 		if err != nil {
-			matchErr = err
+			if strings.Contains(err.Error(), " is ambiguous:") && ambiguityErr == nil {
+				ambiguityErr = err
+			} else {
+				matchErr = err
+			}
 			continue
 		}
 		if matched.ScheduleID != "" && !strings.EqualFold(matched.ScheduleID, entry.ScheduleID) {
@@ -1278,6 +1301,9 @@ func resolveScheduleEdit(entries []client.ScheduleEntry, candidates []scheduleEd
 	}
 	if matched.ScheduleID != "" {
 		return matched, update, nil
+	}
+	if ambiguityErr != nil {
+		return client.ScheduleEntry{}, client.ScheduleUpdate{}, ambiguityErr
 	}
 	if matchErr != nil {
 		return client.ScheduleEntry{}, client.ScheduleUpdate{}, matchErr
@@ -1294,35 +1320,36 @@ func isScheduleEditSetting(value string) bool {
 	}
 }
 
-func parseScheduleEditOptions(args []string, usage string) (client.ScheduleUpdate, error) {
+func parseScheduleEditOptions(args []string, usage string) (client.ScheduleUpdate, int, error) {
 	var update client.ScheduleUpdate
 	seen := make(map[string]bool)
+	parsedPairs := 0
 	for i := 0; i < len(args); i += 2 {
 		if i+1 >= len(args) {
-			return client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+			return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("%s", usage)
 		}
 		key, value := strings.ToLower(args[i]), args[i+1]
 		if seen[key] || !isScheduleEditSetting(key) {
-			return client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+			return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("%s", usage)
 		}
 		seen[key] = true
 		switch key {
 		case "run-at":
 			if _, err := time.Parse("2006-01-02T15:04", value); err != nil {
-				return client.ScheduleUpdate{}, fmt.Errorf("run time must use 2006-01-02T15:04")
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("run time must use 2006-01-02T15:04")
 			}
 			update.RunAt = &value
 		case "repeat":
 			value = strings.ToLower(value)
 			if !isRepeat(value) {
-				return client.ScheduleUpdate{}, fmt.Errorf("unknown repeat type %q", value)
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("unknown repeat type %q", value)
 			}
 			value = client.NormalizeScheduleRepeat(value)
 			update.RepeatType = &value
 		case "interval":
 			interval, err := strconv.Atoi(value)
 			if err != nil || interval < 1 || interval > 365 {
-				return client.ScheduleUpdate{}, fmt.Errorf("repeat interval must be between 1 and 365")
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("repeat interval must be between 1 and 365")
 			}
 			update.RepeatInterval = &interval
 		case "clear-context":
@@ -1333,12 +1360,13 @@ func parseScheduleEditOptions(args []string, usage string) (client.ScheduleUpdat
 			case "false":
 				clear = false
 			default:
-				return client.ScheduleUpdate{}, fmt.Errorf("clear-context must be true or false")
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("clear-context must be true or false")
 			}
 			update.ClearContextOnStart = &clear
 		}
+		parsedPairs++
 	}
-	return update, nil
+	return update, parsedPairs, nil
 }
 
 func applyScheduleUpdate(config client.ScheduleConfig, update client.ScheduleUpdate) client.ScheduleConfig {

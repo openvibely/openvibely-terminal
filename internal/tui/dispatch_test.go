@@ -2697,6 +2697,56 @@ func TestScheduleEditResolvesNonFirstCardAndPreservesOmittedSettings(t *testing.
 	}
 }
 
+func TestScheduleEditRejectsMalformedEarlierOptionsBeforeRequests(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "timestamp", line: "/schedule edit s-1 run-at bad interval 5", want: "run time must use"},
+		{name: "repeat", line: "/schedule edit s-1 repeat yearly interval 5", want: `unknown repeat type "yearly"`},
+		{name: "interval", line: "/schedule edit s-1 interval 0 repeat daily", want: "repeat interval must be between"},
+		{name: "boolean", line: "/schedule edit s-1 clear-context maybe interval 5", want: "clear-context must be true or false"},
+		{name: "duplicate", line: "/schedule edit s-1 repeat daily repeat weekly interval 5", want: "usage"},
+		{name: "surplus", line: "/schedule edit s-1 repeat daily surplus interval 5", want: "usage"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.line)
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("malformed command made requests:\n%s", calls)
+			}
+			if out := stripANSI(transcript(m)); !strings.Contains(out, tc.want) {
+				t.Fatalf("validation output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+func TestScheduleEditPreservesEarlierCandidateAmbiguity(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-1">Weekly alpha</div>
+		<div data-task-id="t-2" data-schedule-id="s-2">Weekly beta</div>
+	</div>`
+	var detailGets, puts int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			_, _ = io.WriteString(w, scheduleHTML)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/tasks/"):
+			detailGets++
+		case r.Method == http.MethodPut:
+			puts++
+		}
+	})
+	m = runLine(t, m, "/schedule edit Weekly repeat daily interval 5")
+	out := stripANSI(transcript(m))
+	if detailGets != 0 || puts != 0 || !strings.Contains(out, `"Weekly" is ambiguous`) {
+		t.Fatalf("candidate ambiguity detail GETs=%d puts=%d:\n%s", detailGets, puts, out)
+	}
+}
+
 func TestScheduleEditRejectsInvalidSyntaxBeforeRequests(t *testing.T) {
 	cases := []string{
 		"/schedule unknown", "/schedule list extra", "/schedule edit s-1", "/schedule edit s-1 run-at bad",
