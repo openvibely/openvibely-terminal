@@ -408,6 +408,31 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 	}
 }
 
+func BenchmarkLifecyclePayloadSummaryReflectedNativeLongCommonPrefixKeys(b *testing.B) {
+	for _, size := range []struct {
+		name  string
+		bytes int
+	}{
+		{name: "1KiB", bytes: 1 << 10},
+		{name: "64KiB", bytes: 64 << 10},
+		{name: "1MiB", bytes: 1 << 20},
+	} {
+		prefix := strings.Repeat("k", size.bytes)
+		values := make(map[string]int, 32)
+		for i := range 32 {
+			values[fmt.Sprintf("%s-%03d", prefix, i)] = i
+		}
+		payload := map[string]any{"values": values}
+		b.Run(size.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				lifecycleBenchmarkSink = lifecyclePayloadSummary(payload)
+			}
+		})
+	}
+}
+
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
 	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "many_long_common_prefix_keys", "decoded_wide_map", "wide_error_capable_map", "wide_value_sensitive_map", "wide_nested_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
 		for _, size := range []struct {

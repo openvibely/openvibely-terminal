@@ -1398,6 +1398,11 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 				break
 			}
 		}
+		if orderingUnavailable {
+			// Do not insert the ambiguity-triggering key: its unrestricted source
+			// value must never reach the comparator after bounded ordering fails.
+			continue
+		}
 		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
 		if mayError {
 			for _, retained := range validationKeys {
