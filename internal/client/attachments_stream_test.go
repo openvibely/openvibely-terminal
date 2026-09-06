@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -39,6 +40,15 @@ func (f *attachmentTestFile) Stat() (os.FileInfo, error) {
 }
 
 type attachmentTestFileInfo struct{ size int64 }
+
+func stubAttachmentStat(t testing.TB, size int64) {
+	t.Helper()
+	originalStat := statAttachmentFile
+	t.Cleanup(func() { statAttachmentFile = originalStat })
+	statAttachmentFile = func(string) (os.FileInfo, error) {
+		return attachmentTestFileInfo{size: size}, nil
+	}
+}
 
 func (i attachmentTestFileInfo) Name() string       { return "fixture.bin" }
 func (i attachmentTestFileInfo) Size() int64        { return i.size }
@@ -87,10 +97,11 @@ func TestAddTaskAttachmentsLooksUpBeforeOpeningFiles(t *testing.T) {
 }
 
 func TestAddTaskAttachmentsStartsBodyBeforeReadingFullPayload(t *testing.T) {
+	const payloadSize = 64 << 10
+	stubAttachmentStat(t, payloadSize)
 	originalOpen := openAttachmentFile
 	defer func() { openAttachmentFile = originalOpen }()
 
-	const payloadSize = 64 << 10
 	allowRest := make(chan struct{})
 	var readBytes atomic.Int64
 	file := &attachmentTestFile{size: payloadSize}
@@ -235,6 +246,7 @@ func TestAddTaskAttachmentsUnblocksProducerOnEarlyFailureAndCancellation(t *test
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			stubAttachmentStat(t, 1<<30)
 			originalOpen := openAttachmentFile
 			defer func() { openAttachmentFile = originalOpen }()
 			file := &attachmentTestFile{size: 1 << 30, read: func(p []byte) (int, error) {
@@ -289,6 +301,11 @@ func TestAddTaskAttachmentsPreservesLocalFileErrors(t *testing.T) {
 		{name: "close", file: &attachmentTestFile{read: func([]byte) (int, error) { return 0, io.EOF }, close: func() error { return errors.New("close sentinel") }}, want: `close attachment "fixture.bin": close sentinel`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			size := int64(0)
+			if tc.file != nil {
+				size = tc.file.size
+			}
+			stubAttachmentStat(t, size)
 			originalOpen := openAttachmentFile
 			defer func() { openAttachmentFile = originalOpen }()
 			openAttachmentFile = func(string) (attachmentFile, error) { return tc.file, tc.open }
@@ -311,11 +328,169 @@ func TestAddTaskAttachmentsPreservesLocalFileErrors(t *testing.T) {
 	}
 }
 
-func TestAttachmentMultipartBodyUsesFixedLengthAndPullBackpressure(t *testing.T) {
+func TestAddTaskAttachmentsHTTPCancellationClosesBlockedBodyRead(t *testing.T) {
+	stubAttachmentStat(t, 1<<20)
 	originalOpen := openAttachmentFile
 	defer func() { openAttachmentFile = originalOpen }()
 
+	readStarted := make(chan struct{})
+	closed := make(chan struct{})
+	var readOnce, closeOnce sync.Once
+	file := &attachmentTestFile{size: 1 << 20}
+	file.read = func([]byte) (int, error) {
+		readOnce.Do(func() { close(readStarted) })
+		<-closed
+		return 0, os.ErrClosed
+	}
+	file.close = func() error {
+		closeOnce.Do(func() { close(closed) })
+		return nil
+	}
+	openAttachmentFile = func(string) (attachmentFile, error) { return file, nil }
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, attachmentListMarkup("p1", ""))
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.AddTaskAttachments(ctx, "t-1", "p1", []string{"fixture.bin"})
+		done <- err
+	}()
+	select {
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP transport did not start reading the body")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) && (err == nil || !strings.Contains(err.Error(), context.Canceled.Error())) {
+			t.Fatalf("AddTaskAttachments error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("HTTP cancellation did not unblock the body read")
+	}
+	select {
+	case <-closed:
+	default:
+		t.Fatal("HTTP transport did not close the active attachment")
+	}
+	if got := file.closeCall.Load(); got != 1 {
+		t.Fatalf("file close calls = %d, want 1", got)
+	}
+}
+
+func TestAttachmentMultipartBodyConcurrentReadClose(t *testing.T) {
+	stubAttachmentStat(t, 1<<20)
+	originalOpen := openAttachmentFile
+	defer func() { openAttachmentFile = originalOpen }()
+
+	readStarted := make(chan struct{})
+	closed := make(chan struct{})
+	var closeOnce sync.Once
+	file := &attachmentTestFile{size: 1 << 20}
+	file.read = func([]byte) (int, error) {
+		close(readStarted)
+		<-closed
+		return 0, os.ErrClosed
+	}
+	file.close = func() error {
+		closeOnce.Do(func() { close(closed) })
+		return nil
+	}
+	openAttachmentFile = func(string) (attachmentFile, error) { return file, nil }
+
+	body, err := newAttachmentMultipartBody([]string{"fixture.bin"})
+	if err != nil {
+		t.Fatalf("newAttachmentMultipartBody: %v", err)
+	}
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		_, _ = io.Copy(io.Discard, body)
+	}()
+	select {
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("body read did not reach the file")
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	select {
+	case recovered := <-done:
+		if recovered != nil {
+			t.Fatalf("concurrent Read/Close panic: %v", recovered)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent Close did not unblock Read")
+	}
+}
+
+func TestAttachmentMultipartBodyBoundsOpenFiles(t *testing.T) {
+	stubAttachmentStat(t, 1)
+	originalOpen := openAttachmentFile
+	defer func() { openAttachmentFile = originalOpen }()
+
+	const fileCount = 32
+	paths := make([]string, fileCount)
+	var active atomic.Int32
+	var maximum atomic.Int32
+	openAttachmentFile = func(path string) (attachmentFile, error) {
+		current := active.Add(1)
+		for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
+		}
+		return &attachmentTestFile{
+			size: 1,
+			read: func(p []byte) (int, error) {
+				if len(p) == 0 {
+					return 0, nil
+				}
+				p[0] = 'x'
+				return 1, io.EOF
+			},
+			close: func() error {
+				active.Add(-1)
+				return nil
+			},
+		}, nil
+	}
+	for i := range paths {
+		paths[i] = fmt.Sprintf("fixture-%02d.bin", i)
+	}
+
+	body, err := newAttachmentMultipartBody(paths)
+	if err != nil {
+		t.Fatalf("newAttachmentMultipartBody: %v", err)
+	}
+	if _, err := io.Copy(io.Discard, body); err != nil {
+		t.Fatalf("read multipart body: %v", err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := maximum.Load(); got > 1 {
+		t.Fatalf("maximum simultaneously open files = %d, want at most 1", got)
+	}
+	if got := active.Load(); got != 0 {
+		t.Fatalf("files still open = %d", got)
+	}
+}
+
+func TestAttachmentMultipartBodyUsesFixedLengthAndPullBackpressure(t *testing.T) {
 	const payloadSize = 1024
+	stubAttachmentStat(t, payloadSize)
+	originalOpen := openAttachmentFile
+	defer func() { openAttachmentFile = originalOpen }()
+
 	var payloadRead atomic.Int64
 	file := &attachmentTestFile{size: payloadSize, read: func(p []byte) (int, error) {
 		remaining := payloadSize - int(payloadRead.Load())
@@ -382,7 +557,8 @@ func BenchmarkAddTaskAttachments(b *testing.B) {
 
 				var started atomic.Int64
 				var durationsMu sync.Mutex
-				durations := make([]time.Duration, 0, b.N)
+				firstBodyDurations := make([]time.Duration, 0, b.N)
+				totalDurations := make([]time.Duration, 0, b.N)
 				srv := newAttachmentUploadServer(b, nil, func(r *http.Request) {
 					var first [1]byte
 					if _, err := io.ReadFull(r.Body, first[:]); err != nil {
@@ -391,7 +567,7 @@ func BenchmarkAddTaskAttachments(b *testing.B) {
 					}
 					duration := time.Since(time.Unix(0, started.Load()))
 					durationsMu.Lock()
-					durations = append(durations, duration)
+					firstBodyDurations = append(firstBodyDurations, duration)
 					durationsMu.Unlock()
 					if _, err := io.Copy(io.Discard, r.Body); err != nil {
 						b.Errorf("read upload: %v", err)
@@ -403,21 +579,33 @@ func BenchmarkAddTaskAttachments(b *testing.B) {
 				b.SetBytes(int64(sizeMiB) << 20)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
-					started.Store(time.Now().UnixNano())
+					iterationStarted := time.Now()
+					started.Store(iterationStarted.UnixNano())
 					if err := implementation.add(c, path); err != nil {
 						b.Fatal(err)
 					}
+					totalDurations = append(totalDurations, time.Since(iterationStarted))
 				}
 				b.StopTimer()
 				durationsMu.Lock()
-				sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
-				if len(durations) > 0 {
-					b.ReportMetric(float64(durations[len(durations)/2].Nanoseconds()), "first-body-ns")
+				if len(firstBodyDurations) > 0 {
+					b.ReportMetric(float64(medianDuration(firstBodyDurations).Nanoseconds()), "first-body-ns")
 				}
 				durationsMu.Unlock()
+				if len(totalDurations) > 0 {
+					b.ReportMetric(float64(medianDuration(totalDurations).Nanoseconds()), "total-median-ns")
+				}
 			})
 		}
 	}
+}
+func medianDuration(durations []time.Duration) time.Duration {
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	middle := len(durations) / 2
+	if len(durations)%2 != 0 {
+		return durations[middle]
+	}
+	return durations[middle-1] + (durations[middle]-durations[middle-1])/2
 }
 
 func benchmarkBufferedAddTaskAttachment(c *Client, path string) error {
