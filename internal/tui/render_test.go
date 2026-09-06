@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -257,40 +258,48 @@ func BenchmarkTruncateLargeFixtures(b *testing.B) {
 
 var lifecycleBenchmarkSink string
 
-func lifecycleBenchmarkPayload(size int) map[string]any {
-	return map[string]any{"message": strings.Repeat("x", size), "status": "completed"}
+func lifecycleBenchmarkPayload(size int, scalar string) map[string]any {
+	return map[string]any{"message": strings.Repeat(scalar, size/len(scalar)), "status": "completed"}
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, size := range []struct {
-		name  string
-		bytes int
+	for _, fixture := range []struct {
+		name   string
+		scalar string
 	}{
-		{name: "1KiB", bytes: 1 << 10},
-		{name: "64KiB", bytes: 64 << 10},
-		{name: "1MiB", bytes: 1 << 20},
+		{name: "ASCII", scalar: "x"},
+		{name: "zero_width", scalar: "\u0301"},
 	} {
-		for _, count := range []int{1, 100} {
-			payload := lifecycleBenchmarkPayload(size.bytes)
-			events := make([]client.LifecycleEvent, count)
-			for i := range events {
-				events[i] = client.LifecycleEvent{
-					ID:        fmt.Sprintf("event-%03d", i),
-					Seq:       i + 1,
-					EventType: "completed",
-					Payload:   payload,
+		for _, size := range []struct {
+			name  string
+			bytes int
+		}{
+			{name: "1KiB", bytes: 1 << 10},
+			{name: "64KiB", bytes: 64 << 10},
+			{name: "1MiB", bytes: 1 << 20},
+		} {
+			for _, count := range []int{1, 100} {
+				payload := lifecycleBenchmarkPayload(size.bytes, fixture.scalar)
+				events := make([]client.LifecycleEvent, count)
+				for i := range events {
+					events[i] = client.LifecycleEvent{
+						ID:        fmt.Sprintf("event-%03d", i),
+						Seq:       i + 1,
+						EventType: "completed",
+						Payload:   payload,
+					}
 				}
+				task := client.Task{ID: "task-1", Title: "Large payload task"}
+				execution := client.LifecycleExecution{ID: "execution-1", Status: "completed"}
+				b.Run(fmt.Sprintf("%s/%s/%d_events", fixture.name, size.name, count), func(b *testing.B) {
+					b.ReportAllocs()
+					b.SetBytes(int64(size.bytes * count))
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						lifecycleBenchmarkSink = renderLifecycleEvents(task, execution, events)
+					}
+				})
 			}
-			task := client.Task{ID: "task-1", Title: "Large payload task"}
-			execution := client.LifecycleExecution{ID: "execution-1", Status: "completed"}
-			b.Run(fmt.Sprintf("%s/%d_events", size.name, count), func(b *testing.B) {
-				b.ReportAllocs()
-				b.SetBytes(int64(size.bytes * count))
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					lifecycleBenchmarkSink = renderLifecycleEvents(task, execution, events)
-				}
-			})
 		}
 	}
 }
@@ -393,6 +402,7 @@ func TestLifecyclePayloadSummaryMatchesCanonicalJSON(t *testing.T) {
 		{"status": "completed", "attempt": float64(2), "ok": true},
 		{"escaping": "<tag> & line\n\t\"quoted\"", "unicode": "café 日本語 e\u0301"},
 		{"nested": map[string]any{"z": nil, "a": []any{"one", float64(2)}}},
+		{"nil_containers": map[string]any(nil), "nil_items": []any(nil)},
 	}
 	for _, payload := range payloads {
 		encoded, err := json.Marshal(payload)
@@ -401,6 +411,67 @@ func TestLifecyclePayloadSummaryMatchesCanonicalJSON(t *testing.T) {
 		}
 		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
 			t.Errorf("lifecyclePayloadSummary(%v) = %q, want canonical preview %q", payload, got, want)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesMarshalableGoValues(t *testing.T) {
+	payloads := []map[string]any{
+		{"items": []string{"one", "two"}},
+		{"bytes": []byte("ordinary bytes")},
+		{"named_string": lifecyclePreviewNamedString("ordinary")},
+		{"marshaler": lifecyclePreviewMarshaler("ordinary")},
+		{"nested": struct {
+			Name string `json:"name"`
+		}{Name: "ordinary"}},
+		{"named": lifecyclePreviewNamedMap{"b": 2, "a": 1}},
+	}
+	for _, payload := range payloads {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal fixture: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Errorf("lifecyclePayloadSummary(%v) = %q, want canonical preview %q", payload, got, want)
+		}
+	}
+}
+
+type lifecyclePreviewNamedMap map[string]int
+type lifecyclePreviewNamedString string
+type lifecyclePreviewMarshaler string
+
+func (value lifecyclePreviewMarshaler) MarshalJSON() ([]byte, error) {
+	return json.Marshal(map[string]string{"custom": string(value)})
+}
+
+func TestLifecyclePayloadSummaryBoundsZeroWidthScalar(t *testing.T) {
+	for _, value := range []any{
+		strings.Repeat("\u0301", 1<<20),
+		lifecyclePreviewNamedString(strings.Repeat("\u0301", 1<<20)),
+	} {
+		payload := map[string]any{"message": value}
+		got := lifecyclePayloadSummary(payload)
+		if !strings.HasPrefix(got, `{"message":"`) || !strings.HasSuffix(got, "…") {
+			t.Fatalf("zero-width scalar preview = %q, want bounded JSON-like prefix", got)
+		}
+		if len(got) > 8192 {
+			t.Fatalf("zero-width scalar preview length = %d, want bounded output", len(got))
+		}
+		if width := lipgloss.Width(got); width > 96 {
+			t.Fatalf("zero-width scalar preview width = %d, want <= 96", width)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryValidatesValuesAfterTruncatedPrefix(t *testing.T) {
+	for _, bad := range []any{make(chan int), math.Inf(1), math.NaN(), json.Number("invalid")} {
+		payload := map[string]any{
+			"a-prefix": strings.Repeat("x", 1<<20),
+			"z-bad":    bad,
+		}
+		if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+			t.Errorf("later invalid value %T preview = %q, want unavailable", bad, got)
 		}
 	}
 }
@@ -416,7 +487,7 @@ func TestLifecyclePayloadSummaryBoundsOversizedValues(t *testing.T) {
 	}
 
 	var nested any = "leaf"
-	for range 1 << 16 {
+	for range 8192 {
 		nested = []any{nested}
 	}
 	got := lifecyclePayloadSummary(map[string]any{"nested": nested})
