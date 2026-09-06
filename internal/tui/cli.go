@@ -671,6 +671,9 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	var payload cliEventPayload
 	payloadErr := json.Unmarshal(ev.Data, &payload)
 	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
+	if strings.TrimSpace(payload.TaskID) != "" && payload.ProjectID == "" {
+		return "", false, nil
+	}
 	if payload.ProjectID != "" && payload.ProjectID != projectID {
 		return "", false, nil
 	}

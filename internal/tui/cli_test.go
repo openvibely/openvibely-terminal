@@ -4095,6 +4095,77 @@ func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 	}
 }
 
+func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		jsonOutput bool
+	}{
+		{name: "plain"},
+		{name: "JSON", jsonOutput: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var eventRequest string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+				case "/events/live":
+					eventRequest = r.URL.RequestURI()
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","task_id":"unscoped-task","status":"running"}`+"\n\n")
+					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p2","task_id":"foreign-task","status":"running"}`+"\n\n")
+					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p1","task_id":"valid-task","status":"completed"}`+"\n\n")
+					_, _ = fmt.Fprint(w, `data: {"type":"chat_new_message","exec_id":"legacy-chat","message":"compatible chat"}`+"\n\n")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"events", "on"}, false, tc.jsonOutput); err != nil {
+				t.Fatalf("events on failed: %v", err)
+			}
+
+			if eventRequest != "/events/live?project_id=p1" {
+				t.Fatalf("event request = %q, want selected-project query", eventRequest)
+			}
+			output := out.String()
+			for _, excluded := range []string{"unscoped-task", "foreign-task"} {
+				if strings.Contains(output, excluded) {
+					t.Errorf("output includes unowned task %q:\n%s", excluded, output)
+				}
+			}
+			for _, included := range []string{"valid-task", "legacy-chat", "compatible chat"} {
+				if !strings.Contains(output, included) {
+					t.Errorf("output missing compatible event field %q:\n%s", included, output)
+				}
+			}
+
+			lines := strings.Split(strings.TrimSpace(output), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("output lines = %d, want valid task and unscoped chat only: %q", len(lines), output)
+			}
+			if tc.jsonOutput {
+				for _, line := range lines {
+					var record cliEventRecord
+					if err := json.Unmarshal([]byte(line), &record); err != nil {
+						t.Fatalf("invalid JSON event line: %v\n%s", err, line)
+					}
+					if record.ProjectID != "p1" {
+						t.Errorf("project_id = %q, want synthesized selected project", record.ProjectID)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestCLIEventsJSONEmitsValidStableLines(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
