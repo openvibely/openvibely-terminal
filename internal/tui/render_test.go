@@ -360,13 +360,22 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 			values[lifecyclePreviewTextKey(fmt.Sprintf("%s-%03d", strings.Repeat("k", keySize), i))] = i%2 == 0
 		}
 		return map[string]any{"value": values}
+	case "text_key_validation":
+		calls := 0
+		values := make(map[lifecyclePreviewCountingTextKey]lifecyclePreviewOrderMarshaler, 128)
+		prefixSize := max(lifecyclePreviewMaxKeyBytes, size/128)
+		for i := range 128 {
+			suffix := fmt.Sprintf("-%03d", i)
+			values[lifecyclePreviewCountingTextKey{ID: i, Suffix: strings.Repeat("k", prefixSize-lifecyclePreviewMaxKeyBytes) + suffix, Calls: &calls}] = lifecyclePreviewOrderMarshaler{Name: suffix, Calls: &[]string{}}
+		}
+		return map[string]any{"value": values}
 	default:
 		return map[string]any{"message": value, "status": "completed"}
 	}
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "many_text_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "many_text_keys", "text_key_validation"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -660,11 +669,26 @@ type lifecyclePreviewCycleNode struct {
 type lifecyclePreviewOrderMarshaler struct {
 	Name  string
 	Calls *[]string
+	Fail  bool
 }
 
 func (value lifecyclePreviewOrderMarshaler) MarshalJSON() ([]byte, error) {
 	*value.Calls = append(*value.Calls, value.Name)
+	if value.Fail {
+		return nil, errors.New("ordered marshaler failed")
+	}
 	return []byte(`null`), nil
+}
+
+type lifecyclePreviewCountingTextKey struct {
+	ID     int
+	Suffix string
+	Calls  *int
+}
+
+func (value lifecyclePreviewCountingTextKey) MarshalText() ([]byte, error) {
+	*value.Calls++
+	return []byte(strings.Repeat("k", lifecyclePreviewMaxKeyBytes) + value.Suffix), nil
 }
 
 type lifecyclePreviewCustomZero struct {
@@ -777,6 +801,31 @@ func TestLifecyclePayloadSummaryPreservesOmitZeroAndIndirectQuotedPointers(t *te
 	}
 	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
 		t.Fatalf("omitzero/indirect quoted preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryMarshalsTextKeysOnceInCanonicalSuffixOrder(t *testing.T) {
+	calls := 0
+	var valueCalls []string
+	values := make(map[lifecyclePreviewCountingTextKey]lifecyclePreviewOrderMarshaler, 130)
+	for i := range 130 {
+		suffix := fmt.Sprintf("-%03d", 129-i)
+		values[lifecyclePreviewCountingTextKey{ID: i, Suffix: suffix, Calls: &calls}] = lifecyclePreviewOrderMarshaler{
+			Name: suffix, Calls: &valueCalls, Fail: suffix == "-129",
+		}
+	}
+	payload := map[string]any{"a-prefix": strings.Repeat("x", 1<<20), "z-values": values}
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("same-prefix late failure preview = %q, want unavailable", got)
+	}
+	if calls != len(values) {
+		t.Fatalf("TextMarshaler key calls = %d, want %d", calls, len(values))
+	}
+	if len(valueCalls) != len(values) {
+		t.Fatalf("same-prefix value calls = %d, want %d: %v", len(valueCalls), len(values), valueCalls)
+	}
+	if valueCalls[0] != "-000" || valueCalls[len(valueCalls)-1] != "-129" {
+		t.Fatalf("same-prefix value order starts/ends %q/%q", valueCalls[0], valueCalls[len(valueCalls)-1])
 	}
 }
 

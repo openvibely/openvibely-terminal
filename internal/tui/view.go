@@ -780,8 +780,13 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 	}
 
 	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
+	var validationKeys []lifecyclePreviewMapKey
 	for key, item := range value {
-		keys = lifecycleInsertPreviewMapKey(keys, lifecyclePreviewMapKey{textString: key, nativeValue: item}, p.limit+1)
+		candidate := lifecyclePreviewMapKey{textString: key, nativeValue: item}
+		keys = lifecycleInsertPreviewMapKey(keys, candidate, p.limit+1)
+		if lifecycleAnyMayMarshalError(item) {
+			validationKeys = append(validationKeys, candidate)
+		}
 	}
 	p.append("{")
 	for i, key := range keys {
@@ -796,26 +801,18 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 			return err
 		}
 	}
-	if len(keys) > 0 {
+	if len(keys) > 0 && len(validationKeys) > 0 {
 		cursor := keys[len(keys)-1]
-		for {
-			batch := make([]lifecyclePreviewMapKey, 0, p.limit+1)
-			for key, item := range value {
-				candidate := lifecyclePreviewMapKey{textString: key, nativeValue: item}
-				if !lifecyclePreviewMapKeyLess(cursor, candidate) || !lifecycleAnyMayMarshalError(item) {
-					continue
-				}
-				batch = lifecycleInsertPreviewMapKey(batch, candidate, p.limit+1)
+		sort.Slice(validationKeys, func(i, j int) bool {
+			return lifecyclePreviewMapKeyLess(validationKeys[i], validationKeys[j])
+		})
+		for _, key := range validationKeys {
+			if !lifecyclePreviewMapKeyLess(cursor, key) {
+				continue
 			}
-			if len(batch) == 0 {
-				break
+			if err := p.appendValue(key.nativeValue, depth+1); err != nil {
+				return err
 			}
-			for _, key := range batch {
-				if err := p.appendValue(key.nativeValue, depth+1); err != nil {
-					return err
-				}
-			}
-			cursor = batch[len(batch)-1]
 		}
 	}
 	p.append("}")
@@ -1308,8 +1305,8 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 		p.append("null")
 		return nil
 	}
-	mayError := lifecycleTypeMayMarshalError(value.Type().Elem())
 	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
+	var validationKeys []lifecyclePreviewMapKey
 	iterator := value.MapRange()
 	for iterator.Next() {
 		key, err := lifecyclePreviewKey(iterator.Key())
@@ -1318,6 +1315,9 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 		}
 		key.mapValue = iterator.Value()
 		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
+		if lifecycleReflectValueMayMarshalError(key.mapValue) {
+			validationKeys = append(validationKeys, key)
+		}
 	}
 	p.append("{")
 	for i, key := range keys {
@@ -1332,31 +1332,18 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 			return err
 		}
 	}
-	if mayError && len(keys) > 0 {
+	if len(keys) > 0 && len(validationKeys) > 0 {
 		cursor := keys[len(keys)-1]
-		for {
-			batch := make([]lifecyclePreviewMapKey, 0, p.limit+1)
-			iterator := value.MapRange()
-			for iterator.Next() {
-				key, err := lifecyclePreviewKey(iterator.Key())
-				if err != nil {
-					return err
-				}
-				if !lifecyclePreviewMapKeyLess(cursor, key) {
-					continue
-				}
-				key.mapValue = iterator.Value()
-				batch = lifecycleInsertPreviewMapKey(batch, key, p.limit+1)
+		sort.Slice(validationKeys, func(i, j int) bool {
+			return lifecyclePreviewMapKeyLess(validationKeys[i], validationKeys[j])
+		})
+		for _, key := range validationKeys {
+			if !lifecyclePreviewMapKeyLess(cursor, key) {
+				continue
 			}
-			if len(batch) == 0 {
-				break
+			if err := p.appendReflectValue(key.mapValue, depth+1); err != nil {
+				return err
 			}
-			for _, key := range batch {
-				if err := validateLifecycleValue(key.mapValue, depth+1); err != nil {
-					return err
-				}
-			}
-			cursor = batch[len(batch)-1]
 		}
 	}
 	p.append("}")
@@ -1396,8 +1383,7 @@ func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 			if err != nil {
 				return lifecyclePreviewMapKey{}, err
 			}
-			prefix := append([]byte(nil), text[:min(len(text), lifecyclePreviewMaxKeyBytes)]...)
-			return lifecyclePreviewMapKey{sourceKey: value, text: prefix, textLength: len(text), textMarshaled: true}, nil
+			return lifecyclePreviewMapKey{sourceKey: value, text: text, textLength: len(text), textMarshaled: true}, nil
 		}
 	}
 	switch value.Kind() {
@@ -1418,18 +1404,16 @@ func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
 }
 
 func lifecyclePreviewMapKeyLess(left, right lifecyclePreviewMapKey) bool {
-	if !left.textMarshaled && !right.textMarshaled {
-		return left.textString < right.textString
+	leftLength, rightLength := left.length(), right.length()
+	for i := 0; i < min(leftLength, rightLength); i++ {
+		leftByte, rightByte := left.byteAt(i), right.byteAt(i)
+		if leftByte != rightByte {
+			return leftByte < rightByte
+		}
 	}
-	if boundedLifecycleMapKeyLess(left, right) {
-		return true
+	if leftLength != rightLength {
+		return leftLength < rightLength
 	}
-	if boundedLifecycleMapKeyLess(right, left) {
-		return false
-	}
-	// Oversized TextMarshaler keys with an identical retained prefix cannot be
-	// compared further without retaining the complete method output. Use the
-	// original comparable key only as a deterministic validation-order tie-break.
 	return lifecyclePreviewSourceKeyLess(left.sourceKey, right.sourceKey)
 }
 
@@ -1452,25 +1436,36 @@ func lifecycleAnyMayMarshalError(value any) bool {
 	if value == nil {
 		return false
 	}
-	return lifecycleTypeMayMarshalError(reflect.TypeOf(value))
+	return lifecycleReflectValueMayMarshalError(reflect.ValueOf(value))
 }
 
-func boundedLifecycleMapKeyLess(left, right lifecyclePreviewMapKey) bool {
-	leftLength, rightLength := left.length(), right.length()
-	limit := min(max(leftLength, rightLength), lifecyclePreviewMaxKeyBytes)
-	for i := 0; i < limit; i++ {
-		if i >= leftLength {
-			return true
-		}
-		if i >= rightLength {
+func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
+	for value.IsValid() && value.Kind() == reflect.Interface {
+		if value.IsNil() {
 			return false
 		}
-		leftByte, rightByte := left.byteAt(i), right.byteAt(i)
-		if leftByte != rightByte {
-			return leftByte < rightByte
-		}
+		value = value.Elem()
 	}
-	return false
+	if !value.IsValid() {
+		return false
+	}
+	typeOf := value.Type()
+	if typeOf == reflect.TypeFor[json.Number]() ||
+		typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
+		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+		return true
+	}
+	switch value.Kind() {
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return false
+	case reflect.Float32, reflect.Float64:
+		float := value.Float()
+		return math.IsInf(float, 0) || math.IsNaN(float)
+	default:
+		return lifecycleTypeMayMarshalError(typeOf)
+	}
 }
 
 func (key lifecyclePreviewMapKey) length() int {
@@ -1531,11 +1526,6 @@ func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, seen map[reflect.Type
 		}
 	}
 	return false
-}
-
-func validateLifecycleValue(value reflect.Value, depth int) error {
-	preview := lifecycleJSONPreview{limit: 0, stopped: true}
-	return preview.appendReflectValue(value, depth)
 }
 
 func (p *lifecycleJSONPreview) appendBytes(value []byte) error {
