@@ -1281,6 +1281,14 @@ type lifecycleJSONIsZeroer interface {
 	IsZero() bool
 }
 
+func lifecycleJSONZeroValueUsesMethod(value reflect.Value) bool {
+	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
+	typeOf := value.Type()
+	return (typeOf.Kind() == reflect.Interface && typeOf.Implements(isZeroerType)) ||
+		(typeOf.Kind() == reflect.Pointer && typeOf.Implements(isZeroerType)) ||
+		typeOf.Implements(isZeroerType) || reflect.PointerTo(typeOf).Implements(isZeroerType)
+}
+
 func lifecycleJSONZeroValue(value reflect.Value) bool {
 	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
 	typeOf := value.Type()
@@ -1672,12 +1680,55 @@ func lifecycleReflectValueMayMarshalErrorSeen(value reflect.Value, active map[li
 			}
 		}
 		return false
+	case reflect.Map:
+		if value.IsNil() {
+			return false
+		}
+		visit := lifecyclePreviewVisit{typeOf: typeOf, pointer: value.Pointer()}
+		if active[visit] {
+			return true
+		}
+		active[visit] = true
+		defer delete(active, visit)
+
+		keyType := typeOf.Key()
+		keyUsesTextMarshaler := false
+		switch keyType.Kind() {
+		case reflect.String,
+			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		default:
+			if !keyType.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+				return true
+			}
+			keyUsesTextMarshaler = true
+		}
+		iterator := value.MapRange()
+		for iterator.Next() {
+			key := iterator.Key()
+			if keyUsesTextMarshaler && !(key.Kind() == reflect.Pointer && key.IsNil()) {
+				return true
+			}
+			if lifecycleReflectValueMayMarshalErrorSeen(iterator.Value(), active, indirections) {
+				return true
+			}
+		}
+		return false
 	case reflect.Struct:
 		for _, field := range lifecycleStructFields(typeOf) {
 			fieldValue, ok := lifecycleFieldByIndex(value, field.index)
-			if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) ||
-				(field.omitZero && lifecycleJSONZeroValue(fieldValue)) {
+			if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) {
 				continue
+			}
+			if field.omitZero {
+				if lifecycleJSONZeroValueUsesMethod(fieldValue) {
+					// IsZero is user code whose result and side effects must occur once in
+					// canonical output order, never during unsorted map classification.
+					return true
+				}
+				if fieldValue.IsZero() {
+					continue
+				}
 			}
 			if lifecycleReflectValueMayMarshalErrorSeen(fieldValue, active, indirections) {
 				return true
