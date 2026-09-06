@@ -1487,7 +1487,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if client.IsAuthRequired(msg.err) {
-			m.flushChatStreamOutput()
 			m.markAuthRequired()
 			return m, nil
 		}
@@ -2442,6 +2441,9 @@ func truncatePrefix(s string, n int) string {
 }
 
 func (m *Model) markAuthRequired() {
+	// Preserve any accepted stream bytes before auth invalidation advances the
+	// stream generation and makes its queued cadence render stale.
+	m.flushChatStreamOutput()
 	wasRequired := m.authRequired
 	m.authRequired = true
 	m.connected = false

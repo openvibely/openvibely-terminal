@@ -3500,6 +3500,52 @@ func TestChatStreamRedrawsAreCadenceBoundedAndFinalOutputMatches(t *testing.T) {
 	}
 }
 
+func TestNonStreamAuthInvalidationFlushesQueuedChatOutput(t *testing.T) {
+	authErr := &client.AuthRequiredError{
+		Method:     http.MethodGet,
+		Path:       "/api/protected",
+		StatusCode: http.StatusUnauthorized,
+	}
+	for _, tc := range []struct {
+		name string
+		msg  func(Model) tea.Msg
+	}{
+		{
+			name: "health check",
+			msg: func(m Model) tea.Msg {
+				return connCheckedMsg{generation: m.connectionGeneration, err: authErr}
+			},
+		},
+		{
+			name: "status counts",
+			msg: func(m Model) tea.Msg {
+				return statusCountsMsg{sessionGeneration: m.sessionGeneration, projectGeneration: m.projectGeneration, err: authErr}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			const partial = "queued λ output"
+			m.updateChatStreamOutput(partial)
+			m.chatStreamRenderQueued = true
+			generation := m.chatStreamGeneration
+
+			next, _ := m.Update(tc.msg(m))
+			m = next.(Model)
+
+			if !m.authRequired || m.chatStreamRenderQueued || m.chatStreamGeneration == generation {
+				t.Fatalf("auth invalidation state: required=%t queued=%t generation=%d, want required, flushed, and generation > %d", m.authRequired, m.chatStreamRenderQueued, m.chatStreamGeneration, generation)
+			}
+			out := transcript(m)
+			partialAt := strings.Index(out, "agent::"+partial)
+			authAt := strings.Index(out, authRecoveryMessage(m.client.BaseURL()))
+			if partialAt < 0 || authAt < 0 || partialAt >= authAt {
+				t.Fatalf("queued output was not preserved before auth recovery message: %q", out)
+			}
+		})
+	}
+}
+
 func TestChatStreamTerminalEventFlushesQueuedOutput(t *testing.T) {
 	for _, eventName := range []string{"done", "error"} {
 		t.Run(eventName, func(t *testing.T) {
