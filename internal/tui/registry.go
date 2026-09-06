@@ -1296,7 +1296,7 @@ func scheduleCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.CreateSchedule(ctx, t.ID, when, repeat, interval); err != nil {
+					if err := c.CreateSchedule(ctx, pid, t.ID, when, repeat, interval); err != nil {
 						return "", err
 					}
 					return scheduleMutationOutput("scheduled "+t.Title+" for "+when+" ("+repeat+")",
@@ -1326,9 +1326,9 @@ func scheduleCommand() command {
 										cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
 											var err error
 											if action == "delete" {
-												err = c.DeleteSchedule(ctx, e.ScheduleID)
+												err = c.DeleteSchedule(ctx, pid, e.ScheduleID)
 											} else {
-												_, err = c.ToggleSchedule(ctx, e.ScheduleID)
+												_, err = c.ToggleSchedule(ctx, pid, e.ScheduleID)
 											}
 											if err != nil {
 												return "", err
@@ -1365,9 +1365,9 @@ func scheduleCommand() command {
 						return "", fmt.Errorf("that task has no schedule")
 					}
 					if action == "delete" {
-						err = c.DeleteSchedule(ctx, e.ScheduleID)
+						err = c.DeleteSchedule(ctx, pid, e.ScheduleID)
 					} else {
-						_, err = c.ToggleSchedule(ctx, e.ScheduleID)
+						_, err = c.ToggleSchedule(ctx, pid, e.ScheduleID)
 					}
 					if err != nil {
 						return "", err
