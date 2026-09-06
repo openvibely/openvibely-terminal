@@ -1595,10 +1595,18 @@ func lifecycleAnyMayMarshalError(value any) bool {
 }
 
 func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
+	return lifecycleReflectValueMayMarshalErrorSeen(value, make(map[lifecyclePreviewVisit]bool), 0)
+}
+
+func lifecycleReflectValueMayMarshalErrorSeen(value reflect.Value, active map[lifecyclePreviewVisit]bool, indirections int) bool {
 	for value.IsValid() && value.Kind() == reflect.Interface {
 		if value.IsNil() {
 			return false
 		}
+		if indirections >= lifecyclePreviewMaxDepth {
+			return true
+		}
+		indirections++
 		value = value.Elem()
 	}
 	if !value.IsValid() {
@@ -1630,13 +1638,48 @@ func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
 	case reflect.Float32, reflect.Float64:
 		float := value.Float()
 		return math.IsInf(float, 0) || math.IsNaN(float)
+	case reflect.Pointer:
+		if indirections >= lifecyclePreviewMaxDepth {
+			return true
+		}
+		visit := lifecyclePreviewVisit{typeOf: typeOf, pointer: value.Pointer()}
+		if active[visit] {
+			return true
+		}
+		active[visit] = true
+		defer delete(active, visit)
+		return lifecycleReflectValueMayMarshalErrorSeen(value.Elem(), active, indirections+1)
+	case reflect.Array:
+		for index := 0; index < value.Len(); index++ {
+			if lifecycleReflectValueMayMarshalErrorSeen(value.Index(index), active, indirections) {
+				return true
+			}
+		}
+		return false
+	case reflect.Slice:
+		if lifecycleUsesByteSliceEncoding(typeOf) || value.IsNil() {
+			return false
+		}
+		visit := lifecyclePreviewVisit{typeOf: typeOf, pointer: value.Pointer(), length: value.Len()}
+		if active[visit] {
+			return true
+		}
+		active[visit] = true
+		defer delete(active, visit)
+		for index := 0; index < value.Len(); index++ {
+			if lifecycleReflectValueMayMarshalErrorSeen(value.Index(index), active, indirections) {
+				return true
+			}
+		}
+		return false
 	case reflect.Struct:
 		for _, field := range lifecycleStructFields(typeOf) {
 			fieldValue, ok := lifecycleFieldByIndex(value, field.index)
-			if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) {
+			if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) ||
+				(field.omitZero && lifecycleJSONZeroValue(fieldValue)) {
 				continue
 			}
-			if lifecycleReflectValueMayMarshalError(fieldValue) {
+			if lifecycleReflectValueMayMarshalErrorSeen(fieldValue, active, indirections) {
 				return true
 			}
 		}

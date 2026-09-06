@@ -366,6 +366,12 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 			values[fmt.Sprintf("key-%08d", i)] = value
 		}
 		return values
+	case "wide_value_sensitive_map":
+		values := make(map[string]lifecyclePreviewValueSensitiveContainers, max(lifecyclePreviewMaxValidationMapKeys+1, size/16))
+		for i := 0; i < max(lifecyclePreviewMaxValidationMapKeys+1, size/16); i++ {
+			values[fmt.Sprintf("key-%08d", i)] = lifecyclePreviewValueSensitiveContainers{Array: [1]float64{float64(i)}}
+		}
+		return map[string]any{"value": values}
 	case "many_text_keys":
 		keyCount := 128
 		keySize := max(1, size/keyCount)
@@ -397,7 +403,7 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "many_long_common_prefix_keys", "decoded_wide_map", "wide_error_capable_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "many_long_common_prefix_keys", "decoded_wide_map", "wide_error_capable_map", "wide_value_sensitive_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -721,6 +727,28 @@ type lifecyclePreviewNestedNilMarshalerFields struct {
 	Text *lifecyclePreviewNilTextValue `json:"text"`
 }
 
+type lifecyclePreviewValueSensitiveContainers struct {
+	Array  [1]float64                                `json:"array"`
+	Slice  []float64                                 `json:"slice"`
+	Nested *lifecyclePreviewNestedNilMarshalerFields `json:"nested"`
+}
+
+type lifecyclePreviewOmitZeroMarshaler struct {
+	Omit bool
+}
+
+func (value lifecyclePreviewOmitZeroMarshaler) IsZero() bool {
+	return value.Omit
+}
+
+func (lifecyclePreviewOmitZeroMarshaler) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("non-omitted zero marshaler failed")
+}
+
+type lifecyclePreviewOmitZeroFields struct {
+	Value lifecyclePreviewOmitZeroMarshaler `json:"value,omitzero"`
+}
+
 type lifecyclePreviewTextKey string
 
 func (value lifecyclePreviewTextKey) MarshalText() ([]byte, error) {
@@ -1008,6 +1036,107 @@ func TestLifecyclePayloadSummaryValidatesLateNestedNonNilMarshaler(t *testing.T)
 				t.Fatalf("preview nested marshaler calls = %d, want 1", lifecyclePreviewNilJSONValueCalls)
 			}
 		})
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesWideValueSensitiveContainers(t *testing.T) {
+	const count = lifecyclePreviewMaxValidationMapKeys + 1
+	concrete := make(map[string]any, count)
+	reflected := make(map[string]lifecyclePreviewValueSensitiveContainers, count)
+	for i := range count {
+		key := fmt.Sprintf("key-%04d", i)
+		value := lifecyclePreviewValueSensitiveContainers{
+			Array:  [1]float64{float64(i)},
+			Slice:  []float64{float64(i)},
+			Nested: &lifecyclePreviewNestedNilMarshalerFields{},
+		}
+		concrete[key] = value
+		reflected[key] = value
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "concrete", payload: concrete},
+		{name: "reflected", payload: map[string]any{"values": reflected}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.payload)
+			if err != nil {
+				t.Fatalf("marshal wide value-sensitive containers: %v", err)
+			}
+			if got, want := lifecyclePayloadSummary(test.payload), truncate(string(encoded), 96); got != want {
+				t.Fatalf("wide value-sensitive preview = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestLifecyclePayloadSummaryValidatesLateValueSensitiveContainerErrors(t *testing.T) {
+	const count = lifecyclePreviewMaxValidationMapKeys + 1
+	for _, test := range []struct {
+		name string
+		bad  lifecyclePreviewValueSensitiveContainers
+	}{
+		{name: "array", bad: lifecyclePreviewValueSensitiveContainers{Array: [1]float64{math.NaN()}}},
+		{name: "slice", bad: lifecyclePreviewValueSensitiveContainers{Slice: []float64{math.Inf(1)}}},
+		{name: "pointer", bad: lifecyclePreviewValueSensitiveContainers{Nested: &lifecyclePreviewNestedNilMarshalerFields{JSON: &lifecyclePreviewNilJSONValue{}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			concrete := make(map[string]any, count)
+			reflected := make(map[string]lifecyclePreviewValueSensitiveContainers, count)
+			for i := range count - 1 {
+				key := fmt.Sprintf("key-%04d", i)
+				value := lifecyclePreviewValueSensitiveContainers{Array: [1]float64{float64(i)}, Slice: []float64{float64(i)}, Nested: &lifecyclePreviewNestedNilMarshalerFields{}}
+				concrete[key] = value
+				reflected[key] = value
+			}
+			concrete["zzzz-failing"] = test.bad
+			reflected["zzzz-failing"] = test.bad
+
+			for _, payload := range []map[string]any{concrete, {"values": reflected}} {
+				if _, err := json.Marshal(payload); err == nil {
+					t.Fatal("late value-sensitive error unexpectedly marshaled")
+				}
+				if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+					t.Fatalf("late value-sensitive error preview = %q, want unavailable", got)
+				}
+			}
+		})
+	}
+}
+
+func TestLifecyclePayloadSummaryHonorsOmitZeroDuringWideMapValidation(t *testing.T) {
+	const count = lifecyclePreviewMaxValidationMapKeys + 1
+	concrete := make(map[string]any, count)
+	reflected := make(map[string]lifecyclePreviewOmitZeroFields, count)
+	for i := range count {
+		key := fmt.Sprintf("key-%04d", i)
+		value := lifecyclePreviewOmitZeroFields{Value: lifecyclePreviewOmitZeroMarshaler{Omit: true}}
+		concrete[key] = value
+		reflected[key] = value
+	}
+
+	for _, payload := range []map[string]any{concrete, {"values": reflected}} {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal wide omitzero map: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Fatalf("wide omitzero preview = %q, want %q", got, want)
+		}
+	}
+
+	concrete["zzzz-failing"] = lifecyclePreviewOmitZeroFields{}
+	reflected["zzzz-failing"] = lifecyclePreviewOmitZeroFields{}
+	for _, payload := range []map[string]any{concrete, {"values": reflected}} {
+		if _, err := json.Marshal(payload); err == nil {
+			t.Fatal("non-omitted late marshaler unexpectedly succeeded")
+		}
+		if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+			t.Fatalf("non-omitted late marshaler preview = %q, want unavailable", got)
+		}
 	}
 }
 
