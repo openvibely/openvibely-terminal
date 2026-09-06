@@ -31,6 +31,44 @@ func htmlServer(t *testing.T, body string) *Client {
 	return c
 }
 
+func TestAggregateAlertPagesPreservesFirstSeenAndEmptyShape(t *testing.T) {
+	parsePage := func(body string) htmlPage {
+		root, err := html.Parse(strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("parse page: %v", err)
+		}
+		return htmlPage{root: root}
+	}
+
+	pages := []htmlPage{
+		parsePage(`<div data-alert-id="a1" data-alert-scroll-anchor="a1" data-alert-scope="global" data-alert-type="custom" data-alert-severity="warning" data-alert-source="first-source" data-alert-decision-state="approved" data-alert-processing-state="claimed" data-search-text="first text"><p class="font-semibold">First title</p></div>`),
+		parsePage(`<div data-alert-id="a1" data-alert-scroll-anchor="a1" data-alert-source="later-source"><p class="font-semibold">Later title</p></div><div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Second title</p></div>`),
+	}
+	alerts := aggregateAlertPages(pages, "project-2")
+	if len(alerts) != 2 {
+		t.Fatalf("alerts = %#v, want two unique alerts", alerts)
+	}
+	first := alerts[0]
+	if first.ID != "a1" || first.Title != "First title" || first.ProjectID != "project-2" || first.Scope != "global" || first.Type != "custom" || first.Severity != "warning" || first.Source != "first-source" || first.DecisionState != "approved" || first.ProcessingState != "claimed" || first.Text != "first text" {
+		t.Fatalf("first alert = %#v, want first-page fields", first)
+	}
+	if alerts[1].ID != "a2" {
+		t.Fatalf("second alert = %#v, want a2", alerts[1])
+	}
+
+	empty := aggregateAlertPages(nil, "project-2")
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("empty alerts = %#v, want non-nil empty slice", empty)
+	}
+	encoded, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty alerts: %v", err)
+	}
+	if string(encoded) != "[]" {
+		t.Fatalf("empty JSON = %s, want []", encoded)
+	}
+}
+
 func TestListAlertsScrapesCards(t *testing.T) {
 	// Mirrors the real alertRow markup.
 	const page = `<div>

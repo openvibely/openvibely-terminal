@@ -86,18 +86,22 @@ func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, err
 	if err != nil {
 		return nil, err
 	}
+	return aggregateAlertPages(pages, projectID), nil
+}
+
+func aggregateAlertPages(pages []htmlPage, projectID string) []Alert {
 	seen := make(map[string]bool)
-	out := make([]Alert, 0)
+	alerts := make([]Alert, 0)
 	for _, page := range pages {
 		for _, alert := range parseAlerts(page.root, projectID) {
 			if seen[alert.ID] {
 				continue
 			}
 			seen[alert.ID] = true
-			out = append(out, alert)
+			alerts = append(alerts, alert)
 		}
 	}
-	return out, nil
+	return alerts
 }
 
 func parseAlerts(root *html.Node, projectID string) []Alert {
@@ -401,18 +405,7 @@ func (c *Client) DeleteAlertAndList(ctx context.Context, alertID, projectID stri
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]bool)
-	alerts := make([]Alert, 0)
-	for _, page := range pages {
-		for _, alert := range parseAlerts(page.root, projectID) {
-			if seen[alert.ID] {
-				continue
-			}
-			seen[alert.ID] = true
-			alerts = append(alerts, alert)
-		}
-	}
-	return alerts, nil
+	return aggregateAlertPages(pages, projectID), nil
 }
 
 // MarkAllAlertsRead marks every alert read.
