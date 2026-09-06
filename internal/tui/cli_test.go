@@ -2378,6 +2378,28 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleRejectsUnknownActionAndListSurplusBeforeRequests(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown action", args: []string{"schedule", "unknown"}},
+		{name: "list surplus", args: []string{"schedule", "list", "extra"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false)
+			if err == nil || !strings.Contains(err.Error(), "schedule [list|add|edit|delete|toggle]") {
+				t.Fatalf("error = %v, want canonical schedule usage", err)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("invalid schedule command dispatched requests:\n%s", calls)
+			}
+		})
+	}
+}
+
 func TestCLIScheduleEditParityAndMissingReferenceValidation(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

@@ -1243,6 +1243,9 @@ func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
 
 func validateScheduleArgs(args []string) error {
 	action, rest := splitAction([]string{"list", "add", "edit", "delete", "toggle"}, args)
+	if action == "" && len(args) > 0 || action == "list" && len(rest) > 0 {
+		return fmt.Errorf("usage: /schedule [list|add|edit|delete|toggle]")
+	}
 	if action == "edit" {
 		_, _, err := parseScheduleEdit(rest)
 		return err
