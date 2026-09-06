@@ -3426,6 +3426,79 @@ func TestSSEChatResponseDoneTriggersImmediateFetch(t *testing.T) {
 	}
 }
 
+func TestChatStreamForcedFlushPreservesBytesCacheAndTruncation(t *testing.T) {
+	m := newTestModel(t)
+	m.log = nil
+	for i := 0; i < maxTranscript; i++ {
+		m.log = append(m.log, entry{role: "system", text: fmt.Sprintf("history-%03d", i)})
+	}
+	m.refreshTranscript()
+	unchanged := append([]string(nil), m.transcriptBlocks[1:]...)
+
+	want := "prefix λ🙂\nwrapped suffix"
+	for _, chunk := range []string{want[:8], want[8:11], want[11:]} {
+		m.updateChatStreamOutput(chunk)
+	}
+	if m.chatStreamOffset != len([]byte(want)) {
+		t.Fatalf("UTF-8 byte offset = %d, want %d", m.chatStreamOffset, len([]byte(want)))
+	}
+	m.flushChatStreamOutput()
+	if len(m.log) != maxTranscript || m.chatStreamLogIndex != maxTranscript-1 || m.log[m.chatStreamLogIndex].text != want {
+		t.Fatalf("flush/truncation mismatch: entries=%d index=%d text=%q", len(m.log), m.chatStreamLogIndex, m.log[m.chatStreamLogIndex].text)
+	}
+	for i, block := range unchanged {
+		if m.transcriptBlocks[i] != block {
+			t.Fatalf("immutable cached block %d changed", i)
+		}
+	}
+	wantBlock := renderTranscriptEntry(entry{role: "agent", text: want}, transcriptWrap(m.effectiveTranscriptWidth()))
+	if m.transcriptBlocks[m.chatStreamLogIndex] != wantBlock || !strings.HasSuffix(m.transcriptContent, wantBlock) {
+		t.Fatalf("forced output differs from canonical rendering:\ngot  %q\nwant %q", m.transcriptBlocks[m.chatStreamLogIndex], wantBlock)
+	}
+
+	m.transcriptReady = false
+	m.updateChatStreamOutput(" authoritative")
+	m.flushChatStreamOutput()
+	incremental := m.transcriptContent
+	m.refreshTranscript()
+	if m.transcriptContent != incremental {
+		t.Fatalf("cache-invalidated fallback differs from full refresh\ngot  %q\nwant %q", incremental, m.transcriptContent)
+	}
+}
+
+func TestChatStreamSnapshotFlushesMatchingBufferedOutput(t *testing.T) {
+	m := newTestModel(t)
+	m.updateChatStreamOutput("matching durable snapshot")
+	m.chatStreamRenderQueued = true
+	m.updateChatStreamSnapshot("matching durable snapshot")
+	if m.chatStreamRenderQueued || m.chatStreamLogIndex < 0 || !strings.Contains(transcript(m), "agent::matching durable snapshot") {
+		t.Fatalf("matching durable snapshot did not flush buffered output: queued=%t index=%d transcript=%q", m.chatStreamRenderQueued, m.chatStreamLogIndex, transcript(m))
+	}
+}
+
+func TestChatStreamTerminalEventFlushesQueuedOutput(t *testing.T) {
+	for _, eventName := range []string{"done", "error"} {
+		t.Run(eventName, func(t *testing.T) {
+			m := newTestModel(t)
+			m.selectedID = "project-A"
+			m.pendingMsgID = "exec-1"
+			m.pendingMsgProjectID = "project-A"
+			m.chatSubmissionPending = true
+			m.chatSubmissionID = 7
+			m.chatStreamGeneration = 4
+			m.chatStreamExecID = "exec-1"
+			m.updateChatStreamOutput("queued λ output")
+			m.chatStreamRenderQueued = true
+
+			next, cmd := m.Update(chatStreamEventMsg{generation: 4, submissionID: 7, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Name: eventName}})
+			m = next.(Model)
+			if cmd == nil || m.chatStreamRenderQueued || !strings.Contains(transcript(m), "agent::queued λ output") {
+				t.Fatalf("terminal %s did not force queued output: cmd=%v queued=%t transcript=%q", eventName, cmd != nil, m.chatStreamRenderQueued, transcript(m))
+			}
+		})
+	}
+}
+
 func TestChatOutputStreamIncrementalTerminalStaleAndRecovery(t *testing.T) {
 	m := newTestModel(t)
 	m.selectedID = "project-A"
@@ -3439,13 +3512,18 @@ func TestChatOutputStreamIncrementalTerminalStaleAndRecovery(t *testing.T) {
 
 	next, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: "Hello"}})
 	m = next.(Model)
-	if got := transcript(m); !strings.Contains(got, "agent::Hello") {
-		t.Fatalf("first incremental output not visible: %q", got)
+	if got := transcript(m); strings.Contains(got, "agent::Hello") || !m.chatStreamRenderQueued || m.chatStreamRedraws != 0 {
+		t.Fatalf("first delta should queue rather than redraw immediately: transcript=%q queued=%t redraws=%d", got, m.chatStreamRenderQueued, m.chatStreamRedraws)
 	}
 	next, _ = m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: " world"}})
 	m = next.(Model)
-	if got := transcript(m); strings.Count(got, "agent::") != 1 || !strings.Contains(got, "agent::Hello world") {
-		t.Fatalf("incremental output should update one transcript entry: %q", got)
+	if !m.chatStreamRenderQueued || m.chatStreamRedraws != 0 {
+		t.Fatalf("additional delta should share the queued redraw: queued=%t redraws=%d", m.chatStreamRenderQueued, m.chatStreamRedraws)
+	}
+	next, _ = m.Update(chatStreamRenderMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+	m = next.(Model)
+	if got := transcript(m); strings.Count(got, "agent::") != 1 || !strings.Contains(got, "agent::Hello world") || m.chatStreamRedraws != 1 {
+		t.Fatalf("cadence flush should update one transcript entry once: transcript=%q redraws=%d", got, m.chatStreamRedraws)
 	}
 
 	before := transcript(m)

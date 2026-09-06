@@ -89,6 +89,13 @@ type chatStreamEventMsg struct {
 	event        client.ChatOutputEvent
 }
 
+type chatStreamRenderMsg struct {
+	generation   int
+	submissionID uint64
+	projectID    string
+	execID       string
+}
+
 type chatStreamDisconnectedMsg struct {
 	generation   int
 	submissionID uint64
