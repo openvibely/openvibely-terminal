@@ -978,7 +978,8 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 			return nil
 		}
 		p.append("[")
-		mayError := lifecycleTypeMayMarshalError(value.Type().Elem())
+		elementAddressable := value.Kind() == reflect.Slice || value.CanAddr()
+		mayError := lifecycleTypeMayMarshalErrorAddressable(value.Type().Elem(), elementAddressable)
 		for i := 0; i < value.Len(); i++ {
 			if p.stopped && !mayError {
 				break
@@ -1598,7 +1599,7 @@ func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
 		float := value.Float()
 		return math.IsInf(float, 0) || math.IsNaN(float)
 	default:
-		return lifecycleTypeMayMarshalError(typeOf)
+		return lifecycleTypeMayMarshalErrorAddressable(typeOf, value.CanAddr() && value.Addr().CanInterface())
 	}
 }
 
@@ -1628,35 +1629,57 @@ func lifecycleUsesByteSliceEncoding(typeOf reflect.Type) bool {
 		!pointer.Implements(reflect.TypeFor[encoding.TextMarshaler]())
 }
 
-func lifecycleTypeMayMarshalError(typeOf reflect.Type) bool {
-	return lifecycleTypeMayMarshalErrorSeen(typeOf, make(map[reflect.Type]bool))
+type lifecycleMarshalErrorVisit struct {
+	typeOf      reflect.Type
+	addressable bool
 }
 
-func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, seen map[reflect.Type]bool) bool {
-	if seen[typeOf] {
+func lifecycleTypeMayMarshalError(typeOf reflect.Type) bool {
+	return lifecycleTypeMayMarshalErrorAddressable(typeOf, false)
+}
+
+func lifecycleTypeMayMarshalErrorAddressable(typeOf reflect.Type, addressable bool) bool {
+	return lifecycleTypeMayMarshalErrorSeen(typeOf, addressable, make(map[lifecycleMarshalErrorVisit]bool))
+}
+
+func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, addressable bool, seen map[lifecycleMarshalErrorVisit]bool) bool {
+	visit := lifecycleMarshalErrorVisit{typeOf: typeOf, addressable: addressable}
+	if seen[visit] {
 		// Recursive pointer/container types may contain runtime cycles even when
 		// their scalar leaves cannot otherwise fail JSON encoding.
 		return true
 	}
-	seen[typeOf] = true
-	defer delete(seen, typeOf)
+	seen[visit] = true
+	defer delete(seen, visit)
 	if typeOf == reflect.TypeFor[json.Number]() ||
 		typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
 		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
-		(typeOf.Kind() != reflect.Pointer && (reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()))) {
+		(addressable && typeOf.Kind() != reflect.Pointer && (reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()))) {
 		return true
 	}
 	switch typeOf.Kind() {
 	case reflect.Interface, reflect.Float32, reflect.Float64, reflect.Chan, reflect.Complex64, reflect.Complex128, reflect.Func, reflect.UnsafePointer:
 		return true
-	case reflect.Pointer, reflect.Array, reflect.Slice:
-		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), seen)
+	case reflect.Pointer:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), true, seen)
+	case reflect.Array:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), addressable, seen)
+	case reflect.Slice:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), true, seen)
 	case reflect.Map:
-		return lifecycleTypeMayMarshalErrorSeen(typeOf.Key(), seen) || lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), seen)
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Key(), false, seen) || lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), false, seen)
 	case reflect.Struct:
 		for _, field := range lifecycleStructFields(typeOf) {
-			fieldType := typeOf.FieldByIndex(field.index).Type
-			if lifecycleTypeMayMarshalErrorSeen(fieldType, seen) {
+			fieldType := typeOf
+			fieldAddressable := addressable
+			for _, fieldIndex := range field.index {
+				if fieldType.Kind() == reflect.Pointer {
+					fieldType = fieldType.Elem()
+					fieldAddressable = true
+				}
+				fieldType = fieldType.Field(fieldIndex).Type
+			}
+			if lifecycleTypeMayMarshalErrorSeen(fieldType, fieldAddressable, seen) {
 				return true
 			}
 		}

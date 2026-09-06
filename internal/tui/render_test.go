@@ -692,6 +692,23 @@ type lifecyclePreviewRepeatedSafeSiblings struct {
 	Right lifecyclePreviewSafeLeaf `json:"right"`
 }
 
+type lifecyclePreviewMapPointerJSONInt int
+
+func (*lifecyclePreviewMapPointerJSONInt) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("non-addressable map JSON value method must not be called")
+}
+
+type lifecyclePreviewMapPointerTextInt int
+
+func (*lifecyclePreviewMapPointerTextInt) MarshalText() ([]byte, error) {
+	return nil, errors.New("non-addressable map text value method must not be called")
+}
+
+type lifecyclePreviewMapPointerMethodFields struct {
+	JSON lifecyclePreviewMapPointerJSONInt `json:"json"`
+	Text lifecyclePreviewMapPointerTextInt `json:"text"`
+}
+
 type lifecyclePreviewTextKey string
 
 func (value lifecyclePreviewTextKey) MarshalText() ([]byte, error) {
@@ -930,6 +947,50 @@ func TestLifecyclePayloadSummaryPreservesWideNilPointerMarshalerMaps(t *testing.
 			}
 			if *test.calls != 0 {
 				t.Fatalf("preview invoked nil pointer method %d times", *test.calls)
+			}
+		})
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesWideNonAddressablePointerMethodMapValues(t *testing.T) {
+	const count = lifecyclePreviewMaxValidationMapKeys + 1
+	concreteJSON := make(map[string]any, count)
+	concreteText := make(map[string]any, count)
+	reflectedJSON := make(map[string]lifecyclePreviewMapPointerJSONInt, count)
+	reflectedText := make(map[string]lifecyclePreviewMapPointerTextInt, count)
+	concreteNested := make(map[string]any, count)
+	nested := make(map[string]lifecyclePreviewMapPointerMethodFields, count)
+	for i := range count {
+		key := fmt.Sprintf("key-%04d", i)
+		jsonValue := lifecyclePreviewMapPointerJSONInt(i)
+		textValue := lifecyclePreviewMapPointerTextInt(i)
+		fields := lifecyclePreviewMapPointerMethodFields{JSON: jsonValue, Text: textValue}
+		concreteJSON[key] = jsonValue
+		concreteText[key] = textValue
+		reflectedJSON[key] = jsonValue
+		reflectedText[key] = textValue
+		concreteNested[key] = fields
+		nested[key] = fields
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "concrete_json", payload: concreteJSON},
+		{name: "concrete_text", payload: concreteText},
+		{name: "reflected_json", payload: map[string]any{"values": reflectedJSON}},
+		{name: "reflected_text", payload: map[string]any{"values": reflectedText}},
+		{name: "concrete_nested_fields", payload: concreteNested},
+		{name: "reflected_nested_fields", payload: map[string]any{"values": nested}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			encoded, err := json.Marshal(test.payload)
+			if err != nil {
+				t.Fatalf("marshal wide non-addressable values: %v", err)
+			}
+			if got, want := lifecyclePayloadSummary(test.payload), truncate(string(encoded), 96); got != want {
+				t.Fatalf("wide non-addressable preview = %q, want %q", got, want)
 			}
 		})
 	}
