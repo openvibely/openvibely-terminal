@@ -1632,8 +1632,8 @@ func TestCLIUnknownCommandFails(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "unknown command") {
 				t.Fatalf("err = %v, want unknown command", err)
 			}
-			if rec.saw("POST", "/api/autonomous/trigger") {
-				t.Fatalf("unsupported command made a backend request:\n%s", rec.all())
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("unsupported command made a backend request:\n%s", calls)
 			}
 		})
 	}
