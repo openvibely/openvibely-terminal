@@ -2158,6 +2158,118 @@ func TestWorkersLimitOperandValidationDispatch(t *testing.T) {
 	}
 }
 
+func TestScheduleMutationsUseExactSelectedProjectForDirectAndPickerPaths(t *testing.T) {
+	const projectB = "project B&mode=terminal"
+	const encodedScope = "project_id=project+B%26mode%3Dterminal"
+	cases := []struct {
+		name        string
+		line        string
+		method      string
+		path        string
+		needsTasks  bool
+		destructive bool
+		picker      bool
+	}{
+		{name: "add direct", line: "/schedule add Refactor 2026-09-01T10:00 daily", method: http.MethodPost, path: "/tasks/t-1/schedule", needsTasks: true},
+		{name: "toggle direct", line: "/schedule toggle s-1", method: http.MethodPost, path: "/api/schedules/s-1/toggle"},
+		{name: "delete direct", line: "/schedule delete s-1", method: http.MethodDelete, path: "/schedules/s-1", destructive: true},
+		{name: "toggle picker", line: "/schedule toggle", method: http.MethodPost, path: "/api/schedules/s-1/toggle", picker: true},
+		{name: "delete picker", line: "/schedule delete", method: http.MethodDelete, path: "/schedules/s-1", destructive: true, picker: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mutations int
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case tc.needsTasks && r.Method == http.MethodGet && r.URL.Path == "/tasks":
+					if got := r.URL.Query().Get("project_id"); got != projectB {
+						t.Errorf("task resolution project_id = %q, want %q", got, projectB)
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(taskBoardHTML))
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					if got := r.URL.Query().Get("project_id"); got != projectB {
+						t.Errorf("schedule read project_id = %q, want %q", got, projectB)
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(selScheduleHTML))
+				case r.Method == tc.method && r.URL.Path == tc.path:
+					mutations++
+					if got := r.URL.Query().Get("project_id"); got != projectB {
+						http.Error(w, "schedule belongs to another project", http.StatusForbidden)
+						return
+					}
+					if r.URL.RawQuery != encodedScope {
+						t.Errorf("mutation RawQuery = %q, want %q", r.URL.RawQuery, encodedScope)
+					}
+					if tc.method == http.MethodPost && strings.Contains(tc.path, "/api/schedules/") {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(`{}`))
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m.selectedID = projectB
+			m = runLine(t, m, tc.line)
+			if tc.picker {
+				if !m.selectorActive {
+					t.Fatalf("expected picker:\n%s", transcript(m))
+				}
+				m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			}
+			if tc.destructive {
+				if m.pendingConfirmation == nil {
+					t.Fatalf("expected confirmation:\n%s", transcript(m))
+				}
+				m = runLine(t, m, "yes")
+			}
+			if mutations != 1 {
+				t.Fatalf("mutations = %d, want 1", mutations)
+			}
+			if out := stripANSI(transcript(m)); strings.Contains(out, "error:") {
+				t.Fatalf("Project B mutation failed despite explicit scope:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestScheduleMutationExplicitOwnershipMismatchRemainsRejected(t *testing.T) {
+	var mutations int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(selScheduleHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/api/schedules/s-1/toggle":
+			mutations++
+			if got := r.URL.Query().Get("project_id"); got != "project A" {
+				t.Errorf("mutation project_id = %q, want project A", got)
+			}
+			http.Error(w, "schedule belongs to another project", http.StatusForbidden)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	m.selectedID = "project A"
+	m = runLine(t, m, "/schedule toggle s-1")
+	if mutations != 1 {
+		t.Fatalf("mutations = %d, want 1", mutations)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "403") {
+		t.Fatalf("ownership error missing from transcript:\n%s", out)
+	}
+	if strings.Contains(out, "toggled schedule") {
+		t.Fatalf("ownership failure reported success:\n%s", out)
+	}
+}
+
 func TestScheduleDirectDispatchResolvesSecondScheduleID(t *testing.T) {
 	cases := []struct {
 		action string

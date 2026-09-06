@@ -811,7 +811,7 @@ func (c *Client) UpdateSchedule(ctx context.Context, current ScheduleConfig, upd
 // once/daily/weekly/monthly/seconds/minutes/hours/hourly. The user-facing
 // "hourly" keyword is translated to the backend's "hours" repeat_type, since
 // the backend has no "hourly" value.
-func (c *Client) CreateSchedule(ctx context.Context, taskID, runAt, repeat string, interval int) error {
+func (c *Client) CreateSchedule(ctx context.Context, projectID, taskID, runAt, repeat string, interval int) error {
 	if interval < 1 || interval > 365 {
 		return fmt.Errorf("repeat interval must be between 1 and 365")
 	}
@@ -820,12 +820,12 @@ func (c *Client) CreateSchedule(ctx context.Context, taskID, runAt, repeat strin
 	v.Set("run_at", runAt)
 	v.Set("repeat_type", repeat)
 	v.Set("repeat_interval", strconv.Itoa(interval))
-	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/schedule", v)
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/schedule"+query("project_id", projectID), v)
 }
 
 // DeleteSchedule removes a schedule.
-func (c *Client) DeleteSchedule(ctx context.Context, scheduleID string) error {
-	return c.doForm(ctx, http.MethodDelete, "/schedules/"+url.PathEscape(scheduleID), nil)
+func (c *Client) DeleteSchedule(ctx context.Context, projectID, scheduleID string) error {
+	return c.doForm(ctx, http.MethodDelete, "/schedules/"+url.PathEscape(scheduleID)+query("project_id", projectID), nil)
 }
 
 // --- workers ---

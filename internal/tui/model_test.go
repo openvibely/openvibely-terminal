@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1736,6 +1737,175 @@ func TestProjectLoadTransportFailurePreservesAuthRequired(t *testing.T) {
 	status := strings.ToLower(m.renderStatus())
 	if !strings.Contains(status, "offline") || !strings.Contains(status, "sign-in required") {
 		t.Fatalf("project transport failure omitted combined recovery state:\n%s", m.renderStatus())
+	}
+}
+
+func TestCompletedRequestHandlersShareErrorPolicyAndPreserveBehavior(t *testing.T) {
+	type handlerCase struct {
+		name    string
+		message func(Model, error) tea.Msg
+		success func(*testing.T, Model, tea.Cmd)
+	}
+	cases := []handlerCase{
+		{
+			name: "project creation",
+			message: func(m Model, err error) tea.Msg {
+				return projectCreatedMsg{
+					sessionGeneration: m.sessionGeneration,
+					projectGeneration: m.projectGeneration,
+					requestID:         m.projectRequestID,
+					project:           client.Project{ID: "created", Name: "Created", Path: "/tmp/created"},
+					err:               err,
+				}
+			},
+			success: func(t *testing.T, m Model, cmd tea.Cmd) {
+				if cmd != nil || m.busy || m.selectedID != "created" || len(m.projects) != 1 || m.projects[0].ID != "created" {
+					t.Fatalf("project success changed: busy=%t selected=%q projects=%+v cmd=%v", m.busy, m.selectedID, m.projects, cmd)
+				}
+				if !strings.Contains(transcript(m), `created project "Created"`) {
+					t.Fatalf("project success output missing: %q", transcript(m))
+				}
+			},
+		},
+		{
+			name: "attachment delete target",
+			message: func(m Model, err error) tea.Msg {
+				return attachmentDeleteTargetMsg{
+					sessionGeneration: m.sessionGeneration,
+					projectGeneration: m.projectGeneration,
+					projectID:         "p1",
+					task:              client.Task{ID: "task-1", Title: "Task One"},
+					attachment:        client.Attachment{ID: "attachment-1", FileName: "notes.txt"},
+					err:               err,
+				}
+			},
+			success: func(t *testing.T, m Model, cmd tea.Cmd) {
+				if cmd != nil || m.busy || m.pendingConfirmation == nil {
+					t.Fatalf("attachment success changed: busy=%t confirmation=%v cmd=%v", m.busy, m.pendingConfirmation != nil, cmd)
+				}
+				if want := `Delete attachment "notes.txt" from task "Task One"?`; !strings.Contains(m.pendingConfirmation.message, want) {
+					t.Fatalf("attachment confirmation = %q, want %q", m.pendingConfirmation.message, want)
+				}
+			},
+		},
+		{
+			name: "thread open",
+			message: func(m Model, err error) tea.Msg {
+				return threadOpenedMsg{
+					sessionGeneration: m.sessionGeneration,
+					projectGeneration: m.projectGeneration,
+					requestID:         m.threadOpenRequestID,
+					projectID:         "p1",
+					taskID:            "task-1",
+					title:             "Task One",
+					status:            "RUNNING",
+					body:              "thread body",
+					err:               err,
+				}
+			},
+			success: func(t *testing.T, m Model, cmd tea.Cmd) {
+				if cmd != nil || m.busy || m.threadID != "task-1" || m.threadTitle != "Task One" || m.threadStatus != "running" {
+					t.Fatalf("thread success changed: busy=%t id=%q title=%q status=%q cmd=%v", m.busy, m.threadID, m.threadTitle, m.threadStatus, cmd)
+				}
+				if out := transcript(m); !strings.Contains(out, "thread body") || !strings.Contains(out, "in task thread") {
+					t.Fatalf("thread success output missing: %q", out)
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("authentication precedes transport", func(t *testing.T) {
+				m := newTestModel(t)
+				m.selectedID = "p1"
+				m.projectRequestID = 7
+				m.threadOpenRequestID = 9
+				m.connected = true
+				m.connChecked = true
+				m.busy = true
+				authErr := &client.AuthRequiredError{Method: http.MethodGet, Path: "/protected", StatusCode: http.StatusUnauthorized}
+				combined := errors.Join(authErr, refusedTransportError(t))
+
+				next, cmd := m.Update(tc.message(m, combined))
+				m = next.(Model)
+				out := transcript(m)
+				if cmd != nil || !m.authRequired || m.connected || m.busy {
+					t.Fatalf("auth result state: authRequired=%t connected=%t busy=%t cmd=%v", m.authRequired, m.connected, m.busy, cmd)
+				}
+				if strings.Count(out, authRecoveryMessage(m.client.BaseURL())) != 1 || strings.Contains(out, "Backend offline or unreachable") || m.connErr != "" {
+					t.Fatalf("auth did not take precedence exactly once: connErr=%q transcript=%q", m.connErr, out)
+				}
+			})
+
+			t.Run("transport guidance once", func(t *testing.T) {
+				m := newTestModel(t)
+				m.selectedID = "p1"
+				m.projectRequestID = 7
+				m.threadOpenRequestID = 9
+				m.connected = true
+				m.connChecked = true
+				m.busy = true
+				transportErr := refusedTransportError(t)
+
+				next, cmd := m.Update(tc.message(m, transportErr))
+				m = next.(Model)
+				guidance := OfflineRecoveryMessage(m.client.BaseURL(), transportErr)
+				if cmd != nil || m.connected || !m.connChecked || m.connErr != transportErr.Error() || m.busy {
+					t.Fatalf("transport result state: connected=%t checked=%t connErr=%q busy=%t cmd=%v", m.connected, m.connChecked, m.connErr, m.busy, cmd)
+				}
+				if got := strings.Count(transcript(m), guidance); got != 1 {
+					t.Fatalf("transport guidance count = %d, want 1: %q", got, transcript(m))
+				}
+			})
+
+			t.Run("ordinary error once unchanged", func(t *testing.T) {
+				m := newTestModel(t)
+				m.selectedID = "p1"
+				m.projectRequestID = 7
+				m.threadOpenRequestID = 9
+				m.busy = true
+				ordinaryErr := errors.New("ordinary completed-request failure")
+
+				next, cmd := m.Update(tc.message(m, ordinaryErr))
+				m = next.(Model)
+				if cmd != nil || m.busy {
+					t.Fatalf("ordinary error state: busy=%t cmd=%v", m.busy, cmd)
+				}
+				if got := strings.Count(transcript(m), "error::"+ordinaryErr.Error()+"\n"); got != 1 {
+					t.Fatalf("ordinary error count = %d, want exact entry once: %q", got, transcript(m))
+				}
+			})
+
+			t.Run("stale ignored", func(t *testing.T) {
+				m := newTestModel(t)
+				m.selectedID = "p1"
+				m.projectRequestID = 7
+				m.threadOpenRequestID = 9
+				m.sessionGeneration = 2
+				m.busy = true
+				before := transcript(m)
+
+				staleBase := m
+				staleBase.sessionGeneration = 1
+				next, cmd := m.Update(tc.message(staleBase, errors.New("stale failure")))
+				m = next.(Model)
+				if cmd != nil || !m.busy || transcript(m) != before || m.authRequired || m.connErr != "" || m.pendingConfirmation != nil || m.threadID != "" {
+					t.Fatalf("stale result changed state: busy=%t auth=%t connErr=%q confirmation=%v thread=%q cmd=%v transcript=%q", m.busy, m.authRequired, m.connErr, m.pendingConfirmation != nil, m.threadID, cmd, transcript(m))
+				}
+			})
+
+			t.Run("success", func(t *testing.T) {
+				m := newTestModel(t)
+				m.selectedID = "p1"
+				m.projectRequestID = 7
+				m.threadOpenRequestID = 9
+				m.busy = true
+
+				next, cmd := m.Update(tc.message(m, nil))
+				tc.success(t, next.(Model), cmd)
+			})
+		})
 	}
 }
 

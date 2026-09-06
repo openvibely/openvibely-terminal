@@ -372,9 +372,9 @@ type Schedule struct {
 }
 
 // ToggleSchedule flips a schedule's enabled state.
-func (c *Client) ToggleSchedule(ctx context.Context, id string) (*Schedule, error) {
+func (c *Client) ToggleSchedule(ctx context.Context, projectID, id string) (*Schedule, error) {
 	var out Schedule
-	if err := c.postJSON(ctx, "/api/schedules/"+url.PathEscape(id)+"/toggle", nil, &out); err != nil {
+	if err := c.postJSON(ctx, "/api/schedules/"+url.PathEscape(id)+"/toggle"+query("project_id", projectID), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
