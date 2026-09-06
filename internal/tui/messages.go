@@ -90,10 +90,11 @@ type chatStreamEventMsg struct {
 }
 
 type chatStreamRenderMsg struct {
-	generation   int
-	submissionID uint64
-	projectID    string
-	execID       string
+	generation       int
+	renderGeneration uint64
+	submissionID     uint64
+	projectID        string
+	execID           string
 }
 
 type chatStreamDisconnectedMsg struct {

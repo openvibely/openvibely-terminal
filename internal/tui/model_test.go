@@ -3519,7 +3519,7 @@ func TestChatStreamRedrawsAreCadenceBoundedAndFinalOutputMatches(t *testing.T) {
 		next, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: chunk}})
 		m = next.(Model)
 		if i%cadenceChunks == 0 {
-			next, _ = m.Update(chatStreamRenderMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+			next, _ = m.Update(chatStreamRenderMsg{generation: 3, renderGeneration: m.chatStreamRenderGeneration, submissionID: 9, projectID: "project-A", execID: "exec-1"})
 			m = next.(Model)
 		}
 	}
@@ -3683,7 +3683,7 @@ func TestChatOutputStreamIncrementalTerminalStaleAndRecovery(t *testing.T) {
 	if !m.chatStreamRenderQueued || m.chatStreamRedraws != 0 {
 		t.Fatalf("additional delta should share the queued redraw: queued=%t redraws=%d", m.chatStreamRenderQueued, m.chatStreamRedraws)
 	}
-	next, _ = m.Update(chatStreamRenderMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+	next, _ = m.Update(chatStreamRenderMsg{generation: 3, renderGeneration: m.chatStreamRenderGeneration, submissionID: 9, projectID: "project-A", execID: "exec-1"})
 	m = next.(Model)
 	if got := transcript(m); strings.Count(got, "agent::") != 1 || !strings.Contains(got, "agent::Hello world") || m.chatStreamRedraws != 1 {
 		t.Fatalf("cadence flush should update one transcript entry once: transcript=%q redraws=%d", got, m.chatStreamRedraws)
@@ -3896,6 +3896,130 @@ func pendingChatStreamTestModel(t *testing.T) Model {
 	m.chatStreamGeneration = 3
 	m.chatStreamExecID = "exec-1"
 	return m
+}
+
+func TestAuthoritativeCompletionReconcilesBufferedFirstBlockOnce(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("partial reply")
+	m.chatStreamRenderQueued = true
+
+	m.completeChat("final reply", nil)
+
+	if got := strings.Count(transcript(m), "agent::"); got != 1 {
+		t.Fatalf("completion rendered %d assistant entries; transcript:\n%s", got, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "agent::final reply") || strings.Contains(transcript(m), "partial reply") {
+		t.Fatalf("completion did not reconcile buffered output exactly: %s", transcript(m))
+	}
+	if m.busy || m.pendingMsgID != "" || m.chatStreamRenderQueued {
+		t.Fatalf("completion left pending state: busy=%t id=%q queued=%t", m.busy, m.pendingMsgID, m.chatStreamRenderQueued)
+	}
+}
+
+func TestForcedChatStreamFlushInvalidatesOldCadenceTimer(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("first")
+	if cmd := m.scheduleChatStreamRender(); cmd == nil {
+		t.Fatal("first delta did not schedule render")
+	}
+	oldRenderGeneration := m.chatStreamRenderGeneration
+
+	m.append(entry{role: "system", text: "later entry"})
+	if m.chatStreamRenderQueued || m.chatStreamRedraws != 1 {
+		t.Fatalf("forced append flush state: queued=%t redraws=%d, want false/1", m.chatStreamRenderQueued, m.chatStreamRedraws)
+	}
+	m.updateChatStreamOutput(" second")
+	if cmd := m.scheduleChatStreamRender(); cmd == nil {
+		t.Fatal("second delta did not schedule replacement render")
+	}
+	newRenderGeneration := m.chatStreamRenderGeneration
+	if newRenderGeneration == oldRenderGeneration {
+		t.Fatalf("replacement timer reused render generation %d", newRenderGeneration)
+	}
+
+	next, _ := m.Update(chatStreamRenderMsg{
+		generation:       3,
+		renderGeneration: oldRenderGeneration,
+		submissionID:     9,
+		projectID:        "project-A",
+		execID:           "exec-1",
+	})
+	m = next.(Model)
+	if !m.chatStreamRenderQueued || m.chatStreamRedraws != 1 || strings.Contains(transcript(m), "first second") {
+		t.Fatalf("old timer affected replacement render: queued=%t redraws=%d transcript=%q", m.chatStreamRenderQueued, m.chatStreamRedraws, transcript(m))
+	}
+
+	next, _ = m.Update(chatStreamRenderMsg{
+		generation:       3,
+		renderGeneration: newRenderGeneration,
+		submissionID:     9,
+		projectID:        "project-A",
+		execID:           "exec-1",
+	})
+	m = next.(Model)
+	if m.chatStreamRenderQueued || m.chatStreamRedraws != 2 || !strings.Contains(transcript(m), "agent::first second") {
+		t.Fatalf("replacement timer did not render: queued=%t redraws=%d transcript=%q", m.chatStreamRenderQueued, m.chatStreamRedraws, transcript(m))
+	}
+}
+
+func TestBufferedChatOutputPrecedesEveryLaterTranscriptAppend(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		update func(Model) Model
+		role   string
+		text   string
+	}{
+		{
+			name: "unrelated visible SSE event",
+			update: func(m Model) Model {
+				m.showEvents = true
+				next, _ := m.Update(sseEventMsg{event: client.Event{
+					Name: "task_updated",
+					Data: json.RawMessage(`{"type":"task_updated","project_id":"project-A","task_name":"later task"}`),
+				}})
+				return next.(Model)
+			},
+			role: "event",
+			text: "task_updated",
+		},
+		{
+			name: "asynchronous command result",
+			update: func(m Model) Model {
+				next, _ := m.Update(resultMsg{
+					sessionGeneration: sessionGenerationOf(m),
+					projectGeneration: projectGenerationOf(m),
+					title:             "Later result",
+					body:              "command finished",
+				})
+				return next.(Model)
+			},
+			role: "result",
+			text: "command finished",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			m.updateChatStreamOutput("accepted assistant bytes")
+			m.chatStreamRenderQueued = true
+
+			m = tc.update(m)
+
+			if len(m.log) < 2 {
+				t.Fatalf("expected assistant and later entry, got %#v", m.log)
+			}
+			assistant := m.log[len(m.log)-2]
+			later := m.log[len(m.log)-1]
+			if assistant.role != "agent" || assistant.text != "accepted assistant bytes" {
+				t.Fatalf("entry before later append = %#v, want buffered assistant", assistant)
+			}
+			if later.role != tc.role || !strings.Contains(later.text, tc.text) {
+				t.Fatalf("later entry = %#v, want role=%q containing %q", later, tc.role, tc.text)
+			}
+			if got := strings.Count(transcript(m), "agent::accepted assistant bytes"); got != 1 {
+				t.Fatalf("assistant rendered %d times; transcript:\n%s", got, transcript(m))
+			}
+		})
+	}
 }
 
 func TestBufferedChatOutputPrecedesVisibleSSECompletionEvent(t *testing.T) {

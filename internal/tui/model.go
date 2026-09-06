@@ -156,20 +156,21 @@ type Model struct {
 	// chatSubmissionPending covers the window before the backend returns the
 	// accepted message ID. chatSubmissionID keeps delayed acknowledgements from
 	// an older turn from replacing a newer active submission.
-	chatSubmissionPending  bool
-	chatSubmissionID       uint64
-	chatStreamGeneration   int
-	chatStreamCancel       context.CancelFunc
-	chatStreamEvents       <-chan client.ChatOutputEvent
-	chatStreamErrs         <-chan error
-	chatStreamExecID       string
-	chatStreamOffset       int
-	chatStreamOutput       string
-	chatStreamBuffer       []byte
-	chatStreamLogIndex     int
-	chatStreamRenderQueued bool
-	chatStreamRedraws      int
-	busy                   bool
+	chatSubmissionPending      bool
+	chatSubmissionID           uint64
+	chatStreamGeneration       int
+	chatStreamCancel           context.CancelFunc
+	chatStreamEvents           <-chan client.ChatOutputEvent
+	chatStreamErrs             <-chan error
+	chatStreamExecID           string
+	chatStreamOffset           int
+	chatStreamOutput           string
+	chatStreamBuffer           []byte
+	chatStreamLogIndex         int
+	chatStreamRenderQueued     bool
+	chatStreamRenderGeneration uint64
+	chatStreamRedraws          int
+	busy                       bool
 
 	// operational counts cached by /status
 	pendingAlertCount int
@@ -743,6 +744,11 @@ func (m *Model) currentChatStreamOutput() string {
 
 func (m *Model) flushChatStreamOutput() {
 	output := m.currentChatStreamOutput()
+	if m.chatStreamRenderQueued {
+		// A forced flush cannot cancel tea.Tick, so advance the render epoch to
+		// make that queued tick stale before another delta schedules a new one.
+		m.chatStreamRenderGeneration++
+	}
 	m.chatStreamRenderQueued = false
 	if output == "" && m.chatStreamLogIndex < 0 {
 		return
@@ -755,7 +761,7 @@ func (m *Model) flushChatStreamOutput() {
 		m.log[m.chatStreamLogIndex].text = output
 		m.replaceTranscriptBlock(m.chatStreamLogIndex)
 	} else {
-		m.append(entry{role: "agent", text: output})
+		m.appendTranscriptEntry(entry{role: "agent", text: output})
 		m.chatStreamLogIndex = len(m.log) - 1
 	}
 	m.chatStreamRedraws++
@@ -766,12 +772,15 @@ func (m *Model) scheduleChatStreamRender() tea.Cmd {
 		return nil
 	}
 	m.chatStreamRenderQueued = true
+	m.chatStreamRenderGeneration++
+	renderGeneration := m.chatStreamRenderGeneration
 	return tea.Tick(chatStreamRenderInterval, func(time.Time) tea.Msg {
 		return chatStreamRenderMsg{
-			generation:   m.chatStreamGeneration,
-			submissionID: m.chatSubmissionID,
-			projectID:    m.pendingMsgProjectID,
-			execID:       m.chatStreamExecID,
+			generation:       m.chatStreamGeneration,
+			renderGeneration: renderGeneration,
+			submissionID:     m.chatSubmissionID,
+			projectID:        m.pendingMsgProjectID,
+			execID:           m.chatStreamExecID,
 		}
 	})
 }
@@ -813,6 +822,9 @@ func (m *Model) reconcileChatStreamOutput(response string) {
 // completeChat settles a successful project-chat response. Task IDs are
 // optional because only polling status responses include them.
 func (m *Model) completeChat(response string, taskIDs []string) {
+	// Authoritative completion can race the first cadence tick. Materialize any
+	// accepted bytes first so the final response reconciles one assistant entry.
+	m.flushChatStreamOutput()
 	if m.chatStreamLogIndex >= 0 {
 		m.reconcileChatStreamOutput(response)
 	} else {
@@ -1483,7 +1495,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatStreamRenderMsg:
-		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
+		if msg.generation != m.chatStreamGeneration || msg.renderGeneration != m.chatStreamRenderGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
 			return m, nil
 		}
 		m.flushChatStreamOutput()
@@ -2194,6 +2206,16 @@ func (m Model) historyNext() Model {
 // --- transcript ---
 
 func (m *Model) append(e entry) {
+	output := m.currentChatStreamOutput()
+	if output != "" && (m.chatStreamLogIndex < 0 || output != m.chatStreamOutput) {
+		// Any later transcript entry must follow bytes already accepted from the
+		// assistant, even when their normal cadence render has not fired yet.
+		m.flushChatStreamOutput()
+	}
+	m.appendTranscriptEntry(e)
+}
+
+func (m *Model) appendTranscriptEntry(e entry) {
 	width := m.effectiveTranscriptWidth()
 	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log)
 	block := ""

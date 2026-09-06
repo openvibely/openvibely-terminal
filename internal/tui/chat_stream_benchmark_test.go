@@ -138,10 +138,11 @@ func updateBenchmarkStream(m Model, event client.ChatOutputEvent) Model {
 
 func renderBenchmarkStream(m Model) Model {
 	next, _ := m.Update(chatStreamRenderMsg{
-		generation:   1,
-		submissionID: 1,
-		projectID:    "project-A",
-		execID:       "exec-1",
+		generation:       1,
+		renderGeneration: m.chatStreamRenderGeneration,
+		submissionID:     1,
+		projectID:        "project-A",
+		execID:           "exec-1",
 	})
 	return next.(Model)
 }
@@ -154,6 +155,6 @@ func legacyUpdateChatStreamOutput(m *Model, delta string) {
 		m.refreshTranscript()
 		return
 	}
-	m.append(entry{role: "agent", text: m.chatStreamOutput})
+	m.appendTranscriptEntry(entry{role: "agent", text: m.chatStreamOutput})
 	m.chatStreamLogIndex = len(m.log) - 1
 }
