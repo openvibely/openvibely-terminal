@@ -703,11 +703,9 @@ func lifecyclePayloadSummary(payload map[string]any) string {
 }
 
 const (
-	lifecyclePreviewMaxDepth       = 10_000
-	lifecyclePreviewMaxCloneDepth  = 128
-	lifecyclePreviewMaxBytes       = 512
-	lifecyclePreviewMaxKeyBytes    = 512
-	lifecyclePreviewMaxCustomBytes = 512
+	lifecyclePreviewMaxDepth    = 10_000
+	lifecyclePreviewMaxBytes    = 512
+	lifecyclePreviewMaxKeyBytes = 512
 )
 
 // lifecycleJSONPreview emits the same bytes as encoding/json for ordinary
@@ -781,12 +779,11 @@ func (p *lifecycleJSONPreview) appendValue(value any, depth int) error {
 		}
 		keys := make([]string, 0, len(value))
 		for key := range value {
-			if len(key) > lifecyclePreviewMaxKeyBytes {
-				return fmt.Errorf("lifecycle payload key exceeds preview limit")
-			}
 			keys = append(keys, key)
 		}
-		sort.Strings(keys)
+		sort.Slice(keys, func(i, j int) bool {
+			return boundedLifecycleKeyLess(keys[i], keys[j])
+		})
 		p.append("{")
 		for i, key := range keys {
 			if !p.stopped {
@@ -909,26 +906,30 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 			p.append("null")
 			return nil
 		}
-		if value.Type().Key().Kind() != reflect.String {
-			return p.appendMarshaled(value.Interface())
-		}
-		keys := value.MapKeys()
-		for _, key := range keys {
-			if len(key.String()) > lifecyclePreviewMaxKeyBytes {
-				return fmt.Errorf("lifecycle payload key exceeds preview limit")
+		keys := make([]lifecyclePreviewMapKey, 0, value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			valueKey := iterator.Key()
+			key, err := lifecyclePreviewKey(valueKey)
+			if err != nil {
+				return err
 			}
+			key.value = valueKey
+			keys = append(keys, key)
 		}
-		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		sort.Slice(keys, func(i, j int) bool {
+			return boundedLifecycleMapKeyLess(keys[i], keys[j])
+		})
 		p.append("{")
 		for i, key := range keys {
 			if !p.stopped {
 				if i > 0 {
 					p.append(",")
 				}
-				p.appendJSONString(key.String())
+				key.appendTo(p)
 				p.append(":")
 			}
-			if err := p.appendReflectValue(value.MapIndex(key), depth+1); err != nil {
+			if err := p.appendReflectValue(value.MapIndex(key.value), depth+1); err != nil {
 				return err
 			}
 		}
@@ -936,6 +937,9 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 		return nil
 	case reflect.Struct:
 		bounded := boundedLifecycleValue(value, lifecyclePreviewMaxBytes, depth)
+		if value.CanAddr() && bounded.CanAddr() && bounded.Addr().CanInterface() {
+			return p.appendMarshaled(bounded.Addr().Interface())
+		}
 		return p.appendMarshaled(bounded.Interface())
 	default:
 		if !marshalValue.CanInterface() {
@@ -945,8 +949,81 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 	}
 }
 
+type lifecyclePreviewMapKey struct {
+	value      reflect.Value
+	text       []byte
+	textString string
+}
+
+func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
+	if value.Kind() == reflect.String {
+		return lifecyclePreviewMapKey{textString: value.String()}, nil
+	}
+	if value.CanInterface() {
+		if marshaler, ok := value.Interface().(encoding.TextMarshaler); ok {
+			text, err := marshaler.MarshalText()
+			if err != nil {
+				return lifecyclePreviewMapKey{}, err
+			}
+			return lifecyclePreviewMapKey{text: text}, nil
+		}
+	}
+	switch value.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return lifecyclePreviewMapKey{textString: strconv.FormatInt(value.Int(), 10)}, nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return lifecyclePreviewMapKey{textString: strconv.FormatUint(value.Uint(), 10)}, nil
+	}
+	return lifecyclePreviewMapKey{}, fmt.Errorf("unsupported lifecycle payload map key %s", value.Type())
+}
+
+func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
+	if key.text != nil {
+		preview.appendJSONStringBytes(key.text)
+	} else {
+		preview.appendJSONString(key.textString)
+	}
+}
+
+func boundedLifecycleMapKeyLess(left, right lifecyclePreviewMapKey) bool {
+	leftLength, rightLength := left.length(), right.length()
+	limit := min(max(leftLength, rightLength), lifecyclePreviewMaxKeyBytes)
+	for i := 0; i < limit; i++ {
+		if i >= leftLength {
+			return true
+		}
+		if i >= rightLength {
+			return false
+		}
+		leftByte, rightByte := left.byteAt(i), right.byteAt(i)
+		if leftByte != rightByte {
+			return leftByte < rightByte
+		}
+	}
+	return false
+}
+
+func (key lifecyclePreviewMapKey) length() int {
+	if key.text != nil {
+		return len(key.text)
+	}
+	return len(key.textString)
+}
+
+func (key lifecyclePreviewMapKey) byteAt(index int) byte {
+	if key.text != nil {
+		return key.text[index]
+	}
+	return key.textString[index]
+}
+
+func boundedLifecycleKeyLess(left, right string) bool {
+	limit := min(max(len(left), len(right)), lifecyclePreviewMaxKeyBytes)
+	return strings.Compare(left[:min(len(left), limit)], right[:min(len(right), limit)]) < 0
+}
+
 func boundedLifecycleValue(value reflect.Value, limit, depth int) reflect.Value {
-	if !value.IsValid() || depth >= lifecyclePreviewMaxCloneDepth {
+	if !value.IsValid() || depth >= lifecyclePreviewMaxDepth {
 		return value
 	}
 	typeOf := value.Type()
@@ -1033,9 +1110,6 @@ func (p *lifecycleJSONPreview) appendJSONMarshaler(marshaler json.Marshaler) err
 	if err != nil {
 		return err
 	}
-	if len(encoded) > lifecyclePreviewMaxCustomBytes {
-		return fmt.Errorf("lifecycle payload marshaler output exceeds preview limit")
-	}
 	if !json.Valid(encoded) {
 		return fmt.Errorf("invalid JSON from lifecycle payload marshaler")
 	}
@@ -1048,7 +1122,7 @@ func (p *lifecycleJSONPreview) appendTextMarshaler(marshaler encoding.TextMarsha
 	if err != nil {
 		return err
 	}
-	p.appendJSONString(string(text))
+	p.appendJSONStringBytes(text)
 	return nil
 }
 
@@ -1109,6 +1183,66 @@ func (p *lifecycleJSONPreview) appendMarshaled(value any) error {
 	}
 	p.append(string(encoded))
 	return nil
+}
+
+func (p *lifecycleJSONPreview) appendJSONStringBytes(value []byte) {
+	p.append(`"`)
+	for len(value) > 0 && !p.stopped {
+		plain := 0
+		for plain < len(value) && plain <= p.limit {
+			char := value[plain]
+			if char >= utf8.RuneSelf || char < 0x20 || char == '\\' || char == '"' || char == '<' || char == '>' || char == '&' {
+				break
+			}
+			plain++
+		}
+		if plain > 0 {
+			p.append(string(value[:plain]))
+			value = value[plain:]
+			continue
+		}
+		if value[0] < utf8.RuneSelf {
+			char := value[0]
+			value = value[1:]
+			switch char {
+			case '\\', '"':
+				p.append("\\" + string(char))
+			case '\b':
+				p.append(`\b`)
+			case '\f':
+				p.append(`\f`)
+			case '\n':
+				p.append(`\n`)
+			case '\r':
+				p.append(`\r`)
+			case '\t':
+				p.append(`\t`)
+			case '<', '>', '&':
+				p.append(fmt.Sprintf(`\u%04x`, char))
+			default:
+				if char < 0x20 {
+					p.append(fmt.Sprintf(`\u%04x`, char))
+				} else {
+					p.append(string(char))
+				}
+			}
+			continue
+		}
+
+		r, size := utf8.DecodeRune(value)
+		if r == utf8.RuneError && size == 1 {
+			p.append(`\ufffd`)
+			value = value[1:]
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			p.append(fmt.Sprintf(`\u%04x`, r))
+		} else {
+			p.append(string(value[:size]))
+		}
+		value = value[size:]
+	}
+	p.append(`"`)
 }
 
 func (p *lifecycleJSONPreview) appendJSONString(value string) {
