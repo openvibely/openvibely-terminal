@@ -1335,11 +1335,14 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
 	var validationKeys []lifecyclePreviewMapKey
 	iterator := value.MapRange()
+	sourceOrder := 0
 	for iterator.Next() {
 		key, err := lifecyclePreviewKey(iterator.Key())
 		if err != nil {
 			return err
 		}
+		key.sourceOrder = sourceOrder
+		sourceOrder++
 		key.mapValue = iterator.Value()
 		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
 		if lifecycleReflectValueMayMarshalError(key.mapValue) {
@@ -1392,6 +1395,7 @@ func lifecycleInsertPreviewMapKey(keys []lifecyclePreviewMapKey, key lifecyclePr
 
 type lifecyclePreviewMapKey struct {
 	sourceKey     reflect.Value
+	sourceOrder   int
 	mapValue      reflect.Value
 	nativeValue   any
 	text          []byte
@@ -1450,7 +1454,13 @@ func lifecyclePreviewMapKeyLess(left, right lifecyclePreviewMapKey) bool {
 	if leftLength != rightLength {
 		return leftLength < rightLength
 	}
-	return lifecyclePreviewSourceKeyLess(left.sourceKey, right.sourceKey)
+	if lifecyclePreviewSourceKeyLess(left.sourceKey, right.sourceKey) {
+		return true
+	}
+	if lifecyclePreviewSourceKeyLess(right.sourceKey, left.sourceKey) {
+		return false
+	}
+	return left.sourceOrder < right.sourceOrder
 }
 
 func lifecyclePreviewSourceKeyLess(left, right reflect.Value) bool {

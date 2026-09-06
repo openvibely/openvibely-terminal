@@ -726,6 +726,29 @@ func (value lifecyclePreviewSharedTextKey) MarshalText() ([]byte, error) {
 	return value.Scratch[:], nil
 }
 
+type lifecyclePreviewCollidingTextKey struct {
+	ID    int
+	Calls *int
+}
+
+func (value lifecyclePreviewCollidingTextKey) MarshalText() ([]byte, error) {
+	*value.Calls++
+	return []byte("same-name"), nil
+}
+
+type lifecyclePreviewNthCallMarshaler struct {
+	Calls  *int
+	FailAt int
+}
+
+func (value lifecyclePreviewNthCallMarshaler) MarshalJSON() ([]byte, error) {
+	*value.Calls++
+	if *value.Calls == value.FailAt {
+		return nil, errors.New("late colliding-key value failed")
+	}
+	return []byte(`null`), nil
+}
+
 type lifecyclePreviewPointerZero struct {
 	Empty bool
 	Value string
@@ -968,6 +991,38 @@ func TestLifecyclePayloadSummaryMarshalsTextKeysOnceInCanonicalSuffixOrder(t *te
 	}
 	if valueCalls[0] != "-000" || valueCalls[len(valueCalls)-1] != "-129" {
 		t.Fatalf("same-prefix value order starts/ends %q/%q", valueCalls[0], valueCalls[len(valueCalls)-1])
+	}
+}
+
+func TestLifecyclePayloadSummaryValidatesCollidingTextMapKeys(t *testing.T) {
+	fixture := func() (map[string]any, *int, *int) {
+		keyCalls, valueCalls := new(int), new(int)
+		values := make(map[lifecyclePreviewCollidingTextKey]lifecyclePreviewNthCallMarshaler, 130)
+		for i := range 130 {
+			values[lifecyclePreviewCollidingTextKey{ID: i, Calls: keyCalls}] = lifecyclePreviewNthCallMarshaler{
+				Calls: valueCalls, FailAt: 120,
+			}
+		}
+		return map[string]any{"a-prefix": strings.Repeat("x", 1<<20), "z-values": values}, keyCalls, valueCalls
+	}
+
+	standardPayload, standardKeyCalls, standardValueCalls := fixture()
+	if _, err := json.Marshal(standardPayload); err == nil {
+		t.Fatal("encoding/json accepted colliding text-key late failure")
+	}
+	if *standardKeyCalls != 130 || *standardValueCalls != 120 {
+		t.Fatalf("encoding/json collision calls = keys %d, values %d; want 130, 120", *standardKeyCalls, *standardValueCalls)
+	}
+
+	payload, keyCalls, valueCalls := fixture()
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("colliding text-key late failure preview = %q, want unavailable", got)
+	}
+	if *keyCalls != 130 {
+		t.Fatalf("colliding TextMarshaler key calls = %d, want 130", *keyCalls)
+	}
+	if *valueCalls != 120 {
+		t.Fatalf("colliding text-key value calls = %d, want 120", *valueCalls)
 	}
 }
 
