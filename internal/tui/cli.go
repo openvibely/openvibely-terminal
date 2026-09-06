@@ -699,11 +699,10 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	if record.Type == "" {
 		record.Type = record.Event
 	}
-	if compact := compactJSON(ev.Data); compact != nil {
-		record.Data = compact
-	}
-
 	if jsonOutput {
+		if compact := compactJSON(ev.Data); compact != nil {
+			record.Data = compact
+		}
 		encoded, err := json.Marshal(record)
 		if err != nil {
 			return "", false, fmt.Errorf("encoding live event: %w", err)
@@ -732,8 +731,8 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	}
 	add("completed_output", record.CompletedOutput)
 	if len(parts) == 1 || (len(parts) == 2 && record.Type == record.Event) {
-		if record.Data != nil {
-			parts = append(parts, "data="+strconv.Quote(string(record.Data)))
+		if compact := compactJSON(ev.Data); compact != nil {
+			parts = append(parts, "data="+strconv.Quote(string(compact)))
 		} else if payloadErr != nil && strings.TrimSpace(string(ev.Data)) != "" {
 			parts = append(parts, "data="+strconv.Quote(string(ev.Data)))
 		}

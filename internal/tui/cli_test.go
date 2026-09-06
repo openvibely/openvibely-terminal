@@ -3898,6 +3898,104 @@ func (w *cliEventWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func TestFormatCLIEventPreservesOutputAndFiltering(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      client.Event
+		projectID  string
+		jsonOutput bool
+		want       string
+		wantOK     bool
+	}{
+		{
+			name: "recognized plain event",
+			event: client.Event{
+				Name: " task_status_changed ",
+				Data: json.RawMessage(` { "type": "task_status_changed", "project_id": "p1", "task_id": "t1", "task_name": "Deploy API", "status": "running", "queued": true, "ignored": [ 1, 2 ] } `),
+			},
+			projectID: "p1",
+			want:      `event="task_status_changed" type="task_status_changed" project_id="p1" task_id="t1" task_name="Deploy API" status="running" queued=true`,
+			wantOK:    true,
+		},
+		{
+			name: "JSON event retains compact data",
+			event: client.Event{
+				Name: "task_status_changed",
+				Data: json.RawMessage(` { "type": "task_status_changed", "project_id": "p1", "task_id": "t1", "ignored": [ 1, 2 ] } `),
+			},
+			projectID:  "p1",
+			jsonOutput: true,
+			want:       `{"event":"task_status_changed","type":"task_status_changed","project_id":"p1","task_id":"t1","task_name":"","status":"","category":"","message":"","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false,"data":{"type":"task_status_changed","project_id":"p1","task_id":"t1","ignored":[1,2]}}`,
+			wantOK:     true,
+		},
+		{
+			name:      "valid raw plain fallback is compact",
+			event:     client.Event{Name: "future_event", Data: json.RawMessage(` { "ignored": [ 1, 2 ] } `)},
+			projectID: "",
+			want:      `event="future_event" type="future_event" data="{\"ignored\":[1,2]}"`,
+			wantOK:    true,
+		},
+		{
+			name:      "invalid raw plain fallback is byte identical",
+			event:     client.Event{Name: "future_event", Data: json.RawMessage("  not-json \n")},
+			projectID: "",
+			want:      "event=\"future_event\" type=\"future_event\" data=\"  not-json \\n\"",
+			wantOK:    true,
+		},
+		{
+			name:      "foreign project is filtered",
+			event:     client.Event{Name: "task_status_changed", Data: json.RawMessage(`{"type":"task_status_changed","project_id":"other","task_id":"t1"}`)},
+			projectID: "p1",
+			wantOK:    false,
+		},
+		{
+			name:      "omitted project retains selected ownership",
+			event:     client.Event{Name: "chat_new_message", Data: json.RawMessage(`{"type":"chat_new_message","message":"hello"}`)},
+			projectID: "p1",
+			want:      `event="chat_new_message" type="chat_new_message" project_id="p1" message="hello"`,
+			wantOK:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok, err := formatCLIEvent(tc.event, tc.projectID, tc.jsonOutput)
+			if err != nil {
+				t.Fatalf("formatCLIEvent() error = %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("formatCLIEvent() include = %t, want %t", ok, tc.wantOK)
+			}
+			if got != tc.want {
+				t.Fatalf("formatCLIEvent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func BenchmarkFormatCLIEventRecognizedPlain(b *testing.B) {
+	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
+		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
+			prefix := []byte(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"running","padding":"`)
+			suffix := []byte(`"}`)
+			raw := make([]byte, 0, size)
+			raw = append(raw, prefix...)
+			raw = append(raw, bytes.Repeat([]byte{'x'}, size-len(prefix)-len(suffix))...)
+			raw = append(raw, suffix...)
+			event := client.Event{Name: "task_status_changed", Data: raw}
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(raw)))
+			b.ResetTimer()
+			for b.Loop() {
+				if _, ok, err := formatCLIEvent(event, "p1", false); err != nil || !ok {
+					b.Fatalf("formatCLIEvent() include = %t, error = %v", ok, err)
+				}
+			}
+		})
+	}
+}
+
 func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 	var mu sync.Mutex
 	var eventRequests []string
