@@ -2825,6 +2825,78 @@ func TestCLIJSONTasksList(t *testing.T) {
 	}
 }
 
+func TestCLILaterPageAlertCommands(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		jsonMode   bool
+		force      bool
+		wantMethod string
+		wantPath   string
+	}{
+		{name: "json list", args: []string{"alerts"}, jsonMode: true},
+		{name: "json show", args: []string{"alerts", "show", "a-later"}, jsonMode: true, wantMethod: http.MethodGet, wantPath: "/alerts/a-later/details"},
+		{name: "approve", args: []string{"alerts", "approve", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/approve"},
+		{name: "reject", args: []string{"alerts", "reject", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/reject"},
+		{name: "dismiss", args: []string{"alerts", "dismiss", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/dismiss"},
+		{name: "read", args: []string{"alerts", "read", "a-later"}, wantMethod: http.MethodPost, wantPath: "/alerts/a-later/read"},
+		{name: "delete", args: []string{"alerts", "delete", "a-later"}, force: true, wantMethod: http.MethodDelete, wantPath: "/alerts/a-later"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mutation string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/projects" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+					return
+				}
+				if r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request lost project scope: %s", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts" && r.URL.Query().Get("card_page") == "1":
+					q := r.URL.Query()
+					if q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "1" {
+						t.Errorf("bad continuation query: %s", r.URL.RawQuery)
+					}
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="a-later" data-alert-scroll-anchor="a-later"><p class="font-semibold">Later CLI alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true"><div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts/a-later/details":
+					mutation = r.Method + " " + r.URL.Path
+					_, _ = io.WriteString(w, `<div data-alert-detail-loaded><div data-alert-markdown data-raw-content="Later CLI detail"></div></div>`)
+				case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-later":
+					mutation = r.Method + " " + r.URL.Path
+					_, _ = io.WriteString(w, `<div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div>`)
+				case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/alerts/a-later/"):
+					mutation = r.Method + " " + r.URL.Path
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tt.args, tt.force, tt.jsonMode); err != nil {
+				t.Fatalf("RunCLI: %v", err)
+			}
+			if tt.wantPath != "" && mutation != tt.wantMethod+" "+tt.wantPath {
+				t.Fatalf("mutation/detail request = %q, want %s %s", mutation, tt.wantMethod, tt.wantPath)
+			}
+			if !strings.Contains(out.String(), "Later CLI alert") && !strings.Contains(out.String(), "Later CLI detail") {
+				t.Fatalf("CLI output omitted later-page alert:\n%s", out.String())
+			}
+		})
+	}
+}
+
 func TestCLIJSONAlertsDeleteUsesForceAndRefreshedResponse(t *testing.T) {
 	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build"><p class="font-semibold">Build failed</p></div>`
 	const refreshedAlerts = `<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="remaining"><p class="font-semibold">Remaining</p></div>`

@@ -3807,6 +3807,84 @@ func TestTasksActivateSweepClear(t *testing.T) {
 	})
 }
 
+func TestAlertsLaterPageInteractiveCommands(t *testing.T) {
+	tests := []struct {
+		name        string
+		command     string
+		wantMethod  string
+		wantPath    string
+		wantOutput  string
+		destructive bool
+	}{
+		{name: "list filter", command: "/alerts Later", wantOutput: "Later page alert"},
+		{name: "show", command: "/alerts show a-later", wantMethod: http.MethodGet, wantPath: "/alerts/a-later/details", wantOutput: "Later page detail"},
+		{name: "approve", command: "/alerts approve a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/approve", wantOutput: "approve: Later page alert"},
+		{name: "reject", command: "/alerts reject a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/reject", wantOutput: "reject: Later page alert"},
+		{name: "dismiss", command: "/alerts dismiss a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/dismiss", wantOutput: "dismiss: Later page alert"},
+		{name: "read", command: "/alerts read a-later", wantMethod: http.MethodPost, wantPath: "/alerts/a-later/read", wantOutput: "read: Later page alert"},
+		{name: "delete", command: "/alerts delete a-later", wantMethod: http.MethodDelete, wantPath: "/alerts/a-later", wantOutput: "delete: Later page alert", destructive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.Method+" "+r.URL.Path)
+				if r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request lost project scope: %s", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts" && r.URL.Query().Get("card_page") == "1":
+					q := r.URL.Query()
+					if q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "1" {
+						t.Errorf("bad continuation query: %s", r.URL.RawQuery)
+					}
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="a-later" data-alert-scroll-anchor="a-later" data-search-text="later page"><p class="font-semibold">Later page alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true"><div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts/a-later/details":
+					_, _ = io.WriteString(w, `<div data-alert-detail-loaded><div data-alert-markdown data-raw-content="Later page detail"></div></div>`)
+				case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-later":
+					_, _ = io.WriteString(w, `<div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div>`)
+				case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/alerts/a-later/"):
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			if tt.destructive {
+				m = confirmDestructive(t, m, tt.command)
+			} else {
+				m = runLine(t, m, tt.command)
+			}
+			if !strings.Contains(stripANSI(transcript(m)), tt.wantOutput) {
+				t.Fatalf("output missing %q:\n%s", tt.wantOutput, stripANSI(transcript(m)))
+			}
+			if tt.wantPath != "" {
+				want := tt.wantMethod + " " + tt.wantPath
+				found := false
+				for _, request := range requests {
+					if request == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("requests = %#v, want %q", requests, want)
+				}
+			}
+		})
+	}
+}
+
 func TestAlertsApproveRejectDismiss(t *testing.T) {
 	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
 	  data-search-text="build failed">
