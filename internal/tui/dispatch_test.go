@@ -2724,6 +2724,69 @@ func TestScheduleEditRejectsMalformedEarlierOptionsBeforeRequests(t *testing.T) 
 	}
 }
 
+func TestScheduleEditRejectsMalformedEarlierOptionsForTitleBeforeDetailOrMutation(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "timestamp", line: "/schedule edit Nightly run-at bad interval 5", want: "run time must use"},
+		{name: "repeat", line: "/schedule edit Nightly repeat yearly interval 5", want: `unknown repeat type "yearly"`},
+		{name: "interval", line: "/schedule edit Nightly interval 0 repeat daily", want: "repeat interval must be between"},
+		{name: "boolean", line: "/schedule edit Nightly clear-context maybe interval 5", want: "clear-context must be true or false"},
+		{name: "duplicate", line: "/schedule edit Nightly repeat daily repeat weekly interval 5", want: "usage"},
+		{name: "surplus", line: "/schedule edit Nightly repeat daily surplus interval 5", want: "usage"},
+	}
+	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Nightly</div></div>`
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var scheduleGets, detailGets, puts int
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					scheduleGets++
+					_, _ = io.WriteString(w, scheduleHTML)
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/tasks/"):
+					detailGets++
+				case r.Method == http.MethodPut:
+					puts++
+				}
+			})
+			m = runLine(t, m, tc.line)
+			if scheduleGets != 1 || detailGets != 0 || puts != 0 {
+				t.Fatalf("requests = schedule GETs %d detail GETs %d PUTs %d", scheduleGets, detailGets, puts)
+			}
+			if out := stripANSI(transcript(m)); !strings.Contains(out, tc.want) {
+				t.Fatalf("validation output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+func TestScheduleEditExactIDWinsAcrossCandidateBoundaries(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-1">Canonical ID target</div>
+		<div data-task-id="t-2" data-schedule-id="s-2">s-1 repeat daily</div>
+	</div>`
+	var detailPath, putPath string
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			_, _ = io.WriteString(w, scheduleHTML)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/tasks/"):
+			detailPath = r.URL.Path
+			_, _ = io.WriteString(w, scheduleEditDetailForIDs("p1", "s-1"))
+		case r.Method == http.MethodPut:
+			putPath = r.URL.Path
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	m = runLine(t, m, "/schedule edit s-1 repeat daily interval 5")
+	if detailPath != "/tasks/t-1" || putPath != "/schedules/s-1" {
+		t.Fatalf("exact-ID precedence detail=%q put=%q:\n%s", detailPath, putPath, stripANSI(transcript(m)))
+	}
+}
+
 func TestScheduleEditPreservesEarlierCandidateAmbiguity(t *testing.T) {
 	const scheduleHTML = `<div id="schedule-content">
 		<div data-task-id="t-1" data-schedule-id="s-1">Weekly alpha</div>

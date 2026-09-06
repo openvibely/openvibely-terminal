@@ -1226,6 +1226,7 @@ func nonNilSlice[T any](items []T) []T {
 type scheduleEditCandidate struct {
 	ref    string
 	update client.ScheduleUpdate
+	err    error
 }
 
 func parseScheduleEdit(args []string) ([]scheduleEditCandidate, error) {
@@ -1237,20 +1238,17 @@ func parseScheduleEdit(args []string) ([]scheduleEditCandidate, error) {
 			continue
 		}
 		update, _, err := parseScheduleEditOptions(args[optionAt:], usage)
+		candidate := scheduleEditCandidate{ref: strings.Join(args[:optionAt], " "), update: update, err: err}
 		if err != nil {
 			candidateErr = err
-			// Once an ID-shaped reference is followed by a setting, a malformed
-			// remainder is command syntax rather than a free-form title collision.
-			// Reject it before schedule discovery.
+			// Preserve the zero-request fast path for canonical ID-shaped refs.
+			// Free-form title refs require schedule discovery to distinguish a
+			// malformed suffix from setting-like words that are part of the title.
 			if optionAt == 1 && looksLikeScheduleID(args[0]) {
 				return nil, err
 			}
-			continue
 		}
-		candidates = append(candidates, scheduleEditCandidate{
-			ref:    strings.Join(args[:optionAt], " "),
-			update: update,
-		})
+		candidates = append(candidates, candidate)
 	}
 	if len(candidates) > 0 {
 		return candidates, nil
@@ -1273,34 +1271,107 @@ func looksLikeScheduleID(value string) bool {
 	return false
 }
 
+func scheduleEditMatchRank(entry client.ScheduleEntry, ref string) int {
+	ref = strings.TrimSpace(ref)
+	switch {
+	case strings.EqualFold(entry.ScheduleID, ref):
+		return 4
+	case strings.EqualFold(entry.Text, ref):
+		return 3
+	case strings.HasPrefix(strings.ToLower(entry.ScheduleID), strings.ToLower(ref)),
+		strings.HasPrefix(strings.ToLower(entry.Text), strings.ToLower(ref)):
+		return 2
+	default:
+		return 1
+	}
+}
+
+func scheduleEditAmbiguityRank(entries []client.ScheduleEntry, ref string) int {
+	ref = strings.TrimSpace(ref)
+	lower := strings.ToLower(ref)
+	for rank, matches := range []func(client.ScheduleEntry) bool{
+		func(entry client.ScheduleEntry) bool { return strings.EqualFold(entry.ScheduleID, ref) },
+		func(entry client.ScheduleEntry) bool { return strings.EqualFold(entry.Text, ref) },
+		func(entry client.ScheduleEntry) bool {
+			return strings.HasPrefix(strings.ToLower(entry.ScheduleID), lower) ||
+				strings.HasPrefix(strings.ToLower(entry.Text), lower)
+		},
+		func(entry client.ScheduleEntry) bool { return strings.Contains(strings.ToLower(entry.Text), lower) },
+	} {
+		count := 0
+		for _, entry := range entries {
+			if matches(entry) {
+				count++
+			}
+		}
+		if count > 1 {
+			return 4 - rank
+		}
+		if count == 1 {
+			return 0
+		}
+	}
+	return 0
+}
+
 func resolveScheduleEdit(entries []client.ScheduleEntry, candidates []scheduleEditCandidate) (client.ScheduleEntry, client.ScheduleUpdate, error) {
 	var matched client.ScheduleEntry
 	var update client.ScheduleUpdate
-	var ambiguityErr, matchErr error
+	var malformedErr, ambiguityErr, matchErr error
+	bestMatchRank, bestMalformedRank, bestAmbiguityRank := 0, 0, 0
+	matchConflict := false
 	for _, candidate := range candidates {
 		entry, err := matchRef(entries, candidate.ref,
 			func(s client.ScheduleEntry) string { return s.ScheduleID },
 			func(s client.ScheduleEntry) string { return s.Text })
 		if err != nil {
-			if strings.Contains(err.Error(), " is ambiguous:") && ambiguityErr == nil {
-				ambiguityErr = err
+			if strings.Contains(err.Error(), " is ambiguous:") {
+				rank := scheduleEditAmbiguityRank(entries, candidate.ref)
+				if rank >= bestAmbiguityRank {
+					bestAmbiguityRank, ambiguityErr = rank, err
+				}
 			} else {
 				matchErr = err
 			}
 			continue
 		}
-		if matched.ScheduleID != "" && !strings.EqualFold(matched.ScheduleID, entry.ScheduleID) {
-			return client.ScheduleEntry{}, client.ScheduleUpdate{}, fmt.Errorf(
-				"schedule edit reference is ambiguous: %s, %s — use the full name or ID",
-				matched.Text, entry.Text)
+		rank := scheduleEditMatchRank(entry, candidate.ref)
+		if candidate.err != nil {
+			if rank > bestMalformedRank {
+				bestMalformedRank, malformedErr = rank, candidate.err
+			}
+			continue
 		}
-		// Candidates are ordered from shortest to longest reference. When several
-		// boundaries resolve to the same schedule, the longest reference preserves
-		// the most title text and therefore determines the intended update suffix.
+		if rank > bestMatchRank {
+			matched, update = entry, candidate.update
+			bestMatchRank = rank
+			matchConflict = false
+			continue
+		}
+		if rank < bestMatchRank {
+			continue
+		}
+		if matched.ScheduleID != "" && !strings.EqualFold(matched.ScheduleID, entry.ScheduleID) {
+			matchConflict = true
+			continue
+		}
+		// Equal-tier candidates resolving to the same schedule are ordered from
+		// shortest to longest reference, so the later candidate preserves the
+		// most title text and identifies the actual trailing update suffix.
 		matched, update = entry, candidate.update
 	}
-	if matched.ScheduleID != "" {
+	if matched.ScheduleID != "" && bestMatchRank >= bestMalformedRank && bestMatchRank >= bestAmbiguityRank {
+		if matchConflict {
+			return client.ScheduleEntry{}, client.ScheduleUpdate{}, fmt.Errorf(
+				"schedule edit reference is ambiguous — use the full name or ID")
+		}
 		return matched, update, nil
+	}
+	if ambiguityErr != nil && bestAmbiguityRank > bestMatchRank && bestAmbiguityRank > bestMalformedRank {
+		return client.ScheduleEntry{}, client.ScheduleUpdate{}, ambiguityErr
+	}
+	if malformedErr != nil {
+		return client.ScheduleEntry{}, client.ScheduleUpdate{}, malformedErr
 	}
 	if ambiguityErr != nil {
 		return client.ScheduleEntry{}, client.ScheduleUpdate{}, ambiguityErr

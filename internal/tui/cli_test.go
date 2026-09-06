@@ -2446,6 +2446,52 @@ func TestCLIScheduleEditMalformedEarlierOptionFailsBeforeRequests(t *testing.T) 
 	}
 }
 
+func TestCLIScheduleEditMalformedEarlierTitleOptionsFailBeforeDetailOrMutation(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "timestamp", args: []string{"schedule", "edit", "Nightly", "run-at", "bad", "interval", "5"}, want: "run time must use"},
+		{name: "repeat", args: []string{"schedule", "edit", "Nightly", "repeat", "yearly", "interval", "5"}, want: `unknown repeat type "yearly"`},
+		{name: "interval", args: []string{"schedule", "edit", "Nightly", "interval", "0", "repeat", "daily"}, want: "repeat interval must be between"},
+		{name: "boolean", args: []string{"schedule", "edit", "Nightly", "clear-context", "maybe", "interval", "5"}, want: "clear-context must be true or false"},
+		{name: "duplicate", args: []string{"schedule", "edit", "Nightly", "repeat", "daily", "repeat", "weekly", "interval", "5"}, want: "usage"},
+		{name: "surplus", args: []string{"schedule", "edit", "Nightly", "repeat", "daily", "surplus", "interval", "5"}, want: "usage"},
+	}
+	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Nightly</div></div>`
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": scheduleHTML})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			if rec.saw(http.MethodGet, "/tasks/") || rec.saw(http.MethodPut, "/schedules/") {
+				t.Fatalf("malformed title edit dispatched detail or mutation:\n%s", rec.all())
+			}
+		})
+	}
+}
+
+func TestCLIScheduleEditExactIDWinsAcrossCandidateBoundaries(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-1">Canonical ID target</div>
+		<div data-task-id="t-2" data-schedule-id="s-2">s-1 repeat daily</div>
+	</div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/schedule":     scheduleHTML,
+		"/tasks/t-1":    scheduleEditDetailForIDs("p1", "s-1"),
+	})
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "s-1", "repeat", "daily", "interval", "5"}, false, false); err != nil {
+		t.Fatalf("headless exact-ID edit: %v", err)
+	}
+	if !rec.saw(http.MethodGet, "/tasks/t-1") || !rec.saw(http.MethodPut, "/schedules/s-1") || rec.saw(http.MethodGet, "/tasks/t-2") {
+		t.Fatalf("headless exact-ID precedence requests:\n%s", rec.all())
+	}
+}
+
 func TestCLIScheduleEditAmbiguousReferenceDoesNotMutate(t *testing.T) {
 	const ambiguous = `<div id="schedule-content"><div data-task-id="t1" data-schedule-id="s1">Weekly report</div><div data-task-id="t2" data-schedule-id="s2">Weekly report</div></div>`
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": ambiguous})
