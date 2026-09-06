@@ -1187,14 +1187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale creation after a newer selection or list request
 		}
 		m.busy = false
-		if msg.err != nil {
-			if m.handleAuthError(msg.err) {
-				return m, nil
-			}
-			if m.handleTransportError(msg.err) {
-				return m, nil
-			}
-			m.append(entry{role: "error", text: msg.err.Error()})
+		if m.handleCompletedRequestError(msg.err) {
 			return m, nil
 		}
 		shouldReconnect := msg.startSSE || m.sseCancel != nil || m.sseRetryAfterProject
@@ -1266,14 +1259,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale target from a different project
 		}
 		m.busy = false
-		if msg.err != nil {
-			if m.handleAuthError(msg.err) {
-				return m, nil
-			}
-			if m.handleTransportError(msg.err) {
-				return m, nil
-			}
-			m.append(entry{role: "error", text: msg.err.Error()})
+		if m.handleCompletedRequestError(msg.err) {
 			return m, nil
 		}
 		projectID := msg.projectID
@@ -1465,14 +1451,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // superseded by a newer open or an explicit thread exit
 		}
 		m.busy = false
-		if msg.err != nil {
-			if m.handleAuthError(msg.err) {
-				return m, nil
-			}
-			if m.handleTransportError(msg.err) {
-				return m, nil
-			}
-			m.append(entry{role: "error", text: msg.err.Error()})
+		if m.handleCompletedRequestError(msg.err) {
 			return m, nil
 		}
 		if msg.projectID != "" && msg.projectID != m.selectedID {
@@ -2398,6 +2377,20 @@ func (m *Model) markAuthRequired() {
 	if !wasRequired {
 		m.append(entry{role: "error", text: authRecoveryMessage(m.client.BaseURL())})
 	}
+}
+
+func (m *Model) handleCompletedRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if m.handleAuthError(err) {
+		return true
+	}
+	if m.handleTransportError(err) {
+		return true
+	}
+	m.append(entry{role: "error", text: err.Error()})
+	return true
 }
 
 func (m *Model) handleTransportError(err error) bool {
