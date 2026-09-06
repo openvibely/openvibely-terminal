@@ -106,7 +106,7 @@ type FailedTaskPattern struct {
 // that return a JSON object. segment is the URL path segment after /api/analytics/.
 func analyticsObject[T any](ctx context.Context, c *Client, segment, projectID string) (*T, error) {
 	var out T
-	if err := c.getJSON(ctx, "/api/analytics/"+segment+optProject(projectID), &out); err != nil {
+	if err := c.getJSON(ctx, "/api/analytics/"+segment+query("project_id", projectID), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -121,7 +121,7 @@ func (c *Client) GetUsageAnalytics(ctx context.Context, projectID string) (*Usag
 // return a JSON array. segment is the URL path segment after /api/analytics/.
 func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID string) ([]T, error) {
 	var out []T
-	err := c.getJSON(ctx, "/api/analytics/"+segment+optProject(projectID), &out)
+	err := c.getJSON(ctx, "/api/analytics/"+segment+query("project_id", projectID), &out)
 	return out, err
 }
 
@@ -336,7 +336,7 @@ func (c *Client) ListTaskLifecycleExecutionsForProject(ctx context.Context, task
 
 func (c *Client) listTaskLifecycleExecutions(ctx context.Context, taskID, projectID string) ([]LifecycleExecution, error) {
 	var out []LifecycleExecution
-	err := c.getJSON(ctx, "/api/tasks/"+url.PathEscape(taskID)+"/lifecycle-executions"+optProject(projectID), &out)
+	err := c.getJSON(ctx, "/api/tasks/"+url.PathEscape(taskID)+"/lifecycle-executions"+query("project_id", projectID), &out)
 	return out, err
 }
 
@@ -354,7 +354,7 @@ func (c *Client) GetLifecycleExecutionEventsForProject(ctx context.Context, exec
 
 func (c *Client) getLifecycleExecutionEvents(ctx context.Context, execID, projectID string) ([]LifecycleEvent, error) {
 	var out []LifecycleEvent
-	err := c.getJSON(ctx, "/api/lifecycle-executions/"+url.PathEscape(execID)+"/events"+optProject(projectID), &out)
+	err := c.getJSON(ctx, "/api/lifecycle-executions/"+url.PathEscape(execID)+"/events"+query("project_id", projectID), &out)
 	return out, err
 }
 
@@ -378,15 +378,6 @@ func (c *Client) ToggleSchedule(ctx context.Context, id string) (*Schedule, erro
 		return nil, err
 	}
 	return &out, nil
-}
-
-// --- helpers ---
-
-func optProject(projectID string) string {
-	if projectID == "" {
-		return ""
-	}
-	return "?project_id=" + url.QueryEscape(projectID)
 }
 
 // postJSON issues a POST (optionally with a JSON body) and decodes a JSON
