@@ -771,7 +771,7 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "POST", path: "/models/m1/set-default"},
 		{name: "agent delete", fn: func() error { return c.DeleteAgent(ctx, "ag1") },
 			method: "DELETE", path: "/agents/ag1"},
-		{name: "schedule delete", fn: func() error { return c.DeleteSchedule(ctx, "s1") },
+		{name: "schedule delete", fn: func() error { return c.DeleteSchedule(ctx, "p1", "s1") },
 			method: "DELETE", path: "/schedules/s1"},
 		{name: "worker limit", fn: func() error { return c.SetGlobalWorkerLimit(ctx, 7) },
 			method: "POST", path: "/workers",
@@ -1175,6 +1175,78 @@ func TestNormalizeScheduleRepeat(t *testing.T) {
 	}
 }
 
+func TestScheduleMutationsSendExactProjectScopeAndPreserveOwnershipErrors(t *testing.T) {
+	const projectB = "project B&mode=terminal"
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		call   func(*Client, string) error
+	}{
+		{
+			name:   "create",
+			method: http.MethodPost,
+			path:   "/tasks/t1/schedule",
+			call: func(c *Client, projectID string) error {
+				return c.CreateSchedule(context.Background(), projectID, "t1", "2026-01-02T09:00", "daily", 1)
+			},
+		},
+		{
+			name:   "toggle",
+			method: http.MethodPost,
+			path:   "/api/schedules/s1/toggle",
+			call: func(c *Client, projectID string) error {
+				_, err := c.ToggleSchedule(context.Background(), projectID, "s1")
+				return err
+			},
+		},
+		{
+			name:   "delete",
+			method: http.MethodDelete,
+			path:   "/schedules/s1",
+			call: func(c *Client, projectID string) error {
+				return c.DeleteSchedule(context.Background(), projectID, "s1")
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.Method != tc.method || r.URL.Path != tc.path {
+					t.Errorf("request = %s %s, want %s %s", r.Method, r.URL.Path, tc.method, tc.path)
+				}
+				if got := r.URL.Query().Get("project_id"); got != projectB {
+					http.Error(w, "schedule belongs to another project", http.StatusForbidden)
+					return
+				}
+				if tc.name == "toggle" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"id":"s1","enabled":true}`))
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+
+			c, _ := New(srv.URL)
+			if err := tc.call(c, projectB); err != nil {
+				t.Fatalf("Project B mutation failed with stale Project A preference: %v", err)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1", requests)
+			}
+
+			err := tc.call(c, "project A")
+			if err == nil || !strings.Contains(err.Error(), "403") {
+				t.Fatalf("mismatched explicit scope error = %v, want HTTP 403", err)
+			}
+		})
+	}
+}
+
 func TestCreateScheduleSendsRepeat(t *testing.T) {
 	var form url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1188,7 +1260,7 @@ func TestCreateScheduleSendsRepeat(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(srv.URL)
-	if err := c.CreateSchedule(context.Background(), "t1", "2026-01-02T09:00", "daily", 1); err != nil {
+	if err := c.CreateSchedule(context.Background(), "p1", "t1", "2026-01-02T09:00", "daily", 1); err != nil {
 		t.Fatal(err)
 	}
 	if form.Get("run_at") != "2026-01-02T09:00" || form.Get("repeat_type") != "daily" {
@@ -1209,7 +1281,7 @@ func TestCreateScheduleTranslatesHourlyToHours(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := New(srv.URL)
-	if err := c.CreateSchedule(context.Background(), "t1", "2026-01-02T09:00", "hourly", 1); err != nil {
+	if err := c.CreateSchedule(context.Background(), "p1", "t1", "2026-01-02T09:00", "hourly", 1); err != nil {
 		t.Fatal(err)
 	}
 	if form.Get("repeat_type") != "hours" {
@@ -1243,7 +1315,7 @@ func TestCreateScheduleSendsFastRepeatTypes(t *testing.T) {
 			defer srv.Close()
 
 			c, _ := New(srv.URL)
-			if err := c.CreateSchedule(context.Background(), "t1", "2026-01-02T09:00", tc.repeat, tc.interval); err != nil {
+			if err := c.CreateSchedule(context.Background(), "p1", "t1", "2026-01-02T09:00", tc.repeat, tc.interval); err != nil {
 				t.Fatal(err)
 			}
 			if form.Get("repeat_type") != tc.repeat {
@@ -1268,7 +1340,7 @@ func TestCreateScheduleRejectsInvalidRepeatIntervalsBeforeRequest(t *testing.T) 
 			defer srv.Close()
 
 			c, _ := New(srv.URL)
-			err := c.CreateSchedule(context.Background(), "t1", "2026-01-02T09:00", "minutes", interval)
+			err := c.CreateSchedule(context.Background(), "p1", "t1", "2026-01-02T09:00", "minutes", interval)
 			if err == nil || !strings.Contains(err.Error(), "repeat interval must be between 1 and 365") {
 				t.Fatalf("expected interval validation error, got %v", err)
 			}
