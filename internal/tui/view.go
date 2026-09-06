@@ -1629,6 +1629,7 @@ func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, seen map[reflect.Type
 		return true
 	}
 	seen[typeOf] = true
+	defer delete(seen, typeOf)
 	if typeOf == reflect.TypeFor[json.Number]() ||
 		typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
 		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||

@@ -657,6 +657,15 @@ type lifecyclePreviewAnyHolder struct {
 	Value any `json:"value"`
 }
 
+type lifecyclePreviewSafeLeaf struct {
+	Value int `json:"value"`
+}
+
+type lifecyclePreviewRepeatedSafeSiblings struct {
+	Left  lifecyclePreviewSafeLeaf `json:"left"`
+	Right lifecyclePreviewSafeLeaf `json:"right"`
+}
+
 type lifecyclePreviewTextKey string
 
 func (value lifecyclePreviewTextKey) MarshalText() ([]byte, error) {
@@ -839,6 +848,60 @@ func TestLifecyclePayloadSummaryBoundsDecodedWideMaps(t *testing.T) {
 	}
 	if got, want := lifecyclePayloadSummary(wide), truncate(string(encoded), 96); got != want {
 		t.Fatalf("decoded wide-map preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryBoundsRepeatedSafeSiblingTypes(t *testing.T) {
+	typeOf := reflect.TypeFor[lifecyclePreviewRepeatedSafeSiblings]()
+	for name, candidate := range map[string]reflect.Type{
+		"struct": typeOf,
+		"slice":  reflect.SliceOf(typeOf),
+		"array":  reflect.ArrayOf(1024, typeOf),
+	} {
+		if lifecycleTypeMayMarshalError(candidate) {
+			t.Errorf("%s with repeated safe sibling types classified as error-capable", name)
+		}
+	}
+
+	value := lifecyclePreviewRepeatedSafeSiblings{
+		Left:  lifecyclePreviewSafeLeaf{Value: 1},
+		Right: lifecyclePreviewSafeLeaf{Value: 2},
+	}
+	slice := make([]lifecyclePreviewRepeatedSafeSiblings, 4096)
+	for i := range slice {
+		slice[i] = value
+	}
+	array := [1024]lifecyclePreviewRepeatedSafeSiblings{}
+	for i := range array {
+		array[i] = value
+	}
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "slice", payload: map[string]any{"items": slice}},
+		{name: "array", payload: map[string]any{"items": array}},
+	} {
+		encoded, err := json.Marshal(test.payload)
+		if err != nil {
+			t.Fatalf("marshal wide %s fixture: %v", test.name, err)
+		}
+		if got, want := lifecyclePayloadSummary(test.payload), truncate(string(encoded), 96); got != want {
+			t.Errorf("wide %s preview = %q, want %q", test.name, got, want)
+		}
+	}
+
+	wideMap := make(map[string]lifecyclePreviewRepeatedSafeSiblings, 513)
+	for i := range 513 {
+		wideMap[fmt.Sprintf("key-%04d", i)] = value
+	}
+	payload := map[string]any{"items": wideMap}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal repeated-safe wide map: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("repeated-safe wide-map preview = %q, want %q", got, want)
 	}
 }
 
