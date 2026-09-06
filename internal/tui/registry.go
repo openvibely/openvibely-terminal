@@ -1338,7 +1338,7 @@ func scheduleCommand() command {
 		completions: []commandCompletion{
 			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
 			{after: []string{"edit", "*"}, values: []string{"run-at", "repeat", "interval", "clear-context"}},
-			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
+			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours"}},
 			{after: []string{"edit", "*", "clear-context"}, values: []string{"true", "false"}},
 		},
 		selectorPaths: [][]string{{"add"}, {"edit"}, {"delete"}, {"toggle"}},
@@ -1353,7 +1353,7 @@ func scheduleCommand() command {
 		},
 		actionUsages: []commandActionUsage{
 			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]"},
-			{action: "edit", args: "<id> [run-at <2006-01-02T15:04>] [repeat <once|daily|weekly|monthly|seconds|minutes|hours>] [interval <1..365>] [clear-context <true|false>]"},
+			{action: "edit", args: "<id> [run-at <2006-01-02T15:04>] [repeat <once|daily|weekly|monthly|hourly|seconds|minutes|hours>] [interval <1..365>] [clear-context <true|false>]"},
 		},
 		examples: []string{
 			`schedule add "Daily standup report" 2026-01-20T09:00 daily`,

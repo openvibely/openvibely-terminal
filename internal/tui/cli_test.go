@@ -2457,6 +2457,20 @@ func TestCLIScheduleEditQuotedValidSettingPairReference(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleEditHourlyAliasUsesBackendHours(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/schedule":     selScheduleHTML,
+		"/tasks/t-1":    scheduleEditDetail("p1"),
+	})
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "s-2", "repeat", "hourly"}, false, false); err != nil {
+		t.Fatalf("headless hourly schedule edit: %v", err)
+	}
+	if !rec.saw(http.MethodPut, "/schedules/s-2") || !rec.sawForm("repeat_type=hours") || !rec.sawForm("repeat_interval=3") {
+		t.Fatalf("headless hourly edit requests/forms:\n%s\n%v", rec.all(), rec.forms)
+	}
+}
+
 func TestCLIScheduleEditMalformedEarlierOptionFailsBeforeRequests(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
 	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "s-1", "repeat", "yearly", "interval", "5"}, false, false)

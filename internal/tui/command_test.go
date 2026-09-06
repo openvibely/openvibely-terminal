@@ -1003,7 +1003,7 @@ func TestScheduleEditHelpAndCompletionMetadata(t *testing.T) {
 		t.Fatal("schedule command missing")
 	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"schedule edit <id>", "run-at", "clear-context <true|false>", "schedule edit a1b2c3"} {
+	for _, want := range []string{"schedule edit <id>", "run-at", "once|daily|weekly|monthly|hourly|seconds|minutes|hours", "clear-context <true|false>", "schedule edit a1b2c3"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("help missing %q:\n%s", want, help)
 		}
@@ -1013,7 +1013,7 @@ func TestScheduleEditHelpAndCompletionMetadata(t *testing.T) {
 		want  string
 	}{
 		{after: []string{"edit", "s1"}, want: "run-at"},
-		{after: []string{"edit", "s1", "repeat"}, want: "weekly"},
+		{after: []string{"edit", "s1", "repeat"}, want: "hourly"},
 		{after: []string{"edit", "s1", "clear-context"}, want: "false"},
 	} {
 		if got := registryCompletionValues("schedule", tc.after...); !containsString(got, tc.want) {

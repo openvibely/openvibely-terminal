@@ -2666,6 +2666,31 @@ func TestScheduleEditSettingsTakePrecedenceOverUnquotedTitleText(t *testing.T) {
 	}
 }
 
+func TestScheduleEditHourlyAliasUsesBackendHours(t *testing.T) {
+	var gotForm url.Values
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			_, _ = io.WriteString(w, selScheduleHTML)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			_, _ = io.WriteString(w, scheduleEditDetail("p1"))
+		case r.Method == http.MethodPut && r.URL.Path == "/schedules/s-2":
+			_ = r.ParseForm()
+			gotForm = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	m = runLine(t, m, "/schedule edit s-2 repeat hourly")
+	if gotForm.Get("repeat_type") != "hours" || gotForm.Get("repeat_interval") != "3" {
+		t.Fatalf("hourly edit form = %v, want backend hours with preserved interval", gotForm)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "updated schedule s-2") {
+		t.Fatalf("hourly edit success missing:\n%s", out)
+	}
+}
+
 func TestScheduleEditResolvesNonFirstCardAndPreservesOmittedSettings(t *testing.T) {
 	var gotForm url.Values
 	var scheduleGETs int
