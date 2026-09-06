@@ -661,6 +661,27 @@ func (value lifecyclePreviewTextIntKey) MarshalText() ([]byte, error) {
 	return []byte(fmt.Sprintf("key-%d", value)), nil
 }
 
+var lifecyclePreviewNilTextKeyCalls int
+
+type lifecyclePreviewNilTextKey struct{}
+
+func (value *lifecyclePreviewNilTextKey) MarshalText() ([]byte, error) {
+	lifecyclePreviewNilTextKeyCalls++
+	if value == nil {
+		return nil, errors.New("nil text key method must not be called")
+	}
+	return []byte("non-nil"), nil
+}
+
+type lifecyclePreviewLateUnexportedFields struct {
+	Bad float64 `json:"bad,omitempty"`
+}
+
+type lifecyclePreviewLateUnexportedOuter struct {
+	lifecyclePreviewLateUnexportedFields
+	Prefix string `json:"prefix,omitempty"`
+}
+
 type lifecyclePreviewCycleNode struct {
 	Next *lifecyclePreviewCycleNode `json:"next,omitempty"`
 	Text string                     `json:"text,omitempty"`
@@ -776,6 +797,38 @@ func TestLifecyclePayloadSummaryBoundsDecodedWideMaps(t *testing.T) {
 	}
 	if got, want := lifecyclePayloadSummary(wide), truncate(string(encoded), 96); got != want {
 		t.Fatalf("decoded wide-map preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesNilPointerTextMarshalerMapKey(t *testing.T) {
+	values := map[*lifecyclePreviewNilTextKey]int{nil: 7}
+	payload := map[string]any{"value": values}
+	lifecyclePreviewNilTextKeyCalls = 0
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal nil TextMarshaler key fixture: %v", err)
+	}
+	if lifecyclePreviewNilTextKeyCalls != 0 {
+		t.Fatalf("encoding/json called nil TextMarshaler key %d times", lifecyclePreviewNilTextKeyCalls)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("nil TextMarshaler key preview = %q, want %q", got, want)
+	}
+	if lifecyclePreviewNilTextKeyCalls != 0 {
+		t.Fatalf("preview called nil TextMarshaler key %d times", lifecyclePreviewNilTextKeyCalls)
+	}
+}
+
+func TestLifecyclePayloadSummaryValidatesLatePromotedUnexportedFields(t *testing.T) {
+	payload := map[string]any{"items": []lifecyclePreviewLateUnexportedOuter{
+		{Prefix: strings.Repeat("x", 1<<20)},
+		{lifecyclePreviewLateUnexportedFields: lifecyclePreviewLateUnexportedFields{Bad: math.NaN()}},
+	}}
+	if _, err := json.Marshal(payload); err == nil {
+		t.Fatal("late promoted non-finite float unexpectedly marshaled")
+	}
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("late promoted non-finite preview = %q, want unavailable", got)
 	}
 }
 

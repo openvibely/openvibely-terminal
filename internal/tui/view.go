@@ -1392,6 +1392,11 @@ func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 	if value.Kind() == reflect.String {
 		return lifecyclePreviewMapKey{sourceKey: value, textString: value.String()}, nil
 	}
+	if value.Kind() == reflect.Pointer && value.IsNil() && value.Type().Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
+		// Match encoding/json: nil pointer TextMarshaler map keys encode as
+		// the empty key without invoking MarshalText on the nil receiver.
+		return lifecyclePreviewMapKey{sourceKey: value, textString: ""}, nil
+	}
 	if value.CanInterface() {
 		if marshaler, ok := value.Interface().(encoding.TextMarshaler); ok {
 			text, err := marshaler.MarshalText()
@@ -1538,8 +1543,9 @@ func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, seen map[reflect.Type
 	case reflect.Map:
 		return lifecycleTypeMayMarshalErrorSeen(typeOf.Key(), seen) || lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), seen)
 	case reflect.Struct:
-		for i := 0; i < typeOf.NumField(); i++ {
-			if typeOf.Field(i).IsExported() && lifecycleTypeMayMarshalErrorSeen(typeOf.Field(i).Type, seen) {
+		for _, field := range lifecycleStructFields(typeOf) {
+			fieldType := typeOf.FieldByIndex(field.index).Type
+			if lifecycleTypeMayMarshalErrorSeen(fieldType, seen) {
 				return true
 			}
 		}
