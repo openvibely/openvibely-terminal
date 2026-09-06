@@ -213,6 +213,17 @@ func selectorSearchTexts(items []selectorItem) []string {
 	return search
 }
 
+func matchSelectorItems(items []selectorItem, search []string, filter string) []selectorItem {
+	needle := strings.ToLower(filter)
+	matches := make([]selectorItem, 0, len(items))
+	for i, item := range items {
+		if strings.Contains(search[i], needle) {
+			matches = append(matches, item)
+		}
+	}
+	return matches
+}
+
 func (m Model) setSelectorFilter(filter string) Model {
 	if filter == m.selectorFilter && m.selectorFilteredFor == filter {
 		return m
@@ -231,14 +242,7 @@ func (m Model) rebuildSelectorFilterCache() Model {
 	if len(m.selectorSearch) != len(m.selectorItems) {
 		m.selectorSearch = selectorSearchTexts(m.selectorItems)
 	}
-	f := strings.ToLower(m.selectorFilter)
-	out := make([]selectorItem, 0, len(m.selectorItems))
-	for i, it := range m.selectorItems {
-		if strings.Contains(m.selectorSearch[i], f) {
-			out = append(out, it)
-		}
-	}
-	m.selectorFiltered = out
+	m.selectorFiltered = matchSelectorItems(m.selectorItems, m.selectorSearch, m.selectorFilter)
 	return m
 }
 
@@ -253,14 +257,7 @@ func (m Model) filteredSelectorItems() []selectorItem {
 	if len(m.selectorSearch) != len(m.selectorItems) {
 		m.selectorSearch = selectorSearchTexts(m.selectorItems)
 	}
-	f := strings.ToLower(m.selectorFilter)
-	out := make([]selectorItem, 0, len(m.selectorItems))
-	for i, it := range m.selectorItems {
-		if strings.Contains(m.selectorSearch[i], f) {
-			out = append(out, it)
-		}
-	}
-	return out
+	return matchSelectorItems(m.selectorItems, m.selectorSearch, m.selectorFilter)
 }
 
 // handleSelectorKey routes key input while the selector is open.
