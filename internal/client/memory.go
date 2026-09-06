@@ -177,12 +177,12 @@ func (c *Client) SearchMemories(ctx context.Context, project Project, query stri
 			continue
 		}
 
-		bodyMatch := strings.Contains(strings.ToLower(content), lowerQuery)
-		if !metadataMatch && !bodyMatch {
+		searchText := newMemorySearchText(content)
+		if !metadataMatch && !searchText.contains(lowerQuery) {
 			continue
 		}
 		memory.Body = ""
-		memory.Snippet = memorySearchSnippet(content, query)
+		memory.Snippet = searchText.snippet(lowerQuery)
 		result.Memories = append(result.Memories, memory)
 	}
 	return result, nil
@@ -625,15 +625,41 @@ func firstMemoryParagraph(content string) string {
 	return truncateMemoryText(strings.Join(lines, " "), 220)
 }
 
-func memorySearchSnippet(content, query string) string {
-	lowerQuery := strings.ToLower(strings.TrimSpace(query))
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && strings.Contains(strings.ToLower(line), lowerQuery) {
+type memorySearchText struct {
+	original   string
+	normalized string
+}
+
+func newMemorySearchText(content string) memorySearchText {
+	return memorySearchText{
+		original:   content,
+		normalized: strings.ToLower(content),
+	}
+}
+
+func (text memorySearchText) contains(normalizedQuery string) bool {
+	return strings.Contains(text.normalized, normalizedQuery)
+}
+
+func (text memorySearchText) snippet(normalizedQuery string) string {
+	originalOffset, normalizedOffset := 0, 0
+	for originalOffset <= len(text.original) && normalizedOffset <= len(text.normalized) {
+		originalLine, nextOriginal := memorySearchLine(text.original, originalOffset)
+		normalizedLine, nextNormalized := memorySearchLine(text.normalized, normalizedOffset)
+		line := strings.TrimSpace(originalLine)
+		if line != "" && strings.Contains(strings.TrimSpace(normalizedLine), normalizedQuery) {
 			return truncateMemoryText(line, 220)
 		}
+		originalOffset, normalizedOffset = nextOriginal, nextNormalized
 	}
-	return firstMemoryParagraph(content)
+	return firstMemoryParagraph(text.original)
+}
+
+func memorySearchLine(value string, offset int) (string, int) {
+	if newline := strings.IndexByte(value[offset:], '\n'); newline >= 0 {
+		return value[offset : offset+newline], offset + newline + 1
+	}
+	return value[offset:], len(value) + 1
 }
 
 func truncateMemoryText(value string, max int) string {
