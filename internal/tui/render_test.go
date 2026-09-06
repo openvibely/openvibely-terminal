@@ -300,6 +300,21 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 		}
 		cursor.Text = value
 		return map[string]any{"value": root}
+	case "struct_map":
+		return map[string]any{"value": lifecyclePreviewStructContainers{Values: map[string]string{"message": value}}}
+	case "struct_slice":
+		return map[string]any{"value": lifecyclePreviewStructContainers{Items: []string{value}}}
+	case "wide_struct_slice":
+		items := make([]string, size)
+		return map[string]any{"value": lifecyclePreviewStructContainers{Items: items}}
+	case "struct_custom":
+		return map[string]any{"value": struct {
+			Custom lifecyclePreviewBenchmarkMarshaler `json:"custom"`
+		}{Custom: lifecyclePreviewBenchmarkMarshaler([]byte(`"` + value + `"`))}}
+	case "struct_text":
+		return map[string]any{"value": struct {
+			Text lifecyclePreviewBenchmarkTextMarshaler `json:"text"`
+		}{Text: lifecyclePreviewBenchmarkTextMarshaler([]byte(value))}}
 	case "integer_keys":
 		return map[string]any{"value": map[int]string{10: value, 2: "two"}}
 	case "text_keys":
@@ -318,7 +333,7 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -539,6 +554,33 @@ type lifecyclePreviewNestedStruct struct {
 	Field lifecyclePreviewNestedPointerField `json:"field"`
 }
 
+type lifecyclePreviewNamedByte byte
+
+func (value *lifecyclePreviewNamedByte) MarshalJSON() ([]byte, error) {
+	return json.Marshal(fmt.Sprintf("byte:%d", *value))
+}
+
+type lifecyclePreviewNamedTextByte byte
+
+func (value *lifecyclePreviewNamedTextByte) MarshalText() ([]byte, error) {
+	return []byte(fmt.Sprintf("text-byte:%d", *value)), nil
+}
+
+type lifecyclePreviewStructContainers struct {
+	Values map[string]string `json:"values"`
+	Items  []string          `json:"items"`
+	Array  [1]string         `json:"array"`
+}
+
+type lifecyclePreviewStructCustomContainers struct {
+	Custom []lifecyclePreviewCountingMarshaler           `json:"custom"`
+	Text   map[string]lifecyclePreviewLargeTextMarshaler `json:"text"`
+}
+
+type lifecyclePreviewAnyHolder struct {
+	Value any `json:"value"`
+}
+
 type lifecyclePreviewTextKey string
 
 func (value lifecyclePreviewTextKey) MarshalText() ([]byte, error) {
@@ -630,6 +672,72 @@ func TestLifecyclePayloadSummaryPreservesNestedPointerReceiverDispatch(t *testin
 	}
 	if calls != 2 { // once for the baseline and once while previewing
 		t.Fatalf("nested pointer marshaler calls = %d, want 2 total", calls)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesNamedByteElementMarshalers(t *testing.T) {
+	payloads := []map[string]any{
+		{"items": []lifecyclePreviewNamedByte{1, 2}},
+		{"items": []lifecyclePreviewNamedTextByte{1, 2}},
+	}
+	for _, payload := range payloads {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal named-byte fixture: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Fatalf("named-byte preview = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryBoundsStructContainerScalars(t *testing.T) {
+	large := strings.Repeat("x", 1<<20)
+	for _, value := range []any{
+		lifecyclePreviewStructContainers{Values: map[string]string{"message": large}},
+		lifecyclePreviewStructContainers{Items: []string{large}},
+		lifecyclePreviewStructContainers{Array: [1]string{large}},
+		lifecyclePreviewStructContainers{Items: make([]string, 1<<16)},
+	} {
+		payload := map[string]any{"value": value}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal struct-container fixture: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Fatalf("struct-container preview = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryBoundsNestedStructMarshalers(t *testing.T) {
+	large := strings.Repeat("x", 1<<20)
+	calls := 0
+	payload := map[string]any{"value": lifecyclePreviewStructCustomContainers{
+		Custom: []lifecyclePreviewCountingMarshaler{{Calls: &calls, Value: large}},
+		Text:   map[string]lifecyclePreviewLargeTextMarshaler{"value": lifecyclePreviewLargeTextMarshaler(large)},
+	}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal nested-marshaler fixture: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("nested-marshaler preview = %q, want %q", got, want)
+	}
+	if calls != 2 { // once for the baseline and once while previewing
+		t.Fatalf("nested custom marshaler calls = %d, want 2 total", calls)
+	}
+}
+
+func TestLifecyclePayloadSummaryRejectsPathologicalPointerDepthWithoutMarshalingTail(t *testing.T) {
+	var value any = strings.Repeat("x", 1<<20)
+	for range lifecyclePreviewMaxDepth + 1 {
+		item := value
+		value = &item
+	}
+	payload := map[string]any{"value": lifecyclePreviewAnyHolder{Value: value}}
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("pathological pointer preview = %q, want unavailable", got)
 	}
 }
 

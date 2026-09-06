@@ -879,7 +879,7 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 		}
 		return p.appendMarshaled(value.Interface())
 	case reflect.Array, reflect.Slice:
-		if value.Kind() == reflect.Slice && value.Type().Elem().Kind() == reflect.Uint8 {
+		if value.Kind() == reflect.Slice && lifecycleUsesByteSliceEncoding(value.Type()) {
 			if value.IsNil() {
 				p.append("null")
 				return nil
@@ -891,7 +891,11 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 			return nil
 		}
 		p.append("[")
+		mayError := lifecycleTypeMayMarshalError(value.Type().Elem())
 		for i := 0; i < value.Len(); i++ {
+			if p.stopped && !mayError {
+				break
+			}
 			if !p.stopped && i > 0 {
 				p.append(",")
 			}
@@ -921,7 +925,11 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 			return boundedLifecycleMapKeyLess(keys[i], keys[j])
 		})
 		p.append("{")
+		mayError := lifecycleTypeMayMarshalError(value.Type().Elem())
 		for i, key := range keys {
+			if p.stopped && !mayError {
+				break
+			}
 			if !p.stopped {
 				if i > 0 {
 					p.append(",")
@@ -936,7 +944,18 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 		p.append("}")
 		return nil
 	case reflect.Struct:
-		bounded := boundedLifecycleValue(value, lifecyclePreviewMaxBytes, depth)
+		needsBounded, err := lifecycleValueNeedsBoundedTraversal(value, depth)
+		if err != nil {
+			return err
+		}
+		if needsBounded {
+			return p.appendBoundedStruct(value, depth)
+		}
+		state := lifecycleCloneState{remaining: lifecyclePreviewMaxBytes}
+		bounded, err := boundedLifecycleValue(value, depth, &state)
+		if err != nil {
+			return err
+		}
 		if value.CanAddr() && bounded.CanAddr() && bounded.Addr().CanInterface() {
 			return p.appendMarshaled(bounded.Addr().Interface())
 		}
@@ -947,6 +966,99 @@ func (p *lifecycleJSONPreview) appendReflectValue(value reflect.Value, depth int
 		}
 		return p.appendMarshaled(marshalValue.Interface())
 	}
+}
+
+func (p *lifecycleJSONPreview) appendBoundedStruct(value reflect.Value, depth int) error {
+	p.append("{")
+	written := 0
+	typeOf := value.Type()
+	for i := 0; i < value.NumField(); i++ {
+		fieldType := typeOf.Field(i)
+		if !fieldType.IsExported() {
+			continue
+		}
+		tag := fieldType.Tag.Get("json")
+		name, options, _ := strings.Cut(tag, ",")
+		if name == "-" {
+			continue
+		}
+		if fieldType.Anonymous && name == "" {
+			return fmt.Errorf("embedded struct fields are unavailable in bounded lifecycle preview")
+		}
+		if name == "" {
+			name = fieldType.Name
+		}
+		field := value.Field(i)
+		if strings.Contains(","+options+",", ",omitempty,") && field.IsZero() {
+			continue
+		}
+		if !p.stopped {
+			if written > 0 {
+				p.append(",")
+			}
+			p.appendJSONString(name)
+			p.append(":")
+		}
+		if strings.Contains(","+options+",", ",string,") {
+			return p.appendMarshaled(value.Interface())
+		}
+		if err := p.appendReflectValue(field, depth+1); err != nil {
+			return err
+		}
+		written++
+	}
+	p.append("}")
+	return nil
+}
+
+func lifecycleValueNeedsBoundedTraversal(value reflect.Value, depth int) (bool, error) {
+	if !value.IsValid() || ((value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer) && value.IsNil()) {
+		return false, nil
+	}
+	if depth >= lifecyclePreviewMaxDepth {
+		return false, fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
+	}
+	typeOf := value.Type()
+	if typeOf.Implements(reflect.TypeFor[json.Marshaler]()) || typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
+		(value.Kind() != reflect.Pointer && (reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()))) {
+		return true, nil
+	}
+	switch value.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		return lifecycleValueNeedsBoundedTraversal(value.Elem(), depth+1)
+	case reflect.Array, reflect.Slice:
+		if !lifecycleTypeMayMarshalError(typeOf.Elem()) {
+			return false, nil
+		}
+		for i := 0; i < value.Len(); i++ {
+			bounded, err := lifecycleValueNeedsBoundedTraversal(value.Index(i), depth+1)
+			if bounded || err != nil {
+				return bounded, err
+			}
+		}
+	case reflect.Map:
+		if !lifecycleTypeMayMarshalError(typeOf.Elem()) {
+			return false, nil
+		}
+		iterator := value.MapRange()
+		for iterator.Next() {
+			bounded, err := lifecycleValueNeedsBoundedTraversal(iterator.Value(), depth+1)
+			if bounded || err != nil {
+				return bounded, err
+			}
+		}
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			if !typeOf.Field(i).IsExported() {
+				continue
+			}
+			bounded, err := lifecycleValueNeedsBoundedTraversal(value.Field(i), depth+1)
+			if bounded || err != nil {
+				return bounded, err
+			}
+		}
+	}
+	return false, nil
 }
 
 type lifecyclePreviewMapKey struct {
@@ -1022,72 +1134,180 @@ func boundedLifecycleKeyLess(left, right string) bool {
 	return strings.Compare(left[:min(len(left), limit)], right[:min(len(right), limit)]) < 0
 }
 
-func boundedLifecycleValue(value reflect.Value, limit, depth int) reflect.Value {
-	if !value.IsValid() || depth >= lifecyclePreviewMaxDepth {
-		return value
+type lifecycleCloneState struct {
+	remaining int
+}
+
+func lifecycleUsesByteSliceEncoding(typeOf reflect.Type) bool {
+	if typeOf.Kind() != reflect.Slice || typeOf.Elem().Kind() != reflect.Uint8 {
+		return false
+	}
+	element := typeOf.Elem()
+	pointer := reflect.PointerTo(element)
+	return !element.Implements(reflect.TypeFor[json.Marshaler]()) &&
+		!element.Implements(reflect.TypeFor[encoding.TextMarshaler]()) &&
+		!pointer.Implements(reflect.TypeFor[json.Marshaler]()) &&
+		!pointer.Implements(reflect.TypeFor[encoding.TextMarshaler]())
+}
+
+func boundedLifecycleValue(value reflect.Value, depth int, state *lifecycleCloneState) (reflect.Value, error) {
+	if !value.IsValid() {
+		return value, nil
+	}
+	if depth >= lifecyclePreviewMaxDepth {
+		return reflect.Value{}, fmt.Errorf("lifecycle payload nesting exceeds JSON limit")
 	}
 	typeOf := value.Type()
 	if typeOf.Implements(reflect.TypeFor[json.Marshaler]()) || typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
 		(value.Kind() != reflect.Pointer && (reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()))) {
-		return value
+		return value, nil
 	}
 	switch value.Kind() {
 	case reflect.String:
-		if value.Len() <= limit {
-			return value
-		}
-		prefix := value.String()[:limit]
+		length := min(value.Len(), max(state.remaining, 0))
+		prefix := value.String()[:length]
 		for !utf8.ValidString(prefix) {
 			prefix = prefix[:len(prefix)-1]
 		}
+		state.remaining -= len(prefix)
+		if len(prefix) == value.Len() {
+			return value, nil
+		}
 		clone := reflect.New(typeOf).Elem()
 		clone.SetString(prefix)
-		return clone
+		return clone, nil
 	case reflect.Slice:
 		if value.IsNil() {
-			return value
+			return value, nil
 		}
-		length := value.Len()
-		if typeOf.Elem().Kind() == reflect.Uint8 && length > limit {
-			length = limit
+		if lifecycleUsesByteSliceEncoding(typeOf) {
+			length := min(value.Len(), max(state.remaining, 0))
+			state.remaining -= length
+			clone := reflect.MakeSlice(typeOf, length, length)
+			reflect.Copy(clone, value.Slice(0, length))
+			return clone, nil
 		}
+		length := min(value.Len(), lifecyclePreviewMaxBytes)
 		clone := reflect.MakeSlice(typeOf, length, length)
 		for i := 0; i < length; i++ {
-			clone.Index(i).Set(boundedLifecycleValue(value.Index(i), limit, depth+1))
+			item, err := boundedLifecycleValue(value.Index(i), depth+1, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			clone.Index(i).Set(item)
 		}
-		return clone
+		if lifecycleTypeMayMarshalError(typeOf.Elem()) {
+			for i := length; i < value.Len(); i++ {
+				if err := validateLifecycleValue(value.Index(i), depth+1); err != nil {
+					return reflect.Value{}, err
+				}
+			}
+		}
+		return clone, nil
 	case reflect.Array:
+		if value.Len() > lifecyclePreviewMaxBytes {
+			return reflect.Value{}, fmt.Errorf("lifecycle payload array exceeds preview limit")
+		}
 		clone := reflect.New(typeOf).Elem()
 		for i := 0; i < value.Len(); i++ {
-			clone.Index(i).Set(boundedLifecycleValue(value.Index(i), limit, depth+1))
+			item, err := boundedLifecycleValue(value.Index(i), depth+1, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			clone.Index(i).Set(item)
 		}
-		return clone
+		return clone, nil
+	case reflect.Map:
+		if value.IsNil() {
+			return value, nil
+		}
+		keys := value.MapKeys()
+		if len(keys) > lifecyclePreviewMaxBytes {
+			return reflect.Value{}, fmt.Errorf("lifecycle payload map exceeds preview limit")
+		}
+		clone := reflect.MakeMapWithSize(typeOf, len(keys))
+		for _, key := range keys {
+			item, err := boundedLifecycleValue(value.MapIndex(key), depth+1, state)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			clone.SetMapIndex(key, item)
+		}
+		return clone, nil
 	case reflect.Struct:
 		clone := reflect.New(typeOf).Elem()
 		clone.Set(value)
 		for i := 0; i < value.NumField(); i++ {
 			if clone.Field(i).CanSet() && value.Field(i).CanInterface() {
-				clone.Field(i).Set(boundedLifecycleValue(value.Field(i), limit, depth+1))
+				field, err := boundedLifecycleValue(value.Field(i), depth+1, state)
+				if err != nil {
+					return reflect.Value{}, err
+				}
+				clone.Field(i).Set(field)
 			}
 		}
-		return clone
+		return clone, nil
 	case reflect.Interface:
 		if value.IsNil() {
-			return value
+			return value, nil
 		}
-		item := boundedLifecycleValue(value.Elem(), limit, depth+1)
+		item, err := boundedLifecycleValue(value.Elem(), depth+1, state)
+		if err != nil {
+			return reflect.Value{}, err
+		}
 		clone := reflect.New(typeOf).Elem()
 		clone.Set(item)
-		return clone
+		return clone, nil
 	case reflect.Pointer:
 		if value.IsNil() {
-			return value
+			return value, nil
+		}
+		item, err := boundedLifecycleValue(value.Elem(), depth+1, state)
+		if err != nil {
+			return reflect.Value{}, err
 		}
 		clone := reflect.New(typeOf.Elem())
-		clone.Elem().Set(boundedLifecycleValue(value.Elem(), limit, depth+1))
-		return clone
+		clone.Elem().Set(item)
+		return clone, nil
 	}
-	return value
+	return value, nil
+}
+
+func lifecycleTypeMayMarshalError(typeOf reflect.Type) bool {
+	return lifecycleTypeMayMarshalErrorSeen(typeOf, make(map[reflect.Type]bool))
+}
+
+func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, seen map[reflect.Type]bool) bool {
+	if seen[typeOf] {
+		return false
+	}
+	seen[typeOf] = true
+	if typeOf == reflect.TypeFor[json.Number]() ||
+		typeOf.Implements(reflect.TypeFor[json.Marshaler]()) ||
+		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
+		(typeOf.Kind() != reflect.Pointer && (reflect.PointerTo(typeOf).Implements(reflect.TypeFor[json.Marshaler]()) || reflect.PointerTo(typeOf).Implements(reflect.TypeFor[encoding.TextMarshaler]()))) {
+		return true
+	}
+	switch typeOf.Kind() {
+	case reflect.Interface, reflect.Float32, reflect.Float64, reflect.Chan, reflect.Complex64, reflect.Complex128, reflect.Func, reflect.UnsafePointer:
+		return true
+	case reflect.Pointer, reflect.Array, reflect.Slice:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), seen)
+	case reflect.Map:
+		return lifecycleTypeMayMarshalErrorSeen(typeOf.Key(), seen) || lifecycleTypeMayMarshalErrorSeen(typeOf.Elem(), seen)
+	case reflect.Struct:
+		for i := 0; i < typeOf.NumField(); i++ {
+			if typeOf.Field(i).IsExported() && lifecycleTypeMayMarshalErrorSeen(typeOf.Field(i).Type, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func validateLifecycleValue(value reflect.Value, depth int) error {
+	preview := lifecycleJSONPreview{limit: 0, stopped: true}
+	return preview.appendReflectValue(value, depth)
 }
 
 func (p *lifecycleJSONPreview) appendBytes(value []byte) error {
