@@ -1224,48 +1224,68 @@ func nonNilSlice[T any](items []T) []T {
 
 func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
 	usage := commandUsage("schedule", "edit")
-	optionAt := -1
-	for i, arg := range args {
-		switch strings.ToLower(arg) {
-		case "run-at", "repeat", "interval", "clear-context":
-			optionAt = i
+	var candidateErr error
+	for optionAt := 1; optionAt < len(args); optionAt++ {
+		if !isScheduleEditSetting(args[optionAt]) {
+			continue
 		}
-		if optionAt >= 0 {
-			break
+		update, parsedPairs, err := parseScheduleEditOptions(args[optionAt:], usage)
+		if err == nil {
+			return strings.Join(args[:optionAt], " "), update, nil
+		}
+		candidateErr = err
+		// Once a suffix has consumed a valid setting/value pair, malformed
+		// trailing input belongs to the option list rather than the reference.
+		// Reject it locally instead of reinterpreting that valid pair as title text.
+		if parsedPairs > 0 {
+			return "", client.ScheduleUpdate{}, err
 		}
 	}
-	if optionAt < 1 {
-		return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+	if candidateErr != nil {
+		return "", client.ScheduleUpdate{}, candidateErr
 	}
-	ref := strings.Join(args[:optionAt], " ")
+	return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+}
+
+func isScheduleEditSetting(value string) bool {
+	switch strings.ToLower(value) {
+	case "run-at", "repeat", "interval", "clear-context":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseScheduleEditOptions(args []string, usage string) (client.ScheduleUpdate, int, error) {
 	var update client.ScheduleUpdate
 	seen := make(map[string]bool)
-	for i := optionAt; i < len(args); i += 2 {
+	parsedPairs := 0
+	for i := 0; i < len(args); i += 2 {
 		if i+1 >= len(args) {
-			return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+			return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("%s", usage)
 		}
 		key, value := strings.ToLower(args[i]), args[i+1]
-		if seen[key] {
-			return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+		if seen[key] || !isScheduleEditSetting(key) {
+			return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("%s", usage)
 		}
 		seen[key] = true
 		switch key {
 		case "run-at":
 			if _, err := time.Parse("2006-01-02T15:04", value); err != nil {
-				return "", client.ScheduleUpdate{}, fmt.Errorf("run time must use 2006-01-02T15:04")
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("run time must use 2006-01-02T15:04")
 			}
 			update.RunAt = &value
 		case "repeat":
 			value = strings.ToLower(value)
 			if !isRepeat(value) {
-				return "", client.ScheduleUpdate{}, fmt.Errorf("unknown repeat type %q", value)
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("unknown repeat type %q", value)
 			}
 			value = client.NormalizeScheduleRepeat(value)
 			update.RepeatType = &value
 		case "interval":
 			interval, err := strconv.Atoi(value)
 			if err != nil || interval < 1 || interval > 365 {
-				return "", client.ScheduleUpdate{}, fmt.Errorf("repeat interval must be between 1 and 365")
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("repeat interval must be between 1 and 365")
 			}
 			update.RepeatInterval = &interval
 		case "clear-context":
@@ -1276,14 +1296,13 @@ func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
 			case "false":
 				clear = false
 			default:
-				return "", client.ScheduleUpdate{}, fmt.Errorf("clear-context must be true or false")
+				return client.ScheduleUpdate{}, parsedPairs, fmt.Errorf("clear-context must be true or false")
 			}
 			update.ClearContextOnStart = &clear
-		default:
-			return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
 		}
+		parsedPairs++
 	}
-	return ref, update, nil
+	return update, parsedPairs, nil
 }
 
 func applyScheduleUpdate(config client.ScheduleConfig, update client.ScheduleUpdate) client.ScheduleConfig {

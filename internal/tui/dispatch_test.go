@@ -2507,6 +2507,63 @@ func scheduleEditDetail(projectID string) string {
 		<div data-schedule-id="s-2"><form hx-put="/schedules/s-2?project_id=` + projectID + `"><input name="run_at" value="2026-02-03T10:30"><select name="repeat_type"><option value="daily">Daily</option><option value="weekly" selected>Weekly</option></select><input name="repeat_interval" value="3"><input type="hidden" name="clear_context_on_start" value="false"><input type="checkbox" name="clear_context_on_start" value="true"></form></div></div>`
 }
 
+func TestScheduleEditReferencesMayContainSettingWords(t *testing.T) {
+	cases := []struct {
+		name       string
+		line       string
+		scheduleID string
+	}{
+		{name: "quoted exact reserved word", line: `/schedule edit "repeat" interval 4`, scheduleID: "s-1"},
+		{name: "unquoted multiword", line: `/schedule edit run-at repeat interval clear-context report interval 4`, scheduleID: "s-2"},
+	}
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-1">repeat</div>
+		<div data-task-id="t-1" data-schedule-id="s-2">run-at repeat interval clear-context report</div>
+	</div>`
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var putPath string
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					_, _ = io.WriteString(w, scheduleHTML)
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+					_, _ = io.WriteString(w, scheduleEditDetail("p1"))
+				case r.Method == http.MethodPut:
+					putPath = r.URL.Path
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, tc.line)
+			if want := "/schedules/" + tc.scheduleID; putPath != want {
+				t.Fatalf("PUT path = %q, want %q; transcript:\n%s", putPath, want, stripANSI(transcript(m)))
+			}
+		})
+	}
+}
+
+func TestScheduleEditSettingWordReferencePreservesAmbiguity(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content">
+		<div data-task-id="t-1" data-schedule-id="s-1">Weekly repeat report alpha</div>
+		<div data-task-id="t-2" data-schedule-id="s-2">Weekly repeat report beta</div>
+	</div>`
+	var puts int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+		}
+		_, _ = io.WriteString(w, scheduleHTML)
+	})
+	m = runLine(t, m, "/schedule edit Weekly repeat report interval 4")
+	out := stripANSI(transcript(m))
+	if puts != 0 || !strings.Contains(out, `"Weekly repeat report" is ambiguous`) {
+		t.Fatalf("ambiguous edit puts=%d:\n%s", puts, out)
+	}
+}
+
 func TestScheduleEditResolvesNonFirstCardAndPreservesOmittedSettings(t *testing.T) {
 	var gotForm url.Values
 	var scheduleGETs int

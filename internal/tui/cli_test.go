@@ -2405,6 +2405,21 @@ func TestCLIScheduleEditParityAndMissingReferenceValidation(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleEditReservedWordReference(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">repeat</div></div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/schedule":     scheduleHTML,
+		"/tasks/t-1":    scheduleEditDetail("p1"),
+	})
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "repeat", "interval", "4"}, false, false); err != nil {
+		t.Fatalf("headless reserved-word schedule edit: %v", err)
+	}
+	if !rec.saw(http.MethodPut, "/schedules/s-1") || !rec.sawForm("repeat_interval=4") {
+		t.Fatalf("headless reserved-word edit requests/forms:\n%s\n%v", rec.all(), rec.forms)
+	}
+}
+
 func TestCLIScheduleEditAmbiguousReferenceDoesNotMutate(t *testing.T) {
 	const ambiguous = `<div id="schedule-content"><div data-task-id="t1" data-schedule-id="s1">Weekly report</div><div data-task-id="t2" data-schedule-id="s2">Weekly report</div></div>`
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": ambiguous})
