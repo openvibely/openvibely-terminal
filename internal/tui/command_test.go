@@ -997,6 +997,31 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 	}
 }
 
+func TestScheduleEditHelpAndCompletionMetadata(t *testing.T) {
+	cmd := lookupCommand("schedule")
+	if cmd == nil {
+		t.Fatal("schedule command missing")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{"schedule edit <id>", "run-at", "clear-context <true|false>", "schedule edit a1b2c3"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help missing %q:\n%s", want, help)
+		}
+	}
+	for _, tc := range []struct {
+		after []string
+		want  string
+	}{
+		{after: []string{"edit", "s1"}, want: "run-at"},
+		{after: []string{"edit", "s1", "repeat"}, want: "weekly"},
+		{after: []string{"edit", "s1", "clear-context"}, want: "false"},
+	} {
+		if got := registryCompletionValues("schedule", tc.after...); !containsString(got, tc.want) {
+			t.Errorf("completion after %v = %v, missing %q", tc.after, got, tc.want)
+		}
+	}
+}
+
 // renderCommandHelp must include an "examples:" block for commands that have
 // examples populated, and must not render an empty block for those that don't.
 func TestRenderCommandHelpExamplesBlock(t *testing.T) {

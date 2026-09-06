@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -2388,6 +2389,143 @@ func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
 		})
 	}
 }
+func scheduleEditDetail(projectID string) string {
+	return `<div id="task-detail-content"><div data-project-id="` + projectID + `"></div>
+		<div data-schedule-id="s-1"><form hx-put="/schedules/s-1?project_id=` + projectID + `"><input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select><input name="repeat_interval" value="1"><input type="checkbox" name="clear_context_on_start" value="true" checked></form></div>
+		<div data-schedule-id="s-2"><form hx-put="/schedules/s-2?project_id=` + projectID + `"><input name="run_at" value="2026-02-03T10:30"><select name="repeat_type"><option value="daily">Daily</option><option value="weekly" selected>Weekly</option></select><input name="repeat_interval" value="3"><input type="hidden" name="clear_context_on_start" value="false"><input type="checkbox" name="clear_context_on_start" value="true"></form></div></div>`
+}
+
+func TestScheduleEditResolvesNonFirstCardAndPreservesOmittedSettings(t *testing.T) {
+	var gotForm url.Values
+	var scheduleGETs int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			scheduleGETs++
+			_, _ = io.WriteString(w, selScheduleHTML)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			if r.URL.Query().Get("project_id") != "p1" || r.URL.Query().Get("tab") != "schedules" {
+				t.Errorf("detail query = %s", r.URL.RawQuery)
+			}
+			_, _ = io.WriteString(w, scheduleEditDetail("p1"))
+		case r.Method == http.MethodPut && r.URL.Path == "/schedules/s-2":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("mutation project = %q", r.URL.Query().Get("project_id"))
+			}
+			_ = r.ParseForm()
+			gotForm = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	m = runLine(t, m, "/schedule edit s-2 run-at 2026-04-05T11:45 repeat hours clear-context true")
+	want := url.Values{"run_at": {"2026-04-05T11:45"}, "repeat_type": {"hours"}, "repeat_interval": {"3"}, "clear_context_on_start": {"true"}}
+	if !reflect.DeepEqual(gotForm, want) {
+		t.Fatalf("form = %#v, want %#v", gotForm, want)
+	}
+	if scheduleGETs != 2 {
+		t.Fatalf("schedule GETs = %d, want resolution and refresh", scheduleGETs)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "updated schedule s-2") {
+		t.Fatalf("success output missing:\n%s", out)
+	}
+}
+
+func TestScheduleEditRejectsInvalidSyntaxBeforeRequests(t *testing.T) {
+	cases := []string{
+		"/schedule unknown", "/schedule list extra", "/schedule edit s-1", "/schedule edit s-1 run-at bad",
+		"/schedule edit s-1 repeat yearly", "/schedule edit s-1 interval 0", "/schedule edit s-1 interval 366",
+		"/schedule edit s-1 clear-context maybe", "/schedule edit s-1 repeat daily surplus",
+	}
+	for _, line := range cases {
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, line)
+			if rec.all() != "" {
+				t.Fatalf("invalid command made requests:\n%s", rec.all())
+			}
+			if !strings.Contains(stripANSI(transcript(m)), "usage") && !strings.Contains(stripANSI(transcript(m)), "must") && !strings.Contains(stripANSI(transcript(m)), "unknown repeat") {
+				t.Fatalf("validation error missing:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
+func TestScheduleEditRejectsForeignProjectAndKeepsMutationSuccessOnRefreshFailure(t *testing.T) {
+	for _, foreign := range []bool{true, false} {
+		t.Run(fmt.Sprintf("foreign=%t", foreign), func(t *testing.T) {
+			var puts, scheduleGETs int
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					scheduleGETs++
+					if !foreign && scheduleGETs > 1 {
+						http.Error(w, "refresh failed", http.StatusInternalServerError)
+						return
+					}
+					_, _ = io.WriteString(w, selScheduleHTML)
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+					project := "p1"
+					if foreign {
+						project = "p2"
+					}
+					_, _ = io.WriteString(w, scheduleEditDetail(project))
+				case r.Method == http.MethodPut:
+					puts++
+					w.WriteHeader(http.StatusNoContent)
+				}
+			})
+			m = runLine(t, m, "/schedule edit s-2 interval 4")
+			out := stripANSI(transcript(m))
+			if foreign {
+				if puts != 0 || !strings.Contains(out, "belongs to project") {
+					t.Fatalf("foreign result puts=%d:\n%s", puts, out)
+				}
+				return
+			}
+			if puts != 1 || !strings.Contains(out, "updated schedule s-2") || strings.Contains(out, "refresh failed") {
+				t.Fatalf("refresh failure result puts=%d:\n%s", puts, out)
+			}
+		})
+	}
+}
+
+func TestScheduleEditJSONSuccessIsStableWhenRefreshFails(t *testing.T) {
+	oldJSON := jsonMode
+	jsonMode = true
+	defer func() { jsonMode = oldJSON }()
+	var scheduleGETs int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			scheduleGETs++
+			if scheduleGETs > 1 {
+				http.Error(w, "refresh failed", http.StatusInternalServerError)
+				return
+			}
+			_, _ = io.WriteString(w, selScheduleHTML)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			_, _ = io.WriteString(w, scheduleEditDetail("p1"))
+		case r.Method == http.MethodPut && r.URL.Path == "/schedules/s-2":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	m = runLine(t, m, "/schedule edit s-2 interval 4 clear-context true")
+	out := stripANSI(transcript(m))
+	for _, want := range []string{`"id":"s-2"`, `"task_id":"t-1"`, `"project_id":"p1"`, `"run_at":"2026-02-03T10:30"`, `"repeat_type":"weekly"`, `"repeat_interval":4`, `"clear_context_on_start":true`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("JSON output missing %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "refresh failed") {
+		t.Fatalf("successful JSON mutation exposed refresh failure:\n%s", out)
+	}
+}
+
 func TestScheduleAddResolvesTask(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	runLine(t, m, "/schedule add Refactor 2026-09-01T10:00 daily")

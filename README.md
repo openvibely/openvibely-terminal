@@ -125,6 +125,7 @@ Commands take a resource, an optional action, and arguments:
 /memory list                             inspect indexed project memory
 /memory show managed_memory.md           read one memory file
 /memory search "project scoped"         search memory files
+/schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false
 ```
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
@@ -138,7 +139,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | Command | Aliases | Actions |
 |---|---|---|
 | `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
-| `/schedule` | `schedules` | `list`, `add`, `delete`, `toggle` |
+| `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `show`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |

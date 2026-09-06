@@ -1279,6 +1279,117 @@ func TestCreateScheduleRejectsInvalidRepeatIntervalsBeforeRequest(t *testing.T) 
 	}
 }
 
+func TestScheduleEditLoadsSelectedConfigAndPreservesOmittedValues(t *testing.T) {
+	const detail = `<div id="task-detail-content" data-project-id="p2">
+		<div data-schedule-id="s1"><form action="/schedules/s1?project_id=p2">
+			<input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select>
+			<input name="repeat_interval" value="2"><input type="checkbox" name="clear_context_on_start" value="true" checked>
+		</form></div>
+		<div data-schedule-id="s2"><form action="/schedules/s2?project_id=p2">
+			<input name="run_at" value="2026-02-03T10:30"><select name="repeat_type"><option value="daily">Daily</option><option value="weekly" selected>Weekly</option></select>
+			<input name="repeat_interval" value="3"><input type="hidden" name="clear_context_on_start" value="false"><input type="checkbox" name="clear_context_on_start" value="true">
+		</form></div>
+	</div>`
+	var requests int
+	var gotForm url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("project_id"); got != "p2" {
+			t.Errorf("project_id = %q, want p2", got)
+		}
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.Path != "/tasks/t2" || r.URL.Query().Get("tab") != "schedules" {
+				t.Errorf("config request = %s %s", r.Method, r.URL.RequestURI())
+			}
+			_, _ = io.WriteString(w, detail)
+		case http.MethodPut:
+			if r.URL.Path != "/schedules/s2" {
+				t.Errorf("update path = %q", r.URL.Path)
+			}
+			_ = r.ParseForm()
+			gotForm = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected request %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	config, err := c.GetTaskSchedule(context.Background(), "p2", "t2", "s2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ID != "s2" || config.TaskID != "t2" || config.ProjectID != "p2" || config.RunAt != "2026-02-03T10:30" || config.RepeatType != "weekly" || config.RepeatInterval != 3 || config.ClearContextOnStart {
+		t.Fatalf("config = %#v", config)
+	}
+	if err := c.UpdateSchedule(context.Background(), config, ScheduleUpdate{RepeatType: ptr("hours")}); err != nil {
+		t.Fatal(err)
+	}
+	want := url.Values{"run_at": {"2026-02-03T10:30"}, "repeat_type": {"hours"}, "repeat_interval": {"3"}}
+	if !reflect.DeepEqual(gotForm, want) {
+		t.Fatalf("form = %#v, want %#v", gotForm, want)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestUpdateScheduleSupportsEveryRecurrenceAndExplicitContext(t *testing.T) {
+	for _, repeat := range []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours", "hourly"} {
+		t.Run(repeat, func(t *testing.T) {
+			var form url.Values
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				form = r.PostForm
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+			c, _ := New(srv.URL)
+			clear := false
+			config := ScheduleConfig{ID: "s1", TaskID: "t1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: true}
+			if err := c.UpdateSchedule(context.Background(), config, ScheduleUpdate{RepeatType: &repeat, ClearContextOnStart: &clear}); err != nil {
+				t.Fatal(err)
+			}
+			wantRepeat := NormalizeScheduleRepeat(repeat)
+			if form.Get("repeat_type") != wantRepeat || form.Get("clear_context_on_start") != "false" {
+				t.Fatalf("form = %#v, want repeat %q and explicit false", form, wantRepeat)
+			}
+		})
+	}
+}
+
+func TestScheduleEditRejectsForeignProjectAndInvalidValuesBeforeMutation(t *testing.T) {
+	const foreign = `<div id="task-detail-content" data-project-id="foreign"><div data-schedule-id="s1"><form action="/schedules/s1?project_id=foreign"><input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select><input name="repeat_interval" value="1"></form></div></div>`
+	var puts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+		}
+		_, _ = io.WriteString(w, foreign)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	if _, err := c.GetTaskSchedule(context.Background(), "p1", "t1", "s1"); err == nil || !strings.Contains(err.Error(), "belongs to project") {
+		t.Fatalf("foreign project error = %v", err)
+	}
+
+	base := ScheduleConfig{ID: "s1", TaskID: "t1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1}
+	badTime, badType := "not-a-time", "yearly"
+	zero, tooLarge := 0, 366
+	for _, update := range []ScheduleUpdate{{RunAt: &badTime}, {RepeatType: &badType}, {RepeatInterval: &zero}, {RepeatInterval: &tooLarge}} {
+		if err := c.UpdateSchedule(context.Background(), base, update); err == nil {
+			t.Fatalf("UpdateSchedule(%#v) unexpectedly succeeded", update)
+		}
+	}
+	if puts != 0 {
+		t.Fatalf("invalid updates sent %d PUT requests", puts)
+	}
+}
+
+func ptr[T any](value T) *T { return &value }
+
 func TestListPersonalitiesScrapesBuiltinsCustomsAndActiveState(t *testing.T) {
 	const page = `<div id="personality-section" data-selected-personality="release_coach">
 		<div data-personality-key="" data-personality-name="Base" data-personality-description="Standard professional assistant tone"

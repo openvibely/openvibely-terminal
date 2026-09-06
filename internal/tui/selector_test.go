@@ -141,6 +141,7 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"channels_remove", "/channels remove", "channels remove"},
 		// schedule
 		{"schedule_add", "/schedule add", "schedule add"},
+		{"schedule_edit", "/schedule edit", "schedule edit"},
 		{"schedule_delete", "/schedule delete", "schedule delete"},
 		{"schedule_toggle", "/schedule toggle", "schedule toggle"},
 		// personality

@@ -2378,6 +2378,45 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleEditParityAndMissingReferenceValidation(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/schedule":     selScheduleHTML,
+		"/tasks/t-1":    scheduleEditDetail("p1"),
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"schedule", "edit", "s-2", "repeat", "monthly", "interval", "2", "clear-context", "false"}, false, false); err != nil {
+		t.Fatalf("headless schedule edit: %v", err)
+	}
+	if !rec.saw(http.MethodPut, "/schedules/s-2") || !rec.sawForm("repeat_type=monthly") || !rec.sawForm("repeat_interval=2") || !rec.sawForm("clear_context_on_start=false") {
+		t.Fatalf("headless edit requests/forms:\n%s\n%v", rec.all(), rec.forms)
+	}
+	if !strings.Contains(out.String(), "updated schedule s-2") {
+		t.Fatalf("headless output = %q", out.String())
+	}
+
+	c, rec = cliServer(t, map[string]string{"/api/projects": cliProjects})
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "usage: schedule edit") {
+		t.Fatalf("missing ref error = %v", err)
+	}
+	if rec.saw(http.MethodGet, "/schedule") || rec.saw(http.MethodPut, "/schedules/") {
+		t.Fatalf("missing ref dispatched schedule work:\n%s", rec.all())
+	}
+}
+
+func TestCLIScheduleEditAmbiguousReferenceDoesNotMutate(t *testing.T) {
+	const ambiguous = `<div id="schedule-content"><div data-task-id="t1" data-schedule-id="s1">Weekly report</div><div data-task-id="t2" data-schedule-id="s2">Weekly report</div></div>`
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": ambiguous})
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", "edit", "Weekly report", "repeat", "daily"}, false, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "ambiguous") {
+		t.Fatalf("ambiguous ref error = %v", err)
+	}
+	if rec.saw(http.MethodPut, "/schedules/") {
+		t.Fatalf("ambiguous ref mutated schedule:\n%s", rec.all())
+	}
+}
+
 func TestCLIAutomationsShowMissingReferenceReturnsUsageWithoutSelectorOrList(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/automations": `<div></div>`})
 	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"automations", "show"}, false, false)

@@ -1222,8 +1222,88 @@ func nonNilSlice[T any](items []T) []T {
 
 // --- schedule ---
 
+func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
+	usage := commandUsage("schedule", "edit")
+	optionAt := -1
+	for i, arg := range args {
+		switch strings.ToLower(arg) {
+		case "run-at", "repeat", "interval", "clear-context":
+			optionAt = i
+		}
+		if optionAt >= 0 {
+			break
+		}
+	}
+	if optionAt < 1 {
+		return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+	}
+	ref := strings.Join(args[:optionAt], " ")
+	var update client.ScheduleUpdate
+	seen := make(map[string]bool)
+	for i := optionAt; i < len(args); i += 2 {
+		if i+1 >= len(args) {
+			return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+		}
+		key, value := strings.ToLower(args[i]), args[i+1]
+		if seen[key] {
+			return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+		}
+		seen[key] = true
+		switch key {
+		case "run-at":
+			if _, err := time.Parse("2006-01-02T15:04", value); err != nil {
+				return "", client.ScheduleUpdate{}, fmt.Errorf("run time must use 2006-01-02T15:04")
+			}
+			update.RunAt = &value
+		case "repeat":
+			value = strings.ToLower(value)
+			if !isRepeat(value) {
+				return "", client.ScheduleUpdate{}, fmt.Errorf("unknown repeat type %q", value)
+			}
+			value = client.NormalizeScheduleRepeat(value)
+			update.RepeatType = &value
+		case "interval":
+			interval, err := strconv.Atoi(value)
+			if err != nil || interval < 1 || interval > 365 {
+				return "", client.ScheduleUpdate{}, fmt.Errorf("repeat interval must be between 1 and 365")
+			}
+			update.RepeatInterval = &interval
+		case "clear-context":
+			var clear bool
+			switch strings.ToLower(value) {
+			case "true":
+				clear = true
+			case "false":
+				clear = false
+			default:
+				return "", client.ScheduleUpdate{}, fmt.Errorf("clear-context must be true or false")
+			}
+			update.ClearContextOnStart = &clear
+		default:
+			return "", client.ScheduleUpdate{}, fmt.Errorf("%s", usage)
+		}
+	}
+	return ref, update, nil
+}
+
+func applyScheduleUpdate(config client.ScheduleConfig, update client.ScheduleUpdate) client.ScheduleConfig {
+	if update.RunAt != nil {
+		config.RunAt = *update.RunAt
+	}
+	if update.RepeatType != nil {
+		config.RepeatType = *update.RepeatType
+	}
+	if update.RepeatInterval != nil {
+		config.RepeatInterval = *update.RepeatInterval
+	}
+	if update.ClearContextOnStart != nil {
+		config.ClearContextOnStart = *update.ClearContextOnStart
+	}
+	return config
+}
+
 func scheduleCommand() command {
-	actions := []string{"list", "add", "delete", "toggle"}
+	actions := []string{"list", "add", "edit", "delete", "toggle"}
 	return command{
 		name:    "schedule",
 		aliases: []string{"schedules"},
@@ -1231,22 +1311,28 @@ func scheduleCommand() command {
 		actions: actions,
 		completions: []commandCompletion{
 			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
+			{after: []string{"edit", "*"}, values: []string{"run-at", "repeat", "interval", "clear-context"}},
+			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
+			{after: []string{"edit", "*", "clear-context"}, values: []string{"true", "false"}},
 		},
-		selectorPaths: [][]string{{"add"}, {"delete"}, {"toggle"}},
+		selectorPaths: [][]string{{"add"}, {"edit"}, {"delete"}, {"toggle"}},
 		desc:          "scheduled/recurring task runs",
 		usage: []string{
 			"schedule                                   list schedules",
 			"omit <task> on add → interactive selector",
 			"schedule delete <id>                       remove a schedule",
+			"schedule edit <id> <setting> <value> [...] update a schedule",
 			"schedule toggle <id>                       enable/disable a schedule",
-			"omit <id> on delete/toggle → interactive selector",
+			"omit <id> on edit/delete/toggle → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
 			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]"},
+			{action: "edit", args: "<id> [run-at <2006-01-02T15:04>] [repeat <once|daily|weekly|monthly|seconds|minutes|hours>] [interval <1..365>] [clear-context <true|false>]"},
 		},
 		examples: []string{
 			`schedule add "Daily standup report" 2026-01-20T09:00 daily`,
 			`schedule add "Weekly metrics" 2026-01-22T08:00 weekly`,
+			`schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false`,
 			`schedule toggle a1b2c3`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
@@ -1256,6 +1342,9 @@ func scheduleCommand() command {
 			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
+			if (action == "" && len(rest) > 0) || (action == "list" && len(rest) > 0) {
+				return m, errCmd("usage: /schedule [list|add|edit|delete|toggle]")
+			}
 
 			switch action {
 			case "", "list":
@@ -1300,6 +1389,56 @@ func scheduleCommand() command {
 						return "", err
 					}
 					return scheduleMutationOutput("scheduled "+t.Title+" for "+when+" ("+repeat+")",
+						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
+				})
+			case "edit":
+				if len(rest) == 0 {
+					return selectorOr(m, commandUsage("schedule", "edit"),
+						selectorForWithSuffix("Schedule", "schedule edit", scheduleEmptyStateHint, " ", func(ctx context.Context) ([]selectorItem, error) {
+							entries, _, err := c.GetSchedule(ctx, pid)
+							if err != nil {
+								return nil, err
+							}
+							items := make([]selectorItem, 0, len(entries))
+							for _, e := range entries {
+								if e.ScheduleID != "" {
+									items = append(items, selectorItem{ref: e.ScheduleID, label: firstNonEmpty(e.Text, shortID(e.ScheduleID))})
+								}
+							}
+							return items, nil
+						}))
+				}
+				ref, update, err := parseScheduleEdit(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+					entries, _, err := c.GetSchedule(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					entry, err := matchRef(entries, ref,
+						func(s client.ScheduleEntry) string { return s.ScheduleID },
+						func(s client.ScheduleEntry) string { return s.Text })
+					if err != nil {
+						return "", err
+					}
+					if entry.ScheduleID == "" || entry.TaskID == "" {
+						return "", fmt.Errorf("that task has no schedule")
+					}
+					config, err := c.GetTaskSchedule(ctx, pid, entry.TaskID, entry.ScheduleID)
+					if err != nil {
+						return "", err
+					}
+					if err := c.UpdateSchedule(ctx, config, update); err != nil {
+						return "", err
+					}
+					updated := applyScheduleUpdate(config, update)
+					if jsonMode {
+						_, _, _ = c.GetSchedule(ctx, pid)
+						return marshalJSON(updated)
+					}
+					return scheduleMutationOutput("updated schedule "+entry.ScheduleID,
 						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
 				})
 			case "delete", "toggle":

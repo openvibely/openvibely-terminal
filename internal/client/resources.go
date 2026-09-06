@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -644,6 +645,25 @@ type ScheduleEntry struct {
 	Text       string `json:"text"`
 }
 
+// ScheduleConfig is the editable state of one existing schedule.
+type ScheduleConfig struct {
+	ID                  string `json:"id"`
+	TaskID              string `json:"task_id"`
+	ProjectID           string `json:"project_id"`
+	RunAt               string `json:"run_at"`
+	RepeatType          string `json:"repeat_type"`
+	RepeatInterval      int    `json:"repeat_interval"`
+	ClearContextOnStart bool   `json:"clear_context_on_start"`
+}
+
+// ScheduleUpdate contains optional changes to an existing schedule.
+type ScheduleUpdate struct {
+	RunAt               *string
+	RepeatType          *string
+	RepeatInterval      *int
+	ClearContextOnStart *bool
+}
+
 // GetSchedule scrapes the Schedule screen for a project.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
 	root, err := c.getHTML(ctx, "/schedule"+query("project_id", projectID))
@@ -673,6 +693,118 @@ func NormalizeScheduleRepeat(repeat string) string {
 		return "hours"
 	}
 	return repeat
+}
+
+func validScheduleRepeat(repeat string) bool {
+	switch NormalizeScheduleRepeat(strings.ToLower(repeat)) {
+	case "once", "daily", "weekly", "monthly", "seconds", "minutes", "hours":
+		return true
+	default:
+		return false
+	}
+}
+
+// GetTaskSchedule loads the current editable values for one schedule from its
+// task's project-scoped schedule tab.
+func (c *Client) GetTaskSchedule(ctx context.Context, projectID, taskID, scheduleID string) (ScheduleConfig, error) {
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("tab", "schedules", "project_id", projectID))
+	if err != nil {
+		return ScheduleConfig{}, err
+	}
+	containers := findAll(root, func(n *html.Node) bool {
+		return attr(n, "data-schedule-id") == scheduleID
+	})
+	var form *html.Node
+	for _, container := range containers {
+		form = findNode(container, func(n *html.Node) bool {
+			return n.Type == html.ElementNode && n.Data == "form" && (attr(n, "hx-put") != "" || attr(n, "action") != "")
+		})
+		if form != nil {
+			break
+		}
+	}
+	if form == nil {
+		return ScheduleConfig{}, fmt.Errorf("schedule %q was not found in task %q", scheduleID, taskID)
+	}
+	updateTarget := attr(form, "hx-put")
+	if updateTarget == "" {
+		updateTarget = attr(form, "action")
+	}
+	updateURL, err := url.Parse(updateTarget)
+	if err != nil {
+		return ScheduleConfig{}, fmt.Errorf("invalid schedule update form: %w", err)
+	}
+	if got := updateURL.Query().Get("project_id"); got != projectID {
+		return ScheduleConfig{}, fmt.Errorf("schedule %q belongs to project %q, not selected project %q", scheduleID, got, projectID)
+	}
+	if updateURL.Path != "/schedules/"+scheduleID {
+		return ScheduleConfig{}, fmt.Errorf("schedule update form identity does not match %q", scheduleID)
+	}
+	inputValue := func(name string) string {
+		n := findNode(form, func(n *html.Node) bool { return attr(n, "name") == name && attr(n, "type") != "hidden" })
+		return attr(n, "value")
+	}
+	selectValue := func(name string) string {
+		selectNode := findNode(form, func(n *html.Node) bool { return n.Data == "select" && attr(n, "name") == name })
+		if selectNode == nil {
+			return ""
+		}
+		selected := findNode(selectNode, func(n *html.Node) bool { return n.Data == "option" && hasHTMLAttr(n, "selected") })
+		return attr(selected, "value")
+	}
+	interval, err := strconv.Atoi(inputValue("repeat_interval"))
+	if err != nil {
+		return ScheduleConfig{}, fmt.Errorf("invalid schedule repeat interval")
+	}
+	checkedClear := findNode(form, func(n *html.Node) bool {
+		return attr(n, "name") == "clear_context_on_start" && attr(n, "type") == "checkbox" && hasHTMLAttr(n, "checked")
+	}) != nil
+	config := ScheduleConfig{ID: scheduleID, TaskID: taskID, ProjectID: projectID, RunAt: inputValue("run_at"), RepeatType: selectValue("repeat_type"), RepeatInterval: interval, ClearContextOnStart: checkedClear}
+	if err := validateScheduleValues(config.RunAt, config.RepeatType, config.RepeatInterval); err != nil {
+		return ScheduleConfig{}, fmt.Errorf("invalid existing schedule: %w", err)
+	}
+	return config, nil
+}
+
+func validateScheduleValues(runAt, repeat string, interval int) error {
+	if _, err := time.Parse("2006-01-02T15:04", runAt); err != nil {
+		return fmt.Errorf("run time must use 2006-01-02T15:04")
+	}
+	if !validScheduleRepeat(repeat) {
+		return fmt.Errorf("unknown repeat type %q", repeat)
+	}
+	if interval < 1 || interval > 365 {
+		return fmt.Errorf("repeat interval must be between 1 and 365")
+	}
+	return nil
+}
+
+// UpdateSchedule applies optional changes while retaining all omitted values.
+func (c *Client) UpdateSchedule(ctx context.Context, current ScheduleConfig, update ScheduleUpdate) error {
+	runAt, repeat, interval := current.RunAt, current.RepeatType, current.RepeatInterval
+	if update.RunAt != nil {
+		runAt = *update.RunAt
+	}
+	if update.RepeatType != nil {
+		repeat = NormalizeScheduleRepeat(strings.ToLower(*update.RepeatType))
+	}
+	if update.RepeatInterval != nil {
+		interval = *update.RepeatInterval
+	}
+	if err := validateScheduleValues(runAt, repeat, interval); err != nil {
+		return err
+	}
+	if current.ID == "" || current.ProjectID == "" {
+		return fmt.Errorf("schedule and project IDs are required")
+	}
+	v := url.Values{}
+	v.Set("run_at", runAt)
+	v.Set("repeat_type", repeat)
+	v.Set("repeat_interval", strconv.Itoa(interval))
+	if update.ClearContextOnStart != nil {
+		v.Set("clear_context_on_start", strconv.FormatBool(*update.ClearContextOnStart))
+	}
+	return c.doForm(ctx, http.MethodPut, "/schedules/"+url.PathEscape(current.ID)+query("project_id", current.ProjectID), v)
 }
 
 // CreateSchedule schedules a task. repeat is
