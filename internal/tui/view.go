@@ -1383,6 +1383,10 @@ func lifecyclePreviewKey(value reflect.Value) (lifecyclePreviewMapKey, error) {
 			if err != nil {
 				return lifecyclePreviewMapKey{}, err
 			}
+			// MarshalText implementations may reuse mutable scratch storage. Match
+			// encoding/json's ownership semantics so later calls cannot mutate a
+			// key already retained for canonical sorting or validation.
+			text = append([]byte(nil), text...)
 			return lifecyclePreviewMapKey{sourceKey: value, text: text, textLength: len(text), textMarshaled: true}, nil
 		}
 	}

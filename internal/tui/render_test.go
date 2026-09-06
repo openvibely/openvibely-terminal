@@ -691,6 +691,42 @@ func (value lifecyclePreviewCountingTextKey) MarshalText() ([]byte, error) {
 	return []byte(strings.Repeat("k", lifecyclePreviewMaxKeyBytes) + value.Suffix), nil
 }
 
+type lifecyclePreviewSharedTextKey struct {
+	ID      byte
+	Scratch *[32]byte
+	Calls   *int
+}
+
+func (value lifecyclePreviewSharedTextKey) MarshalText() ([]byte, error) {
+	*value.Calls++
+	for i := range value.Scratch {
+		value.Scratch[i] = value.ID
+	}
+	return value.Scratch[:], nil
+}
+
+type lifecyclePreviewPointerZero struct {
+	Empty bool
+	Value string
+}
+
+func (value *lifecyclePreviewPointerZero) IsZero() bool {
+	return value != nil && value.Empty
+}
+
+type lifecyclePreviewUnexportedEmbedded struct {
+	Scalar  int                                `json:"scalar"`
+	Method  lifecyclePreviewMarshaler          `json:"method"`
+	Pointer lifecyclePreviewNestedPointerField `json:"pointer"`
+	Omitted lifecyclePreviewCustomZero         `json:"omitted,omitzero"`
+	Kept    lifecyclePreviewCustomZero         `json:"kept,omitzero"`
+	ZeroPtr lifecyclePreviewPointerZero        `json:"zero_ptr,omitzero"`
+}
+
+type lifecyclePreviewOuterWithUnexportedEmbedded struct {
+	lifecyclePreviewUnexportedEmbedded
+}
+
 type lifecyclePreviewCustomZero struct {
 	Empty bool
 	Value string
@@ -842,6 +878,92 @@ func TestLifecyclePayloadSummaryPreservesManyOversizedTextKeys(t *testing.T) {
 	}
 	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
 		t.Fatalf("oversized text-key preview = %q, want %q", got, want)
+	}
+}
+
+func TestLifecyclePayloadSummaryCopiesSharedTextKeyStorage(t *testing.T) {
+	var scratch [32]byte
+	calls := 0
+	values := map[lifecyclePreviewSharedTextKey]int{
+		{ID: 'c', Scratch: &scratch, Calls: &calls}: 3,
+		{ID: 'a', Scratch: &scratch, Calls: &calls}: 1,
+		{ID: 'b', Scratch: &scratch, Calls: &calls}: 2,
+	}
+	payload := map[string]any{"value": values}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal shared-key-storage fixture: %v", err)
+	}
+	calls = 0
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("shared-key-storage preview = %q, want %q", got, want)
+	}
+	if calls != len(values) {
+		t.Fatalf("shared-key-storage MarshalText calls = %d, want %d", calls, len(values))
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesUnexportedAnonymousPromotion(t *testing.T) {
+	payload := map[string]any{"value": lifecyclePreviewOuterWithUnexportedEmbedded{
+		lifecyclePreviewUnexportedEmbedded: lifecyclePreviewUnexportedEmbedded{
+			Scalar:  7,
+			Method:  "custom",
+			Omitted: lifecyclePreviewCustomZero{Empty: true, Value: "hidden"},
+			Kept:    lifecyclePreviewCustomZero{Value: "visible"},
+			ZeroPtr: lifecyclePreviewPointerZero{Empty: true, Value: "hidden"},
+		},
+	}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal unexported-embedded fixture: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("unexported-embedded preview = %q, want %q", got, want)
+	}
+
+	calls := 0
+	items := []lifecyclePreviewOuterWithUnexportedEmbedded{{
+		lifecyclePreviewUnexportedEmbedded: lifecyclePreviewUnexportedEmbedded{
+			Scalar:  8,
+			Method:  "addressable",
+			Pointer: lifecyclePreviewNestedPointerField{Value: "promoted", Calls: &calls},
+			ZeroPtr: lifecyclePreviewPointerZero{Empty: true, Value: "hidden"},
+		},
+	}}
+	encoded, err = json.Marshal(items)
+	if err != nil {
+		t.Fatalf("marshal addressable unexported-embedded fixture: %v", err)
+	}
+	calls = 0
+	if got, want := lifecyclePayloadSummary(map[string]any{"items": items}), truncate(`{"items":`+string(encoded)+`}`, 96); got != want {
+		t.Fatalf("addressable unexported-embedded preview = %q, want %q", got, want)
+	}
+	if calls != 1 {
+		t.Fatalf("promoted pointer marshaler calls = %d, want 1", calls)
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesPointerToUnexportedAnonymousPromotion(t *testing.T) {
+	calls := 0
+	payload := map[string]any{"value": struct {
+		*lifecyclePreviewUnexportedEmbedded
+	}{&lifecyclePreviewUnexportedEmbedded{
+		Scalar:  9,
+		Method:  "pointer",
+		Pointer: lifecyclePreviewNestedPointerField{Value: "embedded", Calls: &calls},
+		Kept:    lifecyclePreviewCustomZero{Value: "kept"},
+		ZeroPtr: lifecyclePreviewPointerZero{Empty: true, Value: "hidden"},
+	}}}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal unexported-embedded-pointer fixture: %v", err)
+	}
+	calls = 0
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("unexported-embedded-pointer preview = %q, want %q", got, want)
+	}
+	if calls != 1 {
+		t.Fatalf("pointer-embedded promoted marshaler calls = %d, want 1", calls)
 	}
 }
 
