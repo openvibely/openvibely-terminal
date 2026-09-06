@@ -776,6 +776,25 @@ type lifecyclePreviewStatefulZeroFields struct {
 	Value lifecyclePreviewStatefulZero `json:"value,omitzero"`
 }
 
+var lifecyclePreviewNilZeroCalls int
+
+type lifecyclePreviewNilZero struct{}
+
+func (*lifecyclePreviewNilZero) IsZero() bool {
+	lifecyclePreviewNilZeroCalls++
+	return true
+}
+
+type lifecyclePreviewZeroInterface interface {
+	IsZero() bool
+}
+
+type lifecyclePreviewNilZeroFields struct {
+	Pointer        *lifecyclePreviewNilZero      `json:"pointer,omitzero"`
+	NilInterface   lifecyclePreviewZeroInterface `json:"nil_interface,omitzero"`
+	TypedNilInFace lifecyclePreviewZeroInterface `json:"typed_nil_interface,omitzero"`
+}
+
 type lifecyclePreviewTextKey string
 
 func (value lifecyclePreviewTextKey) MarshalText() ([]byte, error) {
@@ -1241,6 +1260,49 @@ func TestLifecyclePayloadSummaryInvokesIsZeroOnceInCanonicalMapOrder(t *testing.
 		t.Fatalf("stateful omitzero preview = %q, want %q", got, want)
 	}
 	assertCalls(t, calls, order)
+}
+
+func TestLifecyclePayloadSummaryOmitsNilIsZeroFieldsBeyondValidationCap(t *testing.T) {
+	const count = lifecyclePreviewMaxValidationMapKeys + 1
+	fixture := func() lifecyclePreviewNilZeroFields {
+		var typedNil *lifecyclePreviewNilZero
+		return lifecyclePreviewNilZeroFields{TypedNilInFace: typedNil}
+	}
+	concrete := make(map[string]any, count)
+	reflected := make(map[string]lifecyclePreviewNilZeroFields, count)
+	for i := range count {
+		key := fmt.Sprintf("key-%04d", i)
+		value := fixture()
+		concrete[key] = value
+		reflected[key] = value
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "concrete", payload: concrete},
+		{name: "reflected", payload: map[string]any{"values": reflected}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecyclePreviewNilZeroCalls = 0
+			encoded, err := json.Marshal(test.payload)
+			if err != nil {
+				t.Fatalf("marshal nil IsZero fields: %v", err)
+			}
+			if lifecyclePreviewNilZeroCalls != 0 {
+				t.Fatalf("encoding/json IsZero calls = %d, want 0", lifecyclePreviewNilZeroCalls)
+			}
+
+			lifecyclePreviewNilZeroCalls = 0
+			if got, want := lifecyclePayloadSummary(test.payload), truncate(string(encoded), 96); got != want {
+				t.Fatalf("nil IsZero fields preview = %q, want %q", got, want)
+			}
+			if lifecyclePreviewNilZeroCalls != 0 {
+				t.Fatalf("preview IsZero calls = %d, want 0", lifecyclePreviewNilZeroCalls)
+			}
+		})
+	}
 }
 
 func TestLifecyclePayloadSummaryHonorsOmitZeroDuringBoundedMapValidation(t *testing.T) {

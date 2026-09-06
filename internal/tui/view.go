@@ -1284,9 +1284,15 @@ type lifecycleJSONIsZeroer interface {
 func lifecycleJSONZeroValueUsesMethod(value reflect.Value) bool {
 	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
 	typeOf := value.Type()
-	return (typeOf.Kind() == reflect.Interface && typeOf.Implements(isZeroerType)) ||
-		(typeOf.Kind() == reflect.Pointer && typeOf.Implements(isZeroerType)) ||
-		typeOf.Implements(isZeroerType) || reflect.PointerTo(typeOf).Implements(isZeroerType)
+	switch {
+	case typeOf.Kind() == reflect.Interface && typeOf.Implements(isZeroerType):
+		return !value.IsNil() &&
+			!(value.Elem().Kind() == reflect.Pointer && value.Elem().IsNil())
+	case typeOf.Kind() == reflect.Pointer && typeOf.Implements(isZeroerType):
+		return !value.IsNil()
+	default:
+		return typeOf.Implements(isZeroerType) || reflect.PointerTo(typeOf).Implements(isZeroerType)
+	}
 }
 
 func lifecycleJSONZeroValue(value reflect.Value) bool {
