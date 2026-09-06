@@ -783,10 +783,24 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 
 	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
 	var validationKeys []lifecyclePreviewMapKey
+	sourceOrder := 0
 	for key, item := range value {
-		candidate := lifecyclePreviewMapKey{textString: key, nativeValue: item}
+		candidate := lifecyclePreviewNativeStringKey(key)
+		candidate.sourceOrder = sourceOrder
+		sourceOrder++
+		candidate.nativeValue = item
+		for _, retained := range keys {
+			if lifecyclePreviewMapKeyOrderAmbiguous(retained, candidate) {
+				return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+			}
+		}
 		keys = lifecycleInsertPreviewMapKey(keys, candidate, p.limit+1)
 		if lifecycleAnyMayMarshalError(item) {
+			for _, retained := range validationKeys {
+				if lifecyclePreviewMapKeyOrderAmbiguous(retained, candidate) {
+					return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+				}
+			}
 			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
 				return fmt.Errorf("lifecycle payload map validation exceeds preview bounds")
 			}
@@ -799,7 +813,7 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 			if i > 0 {
 				p.append(",")
 			}
-			p.appendJSONString(key.textString)
+			key.appendTo(p)
 			p.append(":")
 		}
 		if err := p.appendValue(key.nativeValue, depth+1); err != nil {
@@ -1362,14 +1376,12 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 		sourceOrder++
 		key.mapValue = iterator.Value()
 		mayError := lifecycleReflectValueMayMarshalError(key.mapValue)
-		if key.textTruncated {
-			for _, retained := range keys {
-				if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
-					// These keys may differ only beyond a discarded suffix, so their
-					// canonical output order cannot be determined within the bound.
-					orderingUnavailable = true
-					break
-				}
+		for _, retained := range keys {
+			if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+				// These keys may differ only beyond a discarded suffix, so their
+				// canonical output order cannot be determined within the bound.
+				orderingUnavailable = true
+				break
 			}
 		}
 		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
@@ -1444,14 +1456,29 @@ type lifecyclePreviewMapKey struct {
 	nativeValue   any
 	text          []byte
 	textLength    int
-	textMarshaled bool
+	retainedText  bool
 	textTruncated bool
 	textString    string
 }
 
+func lifecyclePreviewNativeStringKey(text string) lifecyclePreviewMapKey {
+	if len(text) <= lifecyclePreviewMaxKeyBytes+1 {
+		return lifecyclePreviewMapKey{textString: text}
+	}
+	retained := append([]byte(nil), text[:lifecyclePreviewMaxKeyBytes+1]...)
+	return lifecyclePreviewMapKey{
+		text: retained, textLength: len(retained), retainedText: true, textTruncated: true,
+	}
+}
+
 func lifecyclePreviewKey(value reflect.Value, retainedBudget int) (lifecyclePreviewMapKey, error) {
 	if value.Kind() == reflect.String {
-		return lifecyclePreviewMapKey{sourceKey: value, textString: value.String()}, nil
+		if retainedBudget < 0 {
+			return lifecyclePreviewMapKey{}, nil
+		}
+		key := lifecyclePreviewNativeStringKey(value.String())
+		key.sourceKey = value
+		return key, nil
 	}
 	if value.Kind() == reflect.Pointer && value.IsNil() && value.Type().Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
 		// Match encoding/json: nil pointer TextMarshaler map keys encode as
@@ -1479,7 +1506,7 @@ func lifecyclePreviewKey(value reflect.Value, retainedBudget int) (lifecyclePrev
 			retained := append([]byte(nil), text[:textLength]...)
 			return lifecyclePreviewMapKey{
 				sourceKey: value, text: retained, textLength: len(retained),
-				textMarshaled: true, textTruncated: len(text) > len(retained),
+				retainedText: true, textTruncated: len(text) > len(retained),
 			}, nil
 		}
 	}
@@ -1493,7 +1520,7 @@ func lifecyclePreviewKey(value reflect.Value, retainedBudget int) (lifecyclePrev
 }
 
 func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
-	if key.textMarshaled {
+	if key.retainedText {
 		preview.appendJSONStringBytes(key.text)
 	} else {
 		preview.appendJSONString(key.textString)
@@ -1590,6 +1617,11 @@ func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
 		typeOf.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
 		return true
 	}
+	if value.CanAddr() && value.Addr().CanInterface() &&
+		(value.Addr().Type().Implements(reflect.TypeFor[json.Marshaler]()) ||
+			value.Addr().Type().Implements(reflect.TypeFor[encoding.TextMarshaler]())) {
+		return true
+	}
 	switch value.Kind() {
 	case reflect.Bool, reflect.String,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
@@ -1598,20 +1630,31 @@ func lifecycleReflectValueMayMarshalError(value reflect.Value) bool {
 	case reflect.Float32, reflect.Float64:
 		float := value.Float()
 		return math.IsInf(float, 0) || math.IsNaN(float)
+	case reflect.Struct:
+		for _, field := range lifecycleStructFields(typeOf) {
+			fieldValue, ok := lifecycleFieldByIndex(value, field.index)
+			if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) {
+				continue
+			}
+			if lifecycleReflectValueMayMarshalError(fieldValue) {
+				return true
+			}
+		}
+		return false
 	default:
 		return lifecycleTypeMayMarshalErrorAddressable(typeOf, value.CanAddr() && value.Addr().CanInterface())
 	}
 }
 
 func (key lifecyclePreviewMapKey) length() int {
-	if key.textMarshaled {
+	if key.retainedText {
 		return key.textLength
 	}
 	return len(key.textString)
 }
 
 func (key lifecyclePreviewMapKey) byteAt(index int) byte {
-	if key.textMarshaled {
+	if key.retainedText {
 		return key.text[index]
 	}
 	return key.textString[index]

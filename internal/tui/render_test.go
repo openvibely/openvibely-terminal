@@ -346,6 +346,13 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 			strings.Repeat("k", size) + "a": []byte(`null`),
 			strings.Repeat("k", size) + "b": []byte(`null`),
 		}}
+	case "many_long_common_prefix_keys":
+		values := make(map[string]int, 32)
+		prefix := strings.Repeat("k", size)
+		for i := range 32 {
+			values[fmt.Sprintf("%s-%03d", prefix, i)] = i
+		}
+		return map[string]any{"value": values}
 	case "decoded_wide_map":
 		values := make(map[string]any, max(1, size/16))
 		for i := 0; i < max(1, size/16); i++ {
@@ -390,7 +397,7 @@ func lifecycleBenchmarkPayload(size int, fixture string) map[string]any {
 }
 
 func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
-	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "decoded_wide_map", "wide_error_capable_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
+	for _, fixture := range []string{"ASCII", "zero_width", "struct", "deep_struct", "struct_map", "wide_struct_map", "wide_struct_array", "struct_long_keys", "struct_slice", "wide_struct_slice", "struct_custom", "struct_text", "bytes", "custom", "text", "integer_keys", "text_keys", "long_keys", "long_key_validation", "many_long_common_prefix_keys", "decoded_wide_map", "wide_error_capable_map", "many_text_keys", "text_key_validation", "many_oversized_colliding_text_keys"} {
 		for _, size := range []struct {
 			name  string
 			bytes int
@@ -709,6 +716,11 @@ type lifecyclePreviewMapPointerMethodFields struct {
 	Text lifecyclePreviewMapPointerTextInt `json:"text"`
 }
 
+type lifecyclePreviewNestedNilMarshalerFields struct {
+	JSON *lifecyclePreviewNilJSONValue `json:"json"`
+	Text *lifecyclePreviewNilTextValue `json:"text"`
+}
+
 type lifecyclePreviewTextKey string
 
 func (value lifecyclePreviewTextKey) MarshalText() ([]byte, error) {
@@ -919,34 +931,130 @@ func TestLifecyclePayloadSummaryBoundsStringAnyMapValidationCandidates(t *testin
 func TestLifecyclePayloadSummaryPreservesWideNilPointerMarshalerMaps(t *testing.T) {
 	jsonValues := make(map[string]*lifecyclePreviewNilJSONValue, lifecyclePreviewMaxValidationMapKeys+1)
 	textValues := make(map[string]*lifecyclePreviewNilTextValue, lifecyclePreviewMaxValidationMapKeys+1)
+	concreteNested := make(map[string]any, lifecyclePreviewMaxValidationMapKeys+1)
+	reflectedNested := make(map[string]lifecyclePreviewNestedNilMarshalerFields, lifecyclePreviewMaxValidationMapKeys+1)
 	for i := range lifecyclePreviewMaxValidationMapKeys + 1 {
 		key := fmt.Sprintf("key-%04d", i)
 		jsonValues[key] = nil
 		textValues[key] = nil
+		fields := lifecyclePreviewNestedNilMarshalerFields{}
+		concreteNested[key] = fields
+		reflectedNested[key] = fields
 	}
 
 	for _, test := range []struct {
 		name    string
 		payload map[string]any
-		calls   *int
 	}{
-		{name: "json", payload: map[string]any{"values": jsonValues}, calls: &lifecyclePreviewNilJSONValueCalls},
-		{name: "text", payload: map[string]any{"values": textValues}, calls: &lifecyclePreviewNilTextValueCalls},
+		{name: "json", payload: map[string]any{"values": jsonValues}},
+		{name: "text", payload: map[string]any{"values": textValues}},
+		{name: "concrete_nested", payload: concreteNested},
+		{name: "reflected_nested", payload: map[string]any{"values": reflectedNested}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			*test.calls = 0
+			lifecyclePreviewNilJSONValueCalls = 0
+			lifecyclePreviewNilTextValueCalls = 0
 			encoded, err := json.Marshal(test.payload)
 			if err != nil {
 				t.Fatalf("marshal nil pointer values: %v", err)
 			}
-			if *test.calls != 0 {
-				t.Fatalf("encoding/json invoked nil pointer method %d times", *test.calls)
+			if lifecyclePreviewNilJSONValueCalls != 0 || lifecyclePreviewNilTextValueCalls != 0 {
+				t.Fatalf("encoding/json invoked nil pointer methods: JSON %d, text %d", lifecyclePreviewNilJSONValueCalls, lifecyclePreviewNilTextValueCalls)
 			}
 			if got, want := lifecyclePayloadSummary(test.payload), truncate(string(encoded), 96); got != want {
 				t.Fatalf("nil pointer map preview = %q, want %q", got, want)
 			}
-			if *test.calls != 0 {
-				t.Fatalf("preview invoked nil pointer method %d times", *test.calls)
+			if lifecyclePreviewNilJSONValueCalls != 0 || lifecyclePreviewNilTextValueCalls != 0 {
+				t.Fatalf("preview invoked nil pointer methods: JSON %d, text %d", lifecyclePreviewNilJSONValueCalls, lifecyclePreviewNilTextValueCalls)
+			}
+		})
+	}
+}
+
+func TestLifecyclePayloadSummaryValidatesLateNestedNonNilMarshaler(t *testing.T) {
+	const count = lifecyclePreviewMaxValidationMapKeys + 1
+	concrete := make(map[string]any, count)
+	reflected := make(map[string]lifecyclePreviewNestedNilMarshalerFields, count)
+	for i := range count - 1 {
+		key := fmt.Sprintf("key-%04d", i)
+		fields := lifecyclePreviewNestedNilMarshalerFields{}
+		concrete[key] = fields
+		reflected[key] = fields
+	}
+	failing := lifecyclePreviewNestedNilMarshalerFields{JSON: &lifecyclePreviewNilJSONValue{}}
+	concrete["zzzz-failing"] = failing
+	reflected["zzzz-failing"] = failing
+
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "concrete", payload: concrete},
+		{name: "reflected", payload: map[string]any{"values": reflected}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lifecyclePreviewNilJSONValueCalls = 0
+			if _, err := json.Marshal(test.payload); err == nil {
+				t.Fatal("late non-nil nested marshaler unexpectedly succeeded")
+			}
+			if lifecyclePreviewNilJSONValueCalls != 1 {
+				t.Fatalf("encoding/json nested marshaler calls = %d, want 1", lifecyclePreviewNilJSONValueCalls)
+			}
+			lifecyclePreviewNilJSONValueCalls = 0
+			if got := lifecyclePayloadSummary(test.payload); got != "<unavailable>" {
+				t.Fatalf("late non-nil nested marshaler preview = %q, want unavailable", got)
+			}
+			if lifecyclePreviewNilJSONValueCalls != 1 {
+				t.Fatalf("preview nested marshaler calls = %d, want 1", lifecyclePreviewNilJSONValueCalls)
+			}
+		})
+	}
+}
+
+func TestLifecyclePayloadSummaryPreservesDistinguishableOversizedNativeMapKeys(t *testing.T) {
+	concrete := map[string]any{
+		"a-" + strings.Repeat("k", 1<<20): 1,
+		"z-" + strings.Repeat("k", 1<<20): 2,
+	}
+	reflected := map[string]int{
+		"a-" + strings.Repeat("k", 1<<20): 1,
+		"z-" + strings.Repeat("k", 1<<20): 2,
+	}
+	for _, payload := range []map[string]any{concrete, {"values": reflected}} {
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal distinguishable oversized keys: %v", err)
+		}
+		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+			t.Fatalf("distinguishable oversized key preview = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestLifecyclePayloadSummaryBoundsNativeLongCommonPrefixMapKeys(t *testing.T) {
+	const keyCount = 32
+	prefix := strings.Repeat("k", 1<<20)
+	concrete := make(map[string]any, keyCount)
+	reflected := make(map[string]int, keyCount)
+	for i := range keyCount {
+		key := fmt.Sprintf("%s-%03d", prefix, i)
+		concrete[key] = i
+		reflected[key] = i
+	}
+
+	for _, test := range []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "concrete", payload: concrete},
+		{name: "reflected", payload: map[string]any{"values": reflected}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := json.Marshal(test.payload); err != nil {
+				t.Fatalf("marshal long common-prefix keys: %v", err)
+			}
+			if got := lifecyclePayloadSummary(test.payload); got != "<unavailable>" {
+				t.Fatalf("ambiguous bounded key preview = %q, want unavailable", got)
 			}
 		})
 	}
@@ -1390,19 +1498,18 @@ func TestLifecyclePayloadSummaryBoundsOversizedCollidingTextMapKeys(t *testing.T
 	}
 }
 
-func TestLifecyclePayloadSummaryPreservesManyOversizedTextKeys(t *testing.T) {
+func TestLifecyclePayloadSummaryBoundsManyOversizedTextKeys(t *testing.T) {
 	keys := make(map[lifecyclePreviewTextKey]bool, 256)
 	prefix := strings.Repeat("k", 1<<16)
 	for i := range 256 {
 		keys[lifecyclePreviewTextKey(fmt.Sprintf("%s-%03d", prefix, i))] = i%2 == 0
 	}
 	payload := map[string]any{"value": keys}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
+	if _, err := json.Marshal(payload); err != nil {
 		t.Fatalf("marshal oversized text-key fixture: %v", err)
 	}
-	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
-		t.Fatalf("oversized text-key preview = %q, want %q", got, want)
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("ambiguous oversized text-key preview = %q, want unavailable", got)
 	}
 }
 
@@ -1669,19 +1776,22 @@ func TestLifecyclePayloadSummaryBoundsWideStructContainersAndKeys(t *testing.T) 
 	for i := range wide.Array {
 		wide.Array[i] = "value"
 	}
-	prefix := strings.Repeat("k", 1<<20)
-	payloads := []map[string]any{
-		{"value": wide},
-		{"value": lifecyclePreviewStructLongKeys{Values: map[string]string{prefix + "a": "one", prefix + "b": "two"}}},
+	payload := map[string]any{"value": wide}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal wide struct fixture: %v", err)
 	}
-	for _, payload := range payloads {
-		encoded, err := json.Marshal(payload)
-		if err != nil {
-			t.Fatalf("marshal wide struct fixture: %v", err)
-		}
-		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
-			t.Fatalf("wide struct preview = %q, want %q", got, want)
-		}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("wide struct preview = %q, want %q", got, want)
+	}
+
+	prefix := strings.Repeat("k", 1<<20)
+	longKeys := map[string]any{"value": lifecyclePreviewStructLongKeys{Values: map[string]string{prefix + "a": "one", prefix + "b": "two"}}}
+	if _, err := json.Marshal(longKeys); err != nil {
+		t.Fatalf("marshal long-key struct fixture: %v", err)
+	}
+	if got := lifecyclePayloadSummary(longKeys); got != "<unavailable>" {
+		t.Fatalf("ambiguous long-key struct preview = %q, want unavailable", got)
 	}
 }
 
@@ -1721,7 +1831,6 @@ func TestLifecyclePayloadSummaryPreservesSupportedMapKeys(t *testing.T) {
 		{"value": map[int]string{10: "ten", 2: "two"}},
 		{"value": map[lifecyclePreviewTextIntKey]string{10: "ten", 2: "two"}},
 		{"value": map[lifecyclePreviewTextKey]string{"b": "bee", "a": "aye"}},
-		{strings.Repeat("k", 1<<20) + "a": true, strings.Repeat("k", 1<<20) + "b": false},
 	}
 	for _, payload := range payloads {
 		encoded, err := json.Marshal(payload)
@@ -1748,12 +1857,11 @@ func TestLifecyclePayloadSummaryBoundsLargeTextMarshaler(t *testing.T) {
 func TestLifecyclePayloadSummaryBoundsLongMapKeys(t *testing.T) {
 	prefix := strings.Repeat("k", 1<<20)
 	payload := map[string]any{prefix + "a": true, prefix + "b": false}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
+	if _, err := json.Marshal(payload); err != nil {
 		t.Fatalf("marshal long-key fixture: %v", err)
 	}
-	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
-		t.Fatalf("oversized map-key preview = %q, want %q", got, want)
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("ambiguous oversized map-key preview = %q, want unavailable", got)
 	}
 }
 
