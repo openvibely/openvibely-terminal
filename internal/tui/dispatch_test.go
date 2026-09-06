@@ -4682,6 +4682,39 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 
 // --- channels ---
 
+func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
+	cases := []struct {
+		line      string
+		wantUsage string
+	}{
+		{line: "/channels nonsense", wantUsage: "usage: /channels [list|test <channel>|remove <channel>]"},
+		{line: "/channels list extra", wantUsage: "usage: /channels list"},
+		{line: "/channels test telegram extra", wantUsage: "usage: /channels test <channel>"},
+		{line: "/channels remove slack extra", wantUsage: "usage: /channels remove <channel>"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": `<html><body>channels</body></html>`})
+			m = runLine(t, m, tc.line)
+
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.wantUsage) {
+				t.Fatalf("malformed command output = %q, want canonical usage", out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("malformed command made backend requests:\n%s", calls)
+			}
+			if m.selectorActive {
+				t.Fatal("malformed command opened a selector")
+			}
+			if m.pendingConfirmation != nil {
+				t.Fatal("malformed command opened a confirmation")
+			}
+		})
+	}
+}
+
 func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
 	const channelsPage = `<html><body>Telegram: connected  Slack: disconnected</body></html>`
 	cases := []struct {

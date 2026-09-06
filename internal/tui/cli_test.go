@@ -2363,6 +2363,51 @@ func TestCLIAutomationsRunMissingReferenceUsesCanonicalUsageWithoutList(t *testi
 	}
 }
 
+func TestCLIChannelsRejectMalformedArgumentsBeforeRequests(t *testing.T) {
+	cases := []struct {
+		args      []string
+		wantUsage string
+	}{
+		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|test <channel>|remove <channel>]"},
+		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels list"},
+		{args: []string{"channels", "test", "telegram", "extra"}, wantUsage: "usage: channels test <channel>"},
+		{args: []string{"channels", "remove", "slack", "extra"}, wantUsage: "usage: channels remove <channel>"},
+	}
+
+	for _, tc := range cases {
+		t.Run(strings.Join(tc.args[1:], "_"), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, true, false)
+			if err == nil {
+				t.Fatal("malformed channels command returned success")
+			}
+			if !strings.Contains(err.Error(), tc.wantUsage) {
+				t.Fatalf("malformed command error = %v, want canonical usage", err)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("malformed CLI command made backend requests:\n%s", calls)
+			}
+		})
+	}
+}
+
+func TestCLIChannelsBareAndListRemainValid(t *testing.T) {
+	for _, args := range [][]string{{"channels"}, {"channels", "list"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels":     `<html><body>channels</body></html>`,
+			})
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err != nil {
+				t.Fatalf("valid channels command failed: %v", err)
+			}
+			if !rec.saw("GET", "/channels") {
+				t.Fatalf("valid channels command did not list channels:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 // One-shot CLI mode works headlessly for the new channels actions,
 // exiting cleanly on success and nonzero on a backend failure.
 func TestCLIRunsChannelsTest(t *testing.T) {

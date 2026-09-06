@@ -89,6 +89,11 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 	if cmdDef == nil {
 		return fmt.Errorf("unknown command %q — run \"help\" to list commands", name)
 	}
+	if cmdDef.validateArgs != nil {
+		if err := cmdDef.validateArgs(fields[1:]); err != nil {
+			return err
+		}
+	}
 
 	m := New(c)
 	m.cliContext = ctx

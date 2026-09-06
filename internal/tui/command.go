@@ -35,7 +35,10 @@ type commandActionUsage struct {
 }
 
 func (u commandActionUsage) syntax(commandName string) string {
-	parts := []string{commandName, u.action}
+	parts := []string{commandName}
+	if u.action != "" {
+		parts = append(parts, u.action)
+	}
 	if u.args != "" {
 		parts = append(parts, u.args)
 	}
@@ -90,9 +93,10 @@ type command struct {
 	// examples holds concrete runnable invocations shown after the usage block
 	// in /help <command> output, satisfying VISION.md "Help should include
 	// examples, not only syntax."
-	examples []string
-	desc     string
-	run      func(m Model, args []string) (Model, tea.Cmd)
+	examples     []string
+	desc         string
+	validateArgs func([]string) error
+	run          func(m Model, args []string) (Model, tea.Cmd)
 }
 
 func (c command) actionSyntax(action string) string {
