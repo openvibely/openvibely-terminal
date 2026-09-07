@@ -2079,14 +2079,144 @@ func filterMemoryList(list client.MemoryList, filter string) client.MemoryList {
 
 // --- agents ---
 
+type agentEdit struct {
+	Name                *string
+	Description         *string
+	SystemPrompt        *string
+	Model               *string
+	Key                 *string
+	Scope               *string
+	Enabled             *bool
+	SelectableAsPrimary *bool
+}
+
+func isAgentEditField(value string) bool {
+	switch strings.ToLower(value) {
+	case "name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseAgentEdit(args []string) (string, agentEdit, error) {
+	usage := commandUsage("agents", "edit")
+	optionAt := -1
+	for i := 1; i < len(args); i++ {
+		if isAgentEditField(args[i]) {
+			optionAt = i
+			break
+		}
+	}
+	if optionAt < 1 {
+		return "", agentEdit{}, fmt.Errorf("%s", usage)
+	}
+	var update agentEdit
+	seen := map[string]bool{}
+	for i := optionAt; i < len(args); i += 2 {
+		if i+1 >= len(args) || !isAgentEditField(args[i]) || seen[strings.ToLower(args[i])] {
+			return "", agentEdit{}, fmt.Errorf("%s", usage)
+		}
+		key, value := strings.ToLower(args[i]), args[i+1]
+		seen[key] = true
+		switch key {
+		case "name":
+			if strings.TrimSpace(value) == "" {
+				return "", agentEdit{}, errors.New("agent name cannot be empty")
+			}
+			update.Name = &value
+		case "description":
+			update.Description = &value
+		case "system-prompt":
+			update.SystemPrompt = &value
+		case "model":
+			if strings.TrimSpace(value) == "" {
+				return "", agentEdit{}, errors.New("agent model cannot be empty")
+			}
+			update.Model = &value
+		case "key":
+			if strings.TrimSpace(value) == "" {
+				return "", agentEdit{}, errors.New("agent key cannot be empty")
+			}
+			update.Key = &value
+		case "scope":
+			value = strings.ToLower(value)
+			if value != "global" && value != "project" {
+				return "", agentEdit{}, errors.New("agent scope must be global or project")
+			}
+			update.Scope = &value
+		case "enabled", "selectable":
+			var parsed bool
+			switch strings.ToLower(value) {
+			case "true":
+				parsed = true
+			case "false":
+				parsed = false
+			default:
+				return "", agentEdit{}, fmt.Errorf("agent %s must be true or false", key)
+			}
+			if key == "enabled" {
+				update.Enabled = &parsed
+			} else {
+				update.SelectableAsPrimary = &parsed
+			}
+		}
+	}
+	return strings.Join(args[:optionAt], " "), update, nil
+}
+
+func applyAgentEdit(agent client.AgentDefinition, update agentEdit) client.AgentDefinition {
+	if update.Name != nil {
+		agent.Name = *update.Name
+	}
+	if update.Description != nil {
+		agent.Description = *update.Description
+	}
+	if update.SystemPrompt != nil {
+		agent.SystemPrompt = *update.SystemPrompt
+	}
+	if update.Model != nil {
+		agent.Model = *update.Model
+	}
+	if update.Key != nil {
+		agent.Key = *update.Key
+	}
+	if update.Scope != nil {
+		agent.Scope = *update.Scope
+	}
+	if update.Enabled != nil {
+		agent.Enabled = *update.Enabled
+	}
+	if update.SelectableAsPrimary != nil {
+		agent.SelectableAsPrimary = *update.SelectableAsPrimary
+	}
+	return agent
+}
+
+func validateAgentArgs(args []string) error {
+	action, rest := splitAction([]string{"list", "edit", "delete", "generate", "metrics", "votes"}, args)
+	if action == "edit" && len(rest) > 0 {
+		_, _, err := parseAgentEdit(rest)
+		return err
+	}
+	return nil
+}
+
 func agentsCommand() command {
-	actions := []string{"list", "delete", "generate", "metrics", "votes"}
+	actions := []string{"list", "edit", "delete", "generate", "metrics", "votes"}
 	return command{
-		name:          "agents",
-		aliases:       []string{"agent"},
-		args:          "[name]",
-		actions:       actions,
-		selectorPaths: [][]string{{"delete"}},
+		name:         "agents",
+		aliases:      []string{"agent"},
+		args:         "[name]",
+		actions:      actions,
+		validateArgs: validateAgentArgs,
+		completions: []commandCompletion{
+			{after: []string{"edit", "*"}, values: []string{"name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable"}},
+			{after: []string{"edit", "*", "scope"}, values: []string{"global", "project"}},
+			{after: []string{"edit", "*", "enabled"}, values: []string{"true", "false"}},
+			{after: []string{"edit", "*", "selectable"}, values: []string{"true", "false"}},
+		},
+		selectorPaths: [][]string{{"edit"}, {"delete"}},
 		desc:          "agent definitions, workflow metrics and vote audits",
 		usage: []string{
 			"agents [filter]                            list agent definitions",
@@ -2095,9 +2225,11 @@ func agentsCommand() command {
 			"agents metrics                             per-agent workflow metrics",
 		},
 		actionUsages: []commandActionUsage{
+			{action: "edit", args: "<agent> <field> <value> [...]", description: "edit name, prompt, model, identity, scope, or state"},
 			{action: "votes", args: "<step-execution-id>", description: "inspect parallel-step votes"},
 		},
 		examples: []string{
+			`agents edit reviewer description "Reviews Go changes" enabled true`,
 			`agents generate A code reviewer that checks Go PRs for style and correctness`,
 			`agents delete reviewer`,
 			`agents metrics`,
@@ -2172,6 +2304,56 @@ func agentsCommand() command {
 					return refreshAndRender("generated an agent from your description",
 						func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
 						renderAgents)
+				})
+			case "edit":
+				if len(rest) == 0 {
+					return selectorOr(m, commandUsage("agents", "edit"),
+						selectorForWithSuffix("Agents", "agents edit",
+							"no agent definitions — /agents generate <description> creates one", " ",
+							func(ctx context.Context) ([]selectorItem, error) {
+								agents, err := c.ListAgents(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(agents))
+								for _, a := range agents {
+									items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, a.Key, shortID(a.ID)), detail: truncate(a.Description, 40)})
+								}
+								return items, nil
+							}))
+				}
+				ref, edit, err := parseAgentEdit(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				return m, run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
+					agents, err := c.ListAgents(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					matched, err := matchRef(agents, ref,
+						func(a client.AgentDef) string { return a.ID },
+						func(a client.AgentDef) string { return a.Name + " " + a.Key })
+					if err != nil {
+						return "", err
+					}
+					definition, err := c.GetAgent(ctx, pid, matched.ID)
+					if err != nil {
+						return "", err
+					}
+					definition = applyAgentEdit(definition, edit)
+					if err := c.UpdateAgent(ctx, pid, definition); err != nil {
+						return "", err
+					}
+					refreshed, refreshErr := c.ListAgents(ctx, pid)
+					if jsonMode {
+						return marshalJSON(definition)
+					}
+					status := "updated agent " + firstNonEmpty(definition.Name, definition.Key, definition.ID)
+					if refreshErr != nil {
+						return status + " (saved; refresh failed)", nil
+					}
+					return status + "\n\n" + renderAgents(refreshed, ""), nil
 				})
 			case "delete":
 				if ref == "" {

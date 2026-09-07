@@ -126,6 +126,7 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"skills_disable", "/skills disable", "skills disable"},
 		{"skills_always", "/skills always", "skills always"},
 		// agents
+		{"agents_edit", "/agents edit", "agents edit"},
 		{"agents_delete", "/agents delete", "agents delete"},
 		// models
 		{"models_default", "/models default", "models default"},

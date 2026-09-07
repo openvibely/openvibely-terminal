@@ -2998,7 +2998,7 @@ func renderAgents(agents []client.AgentDef, filter string) string {
 		return dimStyle.Render("no agent definitions — /agents generate <description> creates one")
 	}
 	return table(append([][]string{{"NAME", "SCOPE", "MODEL", "DESCRIPTION"}}, rows...)) + "\n\n" +
-		dimStyle.Render("/agents metrics · /agents generate <description> · /agents delete <name>")
+		dimStyle.Render("/agents metrics · /agents generate <description> · /agents edit <name> <field> <value> · /agents delete <name>")
 }
 
 func renderAgentMetrics(metrics []client.AgentMetric, best, cheapest *client.AgentRecommendation) string {

@@ -121,6 +121,7 @@ Commands take a resource, an optional action, and arguments:
 /tasks move Refactor active   move a task between columns
 /tasks attachments add Refactor ./request.txt ./trace.json
 /tasks attachments delete Refactor att-123
+/agents edit reviewer description "Reviews Go and SQL" enabled true
 /agents votes parallel-step-exec-123     inspect every agent vote
 /memory list                             inspect indexed project memory
 /memory show managed_memory.md           read one memory file
@@ -145,7 +146,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/alerts` | `alert` | `list`, `show`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
-| `/agents` | `agent` | `list`, `delete`, `generate`, `metrics`, `votes` |
+| `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations` | `list`, `test`, `remove` |
