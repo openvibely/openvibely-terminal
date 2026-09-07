@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1048,6 +1049,9 @@ func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
 			if rec.count("GET", "/api/capacity/global") != 1 || rec.count("GET", "/auth/me") != 1 {
 				t.Errorf("global status checks did not run exactly once:\n%s", rec.all())
 			}
+			if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
+				t.Errorf("project-list failure made scoped requests:\n%s", rec.all())
+			}
 		})
 	}
 }
@@ -1071,8 +1075,87 @@ func TestCLIStatusMultipleProjectsIsGlobalAndUnambiguous(t *testing.T) {
 	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
 		t.Fatalf("multi-project status made scoped requests:\n%s", rec.all())
 	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("multi-project status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
 	if !strings.Contains(got, "1 running / 4 max") || !strings.Contains(got, "disabled or anonymous") {
 		t.Fatalf("multi-project status omitted global rows:\n%s", got)
+	}
+}
+
+func TestCLIStatusZeroProjectsSkipsScopedCounts(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        `{"projects":[]}`,
+		"/api/capacity/global": `{"total_running":0,"max_workers":4,"queue_size":0,"available_slots":4}`,
+		"/auth/me":             `{"authenticated":false}`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("zero-project status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
+		t.Fatalf("zero-project status made scoped requests:\n%s", rec.all())
+	}
+}
+
+func TestCLIStatusCancellationStopsFirstWaveBeforeScopedCounts(t *testing.T) {
+	started := make(chan string, 3)
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects", "/api/capacity/global", "/auth/me":
+			started <- r.URL.Path
+			<-r.Context().Done()
+		case "/alerts", "/tasks":
+			http.Error(w, "unexpected scoped request", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, &bytes.Buffer{}, "", []string{"status"}, false, false)
+	}()
+	seen := make(map[string]bool, 3)
+	for len(seen) < 3 {
+		select {
+		case path := <-started:
+			seen[path] = true
+		case <-time.After(time.Second):
+			t.Fatalf("first wave did not start before cancellation; saw %v", seen)
+		}
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("canceled status returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled status did not return promptly")
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("canceled status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
+		t.Fatalf("canceled status made scoped requests:\n%s", rec.all())
 	}
 }
 
@@ -1171,24 +1254,107 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	}
 }
 
-func TestCLIStatusUsesOneDelayedCountWave(t *testing.T) {
-	const countDelay = 100 * time.Millisecond
+func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *testing.T) {
+	firstWaveStarted := make(chan string, 3)
+	releaseFirstWave := make(chan struct{})
+	var releaseOnce sync.Once
+	var mu sync.Mutex
+	projectCompleted := false
+	scopedStartedEarly := false
+
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects", "/api/capacity/global", "/auth/me":
+			firstWaveStarted <- r.URL.Path
+			<-releaseFirstWave
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/projects":
+				_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+				mu.Lock()
+				projectCompleted = true
+				mu.Unlock()
+			case "/api/capacity/global":
+				_, _ = io.WriteString(w, `{"total_running":1,"max_workers":4,"available_slots":3}`)
+			case "/auth/me":
+				_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
+			}
+		case "/alerts", "/tasks":
+			mu.Lock()
+			if !projectCompleted {
+				scopedStartedEarly = true
+			}
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div></div>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allFirstWaveStarted := make(chan bool, 1)
+	go func() {
+		seen := make(map[string]bool, 3)
+		timer := time.NewTimer(500 * time.Millisecond)
+		defer timer.Stop()
+		for len(seen) < 3 {
+			select {
+			case path := <-firstWaveStarted:
+				seen[path] = true
+			case <-timer.C:
+				releaseOnce.Do(func() { close(releaseFirstWave) })
+				allFirstWaveStarted <- false
+				return
+			}
+		}
+		releaseOnce.Do(func() { close(releaseFirstWave) })
+		allFirstWaveStarted <- true
+	}()
+
+	if err := RunCLI(c, &bytes.Buffer{}, "", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if !<-allFirstWaveStarted {
+		t.Fatal("projects, capacity, and auth did not begin in one wave")
+	}
+	mu.Lock()
+	early := scopedStartedEarly
+	mu.Unlock()
+	if early {
+		t.Fatal("project-scoped counts started before project selection completed")
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/alerts", "/tasks"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+}
+
+func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
+	const endpointDelay = 100 * time.Millisecond
 	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><span class="badge">pending</span></div>`
 	const tasksHTML = `<div><div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Task A">Task A</a></div></div>`
 
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.recordURL(r.Method, r.URL.RequestURI())
+		time.Sleep(endpointDelay)
 		switch r.URL.Path {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(cliProjects))
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
 		case "/alerts":
-			time.Sleep(countDelay)
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(alertsHTML))
 		case "/tasks":
-			time.Sleep(countDelay)
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(tasksHTML))
 		default:
@@ -1202,20 +1368,25 @@ func TestCLIStatusUsesOneDelayedCountWave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"status"}, false, false); err != nil {
-		t.Fatalf("status failed: %v", err)
+	const runs = 5
+	durations := make([]time.Duration, 0, runs)
+	for range runs {
+		start := time.Now()
+		if err := RunCLI(c, &bytes.Buffer{}, "", []string{"status"}, false, false); err != nil {
+			t.Fatalf("status failed: %v", err)
+		}
+		durations = append(durations, time.Since(start))
 	}
-	elapsed := time.Since(start)
+	slices.Sort(durations)
+	median := durations[len(durations)/2]
 
-	if got := rec.count("GET", "/alerts"); got != 1 {
-		t.Fatalf("delayed CLI status made %d /alerts requests, want 1:\n%s", got, rec.all())
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/alerts", "/tasks"} {
+		if got := rec.count("GET", path); got != runs {
+			t.Errorf("delayed status made %d GET requests to %s, want %d:\n%s", got, path, runs, rec.all())
+		}
 	}
-	if got := rec.count("GET", "/tasks"); got != 1 {
-		t.Fatalf("delayed CLI status made %d /tasks requests, want 1:\n%s", got, rec.all())
-	}
-	if elapsed >= 2*countDelay {
-		t.Fatalf("CLI status took %s; expected one delayed count-refresh wave, not two", elapsed)
+	if median >= 225*time.Millisecond {
+		t.Fatalf("median CLI status latency = %s, want under 225ms for two 100ms request waves (durations: %v)", median, durations)
 	}
 }
 
@@ -2607,6 +2778,44 @@ func TestCLIChannelsBareAndListRemainValid(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCLIChannelsRemoveResolvesReferenceBeforeForce(t *testing.T) {
+	t.Run("invalid references report matching errors", func(t *testing.T) {
+		cases := []struct {
+			ref  string
+			want string
+		}{
+			{ref: "a", want: `"a" is ambiguous`},
+			{ref: "irc", want: `nothing matches "irc"`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.ref, func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+				err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "remove", tc.ref}, false, false)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("remove %q error = %v, want %q", tc.ref, err, tc.want)
+				}
+				if strings.Contains(err.Error(), "--force") {
+					t.Fatalf("remove %q checked force before reference: %v", tc.ref, err)
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("invalid removal made backend requests:\n%s", calls)
+				}
+			})
+		}
+	})
+
+	t.Run("valid partial names canonical target", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "remove", "tele"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), `--force to confirm removal of channel "Telegram"`) {
+			t.Fatalf("partial removal error = %v, want canonical force guidance", err)
+		}
+		if rec.saw("POST", "/channels/telegram/remove") {
+			t.Fatalf("unforced partial removal mutated the backend:\n%s", rec.all())
+		}
+	})
 }
 
 // One-shot CLI mode works headlessly for the new channels actions,

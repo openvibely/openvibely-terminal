@@ -133,15 +133,10 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	matchingItems := msg.items
+	var search []string
 	if msg.initialFilter != "" {
-		search := selectorSearchTexts(msg.items)
-		needle := strings.ToLower(msg.initialFilter)
-		matchingItems = nil
-		for i, item := range msg.items {
-			if strings.Contains(search[i], needle) {
-				matchingItems = append(matchingItems, item)
-			}
-		}
+		search = selectorSearchTexts(msg.items)
+		matchingItems = matchSelectorItems(msg.items, search, msg.initialFilter)
 	}
 	if len(matchingItems) == 1 && !msg.forcePicker {
 		if len(warnings) > 0 {
@@ -155,7 +150,10 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.selectorTitle = msg.title
 	m.selectorItems = msg.items
 	m.selectorWarnings = warnings
-	m.selectorSearch = selectorSearchTexts(msg.items)
+	if search == nil {
+		search = selectorSearchTexts(msg.items)
+	}
+	m.selectorSearch = search
 	m.selectorFilter = msg.initialFilter
 	m.selectorFiltered = matchingItems
 	m.selectorFilteredFor = msg.initialFilter

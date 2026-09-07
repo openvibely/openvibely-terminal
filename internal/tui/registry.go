@@ -2512,6 +2512,12 @@ func workersCommand() command {
 
 // --- channels / personality ---
 
+func matchChannelRef(ref string) (client.Channel, error) {
+	return matchRef(client.KnownChannels, ref,
+		func(ch client.Channel) string { return ch.Type },
+		func(ch client.Channel) string { return ch.Name })
+}
+
 func validateChannelsArgs(args []string) error {
 	if len(args) == 0 {
 		return nil
@@ -2524,6 +2530,10 @@ func validateChannelsArgs(args []string) error {
 		}
 	case "test", "remove":
 		if len(args) <= 2 {
+			if len(args) == 2 {
+				_, err := matchChannelRef(args[1])
+				return err
+			}
 			return nil
 		}
 	default:
@@ -2586,13 +2596,11 @@ func channelsCommand() command {
 								return items, nil
 							}))
 				}
+				ch, err := matchChannelRef(ref)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
 				cmd := run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
-					ch, err := matchRef(client.KnownChannels, ref,
-						func(ch client.Channel) string { return ch.Type },
-						func(ch client.Channel) string { return ch.Name })
-					if err != nil {
-						return "", err
-					}
 					status := action + ": " + ch.Name
 					return actAndReloadText(status,
 						func() error { return c.ChannelAction(ctx, ch.Type, action, pid) },
@@ -2600,8 +2608,8 @@ func channelsCommand() command {
 				})
 				if action == "remove" {
 					return confirmOr(m,
-						fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ref),
-						fmt.Sprintf("use --force to confirm removal of channel %q", ref),
+						fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name),
+						fmt.Sprintf("use --force to confirm removal of channel %q", ch.Name),
 						cmd)
 				}
 				return m, cmd

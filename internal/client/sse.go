@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,6 +55,35 @@ type ChatEvent struct {
 type ChatOutputEvent struct {
 	Name string
 	Data string
+}
+
+type rawSSEFrame struct {
+	eventName string
+	dataLines []string
+}
+
+func scanSSEFrames(r io.Reader, handle func(rawSSEFrame) bool) error {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var frame rawSSEFrame
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case line == "":
+			if len(frame.dataLines) > 0 && !handle(frame) {
+				return nil
+			}
+			frame = rawSSEFrame{}
+		case strings.HasPrefix(line, "event:"):
+			frame.eventName = strings.TrimPrefix(line, "event:")
+		case strings.HasPrefix(line, "data:"):
+			frame.dataLines = append(frame.dataLines, strings.TrimPrefix(line, "data:"))
+		case strings.HasPrefix(line, ":"):
+			// Comment / keep-alive ping.
+		}
+	}
+	return scanner.Err()
 }
 
 const (
@@ -114,35 +144,24 @@ func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int
 			return
 		}
 
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		var eventName string
-		var dataLines []string
-		for scanner.Scan() {
-			line := scanner.Text()
-			switch {
-			case line == "":
-				if len(dataLines) > 0 {
-					event := ChatOutputEvent{Name: eventName, Data: strings.Join(dataLines, "\n")}
-					select {
-					case events <- event:
-					case <-ctx.Done():
-						return
-					}
-				}
-				eventName = ""
-				dataLines = nil
-			case strings.HasPrefix(line, "event:"):
-				eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			case strings.HasPrefix(line, "data:"):
-				dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
-			case strings.HasPrefix(line, ":"):
+		err = scanSSEFrames(resp.Body, func(frame rawSSEFrame) bool {
+			dataLines := make([]string, len(frame.dataLines))
+			for i, line := range frame.dataLines {
+				dataLines[i] = strings.TrimPrefix(line, " ")
 			}
-		}
-		if ctx.Err() == nil {
-			if err := scanner.Err(); err != nil {
-				errCh <- fmt.Errorf("chat output stream read: %w", err)
+			event := ChatOutputEvent{
+				Name: strings.TrimSpace(frame.eventName),
+				Data: strings.Join(dataLines, "\n"),
 			}
+			select {
+			case events <- event:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		})
+		if ctx.Err() == nil && err != nil {
+			errCh <- fmt.Errorf("chat output stream read: %w", err)
 		}
 	}()
 
@@ -267,40 +286,26 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 			sendErr(fmt.Errorf("event stream returned status %d", resp.StatusCode))
 			return
 		}
-		scanner := bufio.NewScanner(resp.Body)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-		var eventName string
-		var dataLines []string
-		for scanner.Scan() {
-			line := scanner.Text()
-			switch {
-			case line == "":
-				if len(dataLines) > 0 {
-					event := Event{
-						Name: eventName,
-						Data: json.RawMessage(strings.Join(dataLines, "\n")),
-					}
-					select {
-					case events <- event:
-					case <-ctx.Done():
-						return
-					}
-				}
-				eventName = ""
-				dataLines = nil
-			case strings.HasPrefix(line, "event:"):
-				eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			case strings.HasPrefix(line, "data:"):
-				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
-			case strings.HasPrefix(line, ":"):
-				// comment / keep-alive ping
+		err = scanSSEFrames(resp.Body, func(frame rawSSEFrame) bool {
+			dataLines := make([]string, len(frame.dataLines))
+			for i, line := range frame.dataLines {
+				dataLines[i] = strings.TrimSpace(line)
 			}
-		}
+			event := Event{
+				Name: strings.TrimSpace(frame.eventName),
+				Data: json.RawMessage(strings.Join(dataLines, "\n")),
+			}
+			select {
+			case events <- event:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		})
 		if ctx.Err() != nil {
 			return
 		}
-		if err := scanner.Err(); err != nil {
+		if err != nil {
 			sendErr(fmt.Errorf("event stream read: %w", err))
 			return
 		}
