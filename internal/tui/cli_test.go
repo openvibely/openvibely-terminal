@@ -2609,6 +2609,44 @@ func TestCLIChannelsBareAndListRemainValid(t *testing.T) {
 	}
 }
 
+func TestCLIChannelsRemoveResolvesReferenceBeforeForce(t *testing.T) {
+	t.Run("invalid references report matching errors", func(t *testing.T) {
+		cases := []struct {
+			ref  string
+			want string
+		}{
+			{ref: "a", want: `"a" is ambiguous`},
+			{ref: "irc", want: `nothing matches "irc"`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.ref, func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+				err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "remove", tc.ref}, false, false)
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("remove %q error = %v, want %q", tc.ref, err, tc.want)
+				}
+				if strings.Contains(err.Error(), "--force") {
+					t.Fatalf("remove %q checked force before reference: %v", tc.ref, err)
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("invalid removal made backend requests:\n%s", calls)
+				}
+			})
+		}
+	})
+
+	t.Run("valid partial names canonical target", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "remove", "tele"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), `--force to confirm removal of channel "Telegram"`) {
+			t.Fatalf("partial removal error = %v, want canonical force guidance", err)
+		}
+		if rec.saw("POST", "/channels/telegram/remove") {
+			t.Fatalf("unforced partial removal mutated the backend:\n%s", rec.all())
+		}
+	})
+}
+
 // One-shot CLI mode works headlessly for the new channels actions,
 // exiting cleanly on success and nonzero on a backend failure.
 func TestCLIRunsChannelsTest(t *testing.T) {

@@ -5697,6 +5697,61 @@ func TestChannelsMatchRefResolution(t *testing.T) {
 	})
 }
 
+func TestChannelsRemoveResolvesReferenceBeforeConfirmation(t *testing.T) {
+	t.Run("ambiguous reference fails immediately", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels remove a")
+
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, `"a" is ambiguous`) {
+			t.Fatalf("ambiguous removal output = %q", out)
+		}
+		if m.pendingConfirmation != nil {
+			t.Fatal("ambiguous removal opened a confirmation")
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("ambiguous removal made backend requests:\n%s", calls)
+		}
+	})
+
+	t.Run("unknown reference fails immediately", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels remove irc")
+
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, `nothing matches "irc"`) {
+			t.Fatalf("unknown removal output = %q", out)
+		}
+		if m.pendingConfirmation != nil {
+			t.Fatal("unknown removal opened a confirmation")
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("unknown removal made backend requests:\n%s", calls)
+		}
+	})
+
+	t.Run("unique partial uses canonical name without requesting", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels remove tele")
+
+		out := stripANSI(m.View())
+		if !strings.Contains(out, `Remove channel "Telegram"?`) {
+			t.Fatalf("partial removal prompt = %q, want canonical channel name", out)
+		}
+		if m.pendingConfirmation == nil {
+			t.Fatal("valid partial removal did not open a confirmation")
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("partial removal made requests before confirmation:\n%s", calls)
+		}
+
+		m = runLine(t, m, "no")
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("cancelled partial removal made backend requests:\n%s", calls)
+		}
+	})
+}
+
 func TestChannelsRemoveRequiresConfirmation(t *testing.T) {
 	const refreshedChannelsPage = `<html><body>refreshed channels page</body></html>`
 
