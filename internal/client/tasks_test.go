@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -185,6 +186,104 @@ func TestListTasksUnauthorized(t *testing.T) {
 	if _, err := c.ListTasks(context.Background(), ""); err == nil ||
 		!strings.Contains(err.Error(), "unauthorized") {
 		t.Fatalf("err = %v, want unauthorized", err)
+	}
+}
+
+func TestGetTaskForProjectExactRejectsMismatchedMetadataBeforeLazyLoads(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "foreign project",
+			body: `<div data-task-id="` + taskID + `" data-project-id="p2"><h2 class="font-bold">Foreign title</h2></div>`,
+		},
+		{
+			name: "different task",
+			body: `<div data-task-id="fedcba9876543210fedcba9876543210" data-project-id="p1"><h2 class="font-bold">Other title</h2></div>`,
+		},
+		{
+			name: "missing identity",
+			body: `<div data-project-id="p1"><h2 class="font-bold">Unverified title</h2></div>`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.URL.Path != "/tasks/"+taskID {
+					t.Fatalf("unexpected lazy request %s", r.URL.RequestURI())
+				}
+				if got := r.URL.Query().Get("project_id"); got != "p1" {
+					t.Fatalf("project_id = %q, want p1", got)
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail, err := c.GetTaskForProjectExact(context.Background(), taskID, "p1")
+			if err == nil || detail != nil {
+				t.Fatalf("GetTaskForProjectExact = (%#v, %v), want nil detail and error", detail, err)
+			}
+			if strings.Contains(err.Error(), "Foreign title") || strings.Contains(err.Error(), "Other title") || strings.Contains(err.Error(), "p2") {
+				t.Fatalf("error leaked foreign metadata: %v", err)
+			}
+			if got := requests.Load(); got != 1 {
+				t.Fatalf("requests = %d, want only the detail request", got)
+			}
+		})
+	}
+}
+
+func TestGetTaskForProjectExactPreservesScopedDetailAndCancellation(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	var boardRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tasks" {
+			boardRequests.Add(1)
+			t.Fatal("exact detail lookup must not request the board")
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Fatalf("%s project_id = %q, want p1", r.URL.Path, got)
+		}
+		switch r.URL.Path {
+		case "/tasks/" + taskID:
+			_, _ = w.Write([]byte(`<div data-task-id="` + taskID + `" data-project-id="p1" data-task-status="running" data-task-category="active"><h2 class="font-bold">Exact task</h2><div id="tab-details">details</div><div id="tab-chat"></div><div id="tab-changes"></div><div id="tab-lifecycle">life</div></div>`))
+		case "/tasks/" + taskID + "/thread":
+			_, _ = w.Write([]byte(`<div>thread</div>`))
+		case "/tasks/" + taskID + "/changes":
+			_, _ = w.Write([]byte(`<div>changes</div>`))
+		default:
+			t.Fatalf("unexpected request %s", r.URL.RequestURI())
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := c.GetTaskForProjectExact(context.Background(), taskID, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Task.ID != taskID || detail.Task.ProjectID != "p1" || detail.Task.Title != "Exact task" || detail.Thread != "thread" || detail.Changes != "changes" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	if got := boardRequests.Load(); got != 0 {
+		t.Fatalf("board requests = %d, want 0", got)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.GetTaskForProjectExact(ctx, taskID, "p1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled error = %v, want context.Canceled", err)
 	}
 }
 

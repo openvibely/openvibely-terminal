@@ -131,6 +131,17 @@ func taskReviewsOutput(ctx context.Context, c *client.Client, t client.Task) (st
 	return renderTaskReviews(t, reviews), nil
 }
 
+func taskReviewsOutputForProject(ctx context.Context, c *client.Client, t client.Task, projectID string) (string, error) {
+	reviews, err := c.ListTaskReviewsForProject(ctx, t.ID, projectID)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(reviews)
+	}
+	return renderTaskReviews(t, reviews), nil
+}
+
 // marshalJSON marshals v to a JSON string. When jsonMode is false it is never
 // called; callers should guard with `if jsonMode { ... }`.
 func marshalJSON(v any) (string, error) {
@@ -375,6 +386,28 @@ func tasksCommand() command {
 					return taskSelector(m, "usage: /tasks show <id|title> [tab]", "tasks show", false)
 				}
 				return m, run("Task", cmdTimeout, func(ctx context.Context) (string, error) {
+					if isCanonicalFullTaskID(showRef) {
+						if isReviewTab(tab) || jsonMode {
+							d, err := c.GetTaskMetadataForProjectExact(ctx, showRef, pid)
+							if err != nil {
+								return "", err
+							}
+							if isReviewTab(tab) {
+								return taskReviewsOutputForProject(ctx, c, d.Task, pid)
+							}
+							return marshalJSON(d.Task)
+						}
+
+						d, err := c.GetTaskForProjectExact(ctx, showRef, pid)
+						if err != nil {
+							if d == nil {
+								return "", err
+							}
+							return renderTaskDetail(d.Task, d, tab), err
+						}
+						return renderTaskDetail(d.Task, d, tab), nil
+					}
+
 					t, err := resolveTask(ctx, c, pid, showRef)
 					if err != nil {
 						return "", err
@@ -845,6 +878,18 @@ func addedReviewComment(reviews []client.ReviewComment, form client.ReviewCommen
 		LineType:    form.LineType,
 		CommentText: form.CommentText,
 	}
+}
+
+func isCanonicalFullTaskID(ref string) bool {
+	if len(ref) != 32 {
+		return false
+	}
+	for i := 0; i < len(ref); i++ {
+		if (ref[i] < '0' || ref[i] > '9') && (ref[i] < 'a' || ref[i] > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {

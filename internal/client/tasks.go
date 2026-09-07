@@ -441,7 +441,7 @@ func parseReviewComments(root *html.Node, taskID string) []ReviewComment {
 
 // GetTask fetches the task detail page and extracts each tab's content.
 func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error) {
-	return c.getTask(ctx, taskID, "")
+	return c.getTask(ctx, taskID, "", false, true)
 }
 
 // GetTaskForProject fetches a task detail page within the selected project.
@@ -451,13 +451,37 @@ func (c *Client) GetTaskForProject(ctx context.Context, taskID, projectID string
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("project ID is required for task details")
 	}
-	return c.getTask(ctx, taskID, projectID)
+	return c.getTask(ctx, taskID, projectID, false, true)
 }
 
-func (c *Client) getTask(ctx context.Context, taskID, projectID string) (*TaskDetail, error) {
+// GetTaskForProjectExact fetches task detail after requiring the response's
+// task and project metadata to exactly match the requested identity. It is for
+// callers that already hold a canonical full task ID and therefore must not
+// discover the task through the board first.
+func (c *Client) GetTaskForProjectExact(ctx context.Context, taskID, projectID string) (*TaskDetail, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task details")
+	}
+	return c.getTask(ctx, taskID, projectID, true, true)
+}
+
+// GetTaskMetadataForProjectExact validates and returns only metadata embedded
+// in the initial task detail page. It avoids loading lazy tabs when the caller
+// only needs task identity, such as JSON summary or review rendering.
+func (c *Client) GetTaskMetadataForProjectExact(ctx context.Context, taskID, projectID string) (*TaskDetail, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task details")
+	}
+	return c.getTask(ctx, taskID, projectID, true, false)
+}
+
+func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, loadLazy bool) (*TaskDetail, error) {
 	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID))
 	if err != nil {
 		return nil, err
+	}
+	if exact && (taskDetailTaskID(root) != taskID || taskDetailProjectID(root) != projectID) {
+		return nil, fmt.Errorf("task %q was not found in selected project", taskID)
 	}
 	d := &TaskDetail{Task: Task{ID: taskID, ProjectID: projectID}, Attachments: make([]Attachment, 0)}
 
@@ -498,6 +522,18 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string) (*TaskDe
 			d.Details = NodeText(n)
 		}
 	}
+	if exact {
+		if prompt := findByID(root, "task-prompt-panel"); prompt != nil {
+			if value := findNode(prompt, func(e *html.Node) bool {
+				return strings.Contains(" "+attr(e, "class")+" ", " textarea ")
+			}); value != nil {
+				d.Task.Prompt = strings.TrimSpace(NodeText(value))
+			}
+		}
+	}
+	if !loadLazy {
+		return d, nil
+	}
 
 	// Thread and changes load asynchronously in the browser, so their panels
 	// are empty placeholders in the initial page; fetch the real fragments.
@@ -507,16 +543,23 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string) (*TaskDe
 	var threadNode, changesNode *html.Node
 	var threadErr, changesErr error
 
+	threadPath := "/tasks/" + url.PathEscape(taskID) + "/thread"
+	changesPath := "/tasks/" + url.PathEscape(taskID) + "/changes"
+	if exact {
+		threadPath += query("project_id", projectID)
+		changesPath += query("project_id", projectID)
+	}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		threadNode, threadErr = c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/thread")
+		threadNode, threadErr = c.getHTML(ctx, threadPath)
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		changesNode, changesErr = c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/changes")
+		changesNode, changesErr = c.getHTML(ctx, changesPath)
 	}()
 
 	needLife := d.Life == ""
@@ -568,9 +611,36 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string) (*TaskDe
 	return d, nil
 }
 
+func taskDetailTaskID(root *html.Node) string {
+	if root == nil {
+		return ""
+	}
+	if n := findNode(root, func(e *html.Node) bool {
+		return strings.TrimSpace(attr(e, "data-task-id")) != "" && strings.TrimSpace(attr(e, "data-project-id")) != ""
+	}); n != nil {
+		return strings.TrimSpace(attr(n, "data-task-id"))
+	}
+	if n := findNode(root, func(e *html.Node) bool { return strings.TrimSpace(attr(e, "data-task-id")) != "" }); n != nil {
+		return strings.TrimSpace(attr(n, "data-task-id"))
+	}
+	return ""
+}
+
 // ListTaskReviews fetches inline review comments for a task.
 func (c *Client) ListTaskReviews(ctx context.Context, taskID string) ([]ReviewComment, error) {
-	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/reviews")
+	return c.listTaskReviews(ctx, taskID, "")
+}
+
+// ListTaskReviewsForProject fetches review comments within the selected project.
+func (c *Client) ListTaskReviewsForProject(ctx context.Context, taskID, projectID string) ([]ReviewComment, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task reviews")
+	}
+	return c.listTaskReviews(ctx, taskID, projectID)
+}
+
+func (c *Client) listTaskReviews(ctx context.Context, taskID, projectID string) ([]ReviewComment, error) {
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/reviews"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}

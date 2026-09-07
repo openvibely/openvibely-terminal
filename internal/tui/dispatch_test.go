@@ -635,6 +635,257 @@ func TestTasksRunResolvesQuotedTaskTitle(t *testing.T) {
 	}
 }
 
+func canonicalTaskDetailHTML(taskID, projectID string) string {
+	return `<div data-task-id="` + taskID + `" data-project-id="` + projectID + `" data-task-status="running" data-task-category="active">
+		<h2 class="font-bold">Exact task</h2>
+		<div id="tab-details">details loaded</div><div id="tab-chat"></div><div id="tab-changes"></div><div id="tab-lifecycle">life loaded</div>
+	</div>`
+}
+
+func TestTasksShowCanonicalFullIDBypassesBoard(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks/" + taskID:              canonicalTaskDetailHTML(taskID, "p1"),
+		"/tasks/" + taskID + "/thread":  `<div>thread loaded</div>`,
+		"/tasks/" + taskID + "/changes": `<div>changes loaded</div>`,
+	})
+	m = runLine(t, m, "/tasks show "+taskID+" changes")
+
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("board requests = %d, want 0; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks/"+taskID); got != 1 {
+		t.Fatalf("detail requests = %d, want 1; calls:\n%s", got, rec.all())
+	}
+	for _, path := range []string{"/tasks/" + taskID, "/tasks/" + taskID + "/thread", "/tasks/" + taskID + "/changes"} {
+		if !rec.sawQuery("GET " + path + "?project_id=p1") {
+			t.Errorf("request %s was not project scoped: %v", path, rec.urlsSnapshot())
+		}
+	}
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Exact task", "changes loaded"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "error:") {
+		t.Fatalf("unexpected error:\n%s", out)
+	}
+}
+
+func TestTasksShowCanonicalFullIDJSONAndReviewBypassBoard(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name string
+		line string
+		json bool
+		want string
+	}{
+		{name: "json", line: "/tasks show " + taskID, json: true, want: `"id":"` + taskID + `"`},
+		{name: "review", line: "/tasks show " + taskID + " review", want: "no review comments"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks/" + taskID:              canonicalTaskDetailHTML(taskID, "p1"),
+				"/tasks/" + taskID + "/reviews": `<div></div>`,
+			})
+			previousJSON := jsonMode
+			jsonMode = tc.json
+			defer func() { jsonMode = previousJSON }()
+			m = runLine(t, m, tc.line)
+			if rec.count("GET", "/tasks") != 0 || rec.count("GET", "/tasks/"+taskID+"/thread") != 0 || rec.count("GET", "/tasks/"+taskID+"/changes") != 0 {
+				t.Fatalf("metadata-only show made board or lazy requests:\n%s", rec.all())
+			}
+			if tc.name == "review" && !rec.sawQuery("GET /tasks/"+taskID+"/reviews?project_id=p1") {
+				t.Fatalf("review request was not project scoped: %v", rec.urlsSnapshot())
+			}
+			if !strings.Contains(stripANSI(transcript(m)), tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, transcript(m))
+			}
+		})
+	}
+}
+
+func TestTasksShowCanonicalFullIDPreservesAuthFailure(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	var boardRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tasks" {
+			boardRequests.Add(1)
+		}
+		w.Header().Set("Location", "/login?next=%2Ftasks%2F"+taskID)
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/tasks show "+taskID)
+	if !m.authRequired || m.connected {
+		t.Fatalf("auth state = required %t connected %t", m.authRequired, m.connected)
+	}
+	if boardRequests.Load() != 0 {
+		t.Fatalf("auth failure fell back to board")
+	}
+	if !strings.Contains(stripANSI(transcript(m)), "requires sign-in") {
+		t.Fatalf("auth error missing:\n%s", transcript(m))
+	}
+}
+
+func TestTasksShowCanonicalFullIDLargeBoardPerformance(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	var board strings.Builder
+	board.Grow(600000)
+	for i := 0; i < 2500; i++ {
+		id := fmt.Sprintf("%032x", i+1)
+		title := fmt.Sprintf("Large board task %04d", i)
+		if i == 2499 {
+			id, title = taskID, "Target large task"
+		}
+		fmt.Fprintf(&board, `<div data-task-id="%s" data-task-status="pending" data-task-category="backlog"><a href="/tasks/%s" title="%s">%s</a><p class="line-clamp-2">prompt</p></div>`, id, id, title, title)
+	}
+
+	var boardRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks":
+			boardRequests.Add(1)
+			time.Sleep(20 * time.Millisecond)
+			_, _ = io.WriteString(w, board.String())
+		case "/tasks/" + taskID:
+			_, _ = io.WriteString(w, canonicalTaskDetailHTML(taskID, "p1"))
+		case "/tasks/" + taskID + "/thread":
+			_, _ = io.WriteString(w, `<div>thread</div>`)
+		case "/tasks/" + taskID + "/changes":
+			_, _ = io.WriteString(w, `<div>changes</div>`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runShow := func(ref string) {
+		m := New(c)
+		m.selectedID, m.selectedName = "p1", "demo"
+		_ = runLine(t, m, "/tasks show "+ref)
+	}
+	measure := func(ref string, runs int) (time.Duration, int32) {
+		before := boardRequests.Load()
+		start := time.Now()
+		for i := 0; i < runs; i++ {
+			runShow(ref)
+		}
+		return time.Since(start), boardRequests.Load() - before
+	}
+
+	const runs = 3
+	directTime, directBoards := measure(taskID, runs)
+	boardTime, fuzzyBoards := measure("Target large task", runs)
+	if directBoards != 0 || fuzzyBoards != runs {
+		t.Fatalf("board request evidence: direct=%d fuzzy=%d, want 0 and %d", directBoards, fuzzyBoards, runs)
+	}
+	if directTime*5 > boardTime*4 {
+		t.Fatalf("large-board timing improved less than 20%%: direct=%v board=%v", directTime, boardTime)
+	}
+
+	directAllocs := testing.AllocsPerRun(3, func() { runShow(taskID) })
+	boardAllocs := testing.AllocsPerRun(3, func() { runShow("Target large task") })
+	if directAllocs*5 > boardAllocs*4 {
+		t.Fatalf("large-board allocations improved less than 20%%: direct=%.0f board=%.0f", directAllocs, boardAllocs)
+	}
+	t.Logf("large-board evidence: board requests %d -> %d; elapsed %v -> %v; allocations %.0f -> %.0f", fuzzyBoards, directBoards, boardTime, directTime, boardAllocs, directAllocs)
+}
+
+func TestTasksShowCanonicalFullIDRejectsForeignMetadataWithoutFallback(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":           `<div data-task-id="` + taskID + `" data-task-category="active"><a href="/tasks/` + taskID + `" title="Board secret">Board secret</a></div>`,
+		"/tasks/" + taskID: `<div data-task-id="` + taskID + `" data-project-id="p2"><h2 class="font-bold">Foreign secret</h2></div>`,
+	})
+	m = runLine(t, m, "/tasks show "+taskID)
+
+	if rec.count("GET", "/tasks") != 0 || rec.count("GET", "/tasks/"+taskID+"/thread") != 0 || rec.count("GET", "/tasks/"+taskID+"/changes") != 0 {
+		t.Fatalf("foreign detail triggered fallback or lazy requests:\n%s", rec.all())
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "not found in selected project") {
+		t.Fatalf("missing scoped not-found error:\n%s", out)
+	}
+	for _, leaked := range []string{"Foreign secret", "Board secret", "p2"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("output leaked %q:\n%s", leaked, out)
+		}
+	}
+}
+
+func TestTasksShowUnknownCanonicalFullIDDoesNotScanBoard(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	var boardRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tasks" {
+			boardRequests.Add(1)
+			_, _ = io.WriteString(w, `<div>board secret</div>`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"task not found"}`)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/tasks show "+taskID)
+	if boardRequests.Load() != 0 {
+		t.Fatal("unknown canonical ID fell back to the board")
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "task not found") || strings.Contains(out, "board secret") {
+		t.Fatalf("unexpected output:\n%s", out)
+	}
+}
+
+func TestTasksShowNoncanonicalReferencesKeepBoardResolution(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	board := `<div data-task-id="` + taskID + `" data-task-status="running" data-task-category="active"><a href="/tasks/` + taskID + `" title="Exact task">Exact task</a></div>`
+	for _, ref := range []string{"Exact task", taskID[:12], strings.ToUpper(taskID)} {
+		t.Run(ref, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":                        board,
+				"/tasks/" + taskID:              canonicalTaskDetailHTML(taskID, "p1"),
+				"/tasks/" + taskID + "/thread":  `<div>thread</div>`,
+				"/tasks/" + taskID + "/changes": `<div>changes</div>`,
+			})
+			m = runLine(t, m, "/tasks show "+ref)
+			if rec.count("GET", "/tasks") != 1 {
+				t.Fatalf("noncanonical ref %q did not retain board matching:\n%s", ref, rec.all())
+			}
+			if strings.Contains(stripANSI(transcript(m)), "error:") {
+				t.Fatalf("noncanonical ref failed:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
+func TestTasksRunCanonicalFullIDStillUsesBoard(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	board := `<div data-task-id="` + taskID + `" data-task-status="pending" data-task-category="backlog"><a href="/tasks/` + taskID + `" title="Exact task">Exact task</a></div>`
+	m, rec := dispatchModel(t, map[string]string{"/tasks": board})
+	m = runLine(t, m, "/tasks run "+taskID)
+	if rec.count("GET", "/tasks") != 2 || rec.count("POST", "/tasks/"+taskID+"/run") != 1 {
+		t.Fatalf("non-show action changed behavior:\n%s", rec.all())
+	}
+}
+
 func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
