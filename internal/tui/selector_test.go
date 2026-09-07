@@ -82,6 +82,7 @@ func selFixtures() map[string]string {
 		"/agents":      selAgentsHTML,
 		"/models":      selModelsHTML,
 		"/automations": selAutomationsHTML,
+		"/channels":    webhookCardsHTML,
 		"/schedule":    selScheduleHTML,
 		"/personality": selPersonalitiesHTML,
 	}
@@ -139,8 +140,13 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		// channels
 		{"channels_test", "/channels test", "channels test"},
 		{"channels_remove", "/channels remove", "channels remove"},
-		// schedule
-		{"schedule_add", "/schedule add", "schedule add"},
+		// inbound webhooks
+		{"webhooks_show", "/webhooks show", "webhooks show"},
+		{"webhooks_edit", "/webhooks edit", "webhooks edit"},
+		{"webhooks_test", "/webhooks test", "webhooks test"},
+		{"webhooks_rotate", "/webhooks rotate", "webhooks rotate"},
+		{"webhooks_delete", "/webhooks delete", "webhooks delete"},
+		// schedule		{"schedule_add", "/schedule add", "schedule add"},
 		{"schedule_edit", "/schedule edit", "schedule edit"},
 		{"schedule_delete", "/schedule delete", "schedule delete"},
 		{"schedule_toggle", "/schedule toggle", "schedule toggle"},

@@ -6983,3 +6983,136 @@ func TestInteractiveUnmatchedQuoteReportsParseError(t *testing.T) {
 		t.Fatalf("malformed input must not reach task lookup or mutation:\n%s\ncalls:\n%s", transcript(m), rec.all())
 	}
 }
+
+const webhookCardsHTML = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w1" data-webhook-name="Pager Duty" data-webhook-enabled="false" data-webhook-token="safe-token" data-webhook-default-priority="4"></div><div data-webhook-id="w2" data-webhook-name="Pager Build" data-webhook-enabled="true" data-webhook-token="build-token" data-webhook-default-priority="2"></div></div>`
+
+const webhookDetailJSON = `{"id":"w1","project_id":"p1","name":"Pager Duty","enabled":false,"path_token":"safe-token","secret":"never-print-this","system_instructions":"keep system","title_template":"keep title","prompt_template":"keep prompt","default_priority":4,"agent_ids":["a1","a2"]}`
+
+func TestWebhooksDispatchCreate(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"POST /channels/webhooks":   `{"id":"w3","project_id":"p1","secret":"create-secret-must-not-print"}`,
+		"GET /channels/webhooks/w3": `{"id":"w3","project_id":"p1","name":"Incident Hook","enabled":true,"path_token":"incident-token","secret":"create-secret-must-not-print","default_priority":3,"agent_ids":["agent-1"]}`,
+	})
+	m = runLine(t, m, `/webhooks create "Incident Hook" --priority 3 --agents agent-1`)
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "created webhook") || !strings.Contains(out, "/webhooks/inbound/incident-token") {
+		t.Fatalf("create output:\n%s", out)
+	}
+	if strings.Contains(out, "create-secret-must-not-print") {
+		t.Fatalf("create output disclosed secret:\n%s", out)
+	}
+	for _, want := range []string{"name=Incident+Hook", "enabled=true", "default_priority=3", "agent_ids=agent-1"} {
+		if !rec.sawForm(want) {
+			t.Errorf("create form missing %q: %#v", want, rec.forms)
+		}
+	}
+}
+
+func TestWebhooksDispatchListShowEditAndTest(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/channels":                       webhookCardsHTML,
+		"GET /channels/webhooks/w1":       webhookDetailJSON,
+		"PUT /channels/webhooks/w1":       "",
+		"POST /channels/webhooks/w1/test": `{"task_id":"task-created-123"}`,
+	})
+
+	m = runLine(t, m, "/webhooks list")
+	m = runLine(t, m, "/webhooks show w1")
+	m = runLine(t, m, "/webhooks edit w1 --name Renamed --enabled true")
+	m = runLine(t, m, "/webhooks test w1")
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Pager Duty", "/webhooks/inbound/safe-token", "URL:", "updated webhook", "test task created: task-created-123"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "never-print-this") || strings.Contains(out, "secret\":") {
+		t.Fatalf("ordinary webhook output disclosed a secret:\n%s", out)
+	}
+	for _, want := range []string{"name=Renamed", "enabled=true", "system_instructions=keep+system", "title_template=keep+title", "prompt_template=keep+prompt", "default_priority=4", "agent_ids=a1%2Ca2"} {
+		if !rec.sawForm(want) {
+			t.Errorf("preserved edit form missing %q; forms: %#v", want, rec.forms)
+		}
+	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Fatalf("webhook requests were not project scoped: %#v", rec.urlsSnapshot())
+	}
+}
+
+func TestWebhooksAmbiguousAndForeignRefsDoNotMutate(t *testing.T) {
+	for _, line := range []string{"/webhooks test pager", "/webhooks test foreign-id"} {
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": webhookCardsHTML})
+			m = runLine(t, m, line)
+			if rec.count("POST", "/channels/webhooks/w1/test")+rec.count("POST", "/channels/webhooks/w2/test") != 0 {
+				t.Fatalf("invalid reference mutated:\n%s", rec.all())
+			}
+			out := strings.ToLower(stripANSI(transcript(m)))
+			if !strings.Contains(out, "ambiguous") && !strings.Contains(out, "nothing matches") {
+				t.Fatalf("missing reference error:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestWebhooksRotateDeleteConfirmationAndSanitization(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/channels": webhookCardsHTML,
+		"POST /channels/webhooks/w1/rotate-secret": `{"secret":"new-secret\u001b[31m\nvalue"}`,
+		"DELETE /channels/webhooks/w1":             "",
+	})
+	m = runLine(t, m, "/webhooks rotate w1")
+	if rec.saw("POST", "/channels/webhooks/w1/rotate-secret") {
+		t.Fatal("rotation ran before confirmation")
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if rec.saw("POST", "/channels/webhooks/w1/rotate-secret") {
+		t.Fatal("cancelled rotation mutated")
+	}
+	m = confirmDestructive(t, m, "/webhooks rotate w1")
+	if !rec.saw("POST", "/channels/webhooks/w1/rotate-secret") {
+		t.Fatal("confirmed rotation did not run")
+	}
+	out := transcript(m)
+	if strings.Contains(out, "\x1b[31m") || !strings.Contains(stripANSI(out), "new-secret value") {
+		t.Fatalf("rotation output was not terminal safe:\n%q", out)
+	}
+
+	m = runLine(t, m, "/webhooks delete w1")
+	if rec.saw("DELETE", "/channels/webhooks/w1") {
+		t.Fatal("delete ran before confirmation")
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if rec.saw("DELETE", "/channels/webhooks/w1") {
+		t.Fatal("cancelled delete mutated")
+	}
+}
+
+func TestWebhooksInvalidOptionsFailBeforeRequests(t *testing.T) {
+	for _, line := range []string{"/webhooks create hook --enabled maybe", "/webhooks edit w1 --priority 5", "/webhooks edit w1 --name"} {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, line)
+		if got := rec.all(); got != "" {
+			t.Fatalf("%q made requests:\n%s", line, got)
+		}
+	}
+}
+
+func TestWebhooksRequireSelectedProjectBeforeDiscovery(t *testing.T) {
+	for _, line := range []string{"/webhooks", "/webhooks show w1", "/webhooks create hook", "/webhooks edit w1 --enabled true", "/webhooks test w1", "/webhooks rotate w1", "/webhooks delete w1"} {
+		m, rec := dispatchModel(t, nil)
+		m.selectedID = ""
+		m = runLine(t, m, line)
+		if got := rec.all(); got != "" {
+			t.Fatalf("%q made requests without a project:\n%s", line, got)
+		}
+		if !strings.Contains(stripANSI(transcript(m)), "no project selected") {
+			t.Fatalf("%q missing project guidance:\n%s", line, transcript(m))
+		}
+		if m.selectorActive || m.pendingConfirmation != nil {
+			t.Fatalf("%q opened selector/confirmation without a project", line)
+		}
+	}
+}

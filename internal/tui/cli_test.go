@@ -4653,3 +4653,53 @@ func TestEventsHelpDistinguishesInteractiveAndCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
+	t.Run("list JSON is secret-free", func(t *testing.T) {
+		c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"webhooks", "list"}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		if !json.Valid(out.Bytes()) || !strings.Contains(out.String(), `"path":"/webhooks/inbound/safe-token"`) {
+			t.Fatalf("unexpected JSON: %s", out.String())
+		}
+		if strings.Contains(strings.ToLower(out.String()), "secret") {
+			t.Fatalf("list JSON disclosed a secret field: %s", out.String())
+		}
+	})
+
+	for _, action := range []string{"rotate", "delete"} {
+		t.Run(action+" requires force", func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"webhooks", action, "w1"}, false, false)
+			if err == nil || !strings.Contains(err.Error(), "--force") {
+				t.Fatalf("error = %v", err)
+			}
+			if rec.saw("POST", "/channels/webhooks/w1/rotate-secret") || rec.saw("DELETE", "/channels/webhooks/w1") {
+				t.Fatal("unforced destructive action mutated")
+			}
+		})
+	}
+
+	t.Run("forced delete resolves then mutates", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML, "/channels/webhooks/w1": ""})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"webhooks", "delete", "w1"}, true, false); err != nil {
+			t.Fatal(err)
+		}
+		if !rec.saw("DELETE", "/channels/webhooks/w1") || !rec.sawQuery("project_id=p1") {
+			t.Fatalf("calls: %s %#v", rec.all(), rec.urlsSnapshot())
+		}
+	})
+
+	t.Run("test JSON reports task ID", func(t *testing.T) {
+		c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML, "/channels/webhooks/w1/test": `{"task_id":"task-cli-1"}`})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"webhooks", "test", "w1"}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		if !json.Valid(out.Bytes()) || !strings.Contains(out.String(), `"task_id":"task-cli-1"`) {
+			t.Fatalf("output = %s", out.String())
+		}
+	})
+}

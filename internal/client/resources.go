@@ -875,6 +875,216 @@ func (c *Client) GetChannels(ctx context.Context, projectID string) (string, err
 	return c.paginatedPageText(ctx, "/channels"+query("project_id", projectID), "")
 }
 
+// Webhook is the terminal-safe representation of one project-scoped inbound
+// webhook. Backend secrets are deliberately not represented: list/detail JSON,
+// diagnostics, and formatted values therefore cannot disclose them by default.
+type Webhook struct {
+	ID                 string   `json:"id"`
+	ProjectID          string   `json:"project_id"`
+	Name               string   `json:"name"`
+	Enabled            bool     `json:"enabled"`
+	Path               string   `json:"path"`
+	URL                string   `json:"url"`
+	SystemInstructions string   `json:"system_instructions,omitempty"`
+	TitleTemplate      string   `json:"title_template,omitempty"`
+	PromptTemplate     string   `json:"prompt_template,omitempty"`
+	DefaultPriority    int      `json:"default_priority"`
+	AgentIDs           []string `json:"agent_ids"`
+}
+
+// WebhookTestResult is returned after creating the synthetic webhook test task.
+type WebhookTestResult struct {
+	TaskID string `json:"task_id"`
+}
+
+// WebhookSecretRotation is returned only by the explicit, confirmation-gated
+// secret rotation action. It must never be included in ordinary webhook output.
+type WebhookSecretRotation struct {
+	Secret string `json:"secret"`
+}
+
+func (c *Client) webhookLocation(pathToken string) (string, string) {
+	path := "/webhooks/inbound/" + url.PathEscape(pathToken)
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return path, path
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = path
+	u.RawPath = ""
+	return path, u.String()
+}
+
+func (c *Client) webhooksFromPages(pages []htmlPage, projectID string) []Webhook {
+	out := make([]Webhook, 0)
+	seen := make(map[string]struct{})
+	for _, page := range pages {
+		for _, card := range scrapeCards(page.root, "data-webhook-id") {
+			id := strings.TrimSpace(card.Get("webhook-id"))
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			path, endpointURL := c.webhookLocation(card.Get("webhook-token"))
+			out = append(out, Webhook{
+				ID:              id,
+				ProjectID:       projectID,
+				Name:            card.Get("webhook-name"),
+				Enabled:         card.Bool("webhook-enabled"),
+				Path:            path,
+				URL:             endpointURL,
+				DefaultPriority: card.Int("webhook-default-priority"),
+				AgentIDs:        make([]string, 0),
+			})
+		}
+	}
+	return out
+}
+
+// ListWebhooks returns every inbound webhook card for exactly one project.
+func (c *Client) ListWebhooks(ctx context.Context, projectID string) ([]Webhook, error) {
+	pages, err := c.getCardPages(ctx, "/channels"+query("project_id", projectID))
+	if err != nil {
+		return nil, err
+	}
+	return c.webhooksFromPages(pages, projectID), nil
+}
+
+// GetWebhook loads complete editable configuration while discarding the secret
+// returned by the backend detail route.
+func (c *Client) GetWebhook(ctx context.Context, projectID, id string) (*Webhook, error) {
+	var raw struct {
+		ID                 string   `json:"id"`
+		ProjectID          string   `json:"project_id"`
+		Name               string   `json:"name"`
+		Enabled            bool     `json:"enabled"`
+		PathToken          string   `json:"path_token"`
+		SystemInstructions string   `json:"system_instructions"`
+		TitleTemplate      string   `json:"title_template"`
+		PromptTemplate     string   `json:"prompt_template"`
+		DefaultPriority    int      `json:"default_priority"`
+		AgentIDs           []string `json:"agent_ids"`
+	}
+	path := "/channels/webhooks/" + url.PathEscape(id) + query("project_id", projectID)
+	if err := c.getJSON(ctx, path, &raw); err != nil {
+		return nil, err
+	}
+	if raw.ProjectID != projectID {
+		return nil, fmt.Errorf("webhook %q does not belong to selected project", id)
+	}
+	endpointPath, endpointURL := c.webhookLocation(raw.PathToken)
+	return &Webhook{
+		ID: raw.ID, ProjectID: raw.ProjectID, Name: raw.Name, Enabled: raw.Enabled,
+		Path: endpointPath, URL: endpointURL, SystemInstructions: raw.SystemInstructions,
+		TitleTemplate: raw.TitleTemplate, PromptTemplate: raw.PromptTemplate,
+		DefaultPriority: raw.DefaultPriority, AgentIDs: nonNilStrings(raw.AgentIDs),
+	}, nil
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return make([]string, 0)
+	}
+	return values
+}
+
+func webhookForm(webhook Webhook) url.Values {
+	form := url.Values{}
+	form.Set("name", webhook.Name)
+	form.Set("enabled", strconv.FormatBool(webhook.Enabled))
+	form.Set("system_instructions", webhook.SystemInstructions)
+	form.Set("title_template", webhook.TitleTemplate)
+	form.Set("prompt_template", webhook.PromptTemplate)
+	form.Set("default_priority", strconv.Itoa(webhook.DefaultPriority))
+	form.Set("agent_ids", strings.Join(webhook.AgentIDs, ","))
+	return form
+}
+
+// CreateWebhook creates one webhook and returns its secret-free detail.
+func (c *Client) CreateWebhook(ctx context.Context, projectID string, webhook Webhook) (*Webhook, error) {
+	var created struct {
+		ID        string `json:"id"`
+		ProjectID string `json:"project_id"`
+	}
+	if err := c.doWebhookJSONForm(ctx, http.MethodPost, "/channels/webhooks"+query("project_id", projectID), webhookForm(webhook), &created); err != nil {
+		return nil, err
+	}
+	if created.ProjectID != projectID {
+		return nil, fmt.Errorf("created webhook does not belong to selected project")
+	}
+	return c.GetWebhook(ctx, projectID, created.ID)
+}
+
+// UpdateWebhook replaces the backend form while callers preserve omitted fields
+// by starting from GetWebhook's complete configuration.
+func (c *Client) UpdateWebhook(ctx context.Context, projectID string, webhook Webhook) (*Webhook, error) {
+	if webhook.ProjectID != projectID {
+		return nil, fmt.Errorf("webhook %q does not belong to selected project", webhook.ID)
+	}
+	path := "/channels/webhooks/" + url.PathEscape(webhook.ID) + query("project_id", projectID)
+	if err := c.doForm(ctx, http.MethodPut, path, webhookForm(webhook)); err != nil {
+		return nil, err
+	}
+	return c.GetWebhook(ctx, projectID, webhook.ID)
+}
+
+func (c *Client) doWebhookJSONForm(ctx context.Context, method, path string, form url.Values, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	defer drainAndClose(resp.Body)
+	if isAuthResponse(resp) {
+		return newAuthRequiredError(method, path, resp)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return apiError(resp)
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	return nil
+}
+
+// TestWebhook creates a synthetic task and returns its backend task ID.
+func (c *Client) TestWebhook(ctx context.Context, projectID, id string) (*WebhookTestResult, error) {
+	var out WebhookTestResult
+	path := "/channels/webhooks/" + url.PathEscape(id) + "/test" + query("project_id", projectID)
+	if err := c.doWebhookJSONForm(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RotateWebhookSecret rotates a secret only through the explicit caller action.
+func (c *Client) RotateWebhookSecret(ctx context.Context, projectID, id string) (*WebhookSecretRotation, error) {
+	var out WebhookSecretRotation
+	path := "/channels/webhooks/" + url.PathEscape(id) + "/rotate-secret" + query("project_id", projectID)
+	if err := c.doWebhookJSONForm(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteWebhook deletes one webhook in the selected project.
+func (c *Client) DeleteWebhook(ctx context.Context, projectID, id string) error {
+	return c.doForm(ctx, http.MethodDelete, "/channels/webhooks/"+url.PathEscape(id)+query("project_id", projectID), nil)
+}
+
 // ChannelAction runs test or remove on a channel integration.
 // Supported channel types: telegram, slack, discord, email.
 // Supported actions: test, remove.

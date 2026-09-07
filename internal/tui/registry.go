@@ -31,6 +31,7 @@ func init() {
 		modelsCommand(),
 		workersCommand(),
 		channelsCommand(),
+		webhooksCommand(),
 		personalityCommand(),
 		pulseCommand(),
 		reflectionCommand(),
@@ -2605,6 +2606,291 @@ func channelsCommand() command {
 				}
 				return m, cmd
 			}
+		},
+	}
+}
+
+// webhookActionJSON is the stable machine-readable acknowledgement for delete.
+type webhookActionJSON struct {
+	Action string `json:"action"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+}
+
+var webhookOptionNames = map[string]string{
+	"--name": "name", "--enabled": "enabled", "--priority": "priority", "--default-priority": "priority",
+	"--system-instructions": "system_instructions", "--title-template": "title_template", "--prompt-template": "prompt_template",
+	"--agents": "agent_ids", "--agent-ids": "agent_ids",
+}
+
+func webhookOptionBoundary(args []string) int {
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			return i
+		}
+	}
+	return len(args)
+}
+
+func parseWebhookOptions(args []string) (map[string]string, error) {
+	values := make(map[string]string)
+	for len(args) > 0 {
+		key, ok := webhookOptionNames[strings.ToLower(args[0])]
+		if !ok {
+			return nil, fmt.Errorf("unknown webhook option %q", args[0])
+		}
+		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
+			return nil, fmt.Errorf("webhook option %s requires a value", args[0])
+		}
+		if _, duplicate := values[key]; duplicate {
+			return nil, fmt.Errorf("webhook option %s was provided more than once", args[0])
+		}
+		values[key] = args[1]
+		args = args[2:]
+	}
+	if enabled, ok := values["enabled"]; ok {
+		if enabled != "true" && enabled != "false" {
+			return nil, errors.New("webhook enabled must be true or false")
+		}
+	}
+	if priority, ok := values["priority"]; ok {
+		n, err := strconv.Atoi(priority)
+		if err != nil || n < 1 || n > 4 {
+			return nil, errors.New("webhook priority must be between 1 and 4")
+		}
+	}
+	return values, nil
+}
+
+func applyWebhookOptions(webhook *client.Webhook, values map[string]string) {
+	if value, ok := values["name"]; ok {
+		webhook.Name = strings.TrimSpace(value)
+	}
+	if value, ok := values["enabled"]; ok {
+		webhook.Enabled, _ = strconv.ParseBool(value)
+	}
+	if value, ok := values["priority"]; ok {
+		webhook.DefaultPriority, _ = strconv.Atoi(value)
+	}
+	if value, ok := values["system_instructions"]; ok {
+		webhook.SystemInstructions = value
+	}
+	if value, ok := values["title_template"]; ok {
+		webhook.TitleTemplate = value
+	}
+	if value, ok := values["prompt_template"]; ok {
+		webhook.PromptTemplate = value
+	}
+	if value, ok := values["agent_ids"]; ok {
+		webhook.AgentIDs = make([]string, 0)
+		for _, id := range strings.Split(value, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				webhook.AgentIDs = append(webhook.AgentIDs, id)
+			}
+		}
+	}
+}
+
+func validateWebhooksArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	action, rest := strings.ToLower(args[0]), args[1:]
+	switch action {
+	case "list":
+		if len(rest) != 0 {
+			return errors.New(commandUsage("webhooks", "list"))
+		}
+		return nil
+	case "show", "test", "rotate", "delete":
+		return nil
+	case "create", "edit":
+		boundary := webhookOptionBoundary(rest)
+		if _, err := parseWebhookOptions(rest[boundary:]); err != nil {
+			return err
+		}
+		if action == "create" && strings.TrimSpace(strings.Join(rest[:boundary], " ")) == "" {
+			return errors.New(commandUsage("webhooks", "create"))
+		}
+		if action == "edit" && boundary == len(rest) && len(rest) > 0 {
+			return errors.New(commandUsage("webhooks", "edit"))
+		}
+		return nil
+	default:
+		return errors.New(commandUsage("webhooks", ""))
+	}
+}
+
+func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string) (client.Webhook, error) {
+	webhooks, err := c.ListWebhooks(ctx, projectID)
+	if err != nil {
+		return client.Webhook{}, err
+	}
+	return matchRef(webhooks, ref, func(w client.Webhook) string { return w.ID }, func(w client.Webhook) string { return w.Name })
+}
+
+func webhookSelector(m Model, action string, prefill bool) (Model, tea.Cmd) {
+	c, projectID := m.client, m.selectedID
+	prefillSuffix := ""
+	if prefill {
+		prefillSuffix = " "
+	}
+	return selectorOr(m, commandUsage("webhooks", action), selectorForWithSuffix("Webhooks", "webhooks "+action, "no inbound webhooks configured", prefillSuffix, func(ctx context.Context) ([]selectorItem, error) {
+		webhooks, err := c.ListWebhooks(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		items := make([]selectorItem, 0, len(webhooks))
+		for _, webhook := range webhooks {
+			items = append(items, selectorItem{ref: webhook.ID, label: webhook.Name, detail: webhook.Path})
+		}
+		return items, nil
+	}))
+}
+
+func renderWebhooks(webhooks []client.Webhook) string {
+	if len(webhooks) == 0 {
+		return "no inbound webhooks configured"
+	}
+	var b strings.Builder
+	b.WriteString("Inbound webhooks\n")
+	for _, webhook := range webhooks {
+		state := "disabled"
+		if webhook.Enabled {
+			state = "enabled"
+		}
+		fmt.Fprintf(&b, "  %s  %s  %s  priority %d\n    %s\n", sanitizeAutomationDetailText(webhook.Name), sanitizeAutomationDetailText(shortID(webhook.ID)), state, webhook.DefaultPriority, sanitizeAutomationDetailText(webhook.Path))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderWebhookDetail(webhook client.Webhook) string {
+	safe := sanitizeAutomationDetailText
+	state := "disabled"
+	if webhook.Enabled {
+		state = "enabled"
+	}
+	return fmt.Sprintf("Webhook: %s\nID: %s\nProject: %s\nState: %s\nURL: %s\nPath: %s\nPriority: %d\nAgents: %s\nSystem instructions: %s\nTitle template: %s\nPrompt template: %s", safe(webhook.Name), safe(webhook.ID), safe(webhook.ProjectID), state, safe(webhook.URL), safe(webhook.Path), webhook.DefaultPriority, safe(strings.Join(webhook.AgentIDs, ", ")), safe(webhook.SystemInstructions), safe(webhook.TitleTemplate), safe(webhook.PromptTemplate))
+}
+
+func webhooksCommand() command {
+	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
+	return command{
+		name: "webhooks", aliases: []string{"inbound-webhooks"}, args: "[action] [webhook]", actions: actions,
+		selectorPaths: [][]string{{"show"}, {"edit"}, {"test"}, {"rotate"}, {"delete"}}, desc: "project-scoped inbound webhook endpoints",
+		actionUsages: []commandActionUsage{
+			{action: "", args: "[list|show <webhook>|create <name> [options]|edit <webhook> <options>|test <webhook>|rotate <webhook>|delete <webhook>]"},
+			{action: "list", description: "list inbound webhooks"}, {action: "show", args: "<webhook>", description: "show secret-free webhook detail"},
+			{action: "create", args: "<name> [options]", description: "create an inbound webhook"}, {action: "edit", args: "<webhook> <options>", description: "edit only specified configuration"},
+			{action: "test", args: "<webhook>", description: "create a synthetic test task"}, {action: "rotate", args: "<webhook>", description: "rotate the webhook secret (confirmation required)"},
+			{action: "delete", args: "<webhook>", description: "delete a webhook (confirmation required)"},
+		},
+		usage:    []string{"options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents", "omit <webhook> on show/edit/test/rotate/delete → interactive selector"},
+		examples: []string{`webhooks create "PagerDuty alerts" --priority 3`, `webhooks edit pager --enabled false`, `webhooks test pager`, `webhooks rotate pager`}, validateArgs: validateWebhooksArgs,
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, noProject, ok := m.needProject()
+			if !ok {
+				return mm, noProject
+			}
+			if err := validateWebhooksArgs(args); err != nil {
+				return m, errCmd(err.Error())
+			}
+			action, rest := splitAction(actions, args)
+			c, projectID := m.client, m.selectedID
+			if action == "" || action == "list" {
+				return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+					webhooks, err := c.ListWebhooks(ctx, projectID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(webhooks)
+					}
+					return renderWebhooks(webhooks), nil
+				})
+			}
+			boundary := webhookOptionBoundary(rest)
+			ref := strings.TrimSpace(strings.Join(rest[:boundary], " "))
+			options, _ := parseWebhookOptions(rest[boundary:])
+			if ref == "" && action != "create" {
+				return webhookSelector(m, action, action == "edit")
+			}
+			if action == "create" {
+				return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+					webhook := client.Webhook{ProjectID: projectID, Name: ref, Enabled: true, DefaultPriority: 2, AgentIDs: make([]string, 0)}
+					applyWebhookOptions(&webhook, options)
+					created, err := c.CreateWebhook(ctx, projectID, webhook)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(created)
+					}
+					return "created webhook\n\n" + renderWebhookDetail(*created), nil
+				})
+			}
+			cmd := run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+				webhook, err := resolveWebhook(ctx, c, projectID, ref)
+				if err != nil {
+					return "", err
+				}
+				switch action {
+				case "show":
+					detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(detail)
+					}
+					return renderWebhookDetail(*detail), nil
+				case "edit":
+					detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
+					if err != nil {
+						return "", err
+					}
+					applyWebhookOptions(detail, options)
+					updated, err := c.UpdateWebhook(ctx, projectID, *detail)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(updated)
+					}
+					return "updated webhook\n\n" + renderWebhookDetail(*updated), nil
+				case "test":
+					result, err := c.TestWebhook(ctx, projectID, webhook.ID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(result)
+					}
+					return fmt.Sprintf("test task created: %s", sanitizeAutomationDetailText(result.TaskID)), nil
+				case "rotate":
+					rotation, err := c.RotateWebhookSecret(ctx, projectID, webhook.ID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(rotation)
+					}
+					return fmt.Sprintf("rotated secret for %s\nNew secret: %s", sanitizeAutomationDetailText(webhook.Name), sanitizeAutomationDetailText(rotation.Secret)), nil
+				case "delete":
+					if err := c.DeleteWebhook(ctx, projectID, webhook.ID); err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(webhookActionJSON{Action: "delete", ID: webhook.ID, Name: webhook.Name})
+					}
+					return "deleted webhook: " + sanitizeAutomationDetailText(webhook.Name), nil
+				}
+				return "", errors.New(commandUsage("webhooks", action))
+			})
+			if action == "rotate" || action == "delete" {
+				return confirmOr(m, fmt.Sprintf("%s webhook %q? Type 'yes' to confirm or Esc to cancel.", titleFor(action), sanitizeAutomationDetailText(ref)), fmt.Sprintf("use --force to confirm %s of webhook %q", action, sanitizeAutomationDetailText(ref)), cmd)
+			}
+			return m, cmd
 		},
 	}
 }
