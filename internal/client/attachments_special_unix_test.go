@@ -1,22 +1,24 @@
-//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+//go:build aix || darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd || solaris
 
 package client
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestAddTaskAttachmentsRejectsFIFOWithoutRequestOrBlocking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "attachment.fifo")
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
+	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Skipf("named pipes unavailable: %v", err)
 	}
 
@@ -25,21 +27,21 @@ func TestAddTaskAttachmentsRejectsFIFOWithoutRequestOrBlocking(t *testing.T) {
 
 func TestAddTaskAttachmentsRejectsConnectedFIFOWithoutRequestOrBlocking(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "attachment.fifo")
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
+	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Skipf("named pipes unavailable: %v", err)
 	}
-	fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_NONBLOCK, 0)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NONBLOCK, 0)
 	if err != nil {
 		t.Skipf("opening connected FIFO unavailable: %v", err)
 	}
-	defer syscall.Close(fd)
+	defer unix.Close(fd)
 
 	assertAttachmentRejectedPromptly(t, path, nil)
 }
 
 func TestAddTaskAttachmentsCancellationCannotLeaveFIFOBlocked(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "attachment.fifo")
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
+	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Skipf("named pipes unavailable: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -53,6 +55,45 @@ func TestAddTaskAttachmentsRejectsOtherSpecialFileWithoutRequest(t *testing.T) {
 		t.Skipf("/dev/null unavailable: %v", err)
 	}
 	assertAttachmentRejectedPromptly(t, "/dev/null", nil)
+}
+
+func TestAttachmentMultipartBodyRejectsRegularFileReplacedByFIFOWithoutBlocking(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "attachment.bin")
+	if err := os.WriteFile(path, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := newAttachmentMultipartBody([]string{path})
+	if err != nil {
+		t.Fatalf("newAttachmentMultipartBody: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(path, 0o600); err != nil {
+		t.Skipf("named pipes unavailable: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, body)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("replacement error = %v, want path-specific not-regular error", err)
+		}
+	case <-time.After(2 * time.Second):
+		// Release an old blocking implementation so the regression does not leak
+		// a permanently blocked goroutine while reporting the failure.
+		if fd, openErr := unix.Open(path, unix.O_WRONLY|unix.O_NONBLOCK, 0); openErr == nil {
+			_ = unix.Close(fd)
+		}
+		t.Fatal("lazy attachment open blocked after FIFO replacement")
+	}
+	if closeErr := body.Close(); closeErr == nil || !strings.Contains(closeErr.Error(), "not a regular file") {
+		t.Fatalf("Close error = %v, want replacement error", closeErr)
+	}
 }
 
 func TestAddTaskAttachmentsSupportsSymlinkToRegularFile(t *testing.T) {
@@ -118,8 +159,8 @@ func assertAttachmentRejectedPromptly(t *testing.T, path string, ctx context.Con
 		// Release a blocked FIFO open in the buggy implementation so the test does
 		// not leak a permanently blocked goroutine while reporting the regression.
 		if info, err := os.Stat(path); err == nil && info.Mode()&os.ModeNamedPipe != 0 {
-			if fd, openErr := syscall.Open(path, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); openErr == nil {
-				_ = syscall.Close(fd)
+			if fd, openErr := unix.Open(path, unix.O_WRONLY|unix.O_NONBLOCK, 0); openErr == nil {
+				_ = unix.Close(fd)
 			}
 		}
 		t.Fatal("attachment validation blocked on a special file")
