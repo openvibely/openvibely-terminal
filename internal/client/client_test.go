@@ -528,23 +528,81 @@ func TestStreamChatOutputParsesChunksAndTerminalEvents(t *testing.T) {
 			t.Fatalf("unexpected stream request: %s", r.URL.RequestURI())
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: hello\ndata:  world\n\n")
+		fmt.Fprint(w, ": keepalive\n\n")
+		fmt.Fprint(w, "event: chunk  \ndata: hello\n: still the same frame\ndata:  world\n\n")
 		fmt.Fprint(w, "event: done\ndata: completed\n\n")
+		fmt.Fprint(w, "data: tail\ndata:  exact\n\n")
 	}))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	events, errs := c.StreamChatOutput(ctx, "exec-1", 7)
-	if got := <-events; got.Name != "" || got.Data != "hello\n world" {
+	if got := <-events; got.Name != "chunk" || got.Data != "hello\n world" {
 		t.Fatalf("chunk = %#v", got)
 	}
 	if got := <-events; got.Name != "done" || got.Data != "completed" {
 		t.Fatalf("done = %#v", got)
 	}
+	if got := <-events; got.Name != "" || got.Data != "tail\n exact" {
+		t.Fatalf("reset unnamed chunk = %#v", got)
+	}
 	for err := range errs {
 		if err != nil {
 			t.Fatalf("unexpected stream error: %v", err)
 		}
+	}
+}
+
+func TestSSEStreamsReportOversizedFrames(t *testing.T) {
+	const oversizedDataBytes = 1024*1024 + 1
+	for _, tc := range []struct {
+		name        string
+		path        string
+		errorPrefix string
+		stream      func(context.Context, *Client) (<-chan error, func())
+	}{
+		{
+			name:        "chat output",
+			path:        "/events/chat/exec",
+			errorPrefix: "chat output stream read:",
+			stream: func(ctx context.Context, c *Client) (<-chan error, func()) {
+				events, errs := c.StreamChatOutput(ctx, "exec", 0)
+				return errs, func() {
+					for range events {
+					}
+				}
+			},
+		},
+		{
+			name:        "live events",
+			path:        "/events/live",
+			errorPrefix: "event stream read:",
+			stream: func(ctx context.Context, c *Client) (<-chan error, func()) {
+				events, errs := c.StreamEvents(ctx, "")
+				return errs, func() {
+					for range events {
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path {
+					t.Fatalf("path = %q, want %q", r.URL.Path, tc.path)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, "data: "+strings.Repeat("x", oversizedDataBytes)+"\n\n")
+			}))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			errs, drainEvents := tc.stream(ctx, c)
+			drainEvents()
+			err := <-errs
+			if err == nil || !strings.Contains(err.Error(), tc.errorPrefix) {
+				t.Fatalf("error = %v, want prefix %q", err, tc.errorPrefix)
+			}
+		})
 	}
 }
 
@@ -646,8 +704,9 @@ func TestStreamEvents(t *testing.T) {
 		flusher := w.(http.Flusher)
 		fmt.Fprint(w, ": ping\n\n")
 		flusher.Flush()
-		fmt.Fprint(w, "event: task_status_changed\n")
-		fmt.Fprint(w, `data: {"type":"task_status_changed","task_id":"t1","status":"running"}`+"\n\n")
+		fmt.Fprint(w, "event: task_status_changed  \n")
+		fmt.Fprint(w, `data:  {"type":"task_status_changed",`+"\n")
+		fmt.Fprint(w, `data:  "task_id":"t1","status":"running"}  `+"\n\n")
 		flusher.Flush()
 		fmt.Fprint(w, `data: {"type":"chat_new_message","project_id":"p1","exec_id":"e1"}`+"\n\n")
 		flusher.Flush()
@@ -681,8 +740,8 @@ func TestStreamEvents(t *testing.T) {
 	// Server closes the stream: expect a terminal error reporting closure.
 	select {
 	case err := <-errs:
-		if err == nil {
-			t.Error("expected stream-closed error")
+		if !errors.Is(err, ErrEventStreamClosed) {
+			t.Errorf("stream error = %v, want ErrEventStreamClosed", err)
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for stream end")
