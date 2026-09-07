@@ -640,6 +640,121 @@ func TestSelectorFilterNarrowsItems(t *testing.T) {
 	}
 }
 
+func TestSelectorInitialAndTypedFilteringEquivalent(t *testing.T) {
+	items := []selectorItem{
+		{ref: "task-label", label: "Mixed CASE Label", detail: "unrelated"},
+		{ref: "task-detail", label: "unrelated", detail: "Mixed Case Detail"},
+		{ref: "MIXED CASE ref", label: "unrelated", detail: "unrelated"},
+		{ref: "task-no-match", label: "other", detail: "other"},
+	}
+
+	for _, filter := range []string{"mIxEd CaSe", "label", "detail", "case ref", "absent"} {
+		t.Run(filter, func(t *testing.T) {
+			initialModel, _ := dispatchModel(t, nil)
+			updated, _ := initialModel.handleSelector(selectorActiveMsg{
+				title:         "Tasks",
+				command:       "tasks open",
+				initialFilter: filter,
+				forcePicker:   true,
+				items:         items,
+			})
+			initial := updated.(Model)
+
+			typedModel, _ := dispatchModel(t, nil)
+			updated, _ = typedModel.handleSelector(selectorActiveMsg{
+				title:       "Tasks",
+				command:     "tasks open",
+				forcePicker: true,
+				items:       items,
+			})
+			typed := updated.(Model).setSelectorFilter(filter)
+
+			if got, want := initial.filteredSelectorItems(), typed.filteredSelectorItems(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("initial filter results differ from typed filter:\ninitial: %+v\ntyped:   %+v", got, want)
+			}
+			if initial.selectorFilter != filter || initial.selectorFilteredFor != filter {
+				t.Fatalf("initial filter cache = %q/%q, want %q/%q",
+					initial.selectorFilter, initial.selectorFilteredFor, filter, filter)
+			}
+		})
+	}
+}
+
+func TestSelectorEmptyInitialFilterPreservesOriginalSlice(t *testing.T) {
+	items := []selectorItem{
+		{ref: "first", label: "First"},
+		{ref: "second", label: "Second"},
+	}
+	m, _ := dispatchModel(t, nil)
+	updated, _ := m.handleSelector(selectorActiveMsg{
+		title:       "Tasks",
+		command:     "tasks open",
+		forcePicker: true,
+		items:       items,
+	})
+	m = updated.(Model)
+
+	if len(m.selectorFiltered) != len(items) || &m.selectorFiltered[0] != &items[0] {
+		t.Fatalf("empty initial filter did not preserve the original item slice")
+	}
+	if m.selectorFilter != "" || m.selectorFilteredFor != "" {
+		t.Fatalf("empty initial filter cache = %q/%q, want empty", m.selectorFilter, m.selectorFilteredFor)
+	}
+}
+
+func TestSelectorInitialFilterAutoSelectHonorsForcePicker(t *testing.T) {
+	items := []selectorItem{
+		{ref: "task-1", label: "First task", detail: "backlog"},
+		{ref: "task-2", label: "Second task", detail: "active"},
+	}
+	msg := selectorActiveMsg{
+		title:         "Tasks",
+		command:       "tasks edit",
+		prefill:       true,
+		prefillSuffix: " | ",
+		initialFilter: "ACTIVE",
+		items:         items,
+		warnings:      []string{"partial task list"},
+	}
+
+	m, _ := dispatchModel(t, nil)
+	updated, cmd := m.handleSelector(msg)
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatal("prefill auto-selection returned an unexpected command")
+	}
+	if m.selectorActive {
+		t.Fatal("unique initial match should auto-select")
+	}
+	if got, want := m.input.Value(), "/tasks edit task-2 | "; got != want {
+		t.Fatalf("auto-selection prefill = %q, want %q", got, want)
+	}
+	if out := transcript(m); !strings.Contains(out, "partial task list") || !strings.Contains(out, "only one match") {
+		t.Fatalf("auto-selection did not preserve warnings and selection output:\n%s", out)
+	}
+
+	forced, _ := dispatchModel(t, nil)
+	msg.forcePicker = true
+	updated, cmd = forced.handleSelector(msg)
+	forced = updated.(Model)
+	if cmd != nil {
+		t.Fatal("forced picker returned an unexpected command")
+	}
+	if !forced.selectorActive {
+		t.Fatal("forcePicker should keep a unique initial match in the picker")
+	}
+	if got := forced.filteredSelectorItems(); len(got) != 1 || got[0].ref != "task-2" {
+		t.Fatalf("forced picker matches = %+v, want task-2", got)
+	}
+	if forced.pendingCommand != msg.command || !forced.selectorPrefill || forced.selectorPrefillSuffix != msg.prefillSuffix || forced.selectorCursor != 0 {
+		t.Fatalf("forced picker state changed: command=%q prefill=%v suffix=%q cursor=%d",
+			forced.pendingCommand, forced.selectorPrefill, forced.selectorPrefillSuffix, forced.selectorCursor)
+	}
+	if !reflect.DeepEqual(forced.selectorWarnings, msg.warnings) {
+		t.Fatalf("forced picker warnings = %v, want %v", forced.selectorWarnings, msg.warnings)
+	}
+}
+
 func TestSelectorCachedAndFallbackFilteringEquivalent(t *testing.T) {
 	items := []selectorItem{
 		{ref: "task-label", label: "Mixed CASE Label", detail: "unrelated"},
