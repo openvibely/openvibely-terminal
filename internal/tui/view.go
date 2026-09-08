@@ -204,7 +204,10 @@ func (m Model) hint() string {
 	switch phase {
 	case connectionPhaseOffline:
 		if m.connErr != "" {
-			return "offline: start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
+			if isRemoteServerURL(m.client.BaseURL()) {
+				return "offline remote server: check/correct -server or OPENVIBELY_SERVER_URL · /setup · /status"
+			}
+			return "offline: /setup · start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
 		}
 	case connectionPhaseUnhealthy:
 		return "backend error: backend responded but is unhealthy · check backend logs or /status"
@@ -227,7 +230,7 @@ func (m Model) renderStatus() string {
 
 	phase := m.connectionPhase()
 	if m.authRequired {
-		row("server", noticeStyle.Render("sign-in required")+dimStyle.Render(" "+m.client.BaseURL()))
+		row("server", noticeStyle.Render("sign-in required")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 		if m.connErr != "" {
 			if m.connReachableError {
 				row("network", statusErrStyle.Render("backend error (unhealthy)"))
@@ -244,18 +247,25 @@ func (m Model) renderStatus() string {
 	} else {
 		switch phase {
 		case connectionPhaseOnline:
-			row("server", statusOKStyle.Render("connected")+dimStyle.Render(" "+m.client.BaseURL()))
+			row("server", statusOKStyle.Render("connected")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 		case connectionPhaseConnecting:
-			row("server", noticeStyle.Render("connecting")+dimStyle.Render(" "+m.client.BaseURL()))
+			row("server", noticeStyle.Render("connecting")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 		case connectionPhaseOffline:
-			row("server", statusErrStyle.Render("offline")+dimStyle.Render(" "+m.client.BaseURL()))
+			row("server", statusErrStyle.Render("offline")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 			if m.connErr != "" {
 				row("error", m.connErr)
 			}
-			row("try", "start/check your local backend, then run /status")
-			row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+			if isRemoteServerURL(m.client.BaseURL()) {
+				row("try", "check or correct the configured remote server URL, then run /status")
+				row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+				row("try", "run /setup or openvibely-tui setup for read-only connection guidance")
+			} else {
+				row("try", "run /setup or openvibely-tui setup for read-only setup steps")
+				row("try", "start/check your local backend, then run /status")
+				row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+			}
 		case connectionPhaseUnhealthy:
-			row("server", statusErrStyle.Render("backend error (unhealthy)")+dimStyle.Render(" "+m.client.BaseURL()))
+			row("server", statusErrStyle.Render("backend error (unhealthy)")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 			if m.connErr != "" {
 				row("error", m.connErr)
 			}

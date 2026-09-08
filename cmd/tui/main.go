@@ -85,8 +85,8 @@ func run() error {
 	}
 
 	args := flag.Args()
-	// Static help must remain available even when configured credentials are
-	// present and the backend is unreachable.
+	// Static help and read-only setup must remain available even when configured
+	// credentials are present and the backend is unreachable.
 	if isStaticHelpCommand(args) {
 		return tui.RunCLI(c, os.Stdout, *project, args, *force, *json)
 	}
@@ -204,7 +204,7 @@ func isStaticHelpCommand(args []string) bool {
 	}
 	name := strings.TrimPrefix(strings.TrimSpace(args[0]), "/")
 	switch strings.ToLower(name) {
-	case "help", "?", "commands":
+	case "help", "?", "commands", "setup":
 		return true
 	default:
 		return false

@@ -805,7 +805,7 @@ const cliProjectSelectionHint = "Project-scoped CLI commands use the only backen
 // project, even though some of their commands also load the project list.
 func (c command) cliProjectScoped(args []string) bool {
 	switch c.name {
-	case "help", "quit", "clear", "login", "project", "projects", "status":
+	case "help", "quit", "clear", "login", "setup", "project", "projects", "status":
 		return false
 	case "chat":
 		return len(args) > 0
@@ -858,7 +858,7 @@ func cliImplicitProject(c command, args []string, projectRef string, m Model) (c
 // needsBackend reports whether the command requires a selected project.
 func (c command) needsBackend() bool {
 	switch c.name {
-	case "help", "quit", "clear", "login":
+	case "help", "quit", "clear", "login", "setup":
 		return false
 	}
 	return true

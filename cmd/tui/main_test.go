@@ -292,6 +292,31 @@ func TestConfiguredCredentialsDoNotBlockStaticHelp(t *testing.T) {
 	}
 }
 
+func TestConfiguredCredentialsDoNotBlockSetup(t *testing.T) {
+	const secret = "setup-secret-that-must-not-be-used"
+	t.Setenv("OPENVIBELY_SERVER_URL", "http://127.0.0.1:1")
+	t.Setenv("OPENVIBELY_AUTH_USERNAME", "configured-user")
+	t.Setenv("OPENVIBELY_AUTH_PASSWORD", secret)
+
+	oldArgs, oldCommandLine, oldStdout := os.Args, flag.CommandLine, os.Stdout
+	defer func() {
+		os.Args, flag.CommandLine, os.Stdout = oldArgs, oldCommandLine, oldStdout
+	}()
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	os.Stdout = devNull
+	flag.CommandLine = flag.NewFlagSet("openvibely-tui", flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	os.Args = []string{"openvibely-tui", "setup"}
+
+	if err := run(); err != nil {
+		t.Fatalf("setup with configured credentials failed: %v", err)
+	}
+}
+
 func TestFlagHelpDoesNotPrintConfiguredPasswordOrContactBackend(t *testing.T) {
 	const secret = "flag-help-secret-that-must-not-appear"
 	t.Setenv("OPENVIBELY_SERVER_URL", "http://127.0.0.1:1")

@@ -278,7 +278,7 @@ func New(c *client.Client) Model {
 	}
 	m.log = []entry{{
 		role: "system",
-		text: "Connecting to " + c.BaseURL() + "\nType /help for commands while connection checks run.",
+		text: "Connecting to " + serverURLDisplay(c.BaseURL()) + "\nType /help or /setup for commands while connection checks run.",
 	}}
 	return m
 }
@@ -1320,7 +1320,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connErr = ""
 			m.connReachableError = false
 			if !wasConnected {
-				m.append(entry{role: "system", text: "Connected to " + m.client.BaseURL() + "."})
+				m.append(entry{role: "system", text: "Connected to " + serverURLDisplay(m.client.BaseURL()) + "."})
 			}
 			if wasAuthRequired && m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
 				m.sseRetryAfterProject = false
@@ -2121,7 +2121,7 @@ func loginFailureText(baseURL string, err error) string {
 	if err != nil && strings.Contains(strings.ToLower(err.Error()), "invalid credentials") {
 		return "sign-in failed: invalid credentials; try again or press Esc to cancel."
 	}
-	return "sign-in failed for " + baseURL + "; check the credentials and backend, then try again or press Esc to cancel."
+	return "sign-in failed for " + serverURLDisplay(baseURL) + "; check the credentials and backend, then try again or press Esc to cancel."
 }
 
 func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2971,7 +2971,7 @@ func (m *Model) handleAuthError(err error) bool {
 }
 
 func authRecoveryMessage(baseURL string) string {
-	return fmt.Sprintf("OpenVibely backend at %s requires sign-in.\nUse /login to enter credentials in the TUI. For CLI runs, use OPENVIBELY_AUTH_USERNAME and OPENVIBELY_AUTH_PASSWORD (or the existing -user/-pass flags). Credentials are not displayed or saved.", baseURL)
+	return fmt.Sprintf("OpenVibely backend at %s requires sign-in.\nUse /login to enter credentials in the TUI. For CLI runs, use OPENVIBELY_AUTH_USERNAME and OPENVIBELY_AUTH_PASSWORD (or the existing -user/-pass flags). Credentials are not displayed or saved.", serverURLDisplay(baseURL))
 }
 
 // connectionErrorMessage selects recovery copy after authentication has been
@@ -2989,7 +2989,7 @@ func connectionErrorMessage(baseURL string, err error) string {
 // limited to the client's safe status/decode diagnostic.
 func ReachableBackendErrorMessage(baseURL string, err error) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Backend error: the OpenVibely backend at %s responded but is unhealthy.", baseURL)
+	fmt.Fprintf(&b, "Backend error: the OpenVibely backend at %s responded but is unhealthy.", serverURLDisplay(baseURL))
 	b.WriteString("\nTry:\n")
 	b.WriteString("  - Check the backend logs and run /status to diagnose the response.\n")
 	b.WriteString("  - Use -server <url> or OPENVIBELY_SERVER_URL to verify the configured backend.")
@@ -3005,10 +3005,19 @@ func ReachableBackendErrorMessage(baseURL string, err error) string {
 // detail without changing the surrounding recovery instructions.
 func OfflineRecoveryMessage(baseURL string, err error) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Unable to reach the OpenVibely backend at %s.", baseURL)
+	safeURL := serverURLDisplay(baseURL)
+	fmt.Fprintf(&b, "Unable to reach the OpenVibely backend at %s.", safeURL)
 	b.WriteString("\nTry:\n")
-	b.WriteString("  - Start or check your local OpenVibely backend, then run /status.\n")
-	b.WriteString("  - Use -server <url> or OPENVIBELY_SERVER_URL to point at a running backend.")
+	if isRemoteServerURL(baseURL) {
+		b.WriteString("  - Check or correct the configured remote server URL first, then run /status or openvibely-tui -server <url> status.\n")
+		b.WriteString("  - Use -server <url> or OPENVIBELY_SERVER_URL to point at the running remote backend.\n")
+		b.WriteString("  - Run /setup in the TUI, or openvibely-tui setup in a shell, for read-only connection guidance.\n")
+	} else {
+		b.WriteString("  - Run /setup in the TUI, or openvibely-tui setup in a shell, for read-only installation and startup steps.\n")
+		b.WriteString("  - Start or check your local OpenVibely backend, then run /status.\n")
+		b.WriteString("  - Use -server <url> or OPENVIBELY_SERVER_URL to point at a running backend.\n")
+	}
+	b.WriteString("  - Setup never installs, starts, or changes anything automatically.")
 	if err != nil {
 		b.WriteString("\nDetails: ")
 		b.WriteString(err.Error())

@@ -57,7 +57,55 @@ make build          # → bin/openvibely-tui
 make run
 ```
 
-Requires Go 1.21+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, start or check your local OpenVibely backend, or point the client at a running server with `-server <url>` or `OPENVIBELY_SERVER_URL`. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
+Requires Go 1.21+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, use `/setup` in the TUI or `openvibely-tui setup` in a shell for explicit, read-only recovery instructions. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
+
+### Backend setup and recovery
+
+`/setup` and `openvibely-tui setup` are read-only guides. They do **not** install
+OpenVibely, clone repositories, start processes, create projects, authenticate,
+or modify files or machine state. They work before a backend, project, or session
+exists, and show the same platform-specific commands below for you to choose and
+run yourself. The backend's [installation guide](https://docs.openvibely.ai/installation)
+is authoritative for installation locations, versions, replacement behavior, and
+installed-binary launch details.
+
+**macOS and Linux**
+
+```bash
+# Explicitly install the OpenVibely server, if you choose to do so.
+curl -fsSL https://openvibely.ai/install.sh | bash -s -- --variant binary
+
+# Or, from an OpenVibely source checkout, start the server.
+./start.sh
+```
+
+**Windows PowerShell**
+
+```powershell
+# Explicitly install the OpenVibely server, if you choose to do so.
+& ([scriptblock]::Create((irm https://openvibely.ai/install.ps1))) -Variant binary
+
+# A source checkout can be started from a shell that supports it.
+./start.sh
+```
+
+After the server starts, verify its health with `/status` in the TUI or
+`openvibely-tui status` in a shell. A local server normally listens at
+`http://localhost:3001`.
+
+For a remote backend, check its URL before starting a local server, then pass it
+explicitly with `-server <url>` or set `OPENVIBELY_SERVER_URL`. The TUI only uses
+that setting to connect; it never changes the setting or starts the remote server.
+
+```bash
+openvibely-tui -server https://openvibely.example status
+OPENVIBELY_SERVER_URL=https://openvibely.example openvibely-tui status
+```
+
+```powershell
+$env:OPENVIBELY_SERVER_URL = "https://openvibely.example"
+openvibely-tui status
+```
 
 ### Configuration
 
@@ -160,6 +208,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/projects` | | `list`, `show <project>`, `create <name> <path>`, `edit <project> [options]` |
 | `/project <name>` | | select the active project |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
+| `/setup` | | read-only backend installation, startup, health, and remote-connection guidance |
 | `/login` | `signin`, `auth` | enter username and masked password; retry the session without restarting |
 | `/events` | `stream`, `log` | interactive `on` / `off` display toggle; one-shot `events on` foreground monitor |
 | `/clear` | | clear the transcript |
