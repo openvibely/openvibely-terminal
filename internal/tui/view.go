@@ -2089,6 +2089,33 @@ func clamp(s string, n int) string {
 
 // --- schedule ---
 
+type scheduleInspection struct {
+	Schedule client.ScheduleEntry `json:"schedule"`
+	Task     *client.Task         `json:"task,omitempty"`
+}
+
+func renderScheduleInspection(entry client.ScheduleEntry, task *client.Task) string {
+	safe := sanitizeAutomationDetailText
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(safe(entry.Text), "Schedule")))
+	fmt.Fprintf(&b, "Schedule ID: %s\n", firstNonEmpty(safe(entry.ScheduleID), "(unknown)"))
+	if entry.TaskID == "" {
+		b.WriteString("Bound task unavailable\n")
+		return strings.TrimSpace(b.String())
+	}
+	fmt.Fprintf(&b, "Task ID: %s\n", safe(entry.TaskID))
+	if task == nil {
+		fmt.Fprintf(&b, "Bound task unavailable (%s)\n", safe(entry.TaskID))
+		return strings.TrimSpace(b.String())
+	}
+	fmt.Fprintf(&b, "Task: %s", firstNonEmpty(safe(task.Title), safe(task.ID)))
+	if task.Status != "" {
+		fmt.Fprintf(&b, " (%s)", safe(task.Status))
+	}
+	fmt.Fprintf(&b, "\n\nOpen bound task: /tasks open %s", safe(task.ID))
+	return strings.TrimSpace(b.String())
+}
+
 func renderSchedule(entries []client.ScheduleEntry, summary string) string {
 	if len(entries) == 0 {
 		if strings.TrimSpace(summary) != "" {

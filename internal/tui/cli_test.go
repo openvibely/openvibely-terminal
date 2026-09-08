@@ -2549,6 +2549,41 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleShowAliasScopingAndMissingReference(t *testing.T) {
+	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-2" data-schedule-id="schedule-full-id">Weekly report</div></div>`
+	const taskHTML = `<div data-task-id="t-2" data-project-id="p1"><h2 class="font-bold">Ship the docs</h2><div data-task-status="running"></div></div>`
+	for _, action := range []string{"show", "open"} {
+		t.Run(action, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": scheduleHTML, "/tasks/t-2": taskHTML})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"schedule", action, "schedule-full-id"}, false, false); err != nil {
+				t.Fatalf("schedule %s: %v", action, err)
+			}
+			for _, want := range []string{"Weekly report", "Schedule ID: schedule-full-id", "Task ID: t-2", "/tasks open t-2"} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("output missing %q: %q", want, out.String())
+				}
+			}
+			for _, path := range []string{"/schedule", "/tasks/t-2"} {
+				if !rec.sawQuery(http.MethodGet + " " + path + "?project_id=p1") {
+					t.Errorf("missing scoped %s request; calls:\n%s", path, rec.all())
+				}
+			}
+		})
+	}
+
+	for _, action := range []string{"show", "open"} {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"schedule", action}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "usage: schedule "+action+" <id|name>") {
+			t.Errorf("missing %s ref error = %v", action, err)
+		}
+		if calls := rec.all(); calls != "" {
+			t.Errorf("missing %s ref prompted or requested backend:\n%s", action, calls)
+		}
+	}
+}
+
 func TestCLIScheduleRejectsUnknownActionAndListSurplusBeforeRequests(t *testing.T) {
 	cases := []struct {
 		name string
@@ -2561,7 +2596,7 @@ func TestCLIScheduleRejectsUnknownActionAndListSurplusBeforeRequests(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
 			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false)
-			if err == nil || !strings.Contains(err.Error(), "schedule [list|add|edit|delete|toggle]") {
+			if err == nil || !strings.Contains(err.Error(), "schedule [list|show|open|add|edit|delete|toggle]") {
 				t.Fatalf("error = %v, want canonical schedule usage", err)
 			}
 			if calls := rec.all(); calls != "" {

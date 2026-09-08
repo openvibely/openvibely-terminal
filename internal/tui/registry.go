@@ -1288,9 +1288,12 @@ func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
 }
 
 func validateScheduleArgs(args []string) error {
-	action, rest := splitAction([]string{"list", "add", "edit", "delete", "toggle"}, args)
+	action, rest := splitAction([]string{"list", "show", "open", "add", "edit", "delete", "toggle"}, args)
 	if action == "" && len(args) > 0 || action == "list" && len(rest) > 0 {
-		return fmt.Errorf("usage: /schedule [list|add|edit|delete|toggle]")
+		return fmt.Errorf("usage: /schedule [list|show|open|add|edit|delete|toggle]")
+	}
+	if (action == "show" || action == "open") && len(rest) == 0 {
+		return fmt.Errorf("%s", commandUsage("schedule", action))
 	}
 	if action == "edit" {
 		_, _, err := parseScheduleEdit(rest)
@@ -1373,8 +1376,35 @@ func applyScheduleUpdate(config client.ScheduleConfig, update client.ScheduleUpd
 	return config
 }
 
+func getBoundScheduleTask(ctx context.Context, c *client.Client, projectID, taskID string) (*client.Task, error) {
+	if taskID == "" {
+		return nil, nil
+	}
+	detail, err := c.GetTaskMetadataForProjectExact(ctx, taskID, projectID)
+	if err != nil {
+		if client.IsReachableError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &detail.Task, nil
+}
+
+func scheduleInspectionCommand(c *client.Client, projectID string, entry client.ScheduleEntry) tea.Cmd {
+	return run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+		boundTask, err := getBoundScheduleTask(ctx, c, projectID, entry.TaskID)
+		if err != nil {
+			return "", err
+		}
+		if jsonMode {
+			return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
+		}
+		return renderScheduleInspection(entry, boundTask), nil
+	})
+}
+
 func scheduleCommand() command {
-	actions := []string{"list", "add", "edit", "delete", "toggle"}
+	actions := []string{"list", "show", "open", "add", "edit", "delete", "toggle"}
 	return command{
 		name:         "schedule",
 		aliases:      []string{"schedules"},
@@ -1387,10 +1417,13 @@ func scheduleCommand() command {
 			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours"}},
 			{after: []string{"edit", "*", "clear-context"}, values: []string{"true", "false"}},
 		},
-		selectorPaths: [][]string{{"add"}, {"edit"}, {"delete"}, {"toggle"}},
+		selectorPaths: [][]string{{"show"}, {"open"}, {"add"}, {"edit"}, {"delete"}, {"toggle"}},
 		desc:          "scheduled/recurring task runs",
 		usage: []string{
 			"schedule                                   list schedules",
+			"schedule show <id|name>                    inspect a schedule and its bound task",
+			"schedule open <id|name>                    compatibility alias for show",
+			"omit <id|name> on show/open → interactive selector",
 			"omit <task> on add → interactive selector",
 			"schedule delete <id>                       remove a schedule",
 			"schedule edit <id> <setting> <value> [...] update a schedule",
@@ -1398,6 +1431,8 @@ func scheduleCommand() command {
 			"omit <id> on edit/delete/toggle → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
+			{action: "show", args: "<id|name>", description: "inspect a schedule and its bound task"},
+			{action: "open", args: "<id|name>", description: "compatibility alias for show"},
 			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]"},
 			{action: "edit", args: "<id> [run-at <2006-01-02T15:04>] [repeat <once|daily|weekly|monthly|hourly|seconds|minutes|hours>] [interval <1..365>] [clear-context <true|false>]"},
 		},
@@ -1415,7 +1450,7 @@ func scheduleCommand() command {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			if (action == "" && len(rest) > 0) || (action == "list" && len(rest) > 0) {
-				return m, errCmd("usage: /schedule [list|add|edit|delete|toggle]")
+				return m, errCmd("usage: /schedule [list|show|open|add|edit|delete|toggle]")
 			}
 
 			switch action {
@@ -1429,6 +1464,55 @@ func scheduleCommand() command {
 						return marshalJSON(entries)
 					}
 					return renderSchedule(entries, summary), nil
+				})
+			case "show", "open":
+				ref := strings.Join(rest, " ")
+				if ref == "" {
+					return selectorOr(m, commandUsage("schedule", action),
+						selectorFor("Schedule", "schedule "+action, scheduleEmptyStateHint, false, func(ctx context.Context) ([]selectorItem, error) {
+							entries, _, err := c.GetSchedule(ctx, pid)
+							if err != nil {
+								return nil, err
+							}
+							items := make([]selectorItem, 0, len(entries))
+							for _, entry := range entries {
+								if entry.ScheduleID == "" {
+									continue
+								}
+								entry := entry
+								items = append(items, selectorItem{
+									ref:    entry.ScheduleID,
+									label:  firstNonEmpty(entry.Text, shortID(entry.ScheduleID)),
+									detail: "task " + firstNonEmpty(shortID(entry.TaskID), "unavailable"),
+									dispatch: func(m Model) (Model, tea.Cmd) {
+										m.busy = true
+										return m, scheduleInspectionCommand(c, pid, entry)
+									},
+								})
+							}
+							return items, nil
+						}))
+				}
+				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+					entries, _, err := c.GetSchedule(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					entry, err := matchRefWithDisplay(entries, ref,
+						func(s client.ScheduleEntry) string { return s.ScheduleID },
+						func(s client.ScheduleEntry) string { return s.Text },
+						sanitizeAutomationDetailText)
+					if err != nil {
+						return "", err
+					}
+					boundTask, err := getBoundScheduleTask(ctx, c, pid, entry.TaskID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
+					}
+					return renderScheduleInspection(entry, boundTask), nil
 				})
 			case "add":
 				if len(rest) == 0 {

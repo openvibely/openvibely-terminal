@@ -2856,6 +2856,86 @@ func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
 		})
 	}
 }
+func TestScheduleShowAndOpenResolveReferencesAndRenderBoundTask(t *testing.T) {
+	const schedules = `<div id="schedule-content">
+		<div data-task-id="task-1" data-schedule-id="sched-alpha">Alpha nightly</div>
+		<div data-task-id="task-2" data-schedule-id="alpha">Alpha weekly</div>
+		<div data-task-id="task-2" data-schedule-id="sched-beta">Beta report</div>
+	</div>`
+	for _, tc := range []struct {
+		name, action, ref, wantSchedule, wantTask string
+	}{
+		{name: "show exact id precedence", action: "show", ref: "alpha", wantSchedule: "Schedule ID: alpha", wantTask: "Weekly task"},
+		{name: "open unique prefix", action: "open", ref: "sched-b", wantSchedule: "Schedule ID: sched-beta", wantTask: "Weekly task"},
+		{name: "show unique substring", action: "show", ref: "night", wantSchedule: "Schedule ID: sched-alpha", wantTask: "Nightly task"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "p1" {
+					t.Errorf("%s %s project_id = %q, want p1", r.Method, r.URL.Path, got)
+				}
+				switch r.URL.Path {
+				case "/schedule":
+					_, _ = io.WriteString(w, schedules)
+				case "/tasks/task-1":
+					_, _ = io.WriteString(w, `<div data-task-id="task-1" data-project-id="p1"><h2 class="font-bold">Nightly task</h2><div data-task-status="pending"></div></div>`)
+				case "/tasks/task-2":
+					_, _ = io.WriteString(w, `<div data-task-id="task-2" data-project-id="p1"><h2 class="font-bold">Weekly task</h2><div data-task-status="running"></div></div>`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, "/schedule "+tc.action+" "+tc.ref)
+			out := stripANSI(transcript(m))
+			for _, want := range []string{tc.wantSchedule, tc.wantTask, "/tasks open " + map[string]string{"Weekly task": "task-2", "Nightly task": "task-1"}[tc.wantTask]} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestScheduleShowHandlesMissingAndInvalidReferencesWithoutMutation(t *testing.T) {
+	const schedules = `<div id="schedule-content">
+		<div data-task-id="deleted-task" data-schedule-id="sched-one">Nightly one</div>
+		<div data-task-id="" data-schedule-id="sched-two">Nightly two</div>
+	</div>`
+	for _, tc := range []struct {
+		name, ref, want string
+	}{
+		{name: "deleted task", ref: "sched-one", want: "Bound task unavailable (deleted-task)"},
+		{name: "missing task id", ref: "sched-two", want: "Bound task unavailable"},
+		{name: "ambiguous", ref: "Nightly", want: "ambiguous"},
+		{name: "unknown", ref: "missing", want: "nothing matches"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mutations int
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					mutations++
+				}
+				switch r.URL.Path {
+				case "/schedule":
+					_, _ = io.WriteString(w, schedules)
+				case "/tasks":
+					_, _ = io.WriteString(w, `<div></div>`)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, "/schedule show "+tc.ref)
+			if out := stripANSI(transcript(m)); !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+			if mutations != 0 {
+				t.Fatalf("read action made %d mutation requests", mutations)
+			}
+		})
+	}
+}
+
 func scheduleEditDetail(projectID string) string {
 	return `<div id="task-detail-content"><div data-project-id="` + projectID + `"></div>
 		<div data-schedule-id="s-1"><form hx-put="/schedules/s-1?project_id=` + projectID + `"><input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select><input name="repeat_interval" value="1"><input type="checkbox" name="clear_context_on_start" value="true" checked></form></div>

@@ -2536,6 +2536,25 @@ func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
 	}
 }
 
+func TestRenderScheduleInspectionIsTerminalSafe(t *testing.T) {
+	out := renderScheduleInspection(
+		client.ScheduleEntry{ScheduleID: "sched\x1b]8;;bad\a-id", TaskID: "task\n-id", Text: "Nightly\x1b[31m\nrun"},
+		&client.Task{ID: "task\n-id", Title: "Bound\r\ntask", Status: "run\tning"},
+	)
+	plain := stripANSI(out)
+	for _, forbidden := range []string{"\x1b", "\a", "\r", "\t"} {
+		if strings.Contains(plain, forbidden) {
+			t.Fatalf("schedule inspection retained terminal control %q: %q", forbidden, plain)
+		}
+	}
+	if strings.Count(plain, "\n") != 5 {
+		t.Fatalf("backend fields changed schedule output line structure: %q", plain)
+	}
+	if !strings.Contains(plain, "/tasks open task -id") {
+		t.Fatalf("safe bound-task command missing: %q", plain)
+	}
+}
+
 // Empty-state messages must include actionable slash-command hints (VISION.md "Friendly By Default").
 func TestRenderAutomationDetailShowsGraphRuntimeResourcesAndExternalState(t *testing.T) {
 	detail := client.AutomationDetail{
