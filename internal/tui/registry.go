@@ -346,6 +346,11 @@ func tasksCommand() command {
 				})
 
 			case "open":
+				if m.pendingMsgTaskID != "" {
+					m.flushChatStreamOutput()
+					m.clearPendingChat()
+					m.busy = false
+				}
 				m.threadOpenRequestID++
 				m.threadRefreshRequestID++
 				m.threadReplyPendingRequestID = 0
@@ -5104,6 +5109,10 @@ func chatCommand() command {
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			// Even before a thread has finished opening, /chat owns the user's
 			// navigation intent and invalidates delayed open/live-refresh results.
+			if len(args) == 0 && m.pendingMsgTaskID != "" {
+				m.flushChatStreamOutput()
+				m.clearPendingChat()
+			}
 			m.threadOpenRequestID++
 			m.threadRefreshRequestID++
 			m.threadReplyPendingRequestID = 0

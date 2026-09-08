@@ -158,6 +158,8 @@ type Model struct {
 	pendingMsgExecutionID       string // promoted execution ID, when a queued input is applied
 	pendingMsgProjectID         string
 	pendingMsgProjectGeneration uint64
+	pendingMsgTaskID            string // non-empty while the active turn is a task-thread follow-up
+	pendingMsgThreadRequestID   uint64
 	// chatSubmissionPending covers the window before the backend returns the
 	// accepted message ID. chatSubmissionID keeps delayed acknowledgements from
 	// an older turn from replacing a newer active submission.
@@ -595,6 +597,8 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.pendingMsgExecutionID = ""
 		m.pendingMsgProjectID = ""
 		m.pendingMsgProjectGeneration = 0
+		m.pendingMsgTaskID = ""
+		m.pendingMsgThreadRequestID = 0
 		m.chatSubmissionPending = false
 		m.busy = false
 		m.pendingConfirmation = nil
@@ -721,16 +725,28 @@ func (m *Model) resetChatStreamOutput() {
 
 func (m *Model) clearPendingChat() {
 	m.invalidateChatStream()
+	if m.pendingMsgTaskID != "" {
+		m.threadReplyPendingRequestID = 0
+	}
 	m.pendingMsgID = ""
 	m.pendingMsgExecutionID = ""
 	m.pendingMsgProjectID = ""
 	m.pendingMsgProjectGeneration = 0
+	m.pendingMsgTaskID = ""
+	m.pendingMsgThreadRequestID = 0
 	m.chatSubmissionPending = false
 	m.resetChatStreamOutput()
 }
 
 func (m Model) matchesPendingChatExecution(id string) bool {
 	return id != "" && (id == m.pendingMsgID || id == m.pendingMsgExecutionID)
+}
+
+func (m Model) pendingChatScopeCurrent() bool {
+	if m.pendingMsgTaskID == "" {
+		return true
+	}
+	return m.pendingMsgTaskID == m.threadID && m.pendingMsgThreadRequestID == m.threadOpenRequestID
 }
 
 func (m *Model) updateChatStreamOutput(delta string) {
@@ -1404,6 +1420,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.projectID != "" && msg.projectID != m.selectedID {
 			return m, nil // stale acknowledgement from a different project
 		}
+		if msg.taskID != "" && (msg.taskID != m.threadID || msg.threadRequestID != m.threadOpenRequestID) {
+			return m, nil // stale task reply acknowledgement from a replaced thread view
+		}
 		// Once an acknowledgement has installed the pending ID, a later
 		// acknowledgement must never replace it. Tagged acknowledgements also
 		// have to belong to the one submission currently in flight. The untagged
@@ -1438,6 +1457,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.chatSubmissionPending = true
+		m.pendingMsgTaskID = msg.taskID
+		m.pendingMsgThreadRequestID = msg.threadRequestID
 		m.pendingMsgID = msg.accepted.MessageID
 		m.pendingMsgExecutionID = ""
 		if !msg.accepted.Queued {
@@ -1465,7 +1486,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 
 	case chatStatusMsg:
-		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) || !m.pendingChatScopeCurrent() {
 			return m, nil // stale chat status from an older session or project
 		}
 		if msg.projectID != "" && msg.projectID != m.selectedID {
@@ -1532,7 +1553,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatStreamEventMsg:
-		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
+		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || !m.pendingChatScopeCurrent() {
 			return m, nil
 		}
 		switch msg.event.Name {
@@ -1548,14 +1569,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case chatStreamRenderMsg:
-		if msg.generation != m.chatStreamGeneration || msg.renderGeneration != m.chatStreamRenderGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
+		if msg.generation != m.chatStreamGeneration || msg.renderGeneration != m.chatStreamRenderGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || !m.pendingChatScopeCurrent() {
 			return m, nil
 		}
 		m.flushChatStreamOutput()
 		return m, nil
 
 	case chatStreamDisconnectedMsg:
-		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) {
+		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || !m.pendingChatScopeCurrent() {
 			return m, nil
 		}
 		if client.IsAuthRequired(msg.err) {
@@ -1569,7 +1590,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.scheduleChatStreamReconnect(m.chatStreamGeneration)
 
 	case chatStreamReconnectMsg:
-		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || m.authRequired || m.loginActive {
+		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || !m.pendingChatScopeCurrent() || m.authRequired || m.loginActive {
 			return m, nil
 		}
 		return m, m.connectChatStream(msg.execID, m.chatStreamOffset)
@@ -1633,6 +1654,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		m.threadReplyPendingRequestID = 0
+		m.clearPendingChat()
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) || m.handleTransportError(msg.err) {
 				return m, nil
@@ -2099,8 +2121,17 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	// Inside a task thread, plain text is a follow-up on that task.
 	if m.threadID != "" {
-		m.busy = true
-		return m, m.sendThreadMessage(m.threadID, text)
+		submissionID, ok := m.beginChatSubmission(m.selectedID)
+		if !ok {
+			return m, nil
+		}
+		m.threadRefreshRequestID++
+		refreshRequestID := m.threadRefreshRequestID
+		m.threadReplyPendingRequestID = refreshRequestID
+		threadRequestID := m.threadOpenRequestID
+		m.pendingMsgTaskID = m.threadID
+		m.pendingMsgThreadRequestID = threadRequestID
+		return m, m.sendThreadMessage(m.threadID, text, submissionID, threadRequestID, refreshRequestID)
 	}
 
 	if m.selectedID == "" {
@@ -2178,6 +2209,12 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 			}
 			m.append(entry{role: role, text: text})
 		}
+		if m.pendingMsgTaskID == m.threadID && m.pendingMsgID != "" {
+			// The execution stream and status endpoint own this follow-up's output.
+			// Refreshing the HTML thread concurrently can render the same final
+			// assistant response a second time inside the thread result block.
+			return m.fetchChatStatus(m.pendingMsgID)
+		}
 		return m.refreshTaskThread(m.threadID, m.selectedID, status)
 	}
 
@@ -2189,6 +2226,12 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	var chatEvent client.ChatEvent
 	if json.Unmarshal(ev.Data, &chatEvent) == nil && chatEvent.TaskID == m.threadID &&
 		chatEvent.ProjectID != "" && chatEvent.ProjectID == m.selectedID {
+		// The execution-specific stream owns incremental rendering for this reply.
+		// Suppress its mirrored project-stream message so completion reconciles one
+		// assistant transcript entry instead of appending a duplicate final block.
+		if m.pendingMsgTaskID == m.threadID && m.matchesPendingChatExecution(chatEvent.ExecID) {
+			return nil
+		}
 		if text := strings.TrimSpace(chatEvent.Message); text != "" {
 			m.append(entry{role: "agent", text: text})
 		}
@@ -2197,29 +2240,42 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	return nil
 }
 
-// sendThreadMessage posts a follow-up into a task thread and returns a result
-// owned by that exact active thread view and refresh sequence.
-func (m *Model) sendThreadMessage(taskID, text string) tea.Cmd {
-	m.threadRefreshRequestID++
-	requestID := m.threadRefreshRequestID
-	m.threadReplyPendingRequestID = requestID
+// sendThreadMessage posts a follow-up into a task thread. Streamable
+// acknowledgements enter the same ordered poll/output state machine as project
+// chat; identity-less orchestration replies retain the thread-refresh fallback.
+func (m Model) sendThreadMessage(taskID, text string, submissionID, threadRequestID, refreshRequestID uint64) tea.Cmd {
 	c := m.client
 	projectID := m.selectedID
 	return withMessageGeneration(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		if err := c.SendTaskThreadMessage(ctx, taskID, text); err != nil {
-			return threadReplyMsg{requestID: requestID, projectID: projectID, taskID: taskID, err: err}
-		}
-		body, err := c.GetTaskThread(ctx, taskID, projectID)
+		accepted, err := c.SendTaskThreadMessageForProject(ctx, taskID, projectID, text)
 		if err != nil {
-			return threadReplyMsg{requestID: requestID, projectID: projectID, taskID: taskID, body: "sent"}
+			return chatSentMsg{projectID: projectID, taskID: taskID, threadRequestID: threadRequestID, submissionID: submissionID, err: err}
+		}
+		if accepted == nil {
+			return chatSentMsg{projectID: projectID, taskID: taskID, threadRequestID: threadRequestID, submissionID: submissionID, err: fmt.Errorf("task reply failed: empty acknowledgement")}
+		}
+		messageID := firstNonEmpty(strings.TrimSpace(accepted.PendingInputID), strings.TrimSpace(accepted.ExecID))
+		if messageID != "" {
+			return chatSentMsg{
+				projectID:       projectID,
+				taskID:          taskID,
+				threadRequestID: threadRequestID,
+				submissionID:    submissionID,
+				accepted:        &client.ChatAccepted{MessageID: messageID, Queued: accepted.Queued},
+			}
+		}
+
+		body, refreshErr := c.GetTaskThread(ctx, taskID, projectID)
+		if refreshErr != nil {
+			return threadReplyMsg{requestID: refreshRequestID, projectID: projectID, taskID: taskID, body: "sent"}
 		}
 		if strings.TrimSpace(body) == "" {
 			body = dimStyle.Render("(no messages yet)")
 		}
-		return threadReplyMsg{requestID: requestID, projectID: projectID, taskID: taskID, body: body, refreshed: true}
-	}, sessionGenerationOf(*m), projectGenerationOf(*m))
+		return threadReplyMsg{requestID: refreshRequestID, projectID: projectID, taskID: taskID, body: body, refreshed: true}
+	}, sessionGenerationOf(m), projectGenerationOf(m))
 }
 
 // --- history ---

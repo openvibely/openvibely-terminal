@@ -58,6 +58,8 @@ type chatSentMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
 	projectID         string
+	taskID            string // non-empty for an interactive task-thread follow-up
+	threadRequestID   uint64
 	submissionID      uint64
 	accepted          *client.ChatAccepted
 	err               error

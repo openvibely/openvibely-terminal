@@ -441,6 +441,207 @@ func TestProjectChatEventWithoutProjectRetainsEventsDisplayCompatibility(t *test
 	}
 }
 
+func TestTaskAliasOpenMatchesCanonicalCommand(t *testing.T) {
+	for _, command := range []string{"/tasks open Refactor", "/task open Refactor"} {
+		t.Run(command, func(t *testing.T) {
+			m, _ := threadModel(t)
+			m = runLine(t, m, command)
+			if m.threadID != "t-1" || !strings.Contains(stripANSI(transcript(m)), "agent: working on it") {
+				t.Fatalf("task open alias did not render the assistant thread: id=%q transcript=%q", m.threadID, transcript(m))
+			}
+		})
+	}
+}
+
+func TestInteractiveTaskReplyInstallsExecutionStreaming(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                 `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor</a></div>`,
+		"/tasks/t-1/thread":      `<div>agent: existing answer</div>`,
+		"POST /tasks/t-1/thread": `<div data-execution-pair="true" data-exec-id="exec-followup" data-exec-status="running"></div>`,
+	})
+	m = runLine(t, m, "/tasks open Refactor")
+	m.input.SetValue("continue")
+	submitted, send := m.submit()
+	m = submitted.(Model)
+	ack, ok := send().(chatSentMsg)
+	if !ok {
+		t.Fatalf("task reply acknowledgement = %T", send())
+	}
+	if ack.taskID != "t-1" || ack.accepted == nil || ack.accepted.MessageID != "exec-followup" || ack.accepted.Queued {
+		t.Fatalf("task reply acknowledgement = %#v", ack)
+	}
+	if !rec.sawQuery("POST /tasks/t-1/thread?project_id=p1") {
+		t.Fatalf("task reply was not project scoped: %v", rec.urlsSnapshot())
+	}
+
+	updated, cmd := m.Update(ack)
+	m = updated.(Model)
+	if cmd == nil || m.pendingMsgTaskID != "t-1" || m.pendingMsgID != "exec-followup" || m.pendingMsgExecutionID != "exec-followup" {
+		t.Fatalf("task execution not installed: cmd=%v task=%q pending=%q execution=%q", cmd != nil, m.pendingMsgTaskID, m.pendingMsgID, m.pendingMsgExecutionID)
+	}
+}
+
+func TestInteractiveTaskReplyIdentitylessFallbackRefreshesAndSettles(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                 `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor</a></div>`,
+		"/tasks/t-1/thread":      `<div>agent: orchestration accepted</div>`,
+		"POST /tasks/t-1/thread": `<div data-task-id="t-1" data-input-mode="swarm"></div>`,
+	})
+	m = runLine(t, m, "/tasks open Refactor")
+	m.input.SetValue("coordinate workers")
+	submitted, send := m.submit()
+	m = submitted.(Model)
+	updated, cmd := m.Update(send())
+	m = updated.(Model)
+	if cmd != nil || m.busy || m.hasPendingChat() || m.pendingMsgTaskID != "" {
+		t.Fatalf("identity-less fallback did not settle: cmd=%v busy=%t pending=%t task=%q", cmd != nil, m.busy, m.hasPendingChat(), m.pendingMsgTaskID)
+	}
+	if got := rec.count("GET", "/tasks/t-1/thread"); got != 2 {
+		t.Fatalf("thread refresh count = %d, want open plus fallback refresh", got)
+	}
+	if !strings.Contains(transcript(m), "orchestration accepted") {
+		t.Fatalf("fallback thread output hidden: %q", transcript(m))
+	}
+}
+
+func TestInteractiveTaskReplySuppressesMirroredLiveMessageAndThreadRefresh(t *testing.T) {
+	m, rec := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	m.pendingMsgID = "exec-1"
+	m.pendingMsgExecutionID = "exec-1"
+	m.pendingMsgProjectID = "p1"
+	m.pendingMsgProjectGeneration = m.projectGeneration
+	m.pendingMsgTaskID = "t-1"
+	m.pendingMsgThreadRequestID = m.threadOpenRequestID
+	m.chatSubmissionPending = true
+	m.chatSubmissionID = 4
+	m.busy = true
+	m.sseGeneration = 15
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+	before := transcript(m)
+
+	updated, _ := m.Update(sseEventMsg{generation: 15, event: client.Event{
+		Name: "chat_new_message",
+		Data: json.RawMessage(`{"type":"chat_new_message","project_id":"p1","task_id":"t-1","exec_id":"exec-1","message":"duplicated final"}`),
+	}})
+	m = updated.(Model)
+	if transcript(m) != before {
+		t.Fatalf("mirrored live message duplicated streamed output: %q", transcript(m))
+	}
+
+	updated, cmd := m.Update(sseEventMsg{generation: 15, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","exec_id":"exec-1","status":"completed"}`),
+	}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("terminal task event did not schedule authoritative status fetch")
+	}
+	if got := rec.count("GET", "/tasks/t-1/thread"); got != 1 {
+		t.Fatalf("streamed reply triggered duplicate thread refresh: count=%d", got)
+	}
+}
+
+func TestInteractiveTaskReplyTerminalErrorFlushesPartialOutput(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.threadID = "t-1"
+	m.pendingMsgTaskID = "t-1"
+	m.updateChatStreamOutput("partial answer")
+	m.chatStreamRenderQueued = true
+	updated, _ := m.Update(chatStatusMsg{
+		sessionGeneration: m.sessionGeneration, projectGeneration: m.projectGeneration,
+		messageID: "exec-1", submissionID: 9, projectID: "project-A",
+		status: &client.ChatStatus{MessageID: "exec-1", Status: "failed", Error: "provider unavailable"},
+	})
+	m = updated.(Model)
+	out := transcript(m)
+	if m.busy || m.hasPendingChat() || !strings.Contains(out, "partial answer") || !strings.Contains(out, "failed: provider unavailable") {
+		t.Fatalf("terminal task failure was hidden or left pending: busy=%t pending=%t transcript=%q", m.busy, m.hasPendingChat(), out)
+	}
+}
+
+func TestInteractiveTaskReplyStreamsOneUTF8AssistantEntry(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.threadID = "t-1"
+	m.threadTitle = "Refactor the API"
+	m.pendingMsgTaskID = "t-1"
+
+	for _, chunk := range []string{"first λ", "🙂 second"} {
+		updated, _ := m.Update(chatStreamEventMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", event: client.ChatOutputEvent{Data: chunk}})
+		m = updated.(Model)
+	}
+	updated, _ := m.Update(chatStreamRenderMsg{generation: 3, renderGeneration: m.chatStreamRenderGeneration, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+	m = updated.(Model)
+
+	if m.chatStreamOffset != len([]byte("first λ🙂 second")) {
+		t.Fatalf("task reply offset = %d", m.chatStreamOffset)
+	}
+	if got := countRole(m.log, "agent"); got != 1 {
+		t.Fatalf("assistant entries = %d, want 1; transcript=%q", got, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "first λ🙂 second") {
+		t.Fatalf("incremental task reply hidden: %q", transcript(m))
+	}
+}
+
+func TestInteractiveTaskReplyCompletionFlushesAndReconciles(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.threadID = "t-1"
+	m.pendingMsgTaskID = "t-1"
+	m.updateChatStreamOutput("buffered λ")
+	m.chatStreamRenderQueued = true
+
+	updated, _ := m.Update(chatStatusMsg{
+		sessionGeneration: m.sessionGeneration, projectGeneration: m.projectGeneration,
+		messageID: "exec-1", submissionID: 9, projectID: "project-A",
+		status: &client.ChatStatus{MessageID: "exec-1", Status: "completed", Response: "buffered λ final"},
+	})
+	m = updated.(Model)
+	if m.busy || m.pendingMsgTaskID != "" || m.chatStreamRenderQueued {
+		t.Fatalf("task completion did not settle: busy=%t task=%q queued=%t", m.busy, m.pendingMsgTaskID, m.chatStreamRenderQueued)
+	}
+	if got := countRole(m.log, "agent"); got != 1 || !strings.Contains(transcript(m), "buffered λ final") {
+		t.Fatalf("task completion did not reconcile one assistant entry: count=%d transcript=%q", got, transcript(m))
+	}
+}
+
+func TestInteractiveTaskReplyReconnectKeepsUTF8OffsetAndRejectsStaleTask(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.threadID = "t-1"
+	m.pendingMsgTaskID = "t-1"
+	m.updateChatStreamOutput("λ🙂")
+	m.chatStreamRenderQueued = true
+
+	updated, cmd := m.Update(chatStreamDisconnectedMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1"})
+	m = updated.(Model)
+	if cmd == nil || m.chatStreamOffset != len([]byte("λ🙂")) || !strings.Contains(transcript(m), "λ🙂") {
+		t.Fatalf("task reconnect lost buffered UTF-8 output: offset=%d transcript=%q", m.chatStreamOffset, transcript(m))
+	}
+	reconnect := cmd().(chatStreamReconnectMsg)
+	if reconnect.offset != len([]byte("λ🙂")) {
+		t.Fatalf("resume offset = %d", reconnect.offset)
+	}
+
+	m.threadID = "t-2"
+	before := transcript(m)
+	updated, next := m.Update(reconnect)
+	m = updated.(Model)
+	if next != nil || transcript(m) != before {
+		t.Fatal("stale task reconnect survived active-thread replacement")
+	}
+}
+
+func countRole(entries []entry, role string) int {
+	count := 0
+	for _, item := range entries {
+		if item.role == role {
+			count++
+		}
+	}
+	return count
+}
+
 // While in a thread, plain text posts to that task's thread endpoint rather
 // than to the project chat endpoint.
 func TestThreadMessageGoesToTaskNotProjectChat(t *testing.T) {
