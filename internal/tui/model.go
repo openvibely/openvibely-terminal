@@ -1185,8 +1185,9 @@ func (m Model) scheduleReconnect(generation int) tea.Cmd {
 	return tea.Tick(backoff, func(time.Time) tea.Msg { return reconnectTickMsg{generation: generation} })
 }
 
-// Cleanup releases the SSE stream; called on shutdown.
+// Cleanup releases all model-owned background work; called on shutdown.
 func (m *Model) Cleanup() {
+	m.clearAutomationEdit()
 	m.invalidateChatStream()
 	if m.sseCancel != nil {
 		m.sseCancel()

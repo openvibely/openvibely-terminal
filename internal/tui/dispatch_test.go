@@ -5250,6 +5250,10 @@ func TestAutomationInteractiveEditCancelsInFlightSaveOnTeardown(t *testing.T) {
 			m.markAuthRequired()
 			return m
 		}},
+		{name: "global cleanup", teardown: func(m Model) Model {
+			m.Cleanup()
+			return m
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const current = "schema_version: 1\nname: Original\n"

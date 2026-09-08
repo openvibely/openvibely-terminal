@@ -2549,7 +2549,7 @@ func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
 		{ID: "automation-paused-002", Name: "GitHub SDLC", State: "paused"},
 	}
 	out := stripANSI(renderAutomations(automations, ""))
-	for _, want := range []string{"automation-active-001", "Native SDLC", "active", "automation-paused-002", "GitHub SDLC", "paused"} {
+	for _, want := range []string{"automation-active-001", "Native SDLC", "active", "automation-paused-002", "GitHub SDLC", "paused", "/automations show <id|name>", "/automations open <id|name>", "/automations edit <id|name>"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("automations output missing %q:\n%s", want, out)
 		}
@@ -2587,6 +2587,44 @@ func TestRenderScheduleInspectionIsTerminalSafe(t *testing.T) {
 }
 
 // Empty-state messages must include actionable slash-command hints (VISION.md "Friendly By Default").
+func TestRenderAutomationDetailBoundsOversizedBackendFields(t *testing.T) {
+	oversized := "BEGIN-" + strings.Repeat("x", 1<<20) + "-END"
+	detail := client.AutomationDetail{
+		Automation: client.AutomationMetadata{
+			ID: oversized, ProjectID: oversized, StableKey: oversized, Name: oversized,
+			Description: oversized, AutomationType: oversized, LifecycleState: oversized,
+			HealthState: oversized, HealthReason: oversized,
+		},
+		Version: client.AutomationVersion{ID: oversized, State: oversized, Source: oversized, AdapterKey: oversized},
+		Nodes: []client.AutomationLiveNode{{
+			AutomationNode: client.AutomationNode{ID: oversized, NodeKey: oversized, Name: oversized, NodeType: oversized, Role: oversized, ConfigSummary: oversized},
+			DisplayState:   oversized,
+		}},
+		Edges: []client.AutomationLiveEdge{{
+			AutomationEdge: client.AutomationEdge{ID: oversized, EdgeKey: oversized, SourceNodeID: oversized, TargetNodeID: oversized, Label: oversized},
+			SourceName:     oversized, TargetName: oversized,
+		}},
+		Resources:      []client.AutomationResourceSummary{{NodeID: oversized, NodeKey: oversized, ResourceType: oversized, ResourceID: oversized, Relation: oversized, Name: oversized, Status: oversized}},
+		ExternalState:  client.AutomationExternalState{Status: oversized, LastUpdatedAt: oversized},
+		Warnings:       []string{oversized},
+		GraphAvailable: true, NodesAvailable: true, EdgesAvailable: true,
+		ResourcesAvailable: true, ExternalStateAvailable: true,
+	}
+
+	out := stripANSI(renderAutomationDetail(detail))
+	if strings.Contains(out, "-END") {
+		t.Fatalf("oversized backend field was rendered without a bound")
+	}
+	if len(out) > 16<<10 {
+		t.Fatalf("single-record detail output = %d bytes, want bounded output", len(out))
+	}
+	for _, section := range []string{"Metadata", "Graph", "Nodes", "Edges", "Runtime", "Resources", "External state", "Notes"} {
+		if !strings.Contains(out, section) {
+			t.Fatalf("field bounds removed section %q", section)
+		}
+	}
+}
+
 func TestRenderAutomationDetailBoundsLargeTopology(t *testing.T) {
 	nodes := make([]client.AutomationLiveNode, 101)
 	edges := make([]client.AutomationLiveEdge, 101)

@@ -2202,27 +2202,40 @@ func renderAutomations(automations []client.Automation, filter string) string {
 		return dimStyle.Render(automationEmptyStateHint)
 	}
 	return table(rows) + "\n\n" +
+		dimStyle.Render("/automations show <id|name> · /automations open <id|name> (alias) · /automations edit <id|name>") + "\n" +
 		dimStyle.Render("/automations run|pause|resume|delete <id|name>")
 }
 
+const (
+	automationDetailIDWidth       = 96
+	automationDetailValueWidth    = 160
+	automationDetailLongTextWidth = 320
+)
+
+func boundedAutomationDetailText(value string, width int) string {
+	return truncate(sanitizeAutomationDetailText(value), width)
+}
+
 func sanitizeAutomationDetailForTerminal(detail client.AutomationDetail) client.AutomationDetail {
-	sanitize := sanitizeAutomationDetailText
+	id := func(value string) string { return boundedAutomationDetailText(value, automationDetailIDWidth) }
+	value := func(value string) string { return boundedAutomationDetailText(value, automationDetailValueWidth) }
+	long := func(value string) string { return boundedAutomationDetailText(value, automationDetailLongTextWidth) }
 	a := &detail.Automation
-	a.ID, a.ProjectID, a.StableKey = sanitize(a.ID), sanitize(a.ProjectID), sanitize(a.StableKey)
-	a.Name, a.Description, a.AutomationType = sanitize(a.Name), sanitize(a.Description), sanitize(a.AutomationType)
-	a.LifecycleState, a.HealthState, a.HealthReason = sanitize(a.LifecycleState), sanitize(a.HealthState), sanitize(a.HealthReason)
+	a.ID, a.ProjectID, a.StableKey = id(a.ID), id(a.ProjectID), value(a.StableKey)
+	a.Name, a.Description, a.AutomationType = value(a.Name), long(a.Description), value(a.AutomationType)
+	a.LifecycleState, a.HealthState, a.HealthReason = value(a.LifecycleState), value(a.HealthState), long(a.HealthReason)
 
 	v := &detail.Version
-	v.ID, v.State, v.Source, v.AdapterKey = sanitize(v.ID), sanitize(v.State), sanitize(v.Source), sanitize(v.AdapterKey)
+	v.ID, v.State, v.Source, v.AdapterKey = id(v.ID), value(v.State), value(v.Source), value(v.AdapterKey)
 
 	detail.Nodes = append([]client.AutomationLiveNode(nil), detail.Nodes...)
 	detail.UnmatchedNodeDetails = append([]client.AutomationLiveNode(nil), detail.UnmatchedNodeDetails...)
 	for _, nodes := range [][]client.AutomationLiveNode{detail.Nodes, detail.UnmatchedNodeDetails} {
 		for i := range nodes {
 			n := &nodes[i]
-			n.ID, n.NodeKey, n.Name = sanitize(n.ID), sanitize(n.NodeKey), sanitize(n.Name)
-			n.NodeType, n.Role, n.DisplayState = sanitize(n.NodeType), sanitize(n.Role), sanitize(n.DisplayState)
-			n.ConfigSummary = sanitize(n.ConfigSummary)
+			n.ID, n.NodeKey, n.Name = id(n.ID), id(n.NodeKey), value(n.Name)
+			n.NodeType, n.Role, n.DisplayState = value(n.NodeType), value(n.Role), value(n.DisplayState)
+			n.ConfigSummary = long(n.ConfigSummary)
 		}
 	}
 
@@ -2231,23 +2244,23 @@ func sanitizeAutomationDetailForTerminal(detail client.AutomationDetail) client.
 	for _, edges := range [][]client.AutomationLiveEdge{detail.Edges, detail.UnmatchedEdgeDetails} {
 		for i := range edges {
 			e := &edges[i]
-			e.ID, e.EdgeKey, e.SourceNodeID = sanitize(e.ID), sanitize(e.EdgeKey), sanitize(e.SourceNodeID)
-			e.TargetNodeID, e.Label = sanitize(e.TargetNodeID), sanitize(e.Label)
-			e.SourceName, e.TargetName = sanitize(e.SourceName), sanitize(e.TargetName)
+			e.ID, e.EdgeKey, e.SourceNodeID = id(e.ID), id(e.EdgeKey), id(e.SourceNodeID)
+			e.TargetNodeID, e.Label = id(e.TargetNodeID), value(e.Label)
+			e.SourceName, e.TargetName = value(e.SourceName), value(e.TargetName)
 		}
 	}
 
 	detail.Resources = append([]client.AutomationResourceSummary(nil), detail.Resources...)
 	for i := range detail.Resources {
 		r := &detail.Resources[i]
-		r.NodeID, r.NodeKey, r.ResourceType = sanitize(r.NodeID), sanitize(r.NodeKey), sanitize(r.ResourceType)
-		r.ResourceID, r.Relation, r.Name, r.Status = sanitize(r.ResourceID), sanitize(r.Relation), sanitize(r.Name), sanitize(r.Status)
+		r.NodeID, r.NodeKey, r.ResourceType = id(r.NodeID), id(r.NodeKey), value(r.ResourceType)
+		r.ResourceID, r.Relation, r.Name, r.Status = id(r.ResourceID), value(r.Relation), value(r.Name), value(r.Status)
 	}
-	detail.ExternalState.Status = sanitize(detail.ExternalState.Status)
-	detail.ExternalState.LastUpdatedAt = sanitize(detail.ExternalState.LastUpdatedAt)
+	detail.ExternalState.Status = value(detail.ExternalState.Status)
+	detail.ExternalState.LastUpdatedAt = value(detail.ExternalState.LastUpdatedAt)
 	detail.Warnings = append([]string(nil), detail.Warnings...)
 	for i := range detail.Warnings {
-		detail.Warnings[i] = sanitize(detail.Warnings[i])
+		detail.Warnings[i] = long(detail.Warnings[i])
 	}
 	return detail
 }
