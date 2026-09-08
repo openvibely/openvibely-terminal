@@ -5176,6 +5176,280 @@ func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 	})
 }
 
+func TestAutomationsPickerAndTypedActionsRenderIdenticalStructuredResults(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+
+	cases := []struct {
+		name          string
+		typedAction   string
+		pickerAction  string
+		backendAction string
+		destructive   bool
+	}{
+		{name: "run", typedAction: "run", pickerAction: "run", backendAction: "run-now"},
+		{name: "run now alias", typedAction: "run-now", pickerAction: "run-now", backendAction: "run-now"},
+		{name: "pause", typedAction: "pause", pickerAction: "pause", backendAction: "pause"},
+		{name: "resume", typedAction: "resume", pickerAction: "resume", backendAction: "resume"},
+		{name: "delete", typedAction: "delete", pickerAction: "delete", backendAction: "delete", destructive: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			typed, typedRec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+			typed = runLine(t, typed, "/automations "+tc.typedAction+" au-1")
+			if tc.destructive {
+				typed = runLine(t, typed, "yes")
+			}
+
+			picked, pickerRec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+			picked = runLine(t, picked, "/automations "+tc.pickerAction)
+			if !picked.selectorActive {
+				t.Fatalf("picker did not open: %s", transcript(picked))
+			}
+			picked = selKey(t, picked, tea.KeyMsg{Type: tea.KeyEnter})
+			if tc.destructive {
+				if picked.pendingConfirmation == nil {
+					t.Fatalf("picker delete did not require confirmation: %s", transcript(picked))
+				}
+				picked = runLine(t, picked, "yes")
+			}
+
+			for name, rec := range map[string]*recorder{"typed": typedRec, "picker": pickerRec} {
+				if got := rec.count(http.MethodPost, "/automations/au-1/"+tc.backendAction); got != 1 {
+					t.Fatalf("%s action calls = %d, want 1: %s", name, got, rec.all())
+				}
+				if !rec.sawQuery("POST /automations/au-1/" + tc.backendAction + "?project_id=p1") {
+					t.Fatalf("%s action lost project scope: %s", name, rec.urlsSnapshot())
+				}
+			}
+
+			typedResult := typed.log[len(typed.log)-1]
+			pickerResult := picked.log[len(picked.log)-1]
+			if typedResult.role != "result" || pickerResult.role != "result" {
+				t.Fatalf("expected result entries, typed=%+v picker=%+v", typedResult, pickerResult)
+			}
+			if typedResult.text != pickerResult.text {
+				t.Fatalf("action output differs by entry route:\ntyped:  %q\npicker: %q", typedResult.text, pickerResult.text)
+			}
+			if !strings.Contains(pickerResult.text, "STATE") {
+				t.Fatalf("picker refresh is not a structured automation list: %q", pickerResult.text)
+			}
+			if tc.backendAction == "run-now" && !strings.HasPrefix(pickerResult.text, "run: Native SDLC") {
+				t.Fatalf("run status is not canonical: %q", pickerResult.text)
+			}
+		})
+	}
+}
+
+func TestAutomationActionPickerSingleItemAutoSelectionUsesStructuredRefresh(t *testing.T) {
+	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
+	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+	m, cmd := typeLine(t, m, "/automations pause")
+	for i := 0; cmd != nil && i < 5; i++ {
+		msg := cmd()
+		if msg == nil {
+			break
+		}
+		next, follow := m.Update(msg)
+		m = next.(Model)
+		cmd = follow
+	}
+
+	if m.selectorActive {
+		t.Fatalf("single automation should auto-select: %s", transcript(m))
+	}
+	if got := rec.count(http.MethodPost, "/automations/au-1/pause"); got != 1 {
+		t.Fatalf("pause calls = %d, want 1: %s", got, rec.all())
+	}
+	result := m.log[len(m.log)-1]
+	if result.role != "result" || !strings.Contains(result.text, "pause: Native SDLC") || !strings.Contains(result.text, "STATE") {
+		t.Fatalf("single-item action output = %+v", result)
+	}
+}
+
+func TestAutomationsPickerAndTypedActionErrorsDoNotRefreshOrClaimSuccess(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+
+	for _, action := range []string{"run", "pause", "resume", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			backendAction := action
+			if backendAction == "run" {
+				backendAction = "run-now"
+			}
+			newFailedModel := func(t *testing.T) (Model, *recorder) {
+				t.Helper()
+				rec := &recorder{}
+				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					rec.recordURL(r.Method, r.URL.RequestURI())
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/automations":
+						_, _ = w.Write([]byte(automationsHTML))
+					case r.Method == http.MethodPost && r.URL.Path == "/automations/au-1/"+backendAction:
+						http.Error(w, "mutation failed", http.StatusInternalServerError)
+					default:
+						w.WriteHeader(http.StatusNotFound)
+					}
+				})
+				return m, rec
+			}
+
+			typed, typedRec := newFailedModel(t)
+			typed = runLine(t, typed, "/automations "+action+" au-1")
+			if action == "delete" {
+				typed = runLine(t, typed, "yes")
+			}
+
+			picked, pickerRec := newFailedModel(t)
+			picked = runLine(t, picked, "/automations "+action)
+			picked = selKey(t, picked, tea.KeyMsg{Type: tea.KeyEnter})
+			if action == "delete" {
+				picked = runLine(t, picked, "yes")
+			}
+
+			for name, rec := range map[string]*recorder{"typed": typedRec, "picker": pickerRec} {
+				if got := rec.count(http.MethodPost, "/automations/au-1/"+backendAction); got != 1 {
+					t.Fatalf("%s mutation calls = %d, want 1: %s", name, got, rec.all())
+				}
+				if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+					t.Fatalf("%s refreshed after a mutation failure: %s", name, rec.all())
+				}
+			}
+			typedResult := typed.log[len(typed.log)-1]
+			pickerResult := picked.log[len(picked.log)-1]
+			if typedResult.role != "error" || pickerResult.role != "error" || typedResult.text != pickerResult.text {
+				t.Fatalf("error result differs by route: typed=%+v picker=%+v", typedResult, pickerResult)
+			}
+			if strings.Contains(typedResult.text, action+": Native SDLC") {
+				t.Fatalf("mutation error claimed success: %q", typedResult.text)
+			}
+		})
+	}
+}
+
+func TestAutomationActionRefreshFailurePreservesOnlySuccessStatusForBothRoutes(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+	newRefreshFailureModel := func(t *testing.T) (Model, *recorder) {
+		t.Helper()
+		var gets int
+		rec := &recorder{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			if r.Method == http.MethodGet && r.URL.Path == "/automations" {
+				gets++
+				if gets > 1 {
+					http.Error(w, "refresh failed", http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write([]byte(automationsHTML))
+				return
+			}
+			if r.Method == http.MethodPost && r.URL.Path == "/automations/au-1/pause" {
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+		m = updated.(Model)
+		m.selectedID, m.selectedName = "p1", "demo"
+		return m, rec
+	}
+
+	typed, typedRec := newRefreshFailureModel(t)
+	typed = runLine(t, typed, "/automations pause au-1")
+	picked, pickerRec := newRefreshFailureModel(t)
+	picked = runLine(t, picked, "/automations pause")
+	picked = selKey(t, picked, tea.KeyMsg{Type: tea.KeyEnter})
+
+	for name, rec := range map[string]*recorder{"typed": typedRec, "picker": pickerRec} {
+		if got := rec.count(http.MethodPost, "/automations/au-1/pause"); got != 1 {
+			t.Fatalf("%s mutation calls = %d, want 1: %s", name, got, rec.all())
+		}
+		if got := rec.count(http.MethodGet, "/automations"); got != 2 {
+			t.Fatalf("%s list calls = %d, want 2: %s", name, got, rec.all())
+		}
+	}
+	typedResult := typed.log[len(typed.log)-1]
+	pickerResult := picked.log[len(picked.log)-1]
+	if typedResult.role != "result" || pickerResult.role != "result" || typedResult.text != "pause: Native SDLC" || pickerResult.text != typedResult.text {
+		t.Fatalf("refresh failure result differs by route: typed=%+v picker=%+v", typedResult, pickerResult)
+	}
+}
+
+func TestAutomationActionResolutionAndPickerCancellationDoNotMutate(t *testing.T) {
+	ambiguousHTML := "<div>" +
+		automationCardHTML("au-1", "Deploy A", "active") +
+		automationCardHTML("au-2", "Deploy B", "paused") +
+		"</div>"
+	for _, ref := range []string{"Deploy", "missing"} {
+		t.Run("typed "+ref, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/automations": ambiguousHTML})
+			m = runLine(t, m, "/automations pause "+ref)
+			if rec.count(http.MethodPost, "/automations/au-1/pause") != 0 || rec.count(http.MethodPost, "/automations/au-2/pause") != 0 {
+				t.Fatalf("unresolved reference mutated: %s", rec.all())
+			}
+			if result := m.log[len(m.log)-1]; result.role != "error" {
+				t.Fatalf("unresolved reference result = %+v", result)
+			}
+		})
+	}
+	for _, action := range []string{"run", "pause", "resume", "delete"} {
+		t.Run("cancel picker "+action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/automations": ambiguousHTML})
+			m = runLine(t, m, "/automations "+action)
+			if !m.selectorActive {
+				t.Fatalf("picker did not open: %s", transcript(m))
+			}
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+			if m.selectorActive || strings.Contains(rec.all(), "POST /automations/") {
+				t.Fatalf("picker cancellation changed automation state: %s", rec.all())
+			}
+		})
+	}
+}
+
+func TestAutomationDeleteConfirmationTimingAndCancellationRemainRouteSpecific(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+
+	typed, typedRec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+	typed = runLine(t, typed, "/automations delete au-1")
+	if typed.pendingConfirmation == nil || typedRec.count(http.MethodGet, "/automations") != 0 {
+		t.Fatalf("typed delete resolved before confirmation: confirmation=%v calls=%s", typed.pendingConfirmation, typedRec.all())
+	}
+	typed = runLine(t, typed, "no")
+	if typedRec.count(http.MethodPost, "/automations/au-1/delete") != 0 {
+		t.Fatalf("cancelled typed delete mutated: %s", typedRec.all())
+	}
+
+	picked, pickerRec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+	picked = runLine(t, picked, "/automations delete")
+	picked = selKey(t, picked, tea.KeyMsg{Type: tea.KeyEnter})
+	if picked.pendingConfirmation == nil || pickerRec.count(http.MethodGet, "/automations") != 1 {
+		t.Fatalf("picker delete did not preserve selection-before-confirmation flow: confirmation=%v calls=%s", picked.pendingConfirmation, pickerRec.all())
+	}
+	picked = runLine(t, picked, "no")
+	if pickerRec.count(http.MethodPost, "/automations/au-1/delete") != 0 || pickerRec.count(http.MethodGet, "/automations") != 1 {
+		t.Fatalf("cancelled picker delete mutated or refreshed: %s", pickerRec.all())
+	}
+}
+
 func TestAutomationsReloadFailureAfterActionIsSwallowed(t *testing.T) {
 	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
 	var gets int

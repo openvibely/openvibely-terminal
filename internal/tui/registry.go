@@ -4640,6 +4640,15 @@ func automationsCommand() command {
 			if backendAction == "run" {
 				backendAction = "run-now"
 			}
+			executeResolvedAction := func(ctx context.Context, a client.Automation) (string, error) {
+				status := action + ": " + firstNonEmpty(a.Name, a.ID)
+				if err := c.AutomationAction(ctx, a.ID, backendAction, pid); err != nil {
+					return "", err
+				}
+				return refreshAndRender(status,
+					func() ([]client.Automation, error) { return c.ListAutomations(ctx, pid) },
+					renderAutomations)
+			}
 
 			switch action {
 			case "", "list":
@@ -4791,10 +4800,7 @@ func automationsCommand() command {
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
-											status := action + ": " + firstNonEmpty(a.Name, a.ID)
-											return actAndReloadText(status,
-												func() error { return c.AutomationAction(ctx, a.ID, backendAction, pid) },
-												func() (string, error) { return c.GetAutomations(ctx, pid) })
+											return executeResolvedAction(ctx, a)
 										})
 										if action == "delete" {
 											return confirmOr(m,
@@ -4821,15 +4827,7 @@ func automationsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					status := action + ": " + firstNonEmpty(a.Name, a.ID)
-					if err := c.AutomationAction(ctx, a.ID, backendAction, pid); err != nil {
-						return "", err
-					}
-					return refreshAndRender(status,
-						func() ([]client.Automation, error) { return c.ListAutomations(ctx, pid) },
-						func(automations []client.Automation, _ string) string {
-							return renderAutomations(automations, "")
-						})
+					return executeResolvedAction(ctx, a)
 				})
 				if action == "delete" {
 					return confirmOr(m,
