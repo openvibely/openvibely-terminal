@@ -150,6 +150,57 @@ func TestCLIProjectsEditResolvesNamesContainingOptionLikeTokens(t *testing.T) {
 	}
 }
 
+func TestProjectsEditLiteralPipeCollisionDoesNotRebind(t *testing.T) {
+	for _, headless := range []bool{false, true} {
+		name := "interactive"
+		if headless {
+			name = "headless"
+		}
+		t.Run(name, func(t *testing.T) {
+			var detailIDs []string
+			var putIDs []string
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/projects":
+					_, _ = io.WriteString(w, `{"projects":[{"id":"target-id","name":"Target"},{"id":"long-id","name":"target-id --description"}]}`)
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+					id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/projects/"), "/edit")
+					detailIDs = append(detailIDs, id)
+					fixture := strings.ReplaceAll(projectEditFixture, "/projects/p1", "/projects/"+id)
+					_, _ = io.WriteString(w, fixture)
+				case r.Method == http.MethodPut:
+					putIDs = append(putIDs, strings.TrimPrefix(r.URL.Path, "/projects/"))
+					w.Header().Set("HX-Refresh", "true")
+				default:
+					http.NotFound(w, r)
+				}
+			}
+			if headless {
+				srv := httptest.NewServer(http.HandlerFunc(handler))
+				defer srv.Close()
+				c, _ := client.New(srv.URL)
+				if err := RunCLI(c, io.Discard, "", []string{"projects", "edit", "target-id", "--description", "|", "--name", "Changed"}, false, false); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				m := newModelFromHandler(t, handler)
+				m.projects = []client.Project{{ID: "target-id", Name: "Target"}, {ID: "long-id", Name: "target-id --description"}}
+				m.projectsLoaded = true
+				m = runLine(t, m, `/projects edit target-id --description | --name Changed`)
+				if out := transcript(m); strings.Contains(out, "ambiguous") || strings.Contains(out, "error:") {
+					t.Fatalf("unexpected edit failure: %q", out)
+				}
+			}
+			if got := strings.Join(detailIDs, ","); got != "target-id,target-id" {
+				t.Fatalf("detail IDs = %q, want target-id twice", got)
+			}
+			if got := strings.Join(putIDs, ","); got != "target-id" {
+				t.Fatalf("PUT IDs = %q, want target-id", got)
+			}
+		})
+	}
+}
+
 func TestProjectsEditOptionBoundaryAmbiguityDoesNotRebind(t *testing.T) {
 	projects := []client.Project{{ID: "short-id", Name: "Alpha"}, {ID: "long-id", Name: "Alpha --name Beta"}}
 	for _, headless := range []bool{false, true} {
@@ -536,6 +587,130 @@ func TestProjectsEditRepositoryReplacementRequiresConfirmationAndCanCancel(t *te
 	m = runLine(t, m, "yes")
 	if m.pendingConfirmation != nil || puts != 1 {
 		t.Fatalf("confirmed edit did not mutate exactly once: pending=%v puts=%d", m.pendingConfirmation != nil, puts)
+	}
+}
+
+func TestProjectsEditPostSaveAuthExpiryRetainsLoginGuidance(t *testing.T) {
+	for _, headless := range []bool{false, true} {
+		name := "interactive"
+		if headless {
+			name = "headless"
+		}
+		t.Run(name, func(t *testing.T) {
+			puts, editGets := 0, 0
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/projects":
+					_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"Alpha Project","path":"/tmp/alpha path"}]}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+					editGets++
+					if editGets == 1 {
+						_, _ = io.WriteString(w, projectEditFixture)
+						return
+					}
+					w.Header().Set("Location", "/login?next=/projects/p1/edit")
+					w.WriteHeader(http.StatusFound)
+				case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+					puts++
+					w.Header().Set("HX-Refresh", "true")
+				default:
+					http.NotFound(w, r)
+				}
+			}
+			if headless {
+				srv := httptest.NewServer(http.HandlerFunc(handler))
+				defer srv.Close()
+				c, _ := client.New(srv.URL)
+				err := RunCLI(c, io.Discard, "", []string{"projects", "edit", "p1", "--description", "changed"}, false, false)
+				if err == nil {
+					t.Fatal("expected post-save auth failure")
+				}
+				for _, want := range []string{"requires sign-in", "/login", "OPENVIBELY_AUTH_USERNAME"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("auth guidance missing %q: %v", want, err)
+					}
+				}
+			} else {
+				m := newModelFromHandler(t, handler)
+				m.projects = []client.Project{{ID: "p1", Name: "Alpha Project", Path: "/tmp/alpha path"}}
+				m.projectsLoaded = true
+				m = runLine(t, m, `/projects edit p1 --description changed`)
+				if !m.authRequired || !strings.Contains(transcript(m), "requires sign-in") || strings.Contains(transcript(m), "authoritative refresh failed") {
+					t.Fatalf("typed auth recovery lost: auth=%v transcript=%q", m.authRequired, transcript(m))
+				}
+			}
+			if puts != 1 || editGets != 2 {
+				t.Fatalf("PUTs=%d edit GETs=%d", puts, editGets)
+			}
+		})
+	}
+}
+
+func TestProjectsEditPreservesBackendLimitURLAndEnvironmentFailures(t *testing.T) {
+	disabledLocalForm := strings.Replace(projectEditFixture, `data-local-repo-path-enabled="true"`, `data-local-repo-path-enabled="false"`, 1)
+	for _, tc := range []struct {
+		name       string
+		line       string
+		form       string
+		backendErr string
+		want       string
+		wantPUTs   int
+		force      bool
+	}{
+		{name: "global worker limit", line: `/projects edit p1 --max-workers 99`, form: projectEditFixture, backendErr: "Max concurrent workers cannot exceed the global worker limit of 8", want: "cannot exceed the global worker limit of 8", wantPUTs: 1},
+		{name: "malformed GitHub URL", line: `/projects edit p1 --repository-source github --github-url not-a-url`, form: projectEditFixture, backendErr: "failed to clone GitHub repository: invalid GitHub repository URL", want: "invalid GitHub repository URL", wantPUTs: 1, force: true},
+		{name: "disabled local path", line: `/projects edit p1 --repository-path /tmp/replacement`, form: disabledLocalForm, want: "local repository paths are disabled", wantPUTs: 0},
+	} {
+		for _, headless := range []bool{false, true} {
+			mode := "interactive"
+			if headless {
+				mode = "headless"
+			}
+			t.Run(tc.name+" "+mode, func(t *testing.T) {
+				puts := 0
+				handler := func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.URL.Path == "/api/projects":
+						_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"Alpha Project","path":"/tmp/alpha path"}]}`)
+					case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+						_, _ = io.WriteString(w, tc.form)
+					case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+						puts++
+						w.Header().Set("HX-Trigger", fmt.Sprintf(`{"openvibelyToast":{"message":%q,"status":"failed"}}`, tc.backendErr))
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				}
+				if headless {
+					srv := httptest.NewServer(http.HandlerFunc(handler))
+					defer srv.Close()
+					c, _ := client.New(srv.URL)
+					args, err := tokenizeCommand(tc.line)
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = RunCLI(c, io.Discard, "", args, tc.force, false)
+					if err == nil || !strings.Contains(err.Error(), tc.want) {
+						t.Fatalf("error=%v, want %q", err, tc.want)
+					}
+				} else {
+					m := newModelFromHandler(t, handler)
+					m.projects = []client.Project{{ID: "p1", Name: "Alpha Project", Path: "/tmp/alpha path"}}
+					m.projectsLoaded = true
+					m = runLine(t, m, tc.line)
+					if m.pendingConfirmation != nil {
+						m = runLine(t, m, "yes")
+					}
+					if !strings.Contains(transcript(m), tc.want) {
+						t.Fatalf("transcript=%q, want %q", transcript(m), tc.want)
+					}
+				}
+				if puts != tc.wantPUTs {
+					t.Fatalf("PUTs=%d, want %d", puts, tc.wantPUTs)
+				}
+			})
+		}
 	}
 }
 

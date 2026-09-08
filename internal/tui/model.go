@@ -1449,6 +1449,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		if msg.err != nil {
+			// Authentication expiry must retain typed recovery even when the PUT
+			// succeeded and only the authoritative post-save refresh failed.
+			if m.handleAuthError(msg.err) {
+				return m, nil
+			}
 			if msg.saved {
 				if jsonMode {
 					body, _ := marshalJSON(projectEditPartialResult{Saved: true, ProjectID: msg.projectID, RefreshError: "saved; authoritative refresh failed"})
@@ -1458,7 +1463,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.handleAuthError(msg.err) || m.handleTransportError(msg.err) {
+			if m.handleTransportError(msg.err) {
 				return m, nil
 			}
 			m.append(entry{role: "error", text: sanitizeAutomationDetailText(msg.err.Error())})

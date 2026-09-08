@@ -5295,6 +5295,22 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 			if parseErr != nil {
 				return zeroProject, ref, zeroEdits, parseErr
 			}
+			// A pipe can also be a literal option value. When the complete token
+			// sequence before and after it forms a valid edit against an exact
+			// project ID, canonical ID precedence wins over interpreting the pipe
+			// as a separator for a longer name. This prevents a setting value from
+			// silently rebinding the mutation target.
+			for boundary := 1; boundary < i; boundary++ {
+				if !strings.HasPrefix(args[boundary], "--") {
+					continue
+				}
+				literalRef := strings.TrimSpace(strings.Join(args[:boundary], " "))
+				literalProject, literalMatchErr := matchProject(projects, literalRef)
+				literalEdits, literalParseErr := parseProjectEditOptions(args[boundary:])
+				if literalMatchErr == nil && literalParseErr == nil && projectReferenceTier(literalProject, literalRef) == 0 {
+					return literalProject, literalRef, literalEdits, nil
+				}
+			}
 			return project, ref, edits, nil
 		}
 		if parseErr == nil && separatorMatchErr == nil {
