@@ -649,6 +649,12 @@ func (m Model) selectedProject() client.Project {
 // guessing — so an exact name is never shadowed by a longer one that merely
 // contains it.
 func matchRef[T any](items []T, ref string, id func(T) string, name func(T) string) (T, error) {
+	return matchRefWithDisplay(items, ref, id, name, func(value string) string { return value })
+}
+
+// matchRefWithDisplay preserves raw reference matching while allowing callers
+// to make backend-controlled names and user references safe for presentation.
+func matchRefWithDisplay[T any](items []T, ref string, id func(T) string, name func(T) string, display func(string) string) (T, error) {
 	var zero T
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -659,10 +665,10 @@ func matchRef[T any](items []T, ref string, id func(T) string, name func(T) stri
 	ambiguous := func(hits []T) error {
 		var names []string
 		for _, h := range hits {
-			names = append(names, name(h))
+			names = append(names, display(name(h)))
 		}
 		return fmt.Errorf("%q is ambiguous: %s — use the full name or ID",
-			ref, strings.Join(names, ", "))
+			display(ref), strings.Join(names, ", "))
 	}
 
 	// IDs are canonical references, so a unique exact ID takes precedence over
@@ -716,5 +722,5 @@ func matchRef[T any](items []T, ref string, id func(T) string, name func(T) stri
 			return zero, ambiguous(hits)
 		}
 	}
-	return zero, fmt.Errorf("nothing matches %q", ref)
+	return zero, fmt.Errorf("nothing matches %q", display(ref))
 }

@@ -31,6 +31,7 @@ func init() {
 		modelsCommand(),
 		workersCommand(),
 		channelsCommand(),
+		webhooksCommand(),
 		personalityCommand(),
 		pulseCommand(),
 		reflectionCommand(),
@@ -2123,14 +2124,213 @@ func filterMemoryList(list client.MemoryList, filter string) client.MemoryList {
 
 // --- agents ---
 
+type agentEdit struct {
+	Name                *string
+	Description         *string
+	SystemPrompt        *string
+	Model               *string
+	Key                 *string
+	Scope               *string
+	Enabled             *bool
+	SelectableAsPrimary *bool
+}
+
+func isAgentEditField(value string) bool {
+	switch strings.ToLower(value) {
+	case "name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseAgentEdit(args []string) (string, agentEdit, error) {
+	usage := commandUsage("agents", "edit")
+	optionAt := -1
+	for i := 1; i < len(args); i++ {
+		if isAgentEditField(args[i]) {
+			optionAt = i
+			break
+		}
+	}
+	if optionAt < 1 {
+		return "", agentEdit{}, fmt.Errorf("%s", usage)
+	}
+	var update agentEdit
+	seen := map[string]bool{}
+	for i := optionAt; i < len(args); i += 2 {
+		if i+1 >= len(args) || !isAgentEditField(args[i]) || seen[strings.ToLower(args[i])] {
+			return "", agentEdit{}, fmt.Errorf("%s", usage)
+		}
+		key, value := strings.ToLower(args[i]), args[i+1]
+		seen[key] = true
+		switch key {
+		case "name":
+			if strings.TrimSpace(value) == "" {
+				return "", agentEdit{}, errors.New("agent name cannot be empty")
+			}
+			update.Name = &value
+		case "description":
+			update.Description = &value
+		case "system-prompt":
+			update.SystemPrompt = &value
+		case "model":
+			if strings.TrimSpace(value) == "" {
+				return "", agentEdit{}, errors.New("agent model cannot be empty")
+			}
+			update.Model = &value
+		case "key":
+			if strings.TrimSpace(value) == "" {
+				return "", agentEdit{}, errors.New("agent key cannot be empty")
+			}
+			update.Key = &value
+		case "scope":
+			value = strings.ToLower(value)
+			if value != "global" && value != "project" {
+				return "", agentEdit{}, errors.New("agent scope must be global or project")
+			}
+			update.Scope = &value
+		case "enabled", "selectable":
+			var parsed bool
+			switch strings.ToLower(value) {
+			case "true":
+				parsed = true
+			case "false":
+				parsed = false
+			default:
+				return "", agentEdit{}, fmt.Errorf("agent %s must be true or false", key)
+			}
+			if key == "enabled" {
+				update.Enabled = &parsed
+			} else {
+				update.SelectableAsPrimary = &parsed
+			}
+		}
+	}
+	return strings.Join(args[:optionAt], " "), update, nil
+}
+
+func matchAgentRef(agents []client.AgentDef, ref string) (client.AgentDef, error) {
+	var zero client.AgentDef
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return zero, errors.New("missing id or name")
+	}
+	lower := strings.ToLower(ref)
+	ambiguous := func(hits []client.AgentDef) error {
+		names := make([]string, 0, len(hits))
+		for _, hit := range hits {
+			names = append(names, sanitizeAutomationDetailText(firstNonEmpty(hit.Name, hit.Key, hit.ID)))
+		}
+		return fmt.Errorf("%q is ambiguous: %s — use the full name or ID", sanitizeAutomationDetailText(ref), strings.Join(names, ", "))
+	}
+	matchTier := func(matches func(client.AgentDef) bool) (client.AgentDef, bool, error) {
+		hits := make([]client.AgentDef, 0)
+		for _, agent := range agents {
+			if matches(agent) {
+				hits = append(hits, agent)
+			}
+		}
+		switch len(hits) {
+		case 0:
+			return zero, false, nil
+		case 1:
+			return hits[0], true, nil
+		default:
+			return zero, true, ambiguous(hits)
+		}
+	}
+	for _, tier := range []func(client.AgentDef) bool{
+		func(agent client.AgentDef) bool { return strings.EqualFold(agent.ID, ref) },
+		func(agent client.AgentDef) bool { return strings.EqualFold(agent.Name, ref) },
+		func(agent client.AgentDef) bool { return strings.EqualFold(agent.Key, ref) },
+		func(agent client.AgentDef) bool {
+			return strings.HasPrefix(strings.ToLower(agent.ID), lower) ||
+				strings.HasPrefix(strings.ToLower(agent.Name), lower) ||
+				strings.HasPrefix(strings.ToLower(agent.Key), lower)
+		},
+		func(agent client.AgentDef) bool {
+			return strings.Contains(strings.ToLower(agent.Name), lower) ||
+				strings.Contains(strings.ToLower(agent.Key), lower)
+		},
+	} {
+		if agent, matched, err := matchTier(tier); matched {
+			return agent, err
+		}
+	}
+	return zero, fmt.Errorf("nothing matches %q", ref)
+}
+
+type agentEditPartialResult struct {
+	Saved        bool   `json:"saved"`
+	RefreshError string `json:"refresh_error"`
+}
+
+func validateAgentModel(models []client.LLMModel, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "inherit") {
+		return "inherit", nil
+	}
+	for _, model := range models {
+		if model.Model == value {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("unknown agent model %q; use inherit or an exact configured model value", value)
+}
+
+func applyAgentEdit(agent client.AgentDefinition, update agentEdit) client.AgentDefinition {
+	if update.Name != nil {
+		agent.Name = *update.Name
+	}
+	if update.Description != nil {
+		agent.Description = *update.Description
+	}
+	if update.SystemPrompt != nil {
+		agent.SystemPrompt = *update.SystemPrompt
+	}
+	if update.Model != nil {
+		agent.Model = *update.Model
+	}
+	if update.Key != nil {
+		agent.Key = *update.Key
+	}
+	if update.Scope != nil {
+		agent.Scope = *update.Scope
+	}
+	if update.Enabled != nil {
+		agent.Enabled = *update.Enabled
+	}
+	if update.SelectableAsPrimary != nil {
+		agent.SelectableAsPrimary = *update.SelectableAsPrimary
+	}
+	return agent
+}
+
+func validateAgentArgs(args []string) error {
+	action, rest := splitAction([]string{"list", "edit", "delete", "generate", "metrics", "votes"}, args)
+	if action == "edit" && len(rest) > 0 {
+		_, _, err := parseAgentEdit(rest)
+		return err
+	}
+	return nil
+}
+
 func agentsCommand() command {
-	actions := []string{"list", "delete", "generate", "metrics", "votes"}
+	actions := []string{"list", "edit", "delete", "generate", "metrics", "votes"}
 	return command{
-		name:          "agents",
-		aliases:       []string{"agent"},
-		args:          "[name]",
-		actions:       actions,
-		selectorPaths: [][]string{{"delete"}},
+		name:         "agents",
+		aliases:      []string{"agent"},
+		args:         "[name]",
+		actions:      actions,
+		validateArgs: validateAgentArgs,
+		completions: []commandCompletion{
+			{after: []string{"edit", "*"}, values: []string{"name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable"}},
+			{after: []string{"edit", "*", "scope"}, values: []string{"global", "project"}},
+			{after: []string{"edit", "*", "enabled"}, values: []string{"true", "false"}},
+			{after: []string{"edit", "*", "selectable"}, values: []string{"true", "false"}},
+		},
+		selectorPaths: [][]string{{"edit"}, {"delete"}},
 		desc:          "agent definitions, workflow metrics and vote audits",
 		usage: []string{
 			"agents [filter]                            list agent definitions",
@@ -2139,9 +2339,11 @@ func agentsCommand() command {
 			"agents metrics                             per-agent workflow metrics",
 		},
 		actionUsages: []commandActionUsage{
+			{action: "edit", args: "<agent> <field> <value> [...]", description: "edit name, prompt, model, identity, scope, or state"},
 			{action: "votes", args: "<step-execution-id>", description: "inspect parallel-step votes"},
 		},
 		examples: []string{
+			`agents edit reviewer description "Reviews Go changes" enabled true`,
 			`agents generate A code reviewer that checks Go PRs for style and correctness`,
 			`agents delete reviewer`,
 			`agents metrics`,
@@ -2216,6 +2418,84 @@ func agentsCommand() command {
 					return refreshAndRender("generated an agent from your description",
 						func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
 						renderAgents)
+				})
+			case "edit":
+				if len(rest) == 0 {
+					return selectorOr(m, commandUsage("agents", "edit"),
+						selectorForWithSuffix("Agents", "agents edit",
+							"no agent definitions — /agents generate <description> creates one", " ",
+							func(ctx context.Context) ([]selectorItem, error) {
+								agents, err := c.ListAgents(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(agents))
+								for _, a := range agents {
+									items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, a.Key, shortID(a.ID)), detail: truncate(a.Description, 40)})
+								}
+								return items, nil
+							}))
+				}
+				ref, edit, err := parseAgentEdit(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				return m, run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
+					agents, err := c.ListAgents(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					matched, err := matchAgentRef(agents, ref)
+					if err != nil {
+						return "", err
+					}
+					if edit.Model != nil {
+						if strings.EqualFold(strings.TrimSpace(*edit.Model), "inherit") {
+							model := "inherit"
+							edit.Model = &model
+						} else {
+							models, err := c.ListModels(ctx, pid)
+							if err != nil {
+								return "", fmt.Errorf("validating agent model: %w", err)
+							}
+							model, err := validateAgentModel(models, *edit.Model)
+							if err != nil {
+								return "", err
+							}
+							edit.Model = &model
+						}
+					}
+					definition, err := c.GetAgent(ctx, pid, matched.ID)
+					if err != nil {
+						return "", err
+					}
+					definition = applyAgentEdit(definition, edit)
+					if err := c.UpdateAgent(ctx, pid, definition); err != nil {
+						return "", err
+					}
+					if jsonMode {
+						persisted, refreshErr := c.GetAgent(ctx, pid, matched.ID)
+						if refreshErr != nil {
+							return marshalJSON(agentEditPartialResult{
+								Saved:        true,
+								RefreshError: "saved; authoritative refresh failed",
+							})
+						}
+						return marshalJSON(persisted)
+					}
+					refreshed, refreshErr := c.ListAgents(ctx, pid)
+					statusName := firstNonEmpty(definition.Name, definition.Key, definition.ID)
+					for _, agent := range refreshed {
+						if agent.ID == matched.ID {
+							statusName = firstNonEmpty(agent.Name, agent.Key, agent.ID)
+							break
+						}
+					}
+					status := "updated agent " + sanitizeAutomationDetailText(statusName)
+					if refreshErr != nil {
+						return status + " (saved; refresh failed)", nil
+					}
+					return status + "\n\n" + renderAgents(refreshed, ""), nil
 				})
 			case "delete":
 				if ref == "" {
@@ -2658,6 +2938,321 @@ func channelsCommand() command {
 				}
 				return m, cmd
 			}
+		},
+	}
+}
+
+// webhookActionJSON is the stable machine-readable acknowledgement for delete.
+type webhookActionJSON struct {
+	Action string `json:"action"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+}
+
+var webhookOptionNames = map[string]string{
+	"--name": "name", "--enabled": "enabled", "--priority": "priority", "--default-priority": "priority",
+	"--system-instructions": "system_instructions", "--title-template": "title_template", "--prompt-template": "prompt_template",
+	"--agents": "agent_ids", "--agent-ids": "agent_ids",
+}
+
+func webhookOptionBoundary(args []string) int {
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			return i
+		}
+	}
+	return len(args)
+}
+
+func parseWebhookOptions(args []string) (map[string]string, error) {
+	values := make(map[string]string)
+	for len(args) > 0 {
+		key, ok := webhookOptionNames[strings.ToLower(args[0])]
+		if !ok {
+			return nil, fmt.Errorf("unknown webhook option %q", args[0])
+		}
+		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
+			return nil, fmt.Errorf("webhook option %s requires a value", args[0])
+		}
+		if _, duplicate := values[key]; duplicate {
+			return nil, fmt.Errorf("webhook option %s was provided more than once", args[0])
+		}
+		values[key] = args[1]
+		args = args[2:]
+	}
+	if enabled, ok := values["enabled"]; ok {
+		if enabled != "true" && enabled != "false" {
+			return nil, errors.New("webhook enabled must be true or false")
+		}
+	}
+	if priority, ok := values["priority"]; ok {
+		n, err := strconv.Atoi(priority)
+		if err != nil || n < 1 || n > 4 {
+			return nil, errors.New("webhook priority must be between 1 and 4")
+		}
+	}
+	return values, nil
+}
+
+func applyWebhookOptions(webhook *client.Webhook, values map[string]string) {
+	if value, ok := values["name"]; ok {
+		webhook.Name = strings.TrimSpace(value)
+	}
+	if value, ok := values["enabled"]; ok {
+		webhook.Enabled, _ = strconv.ParseBool(value)
+	}
+	if value, ok := values["priority"]; ok {
+		webhook.DefaultPriority, _ = strconv.Atoi(value)
+	}
+	if value, ok := values["system_instructions"]; ok {
+		webhook.SystemInstructions = value
+	}
+	if value, ok := values["title_template"]; ok {
+		webhook.TitleTemplate = value
+	}
+	if value, ok := values["prompt_template"]; ok {
+		webhook.PromptTemplate = value
+	}
+	if value, ok := values["agent_ids"]; ok {
+		webhook.AgentIDs = make([]string, 0)
+		for _, id := range strings.Split(value, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				webhook.AgentIDs = append(webhook.AgentIDs, id)
+			}
+		}
+	}
+}
+
+func validateWebhooksArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	action, rest := strings.ToLower(args[0]), args[1:]
+	switch action {
+	case "list":
+		if len(rest) != 0 {
+			return errors.New(commandUsage("webhooks", "list"))
+		}
+		return nil
+	case "show", "test", "rotate", "delete":
+		return nil
+	case "create", "edit":
+		boundary := webhookOptionBoundary(rest)
+		if _, err := parseWebhookOptions(rest[boundary:]); err != nil {
+			return err
+		}
+		if action == "create" && strings.TrimSpace(strings.Join(rest[:boundary], " ")) == "" {
+			return errors.New(commandUsage("webhooks", "create"))
+		}
+		if action == "edit" && boundary == len(rest) && len(rest) > 0 {
+			return errors.New(commandUsage("webhooks", "edit"))
+		}
+		return nil
+	default:
+		return errors.New(commandUsage("webhooks", ""))
+	}
+}
+
+func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string) (client.Webhook, error) {
+	webhooks, err := c.ListWebhooks(ctx, projectID)
+	if err != nil {
+		return client.Webhook{}, err
+	}
+	return matchRefWithDisplay(webhooks, ref,
+		func(w client.Webhook) string { return w.ID },
+		func(w client.Webhook) string { return w.Name },
+		sanitizeAutomationDetailText)
+}
+
+func resolveWebhookMutation(c *client.Client, projectID, action, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		webhook, err := resolveWebhook(ctx, c, projectID, ref)
+		return webhookMutationTargetMsg{projectID: projectID, action: action, webhook: webhook, err: err}
+	}
+}
+
+func confirmWebhookMutation(m Model, projectID, action string, webhook client.Webhook) (Model, tea.Cmd) {
+	name := sanitizeAutomationDetailText(firstNonEmpty(webhook.Name, webhook.ID))
+	cmd := run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+		switch action {
+		case "rotate":
+			rotation, err := m.client.RotateWebhookSecret(ctx, projectID, webhook.ID)
+			if err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(rotation)
+			}
+			return fmt.Sprintf("rotated secret for %s\nNew secret: %s", name, sanitizeAutomationDetailText(rotation.Secret)), nil
+		case "delete":
+			if err := m.client.DeleteWebhook(ctx, projectID, webhook.ID); err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(webhookActionJSON{Action: "delete", ID: webhook.ID, Name: webhook.Name})
+			}
+			return "deleted webhook: " + name, nil
+		default:
+			return "", errors.New(commandUsage("webhooks", action))
+		}
+	})
+	return confirmOr(m,
+		fmt.Sprintf("%s webhook %q? Type 'yes' to confirm or Esc to cancel.", titleFor(action), name),
+		fmt.Sprintf("use --force to confirm %s of webhook %q", action, name),
+		cmd)
+}
+
+func webhookSelector(m Model, action string, prefill bool) (Model, tea.Cmd) {
+	c, projectID := m.client, m.selectedID
+	prefillSuffix := ""
+	if prefill {
+		prefillSuffix = " "
+	}
+	return selectorOr(m, commandUsage("webhooks", action), selectorForWithSuffix("Webhooks", "webhooks "+action, "no inbound webhooks configured", prefillSuffix, func(ctx context.Context) ([]selectorItem, error) {
+		webhooks, err := c.ListWebhooks(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		items := make([]selectorItem, 0, len(webhooks))
+		for _, webhook := range webhooks {
+			items = append(items, selectorItem{ref: webhook.ID, label: webhook.Name, detail: webhook.Path})
+		}
+		return items, nil
+	}))
+}
+
+func renderWebhooks(webhooks []client.Webhook) string {
+	if len(webhooks) == 0 {
+		return "no inbound webhooks configured"
+	}
+	var b strings.Builder
+	b.WriteString("Inbound webhooks\n")
+	for _, webhook := range webhooks {
+		state := "disabled"
+		if webhook.Enabled {
+			state = "enabled"
+		}
+		fmt.Fprintf(&b, "  %s  %s  %s  priority %d\n    %s\n", sanitizeAutomationDetailText(webhook.Name), sanitizeAutomationDetailText(shortID(webhook.ID)), state, webhook.DefaultPriority, sanitizeAutomationDetailText(webhook.Path))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderWebhookDetail(webhook client.Webhook) string {
+	safe := sanitizeAutomationDetailText
+	state := "disabled"
+	if webhook.Enabled {
+		state = "enabled"
+	}
+	return fmt.Sprintf("Webhook: %s\nID: %s\nProject: %s\nState: %s\nURL: %s\nPath: %s\nPriority: %d\nAgents: %s\nSystem instructions: %s\nTitle template: %s\nPrompt template: %s", safe(webhook.Name), safe(webhook.ID), safe(webhook.ProjectID), state, safe(webhook.URL), safe(webhook.Path), webhook.DefaultPriority, safe(strings.Join(webhook.AgentIDs, ", ")), safe(webhook.SystemInstructions), safe(webhook.TitleTemplate), safe(webhook.PromptTemplate))
+}
+
+func webhooksCommand() command {
+	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
+	return command{
+		name: "webhooks", aliases: []string{"inbound-webhooks"}, args: "[action] [webhook]", actions: actions,
+		selectorPaths: [][]string{{"show"}, {"edit"}, {"test"}, {"rotate"}, {"delete"}}, desc: "project-scoped inbound webhook endpoints",
+		actionUsages: []commandActionUsage{
+			{action: "", args: "[list|show <webhook>|create <name> [options]|edit <webhook> <options>|test <webhook>|rotate <webhook>|delete <webhook>]"},
+			{action: "list", description: "list inbound webhooks"}, {action: "show", args: "<webhook>", description: "show secret-free webhook detail"},
+			{action: "create", args: "<name> [options]", description: "create an inbound webhook"}, {action: "edit", args: "<webhook> <options>", description: "edit only specified configuration"},
+			{action: "test", args: "<webhook>", description: "create a synthetic test task"}, {action: "rotate", args: "<webhook>", description: "rotate the webhook secret (confirmation required)"},
+			{action: "delete", args: "<webhook>", description: "delete a webhook (confirmation required)"},
+		},
+		usage:    []string{"options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents", "omit <webhook> on show/edit/test/rotate/delete → interactive selector"},
+		examples: []string{`webhooks create "PagerDuty alerts" --priority 3`, `webhooks edit pager --enabled false`, `webhooks test pager`, `webhooks rotate pager`}, validateArgs: validateWebhooksArgs,
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			mm, noProject, ok := m.needProject()
+			if !ok {
+				return mm, noProject
+			}
+			if err := validateWebhooksArgs(args); err != nil {
+				return m, errCmd(err.Error())
+			}
+			action, rest := splitAction(actions, args)
+			c, projectID := m.client, m.selectedID
+			if action == "" || action == "list" {
+				return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+					webhooks, err := c.ListWebhooks(ctx, projectID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(webhooks)
+					}
+					return renderWebhooks(webhooks), nil
+				})
+			}
+			boundary := len(rest)
+			options := map[string]string(nil)
+			if action == "create" || action == "edit" {
+				boundary = webhookOptionBoundary(rest)
+				options, _ = parseWebhookOptions(rest[boundary:])
+			}
+			ref := strings.TrimSpace(strings.Join(rest[:boundary], " "))
+			if ref == "" && action != "create" {
+				return webhookSelector(m, action, action == "edit")
+			}
+			if action == "create" {
+				return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+					webhook := client.Webhook{ProjectID: projectID, Name: ref, Enabled: true, DefaultPriority: 2, AgentIDs: make([]string, 0)}
+					applyWebhookOptions(&webhook, options)
+					created, err := c.CreateWebhook(ctx, projectID, webhook)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(created)
+					}
+					return "created webhook\n\n" + renderWebhookDetail(*created), nil
+				})
+			}
+			if action == "rotate" || action == "delete" {
+				return m, resolveWebhookMutation(c, projectID, action, ref)
+			}
+			cmd := run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+				webhook, err := resolveWebhook(ctx, c, projectID, ref)
+				if err != nil {
+					return "", err
+				}
+				switch action {
+				case "show":
+					detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(detail)
+					}
+					return renderWebhookDetail(*detail), nil
+				case "edit":
+					detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
+					if err != nil {
+						return "", err
+					}
+					applyWebhookOptions(detail, options)
+					updated, err := c.UpdateWebhook(ctx, projectID, *detail)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(updated)
+					}
+					return "updated webhook\n\n" + renderWebhookDetail(*updated), nil
+				case "test":
+					result, err := c.TestWebhook(ctx, projectID, webhook.ID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(result)
+					}
+					return fmt.Sprintf("test task created: %s", sanitizeAutomationDetailText(result.TaskID)), nil
+				}
+				return "", errors.New(commandUsage("webhooks", action))
+			})
+			return m, cmd
 		},
 	}
 }

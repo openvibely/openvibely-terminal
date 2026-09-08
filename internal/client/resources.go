@@ -595,6 +595,100 @@ type AgentDef struct {
 	Scope       string `json:"scope"`
 }
 
+// AgentDefinition is the authoritative agent edit representation returned by
+// GET /agents/:id/json. Fields not exposed by the terminal editor remain in
+// this value and are submitted unchanged by UpdateAgent.
+type AgentDefinition struct {
+	ID                  string                  `json:"id"`
+	Name                string                  `json:"name"`
+	Description         string                  `json:"description"`
+	SystemPrompt        string                  `json:"system_prompt"`
+	Model               string                  `json:"model"`
+	Tools               []string                `json:"tools"`
+	ToolConfig          AgentToolConfig         `json:"tool_config"`
+	Plugins             []string                `json:"plugins"`
+	MCPServers          []MCPServerConfig       `json:"mcp_servers"`
+	SystemKind          string                  `json:"system_kind,omitempty"`
+	Skills              []AgentSkillConfig      `json:"skills"`
+	Key                 string                  `json:"key,omitempty"`
+	Scope               string                  `json:"scope,omitempty"`
+	ProjectID           string                  `json:"project_id,omitempty"`
+	SelectableAsPrimary bool                    `json:"selectable_as_primary"`
+	Enabled             bool                    `json:"enabled"`
+	PermissionDefaults  AgentPermissionDefaults `json:"permission_defaults,omitempty"`
+	ModelDefaults       AgentModelDefaults      `json:"model_defaults,omitempty"`
+	CreatedBy           string                  `json:"created_by,omitempty"`
+	GeneratedStatus     string                  `json:"generated_status,omitempty"`
+	AbsorbedInto        string                  `json:"absorbed_into,omitempty"`
+	SourceRefs          []string                `json:"source_refs,omitempty"`
+	ArchivedAt          *time.Time              `json:"archived_at,omitempty"`
+	CreatedAt           time.Time               `json:"created_at"`
+	UpdatedAt           time.Time               `json:"updated_at"`
+	LifecycleHooks      []AgentLifecycleHook    `json:"lifecycle_hooks,omitempty"`
+}
+
+type MCPServerConfig struct {
+	Name    string            `json:"name"`
+	Type    string            `json:"type,omitempty"`
+	Command []string          `json:"command,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+type AgentSkillConfig struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Tools       string `json:"tools,omitempty"`
+	Content     string `json:"content"`
+}
+
+type ScopedFilesConfig struct {
+	Directory   string   `json:"directory"`
+	Permissions []string `json:"permissions"`
+}
+
+type AgentToolConfig struct {
+	ScopedFiles            []ScopedFilesConfig `json:"scoped_files,omitempty"`
+	SkipDefaultTools       bool                `json:"skip_default_tools,omitempty"`
+	DisableRuntimeWorktree bool                `json:"disable_runtime_worktree,omitempty"`
+}
+
+type AgentPermissionDefaults struct {
+	ReadTaskPrompt       bool `json:"read_task_prompt,omitempty"`
+	ReadTaskExecution    bool `json:"read_task_execution,omitempty"`
+	ReadProjectMemory    bool `json:"read_project_memory,omitempty"`
+	WriteProjectMemory   bool `json:"write_project_memory,omitempty"`
+	ReadAgents           bool `json:"read_agents,omitempty"`
+	WriteAgents          bool `json:"write_agents,omitempty"`
+	ReadSkills           bool `json:"read_skills,omitempty"`
+	WriteSkills          bool `json:"write_skills,omitempty"`
+	ReadRepositoryFiles  bool `json:"read_repository_files,omitempty"`
+	WriteRepositoryFiles bool `json:"write_repository_files,omitempty"`
+	UseShellOrTools      bool `json:"use_shell_or_tools,omitempty"`
+}
+
+type AgentModelDefaults struct {
+	Model       string  `json:"model,omitempty"`
+	Temperature float64 `json:"temperature,omitempty"`
+	MaxTokens   int     `json:"max_tokens,omitempty"`
+}
+
+type AgentLifecycleHook struct {
+	ID              string `json:"id,omitempty"`
+	AgentID         string `json:"agent_id,omitempty"`
+	When            string `json:"when"`
+	SkillKey        string `json:"skill_key"`
+	PromptOverride  string `json:"prompt_override,omitempty"`
+	OutputContract  string `json:"output_contract,omitempty"`
+	Blocking        bool   `json:"blocking"`
+	Enabled         bool   `json:"enabled"`
+	PermissionsJSON string `json:"permissions_json,omitempty"`
+	RunPolicyJSON   string `json:"run_policy_json,omitempty"`
+	ScheduleJSON    string `json:"schedule_json,omitempty"`
+	PayloadJSON     string `json:"payload_json,omitempty"`
+}
+
 // ListAgents scrapes the agents screen.
 func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, error) {
 	pages, err := c.getCardPages(ctx, "/agents"+query("project_id", projectID))
@@ -622,6 +716,92 @@ func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, 
 		})
 	}
 	return out, nil
+}
+
+// GetAgent loads the authoritative definition and lifecycle associations for an
+// edit. Both reads are explicitly scoped to the selected project.
+func (c *Client) GetAgent(ctx context.Context, projectID, agentID string) (AgentDefinition, error) {
+	path := "/agents/" + url.PathEscape(agentID)
+	var agent AgentDefinition
+	if err := c.getJSON(ctx, path+"/json"+query("project_id", projectID), &agent); err != nil {
+		return AgentDefinition{}, err
+	}
+	if strings.EqualFold(agent.Scope, "project") && strings.TrimSpace(agent.ProjectID) != "" && agent.ProjectID != projectID {
+		return AgentDefinition{}, fmt.Errorf("agent %q belongs to a different project", firstNonEmptyString(agent.Name, agent.ID))
+	}
+	if strings.EqualFold(agent.GeneratedStatus, "protected") {
+		return AgentDefinition{}, fmt.Errorf("protected system agent %q is read-only", firstNonEmptyString(agent.Name, agent.ID))
+	}
+	var hooks []AgentLifecycleHook
+	if err := c.getJSON(ctx, path+"/lifecycle-hooks"+query("project_id", projectID), &hooks); err != nil {
+		return AgentDefinition{}, fmt.Errorf("loading agent lifecycle hooks: %w", err)
+	}
+	if hooks == nil {
+		hooks = []AgentLifecycleHook{}
+	}
+	agent.LifecycleHooks = hooks
+	return agent, nil
+}
+
+// UpdateAgent submits the backend dialog's replacement contract for agent
+// fields. Values that are false, empty, or absent in the authoritative
+// definition are encoded explicitly so an edit cannot reset unrelated
+// configuration. Lifecycle hooks are intentionally omitted: the backend PUT
+// preserves them when absent, while its form decoder cannot round-trip every
+// field returned by the lifecycle endpoint.
+func (c *Client) UpdateAgent(ctx context.Context, projectID string, agent AgentDefinition) error {
+	if strings.EqualFold(agent.Scope, "project") && strings.TrimSpace(agent.ProjectID) != "" && agent.ProjectID != projectID {
+		return fmt.Errorf("agent %q belongs to a different project", firstNonEmptyString(agent.Name, agent.ID))
+	}
+	if strings.EqualFold(agent.GeneratedStatus, "protected") {
+		return fmt.Errorf("protected system agent %q is read-only", firstNonEmptyString(agent.Name, agent.ID))
+	}
+	marshal := func(name string, value any) (string, error) {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return "", fmt.Errorf("encoding agent %s: %w", name, err)
+		}
+		return string(data), nil
+	}
+	form := url.Values{}
+	form.Set("name", agent.Name)
+	form.Set("description", agent.Description)
+	form.Set("system_prompt", agent.SystemPrompt)
+	form.Set("model", agent.Model)
+	form.Set("key", agent.Key)
+	form.Set("scope", agent.Scope)
+	form.Set("project_id", agent.ProjectID)
+	form.Set("selectable_as_primary", strconv.FormatBool(agent.SelectableAsPrimary))
+	form.Set("enabled", strconv.FormatBool(agent.Enabled))
+	values := []struct {
+		name  string
+		value any
+	}{
+		{"tools_json", agent.Tools},
+		{"tool_config_json", agent.ToolConfig},
+		{"plugins_json", agent.Plugins},
+		{"skills_json", agent.Skills},
+		{"mcp_servers_json", agent.MCPServers},
+		{"permission_defaults_json", agent.PermissionDefaults},
+		{"source_refs_json", agent.SourceRefs},
+	}
+	for _, value := range values {
+		encoded, err := marshal(value.name, value.value)
+		if err != nil {
+			return err
+		}
+		form.Set(value.name, encoded)
+	}
+	return c.doForm(ctx, http.MethodPut, "/agents/"+url.PathEscape(agent.ID)+query("project_id", projectID), form)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return "agent"
 }
 
 // DeleteAgent removes an agent definition.
@@ -873,6 +1053,216 @@ var KnownChannels = []Channel{
 // GetChannels returns the Channels (integrations) screen as text.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
 	return c.paginatedPageText(ctx, "/channels"+query("project_id", projectID), "")
+}
+
+// Webhook is the terminal-safe representation of one project-scoped inbound
+// webhook. Backend secrets are deliberately not represented: list/detail JSON,
+// diagnostics, and formatted values therefore cannot disclose them by default.
+type Webhook struct {
+	ID                 string   `json:"id"`
+	ProjectID          string   `json:"project_id"`
+	Name               string   `json:"name"`
+	Enabled            bool     `json:"enabled"`
+	Path               string   `json:"path"`
+	URL                string   `json:"url"`
+	SystemInstructions string   `json:"system_instructions,omitempty"`
+	TitleTemplate      string   `json:"title_template,omitempty"`
+	PromptTemplate     string   `json:"prompt_template,omitempty"`
+	DefaultPriority    int      `json:"default_priority"`
+	AgentIDs           []string `json:"agent_ids"`
+}
+
+// WebhookTestResult is returned after creating the synthetic webhook test task.
+type WebhookTestResult struct {
+	TaskID string `json:"task_id"`
+}
+
+// WebhookSecretRotation is returned only by the explicit, confirmation-gated
+// secret rotation action. It must never be included in ordinary webhook output.
+type WebhookSecretRotation struct {
+	Secret string `json:"secret"`
+}
+
+func (c *Client) webhookLocation(pathToken string) (string, string) {
+	path := "/webhooks/inbound/" + url.PathEscape(pathToken)
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return path, path
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = path
+	u.RawPath = ""
+	return path, u.String()
+}
+
+func (c *Client) webhooksFromPages(pages []htmlPage, projectID string) []Webhook {
+	out := make([]Webhook, 0)
+	seen := make(map[string]struct{})
+	for _, page := range pages {
+		for _, card := range scrapeCards(page.root, "data-webhook-id") {
+			id := strings.TrimSpace(card.Get("webhook-id"))
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			path, endpointURL := c.webhookLocation(card.Get("webhook-token"))
+			out = append(out, Webhook{
+				ID:              id,
+				ProjectID:       projectID,
+				Name:            card.Get("webhook-name"),
+				Enabled:         card.Bool("webhook-enabled"),
+				Path:            path,
+				URL:             endpointURL,
+				DefaultPriority: card.Int("webhook-default-priority"),
+				AgentIDs:        make([]string, 0),
+			})
+		}
+	}
+	return out
+}
+
+// ListWebhooks returns every inbound webhook card for exactly one project.
+func (c *Client) ListWebhooks(ctx context.Context, projectID string) ([]Webhook, error) {
+	pages, err := c.getCardPages(ctx, "/channels"+query("project_id", projectID))
+	if err != nil {
+		return nil, err
+	}
+	return c.webhooksFromPages(pages, projectID), nil
+}
+
+// GetWebhook loads complete editable configuration while discarding the secret
+// returned by the backend detail route.
+func (c *Client) GetWebhook(ctx context.Context, projectID, id string) (*Webhook, error) {
+	var raw struct {
+		ID                 string   `json:"id"`
+		ProjectID          string   `json:"project_id"`
+		Name               string   `json:"name"`
+		Enabled            bool     `json:"enabled"`
+		PathToken          string   `json:"path_token"`
+		SystemInstructions string   `json:"system_instructions"`
+		TitleTemplate      string   `json:"title_template"`
+		PromptTemplate     string   `json:"prompt_template"`
+		DefaultPriority    int      `json:"default_priority"`
+		AgentIDs           []string `json:"agent_ids"`
+	}
+	path := "/channels/webhooks/" + url.PathEscape(id) + query("project_id", projectID)
+	if err := c.getJSON(ctx, path, &raw); err != nil {
+		return nil, err
+	}
+	if raw.ProjectID != projectID {
+		return nil, fmt.Errorf("webhook %q does not belong to selected project", id)
+	}
+	endpointPath, endpointURL := c.webhookLocation(raw.PathToken)
+	return &Webhook{
+		ID: raw.ID, ProjectID: raw.ProjectID, Name: raw.Name, Enabled: raw.Enabled,
+		Path: endpointPath, URL: endpointURL, SystemInstructions: raw.SystemInstructions,
+		TitleTemplate: raw.TitleTemplate, PromptTemplate: raw.PromptTemplate,
+		DefaultPriority: raw.DefaultPriority, AgentIDs: nonNilStrings(raw.AgentIDs),
+	}, nil
+}
+
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return make([]string, 0)
+	}
+	return values
+}
+
+func webhookForm(webhook Webhook) url.Values {
+	form := url.Values{}
+	form.Set("name", webhook.Name)
+	form.Set("enabled", strconv.FormatBool(webhook.Enabled))
+	form.Set("system_instructions", webhook.SystemInstructions)
+	form.Set("title_template", webhook.TitleTemplate)
+	form.Set("prompt_template", webhook.PromptTemplate)
+	form.Set("default_priority", strconv.Itoa(webhook.DefaultPriority))
+	form.Set("agent_ids", strings.Join(webhook.AgentIDs, ","))
+	return form
+}
+
+// CreateWebhook creates one webhook and returns its secret-free detail.
+func (c *Client) CreateWebhook(ctx context.Context, projectID string, webhook Webhook) (*Webhook, error) {
+	var created struct {
+		ID        string `json:"id"`
+		ProjectID string `json:"project_id"`
+	}
+	if err := c.doWebhookJSONForm(ctx, http.MethodPost, "/channels/webhooks"+query("project_id", projectID), webhookForm(webhook), &created); err != nil {
+		return nil, err
+	}
+	if created.ProjectID != projectID {
+		return nil, fmt.Errorf("created webhook does not belong to selected project")
+	}
+	return c.GetWebhook(ctx, projectID, created.ID)
+}
+
+// UpdateWebhook replaces the backend form while callers preserve omitted fields
+// by starting from GetWebhook's complete configuration.
+func (c *Client) UpdateWebhook(ctx context.Context, projectID string, webhook Webhook) (*Webhook, error) {
+	if webhook.ProjectID != projectID {
+		return nil, fmt.Errorf("webhook %q does not belong to selected project", webhook.ID)
+	}
+	path := "/channels/webhooks/" + url.PathEscape(webhook.ID) + query("project_id", projectID)
+	if err := c.doForm(ctx, http.MethodPut, path, webhookForm(webhook)); err != nil {
+		return nil, err
+	}
+	return c.GetWebhook(ctx, projectID, webhook.ID)
+}
+
+func (c *Client) doWebhookJSONForm(ctx context.Context, method, path string, form url.Values, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", method, path, err)
+	}
+	defer drainAndClose(resp.Body)
+	if isAuthResponse(resp) {
+		return newAuthRequiredError(method, path, resp)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return apiError(resp)
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	return nil
+}
+
+// TestWebhook creates a synthetic task and returns its backend task ID.
+func (c *Client) TestWebhook(ctx context.Context, projectID, id string) (*WebhookTestResult, error) {
+	var out WebhookTestResult
+	path := "/channels/webhooks/" + url.PathEscape(id) + "/test" + query("project_id", projectID)
+	if err := c.doWebhookJSONForm(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// RotateWebhookSecret rotates a secret only through the explicit caller action.
+func (c *Client) RotateWebhookSecret(ctx context.Context, projectID, id string) (*WebhookSecretRotation, error) {
+	var out WebhookSecretRotation
+	path := "/channels/webhooks/" + url.PathEscape(id) + "/rotate-secret" + query("project_id", projectID)
+	if err := c.doWebhookJSONForm(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DeleteWebhook deletes one webhook in the selected project.
+func (c *Client) DeleteWebhook(ctx context.Context, projectID, id string) error {
+	return c.doForm(ctx, http.MethodDelete, "/channels/webhooks/"+url.PathEscape(id)+query("project_id", projectID), nil)
 }
 
 // ChannelAction runs test or remove on a channel integration.

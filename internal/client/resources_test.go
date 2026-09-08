@@ -2033,3 +2033,143 @@ func TestChannelActionSlackRemoveTranslatesToDisconnect(t *testing.T) {
 		t.Errorf("path = %q, want /channels/slack/disconnect", gotPath)
 	}
 }
+
+func TestCreateWebhookReturnsSecretFreeScopedDetail(t *testing.T) {
+	const secret = "create-response-secret"
+	var createForm url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/webhooks":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("create project = %q", r.URL.Query().Get("project_id"))
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			createForm = r.PostForm
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"id":"new-id","project_id":"p1","secret":%q}`, secret)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/webhooks/new-id":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"id":"new-id","project_id":"p1","name":"Created","enabled":true,"path_token":"new-token","secret":%q,"default_priority":2,"agent_ids":[]}`, secret)
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	created, err := c.CreateWebhook(context.Background(), "p1", Webhook{Name: "Created", Enabled: true, DefaultPriority: 2, AgentIDs: []string{"a1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(created)
+	if strings.Contains(string(encoded), secret) || created.Path != "/webhooks/inbound/new-token" {
+		t.Fatalf("created = %s %#v", encoded, created)
+	}
+	if createForm.Get("enabled") != "true" || createForm.Get("agent_ids") != "a1" || createForm.Get("default_priority") != "2" {
+		t.Fatalf("create form = %#v", createForm)
+	}
+}
+
+func TestListWebhooksPaginatesStablyAndPreservesScope(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.RequestURI())
+		if r.URL.Query().Get("project_id") != "project two" {
+			t.Errorf("project_id = %q", r.URL.Query().Get("project_id"))
+		}
+		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(r.URL.Query().Get("card_page") == ""))
+		if r.URL.Query().Get("card_page") == "" {
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w1" data-webhook-name="Pager Duty" data-webhook-enabled="true" data-webhook-token="token-one" data-webhook-default-priority="3"></div><div data-webhook-id="shared" data-webhook-name="First"></div></div>`)
+			return
+		}
+		_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="shared" data-webhook-name="Duplicate"></div><div data-webhook-id="w2" data-webhook-name="Build Hook" data-webhook-enabled="false" data-webhook-token="token-two" data-webhook-default-priority="2"></div></div>`)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	got, err := c.ListWebhooks(context.Background(), "project two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].ID != "w1" || got[1].Name != "First" || got[2].ID != "w2" {
+		t.Fatalf("webhooks = %#v", got)
+	}
+	if got[0].ProjectID != "project two" || got[0].Path != "/webhooks/inbound/token-one" || !got[0].Enabled || got[0].DefaultPriority != 3 {
+		t.Fatalf("first webhook = %#v", got[0])
+	}
+	if len(requests) != 2 || !strings.Contains(requests[1], "offset=2") || !strings.Contains(requests[1], "project_id=project+two") {
+		t.Fatalf("requests = %#v", requests)
+	}
+}
+
+func TestWebhookDetailAndMutationContracts(t *testing.T) {
+	const secret = "must-not-appear-in-detail-json"
+	var updateForm url.Values
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.RequestURI())
+		if r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("project_id = %q", r.URL.Query().Get("project_id"))
+		}
+		switch {
+		case r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"id":"w1","project_id":"p1","name":"Hook","enabled":false,"path_token":"safe-token","secret":%q,"system_instructions":"keep system","title_template":"keep title","prompt_template":"keep prompt","default_priority":4,"agent_ids":["a1","a2"]}`, secret)
+		case r.Method == http.MethodPut:
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			updateForm = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/test"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, `{"task_id":"task-123"}`)
+		case strings.HasSuffix(r.URL.Path, "/rotate-secret"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"secret":"new-safe-secret"}`)
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	ctx := context.Background()
+
+	detail, err := c.GetWebhook(ctx, "p1", "w1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(detail)
+	if strings.Contains(string(encoded), secret) || strings.Contains(fmt.Sprintf("%#v", detail), secret) {
+		t.Fatalf("detail disclosed secret: %s %#v", encoded, detail)
+	}
+	if detail.Path != "/webhooks/inbound/safe-token" || detail.Name != "Hook" || len(detail.AgentIDs) != 2 {
+		t.Fatalf("detail = %#v", detail)
+	}
+	detail.Name = "Renamed"
+	if _, err := c.UpdateWebhook(ctx, "p1", *detail); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"name": "Renamed", "enabled": "false", "system_instructions": "keep system", "title_template": "keep title", "prompt_template": "keep prompt", "default_priority": "4", "agent_ids": "a1,a2"} {
+		if updateForm.Get(key) != want {
+			t.Errorf("form[%s] = %q, want %q", key, updateForm.Get(key), want)
+		}
+	}
+	testResult, err := c.TestWebhook(ctx, "p1", "w1")
+	if err != nil || testResult.TaskID != "task-123" {
+		t.Fatalf("test = %#v, %v", testResult, err)
+	}
+	rotation, err := c.RotateWebhookSecret(ctx, "p1", "w1")
+	if err != nil || rotation.Secret != "new-safe-secret" {
+		t.Fatalf("rotation = %#v, %v", rotation, err)
+	}
+	if err := c.DeleteWebhook(ctx, "p1", "w1"); err != nil {
+		t.Fatal(err)
+	}
+	_ = calls
+}

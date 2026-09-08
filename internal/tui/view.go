@@ -2992,13 +2992,18 @@ func renderAgents(agents []client.AgentDef, filter string) string {
 		if !filterMatch(filter, a.Name, a.Key, a.Description) {
 			continue
 		}
-		rows = append(rows, []string{truncate(a.Name, 24), a.Scope, truncate(a.Model, 22), truncate(a.Description, 40)})
+		rows = append(rows, []string{
+			truncate(sanitizeAutomationDetailText(a.Name), 24),
+			truncate(sanitizeAutomationDetailText(a.Scope), 16),
+			truncate(sanitizeAutomationDetailText(a.Model), 22),
+			truncate(sanitizeAutomationDetailText(a.Description), 40),
+		})
 	}
 	if len(rows) == 0 {
 		return dimStyle.Render("no agent definitions — /agents generate <description> creates one")
 	}
 	return table(append([][]string{{"NAME", "SCOPE", "MODEL", "DESCRIPTION"}}, rows...)) + "\n\n" +
-		dimStyle.Render("/agents metrics · /agents generate <description> · /agents delete <name>")
+		dimStyle.Render("/agents metrics · /agents generate <description> · /agents edit <name> <field> <value> · /agents delete <name>")
 }
 
 func renderAgentMetrics(metrics []client.AgentMetric, best, cheapest *client.AgentRecommendation) string {
