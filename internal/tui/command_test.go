@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -913,21 +914,43 @@ func TestCommandsWithActionsDocumentTheirSyntax(t *testing.T) {
 	}
 }
 
+func TestChannelsCompletionDocumentsManagementOptions(t *testing.T) {
+	for _, tc := range []struct {
+		after []string
+		want  string
+	}{
+		{[]string{"add", "telegram"}, "--token"},
+		{[]string{"edit", "email"}, "--provider"},
+		{[]string{"add", "github", "--auth-mode"}, "pat"},
+		{[]string{"edit", "slack", "--bot-token-mode"}, "manual"},
+	} {
+		values := registryCompletionValues("channels", tc.after...)
+		if !slices.Contains(values, tc.want) {
+			t.Errorf("completion after %v missing %q: %v", tc.after, tc.want, values)
+		}
+	}
+}
+
 func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 	cmd := lookupCommand("channels")
 	if cmd == nil {
 		t.Fatal("channels command missing")
 	}
 
-	if want := []string{"list", "test", "remove"}; !reflect.DeepEqual(cmd.actions, want) {
+	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect"}; !reflect.DeepEqual(cmd.actions, want) {
 		t.Fatalf("channels actions = %#v, want %#v", cmd.actions, want)
 	}
 
 	help := renderCommandHelp(*cmd)
 	for _, want := range []string{
 		"/channels list",
+		"/channels show <channel>",
+		"/channels add <type> <options>",
+		"/channels connect <github|slack>",
+		"/channels edit <channel> <options>",
 		"/channels test <channel>",
 		"/channels remove <channel>",
+		"/channels disconnect <channel>",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("channels help missing %q:\n%s", want, help)

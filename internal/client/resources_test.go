@@ -1716,6 +1716,172 @@ func TestGetWorkerSettingsReturnsPageText(t *testing.T) {
 	}
 }
 
+func TestListChannelsReturnsStructuredSecretFreeRecords(t *testing.T) {
+	const secret = "telegram-secret-token"
+	c := htmlServer(t, `<div data-channel-type="github" data-search-text="GitHub Connected"><h3>GitHub</h3><button>Edit</button><p>Account: octocat</p></div>
+		<div data-channel-type="slack" data-search-text="Slack Configured"><h3>Slack</h3><button>Delete</button></div>
+		<div data-channel-type="telegram" data-channel-token="`+secret+`" data-channel-running="true" data-search-text="Telegram Bot Connected"><button>Test Connection</button></div>
+		<div data-channel-type="discord" data-search-text="Discord Not configured"></div>
+		<div data-channel-type="email" data-search-text="Email bot@example.com"><input name="email_address" value="bot@example.com"><input name="email_password" value="mail-secret"></div>`)
+	channels, err := c.ListChannels(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 5 {
+		t.Fatalf("channels = %#v", channels)
+	}
+	if channels[0].Type != "github" || channels[0].Name != "GitHub" || !channels[0].Connected {
+		t.Fatalf("github = %#v", channels[0])
+	}
+	if channels[2].Type != "telegram" || !channels[2].Configured || !channels[2].Running {
+		t.Fatalf("telegram = %#v", channels[2])
+	}
+	if channels[3].Type != "discord" || channels[3].Configured || channels[3].Status != "not configured" {
+		t.Fatalf("discord = %#v", channels[3])
+	}
+	encoded, err := json.Marshal(channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{secret, "mail-secret", "Edit", "Delete", "Test Connection", "token", "password"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("structured channels disclosed %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestChannelRequestsPreserveAuthenticationClassification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checks := []func() error{
+		func() error { _, err := c.ListChannels(context.Background(), "p1"); return err },
+		func() error {
+			return c.ConfigureChannel(context.Background(), "discord", "p1", url.Values{"discord_bot_token": {"secret"}})
+		},
+		func() error { return c.ChannelAction(context.Background(), "discord", "test", "p1") },
+	}
+	for i, check := range checks {
+		if err := check(); !IsAuthRequired(err) {
+			t.Errorf("check %d error = %v, want auth required", i, err)
+		}
+	}
+}
+
+func TestUpdateChannelPreservesAuthoritativeSecretsWithoutExposingThem(t *testing.T) {
+	const secret = "authoritative-telegram-token"
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `<div data-channel-type="telegram" data-channel-token="`+secret+`" data-channel-running="true" data-search-text="Telegram Bot Connected"></div><input type="checkbox" name="telegram_rich_messages_v2" checked>`)
+		case http.MethodPost:
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			posted = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UpdateChannel(context.Background(), "telegram", "p1", url.Values{"telegram_rich_messages_v2": {"false"}}); err != nil {
+		t.Fatal(err)
+	}
+	if posted.Get("token") != secret || posted.Get("telegram_rich_messages_v2") != "false" {
+		t.Fatalf("posted form did not preserve authoritative values: %#v", posted)
+	}
+	channel, err := c.GetChannel(context.Background(), "p1", "telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(channel.EditableSettings().Encode(), secret) {
+		t.Fatal("editable settings exposed a credential")
+	}
+	encoded, _ := json.Marshal(channel)
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("channel JSON exposed a credential: %s", encoded)
+	}
+}
+
+func TestChannelMutationErrorsDoNotExposeBackendOrSubmittedSecrets(t *testing.T) {
+	const secret = "submitted-channel-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"unsafe backend text `+secret+`\u001b[31m"}`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.ConfigureChannel(context.Background(), "telegram", "p1", url.Values{"token": {secret}})
+	if err == nil {
+		t.Fatal("configure unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "unsafe backend") || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("unsafe channel error: %q", err)
+	}
+}
+
+func TestConfigureChannelRoutesAndProjectScope(t *testing.T) {
+	tests := []struct {
+		typeName string
+		wantPath string
+	}{
+		{"telegram", "/channels/telegram"},
+		{"github", "/channels/github/configure"},
+		{"slack", "/channels/slack/configure"},
+		{"discord", "/channels/discord/configure"},
+		{"email", "/channels/email/configure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.typeName, func(t *testing.T) {
+			var gotPath, gotProject string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotProject = r.URL.Path, r.URL.Query().Get("project_id")
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.ConfigureChannel(context.Background(), tt.typeName, "p1", url.Values{"safe": {"value"}}); err != nil {
+				t.Fatal(err)
+			}
+			if gotPath != tt.wantPath || gotProject != "p1" {
+				t.Fatalf("request = %s?project_id=%s", gotPath, gotProject)
+			}
+		})
+	}
+}
+
+func TestChannelConnectURLRedactsServerCredentialsAndScopesProject(t *testing.T) {
+	c, err := New("https://user:server-secret@example.com/base?unsafe=1#fragment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.ChannelConnectURL("slack", "project two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://example.com/base/channels/slack/connect?project_id=project+two" {
+		t.Fatalf("connect URL = %q", got)
+	}
+	if strings.Contains(got, "server-secret") || strings.Contains(got, "unsafe") || strings.Contains(got, "fragment") {
+		t.Fatalf("connect URL exposed configured URL data: %q", got)
+	}
+}
+
 func TestGetChannelsReturnsPageText(t *testing.T) {
 	c := htmlServer(t, `<html><body>channels text</body></html>`)
 	text, err := c.GetChannels(context.Background(), "p1")

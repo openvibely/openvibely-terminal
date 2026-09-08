@@ -149,7 +149,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations` | `list`, `test`, `remove` |
+| `/channels` | `integrations` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
@@ -273,26 +273,44 @@ before deletion. `attach` and `attachment` are aliases for `attachments`.
 
 ### Channels and integrations
 
-`/channels` supports `list`, `test`, and `remove` for the selected project. In the
-interactive TUI, run channel actions with the slash command:
+`/channels` provides structured, secret-free management for GitHub, Slack,
+Telegram, Discord, and Email in the selected project. The list shows only
+identity, type, connection state, and safe metadata; browser buttons and raw
+backend page text are never printed.
+
+Interactive setup and editing use field-by-field prompts. Credential fields are
+masked and never enter command history or the transcript. Omit a channel
+reference on `show`, `add`, `connect`, `edit`, `test`, `remove`, or `disconnect`
+to open the searchable selector:
 
 ```
 /channels list
+/channels show slack
+/channels add telegram
+/channels edit email
+/channels connect slack
 /channels test telegram
 /channels remove discord
 ```
 
-The same actions work as one-shot CLI commands. Put `--force` before the command
-when removing a channel:
+Headless setup uses explicit integration options; output never echoes option
+values. Examples:
 
 ```bash
+openvibely-tui -project demo channels add telegram --token "$TELEGRAM_BOT_TOKEN"
+openvibely-tui -project demo channels add github --auth-mode pat --pat "$GITHUB_TOKEN"
+openvibely-tui -project demo channels edit discord --send-responses false
+openvibely-tui -project demo channels connect slack
 openvibely-tui -project demo channels test telegram
 openvibely-tui -project demo --force channels remove discord
 ```
 
-Interactive removal asks you to type `yes` to confirm or press `Esc` to cancel.
-CLI removal requires `--force` (or `-f`). GitHub and Slack OAuth connection and
-callback flows still require a browser.
+Use `help channels` for integration-specific options. GitHub does not expose a
+test route. GitHub and Slack `connect` print a project-scoped local backend URL
+to open in a browser for OAuth, without exposing OAuth state. Interactive
+removal requires typing `yes`; CLI removal requires `--force` (or `-f`).
+`disconnect` is an alias for `remove`, and Slack removal retains the backend's
+special `/channels/slack/disconnect` mapping.
 
 ### Automations
 
@@ -465,9 +483,14 @@ $ openvibely-tui help tasks
   tasks sweep                                sweep finished tasks
   tasks clear <backlog|completed>            clear a column
 $ openvibely-tui help channels
-  channels list                              list configured integrations
-  channels test <channel>                    send a test message (telegram, slack, discord, email)
-  channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)
+  channels list                              list safe channel identity and connection state
+  channels show <channel>                    show safe channel details
+  channels add <type> <options>              configure a new channel
+  channels connect <github|slack>            show the browser OAuth URL
+  channels edit <channel> <options>          update channel settings
+  channels test <channel>                    test Slack, Telegram, Discord, or Email
+  channels remove <channel>                  disconnect/remove a channel (confirmation required)
+  channels disconnect <channel>              alias for remove
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,

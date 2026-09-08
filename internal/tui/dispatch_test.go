@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
@@ -5612,10 +5613,10 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 		line      string
 		wantUsage string
 	}{
-		{line: "/channels nonsense", wantUsage: "usage: /channels [list|test <channel>|remove <channel>]"},
-		{line: "/channels list extra", wantUsage: "usage: /channels list"},
-		{line: "/channels test telegram extra", wantUsage: "usage: /channels test <channel>"},
-		{line: "/channels remove slack extra", wantUsage: "usage: /channels remove <channel>"},
+		{line: "/channels nonsense", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect]"},
+		{line: "/channels list extra", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect]"},
+		{line: "/channels test telegram extra", wantUsage: "nothing matches"},
+		{line: "/channels remove slack extra", wantUsage: "nothing matches"},
 	}
 
 	for _, tc := range cases {
@@ -5640,8 +5641,10 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 	}
 }
 
+const structuredChannelsPage = `<div data-channel-type="github" data-search-text="GitHub Connected"></div><div data-channel-type="slack" data-search-text="Slack Configured"></div><div data-channel-type="telegram" data-channel-running="true" data-search-text="Telegram Bot Connected"></div><div data-channel-type="discord" data-search-text="Discord Not configured"></div><div data-channel-type="email" data-search-text="Email Running"><input name="email_address" value="bot@example.com"></div>`
+
 func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
-	const channelsPage = `<html><body>Telegram: connected  Slack: disconnected</body></html>`
+	const channelsPage = structuredChannelsPage
 	cases := []struct {
 		name         string
 		line         string
@@ -5709,8 +5712,93 @@ func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
 
 // TestChannelsCommandListsPage verifies the no-arg /channels command fetches
 // and renders the integrations page unchanged from the read-only behavior.
+func TestChannelsInteractiveSetupSubmitsMaskedCredentialWithoutEcho(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{"/channels": structuredChannelsPage})
+	m = runLine(t, m, "/channels add telegram")
+	secret := "wizard-telegram-secret"
+	m = runLine(t, m, secret)
+	m = runLine(t, m, "true")
+	if !rec.saw("POST", "/channels/telegram") || !rec.sawQuery("project_id=p1") {
+		t.Fatalf("wizard did not submit scoped channel form: %s", rec.all())
+	}
+	if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+		t.Fatal("wizard credential appeared after submission")
+	}
+	for _, history := range m.history {
+		if strings.Contains(history, secret) {
+			t.Fatal("wizard credential entered command history")
+		}
+	}
+	if m.channelWizard != nil || m.input.EchoMode != textinput.EchoNormal {
+		t.Fatal("wizard did not reset after submission")
+	}
+}
+
+func TestChannelsInteractiveSecretOptionsAreRedactedFromTranscriptAndHistory(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	secret := "sentinel-visible-command-secret"
+	m = runLine(t, m, `/channels add telegram --token "`+secret+`"`)
+	if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+		t.Fatal("secret option appeared in interactive output")
+	}
+	for _, item := range m.history {
+		if strings.Contains(item, secret) {
+			t.Fatalf("secret option appeared in history: %q", item)
+		}
+	}
+	if !strings.Contains(transcript(m), "<redacted>") {
+		t.Fatalf("redacted command was not shown: %s", transcript(m))
+	}
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("interactive options should not bypass masked prompts:\n%s", calls)
+	}
+}
+
+func TestChannelsInteractiveSetupMasksSecretsForEveryTypeAndCancelsCleanly(t *testing.T) {
+	tests := []struct {
+		channel string
+		before  []string
+	}{
+		{"telegram", nil},
+		{"github", []string{""}},
+		{"slack", []string{"client-id"}},
+		{"discord", nil},
+		{"email", []string{"", "bot@example.com"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.channel, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, "/channels add "+tt.channel)
+			if m.channelWizard == nil {
+				t.Fatalf("wizard did not start: %s", transcript(m))
+			}
+			for _, value := range tt.before {
+				m.input.SetValue(value)
+				next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				m = next.(Model)
+			}
+			if m.input.EchoMode != textinput.EchoPassword {
+				t.Fatalf("%s credential prompt is not masked", tt.channel)
+			}
+			secret := "sentinel-" + tt.channel + "-credential"
+			m.input.SetValue(secret)
+			if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+				t.Fatalf("%s credential was visible", tt.channel)
+			}
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			m = next.(Model)
+			if m.channelWizard != nil || m.input.EchoMode != textinput.EchoNormal {
+				t.Fatalf("%s wizard did not reset after cancellation", tt.channel)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s cancellation made requests:\n%s", tt.channel, calls)
+			}
+		})
+	}
+}
+
 func TestChannelsCommandListsPage(t *testing.T) {
-	const channelsPage = `<html><body>Telegram: connected  Slack: disconnected</body></html>`
+	const channelsPage = structuredChannelsPage
 	m, rec := dispatchModel(t, map[string]string{"/channels": channelsPage})
 	m = runLine(t, m, "/channels")
 	if !rec.saw("GET", "/channels") {
@@ -5728,12 +5816,13 @@ func TestChannelsCommandListsPage(t *testing.T) {
 // TestChannelsTestAndRemove exercises the test and remove actions for all
 // manageable channel types. Slack remove must route to /disconnect, not /remove.
 func TestChannelsTestAndRemove(t *testing.T) {
-	const refreshedChannelsPage = `<html><body>refreshed channels page</body></html>`
+	const refreshedChannelsPage = structuredChannelsPage
 	cases := []struct {
 		action      string
 		channelName string
 		wantPath    string
 	}{
+		{"remove", "github", "/channels/github/remove"},
 		{"test", "telegram", "/channels/telegram/test"},
 		{"remove", "telegram", "/channels/telegram/remove"},
 		{"test", "slack", "/channels/slack/test"},
@@ -5759,13 +5848,17 @@ func TestChannelsTestAndRemove(t *testing.T) {
 			if strings.Contains(out, "error:") {
 				t.Errorf("unexpected error for %s %s:\n%s", tc.action, tc.channelName, out)
 			}
-			// Status line must name the channel (display names are Title-cased in KnownChannels).
-			displayName := strings.ToUpper(tc.channelName[:1]) + tc.channelName[1:]
+			// Status lines use the canonical registry display name.
+			channel, err := matchChannelRef(tc.channelName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			displayName := channel.Name
 			if !strings.Contains(out, tc.action+": "+displayName) {
 				t.Errorf("expected status line %q:\n%s", tc.action+": "+displayName, out)
 			}
-			if !strings.Contains(out, "refreshed channels page") {
-				t.Errorf("expected refreshed channels page after action:\n%s", out)
+			if !strings.Contains(out, "CONNECTION") {
+				t.Errorf("expected refreshed structured channel list after action:\n%s", out)
 			}
 		})
 	}
@@ -5839,7 +5932,7 @@ func TestChannelsRemoveResolvesReferenceBeforeConfirmation(t *testing.T) {
 		m = runLine(t, m, "/channels remove tele")
 
 		out := stripANSI(m.View())
-		if !strings.Contains(out, `Remove channel "Telegram"?`) {
+		if !strings.Contains(out, `Remove channel "Telegram Bot"?`) {
 			t.Fatalf("partial removal prompt = %q, want canonical channel name", out)
 		}
 		if m.pendingConfirmation == nil {
@@ -5857,7 +5950,7 @@ func TestChannelsRemoveResolvesReferenceBeforeConfirmation(t *testing.T) {
 }
 
 func TestChannelsRemoveRequiresConfirmation(t *testing.T) {
-	const refreshedChannelsPage = `<html><body>refreshed channels page</body></html>`
+	const refreshedChannelsPage = structuredChannelsPage
 
 	t.Run("slack_no_call_before_confirm", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
@@ -5880,7 +5973,7 @@ func TestChannelsRemoveRequiresConfirmation(t *testing.T) {
 			t.Errorf("expected channels refresh after remove:\n%s", rec.all())
 		}
 		out := transcript(m)
-		if !strings.Contains(out, "remove: Slack") || !strings.Contains(out, "refreshed channels page") {
+		if !strings.Contains(out, "remove: Slack") || !strings.Contains(out, "CONNECTION") {
 			t.Errorf("expected status and refreshed output:\n%s", out)
 		}
 	})
@@ -5928,7 +6021,7 @@ func TestChannelsReloadFailureAfterActionIsSwallowed(t *testing.T) {
 
 	m = runLine(t, m, "/channels test telegram")
 	out := transcript(m)
-	if !strings.Contains(out, "test: Telegram") {
+	if !strings.Contains(out, "test: Telegram Bot") {
 		t.Errorf("expected status line despite refresh failure:\n%s", out)
 	}
 	if strings.Contains(out, "error:") || strings.Contains(out, "refresh failed") {
@@ -5993,8 +6086,12 @@ func TestChannelsMissingArgOpensSelector(t *testing.T) {
 			if m.pendingCommand != "channels "+action {
 				t.Errorf("pendingCommand = %q, want %q", m.pendingCommand, "channels "+action)
 			}
-			if len(m.selectorItems) != len(client.KnownChannels) {
-				t.Errorf("selector items = %d, want %d", len(m.selectorItems), len(client.KnownChannels))
+			wantItems := len(client.KnownChannels)
+			if action == "test" {
+				wantItems--
+			}
+			if len(m.selectorItems) != wantItems {
+				t.Errorf("selector items = %d, want %d", len(m.selectorItems), wantItems)
 			}
 		})
 		t.Run(action+"_cli", func(t *testing.T) {

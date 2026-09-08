@@ -2735,15 +2735,64 @@ func TestCLIAutomationsRunMissingReferenceUsesCanonicalUsageWithoutList(t *testi
 	}
 }
 
+func TestCLIChannelsConfigureEverySupportedTypeWithoutEchoingSecrets(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		path string
+	}{
+		{"telegram", []string{"channels", "add", "telegram", "--token", "secret-telegram"}, "/channels/telegram"},
+		{"github", []string{"channels", "add", "github", "--auth-mode", "pat", "--pat", "secret-github"}, "/channels/github/configure"},
+		{"slack", []string{"channels", "add", "slack", "--client-id", "client", "--client-secret", "secret-slack", "--app-token", "secret-app"}, "/channels/slack/configure"},
+		{"discord", []string{"channels", "add", "discord", "--bot-token", "secret-discord"}, "/channels/discord/configure"},
+		{"email", []string{"channels", "add", "email", "--provider", "gmail", "--address", "bot@example.com", "--password", "secret-email"}, "/channels/email/configure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": structuredChannelsPage, tt.path: ""})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tt.args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			if !rec.saw("POST", tt.path) || !rec.sawQuery("project_id=p1") {
+				t.Fatalf("missing scoped configure request: %s", rec.all())
+			}
+			if strings.Contains(strings.ToLower(out.String()), "secret-") {
+				t.Fatalf("secret appeared in output: %s", out.String())
+			}
+		})
+	}
+}
+
+func TestCLIChannelsValidationPrecedesRequests(t *testing.T) {
+	cases := [][]string{
+		{"channels", "add", "telegram", "--token", ""},
+		{"channels", "edit", "discord", "--send-responses", "maybe"},
+		{"channels", "edit", "email", "--imap-port", "70000"},
+		{"channels", "edit", "github", "--auth-mode", "oauth"},
+		{"channels", "test", "github"},
+		{"channels", "connect", "telegram"},
+	}
+	for _, args := range cases {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err == nil {
+			t.Fatalf("%v unexpectedly succeeded", args)
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("%v made requests before validation:\n%s", args, calls)
+		}
+	}
+}
+
 func TestCLIChannelsRejectMalformedArgumentsBeforeRequests(t *testing.T) {
 	cases := []struct {
 		args      []string
 		wantUsage string
 	}{
-		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|test <channel>|remove <channel>]"},
-		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels list"},
-		{args: []string{"channels", "test", "telegram", "extra"}, wantUsage: "usage: channels test <channel>"},
-		{args: []string{"channels", "remove", "slack", "extra"}, wantUsage: "usage: channels remove <channel>"},
+		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect]"},
+		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect]"},
+		{args: []string{"channels", "test", "telegram", "extra"}, wantUsage: "nothing matches"},
+		{args: []string{"channels", "remove", "slack", "extra"}, wantUsage: "nothing matches"},
 	}
 
 	for _, tc := range cases {
@@ -2809,7 +2858,7 @@ func TestCLIChannelsRemoveResolvesReferenceBeforeForce(t *testing.T) {
 	t.Run("valid partial names canonical target", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
 		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "remove", "tele"}, false, false)
-		if err == nil || !strings.Contains(err.Error(), `--force to confirm removal of channel "Telegram"`) {
+		if err == nil || !strings.Contains(err.Error(), `--force to confirm removal of channel "Telegram Bot"`) {
 			t.Fatalf("partial removal error = %v, want canonical force guidance", err)
 		}
 		if rec.saw("POST", "/channels/telegram/remove") {

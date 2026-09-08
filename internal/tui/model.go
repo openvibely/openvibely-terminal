@@ -119,6 +119,11 @@ type Model struct {
 	loginRestoreEchoMode    textinput.EchoMode
 	loginResumeSSE          bool
 
+	// channelWizard holds interactive channel setup/edit state. Secret values
+	// exist only in the masked input/form while needed for the mutation and are
+	// never appended to transcript or command history.
+	channelWizard *channelWizardState
+
 	// projectsLoaded is true only after a successful project-list response (or
 	// project creation installs the first known project). It remains false while
 	// a list request is in flight so an empty slice cannot be mistaken for an
@@ -1327,6 +1332,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.append(entry{role: "result", head: msg.title, text: body})
 		return m, nil
 
+	case channelWizardStartMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) || msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		return m.beginChannelWizard(msg.action, msg.channel)
+
 	case webhookMutationTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil
@@ -1891,6 +1906,9 @@ func loginFailureText(baseURL string, err error) string {
 
 // handleKey routes keys; the input owns almost everything.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.channelWizard != nil {
+		return m.handleChannelWizardKey(msg)
+	}
 	if m.loginActive {
 		return m.handleLoginKey(msg)
 	}
@@ -2040,14 +2058,18 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	m.input.SetValue("")
 	m.menu = nil
-	m.pushHistory(text)
+	displayText := text
+	if strings.HasPrefix(text, "/") {
+		displayText = redactChannelCommandSecrets(text)
+	}
+	m.pushHistory(displayText)
 
 	if strings.HasPrefix(text, "/") {
 		// Stream bytes were accepted before this command was submitted. Render them
 		// before recording the command so cadence batching cannot reorder the
 		// assistant output behind a later user action.
 		m.flushChatStreamOutput()
-		m.append(entry{role: "you", text: text})
+		m.append(entry{role: "you", text: displayText})
 		newModel, cmd := m.runCommand(text)
 		return newModel.(Model).clearReviewPrefill(), cmd
 	}

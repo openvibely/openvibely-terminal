@@ -132,6 +132,15 @@ type webhookMutationTargetMsg struct {
 	err               error
 }
 
+type channelWizardStartMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	action            string
+	channel           client.Channel
+	err               error
+}
+
 // attachmentDeleteTargetMsg carries the project-scoped task and attachment
 // resolved before an interactive delete confirmation is shown.
 type attachmentDeleteTargetMsg struct {

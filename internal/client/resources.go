@@ -10,6 +10,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -1034,23 +1035,305 @@ func (c *Client) SetProjectWorkerLimit(ctx context.Context, projectID string, li
 
 // --- channels & personality ---
 
-// Channel is one manageable integration on the Channels screen.
-// GitHub and Slack OAuth connect/callback flows require a browser and are not
-// exposed here (known TUI parity gap).
+// Channel is one project-scoped integration from the Channels screen. Only
+// terminal-safe identity, state, and operational metadata are exported. Secret
+// values scraped for backend-required preservation are kept in unexported fields.
 type Channel struct {
-	Type string `json:"type"` // telegram, slack, discord, email
-	Name string `json:"name"` // display name
+	Type       string `json:"type"`
+	Name       string `json:"name"`
+	Configured bool   `json:"configured"`
+	Connected  bool   `json:"connected"`
+	Running    bool   `json:"running"`
+	Status     string `json:"status"`
+	Address    string `json:"address,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+
+	configuration url.Values
 }
 
-// KnownChannels is the fixed set of TUI-manageable channel integrations.
+// KnownChannels is the fixed set of backend-supported channel integrations.
 var KnownChannels = []Channel{
-	{Type: "telegram", Name: "Telegram"},
+	{Type: "github", Name: "GitHub"},
 	{Type: "slack", Name: "Slack"},
+	{Type: "telegram", Name: "Telegram Bot"},
 	{Type: "discord", Name: "Discord"},
 	{Type: "email", Name: "Email"},
 }
 
-// GetChannels returns the Channels (integrations) screen as text.
+func knownChannel(channelType string) (Channel, bool) {
+	for _, channel := range KnownChannels {
+		if channel.Type == strings.ToLower(strings.TrimSpace(channelType)) {
+			return channel, true
+		}
+	}
+	return Channel{}, false
+}
+
+func channelFormValue(root *html.Node, name string) string {
+	n := findNode(root, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && attr(n, "name") == name
+	})
+	if n == nil {
+		return ""
+	}
+	if n.Data == "select" {
+		selected := findNode(n, func(option *html.Node) bool {
+			return option.Type == html.ElementNode && option.Data == "option" && hasHTMLAttr(option, "selected")
+		})
+		if selected != nil {
+			return attr(selected, "value")
+		}
+	}
+	if n.Data == "textarea" {
+		return strings.TrimSpace(NodeText(n))
+	}
+	return strings.TrimSpace(attr(n, "value"))
+}
+
+func channelFormChecked(root *html.Node, name string) (bool, bool) {
+	n := findNode(root, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && attr(n, "name") == name
+	})
+	if n == nil {
+		return false, false
+	}
+	return hasHTMLAttr(n, "checked"), true
+}
+
+var channelFormFields = map[string][]string{
+	"github":   {"github_auth_mode", "github_pat", "github_app_id", "github_app_slug", "github_app_private_key", "github_api_endpoint"},
+	"slack":    {"slack_client_id", "slack_client_secret", "slack_app_token", "slack_bot_token_mode", "slack_bot_token", "slack_send_responses"},
+	"telegram": {"telegram_rich_messages_v2"},
+	"discord":  {"discord_bot_token", "discord_send_responses"},
+	"email":    {"email_provider", "email_address", "email_password", "email_imap_host", "email_imap_port", "email_smtp_host", "email_smtp_port", "email_poll_interval_seconds", "email_send_responses", "email_skip_attachments", "email_mark_existing_seen_on_start"},
+}
+
+var channelBooleanFormFields = map[string]bool{
+	"slack_send_responses": true, "telegram_rich_messages_v2": true,
+	"discord_send_responses": true, "email_send_responses": true,
+	"email_skip_attachments": true, "email_mark_existing_seen_on_start": true,
+}
+
+func channelConfiguration(root *html.Node, channelType string, card Card) url.Values {
+	values := make(url.Values)
+	for _, name := range channelFormFields[channelType] {
+		if channelBooleanFormFields[name] {
+			if checked, found := channelFormChecked(root, name); found {
+				values.Set(name, strconv.FormatBool(checked))
+			}
+			continue
+		}
+		if value := channelFormValue(root, name); value != "" {
+			values.Set(name, value)
+		}
+	}
+	if channelType == "telegram" {
+		values.Set("token", card.Get("channel-token"))
+	}
+	return values
+}
+
+func cloneChannelConfiguration(values url.Values) url.Values {
+	cloned := make(url.Values, len(values))
+	for key, entries := range values {
+		cloned[key] = append([]string(nil), entries...)
+	}
+	return cloned
+}
+
+// EditableSettings returns only non-secret configuration values suitable for
+// interactive defaults. Credential values remain private to the client.
+func (c Channel) EditableSettings() url.Values {
+	settings := make(url.Values)
+	for key, entries := range c.configuration {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "private_key") {
+			continue
+		}
+		settings[key] = append([]string(nil), entries...)
+	}
+	return settings
+}
+
+func channelCardStatus(card Card, displayName string) string {
+	status := strings.ToLower(strings.TrimSpace(card.Get("search-text")))
+	if strings.HasPrefix(status, strings.ToLower(displayName)) {
+		status = strings.TrimSpace(status[len(displayName):])
+	}
+	status += "\n" + strings.ToLower(card.Text)
+	switch {
+	case strings.Contains(status, "not configured"):
+		return "not configured"
+	case strings.Contains(status, "not connected"):
+		return "not connected"
+	case strings.Contains(status, "gateway offline") || strings.Contains(status, "not running"):
+		return "configured, offline"
+	case strings.Contains(status, "connected"):
+		return "connected"
+	case strings.Contains(status, "gateway running") || strings.Contains(status, "running"):
+		return "running"
+	case strings.Contains(status, "configured") && strings.Contains(status, "offline"):
+		return "configured, offline"
+	case strings.Contains(status, "configured"):
+		return "configured"
+	default:
+		return "unknown"
+	}
+}
+
+// ListChannels parses only stable channel cards and allowlisted metadata. It
+// deliberately does not return the page text, controls, backend errors, or any
+// credential-bearing form values.
+func (c *Client) ListChannels(ctx context.Context, projectID string) ([]Channel, error) {
+	root, err := c.getHTML(ctx, "/channels"+query("project_id", projectID))
+	if err != nil {
+		return nil, safeChannelError(err)
+	}
+	cards := scrapeCards(root, "data-channel-type")
+	out := make([]Channel, 0, len(KnownChannels))
+	seen := make(map[string]bool)
+	for _, card := range cards {
+		base, ok := knownChannel(card.Get("channel-type"))
+		if !ok || seen[base.Type] {
+			continue
+		}
+		seen[base.Type] = true
+		base.Status = channelCardStatus(card, base.Name)
+		base.configuration = channelConfiguration(root, base.Type, card)
+		lowerStatus := strings.ToLower(base.Status)
+		base.Connected = strings.Contains(lowerStatus, "connected") && !strings.Contains(lowerStatus, "not connected")
+		base.Running = card.Bool("channel-running") || strings.Contains(lowerStatus, "running")
+		base.Configured = base.Connected || base.Running || (strings.Contains(lowerStatus, "configured") && !strings.Contains(lowerStatus, "not configured"))
+		if (base.Type == "github" || base.Type == "slack") && base.Status == "not connected" {
+			base.Configured = true
+		}
+		if base.Type == "telegram" {
+			base.Configured = base.Running || strings.TrimSpace(base.configuration.Get("token")) != ""
+		}
+		if base.Type == "email" {
+			base.Address = base.configuration.Get("email_address")
+			base.Provider = base.configuration.Get("email_provider")
+			base.Configured = base.Configured || base.Address != ""
+		}
+		if base.Running {
+			base.Status = "running"
+		} else if base.Connected {
+			base.Status = "connected"
+		} else if base.Configured && base.Status == "unknown" {
+			base.Status = "configured"
+		}
+		out = append(out, base)
+	}
+	return out, nil
+}
+
+// GetChannel resolves an exact integration type from the selected project.
+func (c *Client) GetChannel(ctx context.Context, projectID, channelType string) (*Channel, error) {
+	channels, err := c.ListChannels(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range channels {
+		if channels[i].Type == strings.ToLower(strings.TrimSpace(channelType)) {
+			return &channels[i], nil
+		}
+	}
+	return nil, fmt.Errorf("channel %q is not available", channelType)
+}
+
+func safeChannelError(err error) error {
+	if err == nil || IsAuthRequired(err) || IsTransportError(err) {
+		return err
+	}
+	return errors.New("channel request failed")
+}
+
+func (c *Client) doSafeChannelForm(ctx context.Context, path string, form url.Values) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(form.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("HX-Request", "true")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer drainAndClose(resp.Body)
+	if isAuthResponse(resp) {
+		return newAuthRequiredError(http.MethodPost, path, resp)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return errors.New("channel request failed")
+	}
+	return nil
+}
+
+// ConfigureChannel submits one backend-compatible channel configuration form.
+// The caller owns field validation; this method owns exact route and scope.
+func (c *Client) ConfigureChannel(ctx context.Context, channelType, projectID string, form url.Values) error {
+	channelType = strings.ToLower(strings.TrimSpace(channelType))
+	if _, ok := knownChannel(channelType); !ok {
+		return fmt.Errorf("unsupported channel type %q", channelType)
+	}
+	path := "/channels/" + url.PathEscape(channelType)
+	if channelType != "telegram" {
+		path += "/configure"
+	}
+	return c.doSafeChannelForm(ctx, path+query("project_id", projectID), form)
+}
+
+// UpdateChannel performs an authoritative read-modify-write entirely inside
+// the client so omitted settings, including credentials, remain unchanged
+// without exposing them to command or rendering layers.
+func (c *Client) UpdateChannel(ctx context.Context, channelType, projectID string, updates url.Values) error {
+	current, err := c.GetChannel(ctx, projectID, channelType)
+	if err != nil {
+		return err
+	}
+	form := cloneChannelConfiguration(current.configuration)
+	for key, entries := range updates {
+		form[key] = append([]string(nil), entries...)
+	}
+	defer func() {
+		for key := range form {
+			lower := strings.ToLower(key)
+			if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "private_key") {
+				form.Set(key, "")
+			}
+		}
+	}()
+	return c.ConfigureChannel(ctx, channelType, projectID, form)
+}
+
+// ChannelConnectURL returns the safe local backend URL a browser should open
+// to begin OAuth. Any user-info, existing query, or fragment in the configured
+// server URL is deliberately discarded.
+func (c *Client) ChannelConnectURL(channelType, projectID string) (string, error) {
+	channelType = strings.ToLower(strings.TrimSpace(channelType))
+	if channelType != "github" && channelType != "slack" {
+		return "", fmt.Errorf("%s does not support browser connection", channelType)
+	}
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return "", errors.New("invalid server URL")
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = strings.TrimRight(u.Path, "/") + "/channels/" + channelType + "/connect"
+	u.RawPath = ""
+	q := url.Values{}
+	if strings.TrimSpace(projectID) != "" {
+		q.Set("project_id", projectID)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// GetChannels returns the legacy Channels screen as text. New command paths
+// use ListChannels so browser controls and secrets cannot reach terminal output.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
 	return c.paginatedPageText(ctx, "/channels"+query("project_id", projectID), "")
 }
@@ -1266,16 +1549,26 @@ func (c *Client) DeleteWebhook(ctx context.Context, projectID, id string) error 
 }
 
 // ChannelAction runs test or remove on a channel integration.
-// Supported channel types: telegram, slack, discord, email.
-// Supported actions: test, remove.
+// Supported channel types: github, telegram, slack, discord, email.
+// Supported actions: test (except GitHub), remove.
 // For Slack, the backend remove route is /channels/slack/disconnect; all other
 // channel types use /channels/<type>/remove.
 func (c *Client) ChannelAction(ctx context.Context, channelType, action, projectID string) error {
+	channelType = strings.ToLower(strings.TrimSpace(channelType))
+	if _, ok := knownChannel(channelType); !ok {
+		return fmt.Errorf("unsupported channel type %q", channelType)
+	}
+	if action != "test" && action != "remove" {
+		return fmt.Errorf("unsupported channel action %q", action)
+	}
+	if action == "test" && channelType == "github" {
+		return errors.New("GitHub does not expose a connection test")
+	}
 	verb := action
 	if action == "remove" && channelType == "slack" {
 		verb = "disconnect"
 	}
-	return c.doForm(ctx, http.MethodPost,
+	return c.doSafeChannelForm(ctx,
 		"/channels/"+url.PathEscape(channelType)+"/"+verb+query("project_id", projectID), nil)
 }
 

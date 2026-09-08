@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/openvibely/openvibely-tui/internal/client"
@@ -2836,10 +2838,329 @@ func workersCommand() command {
 
 // --- channels / personality ---
 
+type channelWizardStep struct {
+	field       string
+	label       string
+	secret      bool
+	required    bool
+	placeholder string
+}
+
+type channelWizardState struct {
+	action        string
+	channel       client.Channel
+	form          url.Values
+	steps         []channelWizardStep
+	index         int
+	restorePrompt string
+	restoreHint   string
+}
+
+func channelWizardSteps(action, channelType string) []channelWizardStep {
+	required := action == "add"
+	switch channelType {
+	case "telegram":
+		return []channelWizardStep{{"token", "Telegram bot token", true, required, "required for a new bot"}, {"telegram_rich_messages_v2", "Rich messages (true/false)", false, false, "true"}}
+	case "github":
+		return []channelWizardStep{{"github_auth_mode", "Authentication mode (pat/app)", false, false, "pat"}, {"github_pat", "Personal access token (blank for app mode)", true, false, "blank keeps the existing token"}, {"github_app_id", "GitHub App ID", false, false, "blank keeps the current value"}, {"github_app_slug", "GitHub App slug", false, false, "blank keeps the current value"}, {"github_app_private_key", "GitHub App private key", true, false, "blank keeps the existing key"}, {"github_api_endpoint", "GitHub API endpoint", false, false, "https://api.github.com"}}
+	case "slack":
+		return []channelWizardStep{{"slack_client_id", "Slack client ID", false, required, "required for new Slack setup"}, {"slack_client_secret", "Slack client secret", true, required, "blank keeps the existing secret"}, {"slack_app_token", "Slack app-level token", true, required, "xapp-..."}, {"slack_bot_token_mode", "Bot token mode (oauth/manual)", false, false, "oauth"}, {"slack_bot_token", "Manual bot token (optional)", true, false, "xoxb-...; blank keeps existing"}, {"slack_send_responses", "Send task responses (true/false)", false, false, "true"}}
+	case "discord":
+		return []channelWizardStep{{"discord_bot_token", "Discord bot token", true, required, "blank keeps the existing token"}, {"discord_send_responses", "Send task responses (true/false)", false, false, "true"}}
+	case "email":
+		return []channelWizardStep{{"email_provider", "Email provider (gmail/outlook/custom)", false, required, "gmail"}, {"email_address", "Email address", false, required, "bot@example.com"}, {"email_password", "Email app password", true, required, "blank keeps the existing password"}, {"email_imap_host", "IMAP host (custom provider)", false, false, "blank for provider default"}, {"email_imap_port", "IMAP port (custom provider)", false, false, "993"}, {"email_smtp_host", "SMTP host (custom provider)", false, false, "blank for provider default"}, {"email_smtp_port", "SMTP port (custom provider)", false, false, "587"}, {"email_poll_interval_seconds", "Poll interval seconds", false, false, "15"}, {"email_send_responses", "Send responses (true/false)", false, false, "true"}, {"email_skip_attachments", "Skip attachments (true/false)", false, false, "false"}, {"email_mark_existing_seen_on_start", "Mark existing messages seen (true/false)", false, false, "true"}}
+	}
+	return nil
+}
+
+func channelWizardSecretField(field string) bool {
+	return strings.Contains(field, "token") || strings.Contains(field, "secret") || strings.Contains(field, "password") || strings.Contains(field, "private_key")
+}
+
+func redactChannelCommandSecrets(commandLine string) string {
+	tokens, err := tokenizeCommandTokens(commandLine)
+	if err != nil || len(tokens) < 2 {
+		lower := strings.ToLower(commandLine)
+		if strings.Contains(lower, "/channels ") || strings.Contains(lower, "/integrations ") {
+			for _, option := range []string{"--token", "--pat", "--private-key", "--client-secret", "--app-token", "--bot-token", "--password"} {
+				if strings.Contains(lower, option) {
+					return "/channels <redacted sensitive options>"
+				}
+			}
+		}
+		return commandLine
+	}
+	root := strings.TrimPrefix(strings.ToLower(tokens[0].value), "/")
+	if (root != "channels" && root != "integrations") || (tokens[1].value != "add" && tokens[1].value != "edit") {
+		return commandLine
+	}
+	secretOptions := map[string]bool{"--token": true, "--pat": true, "--private-key": true, "--client-secret": true, "--app-token": true, "--bot-token": true, "--password": true}
+	parts := make([]string, 0, len(tokens))
+	for i := 0; i < len(tokens); i++ {
+		parts = append(parts, tokens[i].value)
+		if secretOptions[strings.ToLower(tokens[i].value)] && i+1 < len(tokens) {
+			i++
+			parts = append(parts, "<redacted>")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func (m Model) beginChannelWizard(action string, channel client.Channel) (Model, tea.Cmd) {
+	form := channel.EditableSettings()
+	if action == "add" {
+		form = make(url.Values)
+	}
+	defaults := map[string]string{"telegram_rich_messages_v2": "true", "github_auth_mode": "pat", "slack_bot_token_mode": "oauth", "slack_send_responses": "true", "discord_send_responses": "true", "email_provider": "gmail", "email_imap_port": "993", "email_smtp_port": "587", "email_poll_interval_seconds": "15", "email_send_responses": "true", "email_skip_attachments": "false", "email_mark_existing_seen_on_start": "true"}
+	for key, value := range defaults {
+		if form.Get(key) == "" {
+			form.Set(key, value)
+		}
+	}
+	m.channelWizard = &channelWizardState{action: action, channel: channel, form: form, steps: channelWizardSteps(action, channel.Type), restorePrompt: m.input.Prompt, restoreHint: m.input.Placeholder}
+	m.menu = nil
+	m.input.SetValue("")
+	m.append(entry{role: "system", text: action + " " + channel.Name + ": enter each field; leave optional fields blank to preserve/default them. Esc cancels."})
+	m.setChannelWizardPrompt()
+	return m, nil
+}
+
+func (m *Model) setChannelWizardPrompt() {
+	wizard := m.channelWizard
+	if wizard == nil || wizard.index >= len(wizard.steps) {
+		return
+	}
+	step := wizard.steps[wizard.index]
+	m.input.SetValue("")
+	m.input.Prompt = step.label + ": "
+	m.input.Placeholder = step.placeholder
+	m.input.EchoMode = textinput.EchoNormal
+	if step.secret {
+		m.input.EchoMode = textinput.EchoPassword
+	}
+	m.input.Focus()
+}
+
+func (m *Model) resetChannelWizard() {
+	if m.channelWizard == nil {
+		return
+	}
+	m.input.SetValue("")
+	m.input.Prompt = m.channelWizard.restorePrompt
+	m.input.Placeholder = m.channelWizard.restoreHint
+	m.input.EchoMode = textinput.EchoNormal
+	m.channelWizard = nil
+	m.input.Focus()
+}
+
+func validateChannelWizardValue(step channelWizardStep, value string) error {
+	if strings.HasSuffix(step.field, "send_responses") || step.field == "telegram_rich_messages_v2" || step.field == "email_skip_attachments" || step.field == "email_mark_existing_seen_on_start" {
+		if _, err := strconv.ParseBool(value); err != nil {
+			return errors.New("value must be true or false")
+		}
+	}
+	if step.field == "github_auth_mode" && value != "pat" && value != "app" {
+		return errors.New("authentication mode must be pat or app")
+	}
+	if step.field == "slack_bot_token_mode" && value != "oauth" && value != "manual" {
+		return errors.New("bot token mode must be oauth or manual")
+	}
+	if step.field == "email_imap_port" || step.field == "email_smtp_port" {
+		port, err := strconv.Atoi(value)
+		if err != nil || port < 1 || port > 65535 {
+			return errors.New("port must be from 1 to 65535")
+		}
+	}
+	if step.field == "email_poll_interval_seconds" {
+		interval, err := strconv.Atoi(value)
+		if err != nil || interval < 5 {
+			return errors.New("poll interval must be at least 5 seconds")
+		}
+	}
+	return nil
+}
+
+func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "ctrl+d":
+		m.quitting = true
+		m.Cleanup()
+		return m, tea.Quit
+	case "esc":
+		m.resetChannelWizard()
+		m.append(entry{role: "system", text: "channel setup cancelled"})
+		return m, nil
+	case "enter":
+		wizard := m.channelWizard
+		step := wizard.steps[wizard.index]
+		value := strings.TrimSpace(m.input.Value())
+		m.input.SetValue("")
+		if value == "" && step.required && wizard.form.Get(step.field) == "" {
+			m.append(entry{role: "error", text: step.label + " is required"})
+			m.setChannelWizardPrompt()
+			return m, nil
+		}
+		if value != "" {
+			if err := validateChannelWizardValue(step, value); err != nil {
+				m.append(entry{role: "error", text: err.Error()})
+				m.setChannelWizardPrompt()
+				return m, nil
+			}
+			wizard.form.Set(step.field, value)
+		}
+		wizard.index++
+		if wizard.index < len(wizard.steps) {
+			m.setChannelWizardPrompt()
+			return m, nil
+		}
+		action, channel, form, projectID := wizard.action, wizard.channel, wizard.form, m.selectedID
+		m.resetChannelWizard()
+		m.busy = true
+		c := m.client
+		return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+			defer func() {
+				for field := range form {
+					if channelWizardSecretField(field) {
+						form.Set(field, "")
+					}
+				}
+			}()
+			var err error
+			if action == "edit" {
+				err = c.UpdateChannel(ctx, channel.Type, projectID, form)
+			} else {
+				err = c.ConfigureChannel(ctx, channel.Type, projectID, form)
+			}
+			if err != nil {
+				return "", err
+			}
+			channels, err := c.ListChannels(ctx, projectID)
+			status := action + "ed " + channel.Name
+			if err != nil {
+				return status, nil
+			}
+			return status + "\n\n" + renderChannels(channels), nil
+		})
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
 func matchChannelRef(ref string) (client.Channel, error) {
-	return matchRef(client.KnownChannels, ref,
+	channel, err := matchRef(client.KnownChannels, ref,
 		func(ch client.Channel) string { return ch.Type },
 		func(ch client.Channel) string { return ch.Name })
+	if err != nil {
+		return client.Channel{}, errors.New(sanitizeAutomationDetailText(err.Error()))
+	}
+	return channel, nil
+}
+
+var channelOptionFields = map[string]string{
+	"--token": "token", "--rich-messages": "telegram_rich_messages_v2",
+	"--auth-mode": "github_auth_mode", "--pat": "github_pat", "--app-id": "github_app_id",
+	"--app-slug": "github_app_slug", "--private-key": "github_app_private_key", "--api-endpoint": "github_api_endpoint",
+	"--client-id": "slack_client_id", "--client-secret": "slack_client_secret", "--app-token": "slack_app_token",
+	"--bot-token-mode": "slack_bot_token_mode", "--bot-token": "bot_token",
+	"--send-responses": "send_responses", "--provider": "email_provider", "--address": "email_address",
+	"--password": "email_password", "--imap-host": "email_imap_host", "--imap-port": "email_imap_port",
+	"--smtp-host": "email_smtp_host", "--smtp-port": "email_smtp_port", "--poll-interval": "email_poll_interval_seconds",
+	"--skip-attachments": "email_skip_attachments", "--mark-existing-seen": "email_mark_existing_seen_on_start",
+}
+
+var channelAllowedFields = map[string]map[string]string{
+	"telegram": {"token": "token", "telegram_rich_messages_v2": "telegram_rich_messages_v2"},
+	"github":   {"github_auth_mode": "github_auth_mode", "github_pat": "github_pat", "github_app_id": "github_app_id", "github_app_slug": "github_app_slug", "github_app_private_key": "github_app_private_key", "github_api_endpoint": "github_api_endpoint"},
+	"slack":    {"slack_client_id": "slack_client_id", "slack_client_secret": "slack_client_secret", "slack_app_token": "slack_app_token", "slack_bot_token_mode": "slack_bot_token_mode", "bot_token": "slack_bot_token", "send_responses": "slack_send_responses"},
+	"discord":  {"bot_token": "discord_bot_token", "send_responses": "discord_send_responses"},
+	"email":    {"email_provider": "email_provider", "email_address": "email_address", "email_password": "email_password", "email_imap_host": "email_imap_host", "email_imap_port": "email_imap_port", "email_smtp_host": "email_smtp_host", "email_smtp_port": "email_smtp_port", "email_poll_interval_seconds": "email_poll_interval_seconds", "send_responses": "email_send_responses", "email_skip_attachments": "email_skip_attachments", "email_mark_existing_seen_on_start": "email_mark_existing_seen_on_start"},
+}
+
+func parseChannelMutationArgs(action string, args []string) (client.Channel, map[string]string, error) {
+	if len(args) < 2 {
+		return client.Channel{}, nil, errors.New(commandUsage("channels", action))
+	}
+	ch, err := matchChannelRef(args[1])
+	if err != nil {
+		return client.Channel{}, nil, err
+	}
+	if len(args) == 2 {
+		return client.Channel{}, nil, errors.New(commandUsage("channels", action))
+	}
+	values := make(map[string]string)
+	for i := 2; i < len(args); i += 2 {
+		if i+1 >= len(args) {
+			return client.Channel{}, nil, fmt.Errorf("%s requires a value", sanitizeAutomationDetailText(args[i]))
+		}
+		field, ok := channelOptionFields[strings.ToLower(args[i])]
+		if !ok {
+			return client.Channel{}, nil, fmt.Errorf("unknown channel option %q", sanitizeAutomationDetailText(args[i]))
+		}
+		backendField, ok := channelAllowedFields[ch.Type][field]
+		if !ok {
+			return client.Channel{}, nil, fmt.Errorf("%s is not supported for %s", sanitizeAutomationDetailText(args[i]), ch.Name)
+		}
+		if _, duplicate := values[backendField]; duplicate {
+			return client.Channel{}, nil, fmt.Errorf("duplicate channel option %q", sanitizeAutomationDetailText(args[i]))
+		}
+		value := strings.TrimSpace(args[i+1])
+		if value == "" {
+			return client.Channel{}, nil, fmt.Errorf("%s cannot be empty", sanitizeAutomationDetailText(args[i]))
+		}
+		if strings.HasSuffix(backendField, "send_responses") || backendField == "telegram_rich_messages_v2" || backendField == "email_skip_attachments" || backendField == "email_mark_existing_seen_on_start" {
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return client.Channel{}, nil, fmt.Errorf("%s must be true or false", sanitizeAutomationDetailText(args[i]))
+			}
+			value = strconv.FormatBool(parsed)
+		}
+		if backendField == "github_auth_mode" && value != "pat" && value != "app" {
+			return client.Channel{}, nil, errors.New("--auth-mode must be pat or app")
+		}
+		if backendField == "slack_bot_token_mode" && value != "oauth" && value != "manual" {
+			return client.Channel{}, nil, errors.New("--bot-token-mode must be oauth or manual")
+		}
+		if backendField == "email_imap_port" || backendField == "email_smtp_port" {
+			port, err := strconv.Atoi(value)
+			if err != nil || port < 1 || port > 65535 {
+				return client.Channel{}, nil, fmt.Errorf("%s must be a port from 1 to 65535", sanitizeAutomationDetailText(args[i]))
+			}
+		}
+		if backendField == "email_poll_interval_seconds" {
+			interval, err := strconv.Atoi(value)
+			if err != nil || interval < 5 {
+				return client.Channel{}, nil, errors.New("--poll-interval must be at least 5 seconds")
+			}
+		}
+		values[backendField] = value
+	}
+	if action == "add" {
+		required := map[string][]string{
+			"telegram": {"token"}, "discord": {"discord_bot_token"},
+			"email": {"email_provider", "email_address", "email_password"},
+			"slack": {"slack_client_id", "slack_client_secret", "slack_app_token"},
+		}
+		for _, field := range required[ch.Type] {
+			if values[field] == "" {
+				return client.Channel{}, nil, fmt.Errorf("adding %s requires %s", ch.Name, strings.ReplaceAll(field, "_", "-"))
+			}
+		}
+		if ch.Type == "github" {
+			mode := values["github_auth_mode"]
+			if mode == "" {
+				mode = "pat"
+				values["github_auth_mode"] = mode
+			}
+			if mode == "pat" && values["github_pat"] == "" {
+				return client.Channel{}, nil, errors.New("adding GitHub in PAT mode requires --pat")
+			}
+			if mode == "app" && (values["github_app_id"] == "" || values["github_app_slug"] == "" || values["github_app_private_key"] == "") {
+				return client.Channel{}, nil, errors.New("adding GitHub in app mode requires --app-id, --app-slug, and --private-key")
+			}
+		}
+	}
+	return ch, values, nil
 }
 
 func validateChannelsArgs(args []string) error {
@@ -2852,44 +3173,102 @@ func validateChannelsArgs(args []string) error {
 		if len(args) == 1 {
 			return nil
 		}
-	case "test", "remove":
-		if len(args) <= 2 {
-			if len(args) == 2 {
-				_, err := matchChannelRef(args[1])
-				return err
-			}
+	case "show", "connect", "test", "remove", "disconnect":
+		if len(args) == 1 {
 			return nil
 		}
-	default:
-		action = ""
+		ch, err := matchChannelRef(strings.Join(args[1:], " "))
+		if err != nil {
+			return err
+		}
+		if action == "test" && ch.Type == "github" {
+			return errors.New("GitHub does not expose a connection test")
+		}
+		if action == "connect" && ch.Type != "github" && ch.Type != "slack" {
+			return fmt.Errorf("%s does not support browser connection", ch.Name)
+		}
+		return nil
+	case "add", "edit":
+		if len(args) == 1 {
+			return nil
+		}
+		if !cliMode && len(args) == 2 {
+			_, err := matchChannelRef(args[1])
+			return err
+		}
+		if !cliMode {
+			return errors.New("interactive channel configuration uses masked prompts; omit options")
+		}
+		_, _, err := parseChannelMutationArgs(action, args)
+		return err
 	}
-	return errors.New(commandUsage("channels", action))
+	return errors.New(commandUsage("channels", ""))
+}
+
+func renderChannels(channels []client.Channel) string {
+	if len(channels) == 0 {
+		return "No channel integrations are available."
+	}
+	var b strings.Builder
+	b.WriteString("TYPE       NAME          CONNECTION\n")
+	for _, ch := range channels {
+		status := sanitizeAutomationDetailText(ch.Status)
+		if status == "" {
+			status = "unknown"
+		}
+		metadata := ""
+		if ch.Address != "" {
+			metadata = " · " + sanitizeAutomationDetailText(ch.Address)
+		}
+		fmt.Fprintf(&b, "%-10s %-13s %s%s\n", sanitizeAutomationDetailText(ch.Type), sanitizeAutomationDetailText(ch.Name), status, metadata)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func channelSelector(action string, suffix string, allowed func(client.Channel) bool) tea.Cmd {
+	return selectorForWithSuffix("Channels", "channels "+action, "no matching channels available", suffix, func(ctx context.Context) ([]selectorItem, error) {
+		items := make([]selectorItem, 0, len(client.KnownChannels))
+		for _, ch := range client.KnownChannels {
+			if allowed == nil || allowed(ch) {
+				items = append(items, selectorItem{ref: ch.Type, label: ch.Name})
+			}
+		}
+		return items, nil
+	})
 }
 
 func channelsCommand() command {
-	actions := []string{"list", "test", "remove"}
+	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect"}
 	return command{
-		name:          "channels",
-		aliases:       []string{"integrations"},
-		args:          "[action] [channel]",
-		actions:       actions,
-		selectorPaths: [][]string{{"test"}, {"remove"}},
-		desc:          "integrations: Telegram, Slack, Discord, GitHub, email, webhooks",
+		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
+		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}},
+		completions: []commandCompletion{
+			{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
+			{after: []string{"edit", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
+			{after: []string{"add", "*", "--auth-mode"}, values: []string{"pat", "app"}},
+			{after: []string{"edit", "*", "--auth-mode"}, values: []string{"pat", "app"}},
+			{after: []string{"add", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
+			{after: []string{"edit", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
+		},
+		desc: "manage GitHub, Slack, Telegram, Discord, and Email integrations",
 		actionUsages: []commandActionUsage{
-			{action: "", args: "[list|test <channel>|remove <channel>]"},
-			{action: "list", description: "list configured integrations"},
-			{action: "test", args: "<channel>", description: "send a test message (telegram, slack, discord, email)"},
-			{action: "remove", args: "<channel>", description: "disconnect an integration (telegram, slack, discord, email)"},
+			{action: "", args: "[list|show|add|connect|edit|test|remove|disconnect]"},
+			{action: "list", description: "list safe channel identity and connection state"},
+			{action: "show", args: "<channel>", description: "show safe channel details"},
+			{action: "add", args: "<type> <options>", description: "configure a new channel"},
+			{action: "connect", args: "<github|slack>", description: "show the browser OAuth URL"},
+			{action: "edit", args: "<channel> <options>", description: "update channel settings"},
+			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, or Email"},
+			{action: "remove", args: "<channel>", description: "disconnect/remove a channel (confirmation required)"},
+			{action: "disconnect", args: "<channel>", description: "alias for remove"},
 		},
 		usage: []string{
-			"omit <channel> on test/remove → interactive selector",
-			"Note: GitHub and Slack OAuth connect/callback require a browser (known parity gap).",
+			"options: --token, --rich-messages, --auth-mode, --pat, --app-id, --app-slug, --private-key, --api-endpoint",
+			"         --client-id, --client-secret, --app-token, --bot-token-mode, --bot-token, --send-responses",
+			"         --provider, --address, --password, --imap-host, --imap-port, --smtp-host, --smtp-port, --poll-interval",
+			"Secret options are accepted headlessly but are never echoed; prefer an interactive masked terminal when available.",
 		},
-		examples: []string{
-			`channels test telegram`,
-			`channels test email`,
-			`channels remove discord`,
-		},
+		examples:     []string{"channels show slack", "channels connect slack", "channels test telegram", "channels remove discord"},
 		validateArgs: validateChannelsArgs,
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
@@ -2901,45 +3280,119 @@ func channelsCommand() command {
 			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
-			ref := strings.Join(rest, " ")
-
-			switch action {
-			case "", "list":
+			if action == "" || action == "list" {
 				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
-					return c.GetChannels(ctx, pid)
+					channels, err := c.ListChannels(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(channels)
+					}
+					return renderChannels(channels), nil
 				})
-			default:
-				if ref == "" {
-					return selectorOr(m, commandUsage("channels", action),
-						selectorFor("Channels", "channels "+action, "no channels available", false,
-							func(ctx context.Context) ([]selectorItem, error) {
-								items := make([]selectorItem, 0, len(client.KnownChannels))
-								for _, ch := range client.KnownChannels {
-									items = append(items, selectorItem{ref: ch.Type, label: ch.Name})
-								}
-								return items, nil
-							}))
+			}
+			if len(rest) == 0 {
+				suffix := ""
+				allowed := func(ch client.Channel) bool { return true }
+				if action == "connect" {
+					allowed = func(ch client.Channel) bool { return ch.Type == "github" || ch.Type == "slack" }
 				}
-				ch, err := matchChannelRef(ref)
+				if action == "test" {
+					allowed = func(ch client.Channel) bool { return ch.Type != "github" }
+				}
+				return selectorOr(m, commandUsage("channels", action), channelSelector(action, suffix, allowed))
+			}
+			if action == "add" || action == "edit" {
+				if !cliMode {
+					ch, _ := matchChannelRef(strings.Join(rest, " "))
+					if action == "add" {
+						return m.beginChannelWizard(action, ch)
+					}
+					m.busy = true
+					sessionGeneration, projectGeneration := m.sessionGeneration, m.projectGeneration
+					return m, func() tea.Msg {
+						ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+						defer cancel()
+						current, err := c.GetChannel(ctx, pid, ch.Type)
+						msg := channelWizardStartMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: pid, action: action, err: err}
+						if current != nil {
+							msg.channel = *current
+						}
+						return msg
+					}
+				}
+				ch, updates, _ := parseChannelMutationArgs(action, args)
+				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+					form := mapToValues(updates)
+					var err error
+					if action == "edit" {
+						err = c.UpdateChannel(ctx, ch.Type, pid, form)
+					} else {
+						err = c.ConfigureChannel(ctx, ch.Type, pid, form)
+					}
+					if err != nil {
+						return "", err
+					}
+					channels, err := c.ListChannels(ctx, pid)
+					status := action + "ed " + ch.Name
+					if err != nil {
+						return status, nil
+					}
+					return status + "\n\n" + renderChannels(channels), nil
+				})
+			}
+			ch, _ := matchChannelRef(strings.Join(rest, " "))
+			if action == "show" {
+				return m, run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+					current, err := c.GetChannel(ctx, pid, ch.Type)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(current)
+					}
+					return renderChannels([]client.Channel{*current}), nil
+				})
+			}
+			if action == "connect" {
+				safeURL, err := c.ChannelConnectURL(ch.Type, pid)
 				if err != nil {
 					return m, errCmd(err.Error())
 				}
-				cmd := run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
-					status := action + ": " + ch.Name
-					return actAndReloadText(status,
-						func() error { return c.ChannelAction(ctx, ch.Type, action, pid) },
-						func() (string, error) { return c.GetChannels(ctx, pid) })
+				return m, run("Channels", cmdTimeout, func(context.Context) (string, error) {
+					return "Open this URL in a browser to connect " + ch.Name + ":\n" + safeURL, nil
 				})
-				if action == "remove" {
-					return confirmOr(m,
-						fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name),
-						fmt.Sprintf("use --force to confirm removal of channel %q", ch.Name),
-						cmd)
-				}
-				return m, cmd
 			}
+			backendAction := action
+			if backendAction == "disconnect" {
+				backendAction = "remove"
+			}
+			runAction := run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+				if err := c.ChannelAction(ctx, ch.Type, backendAction, pid); err != nil {
+					return "", err
+				}
+				channels, err := c.ListChannels(ctx, pid)
+				status := backendAction + ": " + ch.Name
+				if err != nil {
+					return status, nil
+				}
+				return status + "\n\n" + renderChannels(channels), nil
+			})
+			if backendAction == "remove" {
+				return confirmOr(m, fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name), fmt.Sprintf("use --force to confirm removal of channel %q", ch.Name), runAction)
+			}
+			return m, runAction
 		},
 	}
+}
+
+func mapToValues(values map[string]string) url.Values {
+	form := make(url.Values)
+	for key, value := range values {
+		form.Set(key, value)
+	}
+	return form
 }
 
 // webhookActionJSON is the stable machine-readable acknowledgement for delete.
