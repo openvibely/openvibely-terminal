@@ -6144,6 +6144,9 @@ func TestChannelAddConditionalValidation(t *testing.T) {
 		{name: "github pat", args: []string{"add", "github", "--auth-mode", "pat"}, want: "requires --pat"},
 		{name: "github app", args: []string{"add", "github", "--auth-mode", "app", "--app-id", "1"}, want: "requires --app-id, --app-slug, and --private-key"},
 		{name: "slack manual", args: []string{"add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"}, want: "requires --bot-token"},
+		{name: "x credentials", args: []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "secret"}, want: "requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret"},
+		{name: "x poll interval low", args: []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "secret", "--access-token", "token", "--access-token-secret", "token-secret", "--poll-interval", "14"}, want: "--poll-interval must be between 15 and 300 seconds"},
+		{name: "x poll interval high", args: []string{"edit", "x", "--poll-interval", "301"}, want: "--poll-interval must be between 15 and 300 seconds"},
 		{name: "unknown email provider", args: []string{"add", "email", "--provider", "other", "--address", "a@example.com", "--password", "secret"}, want: "provider must be one of"},
 		{name: "custom email hosts", args: []string{"add", "email", "--provider", "custom", "--address", "a@example.com", "--password", "secret"}, want: "custom Email requires --imap-host and --smtp-host"},
 	}
@@ -6157,6 +6160,23 @@ func TestChannelAddConditionalValidation(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestChannelXMutationArgsUseBackendFieldsAndDefaults(t *testing.T) {
+	ch, values, err := parseChannelMutationArgs("add", []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "consumer", "--access-token", "token", "--access-token-secret", "access"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.Type != "x" {
+		t.Fatalf("channel = %#v", ch)
+	}
+	want := map[string]string{
+		"x_consumer_key": "key", "x_consumer_secret": "consumer", "x_access_token": "token", "x_access_token_secret": "access",
+		"x_poll_interval_seconds": "30", "x_send_responses": "true",
+	}
+	if !reflect.DeepEqual(values, want) {
+		t.Fatalf("X values = %#v, want %#v", values, want)
 	}
 }
 
@@ -6209,7 +6229,7 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 	}
 }
 
-const structuredChannelsPage = `<div data-channel-type="github" data-search-text="GitHub Connected"></div><div data-channel-type="slack" data-search-text="Slack Configured"></div><div data-channel-type="telegram" data-channel-running="true" data-search-text="Telegram Bot Connected"></div><div data-channel-type="discord" data-search-text="Discord Not configured"></div><div data-channel-type="email" data-search-text="Email Running"><input name="email_address" value="bot@example.com"></div>`
+const structuredChannelsPage = `<div data-channel-type="github" data-search-text="GitHub Connected"></div><div data-channel-type="slack" data-search-text="Slack Configured"></div><div data-channel-type="telegram" data-channel-running="true" data-search-text="Telegram Bot Connected"></div><div data-channel-type="discord" data-search-text="Discord Not configured"></div><div data-channel-type="x" data-search-text="X formerly Twitter mentions posts"><span class="badge badge-success">Connected</span></div><div data-channel-type="email" data-search-text="Email Running"><input name="email_address" value="bot@example.com"></div><form action="/channels/x/configure"><input name="x_poll_interval_seconds" value="30"><input type="checkbox" name="x_send_responses" checked></form>`
 
 func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
 	const channelsPage = structuredChannelsPage
@@ -6343,6 +6363,21 @@ func TestChannelsInteractiveSetupEnforcesConditionalRequirements(t *testing.T) {
 		}
 	})
 
+	t.Run("x poll interval", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels add x")
+		for _, value := range []string{"consumer-key", "consumer-secret", "access-token", "access-token-secret"} {
+			m = runLine(t, m, value)
+		}
+		m = runLine(t, m, "14")
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "x_poll_interval_seconds" || !strings.Contains(transcript(m), "between 15 and 300 seconds") {
+			t.Fatalf("X poll interval requirement not enforced: %s", transcript(m))
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("invalid wizard mutated backend: %s", calls)
+		}
+	})
+
 	t.Run("email provider", func(t *testing.T) {
 		m, rec := dispatchModel(t, nil)
 		m = runLine(t, m, "/channels add email")
@@ -6398,6 +6433,26 @@ func TestChannelsInteractiveSecretOptionsAreRedactedFromTranscriptAndHistory(t *
 	}
 }
 
+func TestChannelsInteractiveXSecretOptionsAreRedactedFromTranscriptAndHistory(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	secrets := []string{"x-consumer-key-secret", "x-consumer-secret", "x-access-token", "x-access-token-secret"}
+	line := `/channels add x --consumer-key "` + secrets[0] + `" --consumer-secret "` + secrets[1] + `" --access-token "` + secrets[2] + `" --access-token-secret "` + secrets[3] + `"`
+	m = runLine(t, m, line)
+	for _, secret := range secrets {
+		if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+			t.Fatalf("X credential %q appeared in interactive output", secret)
+		}
+		for _, item := range m.history {
+			if strings.Contains(item, secret) {
+				t.Fatalf("X credential %q appeared in history", secret)
+			}
+		}
+	}
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("interactive options should not bypass masked prompts:\n%s", calls)
+	}
+}
+
 func TestChannelsInteractiveSetupMasksSecretsForEveryTypeAndCancelsCleanly(t *testing.T) {
 	tests := []struct {
 		channel string
@@ -6407,6 +6462,7 @@ func TestChannelsInteractiveSetupMasksSecretsForEveryTypeAndCancelsCleanly(t *te
 		{"github", []string{""}},
 		{"slack", []string{"client-id"}},
 		{"discord", nil},
+		{"x", nil},
 		{"email", []string{"", "bot@example.com"}},
 	}
 	for _, tt := range tests {
@@ -6451,6 +6507,7 @@ func TestChannelsInteractiveSetupCompletesEverySupportedType(t *testing.T) {
 		{channel: "github", values: []string{"pat", "github-secret", "", "", "", "https://api.github.com"}, path: "/channels/github/configure"},
 		{channel: "slack", values: []string{"client", "client-secret", "app-secret", "oauth", "", "true"}, path: "/channels/slack/configure"},
 		{channel: "discord", values: []string{"discord-secret", "true"}, path: "/channels/discord/configure"},
+		{channel: "x", values: []string{"consumer-key", "consumer-secret", "access-token", "access-token-secret", "30", "true"}, path: "/channels/x/configure"},
 		{channel: "email", values: []string{"gmail", "bot@example.com", "email-secret", "", "", "", "", "15", "true", "false", "true"}, path: "/channels/email/configure"},
 	}
 	for _, tt := range tests {
@@ -6513,6 +6570,8 @@ func TestChannelsTestAndRemove(t *testing.T) {
 		{"remove", "slack", "/channels/slack/disconnect"},
 		{"test", "discord", "/channels/discord/test"},
 		{"remove", "discord", "/channels/discord/remove"},
+		{"test", "x", "/channels/x/test"},
+		{"remove", "x", "/channels/x/remove"},
 		{"test", "email", "/channels/email/test"},
 		{"remove", "email", "/channels/email/remove"},
 	}
@@ -6814,6 +6873,15 @@ func TestChannelsMissingArgOpensSelector(t *testing.T) {
 			}
 			if len(m.selectorItems) != wantItems {
 				t.Errorf("selector items = %d, want %d", len(m.selectorItems), wantItems)
+			}
+			if action != "connect" && action != "disconnect" {
+				foundX := false
+				for _, item := range m.selectorItems {
+					foundX = foundX || item.ref == "x"
+				}
+				if !foundX {
+					t.Errorf("%s selector omitted X: %#v", action, m.selectorItems)
+				}
 			}
 			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 			m = next.(Model)

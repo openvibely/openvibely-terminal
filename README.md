@@ -274,7 +274,8 @@ before deletion. `attach` and `attachment` are aliases for `attachments`.
 ### Channels and integrations
 
 `/channels` provides structured, secret-free management for GitHub, Slack,
-Telegram, Discord, and Email in the selected project. The list shows only
+Telegram, Discord, X (formerly Twitter), and Email in the selected project. The
+list shows only
 identity, type, connection state, and safe metadata; browser buttons and raw
 backend page text are never printed.
 
@@ -289,7 +290,7 @@ to open the searchable selector:
 /channels add telegram
 /channels edit email
 /channels connect slack
-/channels test telegram
+/channels test x
 /channels remove discord
 ```
 
@@ -299,6 +300,8 @@ values. Examples:
 ```bash
 openvibely-tui -project demo channels add telegram --token "$TELEGRAM_BOT_TOKEN"
 openvibely-tui -project demo channels add github --auth-mode pat --pat "$GITHUB_TOKEN"
+openvibely-tui -project demo channels add x --consumer-key "$X_CONSUMER_KEY" --consumer-secret "$X_CONSUMER_SECRET" --access-token "$X_ACCESS_TOKEN" --access-token-secret "$X_ACCESS_TOKEN_SECRET"
+openvibely-tui -project demo channels edit x --poll-interval 45 --send-responses true
 openvibely-tui -project demo channels edit discord --send-responses false
 openvibely-tui -project demo channels connect slack
 openvibely-tui -project demo channels test telegram
@@ -307,7 +310,9 @@ openvibely-tui -project demo --force channels remove discord
 
 Use `help channels` for integration-specific options. Email providers are
 `gmail`, `outlook`, `yahoo`, `fastmail`, `icloud`, and `custom`; custom Email
-requires IMAP and SMTP hosts. GitHub does not expose a test route. GitHub and
+requires IMAP and SMTP hosts. X requires consumer key, consumer secret, access
+token, and access token secret; its poll interval is 15 to 300 seconds. GitHub
+does not expose a test route. GitHub and
 Slack `connect` print a project-scoped local backend URL to open in a browser
 for OAuth, without exposing OAuth state. Their `disconnect` action ends the
 OAuth connection without deleting configuration. Interactive removal requires
@@ -491,7 +496,7 @@ $ openvibely-tui help channels
   channels add <type> <options>              configure a new channel
   channels connect <github|slack>            show the browser OAuth URL
   channels edit <channel> <options>          update channel settings
-  channels test <channel>                    test Slack, Telegram, Discord, or Email
+  channels test <channel>                    test Slack, Telegram, Discord, X, or Email
   channels remove <channel>                  remove configuration; Slack disconnects safely (confirmation required)
   channels disconnect <github|slack>         disconnect OAuth without removing configuration
 ```

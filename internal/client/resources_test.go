@@ -2192,12 +2192,14 @@ func TestListChannelsReturnsStructuredSecretFreeRecords(t *testing.T) {
 		<div data-channel-type="slack" data-search-text="Slack Configured"><h3>Slack</h3><button>Delete</button></div>
 		<div data-channel-type="telegram" data-channel-token="`+secret+`" data-channel-running="true" data-search-text="Telegram Bot Connected"><button>Test Connection</button></div>
 		<div data-channel-type="discord" data-search-text="Discord Not configured"></div>
-		<div data-channel-type="email" data-search-text="Email bot@example.com"><input name="email_address" value="bot@example.com"><input name="email_password" value="mail-secret"></div>`)
+		<div data-channel-type="x" data-search-text="X formerly Twitter mentions posts"><span class="badge badge-success">Connected</span><span class="badge badge-ghost">@safe_user</span><p class="text-warning">not configured x-secret-backend-status</p></div>
+		<div data-channel-type="email" data-search-text="Email bot@example.com"><input name="email_address" value="bot@example.com"><input name="email_password" value="mail-secret"></div>
+		<form action="/channels/x/configure"><input name="x_consumer_key" value="x-secret-key"><input name="x_consumer_secret" value="x-secret-consumer"><input name="x_access_token" value="x-secret-token"><input name="x_access_token_secret" value="x-secret-access"><input name="x_poll_interval_seconds" value="30"><input type="checkbox" name="x_send_responses" checked></form>`)
 	channels, err := c.ListChannels(context.Background(), "p1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(channels) != 5 {
+	if len(channels) != 6 {
 		t.Fatalf("channels = %#v", channels)
 	}
 	if channels[0].Type != "github" || channels[0].Name != "GitHub" || !channels[0].Connected {
@@ -2209,13 +2211,39 @@ func TestListChannelsReturnsStructuredSecretFreeRecords(t *testing.T) {
 	if channels[3].Type != "discord" || channels[3].Configured || channels[3].Status != "not configured" {
 		t.Fatalf("discord = %#v", channels[3])
 	}
+	if channels[4].Type != "x" || channels[4].Name != "X (formerly Twitter)" || !channels[4].Connected || channels[4].Status != "connected" {
+		t.Fatalf("x = %#v", channels[4])
+	}
+	if got := channels[4].EditableSettings(); got.Get("x_poll_interval_seconds") != "30" || got.Get("x_send_responses") != "true" {
+		t.Fatalf("x editable settings = %v", got)
+	}
 	encoded, err := json.Marshal(channels)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{secret, "mail-secret", "Edit", "Delete", "Test Connection", "token", "password"} {
+	for _, forbidden := range []string{secret, "mail-secret", "x-secret-key", "x-secret-consumer", "x-secret-token", "x-secret-access", "x-secret-backend-status", "Edit", "Delete", "Test Connection", "token", "password"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("structured channels disclosed %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestListChannelsParsesXSemanticStatusWithoutBackendText(t *testing.T) {
+	for _, tt := range []struct {
+		badge string
+		want  string
+	}{
+		{`<span class="badge badge-success">Connected</span>`, "connected"},
+		{`<span class="badge badge-warning">Configured, polling offline</span>`, "configured, offline"},
+		{`<span class="badge badge-ghost">Not configured</span>`, "not configured"},
+	} {
+		c := htmlServer(t, `<div data-channel-type="x" data-search-text="X formerly Twitter mentions posts">`+tt.badge+`<p class="text-warning">Connected not configured unsafe error</p></div><form><input name="x_poll_interval_seconds" value="30"></form>`)
+		channels, err := c.ListChannels(context.Background(), "p1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(channels) != 1 || channels[0].Status != tt.want {
+			t.Fatalf("X channels = %#v, want status %q", channels, tt.want)
 		}
 	}
 }
@@ -2274,6 +2302,30 @@ func TestChannelActionDisconnectSupportAndRoutes(t *testing.T) {
 	}
 	if got := strings.Join(paths, "\n"); got != "/channels/github/disconnect\n/channels/slack/disconnect" {
 		t.Fatalf("disconnect paths = %q", got)
+	}
+}
+
+func TestChannelActionXTestAndRemoveRoutes(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path+"?"+r.URL.RawQuery)
+		if strings.HasSuffix(r.URL.Path, "/test") {
+			_, _ = io.WriteString(w, `<div class="text-success">X connection successful</div>`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	if err := c.ChannelAction(context.Background(), "x", "test", "project x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ChannelAction(context.Background(), "x", "remove", "project x"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(paths, "\n"); got != "/channels/x/test?project_id=project+x\n/channels/x/remove?project_id=project+x" {
+		t.Fatalf("X action paths = %q", got)
 	}
 }
 
@@ -2339,6 +2391,36 @@ func TestUpdateChannelPreservesAuthoritativeSecretsWithoutExposingThem(t *testin
 	}
 }
 
+func TestUpdateXChannelPreservesCredentialsAtBackendAndSafeSettings(t *testing.T) {
+	const secret = "x-credential-that-must-not-be-scraped"
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `<div data-channel-type="x" data-search-text="X formerly Twitter mentions posts"><span class="badge badge-success">Connected</span></div><form action="/channels/x/configure"><input name="x_consumer_key" value="`+secret+`"><input name="x_consumer_secret" value="`+secret+`"><input name="x_access_token" value="`+secret+`"><input name="x_access_token_secret" value="`+secret+`"><input name="x_poll_interval_seconds" value="30"><input type="checkbox" name="x_send_responses" checked></form>`)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		posted = r.PostForm
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	if err := c.UpdateChannel(context.Background(), "x", "p1", url.Values{"x_poll_interval_seconds": {"45"}}); err != nil {
+		t.Fatal(err)
+	}
+	if posted.Get("x_poll_interval_seconds") != "45" || posted.Get("x_send_responses") != "true" {
+		t.Fatalf("posted X settings = %v", posted)
+	}
+	for _, field := range []string{"x_consumer_key", "x_consumer_secret", "x_access_token", "x_access_token_secret"} {
+		if posted.Get(field) != "" {
+			t.Fatalf("posted scraped X credential %s", field)
+		}
+	}
+}
+
 func TestChannelMutationErrorsDoNotExposeBackendOrSubmittedSecrets(t *testing.T) {
 	const secret = "submitted-channel-secret"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2368,6 +2450,7 @@ func TestConfigureChannelRoutesAndProjectScope(t *testing.T) {
 		{"github", "/channels/github/configure"},
 		{"slack", "/channels/slack/configure"},
 		{"discord", "/channels/discord/configure"},
+		{"x", "/channels/x/configure"},
 		{"email", "/channels/email/configure"},
 	}
 	for _, tt := range tests {

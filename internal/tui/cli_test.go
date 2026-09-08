@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"slices"
 	"strings"
@@ -2785,6 +2786,7 @@ func TestCLIChannelsConfigureEverySupportedTypeWithoutEchoingSecrets(t *testing.
 		{"github", []string{"channels", "add", "github", "--auth-mode", "pat", "--pat", "secret-github"}, "/channels/github/configure"},
 		{"slack", []string{"channels", "add", "slack", "--client-id", "client", "--client-secret", "secret-slack", "--app-token", "secret-app"}, "/channels/slack/configure"},
 		{"discord", []string{"channels", "add", "discord", "--bot-token", "secret-discord"}, "/channels/discord/configure"},
+		{"x", []string{"channels", "add", "x", "--consumer-key", "secret-x-key", "--consumer-secret", "secret-x-consumer", "--access-token", "secret-x-token", "--access-token-secret", "secret-x-access"}, "/channels/x/configure"},
 		{"email", []string{"channels", "add", "email", "--provider", "gmail", "--address", "bot@example.com", "--password", "secret-email"}, "/channels/email/configure"},
 	}
 	for _, tt := range tests {
@@ -2804,6 +2806,47 @@ func TestCLIChannelsConfigureEverySupportedTypeWithoutEchoingSecrets(t *testing.
 	}
 }
 
+func TestCLIChannelsEditXPreservesSafeSettingsAndNeverEchoesCredentials(t *testing.T) {
+	const storedSecret = "stored-x-secret"
+	const rotatedSecret = "rotated-x-secret"
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels":
+			_, _ = io.WriteString(w, `<div data-channel-type="x" data-search-text="X formerly Twitter mentions posts"><span class="badge badge-success">Connected</span></div><form><input name="x_consumer_key" value="`+storedSecret+`"><input name="x_poll_interval_seconds" value="30"><input type="checkbox" name="x_send_responses" checked></form>`)
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/x/configure":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			posted = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "edit", "x", "--access-token", rotatedSecret, "--poll-interval", "45"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if posted.Get("x_access_token") != rotatedSecret || posted.Get("x_poll_interval_seconds") != "45" || posted.Get("x_send_responses") != "true" {
+		t.Fatalf("posted X edit = %v", posted)
+	}
+	if posted.Get("x_consumer_key") != "" {
+		t.Fatalf("scraped X credential was reposted: %v", posted)
+	}
+	if strings.Contains(out.String(), storedSecret) || strings.Contains(out.String(), rotatedSecret) {
+		t.Fatalf("X edit exposed credentials: %s", out.String())
+	}
+}
+
 func TestCLIChannelsValidationPrecedesRequests(t *testing.T) {
 	cases := [][]string{
 		{"channels", "add", "telegram", "--token", ""},
@@ -2812,6 +2855,8 @@ func TestCLIChannelsValidationPrecedesRequests(t *testing.T) {
 		{"channels", "edit", "github", "--auth-mode", "oauth"},
 		{"channels", "add", "github", "--auth-mode", "pat"},
 		{"channels", "add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"},
+		{"channels", "add", "x", "--consumer-key", "key"},
+		{"channels", "edit", "x", "--poll-interval", "301"},
 		{"channels", "add", "email", "--provider", "unknown", "--address", "a@example.com", "--password", "secret"},
 		{"channels", "add", "email", "--provider", "custom", "--address", "a@example.com", "--password", "secret"},
 		{"channels", "test", "github"},

@@ -2964,15 +2964,33 @@ func validateChannelConfiguration(action, channelType string, values map[string]
 	if provider := values["email_provider"]; provider != "" && !validChannelEmailProvider(provider) {
 		return errors.New("--provider must be one of gmail, outlook, yahoo, fastmail, icloud, custom")
 	}
+	if interval := values["x_poll_interval_seconds"]; interval != "" {
+		seconds, err := strconv.Atoi(interval)
+		if err != nil || seconds < 15 || seconds > 300 {
+			return errors.New("--poll-interval must be between 15 and 300 seconds")
+		}
+	}
 	if action != "add" {
 		return nil
 	}
+	if channelType == "x" {
+		if values["x_poll_interval_seconds"] == "" {
+			values["x_poll_interval_seconds"] = "30"
+		}
+		if values["x_send_responses"] == "" {
+			values["x_send_responses"] = "true"
+		}
+	}
 	required := map[string][]string{
 		"telegram": {"token"}, "discord": {"discord_bot_token"},
+		"x":     {"x_consumer_key", "x_consumer_secret", "x_access_token", "x_access_token_secret"},
 		"email": {"email_provider", "email_address", "email_password"},
 		"slack": {"slack_client_id", "slack_client_secret", "slack_app_token"},
 	}
 	channel, _ := knownChannelForValidation(channelType)
+	if channelType == "x" && (values["x_consumer_key"] == "" || values["x_consumer_secret"] == "" || values["x_access_token"] == "" || values["x_access_token_secret"] == "") {
+		return errors.New("adding X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret")
+	}
 	for _, field := range required[channelType] {
 		if values[field] == "" {
 			return fmt.Errorf("adding %s requires %s", channel.Name, strings.ReplaceAll(field, "_", "-"))
@@ -3051,6 +3069,8 @@ func channelWizardSteps(action, channelType string) []channelWizardStep {
 		return []channelWizardStep{{"slack_client_id", "Slack client ID", false, required, "required for new Slack setup"}, {"slack_client_secret", "Slack client secret", true, required, "blank keeps the existing secret"}, {"slack_app_token", "Slack app-level token", true, required, "xapp-..."}, {"slack_bot_token_mode", "Bot token mode (oauth/manual)", false, false, "oauth"}, {"slack_bot_token", "Manual bot token (optional)", true, false, "xoxb-...; blank keeps existing"}, {"slack_send_responses", "Send task responses (true/false)", false, false, "true"}}
 	case "discord":
 		return []channelWizardStep{{"discord_bot_token", "Discord bot token", true, required, "blank keeps the existing token"}, {"discord_send_responses", "Send task responses (true/false)", false, false, "true"}}
+	case "x":
+		return []channelWizardStep{{"x_consumer_key", "X consumer key", true, required, "blank preserves the existing key"}, {"x_consumer_secret", "X consumer secret", true, required, "blank preserves the existing secret"}, {"x_access_token", "X access token", true, required, "blank preserves the existing token"}, {"x_access_token_secret", "X access token secret", true, required, "blank preserves the existing token secret"}, {"x_poll_interval_seconds", "Poll interval seconds (15-300)", false, false, "30"}, {"x_send_responses", "Post assistant responses (true/false)", false, false, "true"}}
 	case "email":
 		return []channelWizardStep{{"email_provider", "Email provider (gmail/outlook/yahoo/fastmail/icloud/custom)", false, required, "gmail"}, {"email_address", "Email address", false, required, "bot@example.com"}, {"email_password", "Email app password", true, required, "blank keeps the existing password"}, {"email_imap_host", "IMAP host (custom provider)", false, false, "blank for provider default"}, {"email_imap_port", "IMAP port (custom provider)", false, false, "993"}, {"email_smtp_host", "SMTP host (custom provider)", false, false, "blank for provider default"}, {"email_smtp_port", "SMTP port (custom provider)", false, false, "587"}, {"email_poll_interval_seconds", "Poll interval seconds", false, false, "15"}, {"email_send_responses", "Send responses (true/false)", false, false, "true"}, {"email_skip_attachments", "Skip attachments (true/false)", false, false, "false"}, {"email_mark_existing_seen_on_start", "Mark existing messages seen (true/false)", false, false, "true"}}
 	}
@@ -3058,7 +3078,7 @@ func channelWizardSteps(action, channelType string) []channelWizardStep {
 }
 
 func channelWizardSecretField(field string) bool {
-	return strings.Contains(field, "token") || strings.Contains(field, "secret") || strings.Contains(field, "password") || strings.Contains(field, "private_key")
+	return field == "x_consumer_key" || strings.Contains(field, "token") || strings.Contains(field, "secret") || strings.Contains(field, "password") || strings.Contains(field, "private_key")
 }
 
 func redactChannelCommandSecrets(commandLine string) string {
@@ -3066,7 +3086,7 @@ func redactChannelCommandSecrets(commandLine string) string {
 	if err != nil || len(tokens) < 2 {
 		lower := strings.ToLower(commandLine)
 		if strings.Contains(lower, "/channels ") || strings.Contains(lower, "/integrations ") {
-			for _, option := range []string{"--token", "--pat", "--private-key", "--client-secret", "--app-token", "--bot-token", "--password"} {
+			for _, option := range []string{"--token", "--pat", "--private-key", "--client-secret", "--app-token", "--bot-token", "--password", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret"} {
 				if strings.Contains(lower, option) {
 					return "/channels <redacted sensitive options>"
 				}
@@ -3078,7 +3098,7 @@ func redactChannelCommandSecrets(commandLine string) string {
 	if (root != "channels" && root != "integrations") || (tokens[1].value != "add" && tokens[1].value != "edit") {
 		return commandLine
 	}
-	secretOptions := map[string]bool{"--token": true, "--pat": true, "--private-key": true, "--client-secret": true, "--app-token": true, "--bot-token": true, "--password": true}
+	secretOptions := map[string]bool{"--token": true, "--pat": true, "--private-key": true, "--client-secret": true, "--app-token": true, "--bot-token": true, "--password": true, "--consumer-key": true, "--consumer-secret": true, "--access-token": true, "--access-token-secret": true}
 	parts := make([]string, 0, len(tokens))
 	for i := 0; i < len(tokens); i++ {
 		parts = append(parts, tokens[i].value)
@@ -3095,7 +3115,7 @@ func (m Model) beginChannelWizard(action string, channel client.Channel) (Model,
 	if action == "add" {
 		form = make(url.Values)
 	}
-	defaults := map[string]string{"telegram_rich_messages_v2": "true", "github_auth_mode": "pat", "slack_bot_token_mode": "oauth", "slack_send_responses": "true", "discord_send_responses": "true", "email_provider": "gmail", "email_imap_port": "993", "email_smtp_port": "587", "email_poll_interval_seconds": "15", "email_send_responses": "true", "email_skip_attachments": "false", "email_mark_existing_seen_on_start": "true"}
+	defaults := map[string]string{"telegram_rich_messages_v2": "true", "github_auth_mode": "pat", "slack_bot_token_mode": "oauth", "slack_send_responses": "true", "discord_send_responses": "true", "x_poll_interval_seconds": "30", "x_send_responses": "true", "email_provider": "gmail", "email_imap_port": "993", "email_smtp_port": "587", "email_poll_interval_seconds": "15", "email_send_responses": "true", "email_skip_attachments": "false", "email_mark_existing_seen_on_start": "true"}
 	for key, value := range defaults {
 		if form.Get(key) == "" {
 			form.Set(key, value)
@@ -3156,6 +3176,12 @@ func validateChannelWizardValue(step channelWizardStep, value string) error {
 		port, err := strconv.Atoi(value)
 		if err != nil || port < 1 || port > 65535 {
 			return errors.New("port must be from 1 to 65535")
+		}
+	}
+	if step.field == "x_poll_interval_seconds" {
+		interval, err := strconv.Atoi(value)
+		if err != nil || interval < 15 || interval > 300 {
+			return errors.New("poll interval must be between 15 and 300 seconds")
 		}
 	}
 	if step.field == "email_poll_interval_seconds" {
@@ -3256,9 +3282,10 @@ var channelOptionFields = map[string]string{
 	"--app-slug": "github_app_slug", "--private-key": "github_app_private_key", "--api-endpoint": "github_api_endpoint",
 	"--client-id": "slack_client_id", "--client-secret": "slack_client_secret", "--app-token": "slack_app_token",
 	"--bot-token-mode": "slack_bot_token_mode", "--bot-token": "bot_token",
+	"--consumer-key": "x_consumer_key", "--consumer-secret": "x_consumer_secret", "--access-token": "x_access_token", "--access-token-secret": "x_access_token_secret",
 	"--send-responses": "send_responses", "--provider": "email_provider", "--address": "email_address",
 	"--password": "email_password", "--imap-host": "email_imap_host", "--imap-port": "email_imap_port",
-	"--smtp-host": "email_smtp_host", "--smtp-port": "email_smtp_port", "--poll-interval": "email_poll_interval_seconds",
+	"--smtp-host": "email_smtp_host", "--smtp-port": "email_smtp_port", "--poll-interval": "poll_interval_seconds",
 	"--skip-attachments": "email_skip_attachments", "--mark-existing-seen": "email_mark_existing_seen_on_start",
 }
 
@@ -3267,7 +3294,8 @@ var channelAllowedFields = map[string]map[string]string{
 	"github":   {"github_auth_mode": "github_auth_mode", "github_pat": "github_pat", "github_app_id": "github_app_id", "github_app_slug": "github_app_slug", "github_app_private_key": "github_app_private_key", "github_api_endpoint": "github_api_endpoint"},
 	"slack":    {"slack_client_id": "slack_client_id", "slack_client_secret": "slack_client_secret", "slack_app_token": "slack_app_token", "slack_bot_token_mode": "slack_bot_token_mode", "bot_token": "slack_bot_token", "send_responses": "slack_send_responses"},
 	"discord":  {"bot_token": "discord_bot_token", "send_responses": "discord_send_responses"},
-	"email":    {"email_provider": "email_provider", "email_address": "email_address", "email_password": "email_password", "email_imap_host": "email_imap_host", "email_imap_port": "email_imap_port", "email_smtp_host": "email_smtp_host", "email_smtp_port": "email_smtp_port", "email_poll_interval_seconds": "email_poll_interval_seconds", "send_responses": "email_send_responses", "email_skip_attachments": "email_skip_attachments", "email_mark_existing_seen_on_start": "email_mark_existing_seen_on_start"},
+	"x":        {"x_consumer_key": "x_consumer_key", "x_consumer_secret": "x_consumer_secret", "x_access_token": "x_access_token", "x_access_token_secret": "x_access_token_secret", "poll_interval_seconds": "x_poll_interval_seconds", "send_responses": "x_send_responses"},
+	"email":    {"email_provider": "email_provider", "email_address": "email_address", "email_password": "email_password", "email_imap_host": "email_imap_host", "email_imap_port": "email_imap_port", "email_smtp_host": "email_smtp_host", "email_smtp_port": "email_smtp_port", "poll_interval_seconds": "email_poll_interval_seconds", "send_responses": "email_send_responses", "email_skip_attachments": "email_skip_attachments", "email_mark_existing_seen_on_start": "email_mark_existing_seen_on_start"},
 }
 
 func parseChannelMutationArgs(action string, args []string) (client.Channel, map[string]string, error) {
@@ -3321,6 +3349,12 @@ func parseChannelMutationArgs(action string, args []string) (client.Channel, map
 			port, err := strconv.Atoi(value)
 			if err != nil || port < 1 || port > 65535 {
 				return client.Channel{}, nil, fmt.Errorf("%s must be a port from 1 to 65535", sanitizeAutomationDetailText(args[i]))
+			}
+		}
+		if backendField == "x_poll_interval_seconds" {
+			interval, err := strconv.Atoi(value)
+			if err != nil || interval < 15 || interval > 300 {
+				return client.Channel{}, nil, errors.New("--poll-interval must be between 15 and 300 seconds")
 			}
 		}
 		if backendField == "email_poll_interval_seconds" {
@@ -3420,8 +3454,8 @@ func channelsCommand() command {
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
 		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}},
 		completions: []commandCompletion{
-			{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
-			{after: []string{"edit", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
+			{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
+			{after: []string{"edit", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
 			{after: []string{"add", "*", "--auth-mode"}, values: []string{"pat", "app"}},
 			{after: []string{"edit", "*", "--auth-mode"}, values: []string{"pat", "app"}},
 			{after: []string{"add", "*", "--provider"}, values: channelEmailProviders},
@@ -3429,7 +3463,7 @@ func channelsCommand() command {
 			{after: []string{"add", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
 			{after: []string{"edit", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
 		},
-		desc: "manage GitHub, Slack, Telegram, Discord, and Email integrations",
+		desc: "manage GitHub, Slack, Telegram, Discord, X, and Email integrations",
 		actionUsages: []commandActionUsage{
 			{action: "", args: "[list|show|add|connect|edit|test|remove|disconnect]"},
 			{action: "list", description: "list safe channel identity and connection state"},
@@ -3437,21 +3471,23 @@ func channelsCommand() command {
 			{action: "add", args: "<type> <options>", description: "configure a new channel"},
 			{action: "connect", args: "<github|slack>", description: "show the browser OAuth URL"},
 			{action: "edit", args: "<channel> <options>", description: "update channel settings"},
-			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, or Email"},
+			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, X, or Email"},
 			{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
 			{action: "disconnect", args: "<github|slack>", description: "disconnect OAuth without removing configuration"},
 		},
 		usage: []string{
 			"options: --token, --rich-messages, --auth-mode, --pat, --app-id, --app-slug, --private-key, --api-endpoint",
 			"         --client-id, --client-secret, --app-token, --bot-token-mode, --bot-token, --send-responses",
-			"         --provider, --address, --password, --imap-host, --imap-port, --smtp-host, --smtp-port, --poll-interval",
+			"         --consumer-key, --consumer-secret, --access-token, --access-token-secret, --poll-interval",
+			"         --provider, --address, --password, --imap-host, --imap-port, --smtp-host, --smtp-port",
 			"         --skip-attachments, --mark-existing-seen",
 			"Email providers: gmail, outlook, yahoo, fastmail, icloud, custom; custom requires IMAP and SMTP hosts.",
 			"GitHub PAT mode requires --pat; app mode requires --app-id, --app-slug, and --private-key.",
 			"Slack requires client ID, client secret, and app token; manual mode requires --bot-token.",
+			"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret; X poll interval must be 15 to 300 seconds.",
 			"Secret options are accepted headlessly but are never echoed; prefer an interactive masked terminal when available.",
 		},
-		examples:     []string{"channels show slack", "channels connect slack", "channels test telegram", "channels remove discord"},
+		examples:     []string{"channels show slack", "channels add x --consumer-key <key> --consumer-secret <secret> --access-token <token> --access-token-secret <secret>", "channels connect slack", "channels test x", "channels remove discord"},
 		validateArgs: validateChannelsArgs,
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()

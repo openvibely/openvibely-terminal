@@ -923,6 +923,8 @@ func TestChannelsCompletionDocumentsManagementOptions(t *testing.T) {
 		{[]string{"edit", "email"}, "--provider"},
 		{[]string{"add", "github", "--auth-mode"}, "pat"},
 		{[]string{"edit", "slack", "--bot-token-mode"}, "manual"},
+		{[]string{"add", "x"}, "--consumer-key"},
+		{[]string{"edit", "x"}, "--access-token-secret"},
 		{[]string{"add", "email", "--provider"}, "yahoo"},
 		{[]string{"edit", "email", "--provider"}, "icloud"},
 		{[]string{"add", "email"}, "--skip-attachments"},
@@ -958,6 +960,8 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		"--mark-existing-seen",
 		"gmail, outlook, yahoo, fastmail, icloud, custom",
 		"manual mode requires --bot-token",
+		"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret",
+		"X poll interval must be 15 to 300 seconds",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("channels help missing %q:\n%s", want, help)

@@ -1111,6 +1111,7 @@ var KnownChannels = []Channel{
 	{Type: "slack", Name: "Slack"},
 	{Type: "telegram", Name: "Telegram Bot"},
 	{Type: "discord", Name: "Discord"},
+	{Type: "x", Name: "X (formerly Twitter)"},
 	{Type: "email", Name: "Email"},
 }
 
@@ -1159,12 +1160,13 @@ var channelFormFields = map[string][]string{
 	"slack":    {"slack_client_id", "slack_client_secret", "slack_app_token", "slack_bot_token_mode", "slack_bot_token", "slack_send_responses"},
 	"telegram": {"telegram_rich_messages_v2"},
 	"discord":  {"discord_bot_token", "discord_send_responses"},
+	"x":        {"x_poll_interval_seconds", "x_send_responses"},
 	"email":    {"email_provider", "email_address", "email_password", "email_imap_host", "email_imap_port", "email_smtp_host", "email_smtp_port", "email_poll_interval_seconds", "email_send_responses", "email_skip_attachments", "email_mark_existing_seen_on_start"},
 }
 
 var channelBooleanFormFields = map[string]bool{
 	"slack_send_responses": true, "telegram_rich_messages_v2": true,
-	"discord_send_responses": true, "email_send_responses": true,
+	"discord_send_responses": true, "x_send_responses": true, "email_send_responses": true,
 	"email_skip_attachments": true, "email_mark_existing_seen_on_start": true,
 }
 
@@ -1209,7 +1211,47 @@ func (c Channel) EditableSettings() url.Values {
 	return settings
 }
 
-func channelCardStatus(card Card, displayName string) string {
+func channelBadgeStatus(root *html.Node, channelType string) string {
+	card := findNode(root, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && attr(n, "data-channel-type") == channelType
+	})
+	if card == nil {
+		return ""
+	}
+	badges := findAll(card, func(n *html.Node) bool {
+		if n.Type != html.ElementNode {
+			return false
+		}
+		for _, class := range strings.Fields(attr(n, "class")) {
+			if class == "badge" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, badge := range badges {
+		switch strings.ToLower(strings.TrimSpace(NodeText(badge))) {
+		case "connected":
+			return "connected"
+		case "running", "gateway running":
+			return "running"
+		case "configured":
+			return "configured"
+		case "gateway offline", "configured, polling offline", "not running":
+			return "configured, offline"
+		case "not configured":
+			return "not configured"
+		case "not connected":
+			return "not connected"
+		}
+	}
+	return ""
+}
+
+func channelCardStatus(root *html.Node, card Card, channelType, displayName string) string {
+	if status := channelBadgeStatus(root, channelType); status != "" {
+		return status
+	}
 	status := strings.ToLower(strings.TrimSpace(card.Get("search-text")))
 	if strings.HasPrefix(status, strings.ToLower(displayName)) {
 		status = strings.TrimSpace(status[len(displayName):])
@@ -1252,7 +1294,7 @@ func (c *Client) ListChannels(ctx context.Context, projectID string) ([]Channel,
 			continue
 		}
 		seen[base.Type] = true
-		base.Status = channelCardStatus(card, base.Name)
+		base.Status = channelCardStatus(root, card, base.Type, base.Name)
 		base.configuration = channelConfiguration(root, base.Type, card)
 		lowerStatus := strings.ToLower(base.Status)
 		base.Connected = strings.Contains(lowerStatus, "connected") && !strings.Contains(lowerStatus, "not connected")
