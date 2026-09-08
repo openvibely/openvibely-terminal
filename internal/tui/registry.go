@@ -2165,6 +2165,75 @@ func parseAgentEdit(args []string) (string, agentEdit, error) {
 	return strings.Join(args[:optionAt], " "), update, nil
 }
 
+func matchAgentRef(agents []client.AgentDef, ref string) (client.AgentDef, error) {
+	var zero client.AgentDef
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return zero, errors.New("missing id or name")
+	}
+	lower := strings.ToLower(ref)
+	ambiguous := func(hits []client.AgentDef) error {
+		names := make([]string, 0, len(hits))
+		for _, hit := range hits {
+			names = append(names, firstNonEmpty(hit.Name, hit.Key, hit.ID))
+		}
+		return fmt.Errorf("%q is ambiguous: %s — use the full name or ID", ref, strings.Join(names, ", "))
+	}
+	matchTier := func(matches func(client.AgentDef) bool) (client.AgentDef, bool, error) {
+		hits := make([]client.AgentDef, 0)
+		for _, agent := range agents {
+			if matches(agent) {
+				hits = append(hits, agent)
+			}
+		}
+		switch len(hits) {
+		case 0:
+			return zero, false, nil
+		case 1:
+			return hits[0], true, nil
+		default:
+			return zero, true, ambiguous(hits)
+		}
+	}
+	for _, tier := range []func(client.AgentDef) bool{
+		func(agent client.AgentDef) bool { return strings.EqualFold(agent.ID, ref) },
+		func(agent client.AgentDef) bool { return strings.EqualFold(agent.Name, ref) },
+		func(agent client.AgentDef) bool { return strings.EqualFold(agent.Key, ref) },
+		func(agent client.AgentDef) bool {
+			return strings.HasPrefix(strings.ToLower(agent.ID), lower) ||
+				strings.HasPrefix(strings.ToLower(agent.Name), lower) ||
+				strings.HasPrefix(strings.ToLower(agent.Key), lower)
+		},
+		func(agent client.AgentDef) bool {
+			return strings.Contains(strings.ToLower(agent.Name), lower) ||
+				strings.Contains(strings.ToLower(agent.Key), lower)
+		},
+	} {
+		if agent, matched, err := matchTier(tier); matched {
+			return agent, err
+		}
+	}
+	return zero, fmt.Errorf("nothing matches %q", ref)
+}
+
+type agentEditPartialResult struct {
+	Saved        bool   `json:"saved"`
+	RefreshError string `json:"refresh_error"`
+}
+
+func validateAgentModel(models []client.LLMModel, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "inherit") {
+		return "inherit", nil
+	}
+	for _, model := range models {
+		if model.Model == value {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("unknown agent model %q; use inherit or an exact configured model value", value)
+}
+
 func applyAgentEdit(agent client.AgentDefinition, update agentEdit) client.AgentDefinition {
 	if update.Name != nil {
 		agent.Name = *update.Name
@@ -2331,11 +2400,25 @@ func agentsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					matched, err := matchRef(agents, ref,
-						func(a client.AgentDef) string { return a.ID },
-						func(a client.AgentDef) string { return a.Name + " " + a.Key })
+					matched, err := matchAgentRef(agents, ref)
 					if err != nil {
 						return "", err
+					}
+					if edit.Model != nil {
+						if strings.EqualFold(strings.TrimSpace(*edit.Model), "inherit") {
+							model := "inherit"
+							edit.Model = &model
+						} else {
+							models, err := c.ListModels(ctx, pid)
+							if err != nil {
+								return "", fmt.Errorf("validating agent model: %w", err)
+							}
+							model, err := validateAgentModel(models, *edit.Model)
+							if err != nil {
+								return "", err
+							}
+							edit.Model = &model
+						}
 					}
 					definition, err := c.GetAgent(ctx, pid, matched.ID)
 					if err != nil {
@@ -2345,11 +2428,25 @@ func agentsCommand() command {
 					if err := c.UpdateAgent(ctx, pid, definition); err != nil {
 						return "", err
 					}
-					refreshed, refreshErr := c.ListAgents(ctx, pid)
 					if jsonMode {
-						return marshalJSON(definition)
+						persisted, refreshErr := c.GetAgent(ctx, pid, matched.ID)
+						if refreshErr != nil {
+							return marshalJSON(agentEditPartialResult{
+								Saved:        true,
+								RefreshError: "saved; authoritative refresh failed",
+							})
+						}
+						return marshalJSON(persisted)
 					}
-					status := "updated agent " + firstNonEmpty(definition.Name, definition.Key, definition.ID)
+					refreshed, refreshErr := c.ListAgents(ctx, pid)
+					statusName := firstNonEmpty(definition.Name, definition.Key, definition.ID)
+					for _, agent := range refreshed {
+						if agent.ID == matched.ID {
+							statusName = firstNonEmpty(agent.Name, agent.Key, agent.ID)
+							break
+						}
+					}
+					status := "updated agent " + sanitizeAutomationDetailText(statusName)
 					if refreshErr != nil {
 						return status + " (saved; refresh failed)", nil
 					}
