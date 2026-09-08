@@ -452,8 +452,16 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	if resp.StatusCode != http.StatusOK {
 		return apiError(resp)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(out); err != nil {
 		return fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
+		return fmt.Errorf("decoding %s response: trailing JSON data: %w", path, err)
 	}
 	return nil
 }

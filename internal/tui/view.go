@@ -625,41 +625,83 @@ func attachmentSizeText(size int64) string {
 }
 
 func renderLifecycleTaskHeading(task client.Task) string {
-	title := firstNonEmpty(task.Title, shortID(task.ID))
-	return fmt.Sprintf("%s  (id %s)\n", sectionStyle.Render(title), task.ID)
+	title := sanitizeAutomationDetailText(firstNonEmpty(task.Title, shortID(task.ID)))
+	id := sanitizeAutomationDetailText(task.ID)
+	return fmt.Sprintf("%s  (id %s)\n", sectionStyle.Render(title), id)
 }
 
 func renderLifecycleExecutions(task client.Task, executions []client.LifecycleExecution) string {
+	return renderLifecycleExecutionPage(task, client.LifecycleExecutionPage{Items: executions})
+}
+
+func renderLifecycleExecutionPage(task client.Task, page client.LifecycleExecutionPage) string {
 	var b strings.Builder
 	b.WriteString(renderLifecycleTaskHeading(task))
-	if len(executions) == 0 {
+	if len(page.Items) == 0 {
 		b.WriteString(dimStyle.Render("no executions for this task"))
+		if page.HasMore || page.NextCursor != "" {
+			b.WriteString("\n" + lifecyclePageMetadata(page))
+		}
 		return b.String()
 	}
 
-	rows := [][]string{{"ID", "SKILL", "WHEN", "STATUS", "STARTED"}}
-	for _, execution := range executions {
+	rows := [][]string{{"ID", "SKILL", "WHEN", "STATUS", "STARTED", "DETAIL"}}
+	for _, execution := range page.Items {
 		rows = append(rows, []string{
-			firstNonEmpty(execution.ID, "—"),
-			firstNonEmpty(execution.SkillKey, "—"),
-			firstNonEmpty(execution.When, "—"),
-			firstNonEmpty(execution.Status, "—"),
-			firstNonEmpty(execution.StartedAt, "—"),
+			truncate(sanitizeAutomationDetailText(firstNonEmpty(execution.ID, "—")), 36),
+			truncate(sanitizeAutomationDetailText(firstNonEmpty(execution.SkillKey, "—")), 28),
+			truncate(sanitizeAutomationDetailText(firstNonEmpty(execution.When, "—")), 20),
+			truncate(sanitizeAutomationDetailText(firstNonEmpty(execution.Status, "—")), 16),
+			truncate(sanitizeAutomationDetailText(firstNonEmpty(execution.StartedAt, "—")), 28),
+			lifecycleExecutionPreview(execution),
 		})
 	}
 	b.WriteString(table(rows))
+	if page.HasMore || page.NextCursor != "" {
+		b.WriteString("\n" + lifecyclePageMetadata(page))
+	}
 	return b.String()
+}
+
+func lifecycleExecutionPreview(execution client.LifecycleExecution) string {
+	preview := firstNonEmpty(execution.Error, execution.Summary, execution.OutputContract)
+	if preview == "" && len(execution.SelectedSkills) != 0 {
+		preview = "skills: " + strings.Join(execution.SelectedSkills, ", ")
+	}
+	if preview == "" && len(execution.SelectedMemories) != 0 {
+		labels := make([]string, 0, len(execution.SelectedMemories))
+		for _, memory := range execution.SelectedMemories {
+			if label := firstNonEmpty(memory.File, memory.Topic); label != "" {
+				labels = append(labels, label)
+			}
+			if len(labels) == 3 {
+				break
+			}
+		}
+		if len(labels) != 0 {
+			preview = "memories: " + strings.Join(labels, ", ")
+		}
+	}
+	return truncate(sanitizeAutomationDetailText(firstNonEmpty(preview, "—")), 64)
+}
+
+func lifecyclePageMetadata(page client.LifecycleExecutionPage) string {
+	metadata := fmt.Sprintf("page: %d execution(s) · has more: %t", len(page.Items), page.HasMore)
+	if page.NextCursor != "" {
+		metadata += " · next cursor: " + truncate(sanitizeAutomationDetailText(page.NextCursor), 48)
+	}
+	return dimStyle.Render(metadata)
 }
 
 func renderLifecycleEvents(task client.Task, execution client.LifecycleExecution, events []client.LifecycleEvent) string {
 	var b strings.Builder
 	b.WriteString(renderLifecycleTaskHeading(task))
-	fmt.Fprintf(&b, "execution %s", firstNonEmpty(execution.ID, "(unnamed)"))
+	fmt.Fprintf(&b, "execution %s", sanitizeAutomationDetailText(firstNonEmpty(execution.ID, "(unnamed)")))
 	if execution.SkillKey != "" {
-		b.WriteString(" · " + execution.SkillKey)
+		b.WriteString(" · " + sanitizeAutomationDetailText(execution.SkillKey))
 	}
 	if execution.Status != "" {
-		b.WriteString(" · " + execution.Status)
+		b.WriteString(" · " + sanitizeAutomationDetailText(execution.Status))
 	}
 	b.WriteString("\n\n")
 
@@ -683,8 +725,8 @@ func renderLifecycleEvents(task client.Task, execution client.LifecycleExecution
 	for _, event := range ordered {
 		rows = append(rows, []string{
 			fmt.Sprintf("%d", event.Seq),
-			firstNonEmpty(event.CreatedAt, "—"),
-			firstNonEmpty(event.EventType, "—"),
+			truncate(sanitizeAutomationDetailText(firstNonEmpty(event.CreatedAt, "—")), 32),
+			truncate(sanitizeAutomationDetailText(firstNonEmpty(event.EventType, "—")), 32),
 			lifecyclePayloadSummary(event.Payload),
 		})
 	}

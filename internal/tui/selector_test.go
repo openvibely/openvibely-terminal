@@ -89,6 +89,33 @@ func selFixtures() map[string]string {
 	}
 }
 
+func TestTasksLifecycleTaskSelectorSelectionRendersCurrentResponse(t *testing.T) {
+	const tasks = `<div>
+		<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>
+		<div data-task-id="t-2" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-2" title="Write docs">Write docs</a></div>
+	</div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                                  tasks,
+		"/api/tasks/t-1/lifecycle-executions":     `{"items":[{"id":"exec-1","skill_key":"router","status":"completed"}],"has_more":false}`,
+		"/api/lifecycle-executions/exec-1/events": `[{"id":"event-1","seq":1,"event_type":"completed","payload":{"ok":true}}]`,
+	})
+	m = runLine(t, m, "/tasks lifecycle")
+	if !m.selectorActive || m.pendingCommand != "tasks lifecycle" {
+		t.Fatalf("missing-ref lifecycle did not open the task selector: active=%t pending=%q", m.selectorActive, m.pendingCommand)
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive {
+		t.Fatal("task selector remained open after lifecycle selection")
+	}
+	if !rec.sawQuery("GET /api/tasks/t-1/lifecycle-executions?project_id=p1") || !rec.sawQuery("GET /api/lifecycle-executions/exec-1/events?project_id=p1") {
+		t.Fatalf("selected lifecycle request lost project scope:\n%s", rec.all())
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "completed") || !strings.Contains(out, `{"ok":true}`) {
+		t.Fatalf("selected lifecycle execution was not rendered:\n%s", out)
+	}
+}
+
 // TestNoArgOpensSelectorPerArea is the table-driven per-command-area check:
 // every ref-required subcommand invoked with no argument must enter selector
 // mode (selectorActive with the right pendingCommand) instead of erroring.

@@ -1254,8 +1254,8 @@ func TestTasksShowSuccessfulEmptyLazyFragmentRendersEmptyState(t *testing.T) {
 	}
 }
 
-func TestTasksLifecycleRendersOrderedEvents(t *testing.T) {
-	const executions = `[{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"}]`
+func TestTasksLifecycleRendersOrderedEventsFromCurrentPageResponse(t *testing.T) {
+	const executions = `{"items":[{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"}],"has_more":false}`
 	const events = `[
 		{"id":"event-2","seq":2,"event_type":"completed","payload":{"message":"second"},"created_at":"2026-01-20T10:00:02Z"},
 		{"id":"event-1","seq":1,"event_type":"started","payload":{"message":"first"},"created_at":"2026-01-20T10:00:01Z"}

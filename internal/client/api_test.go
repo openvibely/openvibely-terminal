@@ -1,9 +1,12 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -297,6 +300,135 @@ func TestListTaskLifecycleExecutions(t *testing.T) {
 	}
 	if len(execs) != 1 || execs[0].SkillKey != "router" {
 		t.Errorf("unexpected execs: %+v", execs)
+	}
+}
+
+func TestListTaskLifecycleExecutionPageForProject(t *testing.T) {
+	const response = `{
+		"items":[{
+			"id":"le2","skill_key":"reviewer","when":"after_complete","status":"running",
+			"agent_id":"agent-2","output_contract":"learning_summary",
+			"started_at":"2026-09-08T10:00:00Z","selected_skills":["review"],
+			"selected_memories":[{"file":"review.md","topic":"Review","summary":"Check the diff","snippet":"bounded evidence"}]
+		}],
+		"has_more":true,"next_cursor":"cursor-2"
+	}`
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tasks/t1/lifecycle-executions" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p2" {
+			t.Errorf("project_id = %q, want p2", got)
+		}
+		_, _ = w.Write([]byte(response))
+	}))
+
+	page, err := c.ListTaskLifecycleExecutionPageForProject(context.Background(), "t1", "p2")
+	if err != nil {
+		t.Fatalf("ListTaskLifecycleExecutionPageForProject: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != "le2" || !page.HasMore || page.NextCursor != "cursor-2" {
+		t.Fatalf("unexpected page: %+v", page)
+	}
+	if page.Items[0].OutputContract != "learning_summary" || len(page.Items[0].SelectedMemories) != 1 || page.Items[0].SelectedMemories[0].Topic != "Review" {
+		t.Fatalf("documented execution fields were not decoded: %+v", page.Items[0])
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		t.Fatalf("marshal page: %v", err)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, []byte(response)); err != nil {
+		t.Fatalf("compact fixture: %v", err)
+	}
+	if string(encoded) != compact.String() {
+		t.Fatalf("page JSON did not preserve the complete response\ngot:  %s\nwant: %s", encoded, compact.String())
+	}
+}
+
+func TestListTaskLifecycleExecutionPageLegacyArray(t *testing.T) {
+	const response = `[{"id":"legacy-1","skill_key":"router","status":"completed"}]`
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(response))
+	}))
+
+	page, err := c.ListTaskLifecycleExecutionPageForProject(context.Background(), "t1", "p2")
+	if err != nil {
+		t.Fatalf("legacy array: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ID != "legacy-1" || page.HasMore || page.NextCursor != "" {
+		t.Fatalf("legacy page = %+v", page)
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil || string(encoded) != response {
+		t.Fatalf("legacy JSON = %s, %v; want %s", encoded, err, response)
+	}
+}
+
+func TestListTaskLifecycleExecutionPageRejectsMalformedPayloads(t *testing.T) {
+	for _, payload := range []string{
+		`null`,
+		`[null]`,
+		`{}`,
+		`{"items":null,"has_more":false}`,
+		`{"items":[null],"has_more":false}`,
+		`{"items":{},"has_more":false}`,
+		`{"items":[],"has_more":"yes"}`,
+		`{"items":[],"has_more":true,"next_cursor":7}`,
+		`{"items":[],"has_more":false} trailing`,
+	} {
+		t.Run(payload, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(payload))
+			}))
+			if _, err := c.ListTaskLifecycleExecutionPageForProject(context.Background(), "t1", "p2"); err == nil {
+				t.Fatalf("payload %q unexpectedly decoded", payload)
+			}
+		})
+	}
+}
+
+func TestListTaskLifecycleExecutionPagePreservesHTTPAndAuthErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		location   string
+		body       string
+		wantAuth   bool
+		wantDetail string
+	}{
+		{name: "api error", status: http.StatusBadGateway, body: `{"error":"lifecycle unavailable"}`, wantDetail: "lifecycle unavailable"},
+		{name: "unauthorized", status: http.StatusUnauthorized, wantAuth: true},
+		{name: "login redirect", status: http.StatusFound, location: "/login?next=%2Ftasks", wantAuth: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			_, err := c.ListTaskLifecycleExecutionPageForProject(context.Background(), "t1", "p2")
+			if err == nil || IsAuthRequired(err) != tc.wantAuth {
+				t.Fatalf("error = %v, auth = %t; want auth %t", err, IsAuthRequired(err), tc.wantAuth)
+			}
+			if tc.wantDetail != "" && !strings.Contains(err.Error(), tc.wantDetail) {
+				t.Fatalf("error %q missing %q", err, tc.wantDetail)
+			}
+		})
+	}
+}
+
+func TestListTaskLifecycleExecutionPagePreservesCancellation(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[],"has_more":false}`))
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := c.ListTaskLifecycleExecutionPageForProject(ctx, "t1", "p2")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
 	}
 }
 

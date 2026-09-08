@@ -3803,30 +3803,33 @@ func TestCLIJSONTasksShow(t *testing.T) {
 	}
 }
 
-func TestCLILifecycleJSONEmptyExecutionsIsArray(t *testing.T) {
+func TestCLILifecycleJSONEmptyExecutionsPreservesPageEnvelope(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":                       cliProjects,
 		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
-		"/api/tasks/t-1/lifecycle-executions": "null",
+		"/api/tasks/t-1/lifecycle-executions": `{"items":[],"has_more":false}`,
 	})
 
 	var out bytes.Buffer
 	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1"}, false, true); err != nil {
 		t.Fatalf("empty lifecycle executions --json failed: %v", err)
 	}
-	if got := strings.TrimSpace(out.String()); got != "[]" {
-		t.Fatalf("empty lifecycle executions JSON = %q, want []", got)
+	if got := strings.TrimSpace(out.String()); got != `{"items":[],"has_more":false}` {
+		t.Fatalf("empty lifecycle executions JSON = %q, want page envelope", got)
 	}
 	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
 		t.Error("empty lifecycle executions must not fetch event traces")
 	}
 }
 
-func TestCLILifecycleJSONExecutionsPreserveFieldsAndOrder(t *testing.T) {
-	const executions = `[
-		{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","agent_id":"agent-1","started_at":"2026-01-20T10:00:00Z","completed_at":"2026-01-20T10:00:01Z","summary":"first","error":"","selected_skills":["lint"]},
-		{"id":"exec-2","skill_key":"reviewer","when":"post_task","status":"failed","agent_id":"agent-2","started_at":"2026-01-20T11:00:00Z","completed_at":"2026-01-20T11:00:02Z","summary":"second","error":"review failed","selected_skills":[]}
-	]`
+func TestCLILifecycleJSONExecutionsPreserveFieldsMetadataAndOrder(t *testing.T) {
+	const executions = `{
+		"items":[
+			{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","agent_id":"agent-1","output_contract":"selected_skills","started_at":"2026-01-20T10:00:00Z","completed_at":"2026-01-20T10:00:01Z","summary":"first","error":"","selected_skills":["lint"],"selected_memories":[{"file":"routing.md","topic":"Routing"}]},
+			{"id":"exec-2","skill_key":"reviewer","when":"post_task","status":"failed","agent_id":"agent-2","started_at":"2026-01-20T11:00:00Z","completed_at":"2026-01-20T11:00:02Z","summary":"second","error":"review failed","selected_skills":[]}
+		],
+		"has_more":true,"next_cursor":"cursor-2","future_metadata":{"retained":true}
+	}`
 	c, _ := cliServer(t, map[string]string{
 		"/api/projects":                       cliProjects,
 		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
@@ -3838,17 +3841,17 @@ func TestCLILifecycleJSONExecutionsPreserveFieldsAndOrder(t *testing.T) {
 		t.Fatalf("lifecycle executions --json failed: %v", err)
 	}
 	got := strings.TrimSpace(out.String())
-	var decoded []client.LifecycleExecution
+	var decoded client.LifecycleExecutionPage
 	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
-		t.Fatalf("output is not lifecycle execution JSON: %v\noutput: %s", err, got)
+		t.Fatalf("output is not lifecycle execution page JSON: %v\noutput: %s", err, got)
 	}
-	if len(decoded) != 2 || decoded[0].ID != "exec-1" || decoded[1].ID != "exec-2" {
-		t.Fatalf("decoded executions = %+v", decoded)
+	if len(decoded.Items) != 2 || decoded.Items[0].ID != "exec-1" || decoded.Items[1].ID != "exec-2" || !decoded.HasMore || decoded.NextCursor != "cursor-2" {
+		t.Fatalf("decoded lifecycle page = %+v", decoded)
 	}
-	if decoded[0].SelectedSkills[0] != "lint" || decoded[1].Error != "review failed" {
-		t.Fatalf("decoded execution fields = %+v", decoded)
+	if decoded.Items[0].SelectedSkills[0] != "lint" || decoded.Items[1].Error != "review failed" || decoded.Items[0].SelectedMemories[0].Topic != "Routing" {
+		t.Fatalf("decoded execution fields = %+v", decoded.Items)
 	}
-	for _, want := range []string{`"skill_key"`, `"agent_id"`, `"started_at"`, `"completed_at"`, `"selected_skills"`} {
+	for _, want := range []string{`"items"`, `"has_more"`, `"next_cursor"`, `"future_metadata"`, `"skill_key"`, `"agent_id"`, `"output_contract"`, `"started_at"`, `"completed_at"`, `"selected_skills"`, `"selected_memories"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("JSON output missing %s: %s", want, got)
 		}
@@ -3909,11 +3912,14 @@ func TestCLILifecycleJSONEmptyEventsIsArray(t *testing.T) {
 	}
 }
 
-func TestCLILifecycleListsMultipleExecutionsPlainText(t *testing.T) {
-	const executions = `[
-		{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"},
-		{"id":"exec-2","skill_key":"reviewer","when":"post_task","status":"failed","started_at":"2026-01-20T11:00:00Z"}
-	]`
+func TestCLILifecycleListsMultipleExecutionsAndMetadataPlainText(t *testing.T) {
+	const executions = `{
+		"items":[
+			{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z","summary":"selected routing skill"},
+			{"id":"exec-2","skill_key":"reviewer","when":"post_task","status":"failed","started_at":"2026-01-20T11:00:00Z","error":"review failed"}
+		],
+		"has_more":true,"next_cursor":"older-cursor"
+	}`
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":                       cliProjects,
 		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
@@ -3925,7 +3931,7 @@ func TestCLILifecycleListsMultipleExecutionsPlainText(t *testing.T) {
 		t.Fatalf("tasks lifecycle failed: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"exec-1", "exec-2", "router", "reviewer", "completed", "failed"} {
+	for _, want := range []string{"exec-1", "exec-2", "router", "reviewer", "completed", "failed", "selected routing skill", "review failed", "has more: true", "older-cursor"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("plain lifecycle output missing %q:\n%s", want, got)
 		}

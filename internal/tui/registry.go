@@ -1156,10 +1156,11 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 			return resultMsg{title: "Task Lifecycle", err: err}
 		}
 
-		execs, err := c.ListTaskLifecycleExecutionsForProject(ctx, task.ID, projectID)
+		page, err := c.ListTaskLifecycleExecutionPageForProject(ctx, task.ID, projectID)
 		if err != nil {
 			return resultMsg{title: "Task Lifecycle", err: err}
 		}
+		execs := page.Items
 
 		if executionRef != "" {
 			execution, err := matchLifecycleExecution(execs, executionRef)
@@ -1172,33 +1173,37 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 		switch len(execs) {
 		case 0:
 			if jsonMode {
-				body, err := marshalJSON(nonNilSlice(execs))
+				body, err := marshalJSON(page)
 				return resultMsg{title: "Task Lifecycle", body: body, err: err}
 			}
-			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
+			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutionPage(task, page)}
 		case 1:
 			return lifecycleEventsMessage(ctx, c, projectID, task, execs[0])
 		}
 
 		if cliMode {
 			if jsonMode {
-				body, err := marshalJSON(execs)
+				body, err := marshalJSON(page)
 				return resultMsg{title: "Task Lifecycle", body: body, err: err}
 			}
-			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
+			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutionPage(task, page)}
 		}
 
 		items := make([]selectorItem, 0, len(execs))
 		for _, execution := range execs {
-			label := firstNonEmpty(execution.SkillKey, execution.ID, "(unnamed execution)")
-			detail := execution.Status
+			label := sanitizeAutomationDetailText(firstNonEmpty(execution.SkillKey, execution.ID, "(unnamed execution)"))
+			detail := sanitizeAutomationDetailText(execution.Status)
 			if execution.StartedAt != "" {
-				detail = strings.TrimSpace(detail + " · " + execution.StartedAt)
+				detail = strings.TrimSpace(detail + " · " + sanitizeAutomationDetailText(execution.StartedAt))
 			}
-			items = append(items, selectorItem{ref: execution.ID, label: label, detail: detail})
+			items = append(items, selectorItem{ref: execution.ID, label: truncate(label, 64), detail: truncate(detail, 96)})
+		}
+		title := "Lifecycle Executions"
+		if page.HasMore {
+			title += " (more available)"
 		}
 		return selectorActiveMsg{
-			title:     "Lifecycle Executions",
+			title:     title,
 			command:   "tasks " + action + " " + task.ID,
 			emptyHint: "no lifecycle executions for " + firstNonEmpty(task.Title, task.ID),
 			items:     items,

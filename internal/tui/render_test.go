@@ -2340,6 +2340,37 @@ func TestLifecyclePayloadSummaryFallbacks(t *testing.T) {
 	}
 }
 
+func TestRenderLifecycleExecutionPageShowsSafeBoundedDetailsAndMetadata(t *testing.T) {
+	page := client.LifecycleExecutionPage{
+		Items: []client.LifecycleExecution{{
+			ID:             "exec-1\x1b]8;;https://evil.example\x07link\x1b]8;;\x07",
+			SkillKey:       "router\nforged-row",
+			Status:         "failed\rforged-status",
+			StartedAt:      "2026-09-08T10:00:00Z\tforged-time",
+			Error:          strings.Repeat("very long lifecycle failure ", 20) + "\x1b[31mred",
+			Summary:        "must not outrank error",
+			SelectedSkills: []string{"unused"},
+		}},
+		HasMore:    true,
+		NextCursor: "cursor\nforged-cursor\x1b[2J" + strings.Repeat("x", 100),
+	}
+	out := stripANSI(renderLifecycleExecutionPage(client.Task{ID: "task-1\nforged-id", Title: "Task\rforged-title"}, page))
+	for _, want := range []string{"exec-1link", "router forged-row", "failed forged-s", "very long lifecycle failure", "has more: true", "cursor forged-cursor"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered page missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "https://evil.example") || strings.Contains(out, "\x1b") {
+		t.Fatalf("terminal control content leaked:\n%q", out)
+	}
+	if got := lifecycleExecutionPreview(page.Items[0]); lipgloss.Width(got) > 64 {
+		t.Fatalf("execution preview width = %d, want <= 64: %q", lipgloss.Width(got), got)
+	}
+	if got := lifecyclePageMetadata(page); lipgloss.Width(stripANSI(got)) > 104 {
+		t.Fatalf("page metadata was not bounded: width=%d", lipgloss.Width(stripANSI(got)))
+	}
+}
+
 func TestRenderLifecycleEventsPreservesEventOrdering(t *testing.T) {
 	events := []client.LifecycleEvent{
 		{ID: "event-c", Seq: 2, CreatedAt: "2026-01-01T00:00:02Z", EventType: "third", Payload: map[string]any{"n": float64(3)}},
