@@ -329,7 +329,7 @@ func TestParseActualAutomationLiveRouteMarksOmittedSectionsUnavailable(t *testin
 			<div data-automation-live-details-panel><div data-automation-live-node-details>
 				<section data-automation-live-node-detail="start"><div><h3>Start</h3><p>start · trigger</p></div></section>
 				<section data-automation-live-node-detail="review"><div><h3>Review</h3><p>review · implementation</p></div></section>
-			</div><div data-automation-live-edge-details><div data-automation-live-edge-detail="e1"><div>Start → Review</div><p>approved</p></div></div></div>
+			</div><div data-automation-live-edge-details><div data-automation-live-edge-detail="e1"><div>Start → Review</div><p>approved</p><p>{"state":"approved"}</p></div></div></div>
 		</div>
 	</div>`
 	detail, err := parseAutomationDetailFromString(actualFragment)
@@ -342,8 +342,8 @@ func TestParseActualAutomationLiveRouteMarksOmittedSectionsUnavailable(t *testin
 	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable || len(detail.Nodes) != 2 || len(detail.Edges) != 1 {
 		t.Fatalf("actual graph = %+v", detail)
 	}
-	if len(detail.UnmatchedEdgeDetails) != 1 || detail.UnmatchedEdgeDetails[0].EdgeKey != "e1" || detail.UnmatchedEdgeDetails[0].SourceName != "Start" || detail.UnmatchedEdgeDetails[0].TargetName != "Review" {
-		t.Fatalf("unmatched edge details = %+v, want topology retained without inflating graph edge count", detail.UnmatchedEdgeDetails)
+	if len(detail.UnmatchedEdgeDetails) != 1 || detail.UnmatchedEdgeDetails[0].EdgeKey != "e1" || detail.UnmatchedEdgeDetails[0].SourceName != "Start" || detail.UnmatchedEdgeDetails[0].TargetName != "Review" || detail.UnmatchedEdgeDetails[0].ConditionJSON != `{"state":"approved"}` {
+		t.Fatalf("unmatched edge details = %+v, want topology and condition retained without inflating graph edge count", detail.UnmatchedEdgeDetails)
 	}
 	encoded, err := json.Marshal(detail)
 	if err != nil {

@@ -2566,6 +2566,54 @@ func renderAutomationDetailEdgeTable(b *strings.Builder, detail client.Automatio
 	renderAutomationDetailEdgeRows(b, detail.Edges, detail.EdgeCountsAvailable)
 }
 
+func automationEdgeConditionDisplay(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return "—"
+	}
+	const maxConditionInputBytes = 4 << 10
+	if len(raw) > maxConditionInputBytes {
+		return "configured"
+	}
+	var condition map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &condition); err != nil || len(condition) == 0 {
+		return "configured"
+	}
+	parts := make([]string, 0, 3)
+	for _, key := range []string{"state", "status", "result", "if", "event", "type"} {
+		encoded, ok := condition[key]
+		if !ok {
+			continue
+		}
+		var scalar any
+		if err := json.Unmarshal(encoded, &scalar); err != nil {
+			continue
+		}
+		var text string
+		switch value := scalar.(type) {
+		case string:
+			text = value
+		case bool:
+			text = strconv.FormatBool(value)
+		case float64:
+			text = strconv.FormatFloat(value, 'g', -1, 64)
+		default:
+			continue
+		}
+		text = boundedAutomationDetailText(text, 40)
+		if text != "" {
+			parts = append(parts, key+"="+text)
+		}
+		if len(parts) == 3 {
+			break
+		}
+	}
+	if len(parts) == 0 {
+		return "configured"
+	}
+	return strings.Join(parts, "; ")
+}
+
 func renderAutomationDetailEdgeRows(b *strings.Builder, edges []client.AutomationLiveEdge, legacyCountsAvailable bool) {
 	edges = append([]client.AutomationLiveEdge(nil), edges...)
 	sort.SliceStable(edges, func(i, j int) bool {
@@ -2576,7 +2624,7 @@ func renderAutomationDetailEdgeRows(b *strings.Builder, edges []client.Automatio
 		omitted = len(edges) - 100
 		edges = edges[:100]
 	}
-	rows := [][]string{{"FROM", "TO", "LABEL", "TRANSITIONS", "RECENT"}}
+	rows := [][]string{{"FROM", "TO", "LABEL", "CONDITION", "TRANSITIONS", "RECENT"}}
 	legacyEdgeCounts := legacyCountsAvailable && !automationEdgesHaveCountAvailability(edges)
 	for _, edge := range edges {
 		transitions := automationDetailTableCount(edge.TransitionCount, edge.TransitionCountAvailable || legacyEdgeCounts)
@@ -2585,6 +2633,7 @@ func renderAutomationDetailEdgeRows(b *strings.Builder, edges []client.Automatio
 			firstNonEmpty(edge.SourceName, edge.SourceNodeID, "—"),
 			firstNonEmpty(edge.TargetName, edge.TargetNodeID, "—"),
 			firstNonEmpty(edge.Label, edge.EdgeKey, "(unlabelled)"),
+			automationEdgeConditionDisplay(edge.ConditionJSON),
 			transitions,
 			recent,
 		})

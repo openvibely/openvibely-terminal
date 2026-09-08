@@ -2649,6 +2649,38 @@ func TestRenderAutomationDetailBoundsLargeTopology(t *testing.T) {
 	}
 }
 
+func TestRenderAutomationDetailShowsBoundedSecretSafeEdgeConditions(t *testing.T) {
+	oversized := strings.Repeat("x", 1024)
+	detail := client.AutomationDetail{
+		Automation:     client.AutomationMetadata{ID: "au-conditions", Name: "Conditional flow"},
+		GraphAvailable: true,
+		NodesAvailable: true,
+		EdgesAvailable: true,
+		Nodes: []client.AutomationLiveNode{
+			{AutomationNode: client.AutomationNode{ID: "gate", Name: "Gate"}},
+			{AutomationNode: client.AutomationNode{ID: "approved", Name: "Approved"}},
+			{AutomationNode: client.AutomationNode{ID: "rejected", Name: "Rejected"}},
+		},
+		Edges: []client.AutomationLiveEdge{
+			{AutomationEdge: client.AutomationEdge{ID: "e-approved", SourceNodeID: "gate", TargetNodeID: "approved", ConditionJSON: `{"state":"approved","api_token":"TOP-SECRET"}`}, SourceName: "Gate", TargetName: "Approved"},
+			{AutomationEdge: client.AutomationEdge{ID: "e-rejected", SourceNodeID: "gate", TargetNodeID: "rejected", ConditionJSON: `{"state":"rejected"}`}, SourceName: "Gate", TargetName: "Rejected"},
+			{AutomationEdge: client.AutomationEdge{ID: "e-custom", SourceNodeID: "gate", TargetNodeID: "approved", ConditionJSON: `{"custom":"` + oversized + `"}`}, SourceName: "Gate", TargetName: "Approved"},
+		},
+	}
+
+	out := stripANSI(renderAutomationDetail(detail))
+	for _, want := range []string{"CONDITION", "state=approved", "state=rejected", "configured"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("condition output missing %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{"TOP-SECRET", "api_token", oversized} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("condition output leaked or was unbounded: %q", forbidden)
+		}
+	}
+}
+
 func TestRenderAutomationDetailShowsGraphRuntimeResourcesAndExternalState(t *testing.T) {
 	detail := client.AutomationDetail{
 		Automation: client.AutomationMetadata{
