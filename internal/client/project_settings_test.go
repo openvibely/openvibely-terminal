@@ -37,6 +37,80 @@ func TestGetProjectSettingsParsesAuthoritativeEditForm(t *testing.T) {
 	}
 }
 
+func TestGetProjectSettingsRejectsForeignOrIncompleteAuthoritativeForm(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		html string
+		want string
+	}{
+		{
+			name: "foreign form",
+			html: strings.Replace(projectSettingsHTML, `hx-put="/projects/p1"`, `hx-put="/projects/p2"`, 1),
+			want: "requested project",
+		},
+		{
+			name: "missing description",
+			html: strings.Replace(projectSettingsHTML, `<textarea name="description">old description</textarea>`, ``, 1),
+			want: "description",
+		},
+		{
+			name: "duplicate description",
+			html: strings.Replace(projectSettingsHTML, `<textarea name="description">old description</textarea>`, `<textarea name="description">old description</textarea><textarea name="description">stale</textarea>`, 1),
+			want: "duplicate field description",
+		},
+		{
+			name: "missing worker limit",
+			html: strings.Replace(projectSettingsHTML, `<input name="max_workers" value="4">`, ``, 1),
+			want: "max_workers",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.html))
+			}))
+			if _, err := c.GetProjectSettings(context.Background(), "p1"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetProjectSettingsHydratesOmittedGitHubPathFromProjectList(t *testing.T) {
+	html := strings.Replace(projectSettingsHTML, `<input name="repo_path" value="/managed/old">`, ``, 1)
+	html = strings.Replace(html, `data-local-repo-path-enabled="true"`, `data-local-repo-path-enabled="false"`, 1)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/projects/p1/edit":
+			_, _ = w.Write([]byte(html))
+		case "/api/projects":
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"Old Project","path":"/managed/hydrated"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	got, err := c.GetProjectSettings(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RepositoryPath != "/managed/hydrated" {
+		t.Fatalf("repository path = %q", got.RepositoryPath)
+	}
+}
+
+func TestGetProjectSettingsPreservesParenthesesInAgentNames(t *testing.T) {
+	html := strings.Replace(projectSettingsHTML, `Builder (openai/gpt)`, `Builder (fast) (openai/gpt)`, 1)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(html))
+	}))
+	got, err := c.GetProjectSettings(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DefaultAgentName != "Builder (fast)" || got.AvailableAgents[0].Name != "Builder (fast)" {
+		t.Fatalf("agents = %#v default=%q", got.AvailableAgents, got.DefaultAgentName)
+	}
+}
+
 func TestUpdateProjectSettingsSendsFullAuthoritativeFormAndSurfacesToast(t *testing.T) {
 	settings := ProjectSettings{ID: "p /1", Name: "Renamed", Description: "", RepositorySource: "local", RepositoryPath: `\\server\share\repo with spaces`, GitHubURL: "", DefaultAgentID: "", MaxWorkers: intPointer(0)}
 	var got url.Values

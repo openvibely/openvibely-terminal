@@ -240,7 +240,10 @@ openvibely-tui --force projects edit "Renamed Project" \
 `local_repository_paths_enabled`. If saving succeeds but that authoritative refresh
 fails, JSON instead returns `{"saved":true,"project_id":"…","refresh_error":"saved; authoritative refresh failed"}`.
 Edit options omitted from the command retain
-the authoritative existing values. `--default-agent inherit` uses the global
+the authoritative existing values. `--repository-path` is valid only when the
+effective source is `local`, and `--github-url` only when it is `github`; include
+`--repository-source` in the same edit when switching modes.
+`--default-agent inherit` uses the global
 default and `--max-workers inherit` (or `0`) removes the project limit. Local
 paths may be Unix, Windows drive, UNC, or space-containing paths; quote one shell
 argument as shown above.

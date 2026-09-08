@@ -1458,9 +1458,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			if m.handleCompletedRequestError(msg.err) {
+			if m.handleAuthError(msg.err) || m.handleTransportError(msg.err) {
 				return m, nil
 			}
+			m.append(entry{role: "error", text: sanitizeAutomationDetailText(msg.err.Error())})
+			return m, nil
 		}
 		if msg.settings == nil {
 			return m, nil

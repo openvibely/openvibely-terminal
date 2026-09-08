@@ -61,6 +61,54 @@ func TestProjectsShowAndEditPreserveOmittedSettingsAndSameIDContext(t *testing.T
 	}
 }
 
+func TestProjectsEditRejectsIncompleteFormBeforeMutation(t *testing.T) {
+	puts := 0
+	incomplete := strings.Replace(projectEditFixture, `<textarea name="description">kept</textarea>`, ``, 1)
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+		}
+		_, _ = io.WriteString(w, incomplete)
+	})
+	m.projects = []client.Project{{ID: "p1", Name: "Alpha Project"}}
+	m.projectsLoaded = true
+	m = runLine(t, m, `/projects edit p1 --name Renamed`)
+	if puts != 0 {
+		t.Fatalf("PUTs = %d", puts)
+	}
+	if out := transcript(m); !strings.Contains(out, "required field description") {
+		t.Fatalf("missing strict form error: %q", out)
+	}
+}
+
+func TestProjectsEditRefreshesGitHubPathOmittedFromDisabledLocalForm(t *testing.T) {
+	githubForm := strings.Replace(projectEditFixture, `data-local-repo-path-enabled="true"`, `data-local-repo-path-enabled="false"`, 1)
+	githubForm = strings.Replace(githubForm, `<option value="local" selected>Local</option><option value="github">GitHub</option>`, `<option value="github" selected>GitHub</option>`, 1)
+	githubForm = strings.Replace(githubForm, `<input name="repo_path" value="/tmp/alpha path">`, ``, 1)
+	githubForm = strings.Replace(githubForm, `<input name="repo_url" value="">`, `<input name="repo_url" value="https://github.com/acme/repo">`, 1)
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+			_, _ = io.WriteString(w, githubForm)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"Alpha Project","path":"/managed/github-checkout"}]}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+			w.Header().Set("HX-Refresh", "true")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	m.projects = []client.Project{{ID: "p1", Name: "Alpha Project", Path: "/managed/old"}}
+	m.setActiveProject(m.projects[0])
+	m = runLine(t, m, `/projects edit p1 --description updated`)
+	if m.projects[0].Path != "/managed/github-checkout" {
+		t.Fatalf("project path = %q", m.projects[0].Path)
+	}
+	if out := transcript(m); !strings.Contains(out, "/managed/github-checkout") {
+		t.Fatalf("refreshed path missing from output: %q", out)
+	}
+}
+
 func TestProjectsEditValidatesBeforeMutationAndResolvesCanonicalReferences(t *testing.T) {
 	for _, tc := range []struct{ line, want string }{
 		{`/projects edit missing --name nope`, "nothing matches"},
@@ -123,19 +171,96 @@ func TestApplyProjectEditsCoversAllSettingsAndPathForms(t *testing.T) {
 	}
 	for _, path := range []string{"/Users/me/repo with spaces", `C:\Users\me\repo with spaces`, `\\server\share\repo with spaces`} {
 		t.Run(path, func(t *testing.T) {
-			name, description, source, githubURL, agent, workers := "Renamed Project", "", "github", "https://github.com/acme/repo", "Reviewer Agent", "0"
-			updated, err := applyProjectEdits(base, projectEditValues{Name: &name, Description: &description, RepositorySource: &source, RepositoryPath: &path, GitHubURL: &githubURL, DefaultAgent: &agent, MaxWorkers: &workers})
+			source := "local"
+			updated, err := applyProjectEdits(base, projectEditValues{RepositorySource: &source, RepositoryPath: &path})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if updated.Name != name || updated.Description != "" || updated.RepositoryPath != path || updated.GitHubURL != githubURL || updated.DefaultAgentID != "agent-2" || updated.MaxWorkers == nil || *updated.MaxWorkers != 0 {
+			if updated.RepositorySource != "local" || updated.RepositoryPath != path {
 				t.Fatalf("updated = %#v", updated)
 			}
 		})
 	}
+	name, description, source, githubURL, agent, workers := "Renamed Project", "", "github", "https://github.com/acme/repo", "Reviewer Agent", "0"
+	updated, err := applyProjectEdits(base, projectEditValues{Name: &name, Description: &description, RepositorySource: &source, GitHubURL: &githubURL, DefaultAgent: &agent, MaxWorkers: &workers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Name != name || updated.Description != "" || updated.RepositorySource != "github" || updated.GitHubURL != githubURL || updated.DefaultAgentID != "agent-2" || updated.MaxWorkers == nil || *updated.MaxWorkers != 0 {
+		t.Fatalf("updated = %#v", updated)
+	}
 	unchanged, err := applyProjectEdits(base, projectEditValues{})
 	if err != nil || unchanged.Name != base.Name || unchanged.Description != base.Description || unchanged.RepositoryPath != base.RepositoryPath || unchanged.DefaultAgentID != base.DefaultAgentID || unchanged.MaxWorkers == nil || *unchanged.MaxWorkers != 2 {
 		t.Fatalf("omitted values changed: %#v, err=%v", unchanged, err)
+	}
+}
+
+func TestApplyProjectEditsRejectsSourceIncompatibleRepositoryOptions(t *testing.T) {
+	local := client.ProjectSettings{RepositorySource: "local", LocalRepositoryPathsEnabled: true}
+	github := client.ProjectSettings{RepositorySource: "github", LocalRepositoryPathsEnabled: true}
+	path, githubURL := "/tmp/repo", "https://github.com/acme/repo"
+	for _, tc := range []struct {
+		name     string
+		settings client.ProjectSettings
+		edits    projectEditValues
+		want     string
+	}{
+		{name: "github URL for local source", settings: local, edits: projectEditValues{GitHubURL: &githubURL}, want: "requires repository source github"},
+		{name: "local path for GitHub source", settings: github, edits: projectEditValues{RepositoryPath: &path}, want: "requires repository source local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := applyProjectEdits(tc.settings, tc.edits); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestApplyProjectEditsMatchesRawAgentNamesButSanitizesDiagnostics(t *testing.T) {
+	rawName := "Build\x1b[31m\nFast (mode)"
+	settings := client.ProjectSettings{
+		AvailableAgents: []client.ProjectAgentOption{
+			{ID: "a1", Name: rawName},
+			{ID: "a2", Name: "Build\x1b[31m\rOther"},
+		},
+	}
+	updated, err := applyProjectEdits(settings, projectEditValues{DefaultAgent: &rawName})
+	if err != nil || updated.DefaultAgentID != "a1" {
+		t.Fatalf("raw exact match failed: updated=%#v err=%v", updated, err)
+	}
+	ref := "Build\x1b[31m"
+	_, err = applyProjectEdits(settings, projectEditValues{DefaultAgent: &ref})
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("expected ambiguity, got %v", err)
+	}
+	for _, unsafe := range []string{"\x1b", "\n", "\r"} {
+		if strings.Contains(err.Error(), unsafe) {
+			t.Fatalf("unsafe diagnostic %q", err)
+		}
+	}
+}
+
+func TestProjectsEditSanitizesBackendToastFailure(t *testing.T) {
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = io.WriteString(w, projectEditFixture)
+		case http.MethodPut:
+			w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"clone denied\u001b[31m\nretry\rnow\u0007","status":"failed"}}`)
+			w.WriteHeader(http.StatusNoContent)
+		}
+	})
+	m.projects = []client.Project{{ID: "p1", Name: "Alpha Project"}}
+	m.projectsLoaded = true
+	m = runLine(t, m, `/projects edit p1 --name Renamed`)
+	out := transcript(m)
+	if !strings.Contains(out, "clone denied retry now") {
+		t.Fatalf("safe error text missing: %q", out)
+	}
+	for _, unsafe := range []string{"\x1b", "\nretry", "\r", "\a"} {
+		if strings.Contains(out, unsafe) {
+			t.Fatalf("unsafe backend diagnostic %q", out)
+		}
 	}
 }
 

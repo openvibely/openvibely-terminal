@@ -414,10 +414,12 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		t.Fatal("projects command missing")
 	}
 	for input, want := range map[string]string{
-		"/projects cr":                              "/projects create ",
-		"/projects sh":                              "/projects show ",
-		"/projects edit demo --repository-s":        "/projects edit demo --repository-source ",
-		"/projects edit demo --repository-source g": "/projects edit demo --repository-source github ",
+		"/projects cr":                                      "/projects create ",
+		"/projects sh":                                      "/projects show ",
+		"/projects edit demo --repository-s":                "/projects edit demo --repository-source ",
+		"/projects edit demo --repository-source g":         "/projects edit demo --repository-source github ",
+		"/projects edit demo --name renamed --repository-s": "/projects edit demo --name renamed --repository-source ",
+		"/projects edit demo --name renamed --max-workers 2 --repository-source g": "/projects edit demo --name renamed --max-workers 2 --repository-source github ",
 	} {
 		if got := completeSlashInput(input, *cmd); got != want {
 			t.Errorf("completion for %q = %q, want %q", input, got, want)

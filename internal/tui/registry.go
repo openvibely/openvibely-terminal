@@ -5090,13 +5090,8 @@ func projectsCommand() command {
 			{action: "edit", args: "<project> [options]", description: "update project settings"},
 		},
 		selectorPaths: [][]string{{"show"}, {"edit"}},
-		completions: []commandCompletion{
-			{after: []string{"edit", "*"}, values: projectEditOptionNames()},
-			{after: []string{"edit", "*", "--repository-source"}, values: []string{"local", "github"}},
-			{after: []string{"edit", "*", "--max-workers"}, values: []string{"inherit", "0"}},
-			{after: []string{"edit", "*", "--default-agent"}, values: []string{"inherit"}},
-		},
-		desc: "list, show, create, or edit backend-owned projects",
+		completions:   projectEditCompletions(),
+		desc:          "list, show, create, or edit backend-owned projects",
 		usage: []string{
 			"projects [list]                              list projects with running/queued counts",
 			"projects show <project>                     show authoritative project settings",
@@ -5241,6 +5236,30 @@ func projectEditOptionNames() []string {
 	return []string{"--name", "--description", "--repository-source", "--repository-path", "--github-url", "--default-agent", "--max-workers"}
 }
 
+func projectEditCompletions() []commandCompletion {
+	options := projectEditOptionNames()
+	completions := make([]commandCompletion, 0, (len(options)+1)*4)
+	for completedPairs := 0; completedPairs <= len(options); completedPairs++ {
+		base := []string{"edit", "*"}
+		for range completedPairs {
+			base = append(base, "*", "*")
+		}
+		completions = append(completions, commandCompletion{after: base, values: options})
+		for _, valueCompletion := range []struct {
+			option string
+			values []string
+		}{
+			{option: "--repository-source", values: []string{"local", "github"}},
+			{option: "--max-workers", values: []string{"inherit", "0"}},
+			{option: "--default-agent", values: []string{"inherit"}},
+		} {
+			after := append(append([]string(nil), base...), valueCompletion.option)
+			completions = append(completions, commandCompletion{after: after, values: valueCompletion.values})
+		}
+	}
+	return completions
+}
+
 func parseProjectEditArgs(args []string) (string, projectEditValues, error) {
 	var edits projectEditValues
 	firstOption := len(args)
@@ -5317,6 +5336,12 @@ func applyProjectEdits(settings client.ProjectSettings, edits projectEditValues)
 		}
 		settings.RepositorySource = source
 	}
+	if edits.RepositoryPath != nil && settings.RepositorySource != "local" {
+		return settings, fmt.Errorf("--repository-path requires repository source local")
+	}
+	if edits.GitHubURL != nil && settings.RepositorySource != "github" {
+		return settings, fmt.Errorf("--github-url requires repository source github")
+	}
 	if edits.RepositoryPath != nil {
 		if !settings.LocalRepositoryPathsEnabled {
 			return settings, fmt.Errorf("local repository paths are disabled in this environment")
@@ -5334,7 +5359,10 @@ func applyProjectEdits(settings client.ProjectSettings, edits projectEditValues)
 		if value == "" || strings.EqualFold(value, "inherit") || strings.EqualFold(value, "global") {
 			settings.DefaultAgentID, settings.DefaultAgentName = "", ""
 		} else {
-			option, err := matchRef(settings.AvailableAgents, value, func(a client.ProjectAgentOption) string { return a.ID }, func(a client.ProjectAgentOption) string { return a.Name })
+			option, err := matchRefWithDisplay(settings.AvailableAgents, value,
+				func(a client.ProjectAgentOption) string { return a.ID },
+				func(a client.ProjectAgentOption) string { return a.Name },
+				sanitizeAutomationDetailText)
 			if err != nil {
 				return settings, fmt.Errorf("unknown default agent %q: %w", sanitizeAutomationDetailText(value), err)
 			}
