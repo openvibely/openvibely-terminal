@@ -1103,9 +1103,24 @@ var KnownChannels = []Channel{
 	{Type: "email", Name: "Email"},
 }
 
-// GetChannels returns the Channels (integrations) screen as text.
+// GetChannels returns only messaging integrations from the shared Channels
+// screen. Inbound webhook cards are deliberately omitted because their complete
+// lifecycle is rendered under /channels webhooks and mixing both surfaces would
+// duplicate entries.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
-	return c.paginatedPageText(ctx, "/channels"+query("project_id", projectID), "")
+	root, err := c.getHTML(ctx, "/channels"+query("project_id", projectID))
+	if err != nil {
+		return "", err
+	}
+	for _, card := range findAll(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-webhook-id") }) {
+		if card.Parent != nil {
+			card.Parent.RemoveChild(card)
+		}
+	}
+	if container := findByID(root, "channels-container"); container != nil {
+		root = container
+	}
+	return strings.TrimSpace(NodeText(root)), nil
 }
 
 // Webhook is the terminal-safe representation of one project-scoped inbound

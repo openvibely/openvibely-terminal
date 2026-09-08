@@ -95,6 +95,7 @@ type command struct {
 	// examples, not only syntax."
 	examples     []string
 	desc         string
+	hidden       bool // compatibility-only entries remain dispatchable but are omitted from command discovery
 	validateArgs func([]string) error
 	run          func(m Model, args []string) (Model, tea.Cmd)
 }
@@ -207,6 +208,9 @@ func suggest(word string) []command {
 	word = strings.ToLower(strings.TrimPrefix(word, "/"))
 	var out []command
 	for _, c := range commands {
+		if c.hidden {
+			continue
+		}
 		if word == "" || c.hasPrefix(word) {
 			out = append(out, c)
 		}

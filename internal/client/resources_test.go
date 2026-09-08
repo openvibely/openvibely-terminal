@@ -2183,6 +2183,38 @@ func TestGetWorkerSettingsReturnsPageText(t *testing.T) {
 	}
 }
 
+func TestGetChannelsOmitsInboundWebhookCards(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
+		_, _ = io.WriteString(w, `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true">
+			<div data-channel-type="telegram">Telegram configured</div>
+			<section><h2>Inbound webhooks</h2><div id="webhook-card-list">
+				<div data-webhook-id="w1" data-webhook-name="Pager Duty">Pager Duty /webhooks/inbound/token</div>
+			</div></section>
+		</div>`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := c.GetChannels(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("channel list requests = %d, want only the fixed first page", requests)
+	}
+	if !strings.Contains(text, "Telegram configured") {
+		t.Fatalf("channel output lost messaging integration: %q", text)
+	}
+	if strings.Contains(text, "Pager Duty") || strings.Contains(text, "/webhooks/inbound/token") {
+		t.Fatalf("channel output duplicated inbound webhook entries: %q", text)
+	}
+}
+
 func TestGetChannelsReturnsPageText(t *testing.T) {
 	c := htmlServer(t, `<html><body>channels text</body></html>`)
 	text, err := c.GetChannels(context.Background(), "p1")
@@ -2369,20 +2401,6 @@ func TestPaginatedPageTextAppendsOnlyUniqueContinuationCards(t *testing.T) {
 		fixed                           []string
 		orderedCards                    []string
 	}{
-		{
-			name: "channels", path: "/channels",
-			firstBody: `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true">
-				<h1>Channels heading</h1><button>Add channel control</button><div data-channel-type="telegram">Telegram fixed card</div>
-				<div id="webhook-card-list"><div data-webhook-id="w1">First webhook</div><div data-webhook-id="shared">Shared webhook</div></div>
-			</div>`,
-			nextBody: `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="false">
-				<h1>Channels heading</h1><button>Add channel control</button><div data-channel-type="telegram">Telegram fixed card</div>
-				<div id="webhook-card-list"><div data-webhook-id="shared">Shared webhook duplicate</div><div data-webhook-id="w2">Later webhook</div></div>
-			</div>`,
-			load:         func(c *Client) (string, error) { return c.GetChannels(context.Background(), "p1") },
-			fixed:        []string{"Channels heading", "Add channel control", "Telegram fixed card"},
-			orderedCards: []string{"First webhook", "Shared webhook", "Later webhook"},
-		},
 		{
 			name: "automations", path: "/automations",
 			firstBody: `<div id="automations-container" data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true">

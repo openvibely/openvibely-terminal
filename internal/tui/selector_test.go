@@ -174,12 +174,19 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		// channels
 		{"channels_test", "/channels test", "channels test"},
 		{"channels_remove", "/channels remove", "channels remove"},
-		// inbound webhooks
-		{"webhooks_show", "/webhooks show", "webhooks show"},
-		{"webhooks_edit", "/webhooks edit", "webhooks edit"},
-		{"webhooks_test", "/webhooks test", "webhooks test"},
-		{"webhooks_rotate", "/webhooks rotate", "webhooks rotate"},
-		{"webhooks_delete", "/webhooks delete", "webhooks delete"},
+		// inbound webhooks: canonical hierarchy and deprecated aliases all
+		// continue through the canonical picker command.
+		{"channels_webhooks_show", "/channels webhooks show", "channels webhooks show"},
+		{"channels_webhooks_edit", "/channels webhooks edit", "channels webhooks edit"},
+		{"channels_webhooks_test", "/channels webhooks test", "channels webhooks test"},
+		{"channels_webhooks_rotate", "/channels webhooks rotate", "channels webhooks rotate"},
+		{"channels_webhooks_delete", "/channels webhooks delete", "channels webhooks delete"},
+		{"webhooks_show", "/webhooks show", "channels webhooks show"},
+		{"webhooks_edit", "/webhooks edit", "channels webhooks edit"},
+		{"webhooks_test", "/webhooks test", "channels webhooks test"},
+		{"webhooks_rotate", "/webhooks rotate", "channels webhooks rotate"},
+		{"webhooks_delete", "/webhooks delete", "channels webhooks delete"},
+		{"inbound_webhooks_show", "/inbound-webhooks show", "channels webhooks show"},
 		// schedule
 		{"schedule_show", "/schedule show", "schedule show"},
 		{"schedule_open", "/schedule open", "schedule open"},
@@ -451,6 +458,27 @@ func TestDestructiveOptionSelectionStillRequiresConfirmation(t *testing.T) {
 	}
 	if rec.count(http.MethodDelete, "/tasks/clear") != 0 {
 		t.Fatalf("clear request occurred before confirmation:\n%s", rec.all())
+	}
+}
+
+func TestWebhookShowSelectorDispatchesResolvedItemWithoutSecondList(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/channels":             webhookCardsHTML,
+		"/channels/webhooks/w1": webhookDetailJSON,
+	})
+	m = runLine(t, m, "/channels webhooks show")
+	if !m.selectorActive {
+		t.Fatalf("expected webhook selector:\n%s", transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive {
+		t.Fatal("selector remained open after selecting a webhook")
+	}
+	if rec.count(http.MethodGet, "/channels") != 1 || rec.count(http.MethodGet, "/channels/webhooks/w1") != 1 {
+		t.Fatalf("selector dispatch repeated webhook discovery:\n%s", rec.all())
+	}
+	if !rec.sawQuery("GET /channels/webhooks/w1?project_id=p1") {
+		t.Fatalf("selector detail request lost project scope:\n%s", rec.all())
 	}
 }
 

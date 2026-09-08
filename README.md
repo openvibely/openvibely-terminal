@@ -149,7 +149,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations` | `list`, `test`, `remove` |
+| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `test`, `remove`; `webhooks list|show|create|edit|test|rotate|delete` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
@@ -271,28 +271,51 @@ to run unless `--force` is supplied. A task-only delete invocation opens the
 interactive attachment selector, where the selected file is still confirmed
 before deletion. `attach` and `attachment` are aliases for `attachments`.
 
-### Channels and integrations
+### Channels, integrations, and inbound webhooks
 
-`/channels` supports `list`, `test`, and `remove` for the selected project. In the
-interactive TUI, run channel actions with the slash command:
+`/channels` is the single channel-management surface for the selected project.
+Bare `list`, `test`, and `remove` actions manage messaging integrations; inbound
+webhooks use the nested `webhooks` registry:
 
 ```
 /channels list
 /channels test telegram
 /channels remove discord
+/channels webhooks list
+/channels webhooks show "PagerDuty alerts"
+/channels webhooks create "PagerDuty alerts" --priority 3 --agents triage-agent
+/channels webhooks edit pager --enabled false
+/channels webhooks test pager
+/channels webhooks rotate pager
+/channels webhooks delete pager
 ```
 
-The same actions work as one-shot CLI commands. Put `--force` before the command
-when removing a channel:
+Webhook `create` and `edit` accept `--name`, `--enabled`, `--priority` (or
+`--default-priority`), `--system-instructions`, `--title-template`,
+`--prompt-template`, and comma-separated `--agents` (or `--agent-ids`). Edit
+preserves every omitted field. References use the standard exact ID, exact name,
+unique prefix, then unique substring resolution, including exact names containing
+option-like tokens.
+
+The same actions work as one-shot CLI commands:
 
 ```bash
 openvibely-tui -project demo channels test telegram
+openvibely-tui -project demo channels webhooks list
+openvibely-tui -project demo channels webhooks test pager
 openvibely-tui -project demo --force channels remove discord
+openvibely-tui -project demo --force channels webhooks rotate pager
 ```
 
-Interactive removal asks you to type `yes` to confirm or press `Esc` to cancel.
-CLI removal requires `--force` (or `-f`). GitHub and Slack OAuth connection and
-callback flows still require a browser.
+Interactive channel removal, webhook secret rotation, and webhook deletion ask
+you to type `yes` or press `Esc`; one-shot CLI mode requires `--force` (or `-f`).
+Webhook list, show, create, edit, and test output never includes a secret. Rotation
+is the only command that returns a new secret, and only after confirmation.
+`/webhooks` and `/inbound-webhooks` remain accepted as deprecated compatibility
+aliases; both dispatch to `/channels webhooks` with identical project scope,
+selectors, errors, and confirmation behavior. They are omitted from top-level
+command discovery to avoid duplicate channel entries. GitHub and Slack OAuth
+connection and callback flows still require a browser.
 
 ### Automations
 
@@ -465,9 +488,16 @@ $ openvibely-tui help tasks
   tasks sweep                                sweep finished tasks
   tasks clear <backlog|completed>            clear a column
 $ openvibely-tui help channels
-  channels list                              list configured integrations
+  channels list                              list configured messaging integrations
   channels test <channel>                    send a test message (telegram, slack, discord, email)
   channels remove <channel>                  disconnect an integration (telegram, slack, discord, email)
+  channels webhooks list                     list inbound webhooks
+  channels webhooks show <webhook>           show secret-free webhook detail
+  channels webhooks create <name> [options]  create an inbound webhook
+  channels webhooks edit <webhook> <options> edit only specified configuration
+  channels webhooks test <webhook>           create a synthetic test task
+  channels webhooks rotate <webhook>         rotate the webhook secret (confirmation required)
+  channels webhooks delete <webhook>         delete a webhook (confirmation required)
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,

@@ -2775,7 +2775,7 @@ func TestCLIChannelsRejectMalformedArgumentsBeforeRequests(t *testing.T) {
 		args      []string
 		wantUsage string
 	}{
-		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|test <channel>|remove <channel>]"},
+		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|test <channel>|remove <channel>|webhooks <action>]"},
 		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels list"},
 		{args: []string{"channels", "test", "telegram", "extra"}, wantUsage: "usage: channels test <channel>"},
 		{args: []string{"channels", "remove", "slack", "extra"}, wantUsage: "usage: channels remove <channel>"},
@@ -5128,6 +5128,66 @@ func TestEventsHelpDistinguishesInteractiveAndCLI(t *testing.T) {
 		if !strings.Contains(help, want) {
 			t.Errorf("events help missing %q:\n%s", want, help)
 		}
+	}
+}
+
+func TestCLIChannelsWebhooksCanonicalAndAliasParity(t *testing.T) {
+	roots := [][]string{{"channels", "webhooks"}, {"webhooks"}, {"inbound-webhooks"}}
+	var wantOutput string
+	for i, root := range roots {
+		t.Run(strings.Join(root, " "), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":              cliProjects,
+				"/channels":                  webhookCardsHTML,
+				"/channels/webhooks/w1/test": `{"task_id":"task-parity"}`,
+			})
+			var out bytes.Buffer
+			args := append(append([]string(nil), root...), "test", "duty")
+			if err := RunCLI(c, &out, "demo", args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.count("GET", "/channels"); got != 1 {
+				t.Fatalf("webhook resolution requests = %d, want 1; calls: %s", got, rec.all())
+			}
+			if got := rec.count("POST", "/channels/webhooks/w1/test"); got != 1 {
+				t.Fatalf("webhook test requests = %d, want 1; calls: %s", got, rec.all())
+			}
+			if strings.Contains(strings.ToLower(out.String()), "secret") {
+				t.Fatalf("output disclosed secret material: %q", out.String())
+			}
+			if i == 0 {
+				wantOutput = out.String()
+			} else if out.String() != wantOutput {
+				t.Fatalf("alias output = %q, canonical output = %q", out.String(), wantOutput)
+			}
+		})
+	}
+}
+
+func TestCLIChannelsWebhooksPreservesOptionLikeExactName(t *testing.T) {
+	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":            cliProjects,
+		"/channels":                cards,
+		"/channels/webhooks/w-opt": detail,
+	})
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "webhooks", "show", "Hook", "--enabled", "maybe"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !rec.saw("GET", "/channels/webhooks/w-opt") || rec.saw("GET", "/channels/webhooks/w-short") {
+		t.Fatalf("canonical hierarchy shortened exact option-like name: %s", rec.all())
+	}
+}
+
+func TestCLIChannelsWebhooksValidatesBeforeAnyRequest(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "webhooks", "create", "Hook", "--enabled", "maybe"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "true or false") {
+		t.Fatalf("error = %v, want enabled validation", err)
+	}
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("invalid canonical invocation made requests: %s", calls)
 	}
 }
 
