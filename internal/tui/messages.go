@@ -123,6 +123,14 @@ type resultMsg struct {
 	err               error
 }
 
+type agentDeleteTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	agent             client.AgentDef
+	err               error
+}
+
 type webhookMutationTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64

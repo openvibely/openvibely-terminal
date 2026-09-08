@@ -452,10 +452,38 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	if resp.StatusCode != http.StatusOK {
 		return apiError(resp)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(out); err != nil {
 		return fmt.Errorf("decoding %s response: %w", path, err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
+		return fmt.Errorf("decoding %s response: trailing JSON data: %w", path, err)
+	}
 	return nil
+}
+
+// HTTPStatusError identifies a non-successful backend response while preserving
+// the existing user-facing server error text.
+type HTTPStatusError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e.Message != "" {
+		return fmt.Sprintf("server error (%d): %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("server error (%d)", e.StatusCode)
+}
+
+// IsNotFoundError reports whether err came from an HTTP 404 response.
+func IsNotFoundError(err error) bool {
+	var statusErr *HTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound
 }
 
 func apiError(resp *http.Response) error {
@@ -467,10 +495,10 @@ func apiError(resp *http.Response) error {
 			message = er.Message
 		}
 		if message != "" {
-			return fmt.Errorf("server error (%d): %s", resp.StatusCode, message)
+			return &HTTPStatusError{StatusCode: resp.StatusCode, Message: message}
 		}
 	}
-	return fmt.Errorf("server error (%d)", resp.StatusCode)
+	return &HTTPStatusError{StatusCode: resp.StatusCode}
 }
 
 func drainAndClose(rc io.ReadCloser) {

@@ -1141,9 +1141,9 @@ func resolveTaskWithOperands(tasks []client.Task, args []string, trailing int) (
 }
 
 // lifecycleCommand resolves a task and its optional execution, then either
-// renders the execution list or the ordered event trace. A missing execution
-// uses the TUI selector when several executions exist; CLI mode lists them so
-// its output remains deterministic.
+// renders the execution page or, only for an explicit execution reference, the
+// ordered event trace. Interactive pages with several executions use the
+// execution selector; CLI mode always renders the page deterministically.
 func lifecycleCommand(c *client.Client, projectID, action string, args []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
@@ -1158,10 +1158,11 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 			return resultMsg{title: "Task Lifecycle", err: err}
 		}
 
-		execs, err := c.ListTaskLifecycleExecutionsForProject(ctx, task.ID, projectID)
+		page, err := c.ListTaskLifecycleExecutionPageForProject(ctx, task.ID, projectID)
 		if err != nil {
 			return resultMsg{title: "Task Lifecycle", err: err}
 		}
+		execs := page.Items
 
 		if executionRef != "" {
 			execution, err := matchLifecycleExecution(execs, executionRef)
@@ -1171,36 +1172,29 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 			return lifecycleEventsMessage(ctx, c, projectID, task, execution)
 		}
 
-		switch len(execs) {
-		case 0:
-			if jsonMode {
-				body, err := marshalJSON(nonNilSlice(execs))
-				return resultMsg{title: "Task Lifecycle", body: body, err: err}
-			}
-			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
-		case 1:
-			return lifecycleEventsMessage(ctx, c, projectID, task, execs[0])
+		if jsonMode {
+			body, err := marshalJSON(page)
+			return resultMsg{title: "Task Lifecycle", body: body, err: err}
 		}
-
-		if cliMode {
-			if jsonMode {
-				body, err := marshalJSON(execs)
-				return resultMsg{title: "Task Lifecycle", body: body, err: err}
-			}
-			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutions(task, execs)}
+		if cliMode || len(execs) <= 1 {
+			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutionPage(task, page)}
 		}
 
 		items := make([]selectorItem, 0, len(execs))
 		for _, execution := range execs {
-			label := firstNonEmpty(execution.SkillKey, execution.ID, "(unnamed execution)")
-			detail := execution.Status
+			label := sanitizeAutomationDetailText(firstNonEmpty(execution.SkillKey, execution.ID, "(unnamed execution)"))
+			detail := sanitizeAutomationDetailText(execution.Status)
 			if execution.StartedAt != "" {
-				detail = strings.TrimSpace(detail + " · " + execution.StartedAt)
+				detail = strings.TrimSpace(detail + " · " + sanitizeAutomationDetailText(execution.StartedAt))
 			}
-			items = append(items, selectorItem{ref: execution.ID, label: label, detail: detail})
+			items = append(items, selectorItem{ref: execution.ID, label: truncate(label, 64), detail: truncate(detail, 96)})
+		}
+		title := "Lifecycle Executions"
+		if page.HasMore {
+			title += " (more available)"
 		}
 		return selectorActiveMsg{
-			title:     "Lifecycle Executions",
+			title:     title,
 			command:   "tasks " + action + " " + task.ID,
 			emptyHint: "no lifecycle executions for " + firstNonEmpty(task.Title, task.ID),
 			items:     items,
@@ -1290,9 +1284,12 @@ func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
 }
 
 func validateScheduleArgs(args []string) error {
-	action, rest := splitAction([]string{"list", "add", "edit", "delete", "toggle"}, args)
+	action, rest := splitAction([]string{"list", "show", "open", "add", "edit", "delete", "toggle"}, args)
 	if action == "" && len(args) > 0 || action == "list" && len(rest) > 0 {
-		return fmt.Errorf("usage: /schedule [list|add|edit|delete|toggle]")
+		return fmt.Errorf("usage: /schedule [list|show|open|add|edit|delete|toggle]")
+	}
+	if (action == "show" || action == "open") && len(rest) == 0 {
+		return fmt.Errorf("%s", commandUsage("schedule", action))
 	}
 	if action == "edit" {
 		_, _, err := parseScheduleEdit(rest)
@@ -1375,8 +1372,35 @@ func applyScheduleUpdate(config client.ScheduleConfig, update client.ScheduleUpd
 	return config
 }
 
+func getBoundScheduleTask(ctx context.Context, c *client.Client, projectID, taskID string) (*client.Task, error) {
+	if taskID == "" {
+		return nil, nil
+	}
+	detail, err := c.GetTaskMetadataForProjectExact(ctx, taskID, projectID)
+	if err != nil {
+		if client.IsNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &detail.Task, nil
+}
+
+func scheduleInspectionCommand(c *client.Client, projectID string, entry client.ScheduleEntry) tea.Cmd {
+	return run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+		boundTask, err := getBoundScheduleTask(ctx, c, projectID, entry.TaskID)
+		if err != nil {
+			return "", err
+		}
+		if jsonMode {
+			return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
+		}
+		return renderScheduleInspection(entry, boundTask), nil
+	})
+}
+
 func scheduleCommand() command {
-	actions := []string{"list", "add", "edit", "delete", "toggle"}
+	actions := []string{"list", "show", "open", "add", "edit", "delete", "toggle"}
 	return command{
 		name:         "schedule",
 		aliases:      []string{"schedules"},
@@ -1389,10 +1413,13 @@ func scheduleCommand() command {
 			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours"}},
 			{after: []string{"edit", "*", "clear-context"}, values: []string{"true", "false"}},
 		},
-		selectorPaths: [][]string{{"add"}, {"edit"}, {"delete"}, {"toggle"}},
+		selectorPaths: [][]string{{"show"}, {"open"}, {"add"}, {"edit"}, {"delete"}, {"toggle"}},
 		desc:          "scheduled/recurring task runs",
 		usage: []string{
 			"schedule                                   list schedules",
+			"schedule show <id|name>                    inspect a schedule and its bound task",
+			"schedule open <id|name>                    compatibility alias for show",
+			"omit <id|name> on show/open → interactive selector",
 			"omit <task> on add → interactive selector",
 			"schedule delete <id>                       remove a schedule",
 			"schedule edit <id> <setting> <value> [...] update a schedule",
@@ -1400,6 +1427,8 @@ func scheduleCommand() command {
 			"omit <id> on edit/delete/toggle → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
+			{action: "show", args: "<id|name>", description: "inspect a schedule and its bound task"},
+			{action: "open", args: "<id|name>", description: "compatibility alias for show"},
 			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]"},
 			{action: "edit", args: "<id> [run-at <2006-01-02T15:04>] [repeat <once|daily|weekly|monthly|hourly|seconds|minutes|hours>] [interval <1..365>] [clear-context <true|false>]"},
 		},
@@ -1417,7 +1446,7 @@ func scheduleCommand() command {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			if (action == "" && len(rest) > 0) || (action == "list" && len(rest) > 0) {
-				return m, errCmd("usage: /schedule [list|add|edit|delete|toggle]")
+				return m, errCmd("usage: /schedule [list|show|open|add|edit|delete|toggle]")
 			}
 
 			switch action {
@@ -1431,6 +1460,55 @@ func scheduleCommand() command {
 						return marshalJSON(entries)
 					}
 					return renderSchedule(entries, summary), nil
+				})
+			case "show", "open":
+				ref := strings.Join(rest, " ")
+				if ref == "" {
+					return selectorOr(m, commandUsage("schedule", action),
+						selectorFor("Schedule", "schedule "+action, scheduleEmptyStateHint, false, func(ctx context.Context) ([]selectorItem, error) {
+							entries, _, err := c.GetSchedule(ctx, pid)
+							if err != nil {
+								return nil, err
+							}
+							items := make([]selectorItem, 0, len(entries))
+							for _, entry := range entries {
+								if entry.ScheduleID == "" {
+									continue
+								}
+								entry := entry
+								items = append(items, selectorItem{
+									ref:    entry.ScheduleID,
+									label:  firstNonEmpty(entry.Name, entry.Text, shortID(entry.ScheduleID)),
+									detail: "task " + firstNonEmpty(shortID(entry.TaskID), "unavailable"),
+									dispatch: func(m Model) (Model, tea.Cmd) {
+										m.busy = true
+										return m, scheduleInspectionCommand(c, pid, entry)
+									},
+								})
+							}
+							return items, nil
+						}))
+				}
+				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+					entries, _, err := c.GetSchedule(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					entry, err := matchRefWithDisplay(entries, ref,
+						func(s client.ScheduleEntry) string { return s.ScheduleID },
+						func(s client.ScheduleEntry) string { return s.Name },
+						sanitizeAutomationDetailText)
+					if err != nil {
+						return "", err
+					}
+					boundTask, err := getBoundScheduleTask(ctx, c, pid, entry.TaskID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
+					}
+					return renderScheduleInspection(entry, boundTask), nil
 				})
 			case "add":
 				if len(rest) == 0 {
@@ -1476,7 +1554,7 @@ func scheduleCommand() command {
 							items := make([]selectorItem, 0, len(entries))
 							for _, e := range entries {
 								if e.ScheduleID != "" {
-									items = append(items, selectorItem{ref: e.ScheduleID, label: firstNonEmpty(e.Text, shortID(e.ScheduleID))})
+									items = append(items, selectorItem{ref: e.ScheduleID, label: firstNonEmpty(e.Name, e.Text, shortID(e.ScheduleID))})
 								}
 							}
 							return items, nil
@@ -1493,7 +1571,7 @@ func scheduleCommand() command {
 					}
 					entry, err := matchRef(entries, ref,
 						func(s client.ScheduleEntry) string { return s.ScheduleID },
-						func(s client.ScheduleEntry) string { return s.Text })
+						func(s client.ScheduleEntry) string { return s.Name })
 					if err != nil {
 						return "", err
 					}
@@ -1533,7 +1611,7 @@ func scheduleCommand() command {
 									e := e
 									item := selectorItem{
 										ref:   e.ScheduleID,
-										label: firstNonEmpty(e.Text, shortID(e.ScheduleID)),
+										label: firstNonEmpty(e.Name, e.Text, shortID(e.ScheduleID)),
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -1570,7 +1648,7 @@ func scheduleCommand() command {
 					}
 					e, err := matchRef(entries, ref,
 						func(s client.ScheduleEntry) string { return s.ScheduleID },
-						func(s client.ScheduleEntry) string { return s.Text })
+						func(s client.ScheduleEntry) string { return s.Name })
 					if err != nil {
 						return "", err
 					}
@@ -2318,6 +2396,36 @@ func validateAgentArgs(args []string) error {
 	return nil
 }
 
+func resolveAgentDeletion(c *client.Client, projectID, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		agents, err := c.ListAgents(ctx, projectID)
+		if err != nil {
+			return agentDeleteTargetMsg{projectID: projectID, err: err}
+		}
+		agent, err := matchAgentRef(agents, ref)
+		return agentDeleteTargetMsg{projectID: projectID, agent: agent, err: err}
+	}
+}
+
+func confirmAgentDeletion(m Model, projectID string, agent client.AgentDef) (Model, tea.Cmd) {
+	name := sanitizeAutomationDetailText(firstNonEmpty(agent.Name, agent.Key, agent.ID))
+	c := m.client
+	cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
+		if err := c.DeleteAgent(ctx, agent.ID); err != nil {
+			return "", err
+		}
+		return refreshAndRender("deleted "+name,
+			func() ([]client.AgentDef, error) { return c.ListAgents(ctx, projectID) },
+			renderAgents)
+	})
+	return confirmOr(m,
+		fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", name),
+		fmt.Sprintf("use --force to confirm deletion of agent %q", name),
+		cmd)
+}
+
 func agentsCommand() command {
 	actions := []string{"list", "edit", "delete", "generate", "metrics", "votes"}
 	return command{
@@ -2518,46 +2626,14 @@ func agentsCommand() command {
 										detail: truncate(a.Description, 40),
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
-											if err := c.DeleteAgent(ctx, a.ID); err != nil {
-												return "", err
-											}
-											return refreshAndRender("deleted "+a.Name,
-												func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
-												renderAgents)
-										})
-										return confirmOr(m,
-											fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
-											fmt.Sprintf("use --force to confirm deletion of agent %q", a.ID),
-											cmd)
+										return confirmAgentDeletion(m, pid, a)
 									}
 									items = append(items, item)
 								}
 								return items, nil
 							}))
 				}
-				cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
-					agents, err := c.ListAgents(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(agents, ref,
-						func(a client.AgentDef) string { return a.ID },
-						func(a client.AgentDef) string { return a.Name + " " + a.Key })
-					if err != nil {
-						return "", err
-					}
-					if err := c.DeleteAgent(ctx, a.ID); err != nil {
-						return "", err
-					}
-					return refreshAndRender("deleted "+a.Name,
-						func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
-						renderAgents)
-				})
-				return confirmOr(m,
-					fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", ref),
-					fmt.Sprintf("use --force to confirm deletion of agent %q", ref),
-					cmd)
+				return m, resolveAgentDeletion(c, pid, ref)
 			}
 			return m, nil
 		},
@@ -2638,6 +2714,20 @@ func modelsCommand() command {
 				return mm, cmd
 			}
 			pid := m.selectedID
+			executeResolvedAction := func(ctx context.Context, mo client.LLMModel, action string) (string, error) {
+				var err error
+				if action == "default" {
+					err = c.SetDefaultModel(ctx, mo.ID)
+				} else {
+					err = c.DeleteModel(ctx, mo.ID)
+				}
+				if err != nil {
+					return "", err
+				}
+				return refreshAndRender(action+": "+mo.Name,
+					func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
+					renderModels)
+			}
 
 			switch action {
 			case "capacity":
@@ -2668,18 +2758,7 @@ func modelsCommand() command {
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
-											var err error
-											if action == "default" {
-												err = c.SetDefaultModel(ctx, mo.ID)
-											} else {
-												err = c.DeleteModel(ctx, mo.ID)
-											}
-											if err != nil {
-												return "", err
-											}
-											return refreshAndRender(action+": "+mo.Name,
-												func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
-												renderModels)
+											return executeResolvedAction(ctx, mo, action)
 										})
 										if action == "delete" {
 											return confirmOr(m,
@@ -2706,17 +2785,7 @@ func modelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if action == "default" {
-						err = c.SetDefaultModel(ctx, mo.ID)
-					} else {
-						err = c.DeleteModel(ctx, mo.ID)
-					}
-					if err != nil {
-						return "", err
-					}
-					return refreshAndRender(action+": "+mo.Name,
-						func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
-						renderModels)
+					return executeResolvedAction(ctx, mo, action)
 				})
 				if action == "delete" {
 					return confirmOr(m,

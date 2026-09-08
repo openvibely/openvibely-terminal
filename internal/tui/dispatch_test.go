@@ -1255,8 +1255,8 @@ func TestTasksShowSuccessfulEmptyLazyFragmentRendersEmptyState(t *testing.T) {
 	}
 }
 
-func TestTasksLifecycleRendersOrderedEvents(t *testing.T) {
-	const executions = `[{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"}]`
+func TestTasksLifecycleRendersOrderedEventsFromCurrentPageResponse(t *testing.T) {
+	const executions = `{"items":[{"id":"exec-1","skill_key":"router","when":"post_task","status":"completed","started_at":"2026-01-20T10:00:00Z"}],"has_more":false}`
 	const events = `[
 		{"id":"event-2","seq":2,"event_type":"completed","payload":{"message":"second"},"created_at":"2026-01-20T10:00:02Z"},
 		{"id":"event-1","seq":1,"event_type":"started","payload":{"message":"first"},"created_at":"2026-01-20T10:00:01Z"}
@@ -1266,7 +1266,7 @@ func TestTasksLifecycleRendersOrderedEvents(t *testing.T) {
 		"/api/tasks/t-1/lifecycle-executions":     executions,
 		"/api/lifecycle-executions/exec-1/events": events,
 	})
-	m = runLine(t, m, "/tasks lifecycle Refactor the API")
+	m = runLine(t, m, "/tasks lifecycle Refactor the API exec-1")
 
 	if !rec.saw("GET", "/api/tasks/t-1/lifecycle-executions") {
 		t.Fatalf("expected lifecycle execution list, calls:\n%s", rec.all())
@@ -2857,6 +2857,147 @@ func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
 		})
 	}
 }
+func TestScheduleShowAndOpenResolveReferencesAndRenderBoundTask(t *testing.T) {
+	const schedules = `<div id="schedule-content">
+		<div data-task-id="task-1" data-schedule-id="sched-alpha">Alpha nightly</div>
+		<div data-task-id="task-2" data-schedule-id="alpha">Alpha weekly</div>
+		<div data-task-id="task-2" data-schedule-id="sched-beta">Beta report</div>
+	</div>`
+	for _, tc := range []struct {
+		name, action, ref, wantSchedule, wantTask string
+	}{
+		{name: "show exact id precedence", action: "show", ref: "alpha", wantSchedule: "Schedule ID: alpha", wantTask: "Weekly task"},
+		{name: "open unique prefix", action: "open", ref: "sched-b", wantSchedule: "Schedule ID: sched-beta", wantTask: "Weekly task"},
+		{name: "show unique substring", action: "show", ref: "night", wantSchedule: "Schedule ID: sched-alpha", wantTask: "Nightly task"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "p1" {
+					t.Errorf("%s %s project_id = %q, want p1", r.Method, r.URL.Path, got)
+				}
+				switch r.URL.Path {
+				case "/schedule":
+					_, _ = io.WriteString(w, schedules)
+				case "/tasks/task-1":
+					_, _ = io.WriteString(w, `<div data-task-id="task-1" data-project-id="p1"><h2 class="font-bold">Nightly task</h2><div data-task-status="pending"></div></div>`)
+				case "/tasks/task-2":
+					_, _ = io.WriteString(w, `<div data-task-id="task-2" data-project-id="p1"><h2 class="font-bold">Weekly task</h2><div data-task-status="running"></div></div>`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, "/schedule "+tc.action+" "+tc.ref)
+			out := stripANSI(transcript(m))
+			for _, want := range []string{tc.wantSchedule, tc.wantTask, "/tasks open " + map[string]string{"Weekly task": "task-2", "Nightly task": "task-1"}[tc.wantTask]} {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestScheduleShowExactSemanticNamePrecedesRenderedTextPrefixCollision(t *testing.T) {
+	const schedules = `<div id="schedule-content">
+		<div data-task-id="task-1" data-schedule-id="sched-one"><div class="font-semibold truncate leading-tight">Nightly build</div><div class="opacity-60 leading-tight">02:00</div></div>
+		<div data-task-id="task-2" data-schedule-id="sched-two"><div class="font-semibold truncate leading-tight">Nightly build extended</div><div class="opacity-60 leading-tight">03:00</div></div>
+	</div>`
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/schedule":
+			_, _ = io.WriteString(w, schedules)
+		case "/tasks/task-1":
+			_, _ = io.WriteString(w, `<div data-task-id="task-1" data-project-id="p1"><h2 class="font-bold">Nightly task</h2></div>`)
+		case "/tasks/task-2":
+			t.Fatal("exact schedule name resolved to the longer prefix collision")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	})
+	m = runLine(t, m, "/schedule show Nightly build")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "Schedule ID: sched-one") || strings.Contains(out, "ambiguous") {
+		t.Fatalf("exact semantic name did not win:\n%s", out)
+	}
+}
+
+func TestScheduleShowDistinguishesMissingTaskFromLookupFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		taskBody    string
+		want        string
+		unavailable bool
+	}{
+		{name: "deleted", status: http.StatusNotFound, want: "Bound task unavailable (task-1)", unavailable: true},
+		{name: "backend failure", status: http.StatusBadGateway, taskBody: `{"error":"task service unavailable"}`, want: "server error (502): task service unavailable"},
+		{name: "malformed identity", status: http.StatusOK, taskBody: `<div data-project-id="p1"><h2 class="font-bold">Unverified</h2></div>`, want: `task "task-1" was not found in selected project`},
+		{name: "foreign identity", status: http.StatusOK, taskBody: `<div data-task-id="task-1" data-project-id="p2"><h2 class="font-bold">Foreign</h2></div>`, want: `task "task-1" was not found in selected project`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/schedule":
+					_, _ = io.WriteString(w, `<div id="schedule-content"><div data-task-id="task-1" data-schedule-id="sched-one">Nightly</div></div>`)
+				case "/tasks/task-1":
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.taskBody)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+				}
+			})
+			m = runLine(t, m, "/schedule show sched-one")
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+			if !tc.unavailable && strings.Contains(out, "Bound task unavailable") {
+				t.Fatalf("lookup failure was reported as unavailable:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestScheduleShowHandlesMissingAndInvalidReferencesWithoutMutation(t *testing.T) {
+	const schedules = `<div id="schedule-content">
+		<div data-task-id="deleted-task" data-schedule-id="sched-one">Nightly one</div>
+		<div data-task-id="" data-schedule-id="sched-two">Nightly two</div>
+	</div>`
+	for _, tc := range []struct {
+		name, ref, want string
+	}{
+		{name: "deleted task", ref: "sched-one", want: "Bound task unavailable (deleted-task)"},
+		{name: "missing task id", ref: "sched-two", want: "Bound task unavailable"},
+		{name: "ambiguous", ref: "Nightly", want: "ambiguous"},
+		{name: "unknown", ref: "missing", want: "nothing matches"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mutations int
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					mutations++
+				}
+				switch r.URL.Path {
+				case "/schedule":
+					_, _ = io.WriteString(w, schedules)
+				case "/tasks":
+					_, _ = io.WriteString(w, `<div></div>`)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, "/schedule show "+tc.ref)
+			if out := stripANSI(transcript(m)); !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+			if mutations != 0 {
+				t.Fatalf("read action made %d mutation requests", mutations)
+			}
+		})
+	}
+}
+
 func scheduleEditDetail(projectID string) string {
 	return `<div id="task-detail-content"><div data-project-id="` + projectID + `"></div>
 		<div data-schedule-id="s-1"><form hx-put="/schedules/s-1?project_id=` + projectID + `"><input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select><input name="repeat_interval" value="1"><input type="checkbox" name="clear_context_on_start" value="true" checked></form></div>
@@ -4233,6 +4374,259 @@ func TestModelsDelete(t *testing.T) {
 	}
 }
 
+func TestModelsResolvedActionsMatchAcrossEntryRoutes(t *testing.T) {
+	for _, action := range []string{"default", "delete"} {
+		for _, entry := range []string{"typed", "picker"} {
+			t.Run(action+"/"+entry, func(t *testing.T) {
+				m, rec := dispatchModel(t, map[string]string{"/models": selModelsHTML})
+				m.selectedID = "project-selected"
+				m.selectedName = "selected"
+
+				if entry == "typed" {
+					m = runLine(t, m, "/models "+action+" GPT-4o")
+				} else {
+					m = runLine(t, m, "/models "+action)
+					if !m.selectorActive {
+						t.Fatalf("picker route did not open selector:\n%s", transcript(m))
+					}
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				}
+
+				method, path := http.MethodPost, "/models/mo-1/set-default"
+				if action == "delete" {
+					method, path = http.MethodDelete, "/models/mo-1"
+					if m.pendingConfirmation == nil {
+						t.Fatalf("delete did not wait for confirmation:\n%s", transcript(m))
+					}
+					wantPrompt := `Delete model "GPT-4o"? Type 'yes' to confirm or Esc to cancel.`
+					if entry == "picker" {
+						wantPrompt = `Delete model "mo-1"? Type 'yes' to confirm or Esc to cancel.`
+					}
+					if out := stripANSI(m.View()); !strings.Contains(out, wantPrompt) {
+						t.Fatalf("confirmation text missing %q:\n%s", wantPrompt, out)
+					}
+					if got := rec.count(method, path); got != 0 {
+						t.Fatalf("delete requests before confirmation = %d, want 0", got)
+					}
+					m = runLine(t, m, "yes")
+				}
+
+				if got := rec.count(method, path); got != 1 {
+					t.Fatalf("%s requests = %d, want 1; calls:\n%s", path, got, rec.all())
+				}
+				if got := rec.count(http.MethodGet, "/models"); got != 2 {
+					t.Fatalf("model list requests = %d, want resolution/selection and refresh; calls:\n%s", got, rec.all())
+				}
+				urls := rec.urlsSnapshot()
+				for _, request := range urls {
+					if strings.HasPrefix(request, "GET /models") && !strings.Contains(request, "project_id=project-selected") {
+						t.Fatalf("model list request lost selected project: %s", request)
+					}
+				}
+				out := stripANSI(transcript(m))
+				for _, want := range []string{action + ": GPT-4o", "Claude", "claude-sonnet"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("successful output missing %q:\n%s", want, out)
+					}
+				}
+				if strings.Contains(out, "error:") {
+					t.Fatalf("successful action reported an error:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestModelsResolvedActionMutationFailuresSkipSuccessAndRefresh(t *testing.T) {
+	for _, action := range []string{"default", "delete"} {
+		for _, entry := range []string{"typed", "picker"} {
+			t.Run(action+"/"+entry, func(t *testing.T) {
+				var gets, mutations int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/models":
+						gets++
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = w.Write([]byte(selModelsHTML))
+					case r.URL.Path == "/models/mo-1/set-default" || r.URL.Path == "/models/mo-1":
+						mutations++
+						http.Error(w, "model mutation failed", http.StatusInternalServerError)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				t.Cleanup(srv.Close)
+				c, err := client.New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				m := New(c)
+				m.selectedID = "p1"
+				m.selectedName = "demo"
+
+				if entry == "typed" {
+					m = runLine(t, m, "/models "+action+" GPT-4o")
+				} else {
+					m = runLine(t, m, "/models "+action)
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				}
+				if action == "delete" {
+					m = runLine(t, m, "yes")
+				}
+
+				if mutations != 1 {
+					t.Fatalf("mutation requests = %d, want 1", mutations)
+				}
+				if gets != 1 {
+					t.Fatalf("model GETs = %d, want only resolution/selection; refresh ran after failure", gets)
+				}
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, "server error (500)") {
+					t.Fatalf("mutation error missing:\n%s", out)
+				}
+				if strings.Contains(out, action+": GPT-4o") {
+					t.Fatalf("mutation failure reported success:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestModelsResolvedActionRefreshFailuresReturnOnlySuccess(t *testing.T) {
+	for _, action := range []string{"default", "delete"} {
+		for _, entry := range []string{"typed", "picker"} {
+			t.Run(action+"/"+entry, func(t *testing.T) {
+				var gets, mutations int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/models":
+						gets++
+						if gets > 1 {
+							http.Error(w, "refresh failed", http.StatusInternalServerError)
+							return
+						}
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = w.Write([]byte(selModelsHTML))
+					case r.URL.Path == "/models/mo-1/set-default" || r.URL.Path == "/models/mo-1":
+						mutations++
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				t.Cleanup(srv.Close)
+				c, err := client.New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				m := New(c)
+				m.selectedID = "p1"
+				m.selectedName = "demo"
+
+				if entry == "typed" {
+					m = runLine(t, m, "/models "+action+" GPT-4o")
+				} else {
+					m = runLine(t, m, "/models "+action)
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				}
+				if action == "delete" {
+					m = runLine(t, m, "yes")
+				}
+
+				if mutations != 1 || gets != 2 {
+					t.Fatalf("mutations/GETs = %d/%d, want 1/2", mutations, gets)
+				}
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, action+": GPT-4o") {
+					t.Fatalf("success missing after refresh failure:\n%s", out)
+				}
+				for _, forbidden := range []string{"refresh failed", "error:", "Claude", "claude-sonnet"} {
+					if strings.Contains(out, forbidden) {
+						t.Errorf("refresh failure output unexpectedly contains %q:\n%s", forbidden, out)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestModelsTypedReferenceFailuresAndPickerCancellationDoNotMutate(t *testing.T) {
+	const ambiguousModels = `<div>
+		<div data-model-id="mo-1" data-model-name="Sonnet Alpha" data-model-provider="anthropic" data-model-model="claude-alpha"></div>
+		<div data-model-id="mo-2" data-model-name="Sonnet Beta" data-model-provider="anthropic" data-model-model="claude-beta"></div>
+	</div>`
+	for _, action := range []string{"default", "delete"} {
+		for _, tc := range []struct {
+			name string
+			ref  string
+			want string
+		}{
+			{name: "ambiguous", ref: "Sonnet", want: "ambiguous"},
+			{name: "unknown", ref: "Missing", want: "nothing matches"},
+		} {
+			t.Run(action+"/"+tc.name, func(t *testing.T) {
+				m, rec := dispatchModel(t, map[string]string{"/models": ambiguousModels})
+				m = runLine(t, m, "/models "+action+" "+tc.ref)
+				if action == "delete" {
+					if m.pendingConfirmation == nil {
+						t.Fatal("typed delete should confirm before resolving its reference")
+					}
+					if got := rec.count(http.MethodGet, "/models"); got != 0 {
+						t.Fatalf("typed delete resolved before confirmation with %d GETs", got)
+					}
+					m = runLine(t, m, "yes")
+				}
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, tc.want) {
+					t.Fatalf("reference error missing %q:\n%s", tc.want, out)
+				}
+				if rec.count(http.MethodPost, "/models/mo-1/set-default") != 0 ||
+					rec.count(http.MethodPost, "/models/mo-2/set-default") != 0 ||
+					rec.count(http.MethodDelete, "/models/mo-1") != 0 ||
+					rec.count(http.MethodDelete, "/models/mo-2") != 0 {
+					t.Fatalf("invalid reference mutated a model:\n%s", rec.all())
+				}
+			})
+		}
+
+		t.Run(action+"/picker_cancel", func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/models": selModelsHTML})
+			m = runLine(t, m, "/models "+action)
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+			if m.selectorActive || m.pendingConfirmation != nil {
+				t.Fatal("Esc did not cleanly cancel the model picker")
+			}
+			if rec.count(http.MethodPost, "/models/mo-1/set-default") != 0 || rec.count(http.MethodDelete, "/models/mo-1") != 0 {
+				t.Fatalf("cancelled picker mutated a model:\n%s", rec.all())
+			}
+		})
+	}
+}
+
+func TestModelsDeleteConfirmationCancellationDoesNotMutate(t *testing.T) {
+	for _, entry := range []string{"typed", "picker"} {
+		t.Run(entry, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/models": selModelsHTML})
+			if entry == "typed" {
+				m = runLine(t, m, "/models delete GPT-4o")
+			} else {
+				m = runLine(t, m, "/models delete")
+				m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			}
+			if m.pendingConfirmation == nil {
+				t.Fatal("delete did not enter confirmation mode")
+			}
+			m = runLine(t, m, "no")
+			if m.pendingConfirmation != nil {
+				t.Fatal("confirmation cancellation left pending state")
+			}
+			if got := rec.count(http.MethodDelete, "/models/mo-1"); got != 0 {
+				t.Fatalf("cancelled delete requests = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestModelsDeleteUnauthorizedSkipsSuccessAndReload(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
@@ -5460,6 +5854,134 @@ func TestAgentsMetricsRemainsGlobalWithoutSelectedProject(t *testing.T) {
 	}
 	if m.busy {
 		t.Fatal("global metrics left the model busy")
+	}
+}
+
+func TestAgentsDeleteResolvesBeforeConfirmation(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-reviewer" data-agent-key="reviewer" data-agent-name="Code Reviewer"
+		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>
+	<div data-agent-id="ag-alpha" data-agent-key="alpha" data-agent-name="Review Alpha"
+		data-agent-description="reviews releases" data-agent-model="claude" data-agent-scope="project"></div>
+	<div data-agent-id="ag-beta" data-agent-key="beta" data-agent-name="Review Beta"
+		data-agent-description="reviews releases" data-agent-model="claude" data-agent-scope="project"></div>`
+
+	for _, tc := range []struct {
+		name    string
+		ref     string
+		wantErr string
+	}{
+		{name: "ambiguous", ref: "review", wantErr: "is ambiguous"},
+		{name: "unknown", ref: "missing", wantErr: "nothing matches"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+			m = runLine(t, m, "/agents delete "+tc.ref)
+			if m.pendingConfirmation != nil {
+				t.Fatal("invalid reference opened confirmation")
+			}
+			if calls := rec.all(); strings.Contains(calls, "DELETE /agents/") {
+				t.Fatalf("invalid reference made a DELETE request:\n%s", calls)
+			}
+			if out := stripANSI(transcript(m)); !strings.Contains(out, tc.wantErr) {
+				t.Fatalf("output = %q, want %q", out, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("partial canonical prompt and cancellation", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, "/agents delete code")
+		if m.pendingConfirmation == nil {
+			t.Fatal("unique partial reference did not open confirmation")
+		}
+		if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `"Code Reviewer"`) || strings.Contains(prompt, `"code"`) {
+			t.Fatalf("confirmation = %q, want canonical agent name", prompt)
+		}
+		if calls := rec.all(); strings.Contains(calls, "DELETE /agents/") {
+			t.Fatalf("delete occurred before confirmation:\n%s", calls)
+		}
+		m = runLine(t, m, "no")
+		if m.pendingConfirmation != nil {
+			t.Fatal("cancellation left confirmation active")
+		}
+		if calls := rec.all(); strings.Contains(calls, "DELETE /agents/") {
+			t.Fatalf("cancellation made a DELETE request:\n%s", calls)
+		}
+	})
+}
+
+func TestAgentsDeleteConfirmationUsesCapturedID(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		changed bool
+		deleted []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/agents":
+			mu.Lock()
+			useChanged := changed
+			mu.Unlock()
+			id := "ag-original"
+			if useChanged {
+				id = "ag-replacement"
+			}
+			_, _ = fmt.Fprintf(w, `<div data-agent-id="%s" data-agent-key="reviewer" data-agent-name="Code Reviewer" data-agent-scope="project"></div>`, id)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/agents/"):
+			mu.Lock()
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/agents/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+
+	m = runLine(t, m, "/agents delete code")
+	if m.pendingConfirmation == nil {
+		t.Fatal("delete did not open confirmation")
+	}
+	mu.Lock()
+	changed = true
+	mu.Unlock()
+	m = runLine(t, m, "yes")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 1 || deleted[0] != "ag-original" {
+		t.Fatalf("deleted IDs = %v, want captured ag-original", deleted)
+	}
+}
+
+func TestAgentsDeleteResolutionRejectsStaleResults(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Code Reviewer" data-agent-scope="project"></div>`
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Model)
+	}{
+		{name: "project", mutate: func(m *Model) { m.setActiveProject(client.Project{ID: "p2", Name: "other"}) }},
+		{name: "session", mutate: func(m *Model) { m.sessionGeneration++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+			m, cmd := typeLine(t, m, "/agents delete code")
+			if cmd == nil {
+				t.Fatal("delete did not start target resolution")
+			}
+			tc.mutate(&m)
+			next, _ := m.Update(cmd())
+			m = next.(Model)
+			if m.pendingConfirmation != nil {
+				t.Fatal("stale resolution installed confirmation")
+			}
+		})
 	}
 }
 

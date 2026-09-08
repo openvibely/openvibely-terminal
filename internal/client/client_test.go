@@ -413,6 +413,30 @@ func TestReadErrorsClassifyReachableFailures(t *testing.T) {
 	}
 }
 
+func TestNotFoundErrorClassificationIsStatusSpecific(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   bool
+	}{
+		{status: http.StatusNotFound, want: true},
+		{status: http.StatusInternalServerError, want: false},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"error":"request failed"}`))
+			}))
+			_, err := c.GetGlobalCapacity(context.Background())
+			if err == nil {
+				t.Fatal("expected status error")
+			}
+			if got := IsNotFoundError(fmt.Errorf("wrapped: %w", err)); got != tc.want {
+				t.Fatalf("IsNotFoundError(%v) = %t, want %t", err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSendChatMessage(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/chat/message" {

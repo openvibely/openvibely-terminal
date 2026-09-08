@@ -77,6 +77,7 @@ const (
 func selFixtures() map[string]string {
 	return map[string]string{
 		"/tasks":       selTasksHTML,
+		"/tasks/t-1":   `<div data-task-id="t-1" data-project-id="p1"><h2 class="font-bold">Refactor the API</h2><div data-task-status="pending"></div></div>`,
 		"/alerts":      selAlertsHTML,
 		"/skills":      selSkillsHTML,
 		"/agents":      selAgentsHTML,
@@ -85,6 +86,38 @@ func selFixtures() map[string]string {
 		"/channels":    webhookCardsHTML,
 		"/schedule":    selScheduleHTML,
 		"/personality": selPersonalitiesHTML,
+	}
+}
+
+func TestTasksLifecycleTaskSelectorSelectionRendersOneItemPageWithoutImplicitEvents(t *testing.T) {
+	const tasks = `<div>
+		<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>
+		<div data-task-id="t-2" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-2" title="Write docs">Write docs</a></div>
+	</div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                              tasks,
+		"/api/tasks/t-1/lifecycle-executions": `{"items":[{"id":"exec-1","skill_key":"router","status":"completed","summary":"routing complete"}],"has_more":true,"next_cursor":"older-cursor"}`,
+	})
+	m = runLine(t, m, "/tasks lifecycle")
+	if !m.selectorActive || m.pendingCommand != "tasks lifecycle" {
+		t.Fatalf("missing-ref lifecycle did not open the task selector: active=%t pending=%q", m.selectorActive, m.pendingCommand)
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive {
+		t.Fatal("task selector remained open after lifecycle selection")
+	}
+	if !rec.sawQuery("GET /api/tasks/t-1/lifecycle-executions?project_id=p1") {
+		t.Fatalf("selected lifecycle request lost project scope:\n%s", rec.all())
+	}
+	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Fatalf("task-only selector dispatch implicitly fetched event traces:\n%s", rec.all())
+	}
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"exec-1", "router", "completed", "routing complete", "has more: true", "older-cursor"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("selected lifecycle page missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -148,8 +181,9 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"webhooks_rotate", "/webhooks rotate", "webhooks rotate"},
 		{"webhooks_delete", "/webhooks delete", "webhooks delete"},
 		// schedule
-		{"schedule_add", "/schedule add", "schedule add"},
-		{"schedule_edit", "/schedule edit", "schedule edit"},
+		{"schedule_show", "/schedule show", "schedule show"},
+		{"schedule_open", "/schedule open", "schedule open"},
+		{"schedule_add", "/schedule add", "schedule add"}, {"schedule_edit", "/schedule edit", "schedule edit"},
 		{"schedule_delete", "/schedule delete", "schedule delete"},
 		{"schedule_toggle", "/schedule toggle", "schedule toggle"},
 		// personality
@@ -1008,6 +1042,38 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 				t.Errorf("output after %s missing %q:\n%s", tc.command, tc.wantOutput, out)
 			}
 		})
+	}
+}
+
+func TestScheduleShowPickerSelectionAndCancellation(t *testing.T) {
+	m, rec := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/schedule open")
+	if !m.selectorActive || m.pendingCommand != "schedule open" {
+		t.Fatalf("expected schedule open selector: active=%t command=%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Weekly report", "Schedule ID: s-2", "Task ID: t-1", "/tasks open t-1"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("selected schedule output missing %q:\n%s", want, out)
+		}
+	}
+	if got := selectorCallCount(rec, http.MethodGet, "/schedule"); got != 1 {
+		t.Errorf("picker schedule GETs = %d, want 1; calls:\n%s", got, rec.all())
+	}
+
+	m, rec = dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/schedule show")
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.selectorActive {
+		t.Fatal("escape did not cancel schedule selector")
+	}
+	if rec.saw(http.MethodGet, "/tasks") {
+		t.Fatalf("cancelled selector looked up bound task; calls:\n%s", rec.all())
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "cancelled") {
+		t.Fatalf("cancel output missing:\n%s", out)
 	}
 }
 

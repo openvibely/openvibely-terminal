@@ -823,6 +823,7 @@ func (c *Client) GenerateAgent(ctx context.Context, projectID, description strin
 type ScheduleEntry struct {
 	TaskID     string `json:"task_id"`
 	ScheduleID string `json:"schedule_id"`
+	Name       string `json:"-"`
 	Text       string `json:"text"`
 }
 
@@ -845,19 +846,43 @@ type ScheduleUpdate struct {
 	ClearContextOnStart *bool
 }
 
+func scheduleCardName(node *html.Node) string {
+	title := findNode(node, func(n *html.Node) bool {
+		if n.Type != html.ElementNode {
+			return false
+		}
+		for _, class := range strings.Fields(attr(n, "class")) {
+			if class == "font-semibold" {
+				return true
+			}
+		}
+		return false
+	})
+	if title == nil {
+		return ""
+	}
+	return strings.TrimSpace(NodeText(title))
+}
+
 // GetSchedule scrapes the Schedule screen for a project.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
 	root, err := c.getHTML(ctx, "/schedule"+query("project_id", projectID))
 	if err != nil {
 		return nil, "", err
 	}
-	cards := dedupedCards(root, "data-schedule-id")
+	cards := dedupeScrapedCards(scrapeCardNodes(root, "data-schedule-id"), "data-schedule-id")
 	out := make([]ScheduleEntry, 0, len(cards))
 	for _, card := range cards {
+		text := strings.TrimSpace(cardNodeText(card.node))
+		name := scheduleCardName(card.node)
+		if name == "" {
+			name = text
+		}
 		out = append(out, ScheduleEntry{
-			TaskID:     card.Get("task-id"),
-			ScheduleID: card.Get("schedule-id"),
-			Text:       strings.TrimSpace(card.Text),
+			TaskID:     card.attrs["data-task-id"],
+			ScheduleID: card.attrs["data-schedule-id"],
+			Name:       name,
+			Text:       text,
 		})
 	}
 	summary := ""

@@ -298,18 +298,124 @@ func (c *Client) GetVoteRecords(ctx context.Context, stepExecID string) ([]VoteR
 
 // --- Lifecycle executions (/api/tasks/:id/lifecycle-executions) ---
 
+// SelectedMemory mirrors viewmodels.SelectedMemoryView.
+type SelectedMemory struct {
+	File    string `json:"file,omitempty"`
+	Topic   string `json:"topic,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	Snippet string `json:"snippet,omitempty"`
+}
+
 // LifecycleExecution mirrors viewmodels.LifecycleExecutionView.
 type LifecycleExecution struct {
-	ID             string   `json:"id"`
-	SkillKey       string   `json:"skill_key"`
-	When           string   `json:"when"`
-	Status         string   `json:"status"`
-	AgentID        string   `json:"agent_id"`
-	StartedAt      string   `json:"started_at"`
-	CompletedAt    string   `json:"completed_at"`
-	Summary        string   `json:"summary"`
-	Error          string   `json:"error"`
-	SelectedSkills []string `json:"selected_skills"`
+	ID               string           `json:"id"`
+	SkillKey         string           `json:"skill_key"`
+	When             string           `json:"when"`
+	Status           string           `json:"status"`
+	AgentID          string           `json:"agent_id"`
+	OutputContract   string           `json:"output_contract"`
+	StartedAt        string           `json:"started_at"`
+	CompletedAt      string           `json:"completed_at,omitempty"`
+	Summary          string           `json:"summary,omitempty"`
+	Error            string           `json:"error,omitempty"`
+	SelectedSkills   []string         `json:"selected_skills,omitempty"`
+	SelectedMemories []SelectedMemory `json:"selected_memories,omitempty"`
+}
+
+// LifecycleExecutionPage mirrors viewmodels.LifecycleExecutionPageView. The
+// backend currently returns this envelope. Legacy arrays remain supported
+// because the backend web client explicitly accepts that earlier shape.
+type LifecycleExecutionPage struct {
+	Items      []LifecycleExecution `json:"items"`
+	HasMore    bool                 `json:"has_more"`
+	NextCursor string               `json:"next_cursor,omitempty"`
+	raw        json.RawMessage
+}
+
+func (p *LifecycleExecutionPage) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return fmt.Errorf("empty lifecycle execution response")
+	}
+
+	var items []LifecycleExecution
+	var hasMore bool
+	var nextCursor string
+	switch trimmed[0] {
+	case '[':
+		var err error
+		items, err = decodeLifecycleExecutionItems(trimmed)
+		if err != nil {
+			return fmt.Errorf("invalid legacy lifecycle execution array: %w", err)
+		}
+	case '{':
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &fields); err != nil {
+			return fmt.Errorf("invalid lifecycle execution page: %w", err)
+		}
+		rawItems, ok := fields["items"]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawItems), []byte("null")) {
+			return fmt.Errorf("invalid lifecycle execution page: items must be an array")
+		}
+		var decodeErr error
+		items, decodeErr = decodeLifecycleExecutionItems(rawItems)
+		if decodeErr != nil {
+			return fmt.Errorf("invalid lifecycle execution page items: %w", decodeErr)
+		}
+		rawHasMore, ok := fields["has_more"]
+		if !ok || bytes.Equal(bytes.TrimSpace(rawHasMore), []byte("null")) {
+			return fmt.Errorf("invalid lifecycle execution page: has_more must be a boolean")
+		}
+		if err := json.Unmarshal(rawHasMore, &hasMore); err != nil {
+			return fmt.Errorf("invalid lifecycle execution page has_more: %w", err)
+		}
+		if rawNext, ok := fields["next_cursor"]; ok {
+			if bytes.Equal(bytes.TrimSpace(rawNext), []byte("null")) || json.Unmarshal(rawNext, &nextCursor) != nil {
+				return fmt.Errorf("invalid lifecycle execution page: next_cursor must be a string")
+			}
+		}
+	default:
+		return fmt.Errorf("invalid lifecycle execution response: expected object or legacy array")
+	}
+
+	p.Items = items
+	p.HasMore = hasMore
+	p.NextCursor = nextCursor
+	p.raw = append(p.raw[:0], trimmed...)
+	return nil
+}
+
+func decodeLifecycleExecutionItems(data []byte) ([]LifecycleExecution, error) {
+	var rawItems []json.RawMessage
+	if err := json.Unmarshal(data, &rawItems); err != nil {
+		return nil, err
+	}
+	if rawItems == nil {
+		return nil, fmt.Errorf("items must be an array")
+	}
+	items := make([]LifecycleExecution, 0, len(rawItems))
+	for i, raw := range rawItems {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '{' {
+			return nil, fmt.Errorf("item %d must be an object", i)
+		}
+		var item LifecycleExecution
+		if err := json.Unmarshal(trimmed, &item); err != nil {
+			return nil, fmt.Errorf("item %d: %w", i, err)
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+// MarshalJSON preserves the complete validated backend representation for raw
+// JSON output, including documented metadata and forward-compatible fields.
+func (p LifecycleExecutionPage) MarshalJSON() ([]byte, error) {
+	if len(p.raw) != 0 {
+		return append([]byte(nil), p.raw...), nil
+	}
+	type page LifecycleExecutionPage
+	return json.Marshal(page(p))
 }
 
 // LifecycleEvent mirrors viewmodels.LifecycleExecutionEventView.
@@ -325,19 +431,34 @@ type LifecycleEvent struct {
 // the backend's default project scope. Task-detail rendering uses this legacy
 // form to preserve its existing fallback behavior.
 func (c *Client) ListTaskLifecycleExecutions(ctx context.Context, taskID string) ([]LifecycleExecution, error) {
-	return c.listTaskLifecycleExecutions(ctx, taskID, "")
+	page, err := c.listTaskLifecycleExecutionPage(ctx, taskID, "")
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
 }
 
 // ListTaskLifecycleExecutionsForProject fetches lifecycle executions for a task
-// within the explicitly selected project.
+// within the explicitly selected project. It retains the historical slice
+// return for task-detail callers that do not consume page metadata.
 func (c *Client) ListTaskLifecycleExecutionsForProject(ctx context.Context, taskID, projectID string) ([]LifecycleExecution, error) {
-	return c.listTaskLifecycleExecutions(ctx, taskID, projectID)
+	page, err := c.listTaskLifecycleExecutionPage(ctx, taskID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return page.Items, nil
 }
 
-func (c *Client) listTaskLifecycleExecutions(ctx context.Context, taskID, projectID string) ([]LifecycleExecution, error) {
-	var out []LifecycleExecution
-	err := c.getJSON(ctx, "/api/tasks/"+url.PathEscape(taskID)+"/lifecycle-executions"+query("project_id", projectID), &out)
-	return out, err
+// ListTaskLifecycleExecutionPageForProject fetches the authoritative bounded
+// lifecycle page, including continuation metadata, for command rendering.
+func (c *Client) ListTaskLifecycleExecutionPageForProject(ctx context.Context, taskID, projectID string) (LifecycleExecutionPage, error) {
+	return c.listTaskLifecycleExecutionPage(ctx, taskID, projectID)
+}
+
+func (c *Client) listTaskLifecycleExecutionPage(ctx context.Context, taskID, projectID string) (LifecycleExecutionPage, error) {
+	var page LifecycleExecutionPage
+	err := c.getJSON(ctx, "/api/tasks/"+url.PathEscape(taskID)+"/lifecycle-executions"+query("project_id", projectID), &page)
+	return page, err
 }
 
 // GetLifecycleExecutionEvents fetches the trace events of one execution using
