@@ -45,6 +45,17 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader() + "\n")
 	b.WriteString(m.transcript.View() + "\n")
+	if m.automationEditActive {
+		title := "Edit automation: " + sanitizeAutomationDetailText(firstNonEmpty(m.automationEditName, m.automationEditID))
+		b.WriteString(sectionStyle.Render(title) + "\n")
+		b.WriteString(m.automationEditor.View() + "\n")
+		hint := "Ctrl+S preview and save · Esc cancel"
+		if m.automationEditSaving {
+			hint = "validating and saving…"
+		}
+		b.WriteString(helpStyle.Render(hint))
+		return b.String()
+	}
 	if m.selectorActive {
 		b.WriteString(m.renderSelector() + "\n")
 		b.WriteString(helpStyle.Render(m.hint()))

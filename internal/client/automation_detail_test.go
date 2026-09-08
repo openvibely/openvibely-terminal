@@ -1397,24 +1397,32 @@ func TestParseAutomationDetailCanonicalizesDuplicateResourcesDeterministically(t
 	}
 }
 
-func TestParseAutomationDetailBuildsBoundedSecretSafeConfigSummaries(t *testing.T) {
+func TestParseAutomationDetailBuildsRealisticBoundedSecretSafeConfigSummaries(t *testing.T) {
 	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-config" data-project-id="p1" data-automation-lifecycle-state="active">
-		<div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-key="task"><strong>Task</strong></g></div>
-		<section data-automation-live-node-detail="task" data-automation-live-node-id="n1"><h3>Task</h3><p>task · implementation</p><span class="badge">agent task</span><dl>
-			<div><dt>Model</dt><dd>Project default</dd></div><div><dt>Task prompt</dt><dd>TOP-SECRET-PROMPT</dd></div><div><dt>API token</dt><dd>TOP-SECRET-TOKEN</dd></div>
+		<div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-key="schedule"><strong>Schedule</strong></g><g data-automation-live-node="n2" data-automation-node-key="pull-request"><strong>Pull request</strong></g></div>
+		<section data-automation-live-node-detail="schedule" data-automation-live-node-id="n1"><h3>Schedule</h3><p>schedule · fixed_schedule</p><span class="badge">trigger</span><dl>
+			<div><dt>Run At</dt><dd>09:30</dd></div><div><dt>Repeat Type</dt><dd>daily</dd></div><div><dt>Repeat Interval</dt><dd>2</dd></div><div><dt>Clear Context On Start</dt><dd>true</dd></div>
+		</dl></section>
+		<section data-automation-live-node-detail="pull-request" data-automation-live-node-id="n2"><h3>Pull request</h3><p>pull-request · open_pull_request</p><span class="badge">action</span><dl>
+			<div><dt>Agent Ref</dt><dd>reviewer</dd></div><div><dt>Model</dt><dd>Project default</dd></div><div><dt>Base</dt><dd>main</dd></div><div><dt>Draft</dt><dd>true</dd></div><div><dt>Prompt</dt><dd>TOP-SECRET-PROMPT</dd></div><div><dt>Api Token</dt><dd>TOP-SECRET-TOKEN</dd></div>
 		</dl></section></div>`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(detail.Nodes) != 1 {
+	if len(detail.Nodes) != 2 {
 		t.Fatalf("nodes = %+v", detail.Nodes)
 	}
-	summary := detail.Nodes[0].ConfigSummary
-	if !strings.Contains(summary, "Model=Project default") || !strings.Contains(summary, "Task prompt=configured") {
-		t.Fatalf("summary = %q", summary)
+	var summaries string
+	for _, node := range detail.Nodes {
+		summaries += node.ConfigSummary + "\n"
 	}
-	if strings.Contains(summary, "TOP-SECRET") || strings.Contains(strings.ToLower(summary), "api token") {
-		t.Fatalf("secret leaked in summary: %q", summary)
+	for _, want := range []string{"Run At=09:30", "Repeat Type=daily", "Repeat Interval=2", "Agent Ref=reviewer", "Base=main", "Draft=true", "Prompt=configured"} {
+		if !strings.Contains(summaries, want) {
+			t.Errorf("summaries missing %q: %q", want, summaries)
+		}
+	}
+	if strings.Contains(summaries, "TOP-SECRET") || strings.Contains(strings.ToLower(summaries), "api token") {
+		t.Fatalf("secret leaked in summaries: %q", summaries)
 	}
 }
 

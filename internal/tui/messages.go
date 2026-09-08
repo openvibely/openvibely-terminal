@@ -251,6 +251,25 @@ type selectorActiveMsg struct {
 	err           error
 }
 
+type automationEditLoadedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	requestID         uint64
+	automation        client.Automation
+	definition        *client.AutomationDefinition
+	err               error
+}
+
+type automationEditSavedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	automationID      string
+	name              string
+	err               error
+}
+
 // tickMsg drives periodic refresh (status re-check).
 type tickMsg struct{}
 

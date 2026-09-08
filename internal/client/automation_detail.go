@@ -738,10 +738,11 @@ func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (Au
 }
 
 func automationNodeConfigSummary(section *html.Node) string {
-	parts := make([]string, 0, 3)
+	const maxFields = 6
+	parts := make([]string, 0, maxFields)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if len(parts) >= 3 {
+		if len(parts) >= maxFields {
 			return
 		}
 		if n.Type == html.ElementNode && n.Data == "dt" {
@@ -761,9 +762,9 @@ func automationNodeConfigSummary(section *html.Node) string {
 				return
 			}
 			switch lower {
-			case "task prompt", "task goal (optional)", "what needs review", "issue instructions", "pull request instructions", "instructions":
+			case "prompt", "goal", "instructions", "task prompt", "task goal (optional)", "what needs review", "issue instructions", "pull request instructions":
 				value = "configured"
-			case "model", "primary agent", "category", "priority", "time", "repeat", "interval", "clear context on start", "notification type", "base branch", "open as draft pr", "display name":
+			case "model", "agent ref", "primary agent", "category", "priority", "run at", "time", "repeat type", "repeat", "repeat interval", "interval", "clear context on start", "notification type", "base", "base branch", "draft", "open as draft pr", "labels", "display name":
 				if len([]rune(value)) > 40 {
 					value = string([]rune(value)[:39]) + "…"
 				}

@@ -70,26 +70,22 @@ func parseAutomationDefinition(root *html.Node, projectID, automationID string) 
 	if len(yaml) > maxAutomationDefinitionBytes {
 		return nil, fmt.Errorf("automation definition exceeds %d bytes", maxAutomationDefinitionBytes)
 	}
-	// Current web markup identifies the target through the design form action.
+	// The web builder's design-form action is the authoritative identity and
+	// project-scope evidence. Never substitute caller-supplied IDs when it is
+	// absent: a stale or malformed fragment must fail closed before export/save.
 	form := findNode(builder, func(n *html.Node) bool {
 		return n.Type == html.ElementNode && n.Data == "form" && attr(n, "id") == "automation-design-form"
 	})
-	if form != nil {
-		action, err := url.Parse(attr(form, "action"))
-		if err != nil {
-			return nil, fmt.Errorf("automation builder: invalid target")
-		}
-		wantPath := "/automations/" + url.PathEscape(automationID) + "/builder"
-		if action.Path != wantPath || action.Query().Get("project_id") != projectID {
-			return nil, fmt.Errorf("automation builder: response scope does not match selected automation")
-		}
-	} else {
-		if id := attr(builder, "data-automation-id"); id != "" && id != automationID {
-			return nil, fmt.Errorf("automation builder: response identity does not match requested automation")
-		}
-		if id := attr(builder, "data-project-id"); id != "" && id != projectID {
-			return nil, fmt.Errorf("automation builder: response project does not match selected project")
-		}
+	if form == nil || strings.TrimSpace(attr(form, "action")) == "" {
+		return nil, fmt.Errorf("automation builder: authoritative target unavailable")
+	}
+	action, err := url.Parse(attr(form, "action"))
+	if err != nil {
+		return nil, fmt.Errorf("automation builder: invalid target")
+	}
+	wantPath := "/automations/" + url.PathEscape(automationID) + "/builder"
+	if action.Path != wantPath || action.Query().Get("project_id") != projectID {
+		return nil, fmt.Errorf("automation builder: response scope does not match selected automation")
 	}
 	return &AutomationDefinition{AutomationID: automationID, ProjectID: projectID, YAML: yaml}, nil
 }

@@ -362,6 +362,7 @@ In the interactive TUI:
 /automations list
 /automations show "Nightly sweep"
 /automations open automation-id
+/automations edit "Nightly sweep"        # opens the multiline terminal editor; Ctrl+S saves, Esc cancels
 /automations edit "Nightly sweep" --export automation.yaml
 /automations edit "Nightly sweep" --file automation.yaml
 /automations run "Nightly sweep"
@@ -388,11 +389,13 @@ openvibely-tui -project demo --force automations delete "Nightly sweep"
 Interactive deletion requires typing `yes` to confirm, or `Esc` to cancel.
 One-shot CLI deletion requires `--force` or its `-f` shorthand; without it the
 command exits without deleting anything. Automation references resolve by ID,
-ID prefix, or name, and all actions use the selected project. Start an edit with
-`--export`; it creates a new owner-only YAML file and never overwrites an existing
-path. Modify that complete definition, then use `--file` to preview backend validation
-and save. Unchanged files, invalid definitions, canceled selectors, and failed previews
-perform no save.
+ID prefix, or name, and all actions use the selected project. In interactive mode,
+`edit <automation>` opens the complete definition in a multiline terminal editor;
+`Ctrl+S` previews backend validation and saves, while `Esc` cancels without mutation.
+For deterministic or external editing, `--export` creates a new owner-only YAML file
+and never overwrites an existing path. Modify that complete definition, then use
+`--file` to preview backend validation and save. Unchanged files, invalid definitions,
+canceled selectors/editors, and failed previews perform no save.
 
 ### Personalities
 

@@ -486,18 +486,21 @@ func TestWebhookShowSelectorDispatchesResolvedItemWithoutSecondList(t *testing.T
 	}
 }
 
-func TestAutomationEditSelectorStartsWithSafeExport(t *testing.T) {
-	m, rec := dispatchModel(t, map[string]string{"/automations": selAutomationsHTML})
+func TestAutomationEditSelectorOpensInteractiveEditor(t *testing.T) {
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">schema_version: 1
+name: Nightly sweep
+</textarea></div>`
+	m, rec := dispatchModel(t, map[string]string{"/automations": selAutomationsHTML, "/automations/au-1/builder": builder})
 	m = runLine(t, m, "/automations edit")
 	if !m.selectorActive {
 		t.Fatalf("expected automation selector:\n%s", transcript(m))
 	}
 	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
-	if got := m.input.Value(); got != "/automations edit au-1 --export " {
-		t.Fatalf("edit selector prefill = %q", got)
+	if !m.automationEditActive || m.selectorActive {
+		t.Fatalf("selection did not open editor: editor=%v selector=%v", m.automationEditActive, m.selectorActive)
 	}
-	if rec.count(http.MethodGet, "/automations") != 1 || strings.Contains(rec.all(), "/builder") {
-		t.Fatalf("selector must not load or mutate a definition: %s", rec.all())
+	if rec.count(http.MethodGet, "/automations") != 1 || rec.count(http.MethodGet, "/automations/au-1/builder") != 1 || rec.count(http.MethodPost, "/automations/au-1/builder") != 0 {
+		t.Fatalf("selector request sequence is unsafe: %s", rec.all())
 	}
 }
 

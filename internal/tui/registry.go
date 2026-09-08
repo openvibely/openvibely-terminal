@@ -4598,6 +4598,7 @@ func automationsCommand() command {
 			"automations [filter]                       list automations",
 			"automations show <automation>              show live graph, runtime and resources",
 			"automations open <automation>              compatibility alias for show",
+			"automations edit <automation>               open the complete definition in the terminal editor",
 			"automations edit <automation> --export <yaml> export the complete current definition without mutation",
 			"automations edit <automation> --file <yaml> validate and replace the complete graph definition",
 			"automations run <automation>               trigger an immediate run",
@@ -4610,6 +4611,7 @@ func automationsCommand() command {
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<automation>", description: "show live graph, runtime and resources"},
 			{action: "open", args: "<automation>", description: "compatibility alias for show"},
+			{action: "edit", args: "<automation>", description: "open the complete definition in the terminal editor; Ctrl+S saves and Esc cancels"},
 			{action: "edit", args: "<automation> --export <yaml>", description: "export the complete definition without mutation; edit it, then apply with --file"},
 			{action: "edit", args: "<automation> --file <yaml>", description: "validate and replace the complete graph definition"},
 		},
@@ -4655,19 +4657,31 @@ func automationsCommand() command {
 
 			case "edit":
 				if len(rest) == 0 {
+					if cliMode {
+						return m, errCmd(commandUsage("automations", "edit"))
+					}
 					return selectorOr(m, commandUsage("automations", "edit"),
-						selectorForWithSuffix("Automations", "automations edit", automationEmptyStateHint, " --export ",
+						selectorFor("Automations", "automations edit", automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								automations, err := c.ListAutomations(ctx, pid)
 								if err != nil {
 									return nil, err
 								}
 								items := make([]selectorItem, 0, len(automations))
-								for _, a := range automations {
-									items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, shortID(a.ID)), detail: a.State})
+								for _, automation := range automations {
+									automation := automation
+									item := selectorItem{ref: automation.ID, label: firstNonEmpty(automation.Name, shortID(automation.ID)), detail: automation.State}
+									item.dispatch = func(m Model) (Model, tea.Cmd) {
+										return beginAutomationInteractiveEdit(m, c, pid, automation)
+									}
+									items = append(items, item)
 								}
 								return items, nil
 							}))
+				}
+				if !cliMode && !automationEditArgsContainOption(rest) {
+					editRef := strings.Join(rest, " ")
+					return beginAutomationInteractiveEditResolver(m, c, pid, editRef)
 				}
 				editRef, editMode, filePath, err := parseAutomationEditArgs(rest)
 				if err != nil {
@@ -4874,6 +4888,51 @@ func automationDraftDetail(projectID string, automation client.Automation) clien
 		ResourcesAvailable:     false,
 		ExternalStateAvailable: false,
 		Warnings:               []string{"live graph unavailable: automation is draft"},
+	}
+}
+
+const maxAutomationDefinitionEditorBytes = 1 << 20
+
+func automationEditArgsContainOption(args []string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			return true
+		}
+	}
+	return false
+}
+
+func beginAutomationInteractiveEdit(m Model, c *client.Client, projectID string, automation client.Automation) (Model, tea.Cmd) {
+	m.automationEditRequestID++
+	requestID := m.automationEditRequestID
+	m.busy = true
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		definition, err := c.LoadAutomationDefinition(ctx, projectID, automation.ID)
+		return automationEditLoadedMsg{projectID: projectID, requestID: requestID, automation: automation, definition: definition, err: err}
+	}
+}
+
+func beginAutomationInteractiveEditResolver(m Model, c *client.Client, projectID, ref string) (Model, tea.Cmd) {
+	m.automationEditRequestID++
+	requestID := m.automationEditRequestID
+	m.busy = true
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		automations, err := c.ListAutomations(ctx, projectID)
+		if err != nil {
+			return automationEditLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		automation, err := matchRef(automations, ref,
+			func(a client.Automation) string { return a.ID },
+			func(a client.Automation) string { return a.Name })
+		if err != nil {
+			return automationEditLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		definition, err := c.LoadAutomationDefinition(ctx, projectID, automation.ID)
+		return automationEditLoadedMsg{projectID: projectID, requestID: requestID, automation: automation, definition: definition, err: err}
 	}
 }
 

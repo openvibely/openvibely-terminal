@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -77,8 +78,20 @@ type Model struct {
 	transcript viewport.Model
 	input      textinput.Model
 	spin       spinner.Model
-	width      int
-	height     int
+
+	// automationEditor holds the complete authoritative YAML only while an
+	// interactive edit session is active. It is never appended to the transcript.
+	automationEditor           textarea.Model
+	automationEditActive       bool
+	automationEditSaving       bool
+	automationEditProjectID    string
+	automationEditID           string
+	automationEditName         string
+	automationEditOriginalYAML string
+	automationEditRequestID    uint64
+
+	width  int
+	height int
 
 	log []entry
 
@@ -233,6 +246,11 @@ func New(c *client.Client) Model {
 	ti.Prompt = "❯ "
 	ti.Focus()
 
+	editor := textarea.New()
+	editor.Placeholder = "Complete automation YAML"
+	editor.CharLimit = maxAutomationDefinitionEditorBytes
+	editor.ShowLineNumbers = true
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
@@ -240,6 +258,7 @@ func New(c *client.Client) Model {
 	m := Model{
 		client:             c,
 		input:              ti,
+		automationEditor:   editor,
 		spin:               sp,
 		transcript:         viewport.New(0, 0),
 		sseBackoff:         time.Second,
@@ -582,6 +601,18 @@ func (m *Model) advanceProjectGeneration() uint64 {
 	return m.projectGeneration
 }
 
+func (m *Model) clearAutomationEdit() {
+	m.automationEditActive = false
+	m.automationEditSaving = false
+	m.automationEditProjectID = ""
+	m.automationEditID = ""
+	m.automationEditName = ""
+	m.automationEditOriginalYAML = ""
+	m.automationEditor.SetValue("")
+	m.automationEditor.Blur()
+	m.input.Focus()
+}
+
 // setActiveProject installs the selected project and invalidates all work tied
 // to the previous project before any replacement stream or command is started.
 func (m *Model) setActiveProject(project client.Project) bool {
@@ -602,6 +633,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.chatSubmissionPending = false
 		m.busy = false
 		m.pendingConfirmation = nil
+		m.clearAutomationEdit()
 		if m.selectorActive {
 			*m = m.clearSelector()
 		}
@@ -1069,6 +1101,14 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case automationEditLoadedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case automationEditSavedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case statusCountsMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1176,6 +1216,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case selectorActiveMsg:
 		return m.handleSelector(msg)
+
+	case automationEditLoadedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			msg.projectID != m.selectedID || msg.requestID != m.automationEditRequestID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		if msg.definition == nil || msg.definition.ProjectID != msg.projectID || msg.definition.AutomationID != msg.automation.ID {
+			m.append(entry{role: "error", text: "automation editor: loaded definition identity does not match selection"})
+			return m, nil
+		}
+		m.automationEditActive = true
+		m.automationEditSaving = false
+		m.automationEditProjectID = msg.projectID
+		m.automationEditID = msg.automation.ID
+		m.automationEditName = firstNonEmpty(msg.automation.Name, msg.automation.ID)
+		m.automationEditOriginalYAML = msg.definition.YAML
+		m.automationEditor.SetValue(msg.definition.YAML)
+		m.automationEditor.Focus()
+		m.input.Blur()
+		m.resize()
+		return m, nil
+
+	case automationEditSavedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			!m.automationEditActive || msg.projectID != m.selectedID || msg.projectID != m.automationEditProjectID ||
+			msg.automationID != m.automationEditID {
+			return m, nil
+		}
+		m.busy = false
+		m.automationEditSaving = false
+		if msg.err != nil {
+			m.automationEditor.Focus()
+			m.handleCompletedRequestError(msg.err)
+			return m, nil
+		}
+		name := sanitizeAutomationDetailText(firstNonEmpty(msg.name, msg.automationID))
+		m.clearAutomationEdit()
+		m.resize()
+		m.append(entry{role: "result", head: "Automation", text: "updated automation " + name})
+		return m, nil
 
 	case connCheckedMsg:
 		if !m.acceptsConnectionResponse(msg.generation) {
@@ -1963,6 +2047,49 @@ func loginFailureText(baseURL string, err error) string {
 	return "sign-in failed for " + baseURL + "; check the credentials and backend, then try again or press Esc to cancel."
 }
 
+func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quitting = true
+		m.clearAutomationEdit()
+		m.Cleanup()
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.clearAutomationEdit()
+		m.resize()
+		m.append(entry{role: "system", text: "automation edit cancelled"})
+		return m, nil
+	case tea.KeyCtrlS:
+		if m.automationEditSaving {
+			return m, nil
+		}
+		definition := m.automationEditor.Value()
+		if definition == m.automationEditOriginalYAML {
+			m.clearAutomationEdit()
+			m.resize()
+			m.append(entry{role: "system", text: "automation edit cancelled: definition unchanged"})
+			return m, nil
+		}
+		projectID, automationID, name := m.automationEditProjectID, m.automationEditID, m.automationEditName
+		m.automationEditSaving = true
+		m.busy = true
+		m.automationEditor.Blur()
+		cmd := func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+			defer cancel()
+			err := m.client.UpdateAutomationDefinition(ctx, projectID, automationID, definition)
+			return automationEditSavedMsg{projectID: projectID, automationID: automationID, name: name, err: err}
+		}
+		return m, withMessageGeneration(cmd, sessionGenerationOf(m), projectGenerationOf(m))
+	}
+	if m.automationEditSaving {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.automationEditor, cmd = m.automationEditor.Update(msg)
+	return m, cmd
+}
+
 // handleKey routes keys; the input owns almost everything.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.channelWizard != nil {
@@ -1970,6 +2097,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.loginActive {
 		return m.handleLoginKey(msg)
+	}
+	if m.automationEditActive {
+		return m.handleAutomationEditKey(msg)
 	}
 	if m.selectorActive {
 		return m.handleSelectorKey(msg)
@@ -2447,7 +2577,9 @@ func (m *Model) appendTranscriptEntry(e entry) {
 func (m Model) transcriptHeight() int {
 	// Normal layout reserves 5 rows (header + blank + input/menu + help + margin).
 	reserve := 5
-	if m.selectorActive {
+	if m.automationEditActive {
+		reserve = 18
+	} else if m.selectorActive {
 		// The selector takes up to 12 rows (title + filter + 8 items + overflow +
 		// hint), so reserve 14 rows to leave a small margin.
 		reserve = 14
@@ -2463,6 +2595,19 @@ func (m *Model) resize() {
 	m.transcript.Width = m.width
 	m.transcript.Height = m.transcriptHeight()
 	m.input.Width = m.width - 4
+	editorWidth := m.width - 6
+	if editorWidth < 20 {
+		editorWidth = 20
+	}
+	m.automationEditor.SetWidth(editorWidth)
+	editorHeight := 12
+	if m.height > 0 && m.height-8 < editorHeight {
+		editorHeight = m.height - 8
+	}
+	if editorHeight < 3 {
+		editorHeight = 3
+	}
+	m.automationEditor.SetHeight(editorHeight)
 	m.refreshTranscript()
 }
 
@@ -2696,6 +2841,7 @@ func (m *Model) markAuthRequired() {
 	// backend reported that the session was unauthorized.
 	if !wasRequired {
 		m.advanceSessionGeneration()
+		m.clearAutomationEdit()
 		m.invalidateSSE()
 	}
 	// An auth failure can arrive from project/SSE work while a health check is

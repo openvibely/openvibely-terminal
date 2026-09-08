@@ -5177,6 +5177,109 @@ func TestAutomationEditInvalidFileFailsBeforeRequests(t *testing.T) {
 	}
 }
 
+func TestAutomationInteractiveEditLoadsSavesAndDoesNotEchoDefinition(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\nprompt: TOP-SECRET-PROMPT\n"
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/automations":              `<div>` + automationCardHTML("au-1", "Original", "active") + `</div>`,
+		"/automations/au-1/builder": builder,
+	})
+	m = runLine(t, m, "/automations edit Original")
+	if !m.automationEditActive || m.automationEditor.Value() != current {
+		t.Fatalf("editor did not load authoritative definition: active=%v value=%q", m.automationEditActive, m.automationEditor.Value())
+	}
+	if strings.Contains(transcript(m), "TOP-SECRET-PROMPT") || rec.count("POST", "/automations/au-1/builder") != 0 {
+		t.Fatalf("opening editor leaked or mutated: transcript=%q calls=%s", transcript(m), rec.all())
+	}
+	m.automationEditor.SetValue(strings.Replace(current, "Original", "Edited", 1))
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	if m.automationEditActive {
+		t.Fatal("editor remained active after successful save")
+	}
+	if got := rec.count("POST", "/automations/au-1/builder"); got != 2 {
+		t.Fatalf("POSTs = %d, want preview then save: %s", got, rec.all())
+	}
+	if !strings.Contains(transcript(m), "updated automation Original") || strings.Contains(transcript(m), "TOP-SECRET-PROMPT") {
+		t.Fatalf("unsafe or missing success output: %q", transcript(m))
+	}
+}
+
+func TestAutomationInteractiveEditCancellationAndProjectSwitchNeverMutate(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\n"
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+	for _, tc := range []struct {
+		name string
+		end  func(*Model)
+	}{
+		{name: "escape", end: func(m *Model) { next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc}); *m = next.(Model) }},
+		{name: "project switch", end: func(m *Model) { m.setActiveProject(client.Project{ID: "p2", Name: "other"}) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/automations":              `<div>` + automationCardHTML("au-1", "Original", "active") + `</div>`,
+				"/automations/au-1/builder": builder,
+			})
+			m = runLine(t, m, "/automations edit Original")
+			m.automationEditor.SetValue(current + "description: changed\n")
+			tc.end(&m)
+			if m.automationEditActive || rec.count("POST", "/automations/au-1/builder") != 0 {
+				t.Fatalf("cancel/switch retained editor or mutated: active=%v calls=%s", m.automationEditActive, rec.all())
+			}
+		})
+	}
+}
+
+func TestAutomationInteractiveEditIgnoresStaleLoadMessages(t *testing.T) {
+	m, _ := dispatchModel(t, map[string]string{})
+	m.automationEditRequestID = 2
+	definition := &client.AutomationDefinition{AutomationID: "au-1", ProjectID: "p1", YAML: "TOP-SECRET-STALE"}
+	staleRequest := automationEditLoadedMsg{
+		sessionGeneration: m.sessionGeneration, projectGeneration: m.projectGeneration,
+		projectID: "p1", requestID: 1, automation: client.Automation{ID: "au-1", Name: "Old"}, definition: definition,
+	}
+	next, _ := m.Update(staleRequest)
+	m = next.(Model)
+	if m.automationEditActive || strings.Contains(transcript(m), "TOP-SECRET-STALE") {
+		t.Fatal("superseded same-project edit load was accepted")
+	}
+	oldGeneration := m.projectGeneration
+	m.setActiveProject(client.Project{ID: "p2", Name: "other"})
+	staleProject := staleRequest
+	staleProject.requestID = m.automationEditRequestID
+	staleProject.projectGeneration = oldGeneration
+	next, _ = m.Update(staleProject)
+	m = next.(Model)
+	if m.automationEditActive || m.selectedID != "p2" || strings.Contains(transcript(m), "TOP-SECRET-STALE") {
+		t.Fatal("foreign-project edit load was accepted")
+	}
+}
+
+func TestAutomationInteractiveEditValidationFailureKeepsDraftWithoutSaving(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\n"
+	validBuilder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+	requests := 0
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/automations":
+			_, _ = fmt.Fprint(w, `<div>`+automationCardHTML("au-1", "Original", "active")+`</div>`)
+		case r.Method == http.MethodGet && r.URL.Path == "/automations/au-1/builder":
+			_, _ = fmt.Fprint(w, validBuilder)
+		case r.Method == http.MethodPost && r.URL.Path == "/automations/au-1/builder":
+			requests++
+			_, _ = fmt.Fprint(w, `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><div data-automation-validation-summary><ul><li>trigger is required</li></ul></div><textarea name="automation_yaml">invalid</textarea></div>`)
+		}
+	})
+	m = runLine(t, m, "/automations edit Original")
+	m.automationEditor.SetValue("invalid")
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyCtrlS})
+	if !m.automationEditActive || m.automationEditor.Value() != "invalid" || requests != 1 {
+		t.Fatalf("validation did not preserve draft: active=%v value=%q requests=%d", m.automationEditActive, m.automationEditor.Value(), requests)
+	}
+	if !strings.Contains(transcript(m), "trigger is required") {
+		t.Fatalf("validation error missing: %q", transcript(m))
+	}
+}
+
 func TestAutomationEditValidationFailureDoesNotSave(t *testing.T) {
 	const current = "schema_version: 1\nname: Original\n"
 	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><div data-automation-validation-summary><ul><li>trigger is required</li></ul></div><textarea name="automation_yaml">` + current + `</textarea></div>`
