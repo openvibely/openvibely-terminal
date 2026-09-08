@@ -314,11 +314,13 @@ requires IMAP and SMTP hosts. X requires consumer key, consumer secret, access
 token, and access token secret; its poll interval is 15 to 300 seconds. GitHub
 does not expose a test route. GitHub and
 Slack `connect` print a project-scoped local backend URL to open in a browser
-for OAuth, without exposing OAuth state. Their `disconnect` action ends the
-OAuth connection without deleting configuration. Interactive removal requires
-typing `yes`; CLI removal requires `--force` (or `-f`). Slack removal retains
-the required safe mapping to `/channels/slack/disconnect`; other remove actions
-delete that integration's stored configuration.
+for OAuth, without exposing OAuth state. Their `disconnect` action clears active
+credentials while retaining other configuration, so interactive disconnect and
+removal both require typing `yes`; headless use requires `--force` (or `-f`).
+Slack removal retains the required safe mapping to `/channels/slack/disconnect`;
+other remove actions delete that integration's stored configuration. Interactive
+GitHub App setup accepts pasted multiline PEM keys and reconstructs line breaks
+flattened by terminal input.
 
 Inbound webhooks use the nested `/channels webhooks` registry:
 
@@ -519,7 +521,7 @@ $ openvibely-tui help channels
   channels edit <channel> <options>          update channel settings
   channels test <channel>                    test Slack, Telegram, Discord, X, or Email
   channels remove <channel>                  remove configuration; Slack disconnects safely (confirmation required)
-  channels disconnect <github|slack>         disconnect OAuth without removing configuration
+  channels disconnect <github|slack>         clear connection credentials but keep other settings (confirmation required)
   channels webhooks list                     list inbound webhooks
   channels webhooks show <webhook>           show secret-free webhook detail
   channels webhooks create <name> [options]  create an inbound webhook

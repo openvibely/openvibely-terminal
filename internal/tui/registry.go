@@ -6,8 +6,10 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/url"
 	"strconv"
 	"strings"
@@ -2942,7 +2944,9 @@ type channelWizardStep struct {
 type channelWizardState struct {
 	action        string
 	channel       client.Channel
+	original      url.Values
 	form          url.Values
+	supplied      map[string]bool
 	steps         []channelWizardStep
 	index         int
 	restorePrompt string
@@ -2960,7 +2964,56 @@ func validChannelEmailProvider(value string) bool {
 	return false
 }
 
+func validateChannelAPIEndpoint(value string) error {
+	if value == "" {
+		return nil
+	}
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("--api-endpoint must be an absolute HTTP(S) URL")
+	}
+	return nil
+}
+
+func validateChannelEmailAddress(value string) error {
+	if value == "" {
+		return nil
+	}
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value || !strings.Contains(address.Address, "@") {
+		return errors.New("--address must be a valid email address")
+	}
+	return nil
+}
+
+func normalizeGitHubPrivateKey(value string) (string, error) {
+	value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, `\\n`, "\n"), `\n`, "\n"))
+	if block, rest := pem.Decode([]byte(value)); block != nil && strings.TrimSpace(string(rest)) == "" {
+		return string(pem.EncodeToMemory(block)), nil
+	}
+	for _, blockType := range []string{"RSA PRIVATE KEY", "PRIVATE KEY"} {
+		begin := "-----BEGIN " + blockType + "-----"
+		end := "-----END " + blockType + "-----"
+		beginAt, endAt := strings.Index(value, begin), strings.Index(value, end)
+		if beginAt < 0 || endAt <= beginAt+len(begin) {
+			continue
+		}
+		body := strings.Join(strings.Fields(value[beginAt+len(begin):endAt]), "")
+		candidate := begin + "\n" + body + "\n" + end + "\n"
+		if block, rest := pem.Decode([]byte(candidate)); block != nil && strings.TrimSpace(string(rest)) == "" {
+			return string(pem.EncodeToMemory(block)), nil
+		}
+	}
+	return "", errors.New("--private-key must be valid PEM")
+}
+
 func validateChannelConfiguration(action, channelType string, values map[string]string) error {
+	if err := validateChannelAPIEndpoint(values["github_api_endpoint"]); err != nil {
+		return err
+	}
+	if err := validateChannelEmailAddress(values["email_address"]); err != nil {
+		return err
+	}
 	if provider := values["email_provider"]; provider != "" && !validChannelEmailProvider(provider) {
 		return errors.New("--provider must be one of gmail, outlook, yahoo, fastmail, icloud, custom")
 	}
@@ -2969,6 +3022,30 @@ func validateChannelConfiguration(action, channelType string, values map[string]
 		if err != nil || seconds < 15 || seconds > 300 {
 			return errors.New("--poll-interval must be between 15 and 300 seconds")
 		}
+	}
+	if action == "edit" {
+		switch channelType {
+		case "github":
+			switch values["github_auth_mode"] {
+			case "pat":
+				if values["github_pat"] == "" {
+					return errors.New("editing GitHub into PAT mode requires --pat")
+				}
+			case "app":
+				if values["github_app_id"] == "" || values["github_app_slug"] == "" || values["github_app_private_key"] == "" {
+					return errors.New("editing GitHub into app mode requires --app-id, --app-slug, and --private-key")
+				}
+			}
+		case "slack":
+			if values["slack_bot_token_mode"] == "manual" && values["slack_bot_token"] == "" {
+				return errors.New("editing Slack into manual mode requires --bot-token")
+			}
+		case "email":
+			if values["email_provider"] == "custom" && (values["email_imap_host"] == "" || values["email_smtp_host"] == "") {
+				return errors.New("editing Email to custom requires --imap-host and --smtp-host")
+			}
+		}
+		return nil
 	}
 	if action != "add" {
 		return nil
@@ -3038,7 +3115,30 @@ func channelWizardValueMap(values url.Values) map[string]string {
 	return result
 }
 
+func channelWizardTransitionRequiresExplicit(wizard *channelWizardState, field string) bool {
+	if wizard.action != "edit" {
+		return false
+	}
+	switch wizard.channel.Type {
+	case "github":
+		mode := wizard.form.Get("github_auth_mode")
+		if mode == wizard.original.Get("github_auth_mode") {
+			return false
+		}
+		return (mode == "pat" && field == "github_pat") ||
+			(mode == "app" && (field == "github_app_id" || field == "github_app_slug" || field == "github_app_private_key"))
+	case "slack":
+		return wizard.form.Get("slack_bot_token_mode") == "manual" && wizard.original.Get("slack_bot_token_mode") != "manual" && field == "slack_bot_token"
+	case "email":
+		return wizard.form.Get("email_provider") == "custom" && wizard.original.Get("email_provider") != "custom" && (field == "email_imap_host" || field == "email_smtp_host")
+	}
+	return false
+}
+
 func channelWizardFieldRequired(wizard *channelWizardState, step channelWizardStep) bool {
+	if channelWizardTransitionRequiresExplicit(wizard, step.field) {
+		return true
+	}
 	if step.required {
 		return true
 	}
@@ -3111,8 +3211,13 @@ func redactChannelCommandSecrets(commandLine string) string {
 }
 
 func (m Model) beginChannelWizard(action string, channel client.Channel) (Model, tea.Cmd) {
-	form := channel.EditableSettings()
+	original := channel.EditableSettings()
+	form := make(url.Values, len(original))
+	for key, values := range original {
+		form[key] = append([]string(nil), values...)
+	}
 	if action == "add" {
+		original = make(url.Values)
 		form = make(url.Values)
 	}
 	defaults := map[string]string{"telegram_rich_messages_v2": "true", "github_auth_mode": "pat", "slack_bot_token_mode": "oauth", "slack_send_responses": "true", "discord_send_responses": "true", "x_poll_interval_seconds": "30", "x_send_responses": "true", "email_provider": "gmail", "email_imap_port": "993", "email_smtp_port": "587", "email_poll_interval_seconds": "15", "email_send_responses": "true", "email_skip_attachments": "false", "email_mark_existing_seen_on_start": "true"}
@@ -3121,7 +3226,7 @@ func (m Model) beginChannelWizard(action string, channel client.Channel) (Model,
 			form.Set(key, value)
 		}
 	}
-	m.channelWizard = &channelWizardState{action: action, channel: channel, form: form, steps: channelWizardSteps(action, channel.Type), restorePrompt: m.input.Prompt, restoreHint: m.input.Placeholder}
+	m.channelWizard = &channelWizardState{action: action, channel: channel, original: original, form: form, supplied: make(map[string]bool), steps: channelWizardSteps(action, channel.Type), restorePrompt: m.input.Prompt, restoreHint: m.input.Placeholder}
 	m.menu = nil
 	m.input.SetValue("")
 	m.append(entry{role: "system", text: action + " " + channel.Name + ": enter each field; leave optional fields blank to preserve/default them. Esc cancels."})
@@ -3158,6 +3263,12 @@ func (m *Model) resetChannelWizard() {
 }
 
 func validateChannelWizardValue(step channelWizardStep, value string) error {
+	if step.field == "github_api_endpoint" {
+		return validateChannelAPIEndpoint(value)
+	}
+	if step.field == "email_address" {
+		return validateChannelEmailAddress(value)
+	}
 	if strings.HasSuffix(step.field, "send_responses") || step.field == "telegram_rich_messages_v2" || step.field == "email_skip_attachments" || step.field == "email_mark_existing_seen_on_start" {
 		if _, err := strconv.ParseBool(value); err != nil {
 			return errors.New("value must be true or false")
@@ -3193,6 +3304,20 @@ func validateChannelWizardValue(step channelWizardStep, value string) error {
 	return nil
 }
 
+func channelWizardValidationValues(wizard *channelWizardState) map[string]string {
+	if wizard.action == "add" {
+		return channelWizardValueMap(wizard.form)
+	}
+	values := make(map[string]string, len(wizard.supplied))
+	for field := range wizard.supplied {
+		if (field == "github_auth_mode" || field == "slack_bot_token_mode" || field == "email_provider") && wizard.form.Get(field) == wizard.original.Get(field) {
+			continue
+		}
+		values[field] = wizard.form.Get(field)
+	}
+	return values
+}
+
 func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "ctrl+d":
@@ -3208,7 +3333,17 @@ func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		step := wizard.steps[wizard.index]
 		value := strings.TrimSpace(m.input.Value())
 		m.input.SetValue("")
-		if value == "" && channelWizardFieldRequired(wizard, step) && wizard.form.Get(step.field) == "" {
+		if value != "" && step.field == "github_app_private_key" {
+			normalized, err := normalizeGitHubPrivateKey(value)
+			if err != nil {
+				m.append(entry{role: "error", text: err.Error()})
+				m.setChannelWizardPrompt()
+				return m, nil
+			}
+			value = normalized
+		}
+		requiresExplicit := channelWizardTransitionRequiresExplicit(wizard, step.field)
+		if value == "" && channelWizardFieldRequired(wizard, step) && (requiresExplicit || wizard.form.Get(step.field) == "") {
 			m.append(entry{role: "error", text: step.label + " is required"})
 			m.setChannelWizardPrompt()
 			return m, nil
@@ -3220,6 +3355,7 @@ func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			wizard.form.Set(step.field, value)
+			wizard.supplied[step.field] = true
 		}
 		wizard.index++
 		if wizard.index < len(wizard.steps) {
@@ -3227,7 +3363,7 @@ func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		action, channel, form, projectID := wizard.action, wizard.channel, wizard.form, m.selectedID
-		if err := validateChannelConfiguration(action, channel.Type, channelWizardValueMap(form)); err != nil {
+		if err := validateChannelConfiguration(action, channel.Type, channelWizardValidationValues(wizard)); err != nil {
 			wizard.index = 0
 			m.append(entry{role: "error", text: err.Error()})
 			m.setChannelWizardPrompt()
@@ -3328,6 +3464,12 @@ func parseChannelMutationArgs(action string, args []string) (client.Channel, map
 		value := strings.TrimSpace(args[i+1])
 		if value == "" {
 			return client.Channel{}, nil, fmt.Errorf("%s cannot be empty", sanitizeAutomationDetailText(args[i]))
+		}
+		if backendField == "github_app_private_key" {
+			value, err = normalizeGitHubPrivateKey(value)
+			if err != nil {
+				return client.Channel{}, nil, err
+			}
 		}
 		if strings.HasSuffix(backendField, "send_responses") || backendField == "telegram_rich_messages_v2" || backendField == "email_skip_attachments" || backendField == "email_mark_existing_seen_on_start" {
 			parsed, err := strconv.ParseBool(value)
@@ -3480,7 +3622,7 @@ func channelsCommand() command {
 			{action: "edit", args: "<channel> <options>", description: "update channel settings"},
 			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, X, or Email"},
 			{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
-			{action: "disconnect", args: "<github|slack>", description: "disconnect OAuth without removing configuration"},
+			{action: "disconnect", args: "<github|slack>", description: "disconnect credentials without removing other configuration (confirmation required)"},
 			{action: "webhooks", args: "[action]", description: "manage inbound webhook endpoints"},
 			{action: "webhooks list", description: "list inbound webhooks"},
 			{action: "webhooks show", args: "<webhook>", description: "show secret-free webhook detail"},
@@ -3497,7 +3639,9 @@ func channelsCommand() command {
 			"         --provider, --address, --password, --imap-host, --imap-port, --smtp-host, --smtp-port",
 			"         --skip-attachments, --mark-existing-seen",
 			"Email providers: gmail, outlook, yahoo, fastmail, icloud, custom; custom requires IMAP and SMTP hosts.",
-			"GitHub PAT mode requires --pat; app mode requires --app-id, --app-slug, and --private-key.",
+			"GitHub PAT mode requires --pat; app mode requires --app-id, --app-slug, and --private-key. Pasted multiline PEM is supported.",
+			"GitHub API endpoints must be absolute HTTP(S) URLs; Email addresses must be valid mailbox addresses.",
+			"Changing GitHub/Slack auth mode or Email to custom requires the target mode's credentials or hosts.",
 			"Slack requires client ID, client secret, and app token; manual mode requires --bot-token.",
 			"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret; X poll interval must be 15 to 300 seconds.",
 			"Webhook options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents.",
@@ -3623,6 +3767,9 @@ func channelsCommand() command {
 			})
 			if action == "remove" {
 				return confirmOr(m, fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name), fmt.Sprintf("use --force to confirm removal of channel %q", ch.Name), runAction)
+			}
+			if action == "disconnect" {
+				return confirmOr(m, fmt.Sprintf("Disconnect channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name), fmt.Sprintf("use --force to confirm disconnect of channel %q", ch.Name), runAction)
 			}
 			return m, runAction
 		},

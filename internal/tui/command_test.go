@@ -974,6 +974,10 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		"manual mode requires --bot-token",
 		"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret",
 		"X poll interval must be 15 to 300 seconds",
+		"Pasted multiline PEM is supported",
+		"API endpoints must be absolute HTTP(S) URLs",
+		"Email addresses must be valid mailbox addresses",
+		"disconnect credentials without removing other configuration (confirmation required)",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("channels help missing %q:\n%s", want, help)

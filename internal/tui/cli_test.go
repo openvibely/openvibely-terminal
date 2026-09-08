@@ -2852,7 +2852,12 @@ func TestCLIChannelsValidationPrecedesRequests(t *testing.T) {
 		{"channels", "add", "telegram", "--token", ""},
 		{"channels", "edit", "discord", "--send-responses", "maybe"},
 		{"channels", "edit", "email", "--imap-port", "70000"},
+		{"channels", "edit", "email", "--address", "not-an-email"},
+		{"channels", "edit", "github", "--api-endpoint", "not-a-url"},
 		{"channels", "edit", "github", "--auth-mode", "oauth"},
+		{"channels", "edit", "github", "--auth-mode", "app", "--app-id", "1", "--app-slug", "slug"},
+		{"channels", "edit", "slack", "--bot-token-mode", "manual"},
+		{"channels", "edit", "email", "--provider", "custom"},
 		{"channels", "add", "github", "--auth-mode", "pat"},
 		{"channels", "add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"},
 		{"channels", "add", "x", "--consumer-key", "key"},
@@ -2959,21 +2964,37 @@ func TestCLIChannelsRemoveResolvesReferenceBeforeForce(t *testing.T) {
 
 // One-shot CLI mode works headlessly for the new channels actions,
 // exiting cleanly on success and nonzero on a backend failure.
-func TestCLIChannelsDisconnectUsesSupportedRouteWithoutForce(t *testing.T) {
-	c, rec := cliServer(t, map[string]string{
-		"/api/projects": cliProjects,
-		"/channels":     structuredChannelsPage,
-	})
-	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"channels", "disconnect", "github"}, false, false); err != nil {
-		t.Fatalf("GitHub disconnect failed: %v", err)
-	}
-	if !rec.saw("POST", "/channels/github/disconnect") || rec.saw("POST", "/channels/github/remove") {
-		t.Fatalf("disconnect used wrong route: %s", rec.all())
+func TestCLIChannelsDisconnectRequiresForceAndUsesSupportedRoute(t *testing.T) {
+	for _, channelType := range []string{"github", "slack"} {
+		t.Run(channelType, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels":     structuredChannelsPage,
+			})
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", []string{"channels", "disconnect", channelType}, false, false)
+			if err == nil || !strings.Contains(err.Error(), `--force to confirm disconnect of channel`) {
+				t.Fatalf("unforced %s disconnect error = %v", channelType, err)
+			}
+			if rec.saw("POST", "/channels/"+channelType+"/disconnect") {
+				t.Fatalf("unforced disconnect mutated backend: %s", rec.all())
+			}
+
+			c, rec = cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels":     structuredChannelsPage,
+			})
+			if err := RunCLI(c, &out, "demo", []string{"channels", "disconnect", channelType}, true, false); err != nil {
+				t.Fatalf("forced %s disconnect failed: %v", channelType, err)
+			}
+			if !rec.saw("POST", "/channels/"+channelType+"/disconnect") || rec.saw("POST", "/channels/"+channelType+"/remove") {
+				t.Fatalf("forced disconnect used wrong route: %s", rec.all())
+			}
+		})
 	}
 
-	c, rec = cliServer(t, map[string]string{"/api/projects": cliProjects})
-	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "disconnect", "discord"}, false, false); err == nil || !strings.Contains(err.Error(), "does not support disconnect") {
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "disconnect", "discord"}, false, true); err == nil || !strings.Contains(err.Error(), "does not support disconnect") {
 		t.Fatalf("unsupported disconnect error = %v", err)
 	}
 	if rec.saw("POST", "/channels/discord/remove") || rec.saw("POST", "/channels/discord/disconnect") {

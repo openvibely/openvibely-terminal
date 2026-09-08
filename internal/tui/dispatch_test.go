@@ -2,7 +2,11 @@ package tui
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -6143,12 +6147,17 @@ func TestChannelAddConditionalValidation(t *testing.T) {
 	}{
 		{name: "github pat", args: []string{"add", "github", "--auth-mode", "pat"}, want: "requires --pat"},
 		{name: "github app", args: []string{"add", "github", "--auth-mode", "app", "--app-id", "1"}, want: "requires --app-id, --app-slug, and --private-key"},
+		{name: "github edit to app", args: []string{"edit", "github", "--auth-mode", "app", "--app-id", "1", "--app-slug", "slug"}, want: "editing GitHub into app mode requires --app-id, --app-slug, and --private-key"},
+		{name: "github invalid endpoint", args: []string{"edit", "github", "--api-endpoint", "not a URL"}, want: "--api-endpoint must be an absolute HTTP(S) URL"},
 		{name: "slack manual", args: []string{"add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"}, want: "requires --bot-token"},
+		{name: "slack edit to manual", args: []string{"edit", "slack", "--bot-token-mode", "manual"}, want: "editing Slack into manual mode requires --bot-token"},
 		{name: "x credentials", args: []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "secret"}, want: "requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret"},
 		{name: "x poll interval low", args: []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "secret", "--access-token", "token", "--access-token-secret", "token-secret", "--poll-interval", "14"}, want: "--poll-interval must be between 15 and 300 seconds"},
 		{name: "x poll interval high", args: []string{"edit", "x", "--poll-interval", "301"}, want: "--poll-interval must be between 15 and 300 seconds"},
 		{name: "unknown email provider", args: []string{"add", "email", "--provider", "other", "--address", "a@example.com", "--password", "secret"}, want: "provider must be one of"},
+		{name: "invalid email address", args: []string{"edit", "email", "--address", "not-an-email"}, want: "--address must be a valid email address"},
 		{name: "custom email hosts", args: []string{"add", "email", "--provider", "custom", "--address", "a@example.com", "--password", "secret"}, want: "custom Email requires --imap-host and --smtp-host"},
+		{name: "email edit to custom", args: []string{"edit", "email", "--provider", "custom"}, want: "editing Email to custom requires --imap-host and --smtp-host"},
 	}
 	oldCLI := cliMode
 	cliMode = true
@@ -6160,6 +6169,72 @@ func TestChannelAddConditionalValidation(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestChannelWizardEditTransitionsRequireNewModeFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		channel  string
+		original url.Values
+		form     url.Values
+		step     channelWizardStep
+	}{
+		{name: "github pat to app private key", channel: "github", original: url.Values{"github_auth_mode": {"pat"}}, form: url.Values{"github_auth_mode": {"app"}, "github_app_id": {"1"}, "github_app_slug": {"slug"}}, step: channelWizardStep{field: "github_app_private_key"}},
+		{name: "slack oauth to manual bot token", channel: "slack", original: url.Values{"slack_bot_token_mode": {"oauth"}}, form: url.Values{"slack_bot_token_mode": {"manual"}}, step: channelWizardStep{field: "slack_bot_token"}},
+		{name: "email preset to custom imap", channel: "email", original: url.Values{"email_provider": {"gmail"}, "email_imap_host": {"imap.gmail.com"}}, form: url.Values{"email_provider": {"custom"}, "email_imap_host": {"imap.gmail.com"}}, step: channelWizardStep{field: "email_imap_host"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wizard := &channelWizardState{action: "edit", channel: client.Channel{Type: tt.channel}, original: tt.original, form: tt.form, supplied: map[string]bool{}}
+			if !channelWizardFieldRequired(wizard, tt.step) {
+				t.Fatalf("transition field %s was not required", tt.step.field)
+			}
+		})
+	}
+}
+
+func TestNormalizeGitHubPrivateKeyRestoresMultilinePEMFlattenedByTextInput(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der := x509.MarshalPKCS1PrivateKey(key)
+	multiline := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der}))
+	flattened := strings.Join(strings.Fields(multiline), " ")
+
+	normalized, err := normalizeGitHubPrivateKey(flattened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, rest := pem.Decode([]byte(normalized))
+	if block == nil || block.Type != "RSA PRIVATE KEY" || !reflect.DeepEqual(block.Bytes, der) || strings.TrimSpace(string(rest)) != "" {
+		t.Fatalf("normalized PEM was not lossless: block=%#v rest=%q", block, rest)
+	}
+	if !strings.Contains(normalized, "\n") {
+		t.Fatalf("normalized PEM remained single-line: %q", normalized)
+	}
+
+	_, values, err := parseChannelMutationArgs("add", []string{"add", "github", "--auth-mode", "app", "--app-id", "1", "--app-slug", "terminal-app", "--private-key", flattened})
+	if err != nil {
+		t.Fatalf("headless parser rejected flattened valid PEM: %v", err)
+	}
+	if parsed, _ := pem.Decode([]byte(values["github_app_private_key"])); parsed == nil || !reflect.DeepEqual(parsed.Bytes, der) {
+		t.Fatal("headless parser did not preserve normalized private key")
+	}
+}
+
+func TestChannelURLAndEmailValidationAcceptsBrowserValidValues(t *testing.T) {
+	oldCLI := cliMode
+	cliMode = true
+	defer func() { cliMode = oldCLI }()
+	for _, args := range [][]string{
+		{"edit", "github", "--api-endpoint", "https://github.example.test/api/v3"},
+		{"edit", "email", "--address", "bot+tasks@example.com"},
+	} {
+		if err := validateChannelsArgs(args); err != nil {
+			t.Errorf("valid browser-equivalent value rejected for %v: %v", args, err)
+		}
 	}
 }
 
@@ -6378,6 +6453,55 @@ func TestChannelsInteractiveSetupEnforcesConditionalRequirements(t *testing.T) {
 		}
 	})
 
+	t.Run("github edit pat to app", func(t *testing.T) {
+		page := `<div data-channel-type="github" data-search-text="GitHub Configured"></div><form action="/channels/github/configure"><select name="github_auth_mode"><option value="pat" selected>PAT</option><option value="app">App</option></select><input name="github_app_id" value="stale-id"><input name="github_app_slug" value="stale-slug"><input name="github_pat" value="stored-pat"><textarea name="github_app_private_key">stored-key</textarea><input name="github_api_endpoint" value="https://api.github.com"></form>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": page})
+		m = runLine(t, m, "/channels edit github")
+		m = runLine(t, m, "app")
+		m = pressEnter(m) // PAT is optional in App mode.
+		m = pressEnter(m) // Stale App ID cannot satisfy a PAT-to-App transition.
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "github_app_id" || !strings.Contains(transcript(m), "GitHub App ID is required") {
+			t.Fatalf("GitHub edit transition reused stale App settings: %s", transcript(m))
+		}
+		if rec.saw("POST", "/channels/github/configure") {
+			t.Fatalf("invalid GitHub edit mutated backend: %s", rec.all())
+		}
+	})
+
+	t.Run("slack edit oauth to manual", func(t *testing.T) {
+		page := `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form action="/channels/slack/configure"><input name="slack_client_id" value="client"><input name="slack_client_secret" value="secret"><input name="slack_app_token" value="app"><select name="slack_bot_token_mode"><option value="oauth" selected>OAuth</option><option value="manual">Manual</option></select><input name="slack_bot_token" value="stale-bot"></form>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": page})
+		m = runLine(t, m, "/channels edit slack")
+		for _, value := range []string{"", "", "", "manual"} {
+			m.input.SetValue(value)
+			m = pressEnter(m)
+		}
+		m = pressEnter(m)
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "slack_bot_token" || !strings.Contains(transcript(m), "Manual bot token") {
+			t.Fatalf("Slack edit transition reused stale bot token: %s", transcript(m))
+		}
+		if rec.saw("POST", "/channels/slack/configure") {
+			t.Fatalf("invalid Slack edit mutated backend: %s", rec.all())
+		}
+	})
+
+	t.Run("email edit preset to custom", func(t *testing.T) {
+		page := `<div data-channel-type="email" data-search-text="Email Configured"></div><form action="/channels/email/configure"><select name="email_provider"><option value="gmail" selected>Gmail</option><option value="custom">Custom</option></select><input name="email_address" value="bot@example.com"><input name="email_password" value="stored-password"><input name="email_imap_host" value="imap.gmail.com"><input name="email_imap_port" value="993"><input name="email_smtp_host" value="smtp.gmail.com"><input name="email_smtp_port" value="587"></form>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": page})
+		m = runLine(t, m, "/channels edit email")
+		for _, value := range []string{"custom", "", ""} {
+			m.input.SetValue(value)
+			m = pressEnter(m)
+		}
+		m = pressEnter(m)
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "email_imap_host" || !strings.Contains(transcript(m), "IMAP host (custom provider) is required") {
+			t.Fatalf("Email edit transition reused preset hosts: %s", transcript(m))
+		}
+		if rec.saw("POST", "/channels/email/configure") {
+			t.Fatalf("invalid Email edit mutated backend: %s", rec.all())
+		}
+	})
+
 	t.Run("email provider", func(t *testing.T) {
 		m, rec := dispatchModel(t, nil)
 		m = runLine(t, m, "/channels add email")
@@ -6389,6 +6513,53 @@ func TestChannelsInteractiveSetupEnforcesConditionalRequirements(t *testing.T) {
 			t.Fatalf("invalid wizard mutated backend: %s", calls)
 		}
 	})
+}
+
+func TestChannelsInteractiveGitHubAppAcceptsFlattenedMultilinePEM(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der := x509.MarshalPKCS1PrivateKey(key)
+	pemText := string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: der}))
+	flattened := strings.Join(strings.Fields(pemText), " ")
+
+	m, rec := dispatchModel(t, map[string]string{"/channels": structuredChannelsPage})
+	m = runLine(t, m, "/channels add github")
+	for _, value := range []string{"app", "", "123", "terminal-app", flattened, "https://api.github.com"} {
+		m.input.SetValue(value)
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = next.(Model)
+		if cmd != nil {
+			if msg := cmd(); msg != nil {
+				next, _ = m.Update(msg)
+				m = next.(Model)
+			}
+		}
+	}
+	if !rec.saw("POST", "/channels/github/configure") || m.channelWizard != nil {
+		t.Fatalf("GitHub App wizard did not complete: %s\n%s", transcript(m), rec.all())
+	}
+	rec.mu.Lock()
+	forms := append([]string(nil), rec.forms...)
+	rec.mu.Unlock()
+	var posted string
+	for _, form := range forms {
+		if strings.HasPrefix(form, "POST /channels/github/configure?") {
+			posted = strings.TrimPrefix(form, "POST /channels/github/configure?")
+		}
+	}
+	values, err := url.ParseQuery(posted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode([]byte(values.Get("github_app_private_key")))
+	if block == nil || !reflect.DeepEqual(block.Bytes, der) {
+		t.Fatal("GitHub App wizard did not submit a valid reconstructed PEM")
+	}
+	if strings.Contains(m.View(), flattened) || strings.Contains(transcript(m), flattened) {
+		t.Fatal("GitHub private key appeared in terminal output")
+	}
 }
 
 func TestChannelsInteractiveSetupSubmitsMaskedCredentialWithoutEcho(t *testing.T) {
@@ -6787,16 +6958,23 @@ func TestChannelsHTTP200TestFailureIsSafeAndDoesNotReportSuccess(t *testing.T) {
 	}
 }
 
-func TestChannelsDisconnectUsesOnlySupportedNonDestructiveRoutes(t *testing.T) {
+func TestChannelsDisconnectUsesOnlySupportedRoutesAfterConfirmation(t *testing.T) {
 	for _, channelType := range []string{"github", "slack"} {
 		t.Run(channelType, func(t *testing.T) {
 			m, rec := dispatchModel(t, map[string]string{"/channels": structuredChannelsPage})
 			m = runLine(t, m, "/channels disconnect "+channelType)
+			if rec.saw("POST", "/channels/"+channelType+"/disconnect") || m.pendingConfirmation == nil {
+				t.Fatalf("disconnect was not gated before request: %s", rec.all())
+			}
+			if !strings.Contains(stripANSI(m.View()), `Disconnect channel "`+map[string]string{"github": "GitHub", "slack": "Slack"}[channelType]+`"?`) {
+				t.Fatalf("disconnect prompt was not canonical: %s", m.View())
+			}
+			m = runLine(t, m, "yes")
 			if !rec.saw("POST", "/channels/"+channelType+"/disconnect") {
-				t.Fatalf("disconnect route missing: %s", rec.all())
+				t.Fatalf("confirmed disconnect route missing: %s", rec.all())
 			}
 			if rec.saw("POST", "/channels/"+channelType+"/remove") || m.pendingConfirmation != nil {
-				t.Fatalf("disconnect became destructive: %s", rec.all())
+				t.Fatalf("disconnect used remove or left confirmation: %s", rec.all())
 			}
 		})
 	}
