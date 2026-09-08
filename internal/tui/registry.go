@@ -5099,6 +5099,7 @@ func projectsCommand() command {
 			"projects create <name> | <path>              use | when the name or path contains spaces",
 			"projects edit <project> [options]            update only explicitly supplied settings",
 			"projects edit <project> | [options]          separate a project name containing option-like words",
+			"  one-shot flag-like name: [global flags] -- projects edit <project> | [options]",
 			"  --name <name> --description <text>",
 			"  --repository-source <local|github> --repository-path <path> --github-url <url>",
 			"  --default-agent <name|id|inherit> --max-workers <n|inherit>",
@@ -5235,23 +5236,28 @@ func projectEditOptionNames() []string {
 
 func projectEditCompletions() []commandCompletion {
 	options := projectEditOptionNames()
-	completions := make([]commandCompletion, 0, (len(options)+1)*4)
+	completions := make([]commandCompletion, 0, (len(options)+1)*8)
 	for completedPairs := 0; completedPairs <= len(options); completedPairs++ {
-		base := []string{"edit", "*"}
+		pairSuffix := make([]string, 0, completedPairs*2)
 		for range completedPairs {
-			base = append(base, "*", "*")
+			pairSuffix = append(pairSuffix, "*", "*")
 		}
-		completions = append(completions, commandCompletion{after: base, values: options})
-		for _, valueCompletion := range []struct {
-			option string
-			values []string
-		}{
-			{option: "--repository-source", values: []string{"local", "github"}},
-			{option: "--max-workers", values: []string{"inherit", "0"}},
-			{option: "--default-agent", values: []string{"inherit"}},
+		for _, base := range [][]string{
+			append([]string{"edit", "*"}, pairSuffix...),
+			append([]string{"edit", "**", "|"}, pairSuffix...),
 		} {
-			after := append(append([]string(nil), base...), valueCompletion.option)
-			completions = append(completions, commandCompletion{after: after, values: valueCompletion.values})
+			completions = append(completions, commandCompletion{after: base, values: options})
+			for _, valueCompletion := range []struct {
+				option string
+				values []string
+			}{
+				{option: "--repository-source", values: []string{"local", "github"}},
+				{option: "--max-workers", values: []string{"inherit", "0"}},
+				{option: "--default-agent", values: []string{"inherit"}},
+			} {
+				after := append(append([]string(nil), base...), valueCompletion.option)
+				completions = append(completions, commandCompletion{after: after, values: valueCompletion.values})
+			}
 		}
 	}
 	return completions
@@ -5273,8 +5279,11 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 	}
 
 	// A standalone | explicitly separates the complete project reference from
-	// trailing edit options. Accept -- as well for direct dispatch callers, though
-	// the executable's global flag parser consumes it before command dispatch.
+	// trailing edit options only when the prefix resolves to a project. Otherwise
+	// it may be a literal option value and normal boundary evaluation must decide.
+	// Accept -- as well for direct dispatch callers, though the executable's global
+	// flag parser consumes it before command dispatch.
+	var separatorMatchErr error
 	for i := 1; i < len(args); i++ {
 		if args[i] != "|" && args[i] != "--" {
 			continue
@@ -5282,14 +5291,14 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 		ref := strings.TrimSpace(strings.Join(args[:i], " "))
 		project, matchErr := matchProject(projects, ref)
 		edits, parseErr := parseProjectEditOptions(args[i+1:])
-		if parseErr == nil {
-			if matchErr != nil {
-				return zeroProject, ref, zeroEdits, matchErr
+		if matchErr == nil {
+			if parseErr != nil {
+				return zeroProject, ref, zeroEdits, parseErr
 			}
 			return project, ref, edits, nil
 		}
-		if matchErr == nil {
-			return zeroProject, ref, zeroEdits, parseErr
+		if parseErr == nil && separatorMatchErr == nil {
+			separatorMatchErr = matchErr
 		}
 	}
 
@@ -5352,6 +5361,9 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 			}
 		}
 		return chosen.project, chosen.ref, chosen.edits, nil
+	}
+	if separatorMatchErr != nil {
+		return zeroProject, "", zeroEdits, separatorMatchErr
 	}
 	if malformedErr != nil {
 		return zeroProject, "", zeroEdits, malformedErr

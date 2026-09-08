@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +34,9 @@ func TestParseInterspersedFlags(t *testing.T) {
 		{name: "single dash json after operands", args: []string{"tasks", "show", "Task with spaces", "-json"}, wantJSON: true, wantArgs: []string{"tasks", "show", "Task with spaces"}},
 		{name: "post-command flag belongs to command", args: []string{"chat", "--command-local", "quoted argument"}, wantArgs: []string{"chat", "--command-local", "quoted argument"}},
 		{name: "option boundary", args: []string{"chat", "--", "--json", "literal"}, wantArgs: []string{"chat", "--json", "literal"}},
+		{name: "outer boundary preserves json project name", args: []string{"--", "projects", "edit", "--json", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "--json", "|", "--description", "changed"}},
+		{name: "outer boundary preserves force project name", args: []string{"--", "projects", "edit", "--force", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "--force", "|", "--description", "changed"}},
+		{name: "outer boundary preserves project flag project name", args: []string{"--", "projects", "edit", "--project", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "--project", "|", "--description", "changed"}},
 		{name: "project edit reference separator", args: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}},
 		{name: "unknown global", args: []string{"--unknown", "chat", "hello"}, wantErr: "flag provided but not defined"},
 		{name: "malformed global", args: []string{"--=value", "chat", "hello"}, wantErr: "bad flag syntax"},
@@ -221,6 +225,49 @@ func TestConfiguredCredentialTransportFailureIncludesOfflineRecovery(t *testing.
 	}
 	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "configured-user") {
 		t.Fatalf("configured credential transport error exposed credentials: %v", err)
+	}
+}
+
+func TestRunProjectEditGlobalFlagShapedNameAfterBoundary(t *testing.T) {
+	for _, projectName := range []string{"--json", "--force", "--project"} {
+		t.Run(projectName, func(t *testing.T) {
+			puts := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/projects":
+					_, _ = fmt.Fprintf(w, `{"projects":[{"id":"p1","name":%q,"path":"/tmp/repo"}]}`, projectName)
+				case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+					_, _ = fmt.Fprintf(w, `<dialog id="edit_project_modal" data-local-repo-path-enabled="true"><form hx-put="/projects/p1"><input name="name" value=%q><textarea name="description">old</textarea><select name="repo_source"><option value="local" selected>Local</option></select><input name="repo_path" value="/tmp/repo"><input name="repo_url" value=""><select name="default_agent_config_id"><option value="" selected>Global</option></select><input name="max_workers" value=""></form></dialog>`, projectName)
+				case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+					puts++
+					w.Header().Set("HX-Refresh", "true")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			oldArgs, oldCommandLine, oldStdout := os.Args, flag.CommandLine, os.Stdout
+			defer func() {
+				os.Args, flag.CommandLine, os.Stdout = oldArgs, oldCommandLine, oldStdout
+			}()
+			devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer devNull.Close()
+			os.Stdout = devNull
+			flag.CommandLine = flag.NewFlagSet("openvibely-tui", flag.ContinueOnError)
+			flag.CommandLine.SetOutput(io.Discard)
+			os.Args = []string{"openvibely-tui", "--server", srv.URL, "--", "projects", "edit", projectName, "|", "--description", "changed"}
+
+			if err := run(); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if puts != 1 {
+				t.Fatalf("PUTs = %d", puts)
+			}
+		})
 	}
 }
 

@@ -414,11 +414,14 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		t.Fatal("projects command missing")
 	}
 	for input, want := range map[string]string{
-		"/projects cr":                                      "/projects create ",
-		"/projects sh":                                      "/projects show ",
-		"/projects edit demo --repository-s":                "/projects edit demo --repository-source ",
-		"/projects edit demo --repository-source g":         "/projects edit demo --repository-source github ",
-		"/projects edit demo --name renamed --repository-s": "/projects edit demo --name renamed --repository-source ",
+		"/projects cr":                                                             "/projects create ",
+		"/projects sh":                                                             "/projects show ",
+		"/projects edit demo --repository-s":                                       "/projects edit demo --repository-source ",
+		"/projects edit demo --repository-source g":                                "/projects edit demo --repository-source github ",
+		"/projects edit demo --name renamed --repository-s":                        "/projects edit demo --name renamed --repository-source ",
+		`/projects edit "--name" | --repository-s`:                                 `/projects edit "--name" | --repository-source `,
+		"/projects edit Alpha --name Beta | --repository-source g":                 "/projects edit Alpha --name Beta | --repository-source github ",
+		"/projects edit Alpha --name Beta | --description changed --max-w":         "/projects edit Alpha --name Beta | --description changed --max-workers ",
 		"/projects edit demo --name renamed --max-workers 2 --repository-source g": "/projects edit demo --name renamed --max-workers 2 --repository-source github ",
 	} {
 		if got := completeSlashInput(input, *cmd); got != want {
@@ -431,6 +434,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		"projects create <name> <path>",
 		"projects edit <project> [options]",
 		"projects edit <project> | [options]",
+		"[global flags] -- projects edit <project> | [options]",
 		"--repository-source <local|github>",
 		"--default-agent <name|id|inherit>",
 		"repository replacement requires confirmation",

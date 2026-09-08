@@ -231,6 +231,9 @@ browser:
 openvibely-tui --json projects show "Renamed Project"
 openvibely-tui projects edit "Renamed Project" --max-workers inherit
 openvibely-tui projects edit "Release --name Candidate" '|' --description "Local checkout"
+openvibely-tui -- projects edit --json '|' --description "Project named like a global flag"
+openvibely-tui -f -- projects edit --force '|' \
+  --repository-source github --github-url https://github.com/acme/repo
 openvibely-tui --force projects edit "Renamed Project" \
   --repository-source github --github-url https://github.com/acme/repo
 ```
@@ -247,6 +250,11 @@ effective source is `local`, and `--github-url` only when it is `github`; includ
 contains complete option-like words or pairs, put a standalone `|` between the
 complete project reference and its edit options, as shown above (quote or escape
 it in a shell); equally strong boundaries fail as ambiguous rather than shortening or rebinding the target.
+In one-shot mode, if the project name itself is a registered global flag such as
+`--json`, `--force`, or `--project`, put the standard outer `--` before `projects`
+so the name reaches command parsing: `openvibely-tui [global flags] -- projects
+edit --json '|' --description changed`. Put real global flags, such as `-f`,
+before that outer boundary.
 `--default-agent inherit` uses the global
 default and `--max-workers inherit` (or `0`) removes the project limit. Local
 paths may be Unix, Windows drive, UNC, or space-containing paths; quote one shell

@@ -73,7 +73,11 @@ func TestProjectsEditResolvesNamesContainingOptionLikeTokens(t *testing.T) {
 		{name: "option in name", line: `/projects edit "Alpha --description token" --name changed`, want: "Alpha --description token"},
 		{name: "complete option pair in name", line: `/projects edit Alpha --name Beta | --description changed`, want: "Alpha --name Beta"},
 		{name: "explicit separator", line: `/projects edit --name | --description changed`, want: "--name"},
+		{name: "global json flag name", line: `/projects edit --json | --description changed`, want: "--json"},
+		{name: "global force flag name", line: `/projects edit --force | --description changed`, want: "--force"},
+		{name: "global project flag name", line: `/projects edit --project | --description changed`, want: "--project"},
 		{name: "literal separator value", line: `/projects edit target-id --description |`, want: "Target"},
+		{name: "literal separator value before another option", line: `/projects edit target-id --description | --name Changed`, want: "Changed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const projectID = "target-id"
@@ -108,9 +112,13 @@ func TestCLIProjectsEditResolvesNamesContainingOptionLikeTokens(t *testing.T) {
 		want string
 	}{
 		{name: "option name", args: []string{"projects", "edit", "--name", "--description", "changed"}, want: "--name"},
+		{name: "global json flag name after outer boundary", args: []string{"projects", "edit", "--json", "|", "--description", "changed"}, want: "--json"},
+		{name: "global force flag name after outer boundary", args: []string{"projects", "edit", "--force", "|", "--description", "changed"}, want: "--force"},
+		{name: "global project flag name after outer boundary", args: []string{"projects", "edit", "--project", "|", "--description", "changed"}, want: "--project"},
 		{name: "complete option pair in name", args: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}, want: "Alpha --name Beta"},
 		{name: "explicit separator", args: []string{"projects", "edit", "--name", "|", "--description", "changed"}, want: "--name"},
 		{name: "literal separator value", args: []string{"projects", "edit", "target-id", "--description", "|"}, want: "Target"},
+		{name: "literal separator value before another option", args: []string{"projects", "edit", "target-id", "--description", "|", "--name", "Changed"}, want: "Changed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const projectID = "target-id"

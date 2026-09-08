@@ -550,20 +550,24 @@ func completionBoundaryMatches(boundary completionBoundary, tokens []commandToke
 }
 
 func completionPathMatches(pattern, words []string) bool {
-	if len(pattern) > 0 && pattern[len(pattern)-1] == "**" {
-		if len(words) < len(pattern)-1 {
-			return false
+	if len(pattern) == 0 {
+		return len(words) == 0
+	}
+	if pattern[0] == "**" {
+		// A deep wildcard matches zero or more operands. Try the shortest match
+		// first so a following literal such as the project-edit | separator keeps
+		// its structural meaning.
+		for consumed := 0; consumed <= len(words); consumed++ {
+			if completionPathMatches(pattern[1:], words[consumed:]) {
+				return true
+			}
 		}
-		pattern = pattern[:len(pattern)-1]
-	} else if len(pattern) != len(words) {
 		return false
 	}
-	for i, part := range pattern {
-		if part != "*" && !strings.EqualFold(part, words[i]) {
-			return false
-		}
+	if len(words) == 0 || (pattern[0] != "*" && !strings.EqualFold(pattern[0], words[0])) {
+		return false
 	}
-	return true
+	return completionPathMatches(pattern[1:], words[1:])
 }
 
 func completionTokenEnds(value string) []int {
