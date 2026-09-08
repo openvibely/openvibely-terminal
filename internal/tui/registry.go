@@ -1400,16 +1400,22 @@ func getBoundScheduleTask(ctx context.Context, c *client.Client, projectID, task
 	return &detail.Task, nil
 }
 
+// scheduleInspectionOutput loads the bound task selected by either inspection
+// route and renders the established plain or JSON inspection result.
+func scheduleInspectionOutput(ctx context.Context, c *client.Client, projectID string, entry client.ScheduleEntry) (string, error) {
+	boundTask, err := getBoundScheduleTask(ctx, c, projectID, entry.TaskID)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
+	}
+	return renderScheduleInspection(entry, boundTask), nil
+}
+
 func scheduleInspectionCommand(c *client.Client, projectID string, entry client.ScheduleEntry) tea.Cmd {
 	return run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
-		boundTask, err := getBoundScheduleTask(ctx, c, projectID, entry.TaskID)
-		if err != nil {
-			return "", err
-		}
-		if jsonMode {
-			return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
-		}
-		return renderScheduleInspection(entry, boundTask), nil
+		return scheduleInspectionOutput(ctx, c, projectID, entry)
 	})
 }
 
@@ -1515,14 +1521,7 @@ func scheduleCommand() command {
 					if err != nil {
 						return "", err
 					}
-					boundTask, err := getBoundScheduleTask(ctx, c, pid, entry.TaskID)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
-					}
-					return renderScheduleInspection(entry, boundTask), nil
+					return scheduleInspectionOutput(ctx, c, pid, entry)
 				})
 			case "add":
 				if len(rest) == 0 {
@@ -4642,6 +4641,15 @@ func automationsCommand() command {
 			if backendAction == "run" {
 				backendAction = "run-now"
 			}
+			executeResolvedAction := func(ctx context.Context, a client.Automation) (string, error) {
+				status := action + ": " + firstNonEmpty(a.Name, a.ID)
+				if err := c.AutomationAction(ctx, a.ID, backendAction, pid); err != nil {
+					return "", err
+				}
+				return refreshAndRender(status,
+					func() ([]client.Automation, error) { return c.ListAutomations(ctx, pid) },
+					renderAutomations)
+			}
 
 			switch action {
 			case "", "list":
@@ -4793,10 +4801,7 @@ func automationsCommand() command {
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
-											status := action + ": " + firstNonEmpty(a.Name, a.ID)
-											return actAndReloadText(status,
-												func() error { return c.AutomationAction(ctx, a.ID, backendAction, pid) },
-												func() (string, error) { return c.GetAutomations(ctx, pid) })
+											return executeResolvedAction(ctx, a)
 										})
 										if action == "delete" {
 											return confirmOr(m,
@@ -4823,15 +4828,7 @@ func automationsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					status := action + ": " + firstNonEmpty(a.Name, a.ID)
-					if err := c.AutomationAction(ctx, a.ID, backendAction, pid); err != nil {
-						return "", err
-					}
-					return refreshAndRender(status,
-						func() ([]client.Automation, error) { return c.ListAutomations(ctx, pid) },
-						func(automations []client.Automation, _ string) string {
-							return renderAutomations(automations, "")
-						})
+					return executeResolvedAction(ctx, a)
 				})
 				if action == "delete" {
 					return confirmOr(m,
