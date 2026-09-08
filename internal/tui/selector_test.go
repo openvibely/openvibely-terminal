@@ -89,15 +89,14 @@ func selFixtures() map[string]string {
 	}
 }
 
-func TestTasksLifecycleTaskSelectorSelectionRendersCurrentResponse(t *testing.T) {
+func TestTasksLifecycleTaskSelectorSelectionRendersOneItemPageWithoutImplicitEvents(t *testing.T) {
 	const tasks = `<div>
 		<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>
 		<div data-task-id="t-2" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-2" title="Write docs">Write docs</a></div>
 	</div>`
 	m, rec := dispatchModel(t, map[string]string{
-		"/tasks":                                  tasks,
-		"/api/tasks/t-1/lifecycle-executions":     `{"items":[{"id":"exec-1","skill_key":"router","status":"completed"}],"has_more":false}`,
-		"/api/lifecycle-executions/exec-1/events": `[{"id":"event-1","seq":1,"event_type":"completed","payload":{"ok":true}}]`,
+		"/tasks":                              tasks,
+		"/api/tasks/t-1/lifecycle-executions": `{"items":[{"id":"exec-1","skill_key":"router","status":"completed","summary":"routing complete"}],"has_more":true,"next_cursor":"older-cursor"}`,
 	})
 	m = runLine(t, m, "/tasks lifecycle")
 	if !m.selectorActive || m.pendingCommand != "tasks lifecycle" {
@@ -108,11 +107,17 @@ func TestTasksLifecycleTaskSelectorSelectionRendersCurrentResponse(t *testing.T)
 	if m.selectorActive {
 		t.Fatal("task selector remained open after lifecycle selection")
 	}
-	if !rec.sawQuery("GET /api/tasks/t-1/lifecycle-executions?project_id=p1") || !rec.sawQuery("GET /api/lifecycle-executions/exec-1/events?project_id=p1") {
+	if !rec.sawQuery("GET /api/tasks/t-1/lifecycle-executions?project_id=p1") {
 		t.Fatalf("selected lifecycle request lost project scope:\n%s", rec.all())
 	}
-	if out := stripANSI(transcript(m)); !strings.Contains(out, "completed") || !strings.Contains(out, `{"ok":true}`) {
-		t.Fatalf("selected lifecycle execution was not rendered:\n%s", out)
+	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Fatalf("task-only selector dispatch implicitly fetched event traces:\n%s", rec.all())
+	}
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"exec-1", "router", "completed", "routing complete", "has more: true", "older-cursor"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("selected lifecycle page missing %q:\n%s", want, out)
+		}
 	}
 }
 

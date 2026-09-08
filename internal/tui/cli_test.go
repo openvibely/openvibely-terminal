@@ -3822,6 +3822,47 @@ func TestCLILifecycleJSONEmptyExecutionsPreservesPageEnvelope(t *testing.T) {
 	}
 }
 
+func TestCLILifecycleJSONOneExecutionPreservesPageEnvelopeWithoutImplicitEvents(t *testing.T) {
+	const executions = `{"items":[{"id":"exec-1","skill_key":"router","status":"completed","summary":"routing complete"}],"has_more":true,"next_cursor":"older-cursor","future_metadata":{"retained":true}}`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":                       cliProjects,
+		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions": executions,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1"}, false, true); err != nil {
+		t.Fatalf("one-item lifecycle executions --json failed: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != executions {
+		t.Fatalf("one-item lifecycle JSON did not preserve page envelope\ngot:  %s\nwant: %s", got, executions)
+	}
+	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Fatalf("task-only --json request implicitly fetched event traces:\n%s", rec.all())
+	}
+}
+
+func TestCLILifecycleOneExecutionRendersPageWithoutImplicitEvents(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":                       cliProjects,
+		"/tasks":                              `<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`,
+		"/api/tasks/t-1/lifecycle-executions": `{"items":[{"id":"exec-1","skill_key":"router","status":"completed","summary":"routing complete"}],"has_more":true,"next_cursor":"older-cursor"}`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "lifecycle", "t-1"}, false, false); err != nil {
+		t.Fatalf("one-item lifecycle executions failed: %v", err)
+	}
+	for _, want := range []string{"exec-1", "router", "completed", "routing complete", "has more: true", "older-cursor"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("one-item lifecycle page missing %q:\n%s", want, out.String())
+		}
+	}
+	if rec.saw("GET", "/api/lifecycle-executions/exec-1/events") {
+		t.Fatalf("task-only request implicitly fetched event traces:\n%s", rec.all())
+	}
+}
+
 func TestCLILifecycleJSONExecutionsPreserveFieldsMetadataAndOrder(t *testing.T) {
 	const executions = `{
 		"items":[

@@ -1139,9 +1139,9 @@ func resolveTaskWithOperands(tasks []client.Task, args []string, trailing int) (
 }
 
 // lifecycleCommand resolves a task and its optional execution, then either
-// renders the execution list or the ordered event trace. A missing execution
-// uses the TUI selector when several executions exist; CLI mode lists them so
-// its output remains deterministic.
+// renders the execution page or, only for an explicit execution reference, the
+// ordered event trace. Interactive pages with several executions use the
+// execution selector; CLI mode always renders the page deterministically.
 func lifecycleCommand(c *client.Client, projectID, action string, args []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
@@ -1170,22 +1170,11 @@ func lifecycleCommand(c *client.Client, projectID, action string, args []string)
 			return lifecycleEventsMessage(ctx, c, projectID, task, execution)
 		}
 
-		switch len(execs) {
-		case 0:
-			if jsonMode {
-				body, err := marshalJSON(page)
-				return resultMsg{title: "Task Lifecycle", body: body, err: err}
-			}
-			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutionPage(task, page)}
-		case 1:
-			return lifecycleEventsMessage(ctx, c, projectID, task, execs[0])
+		if jsonMode {
+			body, err := marshalJSON(page)
+			return resultMsg{title: "Task Lifecycle", body: body, err: err}
 		}
-
-		if cliMode {
-			if jsonMode {
-				body, err := marshalJSON(page)
-				return resultMsg{title: "Task Lifecycle", body: body, err: err}
-			}
+		if cliMode || len(execs) <= 1 {
 			return resultMsg{title: "Task Lifecycle", body: renderLifecycleExecutionPage(task, page)}
 		}
 

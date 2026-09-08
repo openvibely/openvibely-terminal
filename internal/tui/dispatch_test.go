@@ -1265,7 +1265,7 @@ func TestTasksLifecycleRendersOrderedEventsFromCurrentPageResponse(t *testing.T)
 		"/api/tasks/t-1/lifecycle-executions":     executions,
 		"/api/lifecycle-executions/exec-1/events": events,
 	})
-	m = runLine(t, m, "/tasks lifecycle Refactor the API")
+	m = runLine(t, m, "/tasks lifecycle Refactor the API exec-1")
 
 	if !rec.saw("GET", "/api/tasks/t-1/lifecycle-executions") {
 		t.Fatalf("expected lifecycle execution list, calls:\n%s", rec.all())
