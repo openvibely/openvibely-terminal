@@ -90,6 +90,31 @@ func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, err
 	return aggregateAlertPages(pages, projectID), nil
 }
 
+// FindAlertByID incrementally traverses alert cards and stops after the first
+// page containing id. Callers are responsible for restricting this exact-ID
+// path to references that cannot require full-collection matching semantics.
+func (c *Client) FindAlertByID(ctx context.Context, id, projectID string) (Alert, bool, error) {
+	path := "/alerts" + query("project_id", projectID)
+	root, hasMore, err := c.getHTMLPage(ctx, path)
+	if err != nil {
+		return Alert{}, false, err
+	}
+	var found Alert
+	_, matched, err := c.getCardPagesFromInitialUntil(ctx, path, root, hasMore, func(root *html.Node) bool {
+		for _, alert := range parseAlerts(root, projectID) {
+			if alert.ID == id {
+				found = alert
+				return true
+			}
+		}
+		return false
+	})
+	if err != nil {
+		return Alert{}, false, err
+	}
+	return found, matched, nil
+}
+
 func aggregateAlertPages(pages []htmlPage, projectID string) []Alert {
 	seen := make(map[string]bool)
 	alerts := make([]Alert, 0)

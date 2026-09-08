@@ -3565,6 +3565,117 @@ func TestCLIJSONAlertsList(t *testing.T) {
 	}
 }
 
+func TestCLIAlertsShowCanonicalIDStopsEarlyWithEquivalentOutput(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	runShow := func(t *testing.T, ref string, jsonOutput bool) (string, int, int) {
+		t.Helper()
+		listRequests, detailRequests := 0, 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			switch r.URL.Path {
+			case "/api/projects":
+				_, _ = io.WriteString(w, cliProjects)
+			case "/alerts":
+				listRequests++
+				if r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("unscoped alert request: %s", r.URL.RequestURI())
+				}
+				if r.URL.Query().Get("card_page") == "" {
+					_, _ = io.WriteString(w, alertPageForCLI([]string{id}, true))
+					return
+				}
+				w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+				_, _ = io.WriteString(w, alertPageForCLI([]string{"fedcba9876543210fedcba9876543210"}, false))
+			case "/alerts/" + id + "/details":
+				detailRequests++
+				_, _ = io.WriteString(w, `<div data-alert-detail-loaded><div data-alert-markdown data-raw-content="same detail"></div><pre>{"key":"value"}</pre></div>`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"alerts", "show", ref}, false, jsonOutput); err != nil {
+			t.Fatalf("alerts show %q: %v", ref, err)
+		}
+		return out.String(), listRequests, detailRequests
+	}
+
+	for _, jsonOutput := range []bool{false, true} {
+		canonical, canonicalLists, canonicalDetails := runShow(t, id, jsonOutput)
+		noncanonical, noncanonicalLists, noncanonicalDetails := runShow(t, strings.ToUpper(id), jsonOutput)
+		if canonical != noncanonical {
+			t.Fatalf("json=%t output differs\ncanonical:\n%s\nnoncanonical:\n%s", jsonOutput, canonical, noncanonical)
+		}
+		if canonicalLists != 1 || noncanonicalLists != 2 {
+			t.Fatalf("json=%t list requests canonical=%d noncanonical=%d, want 1 and 2", jsonOutput, canonicalLists, noncanonicalLists)
+		}
+		if canonicalDetails != 1 || noncanonicalDetails != 1 {
+			t.Fatalf("json=%t detail requests canonical=%d noncanonical=%d", jsonOutput, canonicalDetails, noncanonicalDetails)
+		}
+	}
+}
+
+func alertPageForCLI(ids []string, hasMore bool) string {
+	var body strings.Builder
+	fmt.Fprintf(&body, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="%t">`, hasMore)
+	for _, id := range ids {
+		fmt.Fprintf(&body, `<div data-alert-id="%s" data-alert-scroll-anchor="%s" data-alert-type="custom" data-alert-severity="warning" data-alert-decision-state="pending" data-alert-processing-state="unclaimed"><p class="font-semibold">Target alert</p><p class="text-sm opacity-60">same message</p></div>`, id, id)
+	}
+	body.WriteString(`</div>`)
+	return body.String()
+}
+
+func TestCLIAlertsShowCanonicalUnknownAndMalformedReferencesStaySafe(t *testing.T) {
+	const listedID = "0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name string
+		ref  string
+	}{
+		{name: "unknown canonical", ref: "ffffffffffffffffffffffffffffffff"},
+		{name: "malformed id like", ref: "fffffffffffffffffffffffffffffff"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			listRequests, detailRequests := 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				switch r.URL.Path {
+				case "/api/projects":
+					_, _ = io.WriteString(w, cliProjects)
+				case "/alerts":
+					listRequests++
+					if r.URL.Query().Get("card_page") == "" {
+						_, _ = io.WriteString(w, alertPageForCLI([]string{listedID}, true))
+						return
+					}
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+					_, _ = io.WriteString(w, alertPageForCLI([]string{"11111111111111111111111111111111"}, false))
+				default:
+					if strings.HasSuffix(r.URL.Path, "/details") {
+						detailRequests++
+					}
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", []string{"alerts", "show", tt.ref}, false, false)
+			if err == nil || !strings.Contains(err.Error(), "nothing matches") {
+				t.Fatalf("error = %v", err)
+			}
+			if listRequests != 2 || detailRequests != 0 {
+				t.Fatalf("list requests = %d, detail requests = %d", listRequests, detailRequests)
+			}
+		})
+	}
+}
+
 func TestCLIJSONAlertsShowIncludesSummaryAndFullDetail(t *testing.T) {
 	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
 		data-search-text="review pending unclaimed" data-alert-type="custom"
