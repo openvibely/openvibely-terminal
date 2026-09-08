@@ -46,6 +46,16 @@ type projectCreatedMsg struct {
 	err      error
 }
 
+// projectUpdatedMsg carries an authoritative post-save settings refresh.
+type projectUpdatedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	settings          *client.ProjectSettings
+	saved             bool
+	err               error
+}
+
 // loginResultMsg reports the outcome of an interactive cookie-session login.
 // Credentials are intentionally not carried in this message.
 type loginResultMsg struct {

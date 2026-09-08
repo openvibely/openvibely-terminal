@@ -5081,24 +5081,45 @@ func projectCommand() command {
 }
 
 func projectsCommand() command {
-	actions := []string{"list", "create"}
+	actions := []string{"list", "show", "create", "edit"}
 	return command{
 		name:    "projects",
 		actions: actions,
-		desc:    "list or create backend-owned projects",
+		actionUsages: []commandActionUsage{
+			{action: "show", args: "<project>", description: "show authoritative project settings"},
+			{action: "edit", args: "<project> [options]", description: "update project settings"},
+		},
+		selectorPaths: [][]string{{"show"}, {"edit"}},
+		completions: []commandCompletion{
+			{after: []string{"edit", "*"}, values: projectEditOptionNames()},
+			{after: []string{"edit", "*", "--repository-source"}, values: []string{"local", "github"}},
+			{after: []string{"edit", "*", "--max-workers"}, values: []string{"inherit", "0"}},
+			{after: []string{"edit", "*", "--default-agent"}, values: []string{"inherit"}},
+		},
+		desc: "list, show, create, or edit backend-owned projects",
 		usage: []string{
 			"projects [list]                              list projects with running/queued counts",
+			"projects show <project>                     show authoritative project settings",
 			"projects create <name> <path>                create and select a local-path project",
 			"projects create <name> | <path>              use | when the name or path contains spaces",
+			"projects edit <project> [options]            update only explicitly supplied settings",
+			"  --name <name> --description <text>",
+			"  --repository-source <local|github> --repository-path <path> --github-url <url>",
+			"  --default-agent <name|id|inherit> --max-workers <n|inherit>",
+			"  repository replacement requires confirmation (CLI: --force)",
 		},
 		examples: []string{
+			`projects show demo`,
 			`projects create demo /Users/me/src/demo`,
 			`projects create My Project | C:\Users\me\src\my-project`,
+			`projects edit demo --description "Local checkout" --max-workers 4`,
+			`projects edit demo --repository-source github --github-url https://github.com/acme/demo`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
 			action, rest := splitAction(actions, args)
-			if action == "create" {
+			switch action {
+			case "create":
 				name, path, ok := parseProjectCreateArgs(rest)
 				if !ok {
 					return m, errCmd(projectCreateUsage())
@@ -5117,6 +5138,69 @@ func projectsCommand() command {
 					}
 					return projectCreatedMsg{requestID: requestID, startSSE: startSSE, project: *project}
 				}
+			case "show":
+				ref := strings.TrimSpace(strings.Join(rest, " "))
+				if ref == "" {
+					return selectorOr(m, commandUsage("projects", "show"), projectSelector(m.projects, "projects show", ""))
+				}
+				project, err := matchProject(m.projects, ref)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				c := m.client
+				return m, run("Project", cmdTimeout, func(ctx context.Context) (string, error) {
+					settings, err := c.GetProjectSettings(ctx, project.ID)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(settings)
+					}
+					return renderProjectSettings(*settings), nil
+				})
+			case "edit":
+				ref, edits, err := parseProjectEditArgs(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				if ref == "" {
+					return selectorOr(m, commandUsage("projects", "edit"), projectSelector(m.projects, "projects edit", " "))
+				}
+				project, err := matchProject(m.projects, ref)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				c := m.client
+				sessionGeneration := sessionGenerationOf(m)
+				projectGeneration := projectGenerationOf(m)
+				m.busy = true
+				return m, func() tea.Msg {
+					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+					defer cancel()
+					current, err := c.GetProjectSettings(ctx, project.ID)
+					if err != nil {
+						return projectUpdatedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: project.ID, err: err}
+					}
+					updated, err := applyProjectEdits(*current, edits)
+					if err != nil {
+						return projectUpdatedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: project.ID, err: err}
+					}
+					updateCmd := func() tea.Msg {
+						updateCtx, updateCancel := context.WithTimeout(context.Background(), cmdTimeout)
+						defer updateCancel()
+						if err := c.UpdateProjectSettings(updateCtx, updated); err != nil {
+							return projectUpdatedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: project.ID, err: err}
+						}
+						persisted, refreshErr := c.GetProjectSettings(updateCtx, project.ID)
+						return projectUpdatedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, projectID: project.ID, settings: persisted, saved: true, err: refreshErr}
+					}
+					if projectRepositoryReplacementRisk(*current, updated) {
+						warning := "Changing this repository source or GitHub URL will re-clone and may replace the managed checkout for " + sanitizeAutomationDetailText(project.Name) + ".\n⚠ Type 'yes' to confirm or Esc to cancel"
+						cliWarning := "repository replacement for " + sanitizeAutomationDetailText(project.Name) + " requires --force; changing the source or GitHub URL re-clones and may replace the managed checkout"
+						return projectUpdateConfirmationMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, display: warning, cli: cliWarning, cmd: updateCmd}
+					}
+					return updateCmd()
+				}
 			}
 			if jsonMode {
 				c := m.client
@@ -5133,6 +5217,198 @@ func projectsCommand() command {
 			return m, cmd
 		},
 	}
+}
+
+type projectEditValues struct {
+	Name, Description, RepositorySource, RepositoryPath, GitHubURL, DefaultAgent, MaxWorkers *string
+}
+
+type projectEditPartialResult struct {
+	Saved        bool   `json:"saved"`
+	ProjectID    string `json:"project_id"`
+	RefreshError string `json:"refresh_error"`
+}
+
+type projectUpdateConfirmationMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	display           string
+	cli               string
+	cmd               tea.Cmd
+}
+
+func projectEditOptionNames() []string {
+	return []string{"--name", "--description", "--repository-source", "--repository-path", "--github-url", "--default-agent", "--max-workers"}
+}
+
+func parseProjectEditArgs(args []string) (string, projectEditValues, error) {
+	var edits projectEditValues
+	firstOption := len(args)
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			firstOption = i
+			break
+		}
+	}
+	ref := strings.TrimSpace(strings.Join(args[:firstOption], " "))
+	if firstOption == len(args) {
+		if ref == "" {
+			return "", edits, nil
+		}
+		return ref, edits, fmt.Errorf("%s", commandUsage("projects", "edit"))
+	}
+	seen := map[string]bool{}
+	for i := firstOption; i < len(args); i += 2 {
+		option := args[i]
+		if !containsExactString(projectEditOptionNames(), option) {
+			return ref, edits, fmt.Errorf("unknown project edit option %q; %s", option, commandUsage("projects", "edit"))
+		}
+		if seen[option] {
+			return ref, edits, fmt.Errorf("duplicate project edit option %s", option)
+		}
+		if i+1 >= len(args) {
+			return ref, edits, fmt.Errorf("project edit option %s requires a value", option)
+		}
+		seen[option] = true
+		value := args[i+1]
+		switch option {
+		case "--name":
+			edits.Name = &value
+		case "--description":
+			edits.Description = &value
+		case "--repository-source":
+			edits.RepositorySource = &value
+		case "--repository-path":
+			edits.RepositoryPath = &value
+		case "--github-url":
+			edits.GitHubURL = &value
+		case "--default-agent":
+			edits.DefaultAgent = &value
+		case "--max-workers":
+			edits.MaxWorkers = &value
+		}
+	}
+	return ref, edits, nil
+}
+
+func containsExactString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
+}
+
+func applyProjectEdits(settings client.ProjectSettings, edits projectEditValues) (client.ProjectSettings, error) {
+	if edits.Name != nil {
+		if strings.TrimSpace(*edits.Name) == "" {
+			return settings, fmt.Errorf("project name is required")
+		}
+		settings.Name = *edits.Name
+	}
+	if edits.Description != nil {
+		settings.Description = *edits.Description
+	}
+	if edits.RepositorySource != nil {
+		source := strings.ToLower(strings.TrimSpace(*edits.RepositorySource))
+		if source != "local" && source != "github" {
+			return settings, fmt.Errorf("repository source must be local or github")
+		}
+		settings.RepositorySource = source
+	}
+	if edits.RepositoryPath != nil {
+		if !settings.LocalRepositoryPathsEnabled {
+			return settings, fmt.Errorf("local repository paths are disabled in this environment")
+		}
+		settings.RepositoryPath = *edits.RepositoryPath
+	}
+	if edits.GitHubURL != nil {
+		settings.GitHubURL = *edits.GitHubURL
+	}
+	if settings.RepositorySource == "local" && edits.RepositorySource != nil {
+		settings.GitHubURL = ""
+	}
+	if edits.DefaultAgent != nil {
+		value := strings.TrimSpace(*edits.DefaultAgent)
+		if value == "" || strings.EqualFold(value, "inherit") || strings.EqualFold(value, "global") {
+			settings.DefaultAgentID, settings.DefaultAgentName = "", ""
+		} else {
+			option, err := matchRef(settings.AvailableAgents, value, func(a client.ProjectAgentOption) string { return a.ID }, func(a client.ProjectAgentOption) string { return a.Name })
+			if err != nil {
+				return settings, fmt.Errorf("unknown default agent %q: %w", sanitizeAutomationDetailText(value), err)
+			}
+			settings.DefaultAgentID, settings.DefaultAgentName = option.ID, option.Name
+		}
+	}
+	if edits.MaxWorkers != nil {
+		value := strings.TrimSpace(*edits.MaxWorkers)
+		if strings.EqualFold(value, "inherit") || value == "" {
+			settings.MaxWorkers = nil
+		} else {
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 {
+				return settings, fmt.Errorf("max workers must be 0 or a positive whole number, or inherit")
+			}
+			settings.MaxWorkers = &n
+		}
+	}
+	return settings, nil
+}
+
+func projectRepositoryReplacementRisk(current, updated client.ProjectSettings) bool {
+	if current.RepositorySource != updated.RepositorySource {
+		return updated.RepositorySource == "github"
+	}
+	return updated.RepositorySource == "github" && canonicalProjectGitHubRepository(current.GitHubURL) != canonicalProjectGitHubRepository(updated.GitHubURL)
+}
+
+func canonicalProjectGitHubRepository(raw string) string {
+	value := strings.TrimSpace(raw)
+	lower := strings.ToLower(value)
+	if strings.HasPrefix(lower, "git@") {
+		parts := strings.SplitN(value[4:], ":", 2)
+		if len(parts) == 2 {
+			return strings.ToLower(strings.TrimSpace(parts[0]) + "/" + strings.TrimSuffix(strings.Trim(strings.TrimSpace(parts[1]), "/"), ".git"))
+		}
+	}
+	if parsed, err := url.Parse(value); err == nil && parsed.Hostname() != "" {
+		return strings.ToLower(parsed.Host + "/" + strings.TrimSuffix(strings.Trim(parsed.Path, "/"), ".git"))
+	}
+	return "github.com/" + strings.ToLower(strings.TrimSuffix(strings.Trim(value, "/"), ".git"))
+}
+
+func projectSelector(projects []client.Project, command, suffix string) tea.Cmd {
+	return selectorForWithSuffix("Projects", command, "no projects", suffix, func(context.Context) ([]selectorItem, error) {
+		items := make([]selectorItem, 0, len(projects))
+		for _, project := range projects {
+			items = append(items, selectorItem{ref: project.ID, label: project.Name, detail: truncate(project.Path, 40)})
+		}
+		return items, nil
+	})
+}
+
+func renderProjectSettings(settings client.ProjectSettings) string {
+	safe := sanitizeAutomationDetailText
+	defaultAgent := "inherit (global default)"
+	if settings.DefaultAgentID != "" {
+		defaultAgent = firstNonEmpty(settings.DefaultAgentName, settings.DefaultAgentID)
+	}
+	maxWorkers := "inherit"
+	if settings.MaxWorkers != nil && *settings.MaxWorkers > 0 {
+		maxWorkers = strconv.Itoa(*settings.MaxWorkers)
+	}
+	rows := []string{
+		"ID: " + safe(settings.ID),
+		"Name: " + safe(settings.Name),
+		"Description: " + safe(settings.Description),
+		"Repository source: " + safe(settings.RepositorySource),
+		"Repository path: " + safe(settings.RepositoryPath),
+		"GitHub URL: " + safe(settings.GitHubURL),
+		"Default agent: " + safe(defaultAgent),
+		"Max workers: " + maxWorkers,
+	}
+	return strings.Join(rows, "\n")
 }
 
 func projectCreateUsage() string {
@@ -5414,9 +5690,10 @@ func matchProject(projects []client.Project, ref string) (client.Project, error)
 		var zero client.Project
 		return zero, fmt.Errorf("missing project name")
 	}
-	return matchRef(projects, ref,
+	return matchRefWithDisplay(projects, ref,
 		func(p client.Project) string { return p.ID },
-		func(p client.Project) string { return p.Name })
+		func(p client.Project) string { return p.Name },
+		sanitizeAutomationDetailText)
 }
 
 // errCmd reports a usage error in the transcript.

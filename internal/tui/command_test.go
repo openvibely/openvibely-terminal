@@ -408,17 +408,29 @@ func TestWorksAliasCompletesCanonicalCommandAtDepth(t *testing.T) {
 	}
 }
 
-func TestProjectsCreateCompletionAndHelp(t *testing.T) {
+func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	cmd := lookupCommand("projects")
 	if cmd == nil {
 		t.Fatal("projects command missing")
 	}
-	if got := completeSlashInput("/projects cr", *cmd); got != "/projects create " {
-		t.Errorf("completion = %q, want %q", got, "/projects create ")
+	for input, want := range map[string]string{
+		"/projects cr":                              "/projects create ",
+		"/projects sh":                              "/projects show ",
+		"/projects edit demo --repository-s":        "/projects edit demo --repository-source ",
+		"/projects edit demo --repository-source g": "/projects edit demo --repository-source github ",
+	} {
+		if got := completeSlashInput(input, *cmd); got != want {
+			t.Errorf("completion for %q = %q, want %q", input, got, want)
+		}
 	}
 	help := renderCommandHelp(*cmd)
 	for _, want := range []string{
+		"projects show <project>",
 		"projects create <name> <path>",
+		"projects edit <project> [options]",
+		"--repository-source <local|github>",
+		"--default-agent <name|id|inherit>",
+		"repository replacement requires confirmation",
 		"projects create My Project",
 		`C:\Users\me\src\my-project`,
 	} {

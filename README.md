@@ -157,7 +157,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/insights` | `suggestions` | `show`, `analyze` |
 | `/automations` | `automation` | `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, `delete` |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
-| `/projects` | | `list`, `create <name> <path>` |
+| `/projects` | | `list`, `show <project>`, `create <name> <path>`, `edit <project> [options]` |
 | `/project <name>` | | select the active project |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
 | `/login` | `signin`, `auth` | enter username and masked password; retry the session without restarting |
@@ -218,6 +218,42 @@ project immediately:
 The pipe form separates the name from the repository path when either contains
 spaces. The same syntax works in one-shot mode (`openvibely-tui projects create
 ...`); add `--json` for a machine-readable created-project record.
+
+Inspect or update an existing project's backend-owned settings without opening a
+browser:
+
+```bash
+/projects show "My Project"
+/projects edit "My Project" --name "Renamed Project" --description "Local checkout"
+/projects edit "Renamed Project" --repository-path "/Users/me/src/repo with spaces"
+/projects edit "Renamed Project" --default-agent Builder --max-workers 4
+
+openvibely-tui --json projects show "Renamed Project"
+openvibely-tui projects edit "Renamed Project" --max-workers inherit
+openvibely-tui --force projects edit "Renamed Project" \
+  --repository-source github --github-url https://github.com/acme/repo
+```
+
+`projects show` and successful `projects edit` JSON use stable snake-case fields:
+`id`, `name`, `description`, `repository_source`, `repository_path`, `github_url`,
+`default_agent_id`, optional `default_agent_name`, `max_workers`, and
+`local_repository_paths_enabled`. If saving succeeds but that authoritative refresh
+fails, JSON instead returns `{"saved":true,"project_id":"…","refresh_error":"saved; authoritative refresh failed"}`.
+Edit options omitted from the command retain
+the authoritative existing values. `--default-agent inherit` uses the global
+default and `--max-workers inherit` (or `0`) removes the project limit. Local
+paths may be Unix, Windows drive, UNC, or space-containing paths; quote one shell
+argument as shown above.
+
+Changing to a different GitHub repository re-clones into managed storage and can
+replace that checkout. Interactive mode displays a destructive warning and
+requires typing `yes`; `Esc` cancels. One-shot mode exits nonzero unless
+`--force` is supplied. Backend validation remains authoritative for disabled
+local paths, worker limits, GitHub URLs/integration, and clone failures. Unknown
+or ambiguous project references fail before settings are fetched or mutated.
+Protected backends retain the normal typed sign-in guidance: use `/login` in the
+TUI, or configured `OPENVIBELY_AUTH_USERNAME` and
+`OPENVIBELY_AUTH_PASSWORD` for one-shot commands.
 
 ### Task threads
 
@@ -469,6 +505,9 @@ openvibely-tui -project demo analytics usage      # one analytics section
 openvibely-tui -project demo chat "ship the docs" # ask the agent, print the reply
 openvibely-tui projects create demo /Users/me/src/demo # create; output includes its backend ID
 openvibely-tui --json projects create demo /Users/me/src/demo # JSON project record
+openvibely-tui projects show demo                  # authoritative project settings
+openvibely-tui projects edit demo --description "Local checkout" --max-workers 4
+openvibely-tui --force projects edit demo --repository-source github --github-url https://github.com/acme/demo
 openvibely-tui help                               # list every command
 openvibely-tui help tasks                         # full syntax of one command
 openvibely-tui --help                             # commands + flags
@@ -484,7 +523,8 @@ List/show JSON shapes are unchanged.
 When the backend has exactly one project, project-scoped commands use it when
 `-project` is omitted. When more than one project exists, those commands fail
 before making a project request and require `-project <name|id>` (a full ID,
-name, or unique ID prefix). `projects list`, `projects create`, `help`, `login`,
+name, or unique ID prefix). `projects list`, `projects show`, `projects create`,
+`projects edit`, `help`, `login`,
 and other global commands remain usable without a project reference. In this
 implicit single-project mode, human output begins with `project: <name> (project_id=<id>)`; `--json` output uses an envelope with `project_id`,
 `project_name`, and `data` so scripts can see the selected scope.
@@ -508,8 +548,13 @@ you the argument order:
 ```
 $ openvibely-tui help projects
   projects [list]                              list projects with running/queued counts
+  projects show <project>                     show authoritative project settings
   projects create <name> <path>                create and select a local-path project
   projects create <name> | <path>              use | when the name or path contains spaces
+  projects edit <project> [options]            update only explicitly supplied settings
+    --name <name> --description <text>
+    --repository-source <local|github> --repository-path <path> --github-url <url>
+    --default-agent <name|id|inherit> --max-workers <n|inherit>
 
 $ openvibely-tui help tasks
   tasks [filter]                             list the board, optionally filtered
@@ -556,7 +601,7 @@ Notes:
   reference exits non-zero and lists the candidates rather than running against
   the wrong project. A CLI run may omit it only when there are zero or exactly
   one backend projects; project-scoped commands require `-project <name|id>`
-  when multiple projects exist. `projects list`, `projects create`, `help` and
+  when multiple projects exist. Project-reference `projects` commands and
   other global commands do not require it.
 - Chat and long-running commands block until the backend finishes, then print
   the result.
@@ -575,7 +620,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Area | Endpoints |
 |---|---|
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
-| Projects | `GET /api/projects`, `POST /projects` (HTMX form) |
+| Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks`, `failed-task-patterns`, `skills` |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |

@@ -1064,6 +1064,14 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case projectUpdatedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case projectUpdateConfirmationMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case loginResultMsg:
 		typed.sessionGeneration = sessionGeneration
 		return typed
@@ -1425,6 +1433,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.authRequired && m.selectedID != "" && shouldReconnect {
 			m.sseRetryAfterProject = false
 			return m, m.connectSSE()
+		}
+		return m, nil
+
+	case projectUpdateConfirmationMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		m.busy = false
+		return confirmOr(m, msg.display, msg.cli, msg.cmd)
+
+	case projectUpdatedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		m.busy = false
+		if msg.err != nil {
+			if msg.saved {
+				if jsonMode {
+					body, _ := marshalJSON(projectEditPartialResult{Saved: true, ProjectID: msg.projectID, RefreshError: "saved; authoritative refresh failed"})
+					m.append(entry{role: "result", head: "Project", text: body})
+				} else {
+					m.append(entry{role: "result", head: "Project", text: "updated project (saved; authoritative refresh failed)"})
+				}
+				return m, nil
+			}
+			if m.handleCompletedRequestError(msg.err) {
+				return m, nil
+			}
+		}
+		if msg.settings == nil {
+			return m, nil
+		}
+		settings := *msg.settings
+		for i := range m.projects {
+			if m.projects[i].ID == settings.ID {
+				m.projects[i].Name = settings.Name
+				m.projects[i].Path = settings.RepositoryPath
+			}
+		}
+		if m.selectedID == settings.ID {
+			m.setActiveProject(client.Project{ID: settings.ID, Name: settings.Name, Path: settings.RepositoryPath})
+		}
+		if jsonMode {
+			body, err := marshalJSON(settings)
+			if err != nil {
+				m.append(entry{role: "error", text: err.Error()})
+				return m, nil
+			}
+			m.append(entry{role: "result", head: "Project", text: body})
+		} else {
+			m.append(entry{role: "result", head: "Project", text: "updated project " + sanitizeAutomationDetailText(settings.Name) + "\n\n" + renderProjectSettings(settings)})
 		}
 		return m, nil
 
