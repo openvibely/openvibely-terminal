@@ -636,18 +636,45 @@ func TestTasksRunResolvesQuotedTaskTitle(t *testing.T) {
 }
 
 func canonicalTaskDetailHTML(taskID, projectID string) string {
-	return `<div data-task-id="` + taskID + `" data-project-id="` + projectID + `" data-task-status="running" data-task-category="active">
-		<h2 class="font-bold">Exact task</h2>
-		<div id="tab-details">details loaded</div><div id="tab-chat"></div><div id="tab-changes"></div><div id="tab-lifecycle">life loaded</div>
+	return `<div id="task-detail-content" class="h-full flex flex-col">
+		<span class="hidden" aria-hidden="true" data-openvibely-page-title="Exact task - OpenVibely"></span>
+		<a id="task-back-btn" data-project-id="` + projectID + `">Tasks</a>
+		<div data-breadcrumb-selector data-searchable-selector data-searchable-selector-kind="Task">
+			<button id="task-resource-selector-button" data-breadcrumb-selector-button><span>Exact task</span></button>
+		</div>
+		<div id="tab-details">
+			<div id="task-detail-view">
+				<div id="task-detail-metrics" data-task-status="running">
+					<div><span>Category:</span><span class="badge">active</span></div>
+					<div><span>Status:</span><span class="badge">Running</span></div>
+					<div><span>Tag:</span><span class="badge">Bug</span></div>
+					<div><span>Priority:</span><span class="badge">High</span></div>
+					<div><span>Model:</span><span class="badge">Claude Sonnet</span></div>
+					<div><span>Agent:</span><span class="badge">Planner</span></div>
+				</div>
+				<div id="task-prompt-panel"><div>Prompt</div><div class="textarea">Implement exact lookup</div></div>
+				<div id="task-goal-panel" data-task-id="` + taskID + `"><div>Goal</div><span class="badge">Active</span></div>
+			</div>
+			<form id="edit-task-form-` + taskID + `">
+				<input name="title" value="Exact task"><select name="category"><option value="active" selected>active</option></select>
+				<textarea name="prompt">Implement exact lookup</textarea>
+			</form>
+		</div>
+		<div id="tab-chat"></div><div id="tab-changes"></div><div id="tab-lifecycle">life loaded</div>
 	</div>`
+}
+
+func canonicalTaskMetadataJSON(taskID, projectID string) string {
+	return `{"id":"` + taskID + `","project_id":"` + projectID + `","title":"Exact task","prompt":"Implement exact lookup","category":"active","status":"running","display_order":7,"parent_task_id":"parent-1","chain_config":"{\"enabled\":true}","swarm_role":"parent","has_goal":true}`
 }
 
 func TestTasksShowCanonicalFullIDBypassesBoard(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
 	m, rec := dispatchModel(t, map[string]string{
-		"/tasks/" + taskID:              canonicalTaskDetailHTML(taskID, "p1"),
-		"/tasks/" + taskID + "/thread":  `<div>thread loaded</div>`,
-		"/tasks/" + taskID + "/changes": `<div>changes loaded</div>`,
+		"/tasks/" + taskID:                canonicalTaskDetailHTML(taskID, "p1"),
+		"/api/tasks/" + taskID + "/swarm": canonicalTaskMetadataJSON(taskID, "p1"),
+		"/tasks/" + taskID + "/thread":    `<div>thread loaded</div>`,
+		"/tasks/" + taskID + "/changes":   `<div>changes loaded</div>`,
 	})
 	m = runLine(t, m, "/tasks show "+taskID+" changes")
 
@@ -657,7 +684,10 @@ func TestTasksShowCanonicalFullIDBypassesBoard(t *testing.T) {
 	if got := rec.count("GET", "/tasks/"+taskID); got != 1 {
 		t.Fatalf("detail requests = %d, want 1; calls:\n%s", got, rec.all())
 	}
-	for _, path := range []string{"/tasks/" + taskID, "/tasks/" + taskID + "/thread", "/tasks/" + taskID + "/changes"} {
+	if got := rec.count("GET", "/api/tasks/"+taskID+"/swarm"); got != 1 {
+		t.Fatalf("metadata requests = %d, want 1; calls:\n%s", got, rec.all())
+	}
+	for _, path := range []string{"/tasks/" + taskID, "/api/tasks/" + taskID + "/swarm", "/tasks/" + taskID + "/thread", "/tasks/" + taskID + "/changes"} {
 		if !rec.sawQuery("GET " + path + "?project_id=p1") {
 			t.Errorf("request %s was not project scoped: %v", path, rec.urlsSnapshot())
 		}
@@ -679,15 +709,23 @@ func TestTasksShowCanonicalFullIDJSONAndReviewBypassBoard(t *testing.T) {
 		name string
 		line string
 		json bool
-		want string
+		want []string
 	}{
-		{name: "json", line: "/tasks show " + taskID, json: true, want: `"id":"` + taskID + `"`},
-		{name: "review", line: "/tasks show " + taskID + " review", want: "no review comments"},
+		{
+			name: "json", line: "/tasks show " + taskID, json: true,
+			want: []string{
+				`"id":"` + taskID + `"`, `"project_id":"p1"`, `"title":"Exact task"`,
+				`"prompt":"Implement exact lookup"`, `"category":"active"`, `"status":"running"`,
+				`"display_order":7`, `"badges":["Chained","Chain","Goal","Swarm","Claude Sonnet","Planner","Bug","High"]`,
+			},
+		},
+		{name: "review", line: "/tasks show " + taskID + " review", want: []string{"Exact task", "no review comments"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rec := dispatchModel(t, map[string]string{
-				"/tasks/" + taskID:              canonicalTaskDetailHTML(taskID, "p1"),
-				"/tasks/" + taskID + "/reviews": `<div></div>`,
+				"/tasks/" + taskID:                canonicalTaskDetailHTML(taskID, "p1"),
+				"/api/tasks/" + taskID + "/swarm": canonicalTaskMetadataJSON(taskID, "p1"),
+				"/tasks/" + taskID + "/reviews":   `<div></div>`,
 			})
 			previousJSON := jsonMode
 			jsonMode = tc.json
@@ -699,8 +737,11 @@ func TestTasksShowCanonicalFullIDJSONAndReviewBypassBoard(t *testing.T) {
 			if tc.name == "review" && !rec.sawQuery("GET /tasks/"+taskID+"/reviews?project_id=p1") {
 				t.Fatalf("review request was not project scoped: %v", rec.urlsSnapshot())
 			}
-			if !strings.Contains(stripANSI(transcript(m)), tc.want) {
-				t.Fatalf("output missing %q:\n%s", tc.want, transcript(m))
+			out := stripANSI(transcript(m))
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, transcript(m))
+				}
 			}
 		})
 	}
@@ -735,6 +776,42 @@ func TestTasksShowCanonicalFullIDPreservesAuthFailure(t *testing.T) {
 	}
 }
 
+func TestTasksShowCanonicalFullIDPreservesMetadataAuthFailure(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	var boardRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks":
+			boardRequests.Add(1)
+		case "/tasks/" + taskID:
+			_, _ = io.WriteString(w, canonicalTaskDetailHTML(taskID, "p1"))
+		case "/api/tasks/" + taskID + "/swarm":
+			w.Header().Set("Location", "/login?next=%2Fapi%2Ftasks")
+			w.WriteHeader(http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/tasks show "+taskID)
+	if !m.authRequired || m.connected {
+		t.Fatalf("auth state = required %t connected %t", m.authRequired, m.connected)
+	}
+	if boardRequests.Load() != 0 {
+		t.Fatal("metadata auth failure fell back to board")
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "requires sign-in") || strings.Contains(out, "Exact task") {
+		t.Fatalf("unexpected auth output:\n%s", out)
+	}
+}
+
 func TestTasksShowCanonicalFullIDLargeBoardPerformance(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
 	var board strings.Builder
@@ -757,6 +834,9 @@ func TestTasksShowCanonicalFullIDLargeBoardPerformance(t *testing.T) {
 			_, _ = io.WriteString(w, board.String())
 		case "/tasks/" + taskID:
 			_, _ = io.WriteString(w, canonicalTaskDetailHTML(taskID, "p1"))
+		case "/api/tasks/" + taskID + "/swarm":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, canonicalTaskMetadataJSON(taskID, "p1"))
 		case "/tasks/" + taskID + "/thread":
 			_, _ = io.WriteString(w, `<div>thread</div>`)
 		case "/tasks/" + taskID + "/changes":
@@ -818,6 +898,29 @@ func TestTasksShowCanonicalFullIDRejectsForeignMetadataWithoutFallback(t *testin
 		t.Fatalf("missing scoped not-found error:\n%s", out)
 	}
 	for _, leaked := range []string{"Foreign secret", "Board secret", "p2"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("output leaked %q:\n%s", leaked, out)
+		}
+	}
+}
+
+func TestTasksShowCanonicalFullIDRejectsForeignDirectMetadataWithoutFallback(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                          `<div>board secret</div>`,
+		"/tasks/" + taskID:                canonicalTaskDetailHTML(taskID, "p1"),
+		"/api/tasks/" + taskID + "/swarm": `{"id":"` + taskID + `","project_id":"p2","title":"Foreign metadata secret","display_order":99}`,
+	})
+	m = runLine(t, m, "/tasks show "+taskID)
+
+	if rec.count("GET", "/tasks") != 0 || rec.count("GET", "/tasks/"+taskID+"/thread") != 0 || rec.count("GET", "/tasks/"+taskID+"/changes") != 0 {
+		t.Fatalf("foreign metadata triggered fallback or lazy requests:\n%s", rec.all())
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "not found in selected project") {
+		t.Fatalf("missing scoped not-found error:\n%s", out)
+	}
+	for _, leaked := range []string{"Foreign metadata secret", "board secret", "p2", "Exact task"} {
 		if strings.Contains(out, leaked) {
 			t.Fatalf("output leaked %q:\n%s", leaked, out)
 		}
