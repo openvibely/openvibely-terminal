@@ -2222,7 +2222,10 @@ func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
 		return false
 	}
 	if taskEvent.ExecID == "" && taskEvent.PendingInputID == "" {
-		return true // legacy task events do not expose execution identity
+		// Once a task follow-up has been acknowledged, identity-less lifecycle and
+		// mirrored chat events cannot be attributed to that turn. Reject them before
+		// either the open-thread handler or generic /events display can mutate output.
+		return ev.Name != "task_status_changed" && ev.Name != "chat_new_message"
 	}
 	if taskEvent.PendingInputID != "" && taskEvent.PendingInputID != m.pendingMsgID {
 		return false
