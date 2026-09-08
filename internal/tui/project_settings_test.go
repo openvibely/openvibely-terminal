@@ -2,7 +2,9 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,6 +60,222 @@ func TestProjectsShowAndEditPreserveOmittedSettingsAndSameIDContext(t *testing.T
 	}
 	if m.selectedID != "p1" || m.selectedName != "Renamed" || m.threadID != "task-1" || m.input.Placeholder != "Reply to Task One..." {
 		t.Fatalf("same-ID context lost: selected=%s/%s thread=%s placeholder=%q", m.selectedID, m.selectedName, m.threadID, m.input.Placeholder)
+	}
+}
+
+func TestProjectsEditResolvesNamesContainingOptionLikeTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "quoted option name", line: `/projects edit "--name" --description changed`, want: "--name"},
+		{name: "option in name", line: `/projects edit "Alpha --description token" --name changed`, want: "Alpha --description token"},
+		{name: "complete option pair in name", line: `/projects edit Alpha --name Beta | --description changed`, want: "Alpha --name Beta"},
+		{name: "explicit separator", line: `/projects edit --name | --description changed`, want: "--name"},
+		{name: "literal separator value", line: `/projects edit target-id --description |`, want: "Target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const projectID = "target-id"
+			puts := 0
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/projects/"+projectID+"/edit":
+					fixture := strings.ReplaceAll(projectEditFixture, "/projects/p1", "/projects/"+projectID)
+					fixture = strings.Replace(fixture, "Alpha Project", tc.want, 1)
+					_, _ = io.WriteString(w, fixture)
+				case r.Method == http.MethodPut && r.URL.Path == "/projects/"+projectID:
+					puts++
+					w.Header().Set("HX-Refresh", "true")
+				default:
+					http.NotFound(w, r)
+				}
+			})
+			m.projects = []client.Project{{ID: "other-id", Name: "Alpha"}, {ID: projectID, Name: tc.want}}
+			m.projectsLoaded = true
+			m = runLine(t, m, tc.line)
+			if puts != 1 {
+				t.Fatalf("PUTs = %d, transcript=%q", puts, transcript(m))
+			}
+		})
+	}
+}
+
+func TestCLIProjectsEditResolvesNamesContainingOptionLikeTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "option name", args: []string{"projects", "edit", "--name", "--description", "changed"}, want: "--name"},
+		{name: "complete option pair in name", args: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}, want: "Alpha --name Beta"},
+		{name: "explicit separator", args: []string{"projects", "edit", "--name", "|", "--description", "changed"}, want: "--name"},
+		{name: "literal separator value", args: []string{"projects", "edit", "target-id", "--description", "|"}, want: "Target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const projectID = "target-id"
+			puts := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/projects":
+					_, _ = fmt.Fprintf(w, `{"projects":[{"id":"other-id","name":"Alpha"},{"id":"%s","name":%q}]}`, projectID, tc.want)
+				case r.Method == http.MethodGet && r.URL.Path == "/projects/"+projectID+"/edit":
+					fixture := strings.ReplaceAll(projectEditFixture, "/projects/p1", "/projects/"+projectID)
+					fixture = strings.Replace(fixture, "Alpha Project", tc.want, 1)
+					_, _ = io.WriteString(w, fixture)
+				case r.Method == http.MethodPut && r.URL.Path == "/projects/"+projectID:
+					puts++
+					w.Header().Set("HX-Refresh", "true")
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			if err := RunCLI(c, io.Discard, "", tc.args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			if puts != 1 {
+				t.Fatalf("PUTs = %d", puts)
+			}
+		})
+	}
+}
+
+func TestProjectsEditOptionBoundaryAmbiguityDoesNotRebind(t *testing.T) {
+	projects := []client.Project{{ID: "short-id", Name: "Alpha"}, {ID: "long-id", Name: "Alpha --name Beta"}}
+	for _, headless := range []bool{false, true} {
+		name := "interactive"
+		if headless {
+			name = "headless"
+		}
+		t.Run(name, func(t *testing.T) {
+			detailRequests, puts := 0, 0
+			handler := func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/projects" {
+					_, _ = io.WriteString(w, `{"projects":[{"id":"short-id","name":"Alpha"},{"id":"long-id","name":"Alpha --name Beta"}]}`)
+					return
+				}
+				if r.Method == http.MethodGet {
+					detailRequests++
+				}
+				if r.Method == http.MethodPut {
+					puts++
+				}
+				http.NotFound(w, r)
+			}
+			if headless {
+				srv := httptest.NewServer(http.HandlerFunc(handler))
+				defer srv.Close()
+				c, _ := client.New(srv.URL)
+				err := RunCLI(c, io.Discard, "", []string{"projects", "edit", "Alpha", "--name", "Beta", "--description", "changed"}, false, false)
+				if err == nil || !strings.Contains(err.Error(), "ambiguous across option boundaries") {
+					t.Fatalf("error = %v", err)
+				}
+			} else {
+				m := newModelFromHandler(t, handler)
+				m.projects, m.projectsLoaded = projects, true
+				m = runLine(t, m, `/projects edit Alpha --name Beta --description changed`)
+				if out := transcript(m); !strings.Contains(out, "ambiguous across option boundaries") {
+					t.Fatalf("transcript = %q", out)
+				}
+			}
+			if detailRequests != 0 || puts != 0 {
+				t.Fatalf("detail requests=%d PUTs=%d", detailRequests, puts)
+			}
+		})
+	}
+}
+
+func TestProjectsEditLongBoundaryAmbiguityOutranksShortProject(t *testing.T) {
+	requests := 0
+	m := newModelFromHandler(t, func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNotFound)
+	})
+	m.projects = []client.Project{
+		{ID: "short-id", Name: "Alpha"},
+		{ID: "long-1", Name: "Alpha --name Beta"},
+		{ID: "long-2", Name: "Alpha --name Beta"},
+	}
+	m.projectsLoaded = true
+	m = runLine(t, m, `/projects edit Alpha --name Beta --description changed`)
+	if out := transcript(m); !strings.Contains(out, `"Alpha --name Beta" is ambiguous`) {
+		t.Fatalf("stronger ambiguity lost: %q", out)
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
+func TestTerminalSafeProjectSettingsErrorPreservesAuthAndTransportTypes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	_, authErr := c.GetProjectSettings(context.Background(), "p1")
+	if safe := terminalSafeProjectSettingsError(authErr); !client.IsAuthRequired(safe) {
+		t.Fatalf("auth type lost: %v", safe)
+	}
+	if safe := terminalSafeProjectSettingsError(context.DeadlineExceeded); !client.IsTransportError(safe) {
+		t.Fatalf("transport type lost: %v", safe)
+	}
+}
+
+func TestProjectsShowErrorsAreTerminalSafeInteractiveAndHeadless(t *testing.T) {
+	unsafe := "denied\x1b[31m\x1b]0;owned\a\nretry\rnow\a"
+	for _, tc := range []struct {
+		name   string
+		want   string
+		server func(http.ResponseWriter)
+	}{
+		{name: "backend", want: "denied retry now", server: func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": unsafe})
+		}},
+		{name: "parser", want: "invalid local repository path setting", server: func(w http.ResponseWriter) {
+			fixture := strings.Replace(projectEditFixture, `data-local-repo-path-enabled="true"`, `data-local-repo-path-enabled="denied&#x1b;[31m&#x1b;]0;owned&#x7;&#xa;retry&#xd;now&#x7;"`, 1)
+			_, _ = io.WriteString(w, fixture)
+		}},
+	} {
+		t.Run(tc.name+" interactive", func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, _ *http.Request) { tc.server(w) })
+			m.projects = []client.Project{{ID: "p1", Name: "Alpha Project"}}
+			m.projectsLoaded = true
+			m = runLine(t, m, `/projects show p1`)
+			assertTerminalSafeProjectShowError(t, transcript(m), tc.want)
+		})
+		t.Run(tc.name+" headless", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/projects" {
+					_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"Alpha Project"}]}`)
+					return
+				}
+				tc.server(w)
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			err := RunCLI(c, io.Discard, "", []string{"projects", "show", "p1"}, false, false)
+			if err == nil {
+				t.Fatal("expected show failure")
+			}
+			assertTerminalSafeProjectShowError(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func assertTerminalSafeProjectShowError(t *testing.T, output, want string) {
+	t.Helper()
+	if !strings.Contains(output, want) {
+		t.Fatalf("safe error text %q missing: %q", want, output)
+	}
+	for _, unsafe := range []string{"\x1b", "\a", "\nretry", "\r"} {
+		if strings.Contains(output, unsafe) {
+			t.Fatalf("unsafe show error output: %q", output)
+		}
 	}
 }
 

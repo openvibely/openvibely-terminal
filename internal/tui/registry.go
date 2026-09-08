@@ -5098,6 +5098,7 @@ func projectsCommand() command {
 			"projects create <name> <path>                create and select a local-path project",
 			"projects create <name> | <path>              use | when the name or path contains spaces",
 			"projects edit <project> [options]            update only explicitly supplied settings",
+			"projects edit <project> | [options]          separate a project name containing option-like words",
 			"  --name <name> --description <text>",
 			"  --repository-source <local|github> --repository-path <path> --github-url <url>",
 			"  --default-agent <name|id|inherit> --max-workers <n|inherit>",
@@ -5146,7 +5147,7 @@ func projectsCommand() command {
 				return m, run("Project", cmdTimeout, func(ctx context.Context) (string, error) {
 					settings, err := c.GetProjectSettings(ctx, project.ID)
 					if err != nil {
-						return "", err
+						return "", terminalSafeProjectSettingsError(err)
 					}
 					if jsonMode {
 						return marshalJSON(settings)
@@ -5154,16 +5155,12 @@ func projectsCommand() command {
 					return renderProjectSettings(*settings), nil
 				})
 			case "edit":
-				ref, edits, err := parseProjectEditArgs(rest)
+				project, ref, edits, err := parseProjectEditArgs(m.projects, rest)
 				if err != nil {
 					return m, errCmd(err.Error())
 				}
 				if ref == "" {
 					return selectorOr(m, commandUsage("projects", "edit"), projectSelector(m.projects, "projects edit", " "))
-				}
-				project, err := matchProject(m.projects, ref)
-				if err != nil {
-					return m, errCmd(err.Error())
 				}
 				c := m.client
 				sessionGeneration := sessionGenerationOf(m)
@@ -5260,33 +5257,127 @@ func projectEditCompletions() []commandCompletion {
 	return completions
 }
 
-func parseProjectEditArgs(args []string) (string, projectEditValues, error) {
-	var edits projectEditValues
-	firstOption := len(args)
-	for i, arg := range args {
-		if strings.HasPrefix(arg, "--") {
-			firstOption = i
-			break
+type projectEditParseCandidate struct {
+	project  client.Project
+	ref      string
+	edits    projectEditValues
+	tier     int
+	boundary int
+}
+
+func parseProjectEditArgs(projects []client.Project, args []string) (client.Project, string, projectEditValues, error) {
+	var zeroProject client.Project
+	var zeroEdits projectEditValues
+	if len(args) == 0 {
+		return zeroProject, "", zeroEdits, nil
+	}
+
+	// A standalone | explicitly separates the complete project reference from
+	// trailing edit options. Accept -- as well for direct dispatch callers, though
+	// the executable's global flag parser consumes it before command dispatch.
+	for i := 1; i < len(args); i++ {
+		if args[i] != "|" && args[i] != "--" {
+			continue
+		}
+		ref := strings.TrimSpace(strings.Join(args[:i], " "))
+		project, matchErr := matchProject(projects, ref)
+		edits, parseErr := parseProjectEditOptions(args[i+1:])
+		if parseErr == nil {
+			if matchErr != nil {
+				return zeroProject, ref, zeroEdits, matchErr
+			}
+			return project, ref, edits, nil
+		}
+		if matchErr == nil {
+			return zeroProject, ref, zeroEdits, parseErr
 		}
 	}
-	ref := strings.TrimSpace(strings.Join(args[:firstOption], " "))
-	if firstOption == len(args) {
-		if ref == "" {
-			return "", edits, nil
+
+	var candidates []projectEditParseCandidate
+	var strongestMatchErr error
+	var strongestMatchErrTier = 100
+	var malformedErr error
+	malformedBoundary := -1
+	for boundary := 1; boundary < len(args); boundary++ {
+		if !strings.HasPrefix(args[boundary], "--") {
+			continue
 		}
-		return ref, edits, fmt.Errorf("%s", commandUsage("projects", "edit"))
+		ref := strings.TrimSpace(strings.Join(args[:boundary], " "))
+		project, matchErr := matchProject(projects, ref)
+		edits, parseErr := parseProjectEditOptions(args[boundary:])
+		if matchErr == nil && parseErr == nil {
+			candidates = append(candidates, projectEditParseCandidate{
+				project: project, ref: ref, edits: edits,
+				tier: projectReferenceTier(project, ref), boundary: boundary,
+			})
+			continue
+		}
+		if matchErr == nil && parseErr != nil && boundary > malformedBoundary {
+			malformedBoundary, malformedErr = boundary, parseErr
+		}
+		if parseErr == nil && matchErr != nil {
+			tier := projectReferenceErrorTier(projects, ref)
+			if strongestMatchErr == nil || tier < strongestMatchErrTier {
+				strongestMatchErrTier, strongestMatchErr = tier, matchErr
+			}
+		}
+	}
+
+	if len(candidates) > 0 {
+		bestTier := 100
+		for _, candidate := range candidates {
+			if candidate.tier < bestTier {
+				bestTier = candidate.tier
+			}
+		}
+		if strongestMatchErr != nil && strongestMatchErrTier <= bestTier {
+			return zeroProject, "", zeroEdits, strongestMatchErr
+		}
+		var best []projectEditParseCandidate
+		for _, candidate := range candidates {
+			if candidate.tier == bestTier {
+				best = append(best, candidate)
+			}
+		}
+		projectID := best[0].project.ID
+		for _, candidate := range best[1:] {
+			if candidate.project.ID != projectID {
+				return zeroProject, "", zeroEdits, fmt.Errorf("project edit reference is ambiguous across option boundaries; place | between the complete project name and edit options")
+			}
+		}
+		chosen := best[0]
+		for _, candidate := range best[1:] {
+			if candidate.boundary > chosen.boundary {
+				chosen = candidate
+			}
+		}
+		return chosen.project, chosen.ref, chosen.edits, nil
+	}
+	if malformedErr != nil {
+		return zeroProject, "", zeroEdits, malformedErr
+	}
+	if strongestMatchErr != nil {
+		return zeroProject, "", zeroEdits, strongestMatchErr
+	}
+	return zeroProject, strings.TrimSpace(strings.Join(args, " ")), zeroEdits, fmt.Errorf("%s", commandUsage("projects", "edit"))
+}
+
+func parseProjectEditOptions(args []string) (projectEditValues, error) {
+	var edits projectEditValues
+	if len(args) == 0 {
+		return edits, fmt.Errorf("%s", commandUsage("projects", "edit"))
 	}
 	seen := map[string]bool{}
-	for i := firstOption; i < len(args); i += 2 {
+	for i := 0; i < len(args); i += 2 {
 		option := args[i]
 		if !containsExactString(projectEditOptionNames(), option) {
-			return ref, edits, fmt.Errorf("unknown project edit option %q; %s", option, commandUsage("projects", "edit"))
+			return edits, fmt.Errorf("unknown project edit option %q; %s", option, commandUsage("projects", "edit"))
 		}
 		if seen[option] {
-			return ref, edits, fmt.Errorf("duplicate project edit option %s", option)
+			return edits, fmt.Errorf("duplicate project edit option %s", option)
 		}
 		if i+1 >= len(args) {
-			return ref, edits, fmt.Errorf("project edit option %s requires a value", option)
+			return edits, fmt.Errorf("project edit option %s requires a value", option)
 		}
 		seen[option] = true
 		value := args[i+1]
@@ -5307,7 +5398,50 @@ func parseProjectEditArgs(args []string) (string, projectEditValues, error) {
 			edits.MaxWorkers = &value
 		}
 	}
-	return ref, edits, nil
+	return edits, nil
+}
+
+func projectReferenceTier(project client.Project, ref string) int {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	switch {
+	case strings.EqualFold(project.ID, ref):
+		return 0
+	case strings.EqualFold(project.Name, ref):
+		return 1
+	case strings.HasPrefix(strings.ToLower(project.ID), ref) || strings.HasPrefix(strings.ToLower(project.Name), ref):
+		return 2
+	default:
+		return 3
+	}
+}
+
+func projectReferenceErrorTier(projects []client.Project, ref string) int {
+	lower := strings.ToLower(strings.TrimSpace(ref))
+	best := 100
+	for _, project := range projects {
+		tier := 100
+		switch {
+		case strings.EqualFold(project.ID, ref):
+			tier = 0
+		case strings.EqualFold(project.Name, ref):
+			tier = 1
+		case strings.HasPrefix(strings.ToLower(project.ID), lower) || strings.HasPrefix(strings.ToLower(project.Name), lower):
+			tier = 2
+		case strings.Contains(strings.ToLower(project.Name), lower):
+			tier = 3
+		}
+		if tier < best {
+			best = tier
+		}
+	}
+	return best
+}
+
+func terminalSafeProjectSettingsError(err error) error {
+	if err == nil || client.IsAuthRequired(err) || client.IsTransportError(err) {
+		return err
+	}
+	return errors.New(sanitizeAutomationDetailText(err.Error()))
 }
 
 func containsExactString(values []string, value string) bool {

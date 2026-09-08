@@ -230,6 +230,7 @@ browser:
 
 openvibely-tui --json projects show "Renamed Project"
 openvibely-tui projects edit "Renamed Project" --max-workers inherit
+openvibely-tui projects edit "Release --name Candidate" '|' --description "Local checkout"
 openvibely-tui --force projects edit "Renamed Project" \
   --repository-source github --github-url https://github.com/acme/repo
 ```
@@ -242,7 +243,10 @@ fails, JSON instead returns `{"saved":true,"project_id":"…","refresh_error":"s
 Edit options omitted from the command retain
 the authoritative existing values. `--repository-path` is valid only when the
 effective source is `local`, and `--github-url` only when it is `github`; include
-`--repository-source` in the same edit when switching modes.
+`--repository-source` in the same edit when switching modes. If a project name
+contains complete option-like words or pairs, put a standalone `|` between the
+complete project reference and its edit options, as shown above (quote or escape
+it in a shell); equally strong boundaries fail as ambiguous rather than shortening or rebinding the target.
 `--default-agent inherit` uses the global
 default and `--max-workers inherit` (or `0`) removes the project limit. Local
 paths may be Unix, Windows drive, UNC, or space-containing paths; quote one shell

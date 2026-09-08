@@ -430,6 +430,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		"projects show <project>",
 		"projects create <name> <path>",
 		"projects edit <project> [options]",
+		"projects edit <project> | [options]",
 		"--repository-source <local|github>",
 		"--default-agent <name|id|inherit>",
 		"repository replacement requires confirmation",

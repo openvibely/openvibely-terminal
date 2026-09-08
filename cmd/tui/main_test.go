@@ -33,6 +33,7 @@ func TestParseInterspersedFlags(t *testing.T) {
 		{name: "single dash json after operands", args: []string{"tasks", "show", "Task with spaces", "-json"}, wantJSON: true, wantArgs: []string{"tasks", "show", "Task with spaces"}},
 		{name: "post-command flag belongs to command", args: []string{"chat", "--command-local", "quoted argument"}, wantArgs: []string{"chat", "--command-local", "quoted argument"}},
 		{name: "option boundary", args: []string{"chat", "--", "--json", "literal"}, wantArgs: []string{"chat", "--json", "literal"}},
+		{name: "project edit reference separator", args: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}},
 		{name: "unknown global", args: []string{"--unknown", "chat", "hello"}, wantErr: "flag provided but not defined"},
 		{name: "malformed global", args: []string{"--=value", "chat", "hello"}, wantErr: "bad flag syntax"},
 	}
