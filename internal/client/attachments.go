@@ -97,6 +97,11 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 		return nil, fmt.Errorf("at least one attachment file is required")
 	}
 
+	body, err := newAttachmentMultipartBody(filePaths)
+	if err != nil {
+		return nil, err
+	}
+
 	requestedNames := make([]string, 0, len(filePaths))
 	for _, path := range filePaths {
 		requestedNames = append(requestedNames, filepath.Base(strings.TrimSpace(path)))
@@ -104,13 +109,10 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 
 	before, err := c.ListTaskAttachments(ctx, taskID, projectID)
 	if err != nil {
+		_ = body.Close()
 		return nil, fmt.Errorf("checking existing task attachments: %w", err)
 	}
 
-	body, err := newAttachmentMultipartBody(filePaths)
-	if err != nil {
-		return nil, err
-	}
 	closeDone := make(chan struct{})
 	stopClose := context.AfterFunc(ctx, func() {
 		_ = body.closeWithError(ctx.Err())
@@ -217,16 +219,35 @@ type attachmentFile interface {
 }
 
 var openAttachmentFile = func(path string) (attachmentFile, error) {
-	return os.Open(path)
+	return openAttachmentPath(path)
 }
 
-var statAttachmentFile = os.Stat
+var openAttachmentValidationFile = func(path string) (attachmentFile, error) {
+	return openAttachmentPath(path)
+}
+
+var statAttachmentFile = validateAttachmentPath
+
+func validateAttachmentPath(path string) (os.FileInfo, error) {
+	file, err := openAttachmentValidationFile(path)
+	if err != nil {
+		return nil, err
+	}
+	info, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return nil, fmt.Errorf("stat attachment %q: %w", path, statErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close attachment %q: %w", path, closeErr)
+	}
+	return info, nil
+}
 
 type attachmentMultipartBody struct {
 	paths         []string
 	fileSizes     []int64
 	fileInfos     []os.FileInfo
-	preflightErrs []error
 	headers       [][]byte
 	trailer       []byte
 	contentType   string
@@ -248,11 +269,10 @@ type attachmentMultipartBody struct {
 
 func newAttachmentMultipartBody(paths []string) (*attachmentMultipartBody, error) {
 	body := &attachmentMultipartBody{
-		paths:         make([]string, len(paths)),
-		fileSizes:     make([]int64, len(paths)),
-		fileInfos:     make([]os.FileInfo, len(paths)),
-		preflightErrs: make([]error, len(paths)),
-		closeDone:     make(chan struct{}),
+		paths:     make([]string, len(paths)),
+		fileSizes: make([]int64, len(paths)),
+		fileInfos: make([]os.FileInfo, len(paths)),
+		closeDone: make(chan struct{}),
 	}
 	for i, rawPath := range paths {
 		path := strings.TrimSpace(rawPath)
@@ -268,12 +288,10 @@ func newAttachmentMultipartBody(paths []string) (*attachmentMultipartBody, error
 				openPathErr.Op = "open"
 				err = &openPathErr
 			}
-			body.preflightErrs[i] = fmt.Errorf("open attachment %q: %w", path, err)
-			continue
+			return nil, fmt.Errorf("open attachment %q: %w", path, err)
 		}
-		if info.IsDir() {
-			body.preflightErrs[i] = fmt.Errorf("attachment %q is a directory", path)
-			continue
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("attachment %q is not a regular file", path)
 		}
 		body.fileSizes[i] = info.Size()
 		body.fileInfos[i] = info
@@ -342,11 +360,6 @@ func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
 
 		path := b.paths[b.index]
 		index := b.index
-		if err := b.preflightErrs[index]; err != nil {
-			b.recordLocalErrorLocked(err)
-			b.mu.Unlock()
-			return 0, err
-		}
 		file := b.current
 		if file == nil {
 			openingDone := make(chan struct{})
@@ -362,8 +375,8 @@ func (b *attachmentMultipartBody) Read(p []byte) (int, error) {
 				switch {
 				case statErr != nil:
 					preparationErr = fmt.Errorf("stat attachment %q: %w", path, statErr)
-				case openedInfo.IsDir():
-					preparationErr = fmt.Errorf("attachment %q is a directory", path)
+				case !openedInfo.Mode().IsRegular():
+					preparationErr = fmt.Errorf("attachment %q is not a regular file", path)
 				case !samePreparedAttachment(b.fileInfos[index], openedInfo):
 					preparationErr = fmt.Errorf("attachment %q changed after upload preparation", path)
 				}

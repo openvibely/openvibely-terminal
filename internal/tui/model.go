@@ -321,7 +321,11 @@ func (m *Model) advanceConnectionGeneration() int {
 func (m Model) checkConnectionWithGeneration(generation int) tea.Cmd {
 	c := m.client
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		baseCtx := m.cliContext
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 		defer cancel()
 
 		var capacity *client.GlobalCapacity

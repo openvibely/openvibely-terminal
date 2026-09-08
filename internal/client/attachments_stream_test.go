@@ -39,7 +39,10 @@ func (f *attachmentTestFile) Stat() (os.FileInfo, error) {
 	return attachmentTestFileInfo{size: f.size}, nil
 }
 
-type attachmentTestFileInfo struct{ size int64 }
+type attachmentTestFileInfo struct {
+	size int64
+	mode os.FileMode
+}
 
 func stubAttachmentStat(t testing.TB, size int64) {
 	t.Helper()
@@ -52,10 +55,39 @@ func stubAttachmentStat(t testing.TB, size int64) {
 
 func (i attachmentTestFileInfo) Name() string       { return "fixture.bin" }
 func (i attachmentTestFileInfo) Size() int64        { return i.size }
-func (i attachmentTestFileInfo) Mode() os.FileMode  { return 0o600 }
+func (i attachmentTestFileInfo) Mode() os.FileMode  { return i.mode | 0o600 }
 func (i attachmentTestFileInfo) ModTime() time.Time { return time.Time{} }
 func (i attachmentTestFileInfo) IsDir() bool        { return false }
 func (i attachmentTestFileInfo) Sys() any           { return nil }
+
+func TestAttachmentValidationClosesRejectedDescriptor(t *testing.T) {
+	originalOpen := openAttachmentValidationFile
+	defer func() { openAttachmentValidationFile = originalOpen }()
+	file := &attachmentTestFile{
+		read: func([]byte) (int, error) { return 0, io.EOF },
+	}
+	openAttachmentValidationFile = func(string) (attachmentFile, error) {
+		return &attachmentFileInfoOverride{
+			attachmentFile: file,
+			info:           attachmentTestFileInfo{mode: os.ModeNamedPipe},
+		}, nil
+	}
+
+	_, err := newAttachmentMultipartBody([]string{"fixture.fifo"})
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("body preparation error = %v, want not-regular error", err)
+	}
+	if file.closeCall.Load() != 1 {
+		t.Fatalf("descriptor close calls = %d, want 1", file.closeCall.Load())
+	}
+}
+
+type attachmentFileInfoOverride struct {
+	attachmentFile
+	info os.FileInfo
+}
+
+func (f *attachmentFileInfoOverride) Stat() (os.FileInfo, error) { return f.info, nil }
 
 func attachmentHTMLResponse(status int) *http.Response {
 	return &http.Response{
@@ -655,53 +687,34 @@ func TestAddTaskAttachmentsWaitsForAsynchronousTransportBodyClose(t *testing.T) 
 
 func TestAttachmentMultipartBodyMissingFilePreservesOpenError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.bin")
-	body, err := newAttachmentMultipartBody([]string{path})
-	if err != nil {
-		t.Fatalf("newAttachmentMultipartBody returned early error: %v", err)
-	}
-	_, err = io.Copy(io.Discard, body)
+	_, err := newAttachmentMultipartBody([]string{path})
 	want := fmt.Sprintf(`open attachment %q: open %s:`, path, path)
 	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("body error = %v, want %q", err, want)
+		t.Fatalf("body preparation error = %v, want %q", err, want)
 	}
 }
 
-func TestAttachmentMultipartBodyLaterPathDoesNotPreemptEarlierLocalError(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		file *attachmentTestFile
-		open error
-		want string
-	}{
-		{name: "open", open: errors.New("first open sentinel"), want: "first open sentinel"},
-		{name: "read", file: &attachmentTestFile{size: 1, read: func([]byte) (int, error) { return 0, errors.New("first read sentinel") }}, want: "first read sentinel"},
-		{name: "close", file: &attachmentTestFile{size: 1, read: func(p []byte) (int, error) { p[0] = 'x'; return 1, io.EOF }, close: func() error { return errors.New("first close sentinel") }}, want: "first close sentinel"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			firstPath := filepath.Join(dir, "first.bin")
-			if err := os.WriteFile(firstPath, []byte("x"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			missingPath := filepath.Join(dir, "missing.bin")
-			originalOpen := openAttachmentFile
-			defer func() { openAttachmentFile = originalOpen }()
-			openAttachmentFile = func(path string) (attachmentFile, error) {
-				if path == firstPath {
-					return tc.file, tc.open
-				}
-				return os.Open(path)
-			}
+func TestAttachmentMultipartBodyValidatesAllPathsBeforeStreaming(t *testing.T) {
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.bin")
+	if err := os.WriteFile(firstPath, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingPath := filepath.Join(dir, "missing.bin")
+	originalOpen := openAttachmentFile
+	defer func() { openAttachmentFile = originalOpen }()
+	var streamOpens atomic.Int32
+	openAttachmentFile = func(path string) (attachmentFile, error) {
+		streamOpens.Add(1)
+		return os.Open(path)
+	}
 
-			body, err := newAttachmentMultipartBody([]string{firstPath, missingPath})
-			if err != nil {
-				t.Fatalf("later path preempted body processing: %v", err)
-			}
-			_, err = io.Copy(io.Discard, body)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("body error = %v, want earlier %s error %q", err, tc.name, tc.want)
-			}
-		})
+	_, err := newAttachmentMultipartBody([]string{firstPath, missingPath})
+	if err == nil || !strings.Contains(err.Error(), missingPath) {
+		t.Fatalf("body preparation error = %v, want missing path", err)
+	}
+	if streamOpens.Load() != 0 {
+		t.Fatalf("stream opens = %d, want zero before all paths validate", streamOpens.Load())
 	}
 }
 

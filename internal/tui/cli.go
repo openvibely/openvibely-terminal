@@ -114,12 +114,26 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 	}
 
 	var statusProjectLoadErr error
+	var statusCheckResult <-chan tea.Msg
 	// Only commands that talk to the backend need a project or connection
 	// state; /help and friends should stay instant and work offline.
 	if cmdDef.needsProjectLoad(args) {
 		var projectLoad tea.Cmd
 		m, projectLoad = m.beginProjectLoad(false, projectRef)
-		m = drain(m, projectLoad)
+		if cmdDef.needsStatus() {
+			// Project discovery and the global capacity/auth checks are independent.
+			// Execute both immediately, but apply their messages below in the same
+			// projects-then-connection order used by the serialized path.
+			projectResult := make(chan tea.Msg, 1)
+			statusResult := make(chan tea.Msg, 1)
+			statusCheck := m.checkConnection()
+			go func() { projectResult <- projectLoad() }()
+			go func() { statusResult <- statusCheck() }()
+			statusCheckResult = statusResult
+			m = drain(m, func() tea.Msg { return <-projectResult })
+		} else {
+			m = drain(m, projectLoad)
+		}
 		if ctx.Err() != nil {
 			return cliContextResult(ctx)
 		}
@@ -162,7 +176,11 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 	}
 
 	if cmdDef.needsStatus() {
-		m = drain(m, m.checkConnection())
+		if statusCheckResult != nil {
+			m = drain(m, func() tea.Msg { return <-statusCheckResult })
+		} else {
+			m = drain(m, m.checkConnection())
+		}
 		m = drain(m, m.fetchStatusCounts())
 	}
 
