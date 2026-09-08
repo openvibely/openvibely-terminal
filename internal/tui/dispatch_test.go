@@ -5229,6 +5229,93 @@ func TestAutomationInteractiveEditCancellationAndProjectSwitchNeverMutate(t *tes
 	}
 }
 
+func TestAutomationInteractiveEditCancelsInFlightSaveOnTeardown(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		teardown func(Model) Model
+	}{
+		{name: "escape", teardown: func(m Model) Model {
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			return next.(Model)
+		}},
+		{name: "ctrl+c", teardown: func(m Model) Model {
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+			return next.(Model)
+		}},
+		{name: "project switch", teardown: func(m Model) Model {
+			m.setActiveProject(client.Project{ID: "p2", Name: "other"})
+			return m
+		}},
+		{name: "authentication invalidation", teardown: func(m Model) Model {
+			m.markAuthRequired()
+			return m
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const current = "schema_version: 1\nname: Original\n"
+			builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+			started := make(chan struct{})
+			cancelled := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseRequest := func() { releaseOnce.Do(func() { close(release) }) }
+			defer releaseRequest()
+			var posts atomic.Int32
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/automations":
+					_, _ = fmt.Fprint(w, `<div>`+automationCardHTML("au-1", "Original", "active")+`</div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/automations/au-1/builder":
+					_, _ = fmt.Fprint(w, builder)
+				case r.Method == http.MethodPost && r.URL.Path == "/automations/au-1/builder":
+					posts.Add(1)
+					close(started)
+					select {
+					case <-r.Context().Done():
+						close(cancelled)
+					case <-release:
+					}
+				}
+			})
+			m = runLine(t, m, "/automations edit Original")
+			m.automationEditor.SetValue(current + "description: changed\n")
+			next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+			m = next.(Model)
+			if cmd == nil || m.automationEditCancel == nil {
+				t.Fatal("Ctrl+S did not start cancellable save command")
+			}
+			result := make(chan tea.Msg, 1)
+			go func() { result <- cmd() }()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("preview request did not start")
+			}
+			m = tc.teardown(m)
+			select {
+			case <-result:
+			case <-time.After(time.Second):
+				releaseRequest()
+				t.Fatal("save command did not return after cancellation")
+			}
+			select {
+			case <-cancelled:
+			default:
+				// net/http does not guarantee that the server observes a disconnected
+				// client before the handler returns. The command return above proves
+				// the model-owned request context was canceled; release the fixture.
+				releaseRequest()
+			}
+			if posts.Load() != 1 {
+				t.Fatalf("POSTs = %d, want only the canceled preview", posts.Load())
+			}
+			if m.automationEditActive || m.automationEditSaving {
+				t.Fatalf("editor state survived teardown: active=%v saving=%v", m.automationEditActive, m.automationEditSaving)
+			}
+		})
+	}
+}
+
 func TestAutomationInteractiveEditIgnoresStaleLoadMessages(t *testing.T) {
 	m, _ := dispatchModel(t, map[string]string{})
 	m.automationEditRequestID = 2

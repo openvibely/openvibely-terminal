@@ -739,12 +739,13 @@ func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (Au
 
 func automationNodeConfigSummary(section *html.Node) string {
 	const maxFields = 6
-	parts := make([]string, 0, maxFields)
+	type configField struct {
+		label string
+		value string
+	}
+	fields := make(map[string]configField)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
-		if len(parts) >= maxFields {
-			return
-		}
 		if n.Type == html.ElementNode && n.Data == "dt" {
 			label := strings.TrimSpace(NodeText(n))
 			lower := strings.ToLower(label)
@@ -764,14 +765,16 @@ func automationNodeConfigSummary(section *html.Node) string {
 			switch lower {
 			case "prompt", "goal", "instructions", "task prompt", "task goal (optional)", "what needs review", "issue instructions", "pull request instructions":
 				value = "configured"
-			case "model", "agent ref", "primary agent", "category", "priority", "run at", "time", "repeat type", "repeat", "repeat interval", "interval", "clear context on start", "notification type", "base", "base branch", "draft", "open as draft pr", "labels", "display name":
+			case "model", "agent ref", "primary agent", "category", "priority", "run at", "time", "repeat type", "repeat", "repeat interval", "interval", "enabled", "clear context on start", "notification type", "base", "base branch", "draft", "open as draft pr", "labels", "approval method", "display name":
 				if len([]rune(value)) > 40 {
 					value = string([]rune(value)[:39]) + "…"
 				}
 			default:
 				return
 			}
-			parts = append(parts, label+"="+value)
+			if _, exists := fields[lower]; !exists {
+				fields[lower] = configField{label: label, value: value}
+			}
 			return
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
@@ -779,6 +782,28 @@ func automationNodeConfigSummary(section *html.Node) string {
 		}
 	}
 	walk(section)
+
+	// Prefer fields that explain when a trigger runs and what an action does.
+	// The web template emits keys alphabetically, so retaining the first fields
+	// would otherwise exhaust the bound on generic task settings before schedule
+	// timing appears.
+	priority := []string{
+		"run at", "time", "repeat type", "repeat", "repeat interval", "interval", "enabled",
+		"notification type", "base", "base branch", "draft", "open as draft pr", "labels", "approval method",
+		"agent ref", "primary agent", "model", "category", "priority", "clear context on start",
+		"prompt", "task prompt", "goal", "task goal (optional)", "instructions", "what needs review", "issue instructions", "pull request instructions", "display name",
+	}
+	parts := make([]string, 0, maxFields)
+	for _, key := range priority {
+		field, ok := fields[key]
+		if !ok {
+			continue
+		}
+		parts = append(parts, field.label+"="+field.value)
+		if len(parts) == maxFields {
+			break
+		}
+	}
 	return strings.Join(parts, "; ")
 }
 

@@ -84,6 +84,7 @@ type Model struct {
 	automationEditor           textarea.Model
 	automationEditActive       bool
 	automationEditSaving       bool
+	automationEditCancel       context.CancelFunc
 	automationEditProjectID    string
 	automationEditID           string
 	automationEditName         string
@@ -602,6 +603,10 @@ func (m *Model) advanceProjectGeneration() uint64 {
 }
 
 func (m *Model) clearAutomationEdit() {
+	if m.automationEditCancel != nil {
+		m.automationEditCancel()
+		m.automationEditCancel = nil
+	}
 	m.automationEditActive = false
 	m.automationEditSaving = false
 	m.automationEditProjectID = ""
@@ -611,6 +616,7 @@ func (m *Model) clearAutomationEdit() {
 	m.automationEditor.SetValue("")
 	m.automationEditor.Blur()
 	m.input.Focus()
+	m.busy = false
 }
 
 // setActiveProject installs the selected project and invalidates all work tied
@@ -1250,6 +1256,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		m.automationEditSaving = false
+		if m.automationEditCancel != nil {
+			m.automationEditCancel()
+			m.automationEditCancel = nil
+		}
 		if msg.err != nil {
 			m.automationEditor.Focus()
 			m.handleCompletedRequestError(msg.err)
@@ -2071,11 +2081,12 @@ func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		projectID, automationID, name := m.automationEditProjectID, m.automationEditID, m.automationEditName
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		m.automationEditCancel = cancel
 		m.automationEditSaving = true
 		m.busy = true
 		m.automationEditor.Blur()
 		cmd := func() tea.Msg {
-			ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 			defer cancel()
 			err := m.client.UpdateAutomationDefinition(ctx, projectID, automationID, definition)
 			return automationEditSavedMsg{projectID: projectID, automationID: automationID, name: name, err: err}
