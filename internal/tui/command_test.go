@@ -923,6 +923,9 @@ func TestChannelsCompletionDocumentsManagementOptions(t *testing.T) {
 		{[]string{"edit", "email"}, "--provider"},
 		{[]string{"add", "github", "--auth-mode"}, "pat"},
 		{[]string{"edit", "slack", "--bot-token-mode"}, "manual"},
+		{[]string{"add", "email", "--provider"}, "yahoo"},
+		{[]string{"edit", "email", "--provider"}, "icloud"},
+		{[]string{"add", "email"}, "--skip-attachments"},
 	} {
 		values := registryCompletionValues("channels", tc.after...)
 		if !slices.Contains(values, tc.want) {
@@ -950,7 +953,11 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		"/channels edit <channel> <options>",
 		"/channels test <channel>",
 		"/channels remove <channel>",
-		"/channels disconnect <channel>",
+		"/channels disconnect <github|slack>",
+		"--skip-attachments",
+		"--mark-existing-seen",
+		"gmail, outlook, yahoo, fastmail, icloud, custom",
+		"manual mode requires --bot-token",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("channels help missing %q:\n%s", want, help)

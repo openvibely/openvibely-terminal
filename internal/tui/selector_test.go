@@ -172,8 +172,13 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"automations_resume", "/automations resume", "automations resume"},
 		{"automations_delete", "/automations delete", "automations delete"},
 		// channels
+		{"channels_show", "/channels show", "channels show"},
+		{"channels_add", "/channels add", "channels add"},
+		{"channels_connect", "/channels connect", "channels connect"},
+		{"channels_edit", "/channels edit", "channels edit"},
 		{"channels_test", "/channels test", "channels test"},
 		{"channels_remove", "/channels remove", "channels remove"},
+		{"channels_disconnect", "/channels disconnect", "channels disconnect"},
 		// inbound webhooks
 		{"webhooks_show", "/webhooks show", "webhooks show"},
 		{"webhooks_edit", "/webhooks edit", "webhooks edit"},

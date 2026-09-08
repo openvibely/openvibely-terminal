@@ -305,12 +305,15 @@ openvibely-tui -project demo channels test telegram
 openvibely-tui -project demo --force channels remove discord
 ```
 
-Use `help channels` for integration-specific options. GitHub does not expose a
-test route. GitHub and Slack `connect` print a project-scoped local backend URL
-to open in a browser for OAuth, without exposing OAuth state. Interactive
-removal requires typing `yes`; CLI removal requires `--force` (or `-f`).
-`disconnect` is an alias for `remove`, and Slack removal retains the backend's
-special `/channels/slack/disconnect` mapping.
+Use `help channels` for integration-specific options. Email providers are
+`gmail`, `outlook`, `yahoo`, `fastmail`, `icloud`, and `custom`; custom Email
+requires IMAP and SMTP hosts. GitHub does not expose a test route. GitHub and
+Slack `connect` print a project-scoped local backend URL to open in a browser
+for OAuth, without exposing OAuth state. Their `disconnect` action ends the
+OAuth connection without deleting configuration. Interactive removal requires
+typing `yes`; CLI removal requires `--force` (or `-f`). Slack removal retains
+the required safe mapping to `/channels/slack/disconnect`; other remove actions
+delete that integration's stored configuration.
 
 ### Automations
 
@@ -489,8 +492,8 @@ $ openvibely-tui help channels
   channels connect <github|slack>            show the browser OAuth URL
   channels edit <channel> <options>          update channel settings
   channels test <channel>                    test Slack, Telegram, Discord, or Email
-  channels remove <channel>                  disconnect/remove a channel (confirmation required)
-  channels disconnect <channel>              alias for remove
+  channels remove <channel>                  remove configuration; Slack disconnects safely (confirmation required)
+  channels disconnect <github|slack>         disconnect OAuth without removing configuration
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,

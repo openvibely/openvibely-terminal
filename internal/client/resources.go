@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -1573,24 +1574,70 @@ func (c *Client) DeleteWebhook(ctx context.Context, projectID, id string) error 
 	return c.doForm(ctx, http.MethodDelete, "/channels/webhooks/"+url.PathEscape(id)+query("project_id", projectID), nil)
 }
 
-// ChannelAction runs test or remove on a channel integration.
-// Supported channel types: github, telegram, slack, discord, email.
-// Supported actions: test (except GitHub), remove.
-// For Slack, the backend remove route is /channels/slack/disconnect; all other
-// channel types use /channels/<type>/remove.
+func (c *Client) doSafeChannelTest(ctx context.Context, path string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("HX-Request", "true")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer drainAndClose(resp.Body)
+	if isAuthResponse(resp) {
+		return newAuthRequiredError(http.MethodPost, path, resp)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return errors.New("channel test failed")
+	}
+	root, err := html.Parse(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return errors.New("channel test failed")
+	}
+	feedback := ""
+	for _, node := range findAll(root, func(n *html.Node) bool { return n.Type == html.ElementNode }) {
+		for _, class := range strings.Fields(attr(node, "class")) {
+			if class == "text-error" {
+				return errors.New("channel test failed")
+			}
+			if class == "text-success" {
+				feedback = class
+			}
+		}
+	}
+	if feedback == "" {
+		return errors.New("channel test failed")
+	}
+	return nil
+}
+
+// ChannelAction runs a supported operational action on a channel integration.
+// Slack remove intentionally maps to disconnect to preserve the established safe
+// terminal behavior. Explicit disconnect is supported only by GitHub and Slack.
 func (c *Client) ChannelAction(ctx context.Context, channelType, action, projectID string) error {
 	channelType = strings.ToLower(strings.TrimSpace(channelType))
 	if _, ok := knownChannel(channelType); !ok {
 		return fmt.Errorf("unsupported channel type %q", channelType)
 	}
-	if action != "test" && action != "remove" {
+	if action == "test" {
+		if channelType == "github" {
+			return errors.New("GitHub does not expose a connection test")
+		}
+		return c.doSafeChannelTest(ctx, "/channels/"+url.PathEscape(channelType)+"/test"+query("project_id", projectID))
+	}
+	if action == "disconnect" {
+		if channelType != "github" && channelType != "slack" {
+			return fmt.Errorf("%s does not support disconnect", channelType)
+		}
+		return c.doSafeChannelForm(ctx, "/channels/"+url.PathEscape(channelType)+"/disconnect"+query("project_id", projectID), nil)
+	}
+	if action != "remove" {
 		return fmt.Errorf("unsupported channel action %q", action)
 	}
-	if action == "test" && channelType == "github" {
-		return errors.New("GitHub does not expose a connection test")
-	}
-	verb := action
-	if action == "remove" && channelType == "slack" {
+	verb := "remove"
+	if channelType == "slack" {
 		verb = "disconnect"
 	}
 	return c.doSafeChannelForm(ctx,

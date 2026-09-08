@@ -126,6 +126,11 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 			_, _ = w.Write([]byte(body))
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/channels/") && strings.HasSuffix(r.URL.Path, "/test") {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div class="text-success"><span>Connection successful!</span></div>`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	}))
@@ -6130,6 +6135,47 @@ func TestRefreshFailureAfterMutationIsSwallowedAcrossCommands(t *testing.T) {
 
 // --- channels ---
 
+func TestChannelAddConditionalValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "github pat", args: []string{"add", "github", "--auth-mode", "pat"}, want: "requires --pat"},
+		{name: "github app", args: []string{"add", "github", "--auth-mode", "app", "--app-id", "1"}, want: "requires --app-id, --app-slug, and --private-key"},
+		{name: "slack manual", args: []string{"add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"}, want: "requires --bot-token"},
+		{name: "unknown email provider", args: []string{"add", "email", "--provider", "other", "--address", "a@example.com", "--password", "secret"}, want: "provider must be one of"},
+		{name: "custom email hosts", args: []string{"add", "email", "--provider", "custom", "--address", "a@example.com", "--password", "secret"}, want: "custom Email requires --imap-host and --smtp-host"},
+	}
+	oldCLI := cliMode
+	cliMode = true
+	defer func() { cliMode = oldCLI }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateChannelsArgs(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestChannelEmailProvidersAreAccepted(t *testing.T) {
+	oldCLI := cliMode
+	cliMode = true
+	defer func() { cliMode = oldCLI }()
+	for _, provider := range []string{"gmail", "outlook", "yahoo", "fastmail", "icloud"} {
+		args := []string{"add", "email", "--provider", provider, "--address", "a@example.com", "--password", "secret"}
+		if err := validateChannelsArgs(args); err != nil {
+			t.Errorf("provider %s rejected: %v", provider, err)
+		}
+	}
+	custom := []string{"add", "email", "--provider", "custom", "--address", "a@example.com", "--password", "secret", "--imap-host", "imap.example.com", "--smtp-host", "smtp.example.com"}
+	if err := validateChannelsArgs(custom); err != nil {
+		t.Errorf("custom provider rejected: %v", err)
+	}
+}
+
 func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 	cases := []struct {
 		line      string
@@ -6234,6 +6280,82 @@ func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
 
 // TestChannelsCommandListsPage verifies the no-arg /channels command fetches
 // and renders the integrations page unchanged from the read-only behavior.
+func TestChannelsInteractiveSetupEnforcesConditionalRequirements(t *testing.T) {
+	pressEnter := func(m Model) Model {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		return next.(Model)
+	}
+
+	t.Run("github pat", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels add github")
+		m = runLine(t, m, "pat")
+		m = pressEnter(m)
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "github_pat" || !strings.Contains(transcript(m), "Personal access token (blank for app mode) is required") {
+			t.Fatalf("GitHub PAT requirement not enforced: %s", transcript(m))
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("invalid wizard mutated backend: %s", calls)
+		}
+	})
+
+	t.Run("github app", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels add github")
+		m = runLine(t, m, "app")
+		m = pressEnter(m) // PAT is optional in app mode.
+		m = pressEnter(m) // App ID is required.
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "github_app_id" || !strings.Contains(transcript(m), "GitHub App ID is required") {
+			t.Fatalf("GitHub App requirement not enforced: %s", transcript(m))
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("invalid wizard mutated backend: %s", calls)
+		}
+	})
+
+	t.Run("slack manual", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels add slack")
+		for _, value := range []string{"client", "secret", "app-token", "manual"} {
+			m = runLine(t, m, value)
+		}
+		m = pressEnter(m)
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "slack_bot_token" || !strings.Contains(transcript(m), "Manual bot token") {
+			t.Fatalf("Slack manual-token requirement not enforced: %s", transcript(m))
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("invalid wizard mutated backend: %s", calls)
+		}
+	})
+
+	t.Run("email custom", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels add email")
+		for _, value := range []string{"custom", "bot@example.com", "password"} {
+			m = runLine(t, m, value)
+		}
+		m = pressEnter(m)
+		if m.channelWizard == nil || m.channelWizard.steps[m.channelWizard.index].field != "email_imap_host" || !strings.Contains(transcript(m), "IMAP host (custom provider) is required") {
+			t.Fatalf("custom Email host requirement not enforced: %s", transcript(m))
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("invalid wizard mutated backend: %s", calls)
+		}
+	})
+
+	t.Run("email provider", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels add email")
+		m = runLine(t, m, "unknown")
+		if m.channelWizard == nil || m.channelWizard.index != 0 || !strings.Contains(transcript(m), "provider must be one of") {
+			t.Fatalf("Email provider requirement not enforced: %s", transcript(m))
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("invalid wizard mutated backend: %s", calls)
+		}
+	})
+}
+
 func TestChannelsInteractiveSetupSubmitsMaskedCredentialWithoutEcho(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/channels": structuredChannelsPage})
 	m = runLine(t, m, "/channels add telegram")
@@ -6314,6 +6436,46 @@ func TestChannelsInteractiveSetupMasksSecretsForEveryTypeAndCancelsCleanly(t *te
 			}
 			if calls := rec.all(); calls != "" {
 				t.Fatalf("%s cancellation made requests:\n%s", tt.channel, calls)
+			}
+		})
+	}
+}
+
+func TestChannelsInteractiveSetupCompletesEverySupportedType(t *testing.T) {
+	tests := []struct {
+		channel string
+		values  []string
+		path    string
+	}{
+		{channel: "telegram", values: []string{"telegram-secret", "true"}, path: "/channels/telegram"},
+		{channel: "github", values: []string{"pat", "github-secret", "", "", "", "https://api.github.com"}, path: "/channels/github/configure"},
+		{channel: "slack", values: []string{"client", "client-secret", "app-secret", "oauth", "", "true"}, path: "/channels/slack/configure"},
+		{channel: "discord", values: []string{"discord-secret", "true"}, path: "/channels/discord/configure"},
+		{channel: "email", values: []string{"gmail", "bot@example.com", "email-secret", "", "", "", "", "15", "true", "false", "true"}, path: "/channels/email/configure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.channel, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": structuredChannelsPage})
+			m = runLine(t, m, "/channels add "+tt.channel)
+			for _, value := range tt.values {
+				m.input.SetValue(value)
+				next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				m = next.(Model)
+				if cmd != nil {
+					msg := cmd()
+					if msg != nil {
+						next, _ = m.Update(msg)
+						m = next.(Model)
+					}
+				}
+			}
+			if !rec.saw("POST", tt.path) || m.channelWizard != nil {
+				t.Fatalf("%s wizard did not complete: %s\n%s", tt.channel, transcript(m), rec.all())
+			}
+			for _, value := range tt.values {
+				if strings.Contains(value, "secret") && strings.Contains(m.View(), value) {
+					t.Fatalf("%s wizard exposed credential", tt.channel)
+				}
 			}
 		})
 	}
@@ -6529,8 +6691,8 @@ func TestChannelsRemoveRequiresConfirmation(t *testing.T) {
 func TestChannelsReloadFailureAfterActionIsSwallowed(t *testing.T) {
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && r.URL.Path == "/channels/telegram/test" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{}`))
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div class="text-success"><span>Connection successful!</span></div>`))
 			return
 		}
 		if r.Method == "GET" && r.URL.Path == "/channels" {
@@ -6548,6 +6710,41 @@ func TestChannelsReloadFailureAfterActionIsSwallowed(t *testing.T) {
 	}
 	if strings.Contains(out, "error:") || strings.Contains(out, "refresh failed") {
 		t.Errorf("refresh failure must be swallowed:\n%s", out)
+	}
+}
+
+func TestChannelsHTTP200TestFailureIsSafeAndDoesNotReportSuccess(t *testing.T) {
+	const secret = "backend-test-secret"
+	m, _ := dispatchModel(t, map[string]string{
+		"POST /channels/email/test": `<div class="text-error"><span>Connection failed: ` + secret + `</span></div>`,
+	})
+	m = runLine(t, m, "/channels test email")
+	out := transcript(m)
+	if !strings.Contains(out, "channel test failed") {
+		t.Fatalf("test failure was not surfaced: %s", out)
+	}
+	if strings.Contains(out, "test: Email") || strings.Contains(out, secret) {
+		t.Fatalf("test failure reported success or leaked backend text: %s", out)
+	}
+}
+
+func TestChannelsDisconnectUsesOnlySupportedNonDestructiveRoutes(t *testing.T) {
+	for _, channelType := range []string{"github", "slack"} {
+		t.Run(channelType, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": structuredChannelsPage})
+			m = runLine(t, m, "/channels disconnect "+channelType)
+			if !rec.saw("POST", "/channels/"+channelType+"/disconnect") {
+				t.Fatalf("disconnect route missing: %s", rec.all())
+			}
+			if rec.saw("POST", "/channels/"+channelType+"/remove") || m.pendingConfirmation != nil {
+				t.Fatalf("disconnect became destructive: %s", rec.all())
+			}
+		})
+	}
+	m, rec := dispatchModel(t, nil)
+	m = runLine(t, m, "/channels disconnect discord")
+	if !strings.Contains(transcript(m), "does not support disconnect") || rec.saw("POST", "/channels/discord/remove") {
+		t.Fatalf("unsupported disconnect was not rejected safely: %s\n%s", transcript(m), rec.all())
 	}
 }
 
@@ -6590,11 +6787,11 @@ func TestChannelsBackendFailureSurfaces(t *testing.T) {
 	}
 }
 
-// TestChannelsMissingArgOpensSelector verifies that test/remove with no
-// channel name open the inline channel selector without posting to the
-// backend, and that CLI mode keeps the usage error.
+// TestChannelsMissingArgOpensSelector verifies that every reference-based channel
+// action opens the searchable inline selector without requesting or mutating the
+// backend, cancels cleanly, and retains a usage error in headless mode.
 func TestChannelsMissingArgOpensSelector(t *testing.T) {
-	for _, action := range []string{"test", "remove"} {
+	for _, action := range []string{"show", "add", "connect", "edit", "test", "remove", "disconnect"} {
 		action := action
 		t.Run(action, func(t *testing.T) {
 			m, rec := dispatchModel(t, nil)
@@ -6612,8 +6809,16 @@ func TestChannelsMissingArgOpensSelector(t *testing.T) {
 			if action == "test" {
 				wantItems--
 			}
+			if action == "connect" || action == "disconnect" {
+				wantItems = 2
+			}
 			if len(m.selectorItems) != wantItems {
 				t.Errorf("selector items = %d, want %d", len(m.selectorItems), wantItems)
+			}
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			m = next.(Model)
+			if m.selectorActive || rec.all() != "" {
+				t.Errorf("selector cancellation did not remain side-effect free: %s", rec.all())
 			}
 		})
 		t.Run(action+"_cli", func(t *testing.T) {

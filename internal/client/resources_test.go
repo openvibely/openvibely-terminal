@@ -749,6 +749,9 @@ func TestResourceMutationRoutes(t *testing.T) {
 		_ = r.ParseForm()
 		gotMethod, gotPath, gotForm = r.Method, r.URL.Path, r.PostForm
 		w.WriteHeader(http.StatusOK)
+		if strings.HasPrefix(r.URL.Path, "/channels/") && strings.HasSuffix(r.URL.Path, "/test") {
+			_, _ = io.WriteString(w, `<div class="text-success"><span>Connection successful!</span></div>`)
+		}
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL)
@@ -1751,6 +1754,63 @@ func TestListChannelsReturnsStructuredSecretFreeRecords(t *testing.T) {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Fatalf("structured channels disclosed %q: %s", forbidden, encoded)
 		}
+	}
+}
+
+func TestChannelActionParsesHTTP200TestFeedbackWithoutExposingBody(t *testing.T) {
+	const secret = "reflected-test-secret"
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "success", body: `<div class="flex text-success"><span>Connection successful!</span></div>`},
+		{name: "failure", body: `<div class="flex text-error"><span>Connection failed: ` + secret + `</span></div>`, wantErr: true},
+		{name: "malformed", body: `<div><span>` + secret + `</span></div>`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.ChannelAction(context.Background(), "telegram", "test", "p1")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && strings.Contains(err.Error(), secret) {
+				t.Fatalf("test error exposed backend body: %q", err)
+			}
+		})
+	}
+}
+
+func TestChannelActionDisconnectSupportAndRoutes(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, channelType := range []string{"github", "slack"} {
+		if err := c.ChannelAction(context.Background(), channelType, "disconnect", "p1"); err != nil {
+			t.Fatalf("disconnect %s: %v", channelType, err)
+		}
+	}
+	if err := c.ChannelAction(context.Background(), "discord", "disconnect", "p1"); err == nil {
+		t.Fatal("unsupported Discord disconnect succeeded")
+	}
+	if got := strings.Join(paths, "\n"); got != "/channels/github/disconnect\n/channels/slack/disconnect" {
+		t.Fatalf("disconnect paths = %q", got)
 	}
 }
 

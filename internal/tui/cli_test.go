@@ -43,6 +43,11 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 			_, _ = w.Write([]byte(body))
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/channels/") && strings.HasSuffix(r.URL.Path, "/test") {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<div class="text-success"><span>Connection successful!</span></div>`))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	}))
@@ -2805,8 +2810,13 @@ func TestCLIChannelsValidationPrecedesRequests(t *testing.T) {
 		{"channels", "edit", "discord", "--send-responses", "maybe"},
 		{"channels", "edit", "email", "--imap-port", "70000"},
 		{"channels", "edit", "github", "--auth-mode", "oauth"},
+		{"channels", "add", "github", "--auth-mode", "pat"},
+		{"channels", "add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"},
+		{"channels", "add", "email", "--provider", "unknown", "--address", "a@example.com", "--password", "secret"},
+		{"channels", "add", "email", "--provider", "custom", "--address", "a@example.com", "--password", "secret"},
 		{"channels", "test", "github"},
 		{"channels", "connect", "telegram"},
+		{"channels", "disconnect", "email"},
 	}
 	for _, args := range cases {
 		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
@@ -2904,6 +2914,28 @@ func TestCLIChannelsRemoveResolvesReferenceBeforeForce(t *testing.T) {
 
 // One-shot CLI mode works headlessly for the new channels actions,
 // exiting cleanly on success and nonzero on a backend failure.
+func TestCLIChannelsDisconnectUsesSupportedRouteWithoutForce(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/channels":     structuredChannelsPage,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "disconnect", "github"}, false, false); err != nil {
+		t.Fatalf("GitHub disconnect failed: %v", err)
+	}
+	if !rec.saw("POST", "/channels/github/disconnect") || rec.saw("POST", "/channels/github/remove") {
+		t.Fatalf("disconnect used wrong route: %s", rec.all())
+	}
+
+	c, rec = cliServer(t, map[string]string{"/api/projects": cliProjects})
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "disconnect", "discord"}, false, false); err == nil || !strings.Contains(err.Error(), "does not support disconnect") {
+		t.Fatalf("unsupported disconnect error = %v", err)
+	}
+	if rec.saw("POST", "/channels/discord/remove") || rec.saw("POST", "/channels/discord/disconnect") {
+		t.Fatalf("unsupported disconnect mutated backend: %s", rec.all())
+	}
+}
+
 func TestCLIRunsChannelsTest(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,
@@ -2918,6 +2950,22 @@ func TestCLIRunsChannelsTest(t *testing.T) {
 	}
 	if !rec.sawQuery("project_id=p1") {
 		t.Fatalf("channel test request was not scoped to the -project selection:\n%s", rec.all())
+	}
+}
+
+func TestCLIChannelsTestFailsOnHTTP200FeedbackWithoutLeakingBody(t *testing.T) {
+	const secret = "cli-channel-test-secret"
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":        cliProjects,
+		"/channels/email/test": `<div class="text-error"><span>Connection failed: ` + secret + `</span></div>`,
+	})
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"channels", "test", "email"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "channel test failed") {
+		t.Fatalf("HTTP-200 feedback error = %v", err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(out.String(), secret) || strings.Contains(out.String(), "test: Email") {
+		t.Fatalf("HTTP-200 feedback leaked or reported success: err=%v out=%q", err, out.String())
 	}
 }
 
