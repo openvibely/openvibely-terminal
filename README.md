@@ -149,7 +149,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect` |
+| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `webhooks list|show|create|edit|test|rotate|delete` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
@@ -271,7 +271,7 @@ to run unless `--force` is supplied. A task-only delete invocation opens the
 interactive attachment selector, where the selected file is still confirmed
 before deletion. `attach` and `attachment` are aliases for `attachments`.
 
-### Channels and integrations
+### Channels, integrations, and inbound webhooks
 
 `/channels` provides structured, secret-free management for GitHub, Slack,
 Telegram, Discord, X (formerly Twitter), and Email in the selected project. The
@@ -319,6 +319,27 @@ OAuth connection without deleting configuration. Interactive removal requires
 typing `yes`; CLI removal requires `--force` (or `-f`). Slack removal retains
 the required safe mapping to `/channels/slack/disconnect`; other remove actions
 delete that integration's stored configuration.
+
+Inbound webhooks use the nested `/channels webhooks` registry:
+
+```
+/channels webhooks list
+/channels webhooks show "PagerDuty alerts"
+/channels webhooks create "PagerDuty alerts" --priority 3 --agents triage-agent
+/channels webhooks edit pager --enabled false
+/channels webhooks test pager
+/channels webhooks rotate pager
+/channels webhooks delete pager
+```
+
+Webhook `create` and `edit` accept `--name`, `--enabled`, `--priority` (or
+`--default-priority`), `--system-instructions`, `--title-template`,
+`--prompt-template`, and comma-separated `--agents` (or `--agent-ids`). Edit
+preserves omitted fields. Interactive webhook secret rotation and deletion
+require typing `yes`; headless mode requires `--force`. Rotation is the only
+command that returns a new secret. `/webhooks` and `/inbound-webhooks` remain
+hidden deprecated aliases with identical project scope, selectors, errors, and
+confirmation behavior.
 
 ### Automations
 
@@ -499,6 +520,13 @@ $ openvibely-tui help channels
   channels test <channel>                    test Slack, Telegram, Discord, X, or Email
   channels remove <channel>                  remove configuration; Slack disconnects safely (confirmation required)
   channels disconnect <github|slack>         disconnect OAuth without removing configuration
+  channels webhooks list                     list inbound webhooks
+  channels webhooks show <webhook>           show secret-free webhook detail
+  channels webhooks create <name> [options]  create an inbound webhook
+  channels webhooks edit <webhook> <options> edit only specified configuration
+  channels webhooks test <webhook>           create a synthetic test task
+  channels webhooks rotate <webhook>         rotate its secret (confirmation required)
+  channels webhooks delete <webhook>         delete a webhook (confirmation required)
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,

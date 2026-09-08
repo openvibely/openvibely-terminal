@@ -3464,12 +3464,18 @@ func renderHelp() string {
 	// table ~190 columns wide; truncating them would hide real commands.
 	width := 0
 	for _, c := range commands {
+		if c.hidden {
+			continue
+		}
 		if n := lipgloss.Width(c.summary()); n > width {
 			width = n
 		}
 	}
 	const actionsWidth = 74
 	for _, c := range commands {
+		if c.hidden {
+			continue
+		}
 		fmt.Fprintf(&b, "  %-*s  %s\n", width, c.summary(), c.desc)
 		if len(c.aliases) > 0 {
 			aliases := make([]string, 0, len(c.aliases))

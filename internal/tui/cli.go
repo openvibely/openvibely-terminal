@@ -778,12 +778,18 @@ func CommandSummary() string {
 
 	width := 0
 	for _, c := range commands {
+		if c.hidden {
+			continue
+		}
 		if n := len(c.name); n > width {
 			width = n
 		}
 	}
 	var b strings.Builder
 	for _, c := range commands {
+		if c.hidden {
+			continue
+		}
 		fmt.Fprintf(&b, "  %-*s  %s\n", width, c.name, c.desc)
 	}
 	return b.String()

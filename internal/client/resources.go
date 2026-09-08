@@ -1428,10 +1428,41 @@ func (c *Client) ChannelConnectURL(channelType, projectID string) (string, error
 	return u.String(), nil
 }
 
-// GetChannels returns the legacy Channels screen as text. New command paths
-// use ListChannels so browser controls and secrets cannot reach terminal output.
+// GetChannels returns only messaging integrations from the shared Channels
+// screen. Modern pages expose all configured integrations as data-channel-type
+// cards and identify the separately managed webhook list with webhook-card-list.
+// Rendering only non-webhook cards avoids leaking webhook controls, pagination,
+// empty states, modals, or scripts that live elsewhere in the shared page.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
-	return c.paginatedPageText(ctx, "/channels"+query("project_id", projectID), "")
+	root, err := c.getHTML(ctx, "/channels"+query("project_id", projectID))
+	if err != nil {
+		return "", err
+	}
+	if container := findByID(root, "channels-container"); container != nil {
+		if findByID(container, "webhook-card-list") != nil {
+			parts := make([]string, 0)
+			for _, card := range findAll(container, func(n *html.Node) bool {
+				return hasHTMLAttr(n, "data-channel-type") && !strings.EqualFold(attr(n, "data-channel-type"), "webhook")
+			}) {
+				if text := strings.TrimSpace(NodeText(card)); text != "" {
+					parts = append(parts, text)
+				}
+			}
+			if len(parts) == 0 {
+				return "no messaging integrations configured", nil
+			}
+			return strings.Join(parts, "\n\n"), nil
+		}
+		root = container
+	}
+	// Card-only fragments predate the modern webhook list marker. Keep webhook
+	// cards out while preserving their surrounding legacy prose as before.
+	for _, card := range findAll(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-webhook-id") }) {
+		if card.Parent != nil {
+			card.Parent.RemoveChild(card)
+		}
+	}
+	return strings.TrimSpace(NodeText(root)), nil
 }
 
 // Webhook is the terminal-safe representation of one project-scoped inbound

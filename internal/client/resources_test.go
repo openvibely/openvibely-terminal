@@ -2492,6 +2492,64 @@ func TestChannelConnectURLRedactsServerCredentialsAndScopesProject(t *testing.T)
 	}
 }
 
+func TestGetChannelsOmitsInboundWebhookCards(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
+		_, _ = io.WriteString(w, `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true">
+			<h2>Channels</h2>
+			<div><button>+ Add Channel</button><ul><li>Telegram Bot</li><li>Webhook</li></ul></div>
+			<div class="grid">
+				<div data-channel-type="telegram">Telegram configured</div>
+				<div data-channel-type="email">Email configured</div>
+				<div id="webhook-card-list" data-card-pagination-list><div class="grid">
+					<div data-channel-type="webhook" data-webhook-id="w1" data-webhook-name="Pager Duty">Pager Duty /webhooks/inbound/token</div>
+				</div></div>
+				<div data-card-pagination-status><span>Loading more cards...</span><button>Try again</button></div>
+				<div data-search-empty-state>No channels added yet. Use Add Channel to configure Email or Webhooks.</div>
+			</div>
+			<dialog id="webhook_modal"><h3>Add Webhook</h3><button>Webhook Config</button><label>Secret</label><button>Save Webhook</button></dialog>
+			<div id="webhook_agents_data">Webhook agent data</div>
+		</div>`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := c.GetChannels(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("channel list requests = %d, want only the fixed first page", requests)
+	}
+	for _, want := range []string{"Telegram configured", "Email configured"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("channel output lost messaging integration %q: %q", want, text)
+		}
+	}
+	for _, forbidden := range []string{
+		"+ Add Channel",
+		"Webhook",
+		"Loading more cards",
+		"Try again",
+		"No channels added yet",
+		"/webhooks/inbound/token",
+		"Pager Duty",
+		"Add Webhook",
+		"Webhook Config",
+		"Secret",
+		"Save Webhook",
+		"Webhook agent data",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("channel output retained webhook section content %q: %q", forbidden, text)
+		}
+	}
+}
+
 func TestGetChannelsReturnsPageText(t *testing.T) {
 	c := htmlServer(t, `<html><body>channels text</body></html>`)
 	text, err := c.GetChannels(context.Background(), "p1")
@@ -2678,20 +2736,6 @@ func TestPaginatedPageTextAppendsOnlyUniqueContinuationCards(t *testing.T) {
 		fixed                           []string
 		orderedCards                    []string
 	}{
-		{
-			name: "channels", path: "/channels",
-			firstBody: `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true">
-				<h1>Channels heading</h1><button>Add channel control</button><div data-channel-type="telegram">Telegram fixed card</div>
-				<div id="webhook-card-list"><div data-webhook-id="w1">First webhook</div><div data-webhook-id="shared">Shared webhook</div></div>
-			</div>`,
-			nextBody: `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="false">
-				<h1>Channels heading</h1><button>Add channel control</button><div data-channel-type="telegram">Telegram fixed card</div>
-				<div id="webhook-card-list"><div data-webhook-id="shared">Shared webhook duplicate</div><div data-webhook-id="w2">Later webhook</div></div>
-			</div>`,
-			load:         func(c *Client) (string, error) { return c.GetChannels(context.Background(), "p1") },
-			fixed:        []string{"Channels heading", "Add channel control", "Telegram fixed card"},
-			orderedCards: []string{"First webhook", "Shared webhook", "Later webhook"},
-		},
 		{
 			name: "automations", path: "/automations",
 			firstBody: `<div id="automations-container" data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true">

@@ -3376,6 +3376,9 @@ func validateChannelsArgs(args []string) error {
 		return nil
 	}
 	action := strings.ToLower(args[0])
+	if action == "webhooks" {
+		return validateWebhooksArgs(args[1:])
+	}
 	switch action {
 	case "list":
 		if len(args) == 1 {
@@ -3449,23 +3452,27 @@ func channelSelector(action string, suffix string, allowed func(client.Channel) 
 }
 
 func channelsCommand() command {
-	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect"}
+	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "webhooks"}
+	webhookActions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
+	completions := []commandCompletion{
+		{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
+		{after: []string{"edit", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
+		{after: []string{"add", "*", "--auth-mode"}, values: []string{"pat", "app"}},
+		{after: []string{"edit", "*", "--auth-mode"}, values: []string{"pat", "app"}},
+		{after: []string{"add", "*", "--provider"}, values: channelEmailProviders},
+		{after: []string{"edit", "*", "--provider"}, values: channelEmailProviders},
+		{after: []string{"add", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
+		{after: []string{"edit", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
+		{after: []string{"webhooks"}, values: webhookActions},
+	}
+	completions = append(completions, webhookCompletionRules("webhooks")...)
 	return command{
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
-		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}},
-		completions: []commandCompletion{
-			{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
-			{after: []string{"edit", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
-			{after: []string{"add", "*", "--auth-mode"}, values: []string{"pat", "app"}},
-			{after: []string{"edit", "*", "--auth-mode"}, values: []string{"pat", "app"}},
-			{after: []string{"add", "*", "--provider"}, values: channelEmailProviders},
-			{after: []string{"edit", "*", "--provider"}, values: channelEmailProviders},
-			{after: []string{"add", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
-			{after: []string{"edit", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
-		},
-		desc: "manage GitHub, Slack, Telegram, Discord, X, and Email integrations",
+		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}},
+		completions:   completions,
+		desc:          "manage GitHub, Slack, Telegram, Discord, X, and Email integrations",
 		actionUsages: []commandActionUsage{
-			{action: "", args: "[list|show|add|connect|edit|test|remove|disconnect]"},
+			{action: "", args: "[list|show|add|connect|edit|test|remove|disconnect|webhooks]"},
 			{action: "list", description: "list safe channel identity and connection state"},
 			{action: "show", args: "<channel>", description: "show safe channel details"},
 			{action: "add", args: "<type> <options>", description: "configure a new channel"},
@@ -3474,6 +3481,14 @@ func channelsCommand() command {
 			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, X, or Email"},
 			{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
 			{action: "disconnect", args: "<github|slack>", description: "disconnect OAuth without removing configuration"},
+			{action: "webhooks", args: "[action]", description: "manage inbound webhook endpoints"},
+			{action: "webhooks list", description: "list inbound webhooks"},
+			{action: "webhooks show", args: "<webhook>", description: "show secret-free webhook detail"},
+			{action: "webhooks create", args: "<name> [options]", description: "create an inbound webhook"},
+			{action: "webhooks edit", args: "<webhook> <options>", description: "edit only specified configuration"},
+			{action: "webhooks test", args: "<webhook>", description: "create a synthetic test task"},
+			{action: "webhooks rotate", args: "<webhook>", description: "rotate the webhook secret (confirmation required)"},
+			{action: "webhooks delete", args: "<webhook>", description: "delete a webhook (confirmation required)"},
 		},
 		usage: []string{
 			"options: --token, --rich-messages, --auth-mode, --pat, --app-id, --app-slug, --private-key, --api-endpoint",
@@ -3485,11 +3500,23 @@ func channelsCommand() command {
 			"GitHub PAT mode requires --pat; app mode requires --app-id, --app-slug, and --private-key.",
 			"Slack requires client ID, client secret, and app token; manual mode requires --bot-token.",
 			"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret; X poll interval must be 15 to 300 seconds.",
+			"Webhook options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents.",
 			"Secret options are accepted headlessly but are never echoed; prefer an interactive masked terminal when available.",
 		},
-		examples:     []string{"channels show slack", "channels add x --consumer-key <key> --consumer-secret <secret> --access-token <token> --access-token-secret <secret>", "channels connect slack", "channels test x", "channels remove discord"},
+		examples: []string{
+			"channels show slack",
+			"channels add x --consumer-key <key> --consumer-secret <secret> --access-token <token> --access-token-secret <secret>",
+			"channels connect slack",
+			"channels test x",
+			"channels remove discord",
+			`channels webhooks create "PagerDuty alerts" --priority 3`,
+			"channels webhooks test pager",
+		},
 		validateArgs: validateChannelsArgs,
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			if len(args) > 0 && strings.EqualFold(args[0], "webhooks") {
+				return runWebhooks(m, args[1:])
+			}
 			mm, cmd, ok := m.needProject()
 			if !ok {
 				return mm, cmd
@@ -3623,6 +3650,20 @@ var webhookOptionNames = map[string]string{
 	"--agents": "agent_ids", "--agent-ids": "agent_ids",
 }
 
+var webhookOptionCompletions = []string{
+	"--name", "--enabled", "--priority", "--default-priority", "--system-instructions",
+	"--title-template", "--prompt-template", "--agents", "--agent-ids",
+}
+
+func webhookCompletionRules(prefix ...string) []commandCompletion {
+	rules := make([]commandCompletion, 0, 2)
+	for _, action := range []string{"create", "edit"} {
+		after := append(append([]string(nil), prefix...), action, "**")
+		rules = append(rules, commandCompletion{after: after, values: webhookOptionCompletions})
+	}
+	return rules
+}
+
 func webhookOptionBoundary(args []string) int {
 	for i, arg := range args {
 		if strings.HasPrefix(arg, "--") {
@@ -3691,6 +3732,13 @@ func applyWebhookOptions(webhook *client.Webhook, values map[string]string) {
 	}
 }
 
+func webhookCommandUsage(action string) string {
+	if c := lookupCommand("channels"); c != nil {
+		return c.usageMessage(strings.TrimSpace("webhooks " + action))
+	}
+	return "usage: " + cmdPrefix + strings.TrimSpace("channels webhooks "+action)
+}
+
 func validateWebhooksArgs(args []string) error {
 	if len(args) == 0 {
 		return nil
@@ -3699,7 +3747,7 @@ func validateWebhooksArgs(args []string) error {
 	switch action {
 	case "list":
 		if len(rest) != 0 {
-			return errors.New(commandUsage("webhooks", "list"))
+			return errors.New(webhookCommandUsage("list"))
 		}
 		return nil
 	case "show", "test", "rotate", "delete":
@@ -3710,14 +3758,14 @@ func validateWebhooksArgs(args []string) error {
 			return err
 		}
 		if action == "create" && strings.TrimSpace(strings.Join(rest[:boundary], " ")) == "" {
-			return errors.New(commandUsage("webhooks", "create"))
+			return errors.New(webhookCommandUsage("create"))
 		}
 		if action == "edit" && boundary == len(rest) && len(rest) > 0 {
-			return errors.New(commandUsage("webhooks", "edit"))
+			return errors.New(webhookCommandUsage("edit"))
 		}
 		return nil
 	default:
-		return errors.New(commandUsage("webhooks", ""))
+		return errors.New(webhookCommandUsage(""))
 	}
 }
 
@@ -3763,7 +3811,7 @@ func confirmWebhookMutation(m Model, projectID, action string, webhook client.We
 			}
 			return "deleted webhook: " + name, nil
 		default:
-			return "", errors.New(commandUsage("webhooks", action))
+			return "", errors.New(webhookCommandUsage(action))
 		}
 	})
 	return confirmOr(m,
@@ -3778,14 +3826,24 @@ func webhookSelector(m Model, action string, prefill bool) (Model, tea.Cmd) {
 	if prefill {
 		prefillSuffix = " "
 	}
-	return selectorOr(m, commandUsage("webhooks", action), selectorForWithSuffix("Webhooks", "webhooks "+action, "no inbound webhooks configured", prefillSuffix, func(ctx context.Context) ([]selectorItem, error) {
+	return selectorOr(m, webhookCommandUsage(action), selectorForWithSuffix("Webhooks", "channels webhooks "+action, "no inbound webhooks configured", prefillSuffix, func(ctx context.Context) ([]selectorItem, error) {
 		webhooks, err := c.ListWebhooks(ctx, projectID)
 		if err != nil {
 			return nil, err
 		}
 		items := make([]selectorItem, 0, len(webhooks))
 		for _, webhook := range webhooks {
-			items = append(items, selectorItem{ref: webhook.ID, label: webhook.Name, detail: webhook.Path})
+			webhook := webhook
+			item := selectorItem{ref: webhook.ID, label: webhook.Name, detail: webhook.Path}
+			if !prefill {
+				item.dispatch = func(m Model) (Model, tea.Cmd) {
+					if action == "rotate" || action == "delete" {
+						return confirmWebhookMutation(m, projectID, action, webhook)
+					}
+					return m, webhookResolvedCommand(c, projectID, action, webhook, nil)
+				}
+			}
+			items = append(items, item)
 		}
 		return items, nil
 	}))
@@ -3816,113 +3874,130 @@ func renderWebhookDetail(webhook client.Webhook) string {
 	return fmt.Sprintf("Webhook: %s\nID: %s\nProject: %s\nState: %s\nURL: %s\nPath: %s\nPriority: %d\nAgents: %s\nSystem instructions: %s\nTitle template: %s\nPrompt template: %s", safe(webhook.Name), safe(webhook.ID), safe(webhook.ProjectID), state, safe(webhook.URL), safe(webhook.Path), webhook.DefaultPriority, safe(strings.Join(webhook.AgentIDs, ", ")), safe(webhook.SystemInstructions), safe(webhook.TitleTemplate), safe(webhook.PromptTemplate))
 }
 
+func webhookResolvedCommand(c *client.Client, projectID, action string, webhook client.Webhook, options map[string]string) tea.Cmd {
+	return run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+		return webhookResolvedResult(ctx, c, projectID, action, webhook, options)
+	})
+}
+
+func webhookResolvedResult(ctx context.Context, c *client.Client, projectID, action string, webhook client.Webhook, options map[string]string) (string, error) {
+	switch action {
+	case "show":
+		detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
+		if err != nil {
+			return "", err
+		}
+		if jsonMode {
+			return marshalJSON(detail)
+		}
+		return renderWebhookDetail(*detail), nil
+	case "edit":
+		detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
+		if err != nil {
+			return "", err
+		}
+		applyWebhookOptions(detail, options)
+		updated, err := c.UpdateWebhook(ctx, projectID, *detail)
+		if err != nil {
+			return "", err
+		}
+		if jsonMode {
+			return marshalJSON(updated)
+		}
+		return "updated webhook\n\n" + renderWebhookDetail(*updated), nil
+	case "test":
+		result, err := c.TestWebhook(ctx, projectID, webhook.ID)
+		if err != nil {
+			return "", err
+		}
+		if jsonMode {
+			return marshalJSON(result)
+		}
+		return fmt.Sprintf("test task created: %s", sanitizeAutomationDetailText(result.TaskID)), nil
+	default:
+		return "", errors.New(webhookCommandUsage(action))
+	}
+}
+
 func webhooksCommand() command {
 	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
 	return command{
 		name: "webhooks", aliases: []string{"inbound-webhooks"}, args: "[action] [webhook]", actions: actions,
-		selectorPaths: [][]string{{"show"}, {"edit"}, {"test"}, {"rotate"}, {"delete"}}, desc: "project-scoped inbound webhook endpoints",
+		completions:   webhookCompletionRules(),
+		selectorPaths: [][]string{{"show"}, {"edit"}, {"test"}, {"rotate"}, {"delete"}},
+		desc:          "Deprecated: use /channels webhooks (legacy alias retained for compatibility)",
+		hidden:        true,
 		actionUsages: []commandActionUsage{
 			{action: "", args: "[list|show <webhook>|create <name> [options]|edit <webhook> <options>|test <webhook>|rotate <webhook>|delete <webhook>]"},
-			{action: "list", description: "list inbound webhooks"}, {action: "show", args: "<webhook>", description: "show secret-free webhook detail"},
-			{action: "create", args: "<name> [options]", description: "create an inbound webhook"}, {action: "edit", args: "<webhook> <options>", description: "edit only specified configuration"},
-			{action: "test", args: "<webhook>", description: "create a synthetic test task"}, {action: "rotate", args: "<webhook>", description: "rotate the webhook secret (confirmation required)"},
-			{action: "delete", args: "<webhook>", description: "delete a webhook (confirmation required)"},
+			{action: "list", description: "deprecated alias for /channels webhooks list"}, {action: "show", args: "<webhook>", description: "deprecated alias for /channels webhooks show"},
+			{action: "create", args: "<name> [options]", description: "deprecated alias for /channels webhooks create"}, {action: "edit", args: "<webhook> <options>", description: "deprecated alias for /channels webhooks edit"},
+			{action: "test", args: "<webhook>", description: "deprecated alias for /channels webhooks test"}, {action: "rotate", args: "<webhook>", description: "deprecated alias for /channels webhooks rotate"},
+			{action: "delete", args: "<webhook>", description: "deprecated alias for /channels webhooks delete"},
 		},
-		usage:    []string{"options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents", "omit <webhook> on show/edit/test/rotate/delete → interactive selector"},
-		examples: []string{`webhooks create "PagerDuty alerts" --priority 3`, `webhooks edit pager --enabled false`, `webhooks test pager`, `webhooks rotate pager`}, validateArgs: validateWebhooksArgs,
-		run: func(m Model, args []string) (Model, tea.Cmd) {
-			mm, noProject, ok := m.needProject()
-			if !ok {
-				return mm, noProject
-			}
-			if err := validateWebhooksArgs(args); err != nil {
-				return m, errCmd(err.Error())
-			}
-			action, rest := splitAction(actions, args)
-			c, projectID := m.client, m.selectedID
-			if action == "" || action == "list" {
-				return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
-					webhooks, err := c.ListWebhooks(ctx, projectID)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(webhooks)
-					}
-					return renderWebhooks(webhooks), nil
-				})
-			}
-			boundary := len(rest)
-			options := map[string]string(nil)
-			if action == "create" || action == "edit" {
-				boundary = webhookOptionBoundary(rest)
-				options, _ = parseWebhookOptions(rest[boundary:])
-			}
-			ref := strings.TrimSpace(strings.Join(rest[:boundary], " "))
-			if ref == "" && action != "create" {
-				return webhookSelector(m, action, action == "edit")
-			}
-			if action == "create" {
-				return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
-					webhook := client.Webhook{ProjectID: projectID, Name: ref, Enabled: true, DefaultPriority: 2, AgentIDs: make([]string, 0)}
-					applyWebhookOptions(&webhook, options)
-					created, err := c.CreateWebhook(ctx, projectID, webhook)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(created)
-					}
-					return "created webhook\n\n" + renderWebhookDetail(*created), nil
-				})
-			}
-			if action == "rotate" || action == "delete" {
-				return m, resolveWebhookMutation(c, projectID, action, ref)
-			}
-			cmd := run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
-				webhook, err := resolveWebhook(ctx, c, projectID, ref)
-				if err != nil {
-					return "", err
-				}
-				switch action {
-				case "show":
-					detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(detail)
-					}
-					return renderWebhookDetail(*detail), nil
-				case "edit":
-					detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
-					if err != nil {
-						return "", err
-					}
-					applyWebhookOptions(detail, options)
-					updated, err := c.UpdateWebhook(ctx, projectID, *detail)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(updated)
-					}
-					return "updated webhook\n\n" + renderWebhookDetail(*updated), nil
-				case "test":
-					result, err := c.TestWebhook(ctx, projectID, webhook.ID)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(result)
-					}
-					return fmt.Sprintf("test task created: %s", sanitizeAutomationDetailText(result.TaskID)), nil
-				}
-				return "", errors.New(commandUsage("webhooks", action))
-			})
-			return m, cmd
-		},
+		usage:        []string{"DEPRECATED: use /channels webhooks; inbound-webhooks is also retained as a deprecated alias"},
+		examples:     []string{`channels webhooks create "PagerDuty alerts" --priority 3`, `channels webhooks test pager`},
+		validateArgs: validateWebhooksArgs,
+		run:          runWebhooks,
 	}
+}
+
+func runWebhooks(m Model, args []string) (Model, tea.Cmd) {
+	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
+	mm, noProject, ok := m.needProject()
+	if !ok {
+		return mm, noProject
+	}
+	if err := validateWebhooksArgs(args); err != nil {
+		return m, errCmd(err.Error())
+	}
+	action, rest := splitAction(actions, args)
+	c, projectID := m.client, m.selectedID
+	if action == "" || action == "list" {
+		return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+			webhooks, err := c.ListWebhooks(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(webhooks)
+			}
+			return renderWebhooks(webhooks), nil
+		})
+	}
+	boundary := len(rest)
+	options := map[string]string(nil)
+	if action == "create" || action == "edit" {
+		boundary = webhookOptionBoundary(rest)
+		options, _ = parseWebhookOptions(rest[boundary:])
+	}
+	ref := strings.TrimSpace(strings.Join(rest[:boundary], " "))
+	if ref == "" && action != "create" {
+		return webhookSelector(m, action, action == "edit")
+	}
+	if action == "create" {
+		return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+			webhook := client.Webhook{ProjectID: projectID, Name: ref, Enabled: true, DefaultPriority: 2, AgentIDs: make([]string, 0)}
+			applyWebhookOptions(&webhook, options)
+			created, err := c.CreateWebhook(ctx, projectID, webhook)
+			if err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(created)
+			}
+			return "created webhook\n\n" + renderWebhookDetail(*created), nil
+		})
+	}
+	if action == "rotate" || action == "delete" {
+		return m, resolveWebhookMutation(c, projectID, action, ref)
+	}
+	return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+		webhook, err := resolveWebhook(ctx, c, projectID, ref)
+		if err != nil {
+			return "", err
+		}
+		return webhookResolvedResult(ctx, c, projectID, action, webhook, options)
+	})
 }
 
 // personalityActionJSON is the stable machine-readable record used for

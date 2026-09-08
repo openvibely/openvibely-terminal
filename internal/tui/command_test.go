@@ -531,8 +531,17 @@ func TestSuggestFiltersByPrefix(t *testing.T) {
 	if got := suggest("sk"); len(got) != 1 || got[0].name != "skills" {
 		t.Errorf("suggest(sk) = %v", got)
 	}
-	if got := suggest(""); len(got) != len(commands) {
-		t.Errorf("empty prefix should list everything, got %d", len(got))
+	visible := 0
+	for _, command := range commands {
+		if !command.hidden {
+			visible++
+		}
+	}
+	if got := suggest(""); len(got) != visible {
+		t.Errorf("empty prefix should list every visible command, got %d, want %d", len(got), visible)
+	}
+	if got := suggest("webh"); len(got) != 0 {
+		t.Errorf("deprecated webhook root should not be separately suggested, got %v", got)
 	}
 	if got := suggest("zzz"); len(got) != 0 {
 		t.Errorf("no command should match zzz, got %v", got)
@@ -880,6 +889,9 @@ func TestRenderStatusReportsConnection(t *testing.T) {
 func TestHelpListsEveryRegisteredCommand(t *testing.T) {
 	help := renderHelp()
 	for _, c := range commands {
+		if c.hidden {
+			continue
+		}
 		if !strings.Contains(help, cmdPrefix+c.name) {
 			t.Errorf("%s%s is missing from /help", cmdPrefix, c.name)
 		}
@@ -942,7 +954,7 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		t.Fatal("channels command missing")
 	}
 
-	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect"}; !reflect.DeepEqual(cmd.actions, want) {
+	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "webhooks"}; !reflect.DeepEqual(cmd.actions, want) {
 		t.Fatalf("channels actions = %#v, want %#v", cmd.actions, want)
 	}
 
@@ -1164,10 +1176,61 @@ func TestRuntimeUsageMatchesCanonicalHelpSyntax(t *testing.T) {
 	}
 }
 
+func TestChannelsWebhooksHelpCompletionAndDeprecatedAliases(t *testing.T) {
+	channels := lookupCommand("channels")
+	if channels == nil {
+		t.Fatal("channels command missing")
+	}
+	help := renderCommandHelp(*channels)
+	for _, want := range []string{
+		"channels webhooks list",
+		"channels webhooks show <webhook>",
+		"channels webhooks create <name> [options]",
+		"channels webhooks rotate <webhook>",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("channels help missing %q:\n%s", want, help)
+		}
+	}
+	if got := registryCompletionValues("channels"); !slices.Contains(got, "webhooks") {
+		t.Fatalf("channels completions = %v, want webhooks", got)
+	}
+	for _, action := range []string{"list", "show", "create", "edit", "test", "rotate", "delete"} {
+		if got := registryCompletionValues("channels", "webhooks"); !slices.Contains(got, action) {
+			t.Errorf("channels webhooks completions = %v, want %q", got, action)
+		}
+	}
+	for _, root := range []struct {
+		name  string
+		after []string
+	}{
+		{name: "channels", after: []string{"webhooks", "edit", "pager"}},
+		{name: "webhooks", after: []string{"edit", "pager"}},
+		{name: "inbound-webhooks", after: []string{"edit", "pager"}},
+	} {
+		if got := registryCompletionValues(root.name, root.after...); !slices.Contains(got, "--enabled") || !slices.Contains(got, "--priority") {
+			t.Errorf("%s edit option completions = %v", root.name, got)
+		}
+	}
+	for _, alias := range []string{"webhooks", "inbound-webhooks"} {
+		legacy := lookupCommand(alias)
+		if legacy == nil {
+			t.Fatalf("deprecated alias %q missing", alias)
+		}
+		legacyHelp := renderCommandHelp(*legacy)
+		if !strings.Contains(strings.ToLower(legacyHelp), "deprecated") || !strings.Contains(legacyHelp, "/channels webhooks") {
+			t.Errorf("legacy help for %q does not document canonical replacement:\n%s", alias, legacyHelp)
+		}
+	}
+}
+
 // The -h/--help output must list the commands, not just the flags.
 func TestCommandSummaryListsEveryCommand(t *testing.T) {
 	s := CommandSummary()
 	for _, c := range commands {
+		if c.hidden {
+			continue
+		}
 		if !strings.Contains(s, c.name) {
 			t.Errorf("%s missing from the CLI command summary", c.name)
 		}

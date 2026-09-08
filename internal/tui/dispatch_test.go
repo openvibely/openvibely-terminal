@@ -6201,8 +6201,8 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 		line      string
 		wantUsage string
 	}{
-		{line: "/channels nonsense", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect]"},
-		{line: "/channels list extra", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect]"},
+		{line: "/channels nonsense", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|webhooks]"},
+		{line: "/channels list extra", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|webhooks]"},
 		{line: "/channels test telegram extra", wantUsage: "nothing matches"},
 		{line: "/channels remove slack extra", wantUsage: "nothing matches"},
 	}
@@ -8520,7 +8520,7 @@ func TestWebhooksRotateDeleteConfirmationAndSanitization(t *testing.T) {
 		"POST /channels/webhooks/w1/rotate-secret": `{"secret":"new-secret\u001b[31m\nvalue"}`,
 		"DELETE /channels/webhooks/w1":             "",
 	})
-	m = runLine(t, m, "/webhooks rotate w1")
+	m = runLine(t, m, "/channels webhooks rotate w1")
 	if rec.saw("POST", "/channels/webhooks/w1/rotate-secret") {
 		t.Fatal("rotation ran before confirmation")
 	}
@@ -8529,7 +8529,7 @@ func TestWebhooksRotateDeleteConfirmationAndSanitization(t *testing.T) {
 	if rec.saw("POST", "/channels/webhooks/w1/rotate-secret") {
 		t.Fatal("cancelled rotation mutated")
 	}
-	m = confirmDestructive(t, m, "/webhooks rotate w1")
+	m = confirmDestructive(t, m, "/channels webhooks rotate w1")
 	if !rec.saw("POST", "/channels/webhooks/w1/rotate-secret") {
 		t.Fatal("confirmed rotation did not run")
 	}
@@ -8538,7 +8538,7 @@ func TestWebhooksRotateDeleteConfirmationAndSanitization(t *testing.T) {
 		t.Fatalf("rotation output was not terminal safe:\n%q", out)
 	}
 
-	m = runLine(t, m, "/webhooks delete w1")
+	m = runLine(t, m, "/channels webhooks delete w1")
 	if rec.saw("DELETE", "/channels/webhooks/w1") {
 		t.Fatal("delete ran before confirmation")
 	}
