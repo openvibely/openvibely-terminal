@@ -2189,11 +2189,19 @@ func TestGetChannelsOmitsInboundWebhookCards(t *testing.T) {
 		requests++
 		w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
 		_, _ = io.WriteString(w, `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true">
-			<div data-channel-type="telegram">Telegram configured</div>
-			<div data-channel-type="email">Email configured</div>
-			<section><h2>Inbound webhooks</h2><button>Create inbound webhook</button><p>No inbound webhooks configured</p><div id="webhook-card-list">
-				<div data-webhook-id="w1" data-webhook-name="Pager Duty">Pager Duty /webhooks/inbound/token</div>
-			</div></section>
+			<h2>Channels</h2>
+			<div><button>+ Add Channel</button><ul><li>Telegram Bot</li><li>Webhook</li></ul></div>
+			<div class="grid">
+				<div data-channel-type="telegram">Telegram configured</div>
+				<div data-channel-type="email">Email configured</div>
+				<div id="webhook-card-list" data-card-pagination-list><div class="grid">
+					<div data-channel-type="webhook" data-webhook-id="w1" data-webhook-name="Pager Duty">Pager Duty /webhooks/inbound/token</div>
+				</div></div>
+				<div data-card-pagination-status><span>Loading more cards...</span><button>Try again</button></div>
+				<div data-search-empty-state>No channels added yet. Use Add Channel to configure Email or Webhooks.</div>
+			</div>
+			<dialog id="webhook_modal"><h3>Add Webhook</h3><button>Webhook Config</button><label>Secret</label><button>Save Webhook</button></dialog>
+			<div id="webhook_agents_data">Webhook agent data</div>
 		</div>`)
 	}))
 	defer srv.Close()
@@ -2214,11 +2222,18 @@ func TestGetChannelsOmitsInboundWebhookCards(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"Inbound webhooks",
-		"Create inbound webhook",
-		"No inbound webhooks configured",
-		"Pager Duty",
+		"+ Add Channel",
+		"Webhook",
+		"Loading more cards",
+		"Try again",
+		"No channels added yet",
 		"/webhooks/inbound/token",
+		"Pager Duty",
+		"Add Webhook",
+		"Webhook Config",
+		"Secret",
+		"Save Webhook",
+		"Webhook agent data",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("channel output retained webhook section content %q: %q", forbidden, text)

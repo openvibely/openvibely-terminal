@@ -1104,36 +1104,38 @@ var KnownChannels = []Channel{
 }
 
 // GetChannels returns only messaging integrations from the shared Channels
-// screen. Inbound webhook cards are deliberately omitted because their complete
-// lifecycle is rendered under /channels webhooks and mixing both surfaces would
-// duplicate entries.
+// screen. Modern pages expose all configured integrations as data-channel-type
+// cards and identify the separately managed webhook list with webhook-card-list.
+// Rendering only non-webhook cards avoids leaking webhook controls, pagination,
+// empty states, modals, or scripts that live elsewhere in the shared page.
 func (c *Client) GetChannels(ctx context.Context, projectID string) (string, error) {
 	root, err := c.getHTML(ctx, "/channels"+query("project_id", projectID))
 	if err != nil {
 		return "", err
 	}
-	removedWebhookSection := false
-	if list := findByID(root, "webhook-card-list"); list != nil {
-		section := list
-		for section != nil && !(section.Type == html.ElementNode && section.Data == "section") {
-			section = section.Parent
-		}
-		if section != nil && section.Parent != nil {
-			section.Parent.RemoveChild(section)
-			removedWebhookSection = true
-		}
-	}
-	if !removedWebhookSection {
-		// Card-only fragments predate the semantic section. Keep them out of the
-		// messaging list without risking removal of an unrelated parent container.
-		for _, card := range findAll(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-webhook-id") }) {
-			if card.Parent != nil {
-				card.Parent.RemoveChild(card)
-			}
-		}
-	}
 	if container := findByID(root, "channels-container"); container != nil {
+		if findByID(container, "webhook-card-list") != nil {
+			parts := make([]string, 0)
+			for _, card := range findAll(container, func(n *html.Node) bool {
+				return hasHTMLAttr(n, "data-channel-type") && !strings.EqualFold(attr(n, "data-channel-type"), "webhook")
+			}) {
+				if text := strings.TrimSpace(NodeText(card)); text != "" {
+					parts = append(parts, text)
+				}
+			}
+			if len(parts) == 0 {
+				return "no messaging integrations configured", nil
+			}
+			return strings.Join(parts, "\n\n"), nil
+		}
 		root = container
+	}
+	// Card-only fragments predate the modern webhook list marker. Keep webhook
+	// cards out while preserving their surrounding legacy prose as before.
+	for _, card := range findAll(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-webhook-id") }) {
+		if card.Parent != nil {
+			card.Parent.RemoveChild(card)
+		}
 	}
 	return strings.TrimSpace(NodeText(root)), nil
 }
