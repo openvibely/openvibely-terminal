@@ -9,8 +9,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/mail"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -4583,33 +4585,40 @@ func insightsCommand() command {
 }
 
 func automationsCommand() command {
-	actions := []string{"list", "show", "open", "run", "pause", "resume", "delete"}
+	actions := []string{"list", "show", "open", "edit", "run", "pause", "resume", "delete"}
 	return command{
 		name:          "automations",
 		aliases:       []string{"automation"},
 		args:          "[filter]",
 		actions:       actions,
-		selectorPaths: [][]string{{"show"}, {"open"}, {"run"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
+		completions:   []commandCompletion{{after: []string{"edit", "**"}, values: []string{"--export", "--file"}}},
+		selectorPaths: [][]string{{"show"}, {"open"}, {"edit"}, {"run"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
 		desc:          "recurring automations and workflow rules",
 		usage: []string{
 			"automations [filter]                       list automations",
 			"automations show <automation>              show live graph, runtime and resources",
-			"automations open <automation>              alias for show",
+			"automations open <automation>              compatibility alias for show",
+			"automations edit <automation> --export <yaml> export the complete current definition without mutation",
+			"automations edit <automation> --file <yaml> validate and replace the complete graph definition",
 			"automations run <automation>               trigger an immediate run",
 			"automations pause <automation>              pause an active automation",
 			"automations resume <automation>             resume a paused automation",
 			"automations delete <automation>             remove an automation (interactive: type 'yes'; CLI: use --force/-f before the command)",
 			"automations run-now <automation>           compatibility alias for run",
-			"omit <automation> on show/open/run/pause/resume/delete → interactive selector",
+			"omit <automation> on show/open/edit/run/pause/resume/delete → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<automation>", description: "show live graph, runtime and resources"},
-			{action: "open", args: "<automation>", description: "alias for show"},
+			{action: "open", args: "<automation>", description: "compatibility alias for show"},
+			{action: "edit", args: "<automation> --export <yaml>", description: "export the complete definition without mutation; edit it, then apply with --file"},
+			{action: "edit", args: "<automation> --file <yaml>", description: "validate and replace the complete graph definition"},
 		},
 		examples: []string{
 			`automations list`,
 			`automations show "Nightly sweep"`,
 			`automations open automation-id`,
+			`automations edit "Nightly sweep" --export automation.yaml`,
+			`automations edit "Nightly sweep" --file automation.yaml`,
 			`automations run "Nightly sweep"`,
 			`automations pause "Nightly sweep"`,
 			`automations resume "Nightly sweep"`,
@@ -4642,6 +4651,66 @@ func automationsCommand() command {
 						return marshalJSON(automations)
 					}
 					return renderAutomations(automations, ref), nil
+				})
+
+			case "edit":
+				if len(rest) == 0 {
+					return selectorOr(m, commandUsage("automations", "edit"),
+						selectorForWithSuffix("Automations", "automations edit", automationEmptyStateHint, " --export ",
+							func(ctx context.Context) ([]selectorItem, error) {
+								automations, err := c.ListAutomations(ctx, pid)
+								if err != nil {
+									return nil, err
+								}
+								items := make([]selectorItem, 0, len(automations))
+								for _, a := range automations {
+									items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, shortID(a.ID)), detail: a.State})
+								}
+								return items, nil
+							}))
+				}
+				editRef, editMode, filePath, err := parseAutomationEditArgs(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				definitionYAML := ""
+				if editMode == "file" {
+					definitionYAML, err = readAutomationDefinitionFile(filePath)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+				}
+				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
+					automations, err := c.ListAutomations(ctx, pid)
+					if err != nil {
+						return "", err
+					}
+					a, err := matchRef(automations, editRef,
+						func(a client.Automation) string { return a.ID },
+						func(a client.Automation) string { return a.Name })
+					if err != nil {
+						return "", err
+					}
+					current, err := c.LoadAutomationDefinition(ctx, pid, a.ID)
+					if err != nil {
+						return "", err
+					}
+					if current.AutomationID != a.ID || current.ProjectID != pid {
+						return "", fmt.Errorf("automation edit scope changed before save")
+					}
+					if editMode == "export" {
+						if err := writeAutomationDefinitionFile(filePath, current.YAML); err != nil {
+							return "", err
+						}
+						return "exported complete automation definition to " + sanitizeAutomationDetailText(filePath) + "\nedit that file, then apply it with --file", nil
+					}
+					if definitionYAML == current.YAML {
+						return "automation edit cancelled: definition unchanged", nil
+					}
+					if err := c.UpdateAutomationDefinition(ctx, pid, a.ID, definitionYAML); err != nil {
+						return "", err
+					}
+					return "updated automation " + sanitizeAutomationDetailText(firstNonEmpty(a.Name, a.ID)), nil
 				})
 
 			case "show", "open":
@@ -4806,6 +4875,66 @@ func automationDraftDetail(projectID string, automation client.Automation) clien
 		ExternalStateAvailable: false,
 		Warnings:               []string{"live graph unavailable: automation is draft"},
 	}
+}
+
+func parseAutomationEditArgs(args []string) (string, string, string, error) {
+	if len(args) < 3 || (args[len(args)-2] != "--file" && args[len(args)-2] != "--export") {
+		return "", "", "", fmt.Errorf("usage: %sautomations edit <automation> --export <yaml> | --file <yaml>", cmdPrefix)
+	}
+	ref := strings.TrimSpace(strings.Join(args[:len(args)-2], " "))
+	path := strings.TrimSpace(args[len(args)-1])
+	if ref == "" || path == "" {
+		return "", "", "", fmt.Errorf("usage: %sautomations edit <automation> --export <yaml> | --file <yaml>", cmdPrefix)
+	}
+	return ref, strings.TrimPrefix(args[len(args)-2], "--"), path, nil
+}
+
+func writeAutomationDefinitionFile(path, definition string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("export automation definition: %w", err)
+	}
+	_, writeErr := io.WriteString(file, definition)
+	closeErr := file.Close()
+	if writeErr != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("export automation definition: %w", writeErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("export automation definition: %w", closeErr)
+	}
+	return nil
+}
+
+func readAutomationDefinitionFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("read automation definition: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("read automation definition: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("automation definition must be a regular file")
+	}
+	const maxBytes = 1 << 20
+	if info.Size() > maxBytes {
+		return "", fmt.Errorf("automation definition exceeds %d bytes", maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read automation definition: %w", err)
+	}
+	if len(data) > maxBytes {
+		return "", fmt.Errorf("automation definition exceeds %d bytes", maxBytes)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return "", fmt.Errorf("automation definition is empty")
+	}
+	return string(data), nil
 }
 
 // --- analytics ---

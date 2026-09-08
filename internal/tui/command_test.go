@@ -993,7 +993,7 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("automations command missing")
 	}
-	wantActions := []string{"list", "show", "open", "run", "pause", "resume", "delete"}
+	wantActions := []string{"list", "show", "open", "edit", "run", "pause", "resume", "delete"}
 	if !reflect.DeepEqual(cmd.actions, wantActions) {
 		t.Fatalf("automations actions = %#v, want %#v", cmd.actions, wantActions)
 	}
@@ -1014,6 +1014,9 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 			t.Errorf("automations help missing deletion safety %q:\n%s", want, help)
 		}
 	}
+	if got := completeSlashInput(`/automations edit "Nightly sweep" --f`, *cmd); got != `/automations edit "Nightly sweep" --file ` {
+		t.Errorf("automation edit option completion = %q", got)
+	}
 
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
@@ -1024,7 +1027,7 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 		t.Fatalf("read README.md: %v", err)
 	}
 	readmeText := string(readme)
-	row := "| `/automations` | `automation` | `list`, `show`, `open`, `run`, `pause`, `resume`, `delete` |"
+	row := "| `/automations` | `automation` | `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, `delete` |"
 	if !strings.Contains(readmeText, row) {
 		t.Fatalf("README automation command row is missing or out of sync:\n%s", row)
 	}

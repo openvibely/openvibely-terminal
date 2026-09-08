@@ -2211,6 +2211,7 @@ func sanitizeAutomationDetailForTerminal(detail client.AutomationDetail) client.
 			n := &nodes[i]
 			n.ID, n.NodeKey, n.Name = sanitize(n.ID), sanitize(n.NodeKey), sanitize(n.Name)
 			n.NodeType, n.Role, n.DisplayState = sanitize(n.NodeType), sanitize(n.Role), sanitize(n.DisplayState)
+			n.ConfigSummary = sanitize(n.ConfigSummary)
 		}
 	}
 
@@ -2342,6 +2343,11 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		sort.SliceStable(resources, func(i, j int) bool {
 			return automationDetailResourceSortKey(resources[i]) < automationDetailResourceSortKey(resources[j])
 		})
+		omitted := 0
+		if len(resources) > 100 {
+			omitted = len(resources) - 100
+			resources = resources[:100]
+		}
 		rows := [][]string{{"NODE", "TYPE", "RESOURCE", "RELATION", "STATUS"}}
 		for _, resource := range resources {
 			rows = append(rows, []string{
@@ -2354,6 +2360,9 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		}
 		b.WriteString(indentAutomationDetailTable(table(rows)))
 		b.WriteByte('\n')
+		if omitted > 0 {
+			fmt.Fprintf(&b, "  … %d more resources omitted\n", omitted)
+		}
 	}
 
 	b.WriteString("\n" + sectionStyle.Render("External state") + "\n")
@@ -2381,10 +2390,18 @@ func renderAutomationDetail(detail client.AutomationDetail) string {
 		}
 		warnings := append([]string(nil), detail.Warnings...)
 		sort.Strings(warnings)
+		omitted := 0
+		if len(warnings) > 20 {
+			omitted = len(warnings) - 20
+			warnings = warnings[:20]
+		}
 		for _, warning := range warnings {
 			if strings.TrimSpace(warning) != "" {
 				b.WriteString(dimStyle.Render("  "+warning) + "\n")
 			}
+		}
+		if omitted > 0 {
+			fmt.Fprintf(&b, "  … %d more notes omitted\n", omitted)
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -2420,7 +2437,12 @@ func renderAutomationDetailNodeTable(b *strings.Builder, detail client.Automatio
 	sort.SliceStable(nodes, func(i, j int) bool {
 		return automationDetailNodeSortKey(nodes[i]) < automationDetailNodeSortKey(nodes[j])
 	})
-	rows := [][]string{{"NODE", "STATE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
+	omitted := 0
+	if len(nodes) > 100 {
+		omitted = len(nodes) - 100
+		nodes = nodes[:100]
+	}
+	rows := [][]string{{"NODE", "TYPE", "ROLE", "CONFIG", "STATE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
 	legacyNodeCounts := detail.NodeCountsAvailable && len(detail.UnmatchedNodeDetails) == 0 && !automationDetailHasNodeCountAvailability(detail)
 	for _, node := range nodes {
 		state := formatAutomationNodeState(firstNonEmpty(node.DisplayState, "not reported"))
@@ -2432,10 +2454,19 @@ func renderAutomationDetailNodeTable(b *strings.Builder, detail client.Automatio
 			automationDetailTableCount(counts.Failed, counts.FailedAvailable || legacyNodeCounts),
 			automationDetailTableCount(counts.CompletedRecently, counts.CompletedRecentlyAvailable || legacyNodeCounts),
 		}
-		rows = append(rows, append([]string{firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"), state}, countCells...))
+		rows = append(rows, append([]string{
+			firstNonEmpty(node.Name, node.NodeKey, node.ID, "—"),
+			firstNonEmpty(node.NodeType, "—"),
+			firstNonEmpty(node.Role, "—"),
+			firstNonEmpty(node.ConfigSummary, "—"),
+			state,
+		}, countCells...))
 	}
 	b.WriteString(indentAutomationDetailTable(table(rows)))
 	b.WriteByte('\n')
+	if omitted > 0 {
+		fmt.Fprintf(b, "    … %d more nodes omitted\n", omitted)
+	}
 }
 
 func renderAutomationDetailUnmatchedNodeDetails(b *strings.Builder, detail client.AutomationDetail) {
@@ -2448,6 +2479,11 @@ func renderAutomationDetailUnmatchedNodeDetails(b *strings.Builder, detail clien
 	sort.SliceStable(details, func(i, j int) bool {
 		return automationDetailNodeSortKey(details[i]) < automationDetailNodeSortKey(details[j])
 	})
+	omitted := 0
+	if len(details) > 100 {
+		omitted = len(details) - 100
+		details = details[:100]
+	}
 	detailRows := [][]string{{"NODE", "KEY", "ROLE", "TYPE", "RUN", "WAIT", "BLOCK", "FAIL", "RECENT"}}
 	for _, node := range details {
 		counts := node.Counts
@@ -2465,6 +2501,9 @@ func renderAutomationDetailUnmatchedNodeDetails(b *strings.Builder, detail clien
 	}
 	b.WriteString(indentAutomationDetailTable(table(detailRows)))
 	b.WriteByte('\n')
+	if omitted > 0 {
+		fmt.Fprintf(b, "    … %d more node details omitted\n", omitted)
+	}
 }
 
 func renderAutomationDetailEdges(b *strings.Builder, detail client.AutomationDetail) {
@@ -2508,6 +2547,11 @@ func renderAutomationDetailEdgeRows(b *strings.Builder, edges []client.Automatio
 	sort.SliceStable(edges, func(i, j int) bool {
 		return automationDetailEdgeSortKey(edges[i]) < automationDetailEdgeSortKey(edges[j])
 	})
+	omitted := 0
+	if len(edges) > 100 {
+		omitted = len(edges) - 100
+		edges = edges[:100]
+	}
 	rows := [][]string{{"FROM", "TO", "LABEL", "TRANSITIONS", "RECENT"}}
 	legacyEdgeCounts := legacyCountsAvailable && !automationEdgesHaveCountAvailability(edges)
 	for _, edge := range edges {
@@ -2523,6 +2567,9 @@ func renderAutomationDetailEdgeRows(b *strings.Builder, edges []client.Automatio
 	}
 	b.WriteString(indentAutomationDetailTable(table(rows)))
 	b.WriteByte('\n')
+	if omitted > 0 {
+		fmt.Fprintf(b, "    … %d more edges omitted\n", omitted)
+	}
 }
 
 func automationDetailField(b *strings.Builder, label, value string) {

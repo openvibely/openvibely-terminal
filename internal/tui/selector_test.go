@@ -167,6 +167,7 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		// automations
 		{"automations_show", "/automations show", "automations show"},
 		{"automations_open", "/automations open", "automations open"},
+		{"automations_edit", "/automations edit", "automations edit"},
 		{"automations_run", "/automations run", "automations run"},
 		{"automations_pause", "/automations pause", "automations pause"},
 		{"automations_resume", "/automations resume", "automations resume"},
@@ -482,6 +483,21 @@ func TestWebhookShowSelectorDispatchesResolvedItemWithoutSecondList(t *testing.T
 	}
 	if !rec.sawQuery("GET /channels/webhooks/w1?project_id=p1") {
 		t.Fatalf("selector detail request lost project scope:\n%s", rec.all())
+	}
+}
+
+func TestAutomationEditSelectorStartsWithSafeExport(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{"/automations": selAutomationsHTML})
+	m = runLine(t, m, "/automations edit")
+	if !m.selectorActive {
+		t.Fatalf("expected automation selector:\n%s", transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if got := m.input.Value(); got != "/automations edit au-1 --export " {
+		t.Fatalf("edit selector prefill = %q", got)
+	}
+	if rec.count(http.MethodGet, "/automations") != 1 || strings.Contains(rec.all(), "/builder") {
+		t.Fatalf("selector must not load or mutate a definition: %s", rec.all())
 	}
 }
 

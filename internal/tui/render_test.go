@@ -2587,6 +2587,30 @@ func TestRenderScheduleInspectionIsTerminalSafe(t *testing.T) {
 }
 
 // Empty-state messages must include actionable slash-command hints (VISION.md "Friendly By Default").
+func TestRenderAutomationDetailBoundsLargeTopology(t *testing.T) {
+	nodes := make([]client.AutomationLiveNode, 101)
+	edges := make([]client.AutomationLiveEdge, 101)
+	for i := range nodes {
+		nodes[i].ID = fmt.Sprintf("node-%03d", i)
+		edges[i].ID = fmt.Sprintf("edge-%03d", i)
+		edges[i].SourceNodeID = nodes[i].ID
+		edges[i].TargetNodeID = nodes[(i+1)%len(nodes)].ID
+	}
+	out := stripANSI(renderAutomationDetail(client.AutomationDetail{
+		Automation:     client.AutomationMetadata{ID: "au-large", Name: "Large"},
+		GraphAvailable: true, NodesAvailable: true, EdgesAvailable: true,
+		Nodes: nodes, Edges: edges,
+	}))
+	for _, want := range []string{"1 more nodes omitted", "1 more edges omitted"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "node-100") || strings.Contains(out, "edge-100") {
+		t.Fatalf("output exceeded topology bound:\n%s", out)
+	}
+}
+
 func TestRenderAutomationDetailShowsGraphRuntimeResourcesAndExternalState(t *testing.T) {
 	detail := client.AutomationDetail{
 		Automation: client.AutomationMetadata{

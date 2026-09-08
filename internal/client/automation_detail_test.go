@@ -1397,6 +1397,27 @@ func TestParseAutomationDetailCanonicalizesDuplicateResourcesDeterministically(t
 	}
 }
 
+func TestParseAutomationDetailBuildsBoundedSecretSafeConfigSummaries(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-config" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-key="task"><strong>Task</strong></g></div>
+		<section data-automation-live-node-detail="task" data-automation-live-node-id="n1"><h3>Task</h3><p>task · implementation</p><span class="badge">agent task</span><dl>
+			<div><dt>Model</dt><dd>Project default</dd></div><div><dt>Task prompt</dt><dd>TOP-SECRET-PROMPT</dd></div><div><dt>API token</dt><dd>TOP-SECRET-TOKEN</dd></div>
+		</dl></section></div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 {
+		t.Fatalf("nodes = %+v", detail.Nodes)
+	}
+	summary := detail.Nodes[0].ConfigSummary
+	if !strings.Contains(summary, "Model=Project default") || !strings.Contains(summary, "Task prompt=configured") {
+		t.Fatalf("summary = %q", summary)
+	}
+	if strings.Contains(summary, "TOP-SECRET") || strings.Contains(strings.ToLower(summary), "api token") {
+		t.Fatalf("secret leaked in summary: %q", summary)
+	}
+}
+
 func parseAutomationDetailFromString(source string) (AutomationDetail, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {

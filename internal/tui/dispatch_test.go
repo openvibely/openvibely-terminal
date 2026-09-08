@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -5087,6 +5089,111 @@ func TestAutomationsCommandBackendFailures(t *testing.T) {
 				t.Errorf("expected a backend error for %s:\n%s", tc.action, out)
 			}
 		})
+	}
+}
+
+func TestAutomationEditExportPreservesCompleteDefinitionWithoutMutation(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\ndescription: preserve me\n"
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/automations":              `<div>` + automationCardHTML("au-1", "Original", "active") + `</div>`,
+		"/automations/au-1/builder": builder,
+	})
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	m = runLine(t, m, "/automations edit Original --export "+path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != current {
+		t.Fatalf("export = %q", data)
+	}
+	if rec.count("POST", "/automations/au-1/builder") != 0 {
+		t.Fatalf("export mutated backend: %s", rec.all())
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("export mode = %v, err=%v", info.Mode().Perm(), err)
+	}
+}
+
+func TestAutomationEditRoundTripsThroughPreviewBeforeSave(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\nnodes: []\nedges: []\n"
+	const edited = "schema_version: 1\nname: Edited\nnodes: []\nedges: []\n"
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/automations":              `<div>` + automationCardHTML("au-1", "Original", "active") + `</div>`,
+		"/automations/au-1/builder": builder,
+	})
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = runLine(t, m, "/automations edit Original --file "+path)
+	if got := rec.count("GET", "/automations"); got != 1 {
+		t.Fatalf("list requests = %d", got)
+	}
+	if got := rec.count("GET", "/automations/au-1/builder"); got != 1 {
+		t.Fatalf("builder GETs = %d", got)
+	}
+	if got := rec.count("POST", "/automations/au-1/builder"); got != 2 {
+		t.Fatalf("builder POSTs = %d, want preview then save\n%s", got, rec.all())
+	}
+	if !strings.Contains(transcript(m), "updated automation Original") {
+		t.Fatalf("output = %s", transcript(m))
+	}
+	if strings.Contains(transcript(m), edited) {
+		t.Fatal("edited definition leaked into terminal output")
+	}
+}
+
+func TestAutomationEditUnchangedDefinitionDoesNotMutate(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\n"
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/automations":              `<div>` + automationCardHTML("au-1", "Original", "active") + `</div>`,
+		"/automations/au-1/builder": builder,
+	})
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	if err := os.WriteFile(path, []byte(current), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = runLine(t, m, "/automations edit Original --file "+path)
+	if rec.count("POST", "/automations/au-1/builder") != 0 {
+		t.Fatalf("unchanged edit mutated backend: %s", rec.all())
+	}
+	if !strings.Contains(transcript(m), "definition unchanged") {
+		t.Fatalf("output = %s", transcript(m))
+	}
+}
+
+func TestAutomationEditInvalidFileFailsBeforeRequests(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{"/automations": `<div></div>`})
+	m = runLine(t, m, "/automations edit Original --file "+filepath.Join(t.TempDir(), "missing.yaml"))
+	if strings.Contains(rec.all(), "/automations") {
+		t.Fatalf("invalid local input made requests: %s", rec.all())
+	}
+	if !strings.Contains(transcript(m), "read automation definition") {
+		t.Fatalf("output = %s", transcript(m))
+	}
+}
+
+func TestAutomationEditValidationFailureDoesNotSave(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\n"
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><div data-automation-validation-summary><ul><li>trigger is required</li></ul></div><textarea name="automation_yaml">` + current + `</textarea></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/automations":              `<div>` + automationCardHTML("au-1", "Original", "active") + `</div>`,
+		"/automations/au-1/builder": builder,
+	})
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	if err := os.WriteFile(path, []byte(current+"description: changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = runLine(t, m, "/automations edit Original --file "+path)
+	if got := rec.count("POST", "/automations/au-1/builder"); got != 1 {
+		t.Fatalf("POSTs = %d, want preview only: %s", got, rec.all())
+	}
+	if !strings.Contains(transcript(m), "trigger is required") || strings.Contains(transcript(m), "updated automation") {
+		t.Fatalf("output = %s", transcript(m))
 	}
 }
 

@@ -155,7 +155,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/reflection` | `history` | `show`, `summary` |
 | `/grades` | | — |
 | `/insights` | `suggestions` | `show`, `analyze` |
-| `/automations` | `automation` | `list`, `show`, `open`, `run`, `pause`, `resume`, `delete` |
+| `/automations` | `automation` | `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, `delete` |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
 | `/projects` | | `list`, `create <name> <path>` |
 | `/project <name>` | | select the active project |
@@ -346,10 +346,15 @@ confirmation behavior.
 ### Automations
 
 `/automations` (also `/automation`) exposes the selected project's recurring
-automation inspection and lifecycle controls. The supported actions are `list`,
-`show`, `open`, `run`, `pause`, `resume`, and `delete`; `open` is an alias
-for `show`. `run-now` remains accepted as a compatibility alias for `run`.
-Automation creation is not exposed by this command and remains handled elsewhere.
+automation inspection, graph editing, and lifecycle controls. The supported actions are
+`list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, and `delete`; `show` is
+the canonical detail action and `open` is a compatibility alias with identical
+selection and output. `run-now` remains accepted as a compatibility alias for `run`.
+`show` renders the saved graph topology, node and transition status/config summaries,
+runtime totals, resources, external state, and explicit unavailable or empty sections.
+`edit` consumes the backend builder's complete YAML definition, previews it through
+the backend validator, and saves only a valid changed definition. Automation creation
+is not exposed by this command and remains handled elsewhere.
 
 In the interactive TUI:
 
@@ -357,6 +362,8 @@ In the interactive TUI:
 /automations list
 /automations show "Nightly sweep"
 /automations open automation-id
+/automations edit "Nightly sweep" --export automation.yaml
+/automations edit "Nightly sweep" --file automation.yaml
 /automations run "Nightly sweep"
 /automations pause "Nightly sweep"
 /automations resume "Nightly sweep"
@@ -370,6 +377,8 @@ command:
 openvibely-tui -project demo automations list
 openvibely-tui -project demo automations show "Nightly sweep"
 openvibely-tui -project demo automations open automation-id
+openvibely-tui -project demo automations edit "Nightly sweep" --export automation.yaml
+openvibely-tui -project demo automations edit "Nightly sweep" --file automation.yaml
 openvibely-tui -project demo automations run "Nightly sweep"
 openvibely-tui -project demo automations pause "Nightly sweep"
 openvibely-tui -project demo automations resume "Nightly sweep"
@@ -379,7 +388,11 @@ openvibely-tui -project demo --force automations delete "Nightly sweep"
 Interactive deletion requires typing `yes` to confirm, or `Esc` to cancel.
 One-shot CLI deletion requires `--force` or its `-f` shorthand; without it the
 command exits without deleting anything. Automation references resolve by ID,
-ID prefix, or name, and all actions use the selected project.
+ID prefix, or name, and all actions use the selected project. Start an edit with
+`--export`; it creates a new owner-only YAML file and never overwrites an existing
+path. Modify that complete definition, then use `--file` to preview backend validation
+and save. Unchanged files, invalid definitions, canceled selectors, and failed previews
+perform no save.
 
 ### Personalities
 

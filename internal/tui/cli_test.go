@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -2452,6 +2454,31 @@ func TestCLIRunsTaskMutation(t *testing.T) {
 	}
 	if !rec.saw("POST", "/tasks/t-1/run") {
 		t.Fatalf("no run call, calls:\n%s", rec.all())
+	}
+}
+
+func TestCLIAutomationEditIsDeterministicAndSecretSafe(t *testing.T) {
+	const current = "schema_version: 1\nname: Original\n"
+	const edited = "schema_version: 1\nname: Edited\ndescription: TOP-SECRET\n"
+	builder := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">` + current + `</textarea></div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":             cliProjects,
+		"/automations":              `<div>` + automationCardHTML("au-1", "Original", "active") + `</div>`,
+		"/automations/au-1/builder": builder,
+	})
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"automations", "edit", "Original", "--file", path}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if rec.count("POST", "/automations/au-1/builder") != 2 {
+		t.Fatalf("requests = %s", rec.all())
+	}
+	if !strings.Contains(out.String(), "updated automation Original") || strings.Contains(out.String(), "TOP-SECRET") {
+		t.Fatalf("output = %s", out.String())
 	}
 }
 

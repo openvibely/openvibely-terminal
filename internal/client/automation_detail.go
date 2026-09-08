@@ -75,17 +75,18 @@ type AutomationVersion struct {
 
 // AutomationNode is the saved graph node shape used by the live node model.
 type AutomationNode struct {
-	ID           string  `json:"id"`
-	ProjectID    string  `json:"project_id"`
-	AutomationID string  `json:"automation_id"`
-	VersionID    string  `json:"version_id"`
-	NodeKey      string  `json:"node_key"`
-	Name         string  `json:"name"`
-	NodeType     string  `json:"node_type"`
-	Role         string  `json:"role"`
-	ConfigJSON   string  `json:"config_json,omitempty"`
-	PositionX    float64 `json:"position_x,omitempty"`
-	PositionY    float64 `json:"position_y,omitempty"`
+	ID            string  `json:"id"`
+	ProjectID     string  `json:"project_id"`
+	AutomationID  string  `json:"automation_id"`
+	VersionID     string  `json:"version_id"`
+	NodeKey       string  `json:"node_key"`
+	Name          string  `json:"name"`
+	NodeType      string  `json:"node_type"`
+	Role          string  `json:"role"`
+	ConfigJSON    string  `json:"-"`
+	ConfigSummary string  `json:"config_summary,omitempty"`
+	PositionX     float64 `json:"position_x,omitempty"`
+	PositionY     float64 `json:"position_y,omitempty"`
 }
 
 // AutomationNodeCounts contains the meaningful runtime counts for one node.
@@ -732,7 +733,52 @@ func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (Au
 			parsed.NodeType = strings.TrimSpace(NodeText(badge))
 		}
 	}
+	parsed.ConfigSummary = automationNodeConfigSummary(section)
 	return parsed, countsPresent
+}
+
+func automationNodeConfigSummary(section *html.Node) string {
+	parts := make([]string, 0, 3)
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if len(parts) >= 3 {
+			return
+		}
+		if n.Type == html.ElementNode && n.Data == "dt" {
+			label := strings.TrimSpace(NodeText(n))
+			lower := strings.ToLower(label)
+			if strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "password") || strings.Contains(lower, "credential") || strings.Contains(lower, "api key") {
+				return
+			}
+			value := ""
+			for sibling := n.NextSibling; sibling != nil; sibling = sibling.NextSibling {
+				if sibling.Type == html.ElementNode && sibling.Data == "dd" {
+					value = strings.TrimSpace(NodeText(sibling))
+					break
+				}
+			}
+			if value == "" {
+				return
+			}
+			switch lower {
+			case "task prompt", "task goal (optional)", "what needs review", "issue instructions", "pull request instructions", "instructions":
+				value = "configured"
+			case "model", "primary agent", "category", "priority", "time", "repeat", "interval", "clear context on start", "notification type", "base branch", "open as draft pr", "display name":
+				if len([]rune(value)) > 40 {
+					value = string([]rune(value)[:39]) + "…"
+				}
+			default:
+				return
+			}
+			parts = append(parts, label+"="+value)
+			return
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(section)
+	return strings.Join(parts, "; ")
 }
 
 func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, parsed AutomationLiveNode) {
@@ -763,6 +809,9 @@ func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, parsed AutomationLiveN
 	}
 	if current.Role == "" {
 		current.Role = parsed.Role
+	}
+	if current.ConfigSummary == "" {
+		current.ConfigSummary = parsed.ConfigSummary
 	}
 	if current.DisplayState == "" {
 		current.DisplayState = parsed.DisplayState
