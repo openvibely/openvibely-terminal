@@ -4863,6 +4863,67 @@ func TestEventsHelpDistinguishesInteractiveAndCLI(t *testing.T) {
 	}
 }
 
+func TestCLIWebhooksTrailingOptionTokensRemainInReference(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown option", args: []string{"webhooks", "show", "w1", "--bogus", "value"}},
+		{name: "malformed known option", args: []string{"webhooks", "test", "w1", "--enabled", "maybe"}},
+		{name: "missing option value", args: []string{"webhooks", "rotate", "w1", "--enabled"}},
+		{name: "surplus option pair", args: []string{"webhooks", "delete", "w1", "--priority", "3"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, true, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "nothing matches") {
+				t.Fatalf("error = %v, want full-reference rejection", err)
+			}
+			for _, call := range []struct{ method, path string }{
+				{"GET", "/channels/webhooks/w1"},
+				{"POST", "/channels/webhooks/w1/test"},
+				{"POST", "/channels/webhooks/w1/rotate-secret"},
+				{"DELETE", "/channels/webhooks/w1"},
+			} {
+				if rec.saw(call.method, call.path) {
+					t.Fatalf("surplus operands dispatched %s %s; calls: %s", call.method, call.path, rec.all())
+				}
+			}
+		})
+	}
+
+	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	for _, action := range []string{"show", "test", "rotate", "delete"} {
+		t.Run("exact option-token name "+action, func(t *testing.T) {
+			bodies := map[string]string{
+				"/api/projects":                          cliProjects,
+				"/channels":                              cards,
+				"/channels/webhooks/w-opt":               detail,
+				"/channels/webhooks/w-opt/test":          `{"task_id":"task-option-name"}`,
+				"/channels/webhooks/w-opt/rotate-secret": `{"secret":"replacement"}`,
+			}
+			c, rec := cliServer(t, bodies)
+			err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"webhooks", action, "Hook", "--enabled", "maybe"}, true, false)
+			if err != nil {
+				t.Fatalf("exact option-token name failed: %v", err)
+			}
+			wantMethod, wantPath := "GET", "/channels/webhooks/w-opt"
+			switch action {
+			case "test":
+				wantMethod, wantPath = "POST", "/channels/webhooks/w-opt/test"
+			case "rotate":
+				wantMethod, wantPath = "POST", "/channels/webhooks/w-opt/rotate-secret"
+			case "delete":
+				wantMethod, wantPath = "DELETE", "/channels/webhooks/w-opt"
+			}
+			if !rec.saw(wantMethod, wantPath) {
+				t.Fatalf("full exact name did not dispatch %s %s; calls: %s", wantMethod, wantPath, rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 	t.Run("list JSON is secret-free", func(t *testing.T) {
 		c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})

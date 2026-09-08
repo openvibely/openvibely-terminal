@@ -7094,6 +7094,69 @@ func TestWebhooksDispatchListShowEditAndTest(t *testing.T) {
 	}
 }
 
+func TestWebhooksOptionLikeTrailingOperandsAreNotDiscarded(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		action string
+		tail   string
+	}{
+		{name: "unknown option", action: "show", tail: "--bogus value"},
+		{name: "malformed known option", action: "test", tail: "--enabled maybe"},
+		{name: "missing option value", action: "rotate", tail: "--enabled"},
+		{name: "surplus option pair", action: "delete", tail: "--priority 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": webhookCardsHTML})
+			m = runLine(t, m, "/webhooks "+tc.action+" w1 "+tc.tail)
+			if m.pendingConfirmation != nil {
+				t.Fatalf("surplus operands opened confirmation: %q", m.pendingConfirmation.message)
+			}
+			if out := strings.ToLower(transcript(m)); !strings.Contains(out, "nothing matches") {
+				t.Fatalf("surplus operands were not rejected as part of the reference:\n%s", transcript(m))
+			}
+			for _, call := range []struct{ method, path string }{
+				{"GET", "/channels/webhooks/w1"},
+				{"POST", "/channels/webhooks/w1/test"},
+				{"POST", "/channels/webhooks/w1/rotate-secret"},
+				{"DELETE", "/channels/webhooks/w1"},
+			} {
+				if rec.saw(call.method, call.path) {
+					t.Fatalf("surplus operands dispatched %s %s; calls:\n%s", call.method, call.path, rec.all())
+				}
+			}
+		})
+	}
+}
+
+func TestWebhooksOptionLikeTokensRemainPartOfExactName(t *testing.T) {
+	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	for _, action := range []string{"show", "test", "rotate", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/channels":                          cards,
+				"GET /channels/webhooks/w-opt":       detail,
+				"POST /channels/webhooks/w-opt/test": `{"task_id":"task-option-name"}`,
+			})
+			m = runLine(t, m, "/webhooks "+action+" Hook --enabled maybe")
+			switch action {
+			case "show":
+				if !rec.saw("GET", "/channels/webhooks/w-opt") || rec.saw("GET", "/channels/webhooks/w-short") {
+					t.Fatalf("show did not resolve the full exact name; calls:\n%s", rec.all())
+				}
+			case "test":
+				if !rec.saw("POST", "/channels/webhooks/w-opt/test") || rec.saw("POST", "/channels/webhooks/w-short/test") {
+					t.Fatalf("test did not resolve the full exact name; calls:\n%s", rec.all())
+				}
+			case "rotate", "delete":
+				if m.pendingConfirmation == nil || !strings.Contains(m.pendingConfirmation.message, `"Hook --enabled maybe"`) {
+					t.Fatalf("%s did not resolve the full canonical name: %#v", action, m.pendingConfirmation)
+				}
+			}
+		})
+	}
+}
+
 func TestWebhooksAmbiguousAndForeignRefsDoNotMutate(t *testing.T) {
 	for _, line := range []string{"/webhooks test pager", "/webhooks test foreign-id"} {
 		t.Run(line, func(t *testing.T) {

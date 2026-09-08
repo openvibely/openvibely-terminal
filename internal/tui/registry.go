@@ -2860,9 +2860,13 @@ func webhooksCommand() command {
 					return renderWebhooks(webhooks), nil
 				})
 			}
-			boundary := webhookOptionBoundary(rest)
+			boundary := len(rest)
+			options := map[string]string(nil)
+			if action == "create" || action == "edit" {
+				boundary = webhookOptionBoundary(rest)
+				options, _ = parseWebhookOptions(rest[boundary:])
+			}
 			ref := strings.TrimSpace(strings.Join(rest[:boundary], " "))
-			options, _ := parseWebhookOptions(rest[boundary:])
 			if ref == "" && action != "create" {
 				return webhookSelector(m, action, action == "edit")
 			}
