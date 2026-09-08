@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -198,6 +199,88 @@ func TestProjectsEditLiteralPipeCollisionDoesNotRebind(t *testing.T) {
 				t.Fatalf("PUT IDs = %q, want target-id", got)
 			}
 		})
+	}
+}
+
+func TestProjectsEditLiteralPipeNameCollisionsUseCanonicalRanking(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		projects    []client.Project
+		projectJSON string
+		wantErr     string
+		wantDetail  []string
+		wantPUT     []string
+	}{
+		{
+			name: "equal exact names are ambiguous",
+			projects: []client.Project{
+				{ID: "short-id", Name: "Target"},
+				{ID: "long-id", Name: "Target --description"},
+			},
+			projectJSON: `{"projects":[{"id":"short-id","name":"Target"},{"id":"long-id","name":"Target --description"}]}`,
+			wantErr:     "ambiguous across option boundaries",
+		},
+		{
+			name: "exact shorter name beats longer prefix",
+			projects: []client.Project{
+				{ID: "short-id", Name: "Target"},
+				{ID: "long-id", Name: "Target --description Extended"},
+			},
+			projectJSON: `{"projects":[{"id":"short-id","name":"Target"},{"id":"long-id","name":"Target --description Extended"}]}`,
+			wantDetail:  []string{"short-id", "short-id"},
+			wantPUT:     []string{"short-id"},
+		},
+	} {
+		for _, headless := range []bool{false, true} {
+			mode := "interactive"
+			if headless {
+				mode = "headless"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				var detailIDs, putIDs []string
+				handler := func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.URL.Path == "/api/projects":
+						_, _ = io.WriteString(w, tc.projectJSON)
+					case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/edit"):
+						id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/projects/"), "/edit")
+						detailIDs = append(detailIDs, id)
+						fixture := strings.ReplaceAll(projectEditFixture, "/projects/p1", "/projects/"+id)
+						_, _ = io.WriteString(w, fixture)
+					case r.Method == http.MethodPut:
+						putIDs = append(putIDs, strings.TrimPrefix(r.URL.Path, "/projects/"))
+						w.Header().Set("HX-Refresh", "true")
+					default:
+						http.NotFound(w, r)
+					}
+				}
+
+				var gotErr string
+				if headless {
+					srv := httptest.NewServer(http.HandlerFunc(handler))
+					defer srv.Close()
+					c, _ := client.New(srv.URL)
+					if err := RunCLI(c, io.Discard, "", []string{"projects", "edit", "Target", "--description", "|", "--name", "Changed"}, false, false); err != nil {
+						gotErr = err.Error()
+					}
+				} else {
+					m := newModelFromHandler(t, handler)
+					m.projects, m.projectsLoaded = tc.projects, true
+					m = runLine(t, m, `/projects edit Target --description | --name Changed`)
+					gotErr = transcript(m)
+				}
+				if tc.wantErr != "" {
+					if !strings.Contains(gotErr, tc.wantErr) {
+						t.Fatalf("error/output = %q, want %q", gotErr, tc.wantErr)
+					}
+				} else if gotErr != "" && strings.Contains(gotErr, "error:") {
+					t.Fatalf("unexpected failure: %q", gotErr)
+				}
+				if !slices.Equal(detailIDs, tc.wantDetail) || !slices.Equal(putIDs, tc.wantPUT) {
+					t.Fatalf("detail IDs=%v PUT IDs=%v, want %v/%v", detailIDs, putIDs, tc.wantDetail, tc.wantPUT)
+				}
+			})
+		}
 	}
 }
 

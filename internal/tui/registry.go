@@ -5278,12 +5278,16 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 		return zeroProject, "", zeroEdits, nil
 	}
 
-	// A standalone | explicitly separates the complete project reference from
-	// trailing edit options only when the prefix resolves to a project. Otherwise
-	// it may be a literal option value and normal boundary evaluation must decide.
-	// Accept -- as well for direct dispatch callers, though the executable's global
-	// flag parser consumes it before command dispatch.
-	var separatorMatchErr error
+	var candidates []projectEditParseCandidate
+	var strongestMatchErr error
+	var strongestMatchErrTier = 100
+	var malformedErr error
+	malformedBoundary := -1
+
+	// A standalone | or -- can separate the complete project reference from
+	// trailing edit options, but that interpretation is only one candidate. The
+	// same token may be a literal option value, so separator and ordinary option
+	// boundaries must compete under identical canonical reference ranking.
 	for i := 1; i < len(args); i++ {
 		if args[i] != "|" && args[i] != "--" {
 			continue
@@ -5291,38 +5295,24 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 		ref := strings.TrimSpace(strings.Join(args[:i], " "))
 		project, matchErr := matchProject(projects, ref)
 		edits, parseErr := parseProjectEditOptions(args[i+1:])
-		if matchErr == nil {
-			if parseErr != nil {
-				return zeroProject, ref, zeroEdits, parseErr
-			}
-			// A pipe can also be a literal option value. When the complete token
-			// sequence before and after it forms a valid edit against an exact
-			// project ID, canonical ID precedence wins over interpreting the pipe
-			// as a separator for a longer name. This prevents a setting value from
-			// silently rebinding the mutation target.
-			for boundary := 1; boundary < i; boundary++ {
-				if !strings.HasPrefix(args[boundary], "--") {
-					continue
-				}
-				literalRef := strings.TrimSpace(strings.Join(args[:boundary], " "))
-				literalProject, literalMatchErr := matchProject(projects, literalRef)
-				literalEdits, literalParseErr := parseProjectEditOptions(args[boundary:])
-				if literalMatchErr == nil && literalParseErr == nil && projectReferenceTier(literalProject, literalRef) == 0 {
-					return literalProject, literalRef, literalEdits, nil
-				}
-			}
-			return project, ref, edits, nil
+		if matchErr == nil && parseErr == nil {
+			candidates = append(candidates, projectEditParseCandidate{
+				project: project, ref: ref, edits: edits,
+				tier: projectReferenceTier(project, ref), boundary: i,
+			})
+			continue
 		}
-		if parseErr == nil && separatorMatchErr == nil {
-			separatorMatchErr = matchErr
+		if matchErr == nil && parseErr != nil && i > malformedBoundary {
+			malformedBoundary, malformedErr = i, parseErr
+		}
+		if parseErr == nil && matchErr != nil {
+			tier := projectReferenceErrorTier(projects, ref)
+			if strongestMatchErr == nil || tier < strongestMatchErrTier {
+				strongestMatchErrTier, strongestMatchErr = tier, matchErr
+			}
 		}
 	}
 
-	var candidates []projectEditParseCandidate
-	var strongestMatchErr error
-	var strongestMatchErrTier = 100
-	var malformedErr error
-	malformedBoundary := -1
 	for boundary := 1; boundary < len(args); boundary++ {
 		if !strings.HasPrefix(args[boundary], "--") {
 			continue
@@ -5377,9 +5367,6 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 			}
 		}
 		return chosen.project, chosen.ref, chosen.edits, nil
-	}
-	if separatorMatchErr != nil {
-		return zeroProject, "", zeroEdits, separatorMatchErr
 	}
 	if malformedErr != nil {
 		return zeroProject, "", zeroEdits, malformedErr
