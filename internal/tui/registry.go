@@ -1724,6 +1724,22 @@ func alertDeleteOutput(status string, alerts []client.Alert) (string, error) {
 	return status + "\n\n" + renderAlerts(alerts, ""), nil
 }
 
+func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error) {
+	alert, err := matchRef(alerts, ref,
+		func(a client.Alert) string { return a.ID },
+		func(a client.Alert) string { return a.Title })
+	if err == nil || !isMatchRefNotFound(err) {
+		return alert, err
+	}
+
+	// Searchable card text is useful when neither an ID nor a title matches, but
+	// it must never weaken a title match. Retain the historical title-plus-text
+	// fallback value only after the title matcher exhausted every tier.
+	return matchRef(alerts, ref,
+		func(client.Alert) string { return "" },
+		func(a client.Alert) string { return a.Title + " " + a.Text })
+}
+
 func alertsCommand() command {
 	actions := []string{"list", "show", "read", "approve", "reject", "dismiss", "delete", "read-all", "clear"}
 	return command{
@@ -1902,9 +1918,7 @@ func alertsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					a, err := matchRef(alerts, ref,
-						func(a client.Alert) string { return a.ID },
-						func(a client.Alert) string { return a.Title + " " + a.Text })
+					a, err := matchAlertActionRef(alerts, ref)
 					if err != nil {
 						return "", err
 					}

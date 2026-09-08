@@ -1531,6 +1531,111 @@ func TestAlertsShowLoadsFullDetailWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestAlertActionsExactTitleBeatsLongerTitlePrefix(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-deploy" data-alert-scroll-anchor="a-deploy" data-search-text="deploy exact body"><p class="font-semibold">Deploy</p></div>
+		<div data-alert-id="a-deploy-service" data-alert-scroll-anchor="a-deploy-service" data-search-text="deploy service body"><p class="font-semibold">Deploy service</p></div>`
+
+	actions := []struct {
+		action string
+		method string
+		path   string
+	}{
+		{action: "read", method: http.MethodPost, path: "/alerts/a-deploy/read"},
+		{action: "approve", method: http.MethodPost, path: "/alerts/a-deploy/approve"},
+		{action: "reject", method: http.MethodPost, path: "/alerts/a-deploy/reject"},
+		{action: "dismiss", method: http.MethodPost, path: "/alerts/a-deploy/dismiss"},
+		{action: "delete", method: http.MethodDelete, path: "/alerts/a-deploy"},
+	}
+	for _, tc := range actions {
+		t.Run(tc.action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/alerts":                 alertsHTML,
+				"DELETE /alerts/a-deploy": alertsHTML,
+			})
+
+			if tc.action == "delete" {
+				m = confirmDestructive(t, m, "/alerts delete dEpLoY")
+			} else {
+				m = runLine(t, m, "/alerts "+tc.action+" dEpLoY")
+			}
+
+			if !rec.saw(tc.method, tc.path) {
+				t.Fatalf("%s did not act on the exact title:\n%s\n%s", tc.action, rec.all(), transcript(m))
+			}
+			if rec.saw(http.MethodPost, "/alerts/a-deploy-service/"+tc.action) || rec.saw(http.MethodDelete, "/alerts/a-deploy-service") {
+				t.Fatalf("%s acted on the longer prefix candidate:\n%s", tc.action, rec.all())
+			}
+		})
+	}
+}
+
+func TestAlertActionsUseUniqueSearchTextFallback(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-deploy" data-alert-scroll-anchor="a-deploy" data-search-text="release plan unique"><p class="font-semibold">Deploy</p></div>
+		<div data-alert-id="a-deploy-service" data-alert-scroll-anchor="a-deploy-service" data-search-text="service rollout"><p class="font-semibold">Deploy service</p></div>`
+
+	for _, action := range []string{"read", "approve", "reject", "dismiss", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/alerts":                 alertsHTML,
+				"DELETE /alerts/a-deploy": alertsHTML,
+			})
+			if action == "delete" {
+				m = confirmDestructive(t, m, "/alerts delete ReLeAsE PlAn UnIqUe")
+			} else {
+				m = runLine(t, m, "/alerts "+action+" ReLeAsE PlAn UnIqUe")
+			}
+
+			method, path := http.MethodPost, "/alerts/a-deploy/"+action
+			if action == "delete" {
+				method, path = http.MethodDelete, "/alerts/a-deploy"
+			}
+			if !rec.saw(method, path) {
+				t.Fatalf("%s did not use the unique search-text fallback:\n%s\n%s", action, rec.all(), transcript(m))
+			}
+		})
+	}
+}
+
+func TestAlertActionResolutionFailuresNeverMutate(t *testing.T) {
+	const duplicateTitles = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one" data-search-text="first"><p class="font-semibold">Duplicate</p></div>
+		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two" data-search-text="second"><p class="font-semibold">duplicate</p></div>`
+	const ambiguousSearchText = `<div data-alert-id="a-deploy" data-alert-scroll-anchor="a-deploy" data-search-text="shared release note"><p class="font-semibold">Deploy</p></div>
+		<div data-alert-id="a-deploy-service" data-alert-scroll-anchor="a-deploy-service" data-search-text="shared release note"><p class="font-semibold">Deploy service</p></div>`
+
+	failures := []struct {
+		name   string
+		alerts string
+		ref    string
+		want   string
+	}{
+		{name: "missing", alerts: duplicateTitles, ref: "missing", want: "nothing matches"},
+		{name: "duplicate title", alerts: duplicateTitles, ref: "duplicate", want: "ambiguous"},
+		{name: "ambiguous search text", alerts: ambiguousSearchText, ref: "shared release note", want: "ambiguous"},
+	}
+	for _, failure := range failures {
+		for _, action := range []string{"read", "approve", "reject", "dismiss", "delete"} {
+			t.Run(failure.name+"/"+action, func(t *testing.T) {
+				m, rec := dispatchModel(t, map[string]string{"/alerts": failure.alerts})
+				line := "/alerts " + action + " " + failure.ref
+				if action == "delete" {
+					m = confirmDestructive(t, m, line)
+				} else {
+					m = runLine(t, m, line)
+				}
+
+				for _, call := range strings.Split(rec.all(), "\n") {
+					if strings.HasPrefix(call, "POST /alerts/") || strings.HasPrefix(call, "DELETE /alerts/") {
+						t.Fatalf("%s %q made a mutation request: %s", action, failure.ref, call)
+					}
+				}
+				if out := strings.ToLower(stripANSI(transcript(m))); !strings.Contains(out, failure.want) {
+					t.Fatalf("%s %q did not report %q:\n%s", action, failure.ref, failure.want, out)
+				}
+			})
+		}
+	}
+}
+
 func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
 	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build failed"><p class="font-semibold">Build failed</p></div>
 		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="duplicate one"><p class="font-semibold">Duplicate</p></div>
@@ -1579,8 +1684,7 @@ func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
 		t.Fatalf("missing or ambiguous references deleted an alert: deletes=%d", deletes)
 	}
 	plain := stripANSI(transcript(m))
-	if !strings.Contains(plain, `nothing matches "missing"`) || !strings.Contains(plain, `"Duplicate" is ambiguous:`) ||
-		!strings.Contains(plain, "Duplicate duplicate one") || !strings.Contains(plain, "Duplicate duplicate two") {
+	if !strings.Contains(plain, `nothing matches "missing"`) || !strings.Contains(plain, `"Duplicate" is ambiguous:`) {
 		t.Fatalf("resolution errors not reported:\n%s", plain)
 	}
 

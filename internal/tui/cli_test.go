@@ -3685,6 +3685,43 @@ func TestCLILaterPageAlertCommands(t *testing.T) {
 	}
 }
 
+func TestCLIAlertActionsExactTitleBeatsLongerTitlePrefix(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-deploy" data-alert-scroll-anchor="a-deploy" data-search-text="deploy exact body"><p class="font-semibold">Deploy</p></div>
+		<div data-alert-id="a-deploy-service" data-alert-scroll-anchor="a-deploy-service" data-search-text="deploy service body"><p class="font-semibold">Deploy service</p></div>`
+
+	actions := []struct {
+		action string
+		method string
+		path   string
+		force  bool
+	}{
+		{action: "read", method: http.MethodPost, path: "/alerts/a-deploy/read"},
+		{action: "approve", method: http.MethodPost, path: "/alerts/a-deploy/approve"},
+		{action: "reject", method: http.MethodPost, path: "/alerts/a-deploy/reject"},
+		{action: "dismiss", method: http.MethodPost, path: "/alerts/a-deploy/dismiss"},
+		{action: "delete", method: http.MethodDelete, path: "/alerts/a-deploy", force: true},
+	}
+	for _, tc := range actions {
+		t.Run(tc.action, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":    cliProjects,
+				"/alerts":          alertsHTML,
+				"/alerts/a-deploy": alertsHTML,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"alerts", tc.action, "dEpLoY"}, tc.force, false); err != nil {
+				t.Fatalf("RunCLI(%s): %v\n%s", tc.action, err, out.String())
+			}
+			if !rec.saw(tc.method, tc.path) {
+				t.Fatalf("%s did not act on the exact title:\n%s", tc.action, rec.all())
+			}
+			if rec.saw(http.MethodPost, "/alerts/a-deploy-service/"+tc.action) || rec.saw(http.MethodDelete, "/alerts/a-deploy-service") {
+				t.Fatalf("%s acted on the longer prefix candidate:\n%s", tc.action, rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIJSONAlertsDeleteUsesForceAndRefreshedResponse(t *testing.T) {
 	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build"><p class="font-semibold">Build failed</p></div>`
 	const refreshedAlerts = `<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="remaining"><p class="font-semibold">Remaining</p></div>`
@@ -3739,19 +3776,23 @@ func TestCLIJSONAlertsDeleteUsesForceAndRefreshedResponse(t *testing.T) {
 func TestCLIAlertsDeleteResolutionAndBackendErrors(t *testing.T) {
 	const duplicateAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="first"><p class="font-semibold">Duplicate</p></div>
 		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="second"><p class="font-semibold">Duplicate</p></div>`
+	const ambiguousSearchText = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="shared release note"><p class="font-semibold">Deploy</p></div>
+		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="shared release note"><p class="font-semibold">Deploy service</p></div>`
 
 	for _, tc := range []struct {
-		name string
-		ref  string
-		want string
+		name   string
+		ref    string
+		alerts string
+		want   string
 	}{
-		{name: "missing", ref: "missing", want: `nothing matches "missing"`},
-		{name: "ambiguous", ref: "Duplicate", want: `"Duplicate" is ambiguous:`},
+		{name: "missing", ref: "missing", alerts: duplicateAlerts, want: `nothing matches "missing"`},
+		{name: "duplicate title", ref: "Duplicate", alerts: duplicateAlerts, want: `"Duplicate" is ambiguous:`},
+		{name: "ambiguous search text", ref: "shared release note", alerts: ambiguousSearchText, want: `"shared release note" is ambiguous:`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, rec := cliServer(t, map[string]string{
 				"/api/projects": cliProjects,
-				"/alerts":       duplicateAlerts,
+				"/alerts":       tc.alerts,
 			})
 			var out bytes.Buffer
 			err := RunCLI(c, &out, "demo", []string{"alerts", "delete", tc.ref}, true, false)

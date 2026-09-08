@@ -650,6 +650,21 @@ func (m Model) selectedProject() client.Project {
 	return client.Project{ID: m.selectedID, Name: m.selectedName}
 }
 
+// matchRefNotFoundError distinguishes an absent reference from an ambiguous one,
+// allowing callers with lower-priority search fields to fall back safely.
+type matchRefNotFoundError struct {
+	ref string
+}
+
+func (e matchRefNotFoundError) Error() string {
+	return fmt.Sprintf("nothing matches %q", e.ref)
+}
+
+func isMatchRefNotFound(err error) bool {
+	_, ok := err.(matchRefNotFoundError)
+	return ok
+}
+
 // matchRef finds an item by reference, preferring the most specific match:
 // a unique exact ID, then a unique exact name, then an ID/name prefix, then a
 // name substring. Each tier is only consulted when the previous one found
@@ -730,5 +745,5 @@ func matchRefWithDisplay[T any](items []T, ref string, id func(T) string, name f
 			return zero, ambiguous(hits)
 		}
 	}
-	return zero, fmt.Errorf("nothing matches %q", display(ref))
+	return zero, matchRefNotFoundError{ref: display(ref)}
 }

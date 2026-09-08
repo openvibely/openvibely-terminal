@@ -447,6 +447,89 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	}
 }
 
+func TestMatchAlertActionRefRanksTitlesBeforeSearchText(t *testing.T) {
+	tests := []struct {
+		name    string
+		alerts  []client.Alert
+		ref     string
+		wantID  string
+		wantErr string
+	}{
+		{
+			name: "exact ID precedes title",
+			alerts: []client.Alert{
+				{ID: "alert-id", Title: "Other alert"},
+				{ID: "other-id", Title: "ALERT-ID"},
+			},
+			ref:    "aLeRt-Id",
+			wantID: "alert-id",
+		},
+		{
+			name: "case insensitive exact title precedes longer prefix",
+			alerts: []client.Alert{
+				{ID: "deploy", Title: "Deploy", Text: "release deployment"},
+				{ID: "deploy-service", Title: "Deploy service", Text: "release service"},
+			},
+			ref:    "dEpLoY",
+			wantID: "deploy",
+		},
+		{
+			name: "duplicate exact titles are ambiguous",
+			alerts: []client.Alert{
+				{ID: "one", Title: "Deploy"},
+				{ID: "two", Title: "deploy"},
+			},
+			ref:     "DEPLOY",
+			wantErr: "ambiguous",
+		},
+		{
+			name: "unique search text falls back after title matching",
+			alerts: []client.Alert{
+				{ID: "deploy", Title: "Deploy", Text: "release-plan-unique"},
+				{ID: "deploy-service", Title: "Deploy service", Text: "service rollout"},
+			},
+			ref:    "RELEASE-PLAN-UNIQUE",
+			wantID: "deploy",
+		},
+		{
+			name: "title prefix precedes exact search text",
+			alerts: []client.Alert{
+				{ID: "deploy", Title: "Deploy service", Text: "release plan"},
+				{ID: "search", Title: "Other alert", Text: "deploy"},
+			},
+			ref:    "deploy",
+			wantID: "deploy",
+		},
+		{
+			name: "ambiguous search text is rejected",
+			alerts: []client.Alert{
+				{ID: "one", Title: "First", Text: "shared body text"},
+				{ID: "two", Title: "Second", Text: "shared body text"},
+			},
+			ref:     "shared body text",
+			wantErr: "ambiguous",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := matchAlertActionRef(tc.alerts, tc.ref)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("matchAlertActionRef error = %v, want %q", err, tc.wantErr)
+				}
+				if got.ID != "" {
+					t.Fatalf("matchAlertActionRef selected %q despite %s", got.ID, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got.ID != tc.wantID {
+				t.Fatalf("matchAlertActionRef = %+v, %v; want %q", got, err, tc.wantID)
+			}
+		})
+	}
+}
+
 func TestMatchRefByIDPrefixAndName(t *testing.T) {
 	tasks := []client.Task{
 		{ID: "abc123", Title: "Refactor the API"},
