@@ -598,10 +598,10 @@ func BenchmarkAutomationsDOMWork(b *testing.B) {
 
 func TestGetScheduleScrapesEntries(t *testing.T) {
 	const page = `<div id="schedule-content">
-	  <div data-task-id="t1" data-schedule-id="s1">Nightly build — daily 02:00</div>
+	  <div data-task-id="t1" data-schedule-id="s1"><div class="font-semibold truncate leading-tight">Nightly build</div><div class="opacity-60 leading-tight">02:00</div></div>
 	  <div data-task-id="t1" data-schedule-id="s2">Weekly report — duplicate wrapper</div>
-	  <div data-task-id="t1" data-schedule-id="s2" data-schedule-enabled="true">Weekly report — weekly mon</div>
-	  <div data-task-id="t2" data-schedule-id="s3">Monthly cleanup — monthly 03:00</div>
+	  <div data-task-id="t1" data-schedule-id="s2" data-schedule-enabled="true"><div class="font-semibold truncate leading-tight">Weekly report</div><div class="opacity-60 leading-tight">weekly mon</div></div>
+	  <div data-task-id="t2" data-schedule-id="s3"><div class="font-semibold truncate leading-tight">Monthly cleanup</div><div class="opacity-60 leading-tight">monthly 03:00</div></div>
 	</div>`
 	c := htmlServer(t, page)
 
@@ -615,15 +615,19 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	want := []struct {
 		scheduleID string
 		taskID     string
+		name       string
 		text       string
 	}{
-		{scheduleID: "s1", taskID: "t1", text: "Nightly build — daily 02:00"},
-		{scheduleID: "s2", taskID: "t1", text: "Weekly report — weekly mon"},
-		{scheduleID: "s3", taskID: "t2", text: "Monthly cleanup — monthly 03:00"},
+		{scheduleID: "s1", taskID: "t1", name: "Nightly build", text: "Nightly build\n\n02:00"},
+		{scheduleID: "s2", taskID: "t1", name: "Weekly report", text: "Weekly report\n\nweekly mon"},
+		{scheduleID: "s3", taskID: "t2", name: "Monthly cleanup", text: "Monthly cleanup\n\nmonthly 03:00"},
 	}
 	for i, want := range want {
 		if entries[i].ScheduleID != want.scheduleID || entries[i].TaskID != want.taskID {
 			t.Errorf("entry[%d] = %+v, want schedule %s task %s", i, entries[i], want.scheduleID, want.taskID)
+		}
+		if entries[i].Name != want.name {
+			t.Errorf("entry[%d] name = %q, want %q", i, entries[i].Name, want.name)
 		}
 		if entries[i].Text != want.text {
 			t.Errorf("entry[%d] text = %q, want %q", i, entries[i].Text, want.text)

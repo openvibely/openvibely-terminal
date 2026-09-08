@@ -2897,6 +2897,67 @@ func TestScheduleShowAndOpenResolveReferencesAndRenderBoundTask(t *testing.T) {
 	}
 }
 
+func TestScheduleShowExactSemanticNamePrecedesRenderedTextPrefixCollision(t *testing.T) {
+	const schedules = `<div id="schedule-content">
+		<div data-task-id="task-1" data-schedule-id="sched-one"><div class="font-semibold truncate leading-tight">Nightly build</div><div class="opacity-60 leading-tight">02:00</div></div>
+		<div data-task-id="task-2" data-schedule-id="sched-two"><div class="font-semibold truncate leading-tight">Nightly build extended</div><div class="opacity-60 leading-tight">03:00</div></div>
+	</div>`
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/schedule":
+			_, _ = io.WriteString(w, schedules)
+		case "/tasks/task-1":
+			_, _ = io.WriteString(w, `<div data-task-id="task-1" data-project-id="p1"><h2 class="font-bold">Nightly task</h2></div>`)
+		case "/tasks/task-2":
+			t.Fatal("exact schedule name resolved to the longer prefix collision")
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	})
+	m = runLine(t, m, "/schedule show Nightly build")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "Schedule ID: sched-one") || strings.Contains(out, "ambiguous") {
+		t.Fatalf("exact semantic name did not win:\n%s", out)
+	}
+}
+
+func TestScheduleShowDistinguishesMissingTaskFromLookupFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		taskBody    string
+		want        string
+		unavailable bool
+	}{
+		{name: "deleted", status: http.StatusNotFound, want: "Bound task unavailable (task-1)", unavailable: true},
+		{name: "backend failure", status: http.StatusBadGateway, taskBody: `{"error":"task service unavailable"}`, want: "server error (502): task service unavailable"},
+		{name: "malformed identity", status: http.StatusOK, taskBody: `<div data-project-id="p1"><h2 class="font-bold">Unverified</h2></div>`, want: `task "task-1" was not found in selected project`},
+		{name: "foreign identity", status: http.StatusOK, taskBody: `<div data-task-id="task-1" data-project-id="p2"><h2 class="font-bold">Foreign</h2></div>`, want: `task "task-1" was not found in selected project`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/schedule":
+					_, _ = io.WriteString(w, `<div id="schedule-content"><div data-task-id="task-1" data-schedule-id="sched-one">Nightly</div></div>`)
+				case "/tasks/task-1":
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.taskBody)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+				}
+			})
+			m = runLine(t, m, "/schedule show sched-one")
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+			if !tc.unavailable && strings.Contains(out, "Bound task unavailable") {
+				t.Fatalf("lookup failure was reported as unavailable:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestScheduleShowHandlesMissingAndInvalidReferencesWithoutMutation(t *testing.T) {
 	const schedules = `<div id="schedule-content">
 		<div data-task-id="deleted-task" data-schedule-id="sched-one">Nightly one</div>

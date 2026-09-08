@@ -1382,7 +1382,7 @@ func getBoundScheduleTask(ctx context.Context, c *client.Client, projectID, task
 	}
 	detail, err := c.GetTaskMetadataForProjectExact(ctx, taskID, projectID)
 	if err != nil {
-		if client.IsReachableError(err) {
+		if client.IsNotFoundError(err) {
 			return nil, nil
 		}
 		return nil, err
@@ -1482,7 +1482,7 @@ func scheduleCommand() command {
 								entry := entry
 								items = append(items, selectorItem{
 									ref:    entry.ScheduleID,
-									label:  firstNonEmpty(entry.Text, shortID(entry.ScheduleID)),
+									label:  firstNonEmpty(entry.Name, entry.Text, shortID(entry.ScheduleID)),
 									detail: "task " + firstNonEmpty(shortID(entry.TaskID), "unavailable"),
 									dispatch: func(m Model) (Model, tea.Cmd) {
 										m.busy = true
@@ -1500,7 +1500,7 @@ func scheduleCommand() command {
 					}
 					entry, err := matchRefWithDisplay(entries, ref,
 						func(s client.ScheduleEntry) string { return s.ScheduleID },
-						func(s client.ScheduleEntry) string { return s.Text },
+						func(s client.ScheduleEntry) string { return s.Name },
 						sanitizeAutomationDetailText)
 					if err != nil {
 						return "", err
@@ -1558,7 +1558,7 @@ func scheduleCommand() command {
 							items := make([]selectorItem, 0, len(entries))
 							for _, e := range entries {
 								if e.ScheduleID != "" {
-									items = append(items, selectorItem{ref: e.ScheduleID, label: firstNonEmpty(e.Text, shortID(e.ScheduleID))})
+									items = append(items, selectorItem{ref: e.ScheduleID, label: firstNonEmpty(e.Name, e.Text, shortID(e.ScheduleID))})
 								}
 							}
 							return items, nil
@@ -1575,7 +1575,7 @@ func scheduleCommand() command {
 					}
 					entry, err := matchRef(entries, ref,
 						func(s client.ScheduleEntry) string { return s.ScheduleID },
-						func(s client.ScheduleEntry) string { return s.Text })
+						func(s client.ScheduleEntry) string { return s.Name })
 					if err != nil {
 						return "", err
 					}
@@ -1615,7 +1615,7 @@ func scheduleCommand() command {
 									e := e
 									item := selectorItem{
 										ref:   e.ScheduleID,
-										label: firstNonEmpty(e.Text, shortID(e.ScheduleID)),
+										label: firstNonEmpty(e.Name, e.Text, shortID(e.ScheduleID)),
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -1652,7 +1652,7 @@ func scheduleCommand() command {
 					}
 					e, err := matchRef(entries, ref,
 						func(s client.ScheduleEntry) string { return s.ScheduleID },
-						func(s client.ScheduleEntry) string { return s.Text })
+						func(s client.ScheduleEntry) string { return s.Name })
 					if err != nil {
 						return "", err
 					}
