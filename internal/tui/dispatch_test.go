@@ -5603,6 +5603,134 @@ func TestAgentsMetricsRemainsGlobalWithoutSelectedProject(t *testing.T) {
 	}
 }
 
+func TestAgentsDeleteResolvesBeforeConfirmation(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-reviewer" data-agent-key="reviewer" data-agent-name="Code Reviewer"
+		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>
+	<div data-agent-id="ag-alpha" data-agent-key="alpha" data-agent-name="Review Alpha"
+		data-agent-description="reviews releases" data-agent-model="claude" data-agent-scope="project"></div>
+	<div data-agent-id="ag-beta" data-agent-key="beta" data-agent-name="Review Beta"
+		data-agent-description="reviews releases" data-agent-model="claude" data-agent-scope="project"></div>`
+
+	for _, tc := range []struct {
+		name    string
+		ref     string
+		wantErr string
+	}{
+		{name: "ambiguous", ref: "review", wantErr: "is ambiguous"},
+		{name: "unknown", ref: "missing", wantErr: "nothing matches"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+			m = runLine(t, m, "/agents delete "+tc.ref)
+			if m.pendingConfirmation != nil {
+				t.Fatal("invalid reference opened confirmation")
+			}
+			if calls := rec.all(); strings.Contains(calls, "DELETE /agents/") {
+				t.Fatalf("invalid reference made a DELETE request:\n%s", calls)
+			}
+			if out := stripANSI(transcript(m)); !strings.Contains(out, tc.wantErr) {
+				t.Fatalf("output = %q, want %q", out, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("partial canonical prompt and cancellation", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, "/agents delete code")
+		if m.pendingConfirmation == nil {
+			t.Fatal("unique partial reference did not open confirmation")
+		}
+		if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `"Code Reviewer"`) || strings.Contains(prompt, `"code"`) {
+			t.Fatalf("confirmation = %q, want canonical agent name", prompt)
+		}
+		if calls := rec.all(); strings.Contains(calls, "DELETE /agents/") {
+			t.Fatalf("delete occurred before confirmation:\n%s", calls)
+		}
+		m = runLine(t, m, "no")
+		if m.pendingConfirmation != nil {
+			t.Fatal("cancellation left confirmation active")
+		}
+		if calls := rec.all(); strings.Contains(calls, "DELETE /agents/") {
+			t.Fatalf("cancellation made a DELETE request:\n%s", calls)
+		}
+	})
+}
+
+func TestAgentsDeleteConfirmationUsesCapturedID(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		changed bool
+		deleted []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/agents":
+			mu.Lock()
+			useChanged := changed
+			mu.Unlock()
+			id := "ag-original"
+			if useChanged {
+				id = "ag-replacement"
+			}
+			_, _ = fmt.Fprintf(w, `<div data-agent-id="%s" data-agent-key="reviewer" data-agent-name="Code Reviewer" data-agent-scope="project"></div>`, id)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/agents/"):
+			mu.Lock()
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, "/agents/"))
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+
+	m = runLine(t, m, "/agents delete code")
+	if m.pendingConfirmation == nil {
+		t.Fatal("delete did not open confirmation")
+	}
+	mu.Lock()
+	changed = true
+	mu.Unlock()
+	m = runLine(t, m, "yes")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(deleted) != 1 || deleted[0] != "ag-original" {
+		t.Fatalf("deleted IDs = %v, want captured ag-original", deleted)
+	}
+}
+
+func TestAgentsDeleteResolutionRejectsStaleResults(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Code Reviewer" data-agent-scope="project"></div>`
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Model)
+	}{
+		{name: "project", mutate: func(m *Model) { m.setActiveProject(client.Project{ID: "p2", Name: "other"}) }},
+		{name: "session", mutate: func(m *Model) { m.sessionGeneration++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+			m, cmd := typeLine(t, m, "/agents delete code")
+			if cmd == nil {
+				t.Fatal("delete did not start target resolution")
+			}
+			tc.mutate(&m)
+			next, _ := m.Update(cmd())
+			m = next.(Model)
+			if m.pendingConfirmation != nil {
+				t.Fatal("stale resolution installed confirmation")
+			}
+		})
+	}
+}
+
 func TestAgentsGenerateDelete(t *testing.T) {
 	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
 		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`

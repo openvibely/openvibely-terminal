@@ -1011,6 +1011,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case agentDeleteTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case webhookMutationTargetMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1326,6 +1330,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.append(entry{role: "result", head: msg.title, text: body})
 		return m, nil
+
+	case agentDeleteTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		return confirmAgentDeletion(m, msg.projectID, msg.agent)
 
 	case webhookMutationTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {

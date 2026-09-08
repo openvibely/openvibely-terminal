@@ -3082,6 +3082,42 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 	})
 }
 
+func TestCLIAgentsDeleteValidatesBeforeForceGate(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-reviewer" data-agent-key="reviewer"
+		data-agent-name="Code Reviewer" data-agent-description="reviews code"
+		data-agent-model="claude" data-agent-scope="project"></div>
+	<div data-agent-id="ag-alpha" data-agent-key="alpha"
+		data-agent-name="Review Alpha" data-agent-description="reviews releases"
+		data-agent-model="claude" data-agent-scope="project"></div>
+	<div data-agent-id="ag-beta" data-agent-key="beta"
+		data-agent-name="Review Beta" data-agent-description="reviews releases"
+		data-agent-model="claude" data-agent-scope="project"></div>`
+
+	for _, tc := range []struct {
+		name    string
+		ref     string
+		wantErr string
+	}{
+		{name: "ambiguous", ref: "review", wantErr: "is ambiguous"},
+		{name: "unknown", ref: "missing", wantErr: "nothing matches"},
+		{name: "partial canonical force message", ref: "code", wantErr: `use --force to confirm deletion of agent "Code Reviewer"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/agents":       agentsHTML,
+			})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", tc.ref}, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if calls := rec.all(); strings.Contains(calls, "DELETE /agents/") {
+				t.Fatalf("unforced delete mutated backend:\n%s", calls)
+			}
+		})
+	}
+}
+
 // --- JSON output mode tests ---
 
 func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {

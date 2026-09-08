@@ -2394,6 +2394,36 @@ func validateAgentArgs(args []string) error {
 	return nil
 }
 
+func resolveAgentDeletion(c *client.Client, projectID, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		agents, err := c.ListAgents(ctx, projectID)
+		if err != nil {
+			return agentDeleteTargetMsg{projectID: projectID, err: err}
+		}
+		agent, err := matchAgentRef(agents, ref)
+		return agentDeleteTargetMsg{projectID: projectID, agent: agent, err: err}
+	}
+}
+
+func confirmAgentDeletion(m Model, projectID string, agent client.AgentDef) (Model, tea.Cmd) {
+	name := sanitizeAutomationDetailText(firstNonEmpty(agent.Name, agent.Key, agent.ID))
+	c := m.client
+	cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
+		if err := c.DeleteAgent(ctx, agent.ID); err != nil {
+			return "", err
+		}
+		return refreshAndRender("deleted "+name,
+			func() ([]client.AgentDef, error) { return c.ListAgents(ctx, projectID) },
+			renderAgents)
+	})
+	return confirmOr(m,
+		fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", name),
+		fmt.Sprintf("use --force to confirm deletion of agent %q", name),
+		cmd)
+}
+
 func agentsCommand() command {
 	actions := []string{"list", "edit", "delete", "generate", "metrics", "votes"}
 	return command{
@@ -2594,46 +2624,14 @@ func agentsCommand() command {
 										detail: truncate(a.Description, 40),
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
-											if err := c.DeleteAgent(ctx, a.ID); err != nil {
-												return "", err
-											}
-											return refreshAndRender("deleted "+a.Name,
-												func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
-												renderAgents)
-										})
-										return confirmOr(m,
-											fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
-											fmt.Sprintf("use --force to confirm deletion of agent %q", a.ID),
-											cmd)
+										return confirmAgentDeletion(m, pid, a)
 									}
 									items = append(items, item)
 								}
 								return items, nil
 							}))
 				}
-				cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
-					agents, err := c.ListAgents(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(agents, ref,
-						func(a client.AgentDef) string { return a.ID },
-						func(a client.AgentDef) string { return a.Name + " " + a.Key })
-					if err != nil {
-						return "", err
-					}
-					if err := c.DeleteAgent(ctx, a.ID); err != nil {
-						return "", err
-					}
-					return refreshAndRender("deleted "+a.Name,
-						func() ([]client.AgentDef, error) { return c.ListAgents(ctx, pid) },
-						renderAgents)
-				})
-				return confirmOr(m,
-					fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", ref),
-					fmt.Sprintf("use --force to confirm deletion of agent %q", ref),
-					cmd)
+				return m, resolveAgentDeletion(c, pid, ref)
 			}
 			return m, nil
 		},
