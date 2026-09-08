@@ -2352,6 +2352,59 @@ func TestChannelRequestsPreserveAuthenticationClassification(t *testing.T) {
 	}
 }
 
+func TestChannelEditableSettingsIncludesSlackModeButExcludesCredentials(t *testing.T) {
+	const secret = "stored-slack-secret"
+	c := htmlServer(t, `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form><input name="slack_client_id" value="client-id"><input name="slack_client_secret" value="`+secret+`"><input name="slack_app_token" value="stored-app-token"><select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual" selected>Manual</option></select><input name="slack_bot_token" value="stored-bot-token"><input type="checkbox" name="slack_send_responses" checked></form>`)
+	channel, err := c.GetChannel(context.Background(), "p1", "slack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := channel.EditableSettings()
+	if settings.Get("slack_bot_token_mode") != "manual" || settings.Get("slack_client_id") != "client-id" {
+		t.Fatalf("safe Slack settings = %v", settings)
+	}
+	if strings.Contains(settings.Encode(), secret) || settings.Get("slack_client_secret") != "" || settings.Get("slack_app_token") != "" || settings.Get("slack_bot_token") != "" {
+		t.Fatalf("Slack editable settings exposed credentials: %v", settings)
+	}
+}
+
+func TestUpdateChannelFromCurrentUsesTheValidatedAuthoritativeSnapshot(t *testing.T) {
+	const secret = "authoritative-slack-secret"
+	gets := 0
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			gets++
+			_, _ = io.WriteString(w, `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form><input name="slack_client_id" value="client-id"><input name="slack_client_secret" value="`+secret+`"><input name="slack_app_token" value="stored-app-token"><select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual" selected>Manual</option></select><input name="slack_bot_token" value="stored-bot-token"><input type="checkbox" name="slack_send_responses" checked></form>`)
+		case http.MethodPost:
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			posted = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := c.GetChannel(context.Background(), "p1", "slack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UpdateChannelFromCurrent(context.Background(), *current, "p1", url.Values{"slack_send_responses": {"false"}}); err != nil {
+		t.Fatal(err)
+	}
+	if gets != 1 {
+		t.Fatalf("authoritative GETs = %d, want 1", gets)
+	}
+	if posted.Get("slack_client_secret") != secret || posted.Get("slack_bot_token_mode") != "manual" || posted.Get("slack_send_responses") != "false" {
+		t.Fatalf("posted form did not preserve the validated snapshot: %v", posted)
+	}
+}
+
 func TestUpdateChannelPreservesAuthoritativeSecretsWithoutExposingThem(t *testing.T) {
 	const secret = "authoritative-telegram-token"
 	var posted url.Values

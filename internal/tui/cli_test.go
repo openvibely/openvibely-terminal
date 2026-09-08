@@ -2847,6 +2847,81 @@ func TestCLIChannelsEditXPreservesSafeSettingsAndNeverEchoesCredentials(t *testi
 	}
 }
 
+func TestCLIChannelsHeadlessEditUsesAuthoritativeTransitionState(t *testing.T) {
+	const githubPATPage = `<div data-channel-type="github" data-search-text="GitHub Connected"></div><form><select name="github_auth_mode"><option value="pat" selected>PAT</option><option value="app">App</option></select><input name="github_pat" value="stored-github-pat"><input name="github_app_id" value="old-app-id"><input name="github_app_slug" value="old-app-slug"><textarea name="github_app_private_key">stored-private-key</textarea><input name="github_api_endpoint" value="https://api.github.com"></form>`
+	const githubAppPage = `<div data-channel-type="github" data-search-text="GitHub Connected"></div><form><select name="github_auth_mode"><option value="pat">PAT</option><option value="app" selected>App</option></select><input name="github_pat" value="stored-github-pat"><input name="github_app_id" value="app-id"><input name="github_app_slug" value="app-slug"><textarea name="github_app_private_key">stored-private-key</textarea><input name="github_api_endpoint" value="https://api.github.com"></form>`
+	const slackOAuthPage = `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form><input name="slack_client_id" value="client-id"><input name="slack_client_secret" value="stored-client-secret"><input name="slack_app_token" value="stored-app-token"><select name="slack_bot_token_mode"><option value="oauth" selected>OAuth</option><option value="manual">Manual</option></select><input name="slack_bot_token" value="stored-bot-token"><input type="checkbox" name="slack_send_responses" checked></form>`
+	const slackManualPage = `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form><input name="slack_client_id" value="client-id"><input name="slack_client_secret" value="stored-client-secret"><input name="slack_app_token" value="stored-app-token"><select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual" selected>Manual</option></select><input name="slack_bot_token" value="stored-bot-token"><input type="checkbox" name="slack_send_responses" checked></form>`
+	const emailGmailPage = `<div data-channel-type="email" data-search-text="Email bot@example.com"><span class="badge badge-success">Connected</span></div><form><select name="email_provider"><option value="gmail" selected>Gmail</option><option value="custom">Custom</option></select><input name="email_address" value="bot@example.com"><input name="email_password" value="stored-email-password"><input name="email_imap_host" value="imap.gmail.com"><input name="email_imap_port" value="993"><input name="email_smtp_host" value="smtp.gmail.com"><input name="email_smtp_port" value="587"><input name="email_poll_interval_seconds" value="15"></form>`
+	const emailCustomPage = `<div data-channel-type="email" data-search-text="Email bot@example.com"><span class="badge badge-success">Connected</span></div><form><select name="email_provider"><option value="gmail">Gmail</option><option value="custom" selected>Custom</option></select><input name="email_address" value="bot@example.com"><input name="email_password" value="stored-email-password"><input name="email_imap_host" value="imap.example.com"><input name="email_imap_port" value="993"><input name="email_smtp_host" value="smtp.example.com"><input name="email_smtp_port" value="587"><input name="email_poll_interval_seconds" value="15"></form>`
+
+	tests := []struct {
+		name     string
+		page     string
+		args     []string
+		wantErr  string
+		wantPath string
+	}{
+		{name: "github unchanged app", page: githubAppPage, args: []string{"channels", "edit", "github", "--auth-mode", "app", "--api-endpoint", "https://github.example/api/v3"}, wantPath: "/channels/github/configure"},
+		{name: "github valid pat to app", page: githubPATPage, args: []string{"channels", "edit", "github", "--auth-mode", "app", "--app-id", "new-id", "--app-slug", "new-slug", "--private-key", "-----BEGIN PRIVATE KEY-----\nYWJj\n-----END PRIVATE KEY-----"}, wantPath: "/channels/github/configure"},
+		{name: "github invalid pat to app", page: githubPATPage, args: []string{"channels", "edit", "github", "--auth-mode", "app", "--app-id", "new-id", "--app-slug", "new-slug"}, wantErr: "editing GitHub into app mode requires --app-id, --app-slug, and --private-key"},
+		{name: "slack unchanged manual", page: slackManualPage, args: []string{"channels", "edit", "slack", "--bot-token-mode", "manual", "--send-responses", "false"}, wantPath: "/channels/slack/configure"},
+		{name: "slack valid oauth to manual", page: slackOAuthPage, args: []string{"channels", "edit", "slack", "--bot-token-mode", "manual", "--bot-token", "new-bot-token"}, wantPath: "/channels/slack/configure"},
+		{name: "slack invalid oauth to manual", page: slackOAuthPage, args: []string{"channels", "edit", "slack", "--bot-token-mode", "manual"}, wantErr: "editing Slack into manual mode requires --bot-token"},
+		{name: "email unchanged custom", page: emailCustomPage, args: []string{"channels", "edit", "email", "--provider", "custom", "--poll-interval", "30"}, wantPath: "/channels/email/configure"},
+		{name: "email valid gmail to custom", page: emailGmailPage, args: []string{"channels", "edit", "email", "--provider", "custom", "--imap-host", "imap.example.com", "--smtp-host", "smtp.example.com"}, wantPath: "/channels/email/configure"},
+		{name: "email invalid gmail to custom", page: emailGmailPage, args: []string{"channels", "edit", "email", "--provider", "custom"}, wantErr: "editing Email to custom requires --imap-host and --smtp-host"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recorder{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.recordURL(r.Method, r.URL.RequestURI())
+				switch {
+				case r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/channels":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, tt.page)
+				case r.Method == http.MethodPost && r.URL.Path == tt.wantPath:
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", tt.args, false, false)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				if rec.count("GET", "/channels") != 1 || rec.saw("POST", "/channels/github/configure") || rec.saw("POST", "/channels/slack/configure") || rec.saw("POST", "/channels/email/configure") {
+					t.Fatalf("invalid transition requests:\n%s", rec.all())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !rec.saw("POST", tt.wantPath) {
+				t.Fatalf("valid authoritative edit did not POST:\n%s", rec.all())
+			}
+			for _, secret := range []string{"stored-github-pat", "stored-private-key", "stored-client-secret", "stored-app-token", "stored-bot-token", "stored-email-password", "new-bot-token"} {
+				if strings.Contains(out.String(), secret) {
+					t.Fatalf("edit output exposed %q: %s", secret, out.String())
+				}
+			}
+		})
+	}
+}
+
 func TestCLIChannelsValidationPrecedesRequests(t *testing.T) {
 	cases := [][]string{
 		{"channels", "add", "telegram", "--token", ""},
@@ -2855,9 +2930,6 @@ func TestCLIChannelsValidationPrecedesRequests(t *testing.T) {
 		{"channels", "edit", "email", "--address", "not-an-email"},
 		{"channels", "edit", "github", "--api-endpoint", "not-a-url"},
 		{"channels", "edit", "github", "--auth-mode", "oauth"},
-		{"channels", "edit", "github", "--auth-mode", "app", "--app-id", "1", "--app-slug", "slug"},
-		{"channels", "edit", "slack", "--bot-token-mode", "manual"},
-		{"channels", "edit", "email", "--provider", "custom"},
 		{"channels", "add", "github", "--auth-mode", "pat"},
 		{"channels", "add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"},
 		{"channels", "add", "x", "--consumer-key", "key"},

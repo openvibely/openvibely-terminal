@@ -1197,13 +1197,23 @@ func cloneChannelConfiguration(values url.Values) url.Values {
 	return cloned
 }
 
-// EditableSettings returns only non-secret configuration values suitable for
-// interactive defaults. Credential values remain private to the client.
+var channelEditableFormFields = map[string]bool{
+	"github_auth_mode": true, "github_app_id": true, "github_app_slug": true, "github_api_endpoint": true,
+	"slack_client_id": true, "slack_bot_token_mode": true, "slack_send_responses": true,
+	"telegram_rich_messages_v2": true, "discord_send_responses": true,
+	"x_poll_interval_seconds": true, "x_send_responses": true,
+	"email_provider": true, "email_address": true, "email_imap_host": true, "email_imap_port": true,
+	"email_smtp_host": true, "email_smtp_port": true, "email_poll_interval_seconds": true,
+	"email_send_responses": true, "email_skip_attachments": true, "email_mark_existing_seen_on_start": true,
+}
+
+// EditableSettings returns only allowlisted non-secret configuration values
+// suitable for interactive defaults and transition comparison. Credential
+// values remain private to the client.
 func (c Channel) EditableSettings() url.Values {
 	settings := make(url.Values)
 	for key, entries := range c.configuration {
-		lower := strings.ToLower(key)
-		if strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password") || strings.Contains(lower, "private_key") {
+		if !channelEditableFormFields[key] {
 			continue
 		}
 		settings[key] = append([]string(nil), entries...)
@@ -1388,6 +1398,16 @@ func (c *Client) UpdateChannel(ctx context.Context, channelType, projectID strin
 	if err != nil {
 		return err
 	}
+	return c.UpdateChannelFromCurrent(ctx, *current, projectID, updates)
+}
+
+// UpdateChannelFromCurrent merges updates into a channel snapshot returned by
+// GetChannel. Callers that need to validate changes against authoritative state
+// can reuse that same snapshot for the mutation instead of fetching it twice.
+func (c *Client) UpdateChannelFromCurrent(ctx context.Context, current Channel, projectID string, updates url.Values) error {
+	if _, ok := knownChannel(current.Type); !ok {
+		return fmt.Errorf("unsupported channel type %q", current.Type)
+	}
 	form := cloneChannelConfiguration(current.configuration)
 	for key, entries := range updates {
 		form[key] = append([]string(nil), entries...)
@@ -1400,7 +1420,7 @@ func (c *Client) UpdateChannel(ctx context.Context, channelType, projectID strin
 			}
 		}
 	}()
-	return c.ConfigureChannel(ctx, channelType, projectID, form)
+	return c.ConfigureChannel(ctx, current.Type, projectID, form)
 }
 
 // ChannelConnectURL returns the safe local backend URL a browser should open

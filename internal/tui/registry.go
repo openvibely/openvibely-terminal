@@ -3023,30 +3023,6 @@ func validateChannelConfiguration(action, channelType string, values map[string]
 			return errors.New("--poll-interval must be between 15 and 300 seconds")
 		}
 	}
-	if action == "edit" {
-		switch channelType {
-		case "github":
-			switch values["github_auth_mode"] {
-			case "pat":
-				if values["github_pat"] == "" {
-					return errors.New("editing GitHub into PAT mode requires --pat")
-				}
-			case "app":
-				if values["github_app_id"] == "" || values["github_app_slug"] == "" || values["github_app_private_key"] == "" {
-					return errors.New("editing GitHub into app mode requires --app-id, --app-slug, and --private-key")
-				}
-			}
-		case "slack":
-			if values["slack_bot_token_mode"] == "manual" && values["slack_bot_token"] == "" {
-				return errors.New("editing Slack into manual mode requires --bot-token")
-			}
-		case "email":
-			if values["email_provider"] == "custom" && (values["email_imap_host"] == "" || values["email_smtp_host"] == "") {
-				return errors.New("editing Email to custom requires --imap-host and --smtp-host")
-			}
-		}
-		return nil
-	}
 	if action != "add" {
 		return nil
 	}
@@ -3093,6 +3069,38 @@ func validateChannelConfiguration(action, channelType string, values map[string]
 	case "email":
 		if values["email_provider"] == "custom" && (values["email_imap_host"] == "" || values["email_smtp_host"] == "") {
 			return errors.New("custom Email requires --imap-host and --smtp-host")
+		}
+	}
+	return nil
+}
+
+func validateHeadlessChannelEditTransition(current client.Channel, values map[string]string) error {
+	original := current.EditableSettings()
+	switch current.Type {
+	case "github":
+		mode, supplied := values["github_auth_mode"]
+		if !supplied || mode == original.Get("github_auth_mode") {
+			return nil
+		}
+		switch mode {
+		case "pat":
+			if values["github_pat"] == "" {
+				return errors.New("editing GitHub into PAT mode requires --pat")
+			}
+		case "app":
+			if values["github_app_id"] == "" || values["github_app_slug"] == "" || values["github_app_private_key"] == "" {
+				return errors.New("editing GitHub into app mode requires --app-id, --app-slug, and --private-key")
+			}
+		}
+	case "slack":
+		mode, supplied := values["slack_bot_token_mode"]
+		if supplied && mode != original.Get("slack_bot_token_mode") && mode == "manual" && values["slack_bot_token"] == "" {
+			return errors.New("editing Slack into manual mode requires --bot-token")
+		}
+	case "email":
+		provider, supplied := values["email_provider"]
+		if supplied && provider != original.Get("email_provider") && provider == "custom" && (values["email_imap_host"] == "" || values["email_smtp_host"] == "") {
+			return errors.New("editing Email to custom requires --imap-host and --smtp-host")
 		}
 	}
 	return nil
@@ -3717,7 +3725,14 @@ func channelsCommand() command {
 					form := mapToValues(updates)
 					var err error
 					if action == "edit" {
-						err = c.UpdateChannel(ctx, ch.Type, pid, form)
+						current, getErr := c.GetChannel(ctx, pid, ch.Type)
+						if getErr != nil {
+							return "", getErr
+						}
+						if err := validateHeadlessChannelEditTransition(*current, updates); err != nil {
+							return "", err
+						}
+						err = c.UpdateChannelFromCurrent(ctx, *current, pid, form)
 					} else {
 						err = c.ConfigureChannel(ctx, ch.Type, pid, form)
 					}

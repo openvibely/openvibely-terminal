@@ -6147,17 +6147,14 @@ func TestChannelAddConditionalValidation(t *testing.T) {
 	}{
 		{name: "github pat", args: []string{"add", "github", "--auth-mode", "pat"}, want: "requires --pat"},
 		{name: "github app", args: []string{"add", "github", "--auth-mode", "app", "--app-id", "1"}, want: "requires --app-id, --app-slug, and --private-key"},
-		{name: "github edit to app", args: []string{"edit", "github", "--auth-mode", "app", "--app-id", "1", "--app-slug", "slug"}, want: "editing GitHub into app mode requires --app-id, --app-slug, and --private-key"},
 		{name: "github invalid endpoint", args: []string{"edit", "github", "--api-endpoint", "not a URL"}, want: "--api-endpoint must be an absolute HTTP(S) URL"},
 		{name: "slack manual", args: []string{"add", "slack", "--client-id", "id", "--client-secret", "secret", "--app-token", "app", "--bot-token-mode", "manual"}, want: "requires --bot-token"},
-		{name: "slack edit to manual", args: []string{"edit", "slack", "--bot-token-mode", "manual"}, want: "editing Slack into manual mode requires --bot-token"},
 		{name: "x credentials", args: []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "secret"}, want: "requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret"},
 		{name: "x poll interval low", args: []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "secret", "--access-token", "token", "--access-token-secret", "token-secret", "--poll-interval", "14"}, want: "--poll-interval must be between 15 and 300 seconds"},
 		{name: "x poll interval high", args: []string{"edit", "x", "--poll-interval", "301"}, want: "--poll-interval must be between 15 and 300 seconds"},
 		{name: "unknown email provider", args: []string{"add", "email", "--provider", "other", "--address", "a@example.com", "--password", "secret"}, want: "provider must be one of"},
 		{name: "invalid email address", args: []string{"edit", "email", "--address", "not-an-email"}, want: "--address must be a valid email address"},
 		{name: "custom email hosts", args: []string{"add", "email", "--provider", "custom", "--address", "a@example.com", "--password", "secret"}, want: "custom Email requires --imap-host and --smtp-host"},
-		{name: "email edit to custom", args: []string{"edit", "email", "--provider", "custom"}, want: "editing Email to custom requires --imap-host and --smtp-host"},
 	}
 	oldCLI := cliMode
 	cliMode = true
