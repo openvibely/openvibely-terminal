@@ -701,7 +701,7 @@ func taskBoardPromptPreview(value string) string {
 	if len(runes) > taskBoardPromptPreviewCodePoints {
 		runes = runes[:taskBoardPromptPreviewCodePoints]
 	}
-	return string(runes)
+	return strings.Join(strings.Fields(string(runes)), " ")
 }
 
 func taskDetailHasHeading(root *html.Node, text string) bool {

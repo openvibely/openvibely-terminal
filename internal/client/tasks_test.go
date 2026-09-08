@@ -291,7 +291,17 @@ func TestGetTaskForProjectExactPreservesScopedDetailAndCancellation(t *testing.T
 
 func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
-	prompt := strings.Repeat("界", 300) + "TAIL"
+	prompt := "  alpha  \n\t beta   " + strings.Repeat("界", 300) + "  TAIL"
+	promptRunes := []rune(prompt)
+	boardRoot, err := html.Parse(strings.NewReader(`<div data-task-id="` + taskID + `" data-task-status="running" data-task-category="active"><a href="/tasks/` + taskID + `" title="Exact task">Exact task</a><p class="line-clamp-2">` + string(promptRunes[:300]) + `</p></div>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boardTasks := parseTaskCards(boardRoot, "p1")
+	if len(boardTasks) != 1 {
+		t.Fatalf("board tasks = %#v", boardTasks)
+	}
+	boardPrompt := boardTasks[0].Prompt
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -335,7 +345,7 @@ func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Task{
-		ID: taskID, ProjectID: "p1", Title: "Exact task", Prompt: strings.Repeat("界", 300),
+		ID: taskID, ProjectID: "p1", Title: "Exact task", Prompt: boardPrompt,
 		Category: "active", Status: "running", DisplayOrder: 0,
 		Badges: []string{"Chain", "Goal", "Swarm", "Claude Sonnet", "Planner", "Bug", "High"},
 	}
