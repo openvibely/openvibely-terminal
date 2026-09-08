@@ -2734,7 +2734,50 @@ func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string
 	if err != nil {
 		return client.Webhook{}, err
 	}
-	return matchRef(webhooks, ref, func(w client.Webhook) string { return w.ID }, func(w client.Webhook) string { return w.Name })
+	return matchRefWithDisplay(webhooks, ref,
+		func(w client.Webhook) string { return w.ID },
+		func(w client.Webhook) string { return w.Name },
+		sanitizeAutomationDetailText)
+}
+
+func resolveWebhookMutation(c *client.Client, projectID, action, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		webhook, err := resolveWebhook(ctx, c, projectID, ref)
+		return webhookMutationTargetMsg{projectID: projectID, action: action, webhook: webhook, err: err}
+	}
+}
+
+func confirmWebhookMutation(m Model, projectID, action string, webhook client.Webhook) (Model, tea.Cmd) {
+	name := sanitizeAutomationDetailText(firstNonEmpty(webhook.Name, webhook.ID))
+	cmd := run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+		switch action {
+		case "rotate":
+			rotation, err := m.client.RotateWebhookSecret(ctx, projectID, webhook.ID)
+			if err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(rotation)
+			}
+			return fmt.Sprintf("rotated secret for %s\nNew secret: %s", name, sanitizeAutomationDetailText(rotation.Secret)), nil
+		case "delete":
+			if err := m.client.DeleteWebhook(ctx, projectID, webhook.ID); err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(webhookActionJSON{Action: "delete", ID: webhook.ID, Name: webhook.Name})
+			}
+			return "deleted webhook: " + name, nil
+		default:
+			return "", errors.New(commandUsage("webhooks", action))
+		}
+	})
+	return confirmOr(m,
+		fmt.Sprintf("%s webhook %q? Type 'yes' to confirm or Esc to cancel.", titleFor(action), name),
+		fmt.Sprintf("use --force to confirm %s of webhook %q", action, name),
+		cmd)
 }
 
 func webhookSelector(m Model, action string, prefill bool) (Model, tea.Cmd) {
@@ -2837,6 +2880,9 @@ func webhooksCommand() command {
 					return "created webhook\n\n" + renderWebhookDetail(*created), nil
 				})
 			}
+			if action == "rotate" || action == "delete" {
+				return m, resolveWebhookMutation(c, projectID, action, ref)
+			}
 			cmd := run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
 				webhook, err := resolveWebhook(ctx, c, projectID, ref)
 				if err != nil {
@@ -2875,29 +2921,9 @@ func webhooksCommand() command {
 						return marshalJSON(result)
 					}
 					return fmt.Sprintf("test task created: %s", sanitizeAutomationDetailText(result.TaskID)), nil
-				case "rotate":
-					rotation, err := c.RotateWebhookSecret(ctx, projectID, webhook.ID)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(rotation)
-					}
-					return fmt.Sprintf("rotated secret for %s\nNew secret: %s", sanitizeAutomationDetailText(webhook.Name), sanitizeAutomationDetailText(rotation.Secret)), nil
-				case "delete":
-					if err := c.DeleteWebhook(ctx, projectID, webhook.ID); err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(webhookActionJSON{Action: "delete", ID: webhook.ID, Name: webhook.Name})
-					}
-					return "deleted webhook: " + sanitizeAutomationDetailText(webhook.Name), nil
 				}
 				return "", errors.New(commandUsage("webhooks", action))
 			})
-			if action == "rotate" || action == "delete" {
-				return confirmOr(m, fmt.Sprintf("%s webhook %q? Type 'yes' to confirm or Esc to cancel.", titleFor(action), sanitizeAutomationDetailText(ref)), fmt.Sprintf("use --force to confirm %s of webhook %q", action, sanitizeAutomationDetailText(ref)), cmd)
-			}
 			return m, cmd
 		},
 	}

@@ -146,7 +146,8 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"webhooks_test", "/webhooks test", "webhooks test"},
 		{"webhooks_rotate", "/webhooks rotate", "webhooks rotate"},
 		{"webhooks_delete", "/webhooks delete", "webhooks delete"},
-		// schedule		{"schedule_add", "/schedule add", "schedule add"},
+		// schedule
+		{"schedule_add", "/schedule add", "schedule add"},
 		{"schedule_edit", "/schedule edit", "schedule edit"},
 		{"schedule_delete", "/schedule delete", "schedule delete"},
 		{"schedule_toggle", "/schedule toggle", "schedule toggle"},

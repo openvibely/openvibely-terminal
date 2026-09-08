@@ -4878,6 +4878,52 @@ func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 		}
 	})
 
+	for _, tc := range []struct {
+		name   string
+		action string
+		ref    string
+		want   string
+	}{
+		{name: "unknown before force gate", action: "rotate", ref: "foreign-id", want: "nothing matches"},
+		{name: "ambiguous before force gate", action: "delete", ref: "pager", want: "ambiguous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"webhooks", tc.action, tc.ref}, false, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.want) || strings.Contains(err.Error(), "--force") {
+				t.Fatalf("error = %v, want matching error %q before force gate", err, tc.want)
+			}
+			if rec.saw("POST", "/channels/webhooks/w1/rotate-secret") || rec.saw("DELETE", "/channels/webhooks/w1") || rec.saw("DELETE", "/channels/webhooks/w2") {
+				t.Fatalf("invalid reference mutated: %s", rec.all())
+			}
+		})
+	}
+
+	t.Run("unique partial force guidance is canonical", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"webhooks", "rotate", "duty"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "--force") || !strings.Contains(err.Error(), `"Pager Duty"`) || strings.Contains(err.Error(), `"duty"`) {
+			t.Fatalf("error = %v, want canonical force guidance", err)
+		}
+		if got := rec.count("GET", "/channels"); got != 1 {
+			t.Fatalf("resolution requests = %d, want 1; calls: %s", got, rec.all())
+		}
+	})
+
+	t.Run("forced unique partial mutates captured canonical target", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":                       cliProjects,
+			"/channels":                           webhookCardsHTML,
+			"/channels/webhooks/w1/rotate-secret": `{"secret":"replacement"}`,
+		})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"webhooks", "rotate", "duty"}, true, false); err != nil {
+			t.Fatal(err)
+		}
+		if !rec.saw("POST", "/channels/webhooks/w1/rotate-secret") || rec.count("GET", "/channels") != 1 {
+			t.Fatalf("partial reference rebound or mutated wrong target: %s", rec.all())
+		}
+	})
+
 	for _, action := range []string{"rotate", "delete"} {
 		t.Run(action+" requires force", func(t *testing.T) {
 			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})

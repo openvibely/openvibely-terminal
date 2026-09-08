@@ -7110,6 +7110,100 @@ func TestWebhooksAmbiguousAndForeignRefsDoNotMutate(t *testing.T) {
 	}
 }
 
+func TestWebhooksDestructiveReferencesResolveBeforeConfirmation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "unknown rotate", line: "/webhooks rotate foreign-id", want: "nothing matches"},
+		{name: "ambiguous delete", line: "/webhooks delete pager", want: "ambiguous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/channels": webhookCardsHTML})
+			m = runLine(t, m, tc.line)
+			if m.pendingConfirmation != nil {
+				t.Fatalf("invalid reference opened confirmation: %q", m.pendingConfirmation.message)
+			}
+			if !strings.Contains(strings.ToLower(transcript(m)), tc.want) {
+				t.Fatalf("missing matching error %q:\n%s", tc.want, transcript(m))
+			}
+			if rec.saw("POST", "/channels/webhooks/w1/rotate-secret") || rec.saw("DELETE", "/channels/webhooks/w1") || rec.saw("DELETE", "/channels/webhooks/w2") {
+				t.Fatalf("invalid reference mutated:\n%s", rec.all())
+			}
+		})
+	}
+
+	t.Run("unique partial captures canonical target", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/channels": webhookCardsHTML,
+			"POST /channels/webhooks/w1/rotate-secret": `{"secret":"new-secret"}`,
+		})
+		m = runLine(t, m, "/webhooks rotate duty")
+		if m.pendingConfirmation == nil || !strings.Contains(m.pendingConfirmation.message, `"Pager Duty"`) || strings.Contains(m.pendingConfirmation.message, `"duty"`) {
+			t.Fatalf("confirmation did not use canonical target: %#v", m.pendingConfirmation)
+		}
+		if got := rec.count("GET", "/channels"); got != 1 {
+			t.Fatalf("resolution requests = %d, want 1; calls:\n%s", got, rec.all())
+		}
+		m = runLine(t, m, "yes")
+		if !rec.saw("POST", "/channels/webhooks/w1/rotate-secret") {
+			t.Fatalf("confirmed captured target did not mutate w1:\n%s", rec.all())
+		}
+		if got := rec.count("GET", "/channels"); got != 1 {
+			t.Fatalf("confirmed action rebound target with %d discoveries; calls:\n%s", got, rec.all())
+		}
+	})
+
+	t.Run("canonical id uses canonical name", func(t *testing.T) {
+		m, _ := dispatchModel(t, map[string]string{"/channels": webhookCardsHTML})
+		m = runLine(t, m, "/webhooks delete w1")
+		if m.pendingConfirmation == nil || !strings.Contains(m.pendingConfirmation.message, `"Pager Duty"`) {
+			t.Fatalf("canonical ID confirmation = %#v", m.pendingConfirmation)
+		}
+	})
+}
+
+func TestWebhookReferenceErrorsAreTerminalSafeRaw(t *testing.T) {
+	tests := []struct {
+		name  string
+		cards string
+		ref   string
+		want  string
+	}{
+		{
+			name:  "backend controlled ambiguous names",
+			cards: `<div data-webhook-id="w1" data-webhook-name="Bad&#10;&#13;&#9;&#1;Ref One"></div><div data-webhook-id="w2" data-webhook-name="Bad&#10;&#13;&#9;&#1;Ref Two"></div>`,
+			ref:   "Bad",
+			want:  "ambiguous",
+		},
+		{
+			name:  "user controlled missing reference",
+			cards: webhookCardsHTML,
+			ref:   "Missing\x1b[31m\n\r\t\x01Ref",
+			want:  "nothing matches",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, map[string]string{"/channels": tc.cards})
+			m = runLine(t, m, `/webhooks test "`+tc.ref+`"`)
+			if len(m.log) == 0 {
+				t.Fatal("missing reference error entry")
+			}
+			out := m.log[len(m.log)-1].text
+			if !strings.Contains(strings.ToLower(out), tc.want) {
+				t.Fatalf("expected reference error %q: %q", tc.want, out)
+			}
+			for _, forbidden := range []string{"\x1b", "\n", "\r", "\t", "\x01"} {
+				if strings.Contains(out, forbidden) {
+					t.Fatalf("raw reference error contains terminal control %q: %q", forbidden, out)
+				}
+			}
+		})
+	}
+}
+
 func TestWebhooksRotateDeleteConfirmationAndSanitization(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/channels": webhookCardsHTML,
