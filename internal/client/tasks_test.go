@@ -257,9 +257,6 @@ func TestGetTaskForProjectExactPreservesScopedDetailAndCancellation(t *testing.T
 		switch r.URL.Path {
 		case "/tasks/" + taskID:
 			_, _ = w.Write([]byte(`<div data-task-id="` + taskID + `" data-project-id="p1" data-task-status="running" data-task-category="active"><h2 class="font-bold">Exact task</h2><div id="tab-details">details</div><div id="tab-chat"></div><div id="tab-changes"></div><div id="tab-lifecycle">life</div></div>`))
-		case "/api/tasks/" + taskID + "/swarm":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"` + taskID + `","project_id":"p1","title":"Exact task","category":"active","status":"running","display_order":7}`))
 		case "/tasks/" + taskID + "/thread":
 			_, _ = w.Write([]byte(`<div>thread</div>`))
 		case "/tasks/" + taskID + "/changes":
@@ -294,16 +291,11 @@ func TestGetTaskForProjectExactPreservesScopedDetailAndCancellation(t *testing.T
 
 func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
+	prompt := strings.Repeat("界", 300) + "TAIL"
+	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("project_id") != "p1" {
-			t.Fatalf("unexpected request %s", r.URL.RequestURI())
-		}
-		if r.URL.Path == "/api/tasks/"+taskID+"/swarm" {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"`+taskID+`","project_id":"p1","display_order":7,"parent_task_id":"parent-1","chain_config":"{\"enabled\":true}","swarm_role":"parent","has_goal":true}`)
-			return
-		}
-		if r.URL.Path != "/tasks/"+taskID {
+		requests.Add(1)
+		if r.URL.Path != "/tasks/"+taskID || r.URL.Query().Get("project_id") != "p1" {
 			t.Fatalf("unexpected request %s", r.URL.RequestURI())
 		}
 		_, _ = io.WriteString(w, `<div id="task-detail-content">
@@ -315,13 +307,21 @@ func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 					<div><span>Category:</span><span class="badge">active</span></div>
 					<div><span>Tag:</span><span class="badge">Bug</span></div>
 					<div><span>Priority:</span><span class="badge">High</span></div>
-					<div><span>Model:</span><span class="badge">Claude Sonnet</span></div>
+					<div><span>Model:</span><span class="badge">Default model</span></div>
 					<div><span>Agent:</span><span class="badge">Planner</span></div>
 				</div>
-				<div id="task-prompt-panel"><div>Prompt</div><div class="textarea">Implement exact lookup</div></div>
+				<div class="card"><h3>Swarm Overview</h3></div>
+				<div id="task-prompt-panel"><div>Prompt</div><div class="textarea">`+prompt+`</div></div>
 				<div id="task-goal-panel" data-task-id="`+taskID+`"><span class="badge">Active</span></div>
 			</div>
-			<form><input name="title" value="Exact task"><select name="category"><option value="active" selected>active</option></select><textarea name="prompt">Implement exact lookup</textarea></form>
+			<form><input name="title" value="Exact task"><select name="category"><option value="active" selected>active</option></select>
+				<select name="priority"><option value="3" selected>High</option></select>
+				<select name="tag"><option value="bug" selected>Bug</option></select>
+				<textarea name="prompt">`+prompt+`</textarea>
+				<select name="agent_id"><option value="" selected>Use Default Model</option><option value="model-1">Claude Sonnet (Default)</option></select>
+				<select name="agent_definition_id"><option value="">No Agent</option><option value="planner" selected>Planner</option></select>
+			</form>
+			<form><input type="checkbox" name="chain_enabled" checked></form>
 			</div></div>`)
 	}))
 	defer srv.Close()
@@ -335,78 +335,15 @@ func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Task{
-		ID: taskID, ProjectID: "p1", Title: "Exact task", Prompt: "Implement exact lookup",
-		Category: "active", Status: "running", DisplayOrder: 7,
-		Badges: []string{"Chained", "Chain", "Goal", "Swarm", "Claude Sonnet", "Planner", "Bug", "High"},
+		ID: taskID, ProjectID: "p1", Title: "Exact task", Prompt: strings.Repeat("界", 300),
+		Category: "active", Status: "running", DisplayOrder: 0,
+		Badges: []string{"Chain", "Goal", "Swarm", "Claude Sonnet", "Planner", "Bug", "High"},
 	}
 	if !reflect.DeepEqual(detail.Task, want) {
 		t.Fatalf("task = %#v, want %#v", detail.Task, want)
 	}
-}
-
-func TestGetTaskForProjectExactRejectsForeignDirectMetadataBeforeLazyLoads(t *testing.T) {
-	const taskID = "0123456789abcdef0123456789abcdef"
-	var requests atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		switch r.URL.Path {
-		case "/tasks/" + taskID:
-			_, _ = io.WriteString(w, `<a data-project-id="p1">Tasks</a><div id="task-goal-panel" data-task-id="`+taskID+`">No goal set</div>`)
-		case "/api/tasks/" + taskID + "/swarm":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"`+taskID+`","project_id":"p2","title":"Foreign metadata secret","display_order":99}`)
-		default:
-			t.Fatalf("unexpected lazy request %s", r.URL.RequestURI())
-		}
-	}))
-	defer srv.Close()
-
-	c, err := New(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	detail, err := c.GetTaskForProjectExact(context.Background(), taskID, "p1")
-	if err == nil || detail != nil {
-		t.Fatalf("GetTaskForProjectExact = (%#v, %v), want nil detail and error", detail, err)
-	}
-	if strings.Contains(err.Error(), "Foreign metadata secret") || strings.Contains(err.Error(), "p2") {
-		t.Fatalf("error leaked foreign metadata: %v", err)
-	}
-	if got := requests.Load(); got != 2 {
-		t.Fatalf("requests = %d, want detail and direct metadata only", got)
-	}
-}
-
-func TestGetTaskMetadataForProjectExactCancelsDirectMetadataRequest(t *testing.T) {
-	const taskID = "0123456789abcdef0123456789abcdef"
-	metadataStarted := make(chan struct{})
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/tasks/" + taskID:
-			_, _ = io.WriteString(w, `<a data-project-id="p1">Tasks</a><div id="task-goal-panel" data-task-id="`+taskID+`">No goal set</div>`)
-		case "/api/tasks/" + taskID + "/swarm":
-			close(metadataStarted)
-			<-r.Context().Done()
-		default:
-			t.Fatalf("unexpected request %s", r.URL.RequestURI())
-		}
-	}))
-	defer srv.Close()
-
-	c, err := New(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, err := c.GetTaskMetadataForProjectExact(ctx, taskID, "p1")
-		done <- err
-	}()
-	<-metadataStarted
-	cancel()
-	if err := <-done; !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled error = %v, want context.Canceled", err)
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests = %d, want only scoped detail", got)
 	}
 }
 

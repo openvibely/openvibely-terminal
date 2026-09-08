@@ -9,7 +9,6 @@ package client
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -486,12 +485,7 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 	}
 	d := &TaskDetail{Task: Task{ID: taskID, ProjectID: projectID}, Attachments: make([]Attachment, 0)}
 	if exact {
-		metadata, metadataErr := c.getExactTaskMetadata(ctx, taskID, projectID)
-		if metadataErr != nil {
-			return nil, metadataErr
-		}
-		d.Task = metadata.Task
-		populateExactTaskMetadata(root, &d.Task, metadata)
+		populateExactTaskMetadata(root, &d.Task)
 	}
 
 	// The legacy detail page heading carries the real title.
@@ -626,40 +620,26 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 	return d, nil
 }
 
-type exactTaskMetadata struct {
-	Task
-	ParentTaskID      *string `json:"parent_task_id"`
-	ChainConfig       string  `json:"chain_config"`
-	SwarmRole         string  `json:"swarm_role"`
-	HasGoal           bool    `json:"has_goal"`
-	AgentID           *string `json:"agent_id"`
-	AgentDefinitionID *string `json:"agent_definition_id"`
-}
+const taskBoardPromptPreviewCodePoints = 300
 
-func (c *Client) getExactTaskMetadata(ctx context.Context, taskID, projectID string) (*exactTaskMetadata, error) {
-	var metadata exactTaskMetadata
-	path := "/api/tasks/" + url.PathEscape(taskID) + "/swarm" + query("project_id", projectID)
-	if err := c.getJSON(ctx, path, &metadata); err != nil {
-		return nil, err
-	}
-	if metadata.ID != taskID || metadata.ProjectID != projectID {
-		return nil, fmt.Errorf("task %q was not found in selected project", taskID)
-	}
-	return &metadata, nil
-}
-
-func populateExactTaskMetadata(root *html.Node, task *Task, metadata *exactTaskMetadata) {
+func populateExactTaskMetadata(root *html.Node, task *Task) {
 	task.Badges = make([]string, 0)
+	seenBadges := make(map[string]bool)
+	appendBadge := func(badge string) {
+		if badge == "" || seenBadges[badge] {
+			return
+		}
+		seenBadges[badge] = true
+		task.Badges = append(task.Badges, badge)
+	}
 
-	if task.Title == "" {
-		if selector := findNode(root, func(e *html.Node) bool {
-			return nodeHasAttr(e, "data-breadcrumb-selector")
-		}); selector != nil {
-			if button := findNode(selector, func(e *html.Node) bool {
-				return nodeHasAttr(e, "data-breadcrumb-selector-button")
-			}); button != nil {
-				task.Title = strings.TrimSpace(NodeText(button))
-			}
+	if selector := findNode(root, func(e *html.Node) bool {
+		return nodeHasAttr(e, "data-breadcrumb-selector")
+	}); selector != nil {
+		if button := findNode(selector, func(e *html.Node) bool {
+			return nodeHasAttr(e, "data-breadcrumb-selector-button")
+		}); button != nil {
+			task.Title = strings.TrimSpace(NodeText(button))
 		}
 	}
 	if task.Title == "" {
@@ -668,47 +648,142 @@ func populateExactTaskMetadata(root *html.Node, task *Task, metadata *exactTaskM
 		}
 	}
 
-	if task.Category == "" {
-		if selected := taskDetailSelectedOption(root, "category"); selected != nil {
-			task.Category = strings.TrimSpace(attr(selected, "value"))
-			if task.Category == "" {
-				task.Category = strings.TrimSpace(NodeText(selected))
-			}
+	if selected := taskDetailSelectedOption(root, "category"); selected != nil {
+		task.Category = strings.TrimSpace(attr(selected, "value"))
+		if task.Category == "" {
+			task.Category = strings.TrimSpace(NodeText(selected))
 		}
 	}
 	if task.Category == "" {
 		task.Category = taskDetailMetric(root, "Category:")
 	}
-	if task.Status == "" {
-		if n := findNode(root, func(e *html.Node) bool { return attr(e, "data-task-status") != "" }); n != nil {
-			task.Status = strings.TrimSpace(attr(n, "data-task-status"))
+	if n := findNode(root, func(e *html.Node) bool { return attr(e, "data-task-status") != "" }); n != nil {
+		task.Status = strings.TrimSpace(attr(n, "data-task-status"))
+	}
+	if n := findNode(root, func(e *html.Node) bool { return attr(e, "data-display-order") != "" }); n != nil {
+		task.DisplayOrder, _ = strconv.Atoi(strings.TrimSpace(attr(n, "data-display-order")))
+	}
+
+	if prompt := taskDetailNamedControl(root, "textarea", "prompt"); prompt != nil {
+		task.Prompt = taskBoardPromptPreview(taskDetailControlText(prompt))
+	} else if panel := findByID(root, "task-prompt-panel"); panel != nil {
+		if value := findNode(panel, func(e *html.Node) bool {
+			return strings.Contains(" "+attr(e, "class")+" ", " textarea ")
+		}); value != nil {
+			task.Prompt = taskBoardPromptPreview(NodeText(value))
 		}
 	}
 
-	if metadata.ParentTaskID != nil {
-		task.Badges = append(task.Badges, "Chained")
+	if taskDetailSwarmChild(root) {
+		appendBadge("Chained")
 	}
-	if taskChainEnabled(metadata.ChainConfig) {
-		task.Badges = append(task.Badges, "Chain")
+	if taskDetailCheckedControl(root, "chain_enabled") {
+		appendBadge("Chain")
 	}
-	if metadata.HasGoal || taskDetailHasGoal(root) {
-		task.Badges = append(task.Badges, "Goal")
+	if taskDetailHasGoal(root) {
+		appendBadge("Goal")
 	}
-	if metadata.SwarmRole == "parent" {
-		task.Badges = append(task.Badges, "Swarm")
+	if taskDetailHasHeading(root, "Swarm Overview") {
+		appendBadge("Swarm")
 	}
 	for _, badge := range []string{
-		taskDetailMetric(root, "Model:"),
-		taskDetailMetric(root, "Agent:"),
-		taskDetailMetric(root, "Tag:"),
-		taskDetailMetric(root, "Priority:"),
+		taskDetailModelBadge(root),
+		taskDetailSelectedLabel(root, "agent_definition_id", "No Agent"),
+		taskDetailSelectedLabel(root, "tag", "None"),
+		taskDetailSelectedLabel(root, "priority", ""),
 	} {
-		badge = strings.TrimSpace(badge)
-		if badge == "" || strings.EqualFold(badge, "none") || strings.EqualFold(badge, "no agent") {
-			continue
-		}
-		task.Badges = append(task.Badges, badge)
+		appendBadge(badge)
 	}
+}
+
+func taskBoardPromptPreview(value string) string {
+	runes := []rune(value)
+	if len(runes) > taskBoardPromptPreviewCodePoints {
+		runes = runes[:taskBoardPromptPreviewCodePoints]
+	}
+	return string(runes)
+}
+
+func taskDetailHasHeading(root *html.Node, text string) bool {
+	return findNode(root, func(e *html.Node) bool {
+		return e.Data == "h3" && strings.TrimSpace(NodeText(e)) == text
+	}) != nil
+}
+
+func taskDetailSwarmChild(root *html.Node) bool {
+	heading := findNode(root, func(e *html.Node) bool {
+		return e.Data == "h3" && strings.TrimSpace(NodeText(e)) == "Swarm Context"
+	})
+	if heading == nil || heading.Parent == nil || heading.Parent.Parent == nil {
+		return false
+	}
+	return strings.Contains(NodeText(heading.Parent.Parent), "Part of swarm:")
+}
+
+func taskDetailCheckedControl(root *html.Node, name string) bool {
+	control := findNode(root, func(e *html.Node) bool {
+		return (e.Data == "input" || e.Data == "option") && attr(e, "name") == name
+	})
+	return control != nil && nodeHasAttr(control, "checked")
+}
+
+func taskDetailSelectedLabel(root *html.Node, name, emptyLabel string) string {
+	selected := taskDetailSelectedOption(root, name)
+	if selected == nil || strings.TrimSpace(attr(selected, "value")) == "" {
+		return ""
+	}
+	label := strings.TrimSpace(taskDetailControlText(selected))
+	if strings.EqualFold(label, emptyLabel) {
+		return ""
+	}
+	return label
+}
+
+func taskDetailModelBadge(root *html.Node) string {
+	selectNode := taskDetailNamedControl(root, "select", "agent_id")
+	if selectNode == nil {
+		return ""
+	}
+	options := findAll(selectNode, func(e *html.Node) bool { return e.Data == "option" })
+	configured := 0
+	var selected *html.Node
+	for _, option := range options {
+		if strings.TrimSpace(attr(option, "value")) != "" {
+			configured++
+		}
+		if nodeHasAttr(option, "selected") {
+			selected = option
+		}
+	}
+	if configured == 0 {
+		return ""
+	}
+	if selected != nil && strings.TrimSpace(attr(selected, "value")) != "" {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(taskDetailControlText(selected)), "(Default)"))
+	}
+	for _, option := range options {
+		label := strings.TrimSpace(taskDetailControlText(option))
+		if strings.TrimSpace(attr(option, "value")) != "" && strings.HasSuffix(label, "(Default)") {
+			return strings.TrimSpace(strings.TrimSuffix(label, "(Default)"))
+		}
+	}
+	return "No Model"
+}
+
+func taskDetailControlText(node *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(current *html.Node) {
+		if current.Type == html.TextNode {
+			b.WriteString(current.Data)
+			return
+		}
+		for child := current.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(node)
+	return b.String()
 }
 
 func taskDetailNamedControl(root *html.Node, element, name string) *html.Node {
@@ -742,13 +817,6 @@ func nodeHasAttr(node *html.Node, name string) bool {
 func taskDetailHasGoal(root *html.Node) bool {
 	panel := findByID(root, "task-goal-panel")
 	return panel != nil && !strings.Contains(strings.ToLower(NodeText(panel)), "no goal set")
-}
-
-func taskChainEnabled(raw string) bool {
-	var config struct {
-		Enabled bool `json:"enabled"`
-	}
-	return json.Unmarshal([]byte(raw), &config) == nil && config.Enabled
 }
 
 func taskDetailMetric(root *html.Node, label string) string {
