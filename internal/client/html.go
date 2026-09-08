@@ -140,14 +140,14 @@ func (c *Client) getCardPagesFromInitialUntil(ctx context.Context, path string, 
 		}
 	}
 	offset := countPaginationCards(root, selector, keyAttr)
+	if err := validateCardContinuation(1, offset, hasMore); err != nil {
+		return nil, false, err
+	}
 	if stop != nil && stop(root) {
 		return pages, true, nil
 	}
 
 	for page := 1; hasMore; page++ {
-		if page >= maxCardPages || offset >= maxPaginatedCards {
-			return nil, false, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
-		}
 		continuation, err := cardContinuationPath(path, page, offset)
 		if err != nil {
 			return nil, false, err
@@ -166,11 +166,21 @@ func (c *Client) getCardPagesFromInitialUntil(ctx context.Context, path string, 
 		pages = append(pages, htmlPage{root: next})
 		offset += count
 		hasMore = nextHasMore
+		if err := validateCardContinuation(page+1, offset, hasMore); err != nil {
+			return nil, false, err
+		}
 		if stop != nil && stop(next) {
 			return pages, true, nil
 		}
 	}
 	return pages, false, nil
+}
+
+func validateCardContinuation(pages, cards int, hasMore bool) error {
+	if hasMore && (pages >= maxCardPages || cards >= maxPaginatedCards) {
+		return fmt.Errorf("card pagination exceeded safety limit after %d cards", cards)
+	}
+	return nil
 }
 
 func cardContinuationPath(path string, page, offset int) (string, error) {

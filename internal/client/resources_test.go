@@ -524,7 +524,7 @@ func TestFindAlertByIDValidatesMatchingPageMetadataAndLimits(t *testing.T) {
 		}
 	})
 
-	t.Run("page bound", func(t *testing.T) {
+	t.Run("unknown ID reaches page bound", func(t *testing.T) {
 		requests := 0
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			requests++
@@ -539,6 +539,51 @@ func TestFindAlertByIDValidatesMatchingPageMetadataAndLimits(t *testing.T) {
 		}
 		if requests != maxCardPages {
 			t.Fatalf("requests = %d, want %d", requests, maxCardPages)
+		}
+	})
+
+	t.Run("matching page at page bound with continuation", func(t *testing.T) {
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests++
+			w.Header().Set(cardPageMoreHeader, "true")
+			id := fmt.Sprintf("%032x", requests)
+			if requests == maxCardPages {
+				id = target
+			}
+			_, _ = io.WriteString(w, alertListPage([]string{id}, true))
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		_, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
+		if err == nil || !strings.Contains(err.Error(), "card pagination exceeded safety limit") {
+			t.Fatalf("found = %t, error = %v", found, err)
+		}
+		if requests != maxCardPages {
+			t.Fatalf("requests = %d, want %d", requests, maxCardPages)
+		}
+	})
+
+	t.Run("matching page at card bound with continuation", func(t *testing.T) {
+		ids := make([]string, maxPaginatedCards)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("%032x", i+1)
+		}
+		ids[len(ids)-1] = target
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests++
+			w.Header().Set(cardPageMoreHeader, "true")
+			_, _ = io.WriteString(w, alertListPage(ids, true))
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		_, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
+		if err == nil || !strings.Contains(err.Error(), "card pagination exceeded safety limit") {
+			t.Fatalf("found = %t, error = %v", found, err)
+		}
+		if requests != 1 {
+			t.Fatalf("requests = %d, want 1", requests)
 		}
 	})
 }
