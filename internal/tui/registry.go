@@ -346,14 +346,10 @@ func tasksCommand() command {
 				})
 
 			case "open":
-				if m.pendingMsgTaskID != "" {
-					m.flushChatStreamOutput()
-					m.clearPendingChat()
-					m.busy = false
-				}
+				// Advancing only the open request ID orders competing resolutions while
+				// preserving the current thread and any active reply until a replacement
+				// has actually loaded successfully.
 				m.threadOpenRequestID++
-				m.threadRefreshRequestID++
-				m.threadReplyPendingRequestID = 0
 				if ref == "" {
 					return taskSelector(m, "usage: /tasks open <id|title>", "tasks open", false)
 				}

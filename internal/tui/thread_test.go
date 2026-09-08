@@ -311,37 +311,30 @@ func TestDelayedThreadReplyIgnoredAfterNewerOpen(t *testing.T) {
 	}
 }
 
-func TestDelayedThreadReplyCannotRegressTerminalRefresh(t *testing.T) {
+func TestPreAckTaskTerminalCannotSupersedeDelayedThreadReply(t *testing.T) {
 	m, _ := threadModel(t)
 	m = runLine(t, m, "/tasks open Refactor")
 	m.input.SetValue("please add tests")
 	submitted, replyCmd := m.submit()
 	m = submitted.(Model)
+	before := transcript(m)
 
 	m.sseGeneration = 11
 	m.sseEvents = make(chan client.Event)
 	m.sseErrs = make(chan error)
-	updated, terminalCmd := m.Update(sseEventMsg{generation: 11, event: client.Event{
+	updated, _ := m.Update(sseEventMsg{generation: 11, event: client.Event{
 		Name: "task_status_changed",
 		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","status":"completed"}`),
 	}})
 	m = updated.(Model)
-	terminal := threadRefreshMessageFromBatch(t, terminalCmd)
-	terminal.body = "terminal thread"
-	updated, _ = m.Update(terminal)
-	m = updated.(Model)
-	before := transcript(m)
+	if m.threadStatus != "running" || transcript(m) != before || !m.chatSubmissionPending {
+		t.Fatalf("uncorrelated pre-ack terminal event superseded reply: status=%q pending=%t transcript=%q", m.threadStatus, m.chatSubmissionPending, transcript(m))
+	}
 
 	updated, _ = m.Update(replyCmd())
 	m = updated.(Model)
-	if m.threadStatus != "completed" {
-		t.Fatalf("delayed reply regressed terminal status to %q", m.threadStatus)
-	}
-	if m.busy {
-		t.Fatal("terminal refresh left superseded thread reply busy")
-	}
-	if got := transcript(m); got != before {
-		t.Fatalf("delayed reply replaced terminal transcript:\nbefore:\n%s\nafter:\n%s", before, got)
+	if m.threadStatus != "running" || m.busy || m.hasPendingChat() {
+		t.Fatalf("delayed reply did not settle after rejected terminal event: status=%q busy=%t pending=%t", m.threadStatus, m.busy, m.hasPendingChat())
 	}
 }
 
@@ -579,6 +572,385 @@ func TestTaskEventPromotesExecutionOnlyFromMatchingPendingInput(t *testing.T) {
 	m = updated.(Model)
 	if cmd == nil || m.pendingMsgExecutionID != "exec-promoted" || m.threadStatus != "running" {
 		t.Fatalf("matching queued event did not promote current turn: cmd=%t execution=%q status=%q", cmd != nil, m.pendingMsgExecutionID, m.threadStatus)
+	}
+}
+
+func TestTaskOpenFailurePreservesActiveReply(t *testing.T) {
+	const board = `<div>
+		<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor</a></div>
+		<div data-task-id="t-2" data-task-status="running" data-task-category="active"><a href="/tasks/t-2" title="Duplicate target">Duplicate target</a></div>
+		<div data-task-id="t-3" data-task-status="running" data-task-category="active"><a href="/tasks/t-3" title="Duplicate target later">Duplicate target later</a></div>
+	</div>`
+	for _, tt := range []struct {
+		name string
+		ref  string
+	}{
+		{name: "unknown", ref: "does-not-exist"},
+		{name: "ambiguous", ref: "Duplicate"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, map[string]string{
+				"/tasks":            board,
+				"/tasks/t-1/thread": `<div>existing answer</div>`,
+			})
+			m = runLine(t, m, "/tasks open Refactor")
+			installPendingTaskReply(&m, "exec-current")
+			m.updateChatStreamOutput("still streaming")
+			beforeRefreshID := m.threadRefreshRequestID
+
+			next, cmd := m.runCommand("/tasks open " + tt.ref)
+			m = next.(Model)
+			updated, _ := m.Update(cmd())
+			m = updated.(Model)
+
+			assertPendingTaskReply(t, m, "exec-current")
+			if m.threadID != "t-1" || m.threadRefreshRequestID != beforeRefreshID {
+				t.Fatalf("failed open replaced active thread state: thread=%q refresh=%d want=%d", m.threadID, m.threadRefreshRequestID, beforeRefreshID)
+			}
+			if !strings.Contains(transcript(m), "still streaming") {
+				t.Fatalf("failed open hid accepted output: %q", transcript(m))
+			}
+		})
+	}
+}
+
+func TestTaskOpenMissingReferenceAndPickerCancellationPreserveActiveReply(t *testing.T) {
+	m, _ := dispatchModel(t, map[string]string{
+		"/tasks": `<div>
+			<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>
+			<div data-task-id="t-2" data-task-status="running" data-task-category="active"><a href="/tasks/t-2" title="Other">Other</a></div>
+		</div>`,
+		"/tasks/t-1/thread": `<div>existing answer</div>`,
+	})
+	m = runLine(t, m, "/tasks open Refactor")
+	installPendingTaskReply(&m, "exec-current")
+
+	next, cmd := m.runCommand("/tasks open")
+	m = next.(Model)
+	assertPendingTaskReply(t, m, "exec-current")
+	updated, _ := m.Update(cmd())
+	m = updated.(Model)
+	if !m.selectorActive {
+		t.Fatal("missing task reference did not open picker")
+	}
+	assertPendingTaskReply(t, m, "exec-current")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if m.selectorActive || m.threadID != "t-1" {
+		t.Fatalf("picker cancellation changed active thread: selector=%t thread=%q", m.selectorActive, m.threadID)
+	}
+	assertPendingTaskReply(t, m, "exec-current")
+}
+
+func TestFailedTaskOpenDoesNotRejectInFlightReplyAcknowledgement(t *testing.T) {
+	m, _ := dispatchModel(t, map[string]string{
+		"/tasks":                 `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`,
+		"/tasks/t-1/thread":      `<div>existing answer</div>`,
+		"POST /tasks/t-1/thread": `<div data-execution-pair="true" data-exec-id="exec-current" data-exec-status="running"></div>`,
+	})
+	m = runLine(t, m, "/tasks open Refactor")
+	m.input.SetValue("continue")
+	submitted, send := m.submit()
+	m = submitted.(Model)
+	originalOpenRequest := m.pendingMsgThreadRequestID
+
+	next, openCmd := m.runCommand("/tasks open missing")
+	m = next.(Model)
+	updated, _ := m.Update(openCmd())
+	m = updated.(Model)
+	if m.threadOpenRequestID == originalOpenRequest {
+		t.Fatal("failed open did not advance ordered open request ID")
+	}
+
+	updated, cmd := m.Update(send())
+	m = updated.(Model)
+	if cmd == nil || m.pendingMsgID != "exec-current" || m.pendingMsgTaskID != "t-1" || !m.pendingChatScopeCurrent() {
+		t.Fatalf("failed open rejected in-flight acknowledgement: cmd=%t id=%q task=%q current=%t", cmd != nil, m.pendingMsgID, m.pendingMsgTaskID, m.pendingChatScopeCurrent())
+	}
+}
+
+func TestSuccessfulTaskOpenCommitsReplacementAndCancelsPriorReply(t *testing.T) {
+	m, _ := dispatchModel(t, map[string]string{
+		"/tasks": `<div>
+			<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>
+			<div data-task-id="t-2" data-task-status="running" data-task-category="active"><a href="/tasks/t-2" title="Other">Other</a></div>
+		</div>`,
+		"/tasks/t-1/thread": `<div>existing answer</div>`,
+		"/tasks/t-2/thread": `<div>replacement answer</div>`,
+	})
+	m = runLine(t, m, "/tasks open Refactor")
+	installPendingTaskReply(&m, "exec-current")
+	cancelled := false
+	m.chatStreamCancel = func() { cancelled = true }
+	m.updateChatStreamOutput("accepted before replacement")
+
+	next, cmd := m.runCommand("/tasks open Other")
+	m = next.(Model)
+	assertPendingTaskReply(t, m, "exec-current")
+	updated, _ := m.Update(cmd())
+	m = updated.(Model)
+
+	if m.threadID != "t-2" || m.hasPendingChat() || m.busy || !cancelled {
+		t.Fatalf("successful replacement did not commit: thread=%q pending=%t busy=%t cancelled=%t", m.threadID, m.hasPendingChat(), m.busy, cancelled)
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "accepted before replacement") || !strings.Contains(out, "replacement answer") {
+		t.Fatalf("successful replacement lost accepted output or new thread: %q", out)
+	}
+}
+
+func TestTaskOpenRequestErrorsPreserveActiveReply(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		phase  string
+	}{
+		{name: "authentication during resolution", status: http.StatusUnauthorized, phase: "tasks"},
+		{name: "backend during resolution", status: http.StatusInternalServerError, phase: "tasks"},
+		{name: "authentication during thread load", status: http.StatusUnauthorized, phase: "thread"},
+		{name: "backend during thread load", status: http.StatusInternalServerError, phase: "thread"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var fail bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if fail && ((tt.phase == "tasks" && r.URL.Path == "/tasks") || (tt.phase == "thread" && r.URL.Path == "/tasks/t-2/thread")) {
+					w.WriteHeader(tt.status)
+					return
+				}
+				switch r.URL.Path {
+				case "/tasks":
+					_, _ = w.Write([]byte(`<div>
+						<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>
+						<div data-task-id="t-2" data-task-status="running" data-task-category="active"><a href="/tasks/t-2" title="Other">Other</a></div>
+					</div>`))
+				case "/tasks/t-1/thread":
+					_, _ = w.Write([]byte(`<div>existing answer</div>`))
+				case "/tasks/t-2/thread":
+					_, _ = w.Write([]byte(`<div>replacement answer</div>`))
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID = "p1"
+			m = runLine(t, m, "/tasks open Refactor")
+			installPendingTaskReply(&m, "exec-current")
+			fail = true
+
+			next, cmd := m.runCommand("/tasks open Other")
+			m = next.(Model)
+			updated, _ := m.Update(cmd())
+			m = updated.(Model)
+			assertPendingTaskReply(t, m, "exec-current")
+			if m.threadID != "t-1" {
+				t.Fatalf("request failure replaced active thread with %q", m.threadID)
+			}
+		})
+	}
+
+	t.Run("transport", func(t *testing.T) {
+		m, _ := threadModel(t)
+		m = runLine(t, m, "/tasks open Refactor")
+		installPendingTaskReply(&m, "exec-current")
+		m.client, _ = client.New("http://127.0.0.1:1")
+		next, cmd := m.runCommand("/tasks open Other")
+		m = next.(Model)
+		updated, _ := m.Update(cmd())
+		m = updated.(Model)
+		assertPendingTaskReply(t, m, "exec-current")
+		if m.threadID != "t-1" {
+			t.Fatalf("transport failure replaced active thread with %q", m.threadID)
+		}
+	})
+}
+
+func installPendingTaskReply(m *Model, execID string) {
+	m.pendingMsgID = execID
+	m.pendingMsgExecutionID = execID
+	m.pendingMsgProjectID = m.selectedID
+	m.pendingMsgProjectGeneration = m.projectGeneration
+	m.pendingMsgTaskID = m.threadID
+	m.pendingMsgThreadRequestID = m.threadOpenRequestID
+	m.chatSubmissionPending = true
+	m.chatSubmissionID++
+	m.busy = true
+	m.chatStreamExecID = execID
+}
+
+func assertPendingTaskReply(t *testing.T, m Model, execID string) {
+	t.Helper()
+	if !m.hasPendingChat() || m.pendingMsgID != execID || m.pendingMsgTaskID != m.threadID || !m.pendingChatScopeCurrent() {
+		t.Fatalf("active task reply was invalidated: pending=%t id=%q task=%q thread=%q current=%t", m.hasPendingChat(), m.pendingMsgID, m.pendingMsgTaskID, m.threadID, m.pendingChatScopeCurrent())
+	}
+}
+
+func TestTaskEventsRejectIdentityBeforeReplyAcknowledgement(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	m.pendingMsgProjectID = "p1"
+	m.pendingMsgProjectGeneration = m.projectGeneration
+	m.pendingMsgTaskID = "t-1"
+	m.pendingMsgThreadRequestID = m.threadOpenRequestID
+	m.chatSubmissionPending = true
+	m.chatSubmissionID = 12
+	m.busy = true
+	m.sseGeneration = 18
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+	before := transcript(m)
+
+	for _, payload := range []string{
+		`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","exec_id":"exec-old","status":"failed","message":"old execution"}`,
+		`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","status":"failed","message":"unowned execution"}`,
+	} {
+		updated, _ := m.Update(sseEventMsg{generation: 18, event: client.Event{
+			Name: "task_status_changed",
+			Data: json.RawMessage(payload),
+		}})
+		m = updated.(Model)
+	}
+	if m.threadStatus != "running" || transcript(m) != before || m.pendingMsgID != "" || !m.chatSubmissionPending {
+		t.Fatalf("pre-ack execution event mutated active send: status=%q pending=%q submitting=%t transcript=%q", m.threadStatus, m.pendingMsgID, m.chatSubmissionPending, transcript(m))
+	}
+}
+
+func TestTaskEventsRejectConflictingExecutionAfterPromotion(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	installPendingTaskReply(&m, "input-current")
+	m.pendingMsgExecutionID = "exec-current"
+	m.sseGeneration = 19
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+	before := transcript(m)
+
+	updated, _ := m.Update(sseEventMsg{generation: 19, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","pending_input_id":"input-current","exec_id":"exec-conflict","status":"failed","message":"wrong promotion"}`),
+	}})
+	m = updated.(Model)
+	if m.threadStatus != "running" || m.pendingMsgExecutionID != "exec-current" || transcript(m) != before {
+		t.Fatalf("conflicting promoted execution mutated current turn: status=%q execution=%q transcript=%q", m.threadStatus, m.pendingMsgExecutionID, transcript(m))
+	}
+}
+
+func TestTaskEventPromotionRejectsConflictingSecondExecution(t *testing.T) {
+	m, _ := threadModel(t)
+	m = runLine(t, m, "/tasks open Refactor")
+	installPendingTaskReply(&m, "input-current")
+	m.pendingMsgExecutionID = ""
+	m.sseGeneration = 20
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	first, _ := m.Update(sseEventMsg{generation: 20, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","pending_input_id":"input-current","exec_id":"exec-current","status":"running"}`),
+	}})
+	m = first.(Model)
+	before := transcript(m)
+	second, _ := m.Update(sseEventMsg{generation: 20, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t-1","pending_input_id":"input-current","exec_id":"exec-conflict","status":"failed"}`),
+	}})
+	m = second.(Model)
+	if m.pendingMsgExecutionID != "exec-current" || m.threadStatus != "running" || transcript(m) != before {
+		t.Fatalf("second execution replaced verified promotion: execution=%q status=%q transcript=%q", m.pendingMsgExecutionID, m.threadStatus, transcript(m))
+	}
+}
+
+func TestInteractiveTaskReplyIdentitylessFallbackFailureIsExplicit(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+	}{
+		{name: "authentication", status: http.StatusUnauthorized},
+		{name: "backend", status: http.StatusInternalServerError},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			threadGets := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/tasks":
+					_, _ = w.Write([]byte(`<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`))
+				case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread":
+					_, _ = w.Write([]byte(`<div data-task-id="t-1" data-input-mode="swarm"></div>`))
+				case r.URL.Path == "/tasks/t-1/thread":
+					threadGets++
+					if threadGets == 1 {
+						_, _ = w.Write([]byte(`<div>existing answer</div>`))
+						return
+					}
+					w.WriteHeader(tt.status)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID = "p1"
+			m = runLine(t, m, "/tasks open Refactor")
+			m.input.SetValue("coordinate workers")
+			submitted, send := m.submit()
+			m = submitted.(Model)
+			updated, _ := m.Update(send())
+			m = updated.(Model)
+
+			if m.busy || m.hasPendingChat() || strings.Contains(transcript(m), "Thread · Refactor::sent") {
+				t.Fatalf("fallback failure reported success or remained pending: busy=%t pending=%t transcript=%q", m.busy, m.hasPendingChat(), transcript(m))
+			}
+			if tt.status == http.StatusUnauthorized && !m.authRequired {
+				t.Fatalf("fallback auth failure did not enter auth recovery: %q", transcript(m))
+			}
+			if tt.status == http.StatusInternalServerError && !strings.Contains(transcript(m), "500") {
+				t.Fatalf("fallback backend failure was hidden: %q", transcript(m))
+			}
+		})
+	}
+}
+
+func TestInteractiveTaskReplyIdentitylessFallbackTransportFailureIsExplicit(t *testing.T) {
+	threadGets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/tasks":
+			_, _ = w.Write([]byte(`<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread":
+			_, _ = w.Write([]byte(`<div data-task-id="t-1" data-input-mode="swarm"></div>`))
+		case r.URL.Path == "/tasks/t-1/thread":
+			threadGets++
+			if threadGets == 1 {
+				_, _ = w.Write([]byte(`<div>existing answer</div>`))
+				return
+			}
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.connected = true
+	m = runLine(t, m, "/tasks open Refactor")
+	m.input.SetValue("coordinate workers")
+	submitted, send := m.submit()
+	m = submitted.(Model)
+	updated, _ := m.Update(send())
+	m = updated.(Model)
+
+	if m.busy || m.hasPendingChat() || m.connected || m.connErr == "" || strings.Contains(transcript(m), "Thread · Refactor::sent") {
+		t.Fatalf("fallback transport failure did not use offline diagnostics: busy=%t pending=%t connected=%t connErr=%q transcript=%q", m.busy, m.hasPendingChat(), m.connected, m.connErr, transcript(m))
 	}
 }
 

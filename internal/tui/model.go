@@ -746,7 +746,10 @@ func (m Model) pendingChatScopeCurrent() bool {
 	if m.pendingMsgTaskID == "" {
 		return true
 	}
-	return m.pendingMsgTaskID == m.threadID && m.pendingMsgThreadRequestID == m.threadOpenRequestID
+	// An unresolved /tasks open attempt must not invalidate the active reply.
+	// Successful replacement clears the pending turn before installing the new
+	// thread, while explicit navigation and project transitions do the same.
+	return m.pendingMsgTaskID == m.threadID
 }
 
 func (m *Model) updateChatStreamOutput(delta string) {
@@ -1420,11 +1423,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.projectID != "" && msg.projectID != m.selectedID {
 			return m, nil // stale acknowledgement from a different project
 		}
-		if msg.taskID != "" && (msg.taskID != m.threadID || msg.threadRequestID != m.threadOpenRequestID) {
+		if msg.taskID != "" && msg.taskID != m.threadID {
 			return m, nil // stale task reply acknowledgement from a replaced thread view
 		}
-		// Once an acknowledgement has installed the pending ID, a later
-		// acknowledgement must never replace it. Tagged acknowledgements also
+		// Once an acknowledgement has installed the pending ID, a later		// acknowledgement must never replace it. Tagged acknowledgements also
 		// have to belong to the one submission currently in flight. The untagged
 		// branch keeps hand-built legacy test messages usable, but cannot replace
 		// a runtime submission that has an active token.
@@ -1602,13 +1604,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.requestID != 0 && msg.requestID != m.threadOpenRequestID {
 			return m, nil // superseded by a newer open or an explicit thread exit
 		}
-		m.busy = false
-		if m.handleCompletedRequestError(msg.err) {
+		if msg.err != nil {
+			if !m.hasPendingChat() {
+				m.busy = false
+			}
+			m.handleCompletedRequestError(msg.err)
 			return m, nil
 		}
 		if msg.projectID != "" && msg.projectID != m.selectedID {
 			return m, nil // stale — project switched while fetch was in flight
 		}
+		// Resolution and thread loading have both succeeded, so this response is
+		// now allowed to replace the prior task view and cancel its active turn.
+		if m.pendingMsgTaskID != "" {
+			m.flushChatStreamOutput()
+			m.clearPendingChat()
+		}
+		m.busy = false
 		m.threadID = msg.taskID
 		m.threadTitle = msg.title
 		m.threadStatus = strings.ToLower(msg.status)
@@ -1618,7 +1630,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.append(entry{role: "system", text: "in task thread — messages go to this task. /chat returns to project chat."})
 		m.input.Placeholder = "Reply to " + truncate(msg.title, 40) + " (/chat to exit)"
 		return m, nil
-
 	case threadUpdatedMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil
@@ -2191,23 +2202,31 @@ func (m *Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {
 // transcript or the generic /events display. A matching pending-input identity
 // authorizes a newly promoted execution ID from a queued follow-up.
 func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
-	if m.threadID == "" || m.pendingMsgTaskID != m.threadID || m.pendingMsgID == "" {
+	if m.threadID == "" || m.pendingMsgTaskID != m.threadID {
 		return true
 	}
 	var taskEvent client.TaskEvent
 	if json.Unmarshal(ev.Data, &taskEvent) != nil || taskEvent.TaskID != m.threadID || taskEvent.ProjectID != m.selectedID {
 		return true
 	}
+	if m.pendingMsgID == "" {
+		// The send is in flight but no backend identity has been acknowledged yet;
+		// no task event can safely claim this turn. Polling/streaming after the
+		// acknowledgement recovers any output emitted during this short window.
+		return false
+	}
 	if taskEvent.ExecID == "" && taskEvent.PendingInputID == "" {
 		return true // legacy task events do not expose execution identity
 	}
-	if taskEvent.PendingInputID != "" && !m.matchesPendingChatExecution(taskEvent.PendingInputID) {
+	if taskEvent.PendingInputID != "" && taskEvent.PendingInputID != m.pendingMsgID {
 		return false
 	}
 	if taskEvent.ExecID == "" || m.matchesPendingChatExecution(taskEvent.ExecID) {
 		return true
 	}
-	return taskEvent.PendingInputID != "" && m.matchesPendingChatExecution(taskEvent.PendingInputID)
+	// Only the first execution identity proven by the accepted queue input may
+	// promote that input. Once promoted, a conflicting execution is stale.
+	return m.pendingMsgExecutionID == "" && taskEvent.PendingInputID == m.pendingMsgID
 }
 
 // handleOpenThreadSSE mirrors the web task view's live behavior for the one task
@@ -2229,7 +2248,7 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 			// A queued task event may be the first authoritative evidence linking
 			// the accepted input to its promoted execution.
 			if taskEvent.ExecID != "" && m.pendingMsgExecutionID == "" &&
-				taskEvent.PendingInputID != "" && m.matchesPendingChatExecution(taskEvent.PendingInputID) {
+				taskEvent.PendingInputID == m.pendingMsgID {
 				m.pendingMsgExecutionID = taskEvent.ExecID
 			}
 			// Materialize accepted bytes before the terminal state is observable.
@@ -2310,7 +2329,7 @@ func (m Model) sendThreadMessage(taskID, text string, submissionID, threadReques
 
 		body, refreshErr := c.GetTaskThread(ctx, taskID, projectID)
 		if refreshErr != nil {
-			return threadReplyMsg{requestID: refreshRequestID, projectID: projectID, taskID: taskID, body: "sent"}
+			return threadReplyMsg{requestID: refreshRequestID, projectID: projectID, taskID: taskID, err: refreshErr}
 		}
 		if strings.TrimSpace(body) == "" {
 			body = dimStyle.Render("(no messages yet)")
