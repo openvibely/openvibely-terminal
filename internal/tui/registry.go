@@ -884,6 +884,14 @@ func addedReviewComment(reviews []client.ReviewComment, form client.ReviewCommen
 }
 
 func isCanonicalFullTaskID(ref string) bool {
+	return isCanonicalFullID(ref)
+}
+
+func isCanonicalFullAlertID(ref string) bool {
+	return isCanonicalFullID(ref)
+}
+
+func isCanonicalFullID(ref string) bool {
 	if len(ref) != 32 {
 		return false
 	}
@@ -1788,6 +1796,22 @@ func alertsCommand() command {
 							}))
 				}
 				return m, run("Alert", cmdTimeout, func(ctx context.Context) (string, error) {
+					if isCanonicalFullAlertID(ref) {
+						a, alerts, found, err := c.FindAlertByID(ctx, ref, pid)
+						if err != nil {
+							return "", err
+						}
+						if found {
+							return alertInspectionOutput(ctx, c, pid, a)
+						}
+						a, err = matchRef(alerts, ref,
+							func(a client.Alert) string { return a.ID },
+							func(a client.Alert) string { return a.Title })
+						if err != nil {
+							return "", err
+						}
+						return alertInspectionOutput(ctx, c, pid, a)
+					}
 					alerts, err := c.ListAlerts(ctx, pid)
 					if err != nil {
 						return "", err

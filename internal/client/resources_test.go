@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -167,6 +169,467 @@ func TestListAlertsTraversesPagesInStableScopedOrder(t *testing.T) {
 	}
 	if want := []string{"a-1", "shared", "a-3"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("alert order = %#v, want %#v", got, want)
+	}
+}
+
+func TestFindAlertByIDStopsOnMatchingPageBoundaries(t *testing.T) {
+	const total = 151
+	ids := make([]string, total)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("%032x", i+1)
+	}
+
+	tests := []struct {
+		name         string
+		index        int
+		wantRequests int
+	}{
+		{name: "first", index: 0, wantRequests: 1},
+		{name: "fiftieth", index: 49, wantRequests: 1},
+		{name: "fifty first", index: 50, wantRequests: 2},
+		{name: "middle", index: 100, wantRequests: 3},
+		{name: "final", index: 150, wantRequests: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if got := r.URL.Query().Get("project_id"); got != "project/one" {
+					t.Errorf("project_id = %q", got)
+				}
+				offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+				end := offset + cardPageSize
+				if end > len(ids) {
+					end = len(ids)
+				}
+				w.Header().Set(cardPageMoreHeader, strconv.FormatBool(end < len(ids)))
+				_, _ = io.WriteString(w, alertListPage(ids[offset:end], end < len(ids)))
+			}))
+			defer srv.Close()
+			c, _ := New(srv.URL)
+
+			alert, _, found, err := c.FindAlertByID(context.Background(), ids[tt.index], "project/one")
+			if err != nil {
+				t.Fatalf("FindAlertByID: %v", err)
+			}
+			if !found || alert.ID != ids[tt.index] {
+				t.Fatalf("alert = %+v, found = %t", alert, found)
+			}
+			if requests != tt.wantRequests {
+				t.Fatalf("requests = %d, want %d", requests, tt.wantRequests)
+			}
+		})
+	}
+}
+
+func TestFindAlertByIDUnknownTraversesAllPages(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		hasMore := requests < 3
+		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(hasMore))
+		_, _ = io.WriteString(w, alertListPage([]string{fmt.Sprintf("%032x", requests)}, hasMore))
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	alert, _, found, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
+	if err != nil || found || alert.ID != "" {
+		t.Fatalf("alert = %+v, found = %t, error = %v", alert, found, err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+}
+
+func TestFindAlertByIDPreservesPaginationFailures(t *testing.T) {
+	tests := []struct {
+		name  string
+		serve func(http.ResponseWriter, *http.Request, int)
+		want  string
+	}{
+		{
+			name: "malformed continuation",
+			serve: func(w http.ResponseWriter, _ *http.Request, request int) {
+				if request == 2 {
+					w.Header().Set(cardPageMoreHeader, "invalid")
+				}
+				_, _ = io.WriteString(w, alertListPage([]string{fmt.Sprintf("%032x", request)}, true))
+			},
+			want: cardPageMoreHeader,
+		},
+		{
+			name: "backend failure",
+			serve: func(w http.ResponseWriter, _ *http.Request, request int) {
+				if request == 2 {
+					http.Error(w, "failed", http.StatusBadGateway)
+					return
+				}
+				_, _ = io.WriteString(w, alertListPage([]string{fmt.Sprintf("%032x", request)}, true))
+			},
+			want: "loading card page 2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				tt.serve(w, r, requests)
+			}))
+			defer srv.Close()
+			c, _ := New(srv.URL)
+			_, _, _, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindAlertByIDPreservesCancellationAndAuthentication(t *testing.T) {
+	t.Run("authentication", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		_, _, _, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
+		if !IsAuthRequired(err) {
+			t.Fatalf("error = %v, want authentication required", err)
+		}
+	})
+
+	for _, tt := range []struct {
+		name    string
+		timeout time.Duration
+	}{
+		{name: "timeout", timeout: 10 * time.Millisecond},
+		{name: "cancellation", timeout: time.Hour},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			continued := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("card_page") == "" {
+					_, _ = io.WriteString(w, alertListPage([]string{strings.Repeat("1", 32)}, true))
+					return
+				}
+				close(continued)
+				<-r.Context().Done()
+			}))
+			defer srv.Close()
+			c, _ := New(srv.URL)
+			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
+			if tt.name == "cancellation" {
+				go func() {
+					<-continued
+					cancel()
+				}()
+			} else {
+				defer cancel()
+			}
+			_, _, _, err := c.FindAlertByID(ctx, strings.Repeat("f", 32), "p1")
+			if err == nil || (!strings.Contains(err.Error(), context.Canceled.Error()) && !strings.Contains(err.Error(), context.DeadlineExceeded.Error())) {
+				t.Fatalf("error = %v, want context termination", err)
+			}
+		})
+	}
+}
+
+func BenchmarkAlertLookup(b *testing.B) {
+	for _, total := range []int{10, 100, 1000} {
+		ids := make([]string, total)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("%032x", i+1)
+		}
+		for _, delay := range []time.Duration{0, 25 * time.Millisecond} {
+			delayName := "no_delay"
+			if delay > 0 {
+				delayName = "25ms_delay"
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if delay > 0 {
+					time.Sleep(delay)
+				}
+				offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+				end := offset + cardPageSize
+				if end > len(ids) {
+					end = len(ids)
+				}
+				w.Header().Set(cardPageMoreHeader, strconv.FormatBool(end < len(ids)))
+				_, _ = io.WriteString(w, alertListPage(ids[offset:end], end < len(ids)))
+			}))
+			c, _ := New(srv.URL)
+			for _, lookup := range []string{"full", "incremental"} {
+				b.Run(fmt.Sprintf("%d/%s/%s", total, delayName, lookup), func(b *testing.B) {
+					b.ReportAllocs()
+					for i := 0; i < b.N; i++ {
+						if lookup == "full" {
+							alerts, err := c.ListAlerts(context.Background(), "p1")
+							if err != nil || len(alerts) != total {
+								b.Fatalf("ListAlerts = %d, %v", len(alerts), err)
+							}
+						} else {
+							alert, _, found, err := c.FindAlertByID(context.Background(), ids[0], "p1")
+							if err != nil || !found || alert.ID != ids[0] {
+								b.Fatalf("FindAlertByID = %+v, %t, %v", alert, found, err)
+							}
+						}
+					}
+				})
+			}
+			srv.Close()
+		}
+	}
+}
+
+func BenchmarkAlertLookupLatencyPercentiles(b *testing.B) {
+	const samples = 21
+	for _, total := range []int{10, 100, 1000} {
+		ids := make([]string, total)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("%032x", i+1)
+		}
+		for _, delay := range []time.Duration{0, 25 * time.Millisecond} {
+			delayName := "no_delay"
+			if delay > 0 {
+				delayName = "25ms_delay"
+			}
+			b.Run(fmt.Sprintf("%d/%s", total, delayName), func(b *testing.B) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if delay > 0 {
+						time.Sleep(delay)
+					}
+					offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+					end := offset + cardPageSize
+					if end > len(ids) {
+						end = len(ids)
+					}
+					w.Header().Set(cardPageMoreHeader, strconv.FormatBool(end < len(ids)))
+					_, _ = io.WriteString(w, alertListPage(ids[offset:end], end < len(ids)))
+				}))
+				defer srv.Close()
+				c, err := New(srv.URL)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				run := func(incremental bool) time.Duration {
+					start := time.Now()
+					if incremental {
+						alert, _, found, err := c.FindAlertByID(context.Background(), ids[0], "p1")
+						if err != nil || !found || alert.ID != ids[0] {
+							b.Fatalf("FindAlertByID = %+v, %t, %v", alert, found, err)
+						}
+					} else {
+						alerts, err := c.ListAlerts(context.Background(), "p1")
+						if err != nil || len(alerts) != total {
+							b.Fatalf("ListAlerts = %d, %v", len(alerts), err)
+						}
+					}
+					return time.Since(start)
+				}
+
+				// Warm both paths before sampling, then alternate their order to avoid
+				// systematically favoring either side through connection or CPU drift.
+				run(false)
+				run(true)
+				fullSamples := make([]time.Duration, 0, samples)
+				incrementalSamples := make([]time.Duration, 0, samples)
+				b.ResetTimer()
+				for i := 0; i < samples; i++ {
+					if i%2 == 0 {
+						fullSamples = append(fullSamples, run(false))
+						incrementalSamples = append(incrementalSamples, run(true))
+					} else {
+						incrementalSamples = append(incrementalSamples, run(true))
+						fullSamples = append(fullSamples, run(false))
+					}
+				}
+				b.StopTimer()
+
+				fullMedian := durationPercentile(fullSamples, 50)
+				incrementalMedian := durationPercentile(incrementalSamples, 50)
+				fullP95 := durationPercentile(fullSamples, 95)
+				incrementalP95 := durationPercentile(incrementalSamples, 95)
+				medianImprovement := latencyImprovement(fullMedian, incrementalMedian)
+				p95Improvement := latencyImprovement(fullP95, incrementalP95)
+				b.ReportMetric(float64(fullMedian.Microseconds()), "full-median-us")
+				b.ReportMetric(float64(incrementalMedian.Microseconds()), "incremental-median-us")
+				b.ReportMetric(float64(fullP95.Microseconds()), "full-p95-us")
+				b.ReportMetric(float64(incrementalP95.Microseconds()), "incremental-p95-us")
+				b.ReportMetric(medianImprovement, "median-improvement-pct")
+				b.ReportMetric(p95Improvement, "p95-improvement-pct")
+
+				if total == 1000 && delay == 25*time.Millisecond && medianImprovement < 80 {
+					b.Fatalf("delayed median improvement = %.1f%%, want at least 80%%", medianImprovement)
+				}
+				if incrementalP95 > fullP95*120/100 && incrementalP95-fullP95 > 2*time.Millisecond {
+					b.Fatalf("incremental p95 regressed materially: %s versus %s", incrementalP95, fullP95)
+				}
+				if total == 10 && incrementalMedian > fullMedian*120/100 && incrementalMedian-fullMedian > 2*time.Millisecond {
+					b.Fatalf("small-history median regressed materially: %s versus %s", incrementalMedian, fullMedian)
+				}
+			})
+		}
+	}
+}
+
+func durationPercentile(samples []time.Duration, percentile int) time.Duration {
+	ordered := append([]time.Duration(nil), samples...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	index := (len(ordered)*percentile+99)/100 - 1
+	return ordered[index]
+}
+
+func latencyImprovement(before, after time.Duration) float64 {
+	return (1 - float64(after)/float64(before)) * 100
+}
+
+func TestFindAlertByIDDuplicateCardsKeepFirstCardAndStop(t *testing.T) {
+	const target = "0123456789abcdef0123456789abcdef"
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true">
+			<div data-alert-id="`+target+`" data-alert-scroll-anchor="`+target+`"><p class="font-semibold">First card</p></div>
+			<div data-alert-id="`+target+`" data-alert-scroll-anchor="`+target+`"><p class="font-semibold">Duplicate card</p></div>
+		</div>`)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	alert, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
+	if err != nil || !found || alert.Title != "First card" {
+		t.Fatalf("alert = %+v, found = %t, error = %v", alert, found, err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
+func TestFindAlertByIDValidatesMatchingPageMetadataAndLimits(t *testing.T) {
+	const target = "0123456789abcdef0123456789abcdef"
+	t.Run("matching page malformed metadata", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(cardPageMoreHeader, "true")
+			_, _ = io.WriteString(w, `<div data-alert-id="`+target+`" data-alert-scroll-anchor="`+target+`"></div>`)
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		_, _, _, err := c.FindAlertByID(context.Background(), target, "p1")
+		if err == nil || !strings.Contains(err.Error(), "pagination metadata") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+
+	t.Run("unknown ID reaches page bound", func(t *testing.T) {
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests++
+			w.Header().Set(cardPageMoreHeader, "true")
+			_, _ = io.WriteString(w, alertListPage([]string{fmt.Sprintf("%032x", requests)}, true))
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		_, _, _, err := c.FindAlertByID(context.Background(), target, "p1")
+		if err == nil || !strings.Contains(err.Error(), "card pagination exceeded safety limit") {
+			t.Fatalf("error = %v", err)
+		}
+		if requests != maxCardPages {
+			t.Fatalf("requests = %d, want %d", requests, maxCardPages)
+		}
+	})
+
+	t.Run("matching page at page bound with continuation", func(t *testing.T) {
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests++
+			w.Header().Set(cardPageMoreHeader, "true")
+			id := fmt.Sprintf("%032x", requests)
+			if requests == maxCardPages {
+				id = target
+			}
+			_, _ = io.WriteString(w, alertListPage([]string{id}, true))
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		_, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
+		if err == nil || !strings.Contains(err.Error(), "card pagination exceeded safety limit") {
+			t.Fatalf("found = %t, error = %v", found, err)
+		}
+		if requests != maxCardPages {
+			t.Fatalf("requests = %d, want %d", requests, maxCardPages)
+		}
+	})
+
+	t.Run("matching page at card bound with continuation", func(t *testing.T) {
+		ids := make([]string, maxPaginatedCards)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("%032x", i+1)
+		}
+		ids[len(ids)-1] = target
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests++
+			w.Header().Set(cardPageMoreHeader, "true")
+			_, _ = io.WriteString(w, alertListPage(ids, true))
+		}))
+		defer srv.Close()
+		c, _ := New(srv.URL)
+		_, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
+		if err == nil || !strings.Contains(err.Error(), "card pagination exceeded safety limit") {
+			t.Fatalf("found = %t, error = %v", found, err)
+		}
+		if requests != 1 {
+			t.Fatalf("requests = %d, want 1", requests)
+		}
+	})
+}
+
+func TestFindAlertByIDThousandCardHistoryStopsOnPageOne(t *testing.T) {
+	const target = "0123456789abcdef0123456789abcdef"
+	ids := make([]string, 1000)
+	ids[0] = target
+	for i := 1; i < len(ids); i++ {
+		ids[i] = fmt.Sprintf("%032x", i+1)
+	}
+	requests, bytesServed := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		end := offset + cardPageSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		page := alertListPage(ids[offset:end], end < len(ids))
+		bytesServed += len(page)
+		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(end < len(ids)))
+		_, _ = io.WriteString(w, page)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+
+	alert, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
+	if err != nil || !found || alert.ID != target {
+		t.Fatalf("FindAlertByID = %+v, %t, %v", alert, found, err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+	onePageBytes := bytesServed
+
+	requests, bytesServed = 0, 0
+	alerts, err := c.ListAlerts(context.Background(), "p1")
+	if err != nil || len(alerts) != len(ids) {
+		t.Fatalf("ListAlerts = %d, %v", len(alerts), err)
+	}
+	if requests != 20 {
+		t.Fatalf("full-list requests = %d, want 20", requests)
+	}
+	if reduction := 1 - float64(onePageBytes)/float64(bytesServed); reduction < 0.90 {
+		t.Fatalf("list-byte reduction = %.1f%%, want at least 90%%", reduction*100)
 	}
 }
 

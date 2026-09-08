@@ -116,12 +116,19 @@ func (c *Client) getCardPages(ctx context.Context, path string) ([]htmlPage, err
 // getCardPagesFromInitial follows card continuations after an already-loaded
 // first page, such as the refreshed list returned by an HTMX mutation.
 func (c *Client) getCardPagesFromInitial(ctx context.Context, path string, root *html.Node, hasMore bool) ([]htmlPage, error) {
+	pages, _, err := c.getCardPagesFromInitialUntil(ctx, path, root, hasMore, nil)
+	return pages, err
+}
+
+// getCardPagesFromInitialUntil follows the same bounded, validated traversal as
+// getCardPagesFromInitial, but permits a caller to stop after an accepted page.
+func (c *Client) getCardPagesFromInitialUntil(ctx context.Context, path string, root *html.Node, hasMore bool, stop func(*html.Node) bool) ([]htmlPage, bool, error) {
 	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
 	if paginationRoot == nil {
 		if hasMore {
-			return nil, fmt.Errorf("card pagination reported more cards without pagination metadata")
+			return nil, false, fmt.Errorf("card pagination reported more cards without pagination metadata")
 		}
-		return []htmlPage{{root: root}}, nil
+		return []htmlPage{{root: root}}, stop != nil && stop(root), nil
 	}
 	pages := []htmlPage{{root: root}}
 	selector := attr(paginationRoot, "data-card-pagination-card-selector")
@@ -129,35 +136,51 @@ func (c *Client) getCardPagesFromInitial(ctx context.Context, path string, root 
 	if hasMore {
 		marker, _ := paginationSelector(selector)
 		if marker == "" || strings.TrimSpace(keyAttr) == "" {
-			return nil, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
+			return nil, false, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
 		}
 	}
 	offset := countPaginationCards(root, selector, keyAttr)
+	if err := validateCardContinuation(1, offset, hasMore); err != nil {
+		return nil, false, err
+	}
+	if stop != nil && stop(root) {
+		return pages, true, nil
+	}
 
 	for page := 1; hasMore; page++ {
-		if page >= maxCardPages || offset >= maxPaginatedCards {
-			return nil, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
-		}
 		continuation, err := cardContinuationPath(path, page, offset)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		next, nextHasMore, err := c.getHTMLPage(ctx, continuation)
 		if err != nil {
-			return nil, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
+			return nil, false, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
 		}
 		count := countPaginationCards(next, selector, keyAttr)
 		if count == 0 && nextHasMore {
-			return nil, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
+			return nil, false, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
 		}
 		if offset+count > maxPaginatedCards {
-			return nil, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
+			return nil, false, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
 		}
 		pages = append(pages, htmlPage{root: next})
 		offset += count
 		hasMore = nextHasMore
+		if err := validateCardContinuation(page+1, offset, hasMore); err != nil {
+			return nil, false, err
+		}
+		if stop != nil && stop(next) {
+			return pages, true, nil
+		}
 	}
-	return pages, nil
+	return pages, false, nil
+}
+
+func validateCardContinuation(pages, cards int, hasMore bool) error {
+	if hasMore && (pages >= maxCardPages || cards >= maxPaginatedCards) {
+		return fmt.Errorf("card pagination exceeded safety limit after %d cards", cards)
+	}
+	return nil
 }
 
 func cardContinuationPath(path string, page, offset int) (string, error) {
