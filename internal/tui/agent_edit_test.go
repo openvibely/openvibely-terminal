@@ -133,6 +133,90 @@ func TestMatchAgentRefSemantics(t *testing.T) {
 	}
 }
 
+func TestMatchAgentRefAmbiguityIsTerminalSafe(t *testing.T) {
+	ref := "Code\x1b]0;ref-owned\a\n\r"
+	agents := []client.AgentDef{
+		{ID: "ag-one", Name: ref + "One\x1b[31m\a\nFirst", Key: "one"},
+		{ID: "ag-two", Name: ref + "Two\x1b[2J\a\rSecond", Key: "two"},
+	}
+	_, err := matchAgentRef(agents, ref)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("error = %v, want ambiguity", err)
+	}
+	raw := err.Error()
+	for _, forbidden := range []string{"\x1b", "\a", "\n", "\r"} {
+		if strings.Contains(raw, forbidden) {
+			t.Fatalf("ambiguity error retained terminal control %q: %q", forbidden, raw)
+		}
+	}
+	for _, readable := range []string{"Code", "One First", "Two Second"} {
+		if !strings.Contains(raw, readable) {
+			t.Fatalf("ambiguity error missing %q: %q", readable, raw)
+		}
+	}
+}
+
+func TestAgentsEditAmbiguityOutputIsTerminalSafe(t *testing.T) {
+	unsafeOne := "Code\x1b[31m One\x1b[0m\a\nFirst"
+	unsafeTwo := "Code\x1b]0;owned\a Two\a\rSecond"
+	puts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects":
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/agents":
+			_, _ = io.WriteString(w, `<div data-agent-id="ag-one" data-agent-key="one" data-agent-name="`+unsafeOne+`"></div><div data-agent-id="ag-two" data-agent-key="two" data-agent-name="`+unsafeTwo+`"></div>`)
+		case r.Method == http.MethodPut:
+			puts++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSafe := func(label, raw string) {
+		t.Helper()
+		for _, forbidden := range []string{"\x1b[31m One", "\x1b]0;owned", "\a", "One\nFirst", "Two\rSecond"} {
+			if strings.Contains(raw, forbidden) {
+				t.Fatalf("%s ambiguity output retained %q: %q", label, forbidden, raw)
+			}
+		}
+		for _, readable := range []string{"ambiguous", "Code One First", "Code Two Second"} {
+			if !strings.Contains(stripANSI(raw), readable) {
+				t.Fatalf("%s ambiguity output missing %q: %q", label, readable, raw)
+			}
+		}
+	}
+
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID, m.selectedName = "p1", "demo"
+	_, command := typeLine(t, m, `/agents edit Code enabled false`)
+	msg, ok := command().(resultMsg)
+	if !ok || msg.err == nil {
+		t.Fatalf("interactive result = %#v, want error", msg)
+	}
+	assertSafe("interactive", msg.err.Error())
+
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"agents", "edit", "Code", "enabled", "false"}, false, false)
+	if err == nil {
+		t.Fatal("headless edit succeeded, want ambiguity")
+	}
+	assertSafe("headless error", err.Error())
+	if out.Len() > 0 {
+		assertSafe("headless output", out.String())
+	}
+	if puts != 0 {
+		t.Fatalf("ambiguous edits made %d PUT requests", puts)
+	}
+}
+
 func TestAgentsEditHeadlessJSON(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":                cliProjects,

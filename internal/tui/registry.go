@@ -2175,9 +2175,9 @@ func matchAgentRef(agents []client.AgentDef, ref string) (client.AgentDef, error
 	ambiguous := func(hits []client.AgentDef) error {
 		names := make([]string, 0, len(hits))
 		for _, hit := range hits {
-			names = append(names, firstNonEmpty(hit.Name, hit.Key, hit.ID))
+			names = append(names, sanitizeAutomationDetailText(firstNonEmpty(hit.Name, hit.Key, hit.ID)))
 		}
-		return fmt.Errorf("%q is ambiguous: %s — use the full name or ID", ref, strings.Join(names, ", "))
+		return fmt.Errorf("%q is ambiguous: %s — use the full name or ID", sanitizeAutomationDetailText(ref), strings.Join(names, ", "))
 	}
 	matchTier := func(matches func(client.AgentDef) bool) (client.AgentDef, bool, error) {
 		hits := make([]client.AgentDef, 0)
