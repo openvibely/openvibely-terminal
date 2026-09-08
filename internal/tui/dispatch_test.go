@@ -4373,6 +4373,259 @@ func TestModelsDelete(t *testing.T) {
 	}
 }
 
+func TestModelsResolvedActionsMatchAcrossEntryRoutes(t *testing.T) {
+	for _, action := range []string{"default", "delete"} {
+		for _, entry := range []string{"typed", "picker"} {
+			t.Run(action+"/"+entry, func(t *testing.T) {
+				m, rec := dispatchModel(t, map[string]string{"/models": selModelsHTML})
+				m.selectedID = "project-selected"
+				m.selectedName = "selected"
+
+				if entry == "typed" {
+					m = runLine(t, m, "/models "+action+" GPT-4o")
+				} else {
+					m = runLine(t, m, "/models "+action)
+					if !m.selectorActive {
+						t.Fatalf("picker route did not open selector:\n%s", transcript(m))
+					}
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				}
+
+				method, path := http.MethodPost, "/models/mo-1/set-default"
+				if action == "delete" {
+					method, path = http.MethodDelete, "/models/mo-1"
+					if m.pendingConfirmation == nil {
+						t.Fatalf("delete did not wait for confirmation:\n%s", transcript(m))
+					}
+					wantPrompt := `Delete model "GPT-4o"? Type 'yes' to confirm or Esc to cancel.`
+					if entry == "picker" {
+						wantPrompt = `Delete model "mo-1"? Type 'yes' to confirm or Esc to cancel.`
+					}
+					if out := stripANSI(m.View()); !strings.Contains(out, wantPrompt) {
+						t.Fatalf("confirmation text missing %q:\n%s", wantPrompt, out)
+					}
+					if got := rec.count(method, path); got != 0 {
+						t.Fatalf("delete requests before confirmation = %d, want 0", got)
+					}
+					m = runLine(t, m, "yes")
+				}
+
+				if got := rec.count(method, path); got != 1 {
+					t.Fatalf("%s requests = %d, want 1; calls:\n%s", path, got, rec.all())
+				}
+				if got := rec.count(http.MethodGet, "/models"); got != 2 {
+					t.Fatalf("model list requests = %d, want resolution/selection and refresh; calls:\n%s", got, rec.all())
+				}
+				urls := rec.urlsSnapshot()
+				for _, request := range urls {
+					if strings.HasPrefix(request, "GET /models") && !strings.Contains(request, "project_id=project-selected") {
+						t.Fatalf("model list request lost selected project: %s", request)
+					}
+				}
+				out := stripANSI(transcript(m))
+				for _, want := range []string{action + ": GPT-4o", "Claude", "claude-sonnet"} {
+					if !strings.Contains(out, want) {
+						t.Errorf("successful output missing %q:\n%s", want, out)
+					}
+				}
+				if strings.Contains(out, "error:") {
+					t.Fatalf("successful action reported an error:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestModelsResolvedActionMutationFailuresSkipSuccessAndRefresh(t *testing.T) {
+	for _, action := range []string{"default", "delete"} {
+		for _, entry := range []string{"typed", "picker"} {
+			t.Run(action+"/"+entry, func(t *testing.T) {
+				var gets, mutations int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/models":
+						gets++
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = w.Write([]byte(selModelsHTML))
+					case r.URL.Path == "/models/mo-1/set-default" || r.URL.Path == "/models/mo-1":
+						mutations++
+						http.Error(w, "model mutation failed", http.StatusInternalServerError)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				t.Cleanup(srv.Close)
+				c, err := client.New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				m := New(c)
+				m.selectedID = "p1"
+				m.selectedName = "demo"
+
+				if entry == "typed" {
+					m = runLine(t, m, "/models "+action+" GPT-4o")
+				} else {
+					m = runLine(t, m, "/models "+action)
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				}
+				if action == "delete" {
+					m = runLine(t, m, "yes")
+				}
+
+				if mutations != 1 {
+					t.Fatalf("mutation requests = %d, want 1", mutations)
+				}
+				if gets != 1 {
+					t.Fatalf("model GETs = %d, want only resolution/selection; refresh ran after failure", gets)
+				}
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, "server error (500)") {
+					t.Fatalf("mutation error missing:\n%s", out)
+				}
+				if strings.Contains(out, action+": GPT-4o") {
+					t.Fatalf("mutation failure reported success:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestModelsResolvedActionRefreshFailuresReturnOnlySuccess(t *testing.T) {
+	for _, action := range []string{"default", "delete"} {
+		for _, entry := range []string{"typed", "picker"} {
+			t.Run(action+"/"+entry, func(t *testing.T) {
+				var gets, mutations int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/models":
+						gets++
+						if gets > 1 {
+							http.Error(w, "refresh failed", http.StatusInternalServerError)
+							return
+						}
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = w.Write([]byte(selModelsHTML))
+					case r.URL.Path == "/models/mo-1/set-default" || r.URL.Path == "/models/mo-1":
+						mutations++
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				t.Cleanup(srv.Close)
+				c, err := client.New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				m := New(c)
+				m.selectedID = "p1"
+				m.selectedName = "demo"
+
+				if entry == "typed" {
+					m = runLine(t, m, "/models "+action+" GPT-4o")
+				} else {
+					m = runLine(t, m, "/models "+action)
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				}
+				if action == "delete" {
+					m = runLine(t, m, "yes")
+				}
+
+				if mutations != 1 || gets != 2 {
+					t.Fatalf("mutations/GETs = %d/%d, want 1/2", mutations, gets)
+				}
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, action+": GPT-4o") {
+					t.Fatalf("success missing after refresh failure:\n%s", out)
+				}
+				for _, forbidden := range []string{"refresh failed", "error:", "Claude", "claude-sonnet"} {
+					if strings.Contains(out, forbidden) {
+						t.Errorf("refresh failure output unexpectedly contains %q:\n%s", forbidden, out)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestModelsTypedReferenceFailuresAndPickerCancellationDoNotMutate(t *testing.T) {
+	const ambiguousModels = `<div>
+		<div data-model-id="mo-1" data-model-name="Sonnet Alpha" data-model-provider="anthropic" data-model-model="claude-alpha"></div>
+		<div data-model-id="mo-2" data-model-name="Sonnet Beta" data-model-provider="anthropic" data-model-model="claude-beta"></div>
+	</div>`
+	for _, action := range []string{"default", "delete"} {
+		for _, tc := range []struct {
+			name string
+			ref  string
+			want string
+		}{
+			{name: "ambiguous", ref: "Sonnet", want: "ambiguous"},
+			{name: "unknown", ref: "Missing", want: "nothing matches"},
+		} {
+			t.Run(action+"/"+tc.name, func(t *testing.T) {
+				m, rec := dispatchModel(t, map[string]string{"/models": ambiguousModels})
+				m = runLine(t, m, "/models "+action+" "+tc.ref)
+				if action == "delete" {
+					if m.pendingConfirmation == nil {
+						t.Fatal("typed delete should confirm before resolving its reference")
+					}
+					if got := rec.count(http.MethodGet, "/models"); got != 0 {
+						t.Fatalf("typed delete resolved before confirmation with %d GETs", got)
+					}
+					m = runLine(t, m, "yes")
+				}
+				out := stripANSI(transcript(m))
+				if !strings.Contains(out, tc.want) {
+					t.Fatalf("reference error missing %q:\n%s", tc.want, out)
+				}
+				if rec.count(http.MethodPost, "/models/mo-1/set-default") != 0 ||
+					rec.count(http.MethodPost, "/models/mo-2/set-default") != 0 ||
+					rec.count(http.MethodDelete, "/models/mo-1") != 0 ||
+					rec.count(http.MethodDelete, "/models/mo-2") != 0 {
+					t.Fatalf("invalid reference mutated a model:\n%s", rec.all())
+				}
+			})
+		}
+
+		t.Run(action+"/picker_cancel", func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/models": selModelsHTML})
+			m = runLine(t, m, "/models "+action)
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+			if m.selectorActive || m.pendingConfirmation != nil {
+				t.Fatal("Esc did not cleanly cancel the model picker")
+			}
+			if rec.count(http.MethodPost, "/models/mo-1/set-default") != 0 || rec.count(http.MethodDelete, "/models/mo-1") != 0 {
+				t.Fatalf("cancelled picker mutated a model:\n%s", rec.all())
+			}
+		})
+	}
+}
+
+func TestModelsDeleteConfirmationCancellationDoesNotMutate(t *testing.T) {
+	for _, entry := range []string{"typed", "picker"} {
+		t.Run(entry, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/models": selModelsHTML})
+			if entry == "typed" {
+				m = runLine(t, m, "/models delete GPT-4o")
+			} else {
+				m = runLine(t, m, "/models delete")
+				m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			}
+			if m.pendingConfirmation == nil {
+				t.Fatal("delete did not enter confirmation mode")
+			}
+			m = runLine(t, m, "no")
+			if m.pendingConfirmation != nil {
+				t.Fatal("confirmation cancellation left pending state")
+			}
+			if got := rec.count(http.MethodDelete, "/models/mo-1"); got != 0 {
+				t.Fatalf("cancelled delete requests = %d, want 0", got)
+			}
+		})
+	}
+}
+
 func TestModelsDeleteUnauthorizedSkipsSuccessAndReload(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`

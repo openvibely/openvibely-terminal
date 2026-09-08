@@ -2712,6 +2712,20 @@ func modelsCommand() command {
 				return mm, cmd
 			}
 			pid := m.selectedID
+			executeResolvedAction := func(ctx context.Context, mo client.LLMModel, action string) (string, error) {
+				var err error
+				if action == "default" {
+					err = c.SetDefaultModel(ctx, mo.ID)
+				} else {
+					err = c.DeleteModel(ctx, mo.ID)
+				}
+				if err != nil {
+					return "", err
+				}
+				return refreshAndRender(action+": "+mo.Name,
+					func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
+					renderModels)
+			}
 
 			switch action {
 			case "capacity":
@@ -2742,18 +2756,7 @@ func modelsCommand() command {
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
-											var err error
-											if action == "default" {
-												err = c.SetDefaultModel(ctx, mo.ID)
-											} else {
-												err = c.DeleteModel(ctx, mo.ID)
-											}
-											if err != nil {
-												return "", err
-											}
-											return refreshAndRender(action+": "+mo.Name,
-												func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
-												renderModels)
+											return executeResolvedAction(ctx, mo, action)
 										})
 										if action == "delete" {
 											return confirmOr(m,
@@ -2780,17 +2783,7 @@ func modelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if action == "default" {
-						err = c.SetDefaultModel(ctx, mo.ID)
-					} else {
-						err = c.DeleteModel(ctx, mo.ID)
-					}
-					if err != nil {
-						return "", err
-					}
-					return refreshAndRender(action+": "+mo.Name,
-						func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
-						renderModels)
+					return executeResolvedAction(ctx, mo, action)
 				})
 				if action == "delete" {
 					return confirmOr(m,
