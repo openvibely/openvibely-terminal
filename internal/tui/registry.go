@@ -1399,16 +1399,22 @@ func getBoundScheduleTask(ctx context.Context, c *client.Client, projectID, task
 	return &detail.Task, nil
 }
 
+// scheduleInspectionOutput loads the bound task selected by either inspection
+// route and renders the established plain or JSON inspection result.
+func scheduleInspectionOutput(ctx context.Context, c *client.Client, projectID string, entry client.ScheduleEntry) (string, error) {
+	boundTask, err := getBoundScheduleTask(ctx, c, projectID, entry.TaskID)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
+	}
+	return renderScheduleInspection(entry, boundTask), nil
+}
+
 func scheduleInspectionCommand(c *client.Client, projectID string, entry client.ScheduleEntry) tea.Cmd {
 	return run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
-		boundTask, err := getBoundScheduleTask(ctx, c, projectID, entry.TaskID)
-		if err != nil {
-			return "", err
-		}
-		if jsonMode {
-			return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
-		}
-		return renderScheduleInspection(entry, boundTask), nil
+		return scheduleInspectionOutput(ctx, c, projectID, entry)
 	})
 }
 
@@ -1514,14 +1520,7 @@ func scheduleCommand() command {
 					if err != nil {
 						return "", err
 					}
-					boundTask, err := getBoundScheduleTask(ctx, c, pid, entry.TaskID)
-					if err != nil {
-						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(scheduleInspection{Schedule: entry, Task: boundTask})
-					}
-					return renderScheduleInspection(entry, boundTask), nil
+					return scheduleInspectionOutput(ctx, c, pid, entry)
 				})
 			case "add":
 				if len(rest) == 0 {
