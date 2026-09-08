@@ -2190,7 +2190,8 @@ func TestGetChannelsOmitsInboundWebhookCards(t *testing.T) {
 		w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
 		_, _ = io.WriteString(w, `<div id="channels-container" data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id" data-card-pagination-has-more="true">
 			<div data-channel-type="telegram">Telegram configured</div>
-			<section><h2>Inbound webhooks</h2><div id="webhook-card-list">
+			<div data-channel-type="email">Email configured</div>
+			<section><h2>Inbound webhooks</h2><button>Create inbound webhook</button><p>No inbound webhooks configured</p><div id="webhook-card-list">
 				<div data-webhook-id="w1" data-webhook-name="Pager Duty">Pager Duty /webhooks/inbound/token</div>
 			</div></section>
 		</div>`)
@@ -2207,11 +2208,21 @@ func TestGetChannelsOmitsInboundWebhookCards(t *testing.T) {
 	if requests != 1 {
 		t.Fatalf("channel list requests = %d, want only the fixed first page", requests)
 	}
-	if !strings.Contains(text, "Telegram configured") {
-		t.Fatalf("channel output lost messaging integration: %q", text)
+	for _, want := range []string{"Telegram configured", "Email configured"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("channel output lost messaging integration %q: %q", want, text)
+		}
 	}
-	if strings.Contains(text, "Pager Duty") || strings.Contains(text, "/webhooks/inbound/token") {
-		t.Fatalf("channel output duplicated inbound webhook entries: %q", text)
+	for _, forbidden := range []string{
+		"Inbound webhooks",
+		"Create inbound webhook",
+		"No inbound webhooks configured",
+		"Pager Duty",
+		"/webhooks/inbound/token",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("channel output retained webhook section content %q: %q", forbidden, text)
+		}
 	}
 }
 

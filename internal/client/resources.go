@@ -1112,9 +1112,24 @@ func (c *Client) GetChannels(ctx context.Context, projectID string) (string, err
 	if err != nil {
 		return "", err
 	}
-	for _, card := range findAll(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-webhook-id") }) {
-		if card.Parent != nil {
-			card.Parent.RemoveChild(card)
+	removedWebhookSection := false
+	if list := findByID(root, "webhook-card-list"); list != nil {
+		section := list
+		for section != nil && !(section.Type == html.ElementNode && section.Data == "section") {
+			section = section.Parent
+		}
+		if section != nil && section.Parent != nil {
+			section.Parent.RemoveChild(section)
+			removedWebhookSection = true
+		}
+	}
+	if !removedWebhookSection {
+		// Card-only fragments predate the semantic section. Keep them out of the
+		// messaging list without risking removal of an unrelated parent container.
+		for _, card := range findAll(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-webhook-id") }) {
+			if card.Parent != nil {
+				card.Parent.RemoveChild(card)
+			}
 		}
 	}
 	if container := findByID(root, "channels-container"); container != nil {
