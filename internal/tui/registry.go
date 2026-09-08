@@ -126,6 +126,46 @@ func scheduleMutationOutput(status string, reload func() ([]client.ScheduleEntry
 	return status + "\n\n" + renderSchedule(entries, summary), nil
 }
 
+// resolveScheduleDeletion captures the unique schedule selected by a typed
+// reference before either interactive confirmation or the headless force gate.
+func resolveScheduleDeletion(c *client.Client, projectID, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		entries, _, err := c.GetSchedule(ctx, projectID)
+		if err != nil {
+			return scheduleDeleteTargetMsg{projectID: projectID, err: err}
+		}
+		schedule, err := matchRefWithDisplay(entries, ref,
+			func(entry client.ScheduleEntry) string { return entry.ScheduleID },
+			func(entry client.ScheduleEntry) string { return entry.Name },
+			sanitizeAutomationDetailText)
+		if err == nil && schedule.ScheduleID == "" {
+			err = fmt.Errorf("that task has no schedule")
+		}
+		return scheduleDeleteTargetMsg{projectID: projectID, schedule: schedule, err: err}
+	}
+}
+
+// confirmScheduleDeletion closes over the resolved ID so catalog changes after
+// the prompt cannot rebind the destructive request.
+func confirmScheduleDeletion(m Model, projectID string, schedule client.ScheduleEntry) (Model, tea.Cmd) {
+	scheduleID := schedule.ScheduleID
+	displayID := sanitizeAutomationDetailText(scheduleID)
+	c := m.client
+	cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+		if err := c.DeleteSchedule(ctx, projectID, scheduleID); err != nil {
+			return "", err
+		}
+		return scheduleMutationOutput("deleted schedule",
+			func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, projectID) })
+	})
+	return confirmOr(m,
+		fmt.Sprintf("Delete schedule %q? Type 'yes' to confirm or Esc to cancel.", displayID),
+		fmt.Sprintf("use --force to confirm deletion of schedule %q", displayID),
+		cmd)
+}
+
 // taskReviewsOutput fetches and formats the read-only review view for a task.
 func taskReviewsOutput(ctx context.Context, c *client.Client, t client.Task) (string, error) {
 	reviews, err := c.ListTaskReviews(ctx, t.ID)
@@ -1626,34 +1666,27 @@ func scheduleCommand() command {
 										label: firstNonEmpty(e.Name, e.Text, shortID(e.ScheduleID)),
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
-											var err error
-											if action == "delete" {
-												err = c.DeleteSchedule(ctx, pid, e.ScheduleID)
-											} else {
-												_, err = c.ToggleSchedule(ctx, pid, e.ScheduleID)
-											}
-											if err != nil {
-												return "", err
-											}
-											return scheduleMutationOutput(action+"d schedule",
-												func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
-										})
 										if action == "delete" {
-											return confirmOr(m,
-												fmt.Sprintf("Delete schedule %q? Type 'yes' to confirm or Esc to cancel.", e.ScheduleID),
-												fmt.Sprintf("use --force to confirm deletion of schedule %q", e.ScheduleID),
-												cmd)
+											return confirmScheduleDeletion(m, pid, e)
 										}
 										m.busy = true
-										return m, cmd
+										return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+											if _, err := c.ToggleSchedule(ctx, pid, e.ScheduleID); err != nil {
+												return "", err
+											}
+											return scheduleMutationOutput("toggled schedule",
+												func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
+										})
 									}
 									items = append(items, item)
 								}
 								return items, nil
 							}))
 				}
-				cmd := run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
+				if action == "delete" {
+					return m, resolveScheduleDeletion(c, pid, ref)
+				}
+				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
 					entries, _, err := c.GetSchedule(ctx, pid)
 					if err != nil {
 						return "", err
@@ -1667,24 +1700,12 @@ func scheduleCommand() command {
 					if e.ScheduleID == "" {
 						return "", fmt.Errorf("that task has no schedule")
 					}
-					if action == "delete" {
-						err = c.DeleteSchedule(ctx, pid, e.ScheduleID)
-					} else {
-						_, err = c.ToggleSchedule(ctx, pid, e.ScheduleID)
-					}
-					if err != nil {
+					if _, err := c.ToggleSchedule(ctx, pid, e.ScheduleID); err != nil {
 						return "", err
 					}
-					return scheduleMutationOutput(action+"d schedule",
+					return scheduleMutationOutput("toggled schedule",
 						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
 				})
-				if action == "delete" {
-					return confirmOr(m,
-						fmt.Sprintf("Delete schedule %q? Type 'yes' to confirm or Esc to cancel.", ref),
-						fmt.Sprintf("use --force to confirm deletion of schedule %q", ref),
-						cmd)
-				}
-				return m, cmd
 			}
 			return m, nil
 		},
