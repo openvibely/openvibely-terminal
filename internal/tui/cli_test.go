@@ -3676,6 +3676,45 @@ func TestCLIAlertsShowCanonicalUnknownAndMalformedReferencesStaySafe(t *testing.
 	}
 }
 
+func TestCLIAlertsShowCanonicalShapedExactTitleFallsBackToFullMatching(t *testing.T) {
+	const ref = "ffffffffffffffffffffffffffffffff"
+	const alertID = "0123456789abcdef0123456789abcdef"
+	listRequests, detailRequests := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/api/projects":
+			_, _ = io.WriteString(w, cliProjects)
+		case "/alerts":
+			listRequests++
+			if r.URL.Query().Get("card_page") == "" {
+				_, _ = io.WriteString(w, alertPageForCLI([]string{"11111111111111111111111111111111"}, true))
+				return
+			}
+			w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="`+alertID+`" data-alert-scroll-anchor="`+alertID+`"><p class="font-semibold">`+ref+`</p></div></div>`)
+		case "/alerts/" + alertID + "/details":
+			detailRequests++
+			_, _ = io.WriteString(w, `<div data-alert-detail-loaded><div data-alert-markdown data-raw-content="title fallback detail"></div></div>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"alerts", "show", ref}, false, false); err != nil {
+		t.Fatalf("alerts show canonical-shaped title: %v", err)
+	}
+	if !strings.Contains(out.String(), "title fallback detail") {
+		t.Fatalf("output missing detail: %s", out.String())
+	}
+	if listRequests != 2 || detailRequests != 1 {
+		t.Fatalf("list requests = %d, detail requests = %d; want 2 and 1", listRequests, detailRequests)
+	}
+}
+
 func TestCLIJSONAlertsShowIncludesSummaryAndFullDetail(t *testing.T) {
 	const alertsHTML = `<div class="card" data-alert-id="a-1" data-alert-scroll-anchor="a-1"
 		data-search-text="review pending unclaimed" data-alert-type="custom"

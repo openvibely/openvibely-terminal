@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -208,7 +209,7 @@ func TestFindAlertByIDStopsOnMatchingPageBoundaries(t *testing.T) {
 			defer srv.Close()
 			c, _ := New(srv.URL)
 
-			alert, found, err := c.FindAlertByID(context.Background(), ids[tt.index], "project/one")
+			alert, _, found, err := c.FindAlertByID(context.Background(), ids[tt.index], "project/one")
 			if err != nil {
 				t.Fatalf("FindAlertByID: %v", err)
 			}
@@ -233,7 +234,7 @@ func TestFindAlertByIDUnknownTraversesAllPages(t *testing.T) {
 	defer srv.Close()
 	c, _ := New(srv.URL)
 
-	alert, found, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
+	alert, _, found, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
 	if err != nil || found || alert.ID != "" {
 		t.Fatalf("alert = %+v, found = %t, error = %v", alert, found, err)
 	}
@@ -279,7 +280,7 @@ func TestFindAlertByIDPreservesPaginationFailures(t *testing.T) {
 			}))
 			defer srv.Close()
 			c, _ := New(srv.URL)
-			_, _, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
+			_, _, _, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
@@ -294,7 +295,7 @@ func TestFindAlertByIDPreservesCancellationAndAuthentication(t *testing.T) {
 		}))
 		defer srv.Close()
 		c, _ := New(srv.URL)
-		_, _, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
+		_, _, _, err := c.FindAlertByID(context.Background(), strings.Repeat("f", 32), "p1")
 		if !IsAuthRequired(err) {
 			t.Fatalf("error = %v, want authentication required", err)
 		}
@@ -328,7 +329,7 @@ func TestFindAlertByIDPreservesCancellationAndAuthentication(t *testing.T) {
 			} else {
 				defer cancel()
 			}
-			_, _, err := c.FindAlertByID(ctx, strings.Repeat("f", 32), "p1")
+			_, _, _, err := c.FindAlertByID(ctx, strings.Repeat("f", 32), "p1")
 			if err == nil || (!strings.Contains(err.Error(), context.Canceled.Error()) && !strings.Contains(err.Error(), context.DeadlineExceeded.Error())) {
 				t.Fatalf("error = %v, want context termination", err)
 			}
@@ -370,7 +371,7 @@ func BenchmarkAlertLookup(b *testing.B) {
 								b.Fatalf("ListAlerts = %d, %v", len(alerts), err)
 							}
 						} else {
-							alert, found, err := c.FindAlertByID(context.Background(), ids[0], "p1")
+							alert, _, found, err := c.FindAlertByID(context.Background(), ids[0], "p1")
 							if err != nil || !found || alert.ID != ids[0] {
 								b.Fatalf("FindAlertByID = %+v, %t, %v", alert, found, err)
 							}
@@ -381,6 +382,109 @@ func BenchmarkAlertLookup(b *testing.B) {
 			srv.Close()
 		}
 	}
+}
+
+func BenchmarkAlertLookupLatencyPercentiles(b *testing.B) {
+	const samples = 21
+	for _, total := range []int{10, 100, 1000} {
+		ids := make([]string, total)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("%032x", i+1)
+		}
+		for _, delay := range []time.Duration{0, 25 * time.Millisecond} {
+			delayName := "no_delay"
+			if delay > 0 {
+				delayName = "25ms_delay"
+			}
+			b.Run(fmt.Sprintf("%d/%s", total, delayName), func(b *testing.B) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if delay > 0 {
+						time.Sleep(delay)
+					}
+					offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+					end := offset + cardPageSize
+					if end > len(ids) {
+						end = len(ids)
+					}
+					w.Header().Set(cardPageMoreHeader, strconv.FormatBool(end < len(ids)))
+					_, _ = io.WriteString(w, alertListPage(ids[offset:end], end < len(ids)))
+				}))
+				defer srv.Close()
+				c, err := New(srv.URL)
+				if err != nil {
+					b.Fatal(err)
+				}
+
+				run := func(incremental bool) time.Duration {
+					start := time.Now()
+					if incremental {
+						alert, _, found, err := c.FindAlertByID(context.Background(), ids[0], "p1")
+						if err != nil || !found || alert.ID != ids[0] {
+							b.Fatalf("FindAlertByID = %+v, %t, %v", alert, found, err)
+						}
+					} else {
+						alerts, err := c.ListAlerts(context.Background(), "p1")
+						if err != nil || len(alerts) != total {
+							b.Fatalf("ListAlerts = %d, %v", len(alerts), err)
+						}
+					}
+					return time.Since(start)
+				}
+
+				// Warm both paths before sampling, then alternate their order to avoid
+				// systematically favoring either side through connection or CPU drift.
+				run(false)
+				run(true)
+				fullSamples := make([]time.Duration, 0, samples)
+				incrementalSamples := make([]time.Duration, 0, samples)
+				b.ResetTimer()
+				for i := 0; i < samples; i++ {
+					if i%2 == 0 {
+						fullSamples = append(fullSamples, run(false))
+						incrementalSamples = append(incrementalSamples, run(true))
+					} else {
+						incrementalSamples = append(incrementalSamples, run(true))
+						fullSamples = append(fullSamples, run(false))
+					}
+				}
+				b.StopTimer()
+
+				fullMedian := durationPercentile(fullSamples, 50)
+				incrementalMedian := durationPercentile(incrementalSamples, 50)
+				fullP95 := durationPercentile(fullSamples, 95)
+				incrementalP95 := durationPercentile(incrementalSamples, 95)
+				medianImprovement := latencyImprovement(fullMedian, incrementalMedian)
+				p95Improvement := latencyImprovement(fullP95, incrementalP95)
+				b.ReportMetric(float64(fullMedian.Microseconds()), "full-median-us")
+				b.ReportMetric(float64(incrementalMedian.Microseconds()), "incremental-median-us")
+				b.ReportMetric(float64(fullP95.Microseconds()), "full-p95-us")
+				b.ReportMetric(float64(incrementalP95.Microseconds()), "incremental-p95-us")
+				b.ReportMetric(medianImprovement, "median-improvement-pct")
+				b.ReportMetric(p95Improvement, "p95-improvement-pct")
+
+				if total == 1000 && delay == 25*time.Millisecond && medianImprovement < 80 {
+					b.Fatalf("delayed median improvement = %.1f%%, want at least 80%%", medianImprovement)
+				}
+				if incrementalP95 > fullP95*120/100 && incrementalP95-fullP95 > 2*time.Millisecond {
+					b.Fatalf("incremental p95 regressed materially: %s versus %s", incrementalP95, fullP95)
+				}
+				if total == 10 && incrementalMedian > fullMedian*120/100 && incrementalMedian-fullMedian > 2*time.Millisecond {
+					b.Fatalf("small-history median regressed materially: %s versus %s", incrementalMedian, fullMedian)
+				}
+			})
+		}
+	}
+}
+
+func durationPercentile(samples []time.Duration, percentile int) time.Duration {
+	ordered := append([]time.Duration(nil), samples...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	index := (len(ordered)*percentile+99)/100 - 1
+	return ordered[index]
+}
+
+func latencyImprovement(before, after time.Duration) float64 {
+	return (1 - float64(after)/float64(before)) * 100
 }
 
 func TestFindAlertByIDDuplicateCardsKeepFirstCardAndStop(t *testing.T) {
@@ -396,7 +500,7 @@ func TestFindAlertByIDDuplicateCardsKeepFirstCardAndStop(t *testing.T) {
 	defer srv.Close()
 	c, _ := New(srv.URL)
 
-	alert, found, err := c.FindAlertByID(context.Background(), target, "p1")
+	alert, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
 	if err != nil || !found || alert.Title != "First card" {
 		t.Fatalf("alert = %+v, found = %t, error = %v", alert, found, err)
 	}
@@ -414,7 +518,7 @@ func TestFindAlertByIDValidatesMatchingPageMetadataAndLimits(t *testing.T) {
 		}))
 		defer srv.Close()
 		c, _ := New(srv.URL)
-		_, _, err := c.FindAlertByID(context.Background(), target, "p1")
+		_, _, _, err := c.FindAlertByID(context.Background(), target, "p1")
 		if err == nil || !strings.Contains(err.Error(), "pagination metadata") {
 			t.Fatalf("error = %v", err)
 		}
@@ -429,7 +533,7 @@ func TestFindAlertByIDValidatesMatchingPageMetadataAndLimits(t *testing.T) {
 		}))
 		defer srv.Close()
 		c, _ := New(srv.URL)
-		_, _, err := c.FindAlertByID(context.Background(), target, "p1")
+		_, _, _, err := c.FindAlertByID(context.Background(), target, "p1")
 		if err == nil || !strings.Contains(err.Error(), "card pagination exceeded safety limit") {
 			t.Fatalf("error = %v", err)
 		}
@@ -462,7 +566,7 @@ func TestFindAlertByIDThousandCardHistoryStopsOnPageOne(t *testing.T) {
 	defer srv.Close()
 	c, _ := New(srv.URL)
 
-	alert, found, err := c.FindAlertByID(context.Background(), target, "p1")
+	alert, _, found, err := c.FindAlertByID(context.Background(), target, "p1")
 	if err != nil || !found || alert.ID != target {
 		t.Fatalf("FindAlertByID = %+v, %t, %v", alert, found, err)
 	}

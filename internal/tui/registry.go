@@ -1795,12 +1795,18 @@ func alertsCommand() command {
 				}
 				return m, run("Alert", cmdTimeout, func(ctx context.Context) (string, error) {
 					if isCanonicalFullAlertID(ref) {
-						a, found, err := c.FindAlertByID(ctx, ref, pid)
+						a, alerts, found, err := c.FindAlertByID(ctx, ref, pid)
 						if err != nil {
 							return "", err
 						}
-						if !found {
-							return "", fmt.Errorf("nothing matches %q", ref)
+						if found {
+							return alertInspectionOutput(ctx, c, pid, a)
+						}
+						a, err = matchRef(alerts, ref,
+							func(a client.Alert) string { return a.ID },
+							func(a client.Alert) string { return a.Title })
+						if err != nil {
+							return "", err
 						}
 						return alertInspectionOutput(ctx, c, pid, a)
 					}
