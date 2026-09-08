@@ -5107,6 +5107,13 @@ func chatCommand() command {
 		args:    "[message]",
 		desc:    "return to project chat, or send a message",
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			if len(args) > 0 && m.hasPendingChat() {
+				// Reject the overlapping project-chat turn without invalidating the
+				// active task reply. Its stream/status messages still own the current
+				// thread request token and must remain visible until they settle.
+				m.append(entry{role: "system", text: chatStillProcessingMessage})
+				return m, nil
+			}
 			// Even before a thread has finished opening, /chat owns the user's
 			// navigation intent and invalidates delayed open/live-refresh results.
 			if len(args) == 0 && m.pendingMsgTaskID != "" {
@@ -5116,10 +5123,6 @@ func chatCommand() command {
 			m.threadOpenRequestID++
 			m.threadRefreshRequestID++
 			m.threadReplyPendingRequestID = 0
-			if len(args) > 0 && m.hasPendingChat() {
-				m.append(entry{role: "system", text: chatStillProcessingMessage})
-				return m, nil
-			}
 			m.busy = false
 			if m.threadID != "" {
 				title := m.threadTitle

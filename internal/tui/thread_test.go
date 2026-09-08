@@ -453,6 +453,135 @@ func TestTaskAliasOpenMatchesCanonicalCommand(t *testing.T) {
 	}
 }
 
+func TestChatMessageOverlapPreservesPendingTaskReplyOwnership(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.threadID = "t-1"
+	m.threadTitle = "Refactor the API"
+	m.threadStatus = "running"
+	m.pendingMsgTaskID = "t-1"
+	m.pendingMsgThreadRequestID = m.threadOpenRequestID
+	requestID := m.threadOpenRequestID
+
+	updated, cmd := m.runCommand("/chat start another turn")
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatal("overlapping /chat message started a project chat request")
+	}
+	if m.threadOpenRequestID != requestID || m.threadID != "t-1" || !m.pendingChatScopeCurrent() {
+		t.Fatalf("overlap invalidated active task reply: request=%d want=%d thread=%q current=%t", m.threadOpenRequestID, requestID, m.threadID, m.pendingChatScopeCurrent())
+	}
+	if !strings.Contains(transcript(m), chatStillProcessingMessage) {
+		t.Fatalf("overlap warning missing: %q", transcript(m))
+	}
+
+	updated, _ = m.Update(chatStreamEventMsg{
+		generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1",
+		event: client.ChatOutputEvent{Data: "visible reply"},
+	})
+	m = updated.(Model)
+	m.flushChatStreamOutput()
+	if !strings.Contains(transcript(m), "visible reply") {
+		t.Fatalf("active reply output was stranded after overlap: %q", transcript(m))
+	}
+
+	updated, _ = m.Update(chatStatusMsg{
+		sessionGeneration: m.sessionGeneration, projectGeneration: m.projectGeneration,
+		messageID: "exec-1", submissionID: 9, projectID: "project-A",
+		status: &client.ChatStatus{MessageID: "exec-1", Status: "completed", Response: "visible reply"},
+	})
+	m = updated.(Model)
+	if m.hasPendingChat() || m.busy {
+		t.Fatalf("active task reply did not settle: pending=%t busy=%t", m.hasPendingChat(), m.busy)
+	}
+	if _, ok := m.beginChatSubmission("project-A"); !ok {
+		t.Fatal("settled task reply still blocked future submissions")
+	}
+}
+
+func TestTaskTerminalEventFlushesOutputBeforeSingleFailure(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.threadID = "t-1"
+	m.threadStatus = "running"
+	m.pendingMsgTaskID = "t-1"
+	m.pendingMsgThreadRequestID = m.threadOpenRequestID
+	m.updateChatStreamOutput("buffered answer")
+	m.chatStreamRenderQueued = true
+	m.sseGeneration = 16
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, cmd := m.Update(sseEventMsg{generation: 16, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","exec_id":"exec-1","status":"failed","message":"provider unavailable"}`),
+	}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("matching terminal task event did not request authoritative status")
+	}
+
+	updated, _ = m.Update(chatStatusMsg{
+		sessionGeneration: m.sessionGeneration, projectGeneration: m.projectGeneration,
+		messageID: "exec-1", submissionID: 9, projectID: "project-A",
+		status: &client.ChatStatus{MessageID: "exec-1", Status: "failed", Error: "provider unavailable"},
+	})
+	m = updated.(Model)
+	if got := countRole(m.log, "error"); got != 1 {
+		t.Fatalf("terminal failure diagnostics = %d, want 1; transcript=%q", got, transcript(m))
+	}
+	out := transcript(m)
+	if outputAt, failureAt := strings.Index(out, "buffered answer"), strings.Index(out, "failed: provider unavailable"); outputAt < 0 || failureAt < 0 || outputAt > failureAt {
+		t.Fatalf("buffered output was not ordered before terminal failure: %q", out)
+	}
+}
+
+func TestTaskEventsRejectForeignActiveExecutionIdentity(t *testing.T) {
+	for _, payload := range []string{
+		`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","exec_id":"exec-old","status":"failed","message":"old execution"}`,
+		`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","pending_input_id":"input-old","status":"completed","message":"old input"}`,
+	} {
+		m := pendingChatStreamTestModel(t)
+		m.threadID = "t-1"
+		m.threadStatus = "running"
+		m.pendingMsgTaskID = "t-1"
+		m.pendingMsgThreadRequestID = m.threadOpenRequestID
+		m.sseGeneration = 17
+		m.sseEvents = make(chan client.Event)
+		m.sseErrs = make(chan error)
+		before := transcript(m)
+
+		updated, _ := m.Update(sseEventMsg{generation: 17, event: client.Event{
+			Name: "task_status_changed", Data: json.RawMessage(payload),
+		}})
+		m = updated.(Model)
+		if m.threadStatus != "running" || transcript(m) != before || !m.pendingChatScopeCurrent() {
+			t.Fatalf("foreign execution event mutated current turn: status=%q current=%t transcript=%q", m.threadStatus, m.pendingChatScopeCurrent(), transcript(m))
+		}
+	}
+}
+
+func TestTaskEventPromotesExecutionOnlyFromMatchingPendingInput(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.pendingMsgID = "input-1"
+	m.pendingMsgExecutionID = ""
+	m.chatStreamExecID = ""
+	m.threadID = "t-1"
+	m.threadStatus = "running"
+	m.pendingMsgTaskID = "t-1"
+	m.pendingMsgThreadRequestID = m.threadOpenRequestID
+	m.sseGeneration = 18
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, cmd := m.Update(sseEventMsg{generation: 18, event: client.Event{
+		Name: "task_status_changed",
+		Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","pending_input_id":"input-1","exec_id":"exec-promoted","status":"running"}`),
+	}})
+	m = updated.(Model)
+	if cmd == nil || m.pendingMsgExecutionID != "exec-promoted" || m.threadStatus != "running" {
+		t.Fatalf("matching queued event did not promote current turn: cmd=%t execution=%q status=%q", cmd != nil, m.pendingMsgExecutionID, m.threadStatus)
+	}
+}
+
 func TestInteractiveTaskReplyInstallsExecutionStreaming(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/tasks":                 `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor</a></div>`,

@@ -1732,6 +1732,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.acceptsSSEEvent(msg.event) {
 			return m, m.waitForCurrentSSE(msg.generation)
 		}
+		if !m.acceptsOpenThreadTaskEventIdentity(msg.event) {
+			return m, m.waitForCurrentSSE(msg.generation)
+		}
 		// A matching completion is terminal for the pending turn. If its visible
 		// /events entry is appended before a queued first assistant render, the
 		// transcript order is reversed. Flush only completions that can settle this
@@ -2183,6 +2186,30 @@ func (m *Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {
 	}, sessionGenerationOf(*m), projectGenerationOf(*m))
 }
 
+// acceptsOpenThreadTaskEventIdentity rejects delayed events from another
+// execution of the currently open task before they can reach either the task
+// transcript or the generic /events display. A matching pending-input identity
+// authorizes a newly promoted execution ID from a queued follow-up.
+func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
+	if m.threadID == "" || m.pendingMsgTaskID != m.threadID || m.pendingMsgID == "" {
+		return true
+	}
+	var taskEvent client.TaskEvent
+	if json.Unmarshal(ev.Data, &taskEvent) != nil || taskEvent.TaskID != m.threadID || taskEvent.ProjectID != m.selectedID {
+		return true
+	}
+	if taskEvent.ExecID == "" && taskEvent.PendingInputID == "" {
+		return true // legacy task events do not expose execution identity
+	}
+	if taskEvent.PendingInputID != "" && !m.matchesPendingChatExecution(taskEvent.PendingInputID) {
+		return false
+	}
+	if taskEvent.ExecID == "" || m.matchesPendingChatExecution(taskEvent.ExecID) {
+		return true
+	}
+	return taskEvent.PendingInputID != "" && m.matchesPendingChatExecution(taskEvent.PendingInputID)
+}
+
 // handleOpenThreadSSE mirrors the web task view's live behavior for the one task
 // currently in follow-up context. Project and stream ownership have already
 // been checked by Update; task identity and running state are checked here.
@@ -2194,7 +2221,27 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	var taskEvent client.TaskEvent
 	if json.Unmarshal(ev.Data, &taskEvent) == nil && taskEvent.TaskID == m.threadID && taskEvent.Status != "" &&
 		taskEvent.ProjectID != "" && taskEvent.ProjectID == m.selectedID {
+		if !m.acceptsOpenThreadTaskEventIdentity(ev) {
+			return nil
+		}
 		status := strings.ToLower(taskEvent.Status)
+		if m.pendingMsgTaskID == m.threadID && m.pendingMsgID != "" {
+			// A queued task event may be the first authoritative evidence linking
+			// the accepted input to its promoted execution.
+			if taskEvent.ExecID != "" && m.pendingMsgExecutionID == "" &&
+				taskEvent.PendingInputID != "" && m.matchesPendingChatExecution(taskEvent.PendingInputID) {
+				m.pendingMsgExecutionID = taskEvent.ExecID
+			}
+			// Materialize accepted bytes before the terminal state is observable.
+			// The execution status endpoint owns the sole completion/error entry;
+			// appending one here would duplicate failures when status reconciliation
+			// arrives and could place the marker before a queued cadence render.
+			m.flushChatStreamOutput()
+			if status != "" {
+				m.threadStatus = status
+			}
+			return m.fetchChatStatus(m.pendingMsgID)
+		}
 		if status != "" {
 			m.threadStatus = status
 		}
@@ -2208,12 +2255,6 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 				role = "error"
 			}
 			m.append(entry{role: role, text: text})
-		}
-		if m.pendingMsgTaskID == m.threadID && m.pendingMsgID != "" {
-			// The execution stream and status endpoint own this follow-up's output.
-			// Refreshing the HTML thread concurrently can render the same final
-			// assistant response a second time inside the thread result block.
-			return m.fetchChatStatus(m.pendingMsgID)
 		}
 		return m.refreshTaskThread(m.threadID, m.selectedID, status)
 	}
