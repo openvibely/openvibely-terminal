@@ -853,6 +853,12 @@ func (m *Model) completeChat(response string, taskIDs []string) {
 	// Authoritative completion can race the first cadence tick. Materialize any
 	// accepted bytes first so the final response reconciles one assistant entry.
 	m.flushChatStreamOutput()
+	if streamed := m.chatStreamOutput; response != streamed && strings.HasPrefix(streamed, response) {
+		// A terminal status snapshot can lag the execution stream. Never erase or
+		// shorten bytes already accepted when the snapshot is an exact prefix;
+		// divergent terminal responses remain authoritative corrections.
+		response = streamed
+	}
 	if m.chatStreamLogIndex >= 0 {
 		m.reconcileChatStreamOutput(response)
 	} else {

@@ -3916,6 +3916,42 @@ func TestAuthoritativeCompletionReconcilesBufferedFirstBlockOnce(t *testing.T) {
 	}
 }
 
+func TestCompletionPreservesStreamedOutputWhenSnapshotEmpty(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("streamed λ🙂 reply")
+	m.chatStreamRenderQueued = true
+
+	m.completeChat("", nil)
+
+	if got := strings.Count(transcript(m), "agent::"); got != 1 {
+		t.Fatalf("completion rendered %d assistant entries; transcript:\n%s", got, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "agent::streamed λ🙂 reply") {
+		t.Fatalf("empty completion snapshot erased streamed output: %s", transcript(m))
+	}
+	if m.busy || m.pendingMsgID != "" || m.chatStreamRenderQueued {
+		t.Fatalf("completion left pending state: busy=%t id=%q queued=%t", m.busy, m.pendingMsgID, m.chatStreamRenderQueued)
+	}
+}
+
+func TestCompletionPreservesStreamedOutputWhenSnapshotIsShorterPrefix(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.updateChatStreamOutput("streamed λ🙂 reply")
+	m.chatStreamRenderQueued = true
+
+	m.completeChat("streamed λ", nil)
+
+	if got := strings.Count(transcript(m), "agent::"); got != 1 {
+		t.Fatalf("completion rendered %d assistant entries; transcript:\n%s", got, transcript(m))
+	}
+	if !strings.Contains(transcript(m), "agent::streamed λ🙂 reply") {
+		t.Fatalf("lagging completion snapshot shortened streamed output: %s", transcript(m))
+	}
+	if m.busy || m.pendingMsgID != "" || m.chatStreamRenderQueued {
+		t.Fatalf("completion left pending state: busy=%t id=%q queued=%t", m.busy, m.pendingMsgID, m.chatStreamRenderQueued)
+	}
+}
+
 func TestForcedChatStreamFlushInvalidatesOldCadenceTimer(t *testing.T) {
 	m := pendingChatStreamTestModel(t)
 	m.updateChatStreamOutput("first")
