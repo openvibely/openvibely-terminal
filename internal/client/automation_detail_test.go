@@ -1426,6 +1426,158 @@ func TestParseAutomationDetailBuildsRealisticBoundedSecretSafeConfigSummaries(t 
 	}
 }
 
+func TestParseAutomationDetailResolvesAmbiguousNodeReferencesInDocumentOrder(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-node-reference-collision" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<g data-automation-live-node="shared" data-automation-node-name="First match"><strong>First match</strong></g>
+			<g data-automation-live-node="second" data-automation-node-key="shared" data-automation-node-name="Second match"><strong>Second match</strong></g>
+			<line class="automation-graph-edge" data-automation-live-edge="edge-1" data-source-node-id="shared" data-target-node-id="missing" aria-label="next, 1 transitions, 0 recent"></line>
+		</svg></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 1 {
+		t.Fatalf("edges = %+v", detail.Edges)
+	}
+	edge := detail.Edges[0]
+	if edge.SourceName != "First match" || edge.TargetName != "" {
+		t.Fatalf("ambiguous/missing node references changed: %+v", edge)
+	}
+}
+
+func TestParseAutomationDetailKeepsThreeWayEdgeCandidatesUnmatched(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-three-way-edge-candidates" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n1" data-target-node-id="n2" aria-label="first, 1 transitions, 0 recent"></line>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n3" data-target-node-id="n4" aria-label="second, 2 transitions, 0 recent"></line>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e1" data-automation-live-edge="shared" data-source-node-id="n5" data-target-node-id="n6" aria-label="third, 3 transitions, 0 recent"></line>
+		</svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="shared" data-automation-live-edge-id="e1"><div>Unresolved transition</div><p>unknown</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 3 || len(detail.UnmatchedEdgeDetails) != 1 {
+		t.Fatalf("three-way candidates were merged: graph=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
+	}
+	for _, edge := range detail.Edges {
+		if edge.SourceName != "" || edge.TargetName != "" {
+			t.Fatalf("ambiguous detail enriched graph edge: %+v", edge)
+		}
+	}
+}
+
+func TestParseAutomationDetailIndexesUniqueSparseCorrelationsWithoutChangingOrder(t *testing.T) {
+	const records = 100
+	detail, err := parseAutomationDetailFromString(automationDetailSparseCorrelationFixture(records))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != records || len(detail.Edges) != records || len(detail.UnmatchedNodeDetails) != 0 || len(detail.UnmatchedEdgeDetails) != 0 {
+		t.Fatalf("correlation collections = nodes=%d edges=%d unmatched_nodes=%d unmatched_edges=%d", len(detail.Nodes), len(detail.Edges), len(detail.UnmatchedNodeDetails), len(detail.UnmatchedEdgeDetails))
+	}
+	for i := range records {
+		node := detail.Nodes[i]
+		if node.ID != fmt.Sprintf("node-%03d", i) || node.NodeKey != fmt.Sprintf("key-%03d", i) || node.Name != fmt.Sprintf("Node %03d", i) ||
+			!node.Counts.RunningAvailable || node.Counts.Running != i%5 || !node.Counts.CompletedRecentlyAvailable || node.Counts.CompletedRecently != i%7 {
+			t.Fatalf("node %d changed during sparse correlation: %+v", i, node)
+		}
+		edge := detail.Edges[i]
+		if edge.ID != fmt.Sprintf("edge-%03d", i) || edge.EdgeKey != fmt.Sprintf("edge-key-%03d", i) ||
+			edge.SourceNodeID != fmt.Sprintf("node-%03d", i) || edge.TargetNodeID != fmt.Sprintf("node-%03d", (i+1)%records) ||
+			edge.SourceName != fmt.Sprintf("Node %03d", i) || edge.TargetName != fmt.Sprintf("Node %03d", (i+1)%records) ||
+			!edge.TransitionCountAvailable || edge.TransitionCount != i || !edge.RecentTransitionCountAvailable || edge.RecentTransitionCount != i%3 {
+			t.Fatalf("edge %d changed during sparse correlation: %+v", i, edge)
+		}
+	}
+}
+
+func TestGetAutomationDetailRejectsMismatchedAutomationAndProject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "automation", body: `<div id="automation-live" data-automation-id="other" data-project-id="p1"></div>`, want: `response identity "other" does not match requested automation "au1"`},
+		{name: "project", body: `<div id="automation-live" data-automation-id="au1" data-project-id="other"></div>`, want: `response project "other" does not match selected project "p1"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = fmt.Fprint(w, tc.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.GetAutomationDetail(context.Background(), "p1", "au1")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetAutomationDetailPropagatesCancellation(t *testing.T) {
+	c, err := New("http://automation-cancellation.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = c.GetAutomationDetail(ctx, "p1", "au1")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+}
+
+func TestGetAutomationDetailLimitsLargeHTMLResponse(t *testing.T) {
+	body := `<div id="automation-live" data-automation-id="au1" data-project-id="p1"><div data-automation-graph-panel></div>` + strings.Repeat("x", 9<<20) + `</div>`
+	reader := &countingAutomationDetailReader{Reader: strings.NewReader(body)}
+	c, err := New("http://automation-limit.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.http.Transport = htmlTestRoundTripper(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       reader,
+		}, nil
+	})
+
+	detail, err := c.GetAutomationDetail(context.Background(), "p1", "au1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.EdgesAvailable {
+		t.Fatalf("limited response did not preserve complete graph markers: %+v", detail)
+	}
+	const maxRead = (8 << 20) + (64 << 10)
+	if reader.read > maxRead {
+		t.Fatalf("read %d bytes from a %d-byte response, want no more than parser and bounded drain limit %d", reader.read, len(body), maxRead)
+	}
+	if reader.read >= len(body) {
+		t.Fatalf("response limit was bypassed: read all %d bytes", reader.read)
+	}
+}
+
+type countingAutomationDetailReader struct {
+	*strings.Reader
+	read int
+}
+
+func (r *countingAutomationDetailReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.read += n
+	return n, err
+}
+
+func (r *countingAutomationDetailReader) Close() error { return nil }
+
 func parseAutomationDetailFromString(source string) (AutomationDetail, error) {
 	root, err := html.Parse(strings.NewReader(source))
 	if err != nil {

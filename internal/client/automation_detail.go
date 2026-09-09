@@ -500,6 +500,7 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 	}
 	graphNodesPresent := len(liveNodes) > 0
 	detail.GraphNodesPresent = graphNodesPresent
+	nodeIndex := newAutomationLiveNodeIndex(out)
 	type nodeDetailCandidate struct {
 		node      AutomationLiveNode
 		hasCounts bool
@@ -512,7 +513,7 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 		candidates = append(candidates, nodeDetailCandidate{
 			node:      parsed,
 			hasCounts: hasCounts,
-			identity:  automationLiveNodeCorrelationIdentity(out, parsed, graphNodesPresent),
+			identity:  automationLiveNodeCorrelationIdentity(nodeIndex, out, parsed, graphNodesPresent),
 			key:       automationLiveNodeDeterministicKey(parsed),
 		})
 	}
@@ -547,16 +548,17 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 			if parsed.ID == "" && parsed.NodeKey == "" {
 				detail.Warnings = append(detail.Warnings, "node detail record has no stable identity")
 			}
-			mergeAutomationLiveNode(&out, parsed)
+			mergeAutomationLiveNode(&out, nodeIndex, parsed)
 			continue
 		}
-		if automationLiveNodeHasStableMatch(out, parsed) {
+		if match, matched, _ := nodeIndex.matchIndex(out, parsed); matched {
 			if hasCounts {
 				countsPresent = true
 			}
 			// A uniquely correlated detail record is authoritative for metrics that
 			// were absent from the graph representation.
-			mergeAutomationLiveNode(&out, parsed)
+			mergeAutomationLiveNodeAt(&out[match], parsed)
+			nodeIndex.add(match, out[match])
 			continue
 		}
 		// Node IDs and keys are the only safe correlation identities. Preserve
@@ -567,10 +569,109 @@ func parseAutomationLiveNodes(detail *AutomationDetail, live *html.Node) ([]Auto
 	return out, present, countsPresent
 }
 
-func automationLiveNodeCorrelationIdentity(nodes []AutomationLiveNode, node AutomationLiveNode, graphNodesPresent bool) string {
+type automationLiveNodeIndex struct {
+	byID        map[string][]int
+	byKey       map[string][]int
+	byReference map[string][]int
+}
+
+func newAutomationLiveNodeIndex(nodes []AutomationLiveNode) *automationLiveNodeIndex {
+	index := &automationLiveNodeIndex{
+		byID:  make(map[string][]int, len(nodes)),
+		byKey: make(map[string][]int, len(nodes)),
+	}
+	for i, node := range nodes {
+		index.add(i, node)
+	}
+	return index
+}
+
+func newAutomationLiveNodeReferenceIndex(nodes []AutomationLiveNode) *automationLiveNodeIndex {
+	index := &automationLiveNodeIndex{byReference: make(map[string][]int, len(nodes)*2)}
+	for i, node := range nodes {
+		index.addReference(i, node)
+	}
+	return index
+}
+
+func automationCorrelationKey(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func appendAutomationIndexEntry(index map[string][]int, key string, value int) {
+	if key == "" {
+		return
+	}
+	entries := index[key]
+	for _, existing := range entries {
+		if existing == value {
+			return
+		}
+	}
+	index[key] = append(entries, value)
+}
+
+func (index *automationLiveNodeIndex) add(position int, node AutomationLiveNode) {
+	appendAutomationIndexEntry(index.byID, automationCorrelationKey(node.ID), position)
+	appendAutomationIndexEntry(index.byKey, automationCorrelationKey(node.NodeKey), position)
+}
+
+func (index *automationLiveNodeIndex) addReference(position int, node AutomationLiveNode) {
+	// Endpoint name resolution has always been exact and case-sensitive. Keep a
+	// separate raw-reference index rather than changing that lookup contract.
+	appendAutomationIndexEntry(index.byReference, node.ID, position)
+	appendAutomationIndexEntry(index.byReference, node.NodeKey, position)
+}
+
+func (index *automationLiveNodeIndex) matchIndex(nodes []AutomationLiveNode, parsed AutomationLiveNode) (int, bool, bool) {
+	if parsed.ID == "" && parsed.NodeKey == "" {
+		return -1, false, false
+	}
+	var idMatches, keyMatches []int
+	if parsed.ID != "" {
+		idMatches = index.byID[automationCorrelationKey(parsed.ID)]
+	}
+	if parsed.NodeKey != "" {
+		keyMatches = index.byKey[automationCorrelationKey(parsed.NodeKey)]
+	}
+	if len(idMatches) > 1 || len(keyMatches) > 1 {
+		return -1, false, true
+	}
+	if len(idMatches) == 1 && len(keyMatches) == 1 {
+		if idMatches[0] != keyMatches[0] {
+			return -1, false, true
+		}
+		return idMatches[0], true, false
+	}
+	if len(idMatches) == 1 {
+		position := idMatches[0]
+		if parsed.NodeKey != "" && nodes[position].NodeKey != "" && !strings.EqualFold(nodes[position].NodeKey, parsed.NodeKey) {
+			return -1, false, true
+		}
+		return position, true, false
+	}
+	if len(keyMatches) == 1 {
+		position := keyMatches[0]
+		if parsed.ID != "" && nodes[position].ID != "" && !strings.EqualFold(nodes[position].ID, parsed.ID) {
+			return -1, false, true
+		}
+		return position, true, false
+	}
+	return -1, false, false
+}
+
+func (index *automationLiveNodeIndex) firstReference(nodes []AutomationLiveNode, reference string) *AutomationLiveNode {
+	matches := index.byReference[reference]
+	if len(matches) == 0 {
+		return nil
+	}
+	return &nodes[matches[0]]
+}
+
+func automationLiveNodeCorrelationIdentity(index *automationLiveNodeIndex, nodes []AutomationLiveNode, node AutomationLiveNode, graphNodesPresent bool) string {
 	if graphNodesPresent {
-		if index, matched, _ := automationLiveNodeMatchIndex(nodes, node); matched {
-			return fmt.Sprintf("graph\x00%020d", index)
+		if position, matched, _ := index.matchIndex(nodes, node); matched {
+			return fmt.Sprintf("graph\x00%020d", position)
 		}
 	}
 	return automationLiveNodeStableIdentity(node)
@@ -604,50 +705,6 @@ func automationLiveNodeDeterministicKey(node AutomationLiveNode) string {
 		fmt.Sprintf("%020d:%t:%d", counts.Failed, counts.FailedAvailable, counts.failedQuality),
 		fmt.Sprintf("%020d:%t:%d", counts.CompletedRecently, counts.CompletedRecentlyAvailable, counts.completedRecentlyQuality),
 	}, "\x00")
-}
-
-func automationLiveNodeHasStableMatch(nodes []AutomationLiveNode, parsed AutomationLiveNode) bool {
-	_, matched, _ := automationLiveNodeMatchIndex(nodes, parsed)
-	return matched
-}
-
-func automationLiveNodeMatchIndex(nodes []AutomationLiveNode, parsed AutomationLiveNode) (int, bool, bool) {
-	if parsed.ID == "" && parsed.NodeKey == "" {
-		return -1, false, false
-	}
-	var idMatches, keyMatches []int
-	for i, current := range nodes {
-		if parsed.ID != "" && current.ID != "" && strings.EqualFold(current.ID, parsed.ID) {
-			idMatches = append(idMatches, i)
-		}
-		if parsed.NodeKey != "" && current.NodeKey != "" && strings.EqualFold(current.NodeKey, parsed.NodeKey) {
-			keyMatches = append(keyMatches, i)
-		}
-	}
-	if len(idMatches) > 1 || len(keyMatches) > 1 {
-		return -1, false, true
-	}
-	if len(idMatches) == 1 && len(keyMatches) == 1 {
-		if idMatches[0] != keyMatches[0] {
-			return -1, false, true
-		}
-		return idMatches[0], true, false
-	}
-	if len(idMatches) == 1 {
-		index := idMatches[0]
-		if parsed.NodeKey != "" && nodes[index].NodeKey != "" && !strings.EqualFold(nodes[index].NodeKey, parsed.NodeKey) {
-			return -1, false, true
-		}
-		return index, true, false
-	}
-	if len(keyMatches) == 1 {
-		index := keyMatches[0]
-		if parsed.ID != "" && nodes[index].ID != "" && !strings.EqualFold(nodes[index].ID, parsed.ID) {
-			return -1, false, true
-		}
-		return index, true, false
-	}
-	return -1, false, false
 }
 
 func parseAutomationNodeCommon(detail *AutomationDetail, node *html.Node, idAttrs, keyAttrs, stateAttrs []string) (AutomationLiveNode, bool) {
@@ -807,20 +864,26 @@ func automationNodeConfigSummary(section *html.Node) string {
 	return strings.Join(parts, "; ")
 }
 
-func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, parsed AutomationLiveNode) {
+func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, index *automationLiveNodeIndex, parsed AutomationLiveNode) {
 	if parsed.ID == "" && parsed.NodeKey == "" && parsed.Name == "" {
 		// A marked detail record is still meaningful even when no stable field
 		// can be recovered. Keep it as an explicitly unidentified row instead
 		// of silently dropping its counts or configuration.
 		*nodes = append(*nodes, parsed)
+		index.add(len(*nodes)-1, parsed)
 		return
 	}
-	match, matched, _ := automationLiveNodeMatchIndex(*nodes, parsed)
+	match, matched, _ := index.matchIndex(*nodes, parsed)
 	if !matched {
 		*nodes = append(*nodes, parsed)
+		index.add(len(*nodes)-1, parsed)
 		return
 	}
-	current := &(*nodes)[match]
+	mergeAutomationLiveNodeAt(&(*nodes)[match], parsed)
+	index.add(match, (*nodes)[match])
+}
+
+func mergeAutomationLiveNodeAt(current *AutomationLiveNode, parsed AutomationLiveNode) {
 	if current.ID == "" {
 		current.ID = parsed.ID
 	}
@@ -1032,6 +1095,61 @@ const (
 	automationEdgeSourceDetails = 2
 )
 
+type automationLiveEdgeIndex struct {
+	byID       map[string][]int
+	byKey      map[string][]int
+	byEndpoint map[string][]int
+}
+
+func newAutomationLiveEdgeIndex(edges []AutomationLiveEdge) *automationLiveEdgeIndex {
+	index := &automationLiveEdgeIndex{
+		byID:       make(map[string][]int, len(edges)),
+		byKey:      make(map[string][]int, len(edges)),
+		byEndpoint: make(map[string][]int, len(edges)),
+	}
+	for position, edge := range edges {
+		index.add(position, edge)
+	}
+	return index
+}
+
+func (index *automationLiveEdgeIndex) add(position int, edge AutomationLiveEdge) {
+	appendAutomationIndexEntry(index.byID, automationCorrelationKey(edge.ID), position)
+	appendAutomationIndexEntry(index.byKey, automationCorrelationKey(edge.EdgeKey), position)
+	appendAutomationIndexEntry(index.byEndpoint, automationEdgeEndpointKey(edge), position)
+}
+
+func (index *automationLiveEdgeIndex) endpointCount(edge AutomationLiveEdge) int {
+	return len(index.byEndpoint[automationEdgeEndpointKey(edge)])
+}
+
+// candidateIndices returns the collision-preserving union of every index that
+// can satisfy automationEdgeRecordsCanCorrelate. The predicate remains the
+// final authority so malformed or conflicting identities retain their current
+// conservative behavior.
+func (index *automationLiveEdgeIndex) candidateIndices(edge AutomationLiveEdge, allowEndpointMerge bool, marks []int, generation int, candidates []int) []int {
+	candidates = candidates[:0]
+	add := func(entries []int) {
+		for _, position := range entries {
+			if marks[position] == generation {
+				continue
+			}
+			marks[position] = generation
+			candidates = append(candidates, position)
+		}
+	}
+	if edge.ID != "" {
+		add(index.byID[automationCorrelationKey(edge.ID)])
+	}
+	if edge.EdgeKey != "" {
+		add(index.byKey[automationCorrelationKey(edge.EdgeKey)])
+	}
+	if allowEndpointMerge {
+		add(index.byEndpoint[automationEdgeEndpointKey(edge)])
+	}
+	return candidates
+}
+
 func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes []AutomationLiveNode) ([]AutomationLiveEdge, bool, bool, bool) {
 	var out = make([]AutomationLiveEdge, 0)
 	present := false
@@ -1081,24 +1199,37 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	if automationEdgesHaveDuplicateStableIdentity(parsedDetails) {
 		detail.Warnings = append(detail.Warnings, "duplicate edge records could not be correlated safely")
 	}
-	detailAllowEndpointMerge := make([]bool, len(parsedDetails))
-	detailGraphCandidates := make([][]int, len(parsedDetails))
+	graphEdgesIndex := newAutomationLiveEdgeIndex(parsedExplicit)
+	detailEdgesIndex := newAutomationLiveEdgeIndex(parsedDetails)
+	detailGraphMatch := make([]int, len(parsedDetails))
 	graphDetailCandidateCounts := make([]int, len(parsedExplicit))
-	for detailIndex, parsed := range parsedDetails {
-		allowEndpointMerge := automationEdgeHasUniqueEndpointMatch(parsed, parsedExplicit, parsedDetails)
-		detailAllowEndpointMerge[detailIndex] = allowEndpointMerge
-		for graphIndex, graph := range parsedExplicit {
-			if !automationEdgeRecordsCanCorrelate(graph, parsed, allowEndpointMerge) {
+	marks := make([]int, len(parsedExplicit))
+	candidates := make([]int, 0)
+	for detailPosition, parsed := range parsedDetails {
+		allowEndpointMerge := graphEdgesIndex.endpointCount(parsed) == 1 && detailEdgesIndex.endpointCount(parsed) == 1 && automationEdgeEndpointKey(parsed) != ""
+		generation := detailPosition + 1
+		candidates = graphEdgesIndex.candidateIndices(parsed, allowEndpointMerge, marks, generation, candidates)
+		match := -1
+		for _, graphPosition := range candidates {
+			if !automationEdgeRecordsCanCorrelate(parsedExplicit[graphPosition], parsed, allowEndpointMerge) {
 				continue
 			}
-			detailGraphCandidates[detailIndex] = append(detailGraphCandidates[detailIndex], graphIndex)
-			graphDetailCandidateCounts[graphIndex]++
+			if match == -1 {
+				match = graphPosition
+			} else {
+				match = -2
+			}
+			graphDetailCandidateCounts[graphPosition]++
 		}
+		detailGraphMatch[detailPosition] = match
 	}
-	for detailIndex, parsed := range parsedDetails {
-		candidates := detailGraphCandidates[detailIndex]
-		if len(candidates) == 1 && graphDetailCandidateCounts[candidates[0]] == 1 {
-			mergeAutomationLiveEdge(&out, parsed, detailAllowEndpointMerge[detailIndex])
+	for detailPosition, parsed := range parsedDetails {
+		graphPosition := detailGraphMatch[detailPosition]
+		if graphPosition >= 0 && graphDetailCandidateCounts[graphPosition] == 1 {
+			// The candidate graph row is unique globally and within the detail
+			// representation, so it is the same row mergeAutomationLiveEdge would
+			// find after scanning the full collection.
+			mergeAutomationLiveEdgeAt(&out[graphPosition], parsed)
 			continue
 		}
 		if len(explicit) > 0 {
@@ -1112,11 +1243,12 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	if len(explicit) > 0 && len(detail.UnmatchedEdgeDetails) > 0 {
 		detail.Warnings = append(detail.Warnings, "edge records could not be correlated safely")
 	}
+	nodeIndex := newAutomationLiveNodeReferenceIndex(nodes)
 	for i := range out {
-		resolveAutomationEdgeNames(&out[i], nodes)
+		resolveAutomationEdgeNames(&out[i], nodeIndex, nodes)
 	}
 	for i := range detail.UnmatchedEdgeDetails {
-		resolveAutomationEdgeNames(&detail.UnmatchedEdgeDetails[i], nodes)
+		resolveAutomationEdgeNames(&detail.UnmatchedEdgeDetails[i], nodeIndex, nodes)
 	}
 	sortAutomationDuplicateEdges(out)
 	sortAutomationDuplicateEdges(detail.UnmatchedEdgeDetails)
@@ -1124,56 +1256,72 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 }
 
 func automationEdgesHaveDuplicateStableIdentity(edges []AutomationLiveEdge) bool {
-	for i := range edges {
-		for j := i + 1; j < len(edges); j++ {
-			if automationEdgesShareStableIdentity(edges[i], edges[j]) {
-				return true
-			}
+	index := newAutomationLiveEdgeIndex(edges)
+	for _, entries := range index.byID {
+		if len(entries) > 1 {
+			return true
+		}
+	}
+	for _, entries := range index.byKey {
+		if len(entries) > 1 {
+			return true
 		}
 	}
 	return false
 }
 
-func automationEdgesShareStableIdentity(a, b AutomationLiveEdge) bool {
-	if a.ID != "" && b.ID != "" && strings.EqualFold(a.ID, b.ID) {
-		return true
-	}
-	return a.EdgeKey != "" && b.EdgeKey != "" && strings.EqualFold(a.EdgeKey, b.EdgeKey)
-}
-
 func sortAutomationDuplicateEdges(edges []AutomationLiveEdge) {
-	visited := make([]bool, len(edges))
-	for start := range edges {
-		if visited[start] {
-			continue
+	parents := make([]int, len(edges))
+	for i := range parents {
+		parents[i] = i
+	}
+	var find func(int) int
+	find = func(position int) int {
+		if parents[position] != position {
+			parents[position] = find(parents[position])
 		}
-		indices := []int{start}
-		visited[start] = true
-		for cursor := 0; cursor < len(indices); cursor++ {
-			current := indices[cursor]
-			for candidate := range edges {
-				if visited[candidate] || edges[current].edgeSource != edges[candidate].edgeSource {
-					continue
-				}
-				if automationEdgesShareStableIdentity(edges[current], edges[candidate]) {
-					visited[candidate] = true
-					indices = append(indices, candidate)
-				}
+		return parents[position]
+	}
+	union := func(left, right int) {
+		left, right = find(left), find(right)
+		if left != right {
+			parents[right] = left
+		}
+	}
+	owners := make(map[string]int, len(edges)*2)
+	for position, edge := range edges {
+		for _, identity := range []string{
+			"id\x00" + automationCorrelationKey(edge.ID),
+			"key\x00" + automationCorrelationKey(edge.EdgeKey),
+		} {
+			if strings.HasSuffix(identity, "\x00") {
+				continue
+			}
+			identity = fmt.Sprintf("%d\x00%s", edge.edgeSource, identity)
+			if owner, found := owners[identity]; found {
+				union(owner, position)
+			} else {
+				owners[identity] = position
 			}
 		}
+	}
+	groups := make(map[int][]int, len(edges))
+	for position := range edges {
+		groups[find(position)] = append(groups[find(position)], position)
+	}
+	for _, indices := range groups {
 		if len(indices) < 2 {
 			continue
 		}
 		duplicates := make([]AutomationLiveEdge, len(indices))
-		for i, index := range indices {
-			duplicates[i] = edges[index]
+		for i, position := range indices {
+			duplicates[i] = edges[position]
 		}
 		sort.SliceStable(duplicates, func(i, j int) bool {
 			return automationLiveEdgeDeterministicKey(duplicates[i]) < automationLiveEdgeDeterministicKey(duplicates[j])
 		})
-		sort.Ints(indices)
-		for i, index := range indices {
-			edges[index] = duplicates[i]
+		for i, position := range indices {
+			edges[position] = duplicates[i]
 		}
 	}
 }
@@ -1187,24 +1335,6 @@ func automationLiveEdgeDeterministicKey(edge AutomationLiveEdge) string {
 		fmt.Sprintf("%020d:%t:%d", edge.RecentTransitionCount, edge.RecentTransitionCountAvailable, edge.recentTransitionCountQuality),
 		fmt.Sprintf("%t", edge.Highlighted), edge.ProjectID, edge.AutomationID, edge.VersionID,
 	}, "\x00")
-}
-
-func automationEdgeHasUniqueEndpointMatch(parsed AutomationLiveEdge, explicit, details []AutomationLiveEdge) bool {
-	key := automationEdgeEndpointKey(parsed)
-	if key == "" || countAutomationEdgeEndpoint(explicit, key) != 1 || countAutomationEdgeEndpoint(details, key) != 1 {
-		return false
-	}
-	return true
-}
-
-func countAutomationEdgeEndpoint(edges []AutomationLiveEdge, key string) int {
-	count := 0
-	for _, edge := range edges {
-		if automationEdgeEndpointKey(edge) == key {
-			count++
-		}
-	}
-	return count
 }
 
 func automationEdgeEndpointKey(edge AutomationLiveEdge) string {
@@ -1405,22 +1535,7 @@ func automationEdgeHasNoStableIdentity(edge AutomationLiveEdge) bool {
 	return true
 }
 
-func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveEdge, allowEndpointMerge bool) {
-	matches := make([]int, 0, 1)
-	for i := range *edges {
-		if automationEdgesCanMerge((*edges)[i], parsed, allowEndpointMerge) {
-			matches = append(matches, i)
-		}
-	}
-	if len(matches) != 1 {
-		// Zero candidates means this is a distinct retained record. Multiple
-		// compatible candidates are ambiguous and must remain independent rather
-		// than inheriting data from whichever record appeared first.
-		*edges = append(*edges, parsed)
-		return
-	}
-
-	current := &(*edges)[matches[0]]
+func mergeAutomationLiveEdgeAt(current *AutomationLiveEdge, parsed AutomationLiveEdge) {
 	if current.ID == "" {
 		current.ID = parsed.ID
 	}
@@ -1471,15 +1586,6 @@ func mergeAutomationLiveEdge(edges *[]AutomationLiveEdge, parsed AutomationLiveE
 		parsed.RecentTransitionCount, parsed.RecentTransitionCountAvailable, parsed.recentTransitionCountQuality)
 	current.Highlighted = current.Highlighted || parsed.Highlighted
 	current.edgeSource |= parsed.edgeSource
-}
-
-func automationEdgesCanMerge(current, parsed AutomationLiveEdge, allowEndpointMerge bool) bool {
-	if current.edgeSource != 0 && parsed.edgeSource != 0 && current.edgeSource&parsed.edgeSource != 0 {
-		// Multiple records from the same rendered representation are separate
-		// topology rows, even when a malformed fragment repeats a stable identity.
-		return false
-	}
-	return automationEdgeRecordsCanCorrelate(current, parsed, allowEndpointMerge)
 }
 
 func automationEdgeRecordsCanCorrelate(current, parsed AutomationLiveEdge, allowEndpointMerge bool) bool {
@@ -1546,21 +1652,15 @@ func automationEdgeEndpointsEqual(a, b AutomationLiveEdge) bool {
 	return false
 }
 
-func resolveAutomationEdgeNames(edge *AutomationLiveEdge, nodes []AutomationLiveNode) {
+func resolveAutomationEdgeNames(edge *AutomationLiveEdge, index *automationLiveNodeIndex, nodes []AutomationLiveNode) {
 	if edge.SourceName == "" && edge.SourceNodeID != "" {
-		for _, node := range nodes {
-			if node.ID == edge.SourceNodeID || node.NodeKey == edge.SourceNodeID {
-				edge.SourceName = firstNonEmptyAutomation(node.Name, node.NodeKey, node.ID)
-				break
-			}
+		if node := index.firstReference(nodes, edge.SourceNodeID); node != nil {
+			edge.SourceName = firstNonEmptyAutomation(node.Name, node.NodeKey, node.ID)
 		}
 	}
 	if edge.TargetName == "" && edge.TargetNodeID != "" {
-		for _, node := range nodes {
-			if node.ID == edge.TargetNodeID || node.NodeKey == edge.TargetNodeID {
-				edge.TargetName = firstNonEmptyAutomation(node.Name, node.NodeKey, node.ID)
-				break
-			}
+		if node := index.firstReference(nodes, edge.TargetNodeID); node != nil {
+			edge.TargetName = firstNonEmptyAutomation(node.Name, node.NodeKey, node.ID)
 		}
 	}
 }
