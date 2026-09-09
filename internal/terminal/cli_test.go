@@ -1841,6 +1841,68 @@ func TestCLIBriefingCommandsRequireProjectWhenProjectListIsEmpty(t *testing.T) {
 	}
 }
 
+func TestCLIBriefingCommandsAcceptShowAction(t *testing.T) {
+	cases := []struct {
+		name      string
+		args      []string
+		fetchPath string
+		body      string
+	}{
+		{name: "pulse", args: []string{"pulse", "show"}, fetchPath: "/upcoming", body: "<div>upcoming briefing</div>"},
+		{name: "reflection", args: []string{"reflection", "show"}, fetchPath: "/history", body: "<div>history debrief</div>"},
+		{name: "grades", args: []string{"grades", "show"}, fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "insights", args: []string{"insights", "show"}, fetchPath: "/insights", body: "<div>insights</div>"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				tc.fetchPath:    tc.body,
+			})
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false); err != nil {
+				t.Fatalf("RunCLI(%v): %v", tc.args, err)
+			}
+			if got := rec.count("GET", tc.fetchPath); got != 1 {
+				t.Fatalf("RunCLI(%v) made %d GET requests to %s, want 1:\n%s", tc.args, got, tc.fetchPath, rec.all())
+			}
+			if calls := rec.all(); strings.Contains(calls, "POST ") {
+				t.Fatalf("RunCLI(%v) unexpectedly made a POST request:\n%s", tc.args, calls)
+			}
+		})
+	}
+}
+
+func TestCLIBriefingCommandsRejectInvalidOperands(t *testing.T) {
+	cases := []struct {
+		name  string
+		args  []string
+		usage string
+	}{
+		{name: "pulse unknown action", args: []string{"pulse", "sumary"}, usage: "usage: pulse [show|summary]"},
+		{name: "pulse surplus operand", args: []string{"pulse", "summary", "now"}, usage: "usage: pulse [show|summary]"},
+		{name: "reflection unknown action", args: []string{"reflection", "refresh"}, usage: "usage: reflection [show|summary]"},
+		{name: "reflection surplus operand", args: []string{"reflection", "show", "extra"}, usage: "usage: reflection [show|summary]"},
+		{name: "grades unknown action", args: []string{"grades", "rerun"}, usage: "usage: grades [show|run]"},
+		{name: "grades surplus operand", args: []string{"grades", "run", "again"}, usage: "usage: grades [show|run]"},
+		{name: "insights unknown action", args: []string{"insights", "analyse"}, usage: "usage: insights [show|analyze]"},
+		{name: "insights surplus operand", args: []string{"insights", "analyze", "tomorrow"}, usage: "usage: insights [show|analyze]"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, nil)
+			err := RunCLI(c, &bytes.Buffer{}, "", tc.args, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.usage) {
+				t.Fatalf("RunCLI(%v) error = %v, want %q", tc.args, err, tc.usage)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("RunCLI(%v) made backend requests:\n%s", tc.args, calls)
+			}
+		})
+	}
+}
+
 func TestCLIUnknownCommandFails(t *testing.T) {
 	for _, name := range []string{"frobnicate", "build", "/build"} {
 		t.Run(name, func(t *testing.T) {

@@ -4528,13 +4528,29 @@ func personalityCommand() command {
 
 // --- pulse / reflection / grades / insights ---
 
+// validateBriefingArgs accepts only a bare briefing command or exactly one
+// documented action. It is used before CLI project loading and by the
+// interactive handlers after their project guard so invalid input never reaches
+// a briefing endpoint in either mode.
+func validateBriefingArgs(command string, actions, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	action, rest := splitAction(actions, args)
+	if action != "" && len(rest) == 0 {
+		return nil
+	}
+	return fmt.Errorf("usage: %s%s [%s]", cmdPrefix, command, strings.Join(actions, "|"))
+}
+
 func pulseCommand() command {
 	actions := []string{"show", "summary"}
 	return command{
-		name:    "pulse",
-		aliases: []string{"upcoming"},
-		actions: actions,
-		desc:    "briefing on upcoming work",
+		name:         "pulse",
+		aliases:      []string{"upcoming"},
+		actions:      actions,
+		validateArgs: func(args []string) error { return validateBriefingArgs("pulse", actions, args) },
+		desc:         "briefing on upcoming work",
 		usage: []string{
 			"pulse                                      show the upcoming-work briefing",
 			"pulse summary                              regenerate the briefing",
@@ -4547,6 +4563,9 @@ func pulseCommand() command {
 			mm, cmd, ok := m.needProject()
 			if !ok {
 				return mm, cmd
+			}
+			if err := validateBriefingArgs("pulse", actions, args); err != nil {
+				return m, errCmd(err.Error())
 			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -4562,10 +4581,11 @@ func pulseCommand() command {
 func reflectionCommand() command {
 	actions := []string{"show", "summary"}
 	return command{
-		name:    "reflection",
-		aliases: []string{"history"},
-		actions: actions,
-		desc:    "debrief on completed work",
+		name:         "reflection",
+		aliases:      []string{"history"},
+		actions:      actions,
+		validateArgs: func(args []string) error { return validateBriefingArgs("reflection", actions, args) },
+		desc:         "debrief on completed work",
 		usage: []string{
 			"reflection                                 show the completed-work debrief",
 			"reflection summary                         regenerate the debrief",
@@ -4578,6 +4598,9 @@ func reflectionCommand() command {
 			mm, cmd, ok := m.needProject()
 			if !ok {
 				return mm, cmd
+			}
+			if err := validateBriefingArgs("reflection", actions, args); err != nil {
+				return m, errCmd(err.Error())
 			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -4593,9 +4616,10 @@ func reflectionCommand() command {
 func gradesCommand() command {
 	actions := []string{"show", "run"}
 	return command{
-		name:    "grades",
-		actions: actions,
-		desc:    "grade the project's ideas/backlog quality",
+		name:         "grades",
+		actions:      actions,
+		validateArgs: func(args []string) error { return validateBriefingArgs("grades", actions, args) },
+		desc:         "grade the project's ideas/backlog quality",
 		usage: []string{
 			"grades                                     show the current idea grades",
 			"grades run                                 run a fresh grading pass",
@@ -4605,6 +4629,9 @@ func gradesCommand() command {
 			mm, cmd, ok := m.needProject()
 			if !ok {
 				return mm, cmd
+			}
+			if err := validateBriefingArgs("grades", actions, args); err != nil {
+				return m, errCmd(err.Error())
 			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
@@ -4620,10 +4647,11 @@ func gradesCommand() command {
 func insightsCommand() command {
 	actions := []string{"show", "analyze"}
 	return command{
-		name:    "insights",
-		aliases: []string{"suggestions"},
-		actions: actions,
-		desc:    "proactive insights and suggestions",
+		name:         "insights",
+		aliases:      []string{"suggestions"},
+		actions:      actions,
+		validateArgs: func(args []string) error { return validateBriefingArgs("insights", actions, args) },
+		desc:         "proactive insights and suggestions",
 		usage: []string{
 			"insights                                   show current insights",
 			"insights analyze                           run a fresh analysis pass",
@@ -4636,6 +4664,9 @@ func insightsCommand() command {
 			mm, cmd, ok := m.needProject()
 			if !ok {
 				return mm, cmd
+			}
+			if err := validateBriefingArgs("insights", actions, args); err != nil {
+				return m, errCmd(err.Error())
 			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID

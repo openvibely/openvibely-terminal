@@ -8502,6 +8502,68 @@ func TestGenerateThenFetch(t *testing.T) {
 	})
 }
 
+func TestBriefingCommandsAcceptShowAction(t *testing.T) {
+	cases := []struct {
+		name      string
+		line      string
+		fetchPath string
+		body      string
+	}{
+		{name: "pulse", line: "/pulse show", fetchPath: "/upcoming", body: "<div>upcoming briefing</div>"},
+		{name: "reflection", line: "/reflection show", fetchPath: "/history", body: "<div>history debrief</div>"},
+		{name: "grades", line: "/grades show", fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "insights", line: "/insights show", fetchPath: "/insights", body: "<div>insights</div>"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{tc.fetchPath: tc.body})
+			m = runLine(t, m, tc.line)
+
+			if got := rec.count("GET", tc.fetchPath); got != 1 {
+				t.Fatalf("%s made %d GET requests to %s, want 1:\n%s", tc.line, got, tc.fetchPath, rec.all())
+			}
+			if calls := rec.all(); strings.Contains(calls, "POST ") {
+				t.Fatalf("%s unexpectedly made a POST request:\n%s", tc.line, calls)
+			}
+			if strings.Contains(transcript(m), "error:") {
+				t.Fatalf("%s returned an error:\n%s", tc.line, transcript(m))
+			}
+		})
+	}
+}
+
+func TestBriefingCommandsRejectInvalidOperands(t *testing.T) {
+	cases := []struct {
+		name  string
+		line  string
+		usage string
+	}{
+		{name: "pulse unknown action", line: "/pulse sumary", usage: "usage: /pulse [show|summary]"},
+		{name: "pulse surplus operand", line: "/pulse summary now", usage: "usage: /pulse [show|summary]"},
+		{name: "reflection unknown action", line: "/reflection refresh", usage: "usage: /reflection [show|summary]"},
+		{name: "reflection surplus operand", line: "/reflection show extra", usage: "usage: /reflection [show|summary]"},
+		{name: "grades unknown action", line: "/grades rerun", usage: "usage: /grades [show|run]"},
+		{name: "grades surplus operand", line: "/grades run again", usage: "usage: /grades [show|run]"},
+		{name: "insights unknown action", line: "/insights analyse", usage: "usage: /insights [show|analyze]"},
+		{name: "insights surplus operand", line: "/insights analyze tomorrow", usage: "usage: /insights [show|analyze]"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.line)
+
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("%s made backend requests:\n%s", tc.line, calls)
+			}
+			if out := transcript(m); !strings.Contains(out, tc.usage) {
+				t.Fatalf("%s output missing usage %q:\n%s", tc.line, tc.usage, out)
+			}
+		})
+	}
+}
+
 func TestProjectScopedBriefingCommandsRequireSelectionAndPreserveScope(t *testing.T) {
 	type testCase struct {
 		name        string
