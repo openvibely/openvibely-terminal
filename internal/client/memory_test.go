@@ -1,12 +1,15 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"unicode"
@@ -196,6 +199,53 @@ func TestMemorySearchPreservesResultsAndSnippets(t *testing.T) {
 				t.Fatalf("warnings = %#v, want front matter and missing-file warnings", result.Warnings)
 			}
 		})
+	}
+}
+
+func TestMemorySearchPreservesUnterminatedFrontMatterBehavior(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Indexed Title](unterminated.md) - Indexed summary\n", map[string]string{
+		"unterminated.md": "---\ntitle: Parsed title must remain body text\nsummary: Parsed summary must remain body text\nthis line is not front matter\n",
+	})
+
+	result, err := (&Client{}).SearchMemories(context.Background(), Project{Path: repo}, "parsed title")
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(result.Memories) != 1 {
+		t.Fatalf("matches = %#v, want one result", result.Memories)
+	}
+	memory := result.Memories[0]
+	if memory.File != "unterminated.md" || memory.Title != "Indexed Title" || memory.Summary != "Indexed summary" ||
+		memory.Snippet != "title: Parsed title must remain body text" || memory.Body != "" {
+		t.Fatalf("unterminated-front-matter match = %#v", memory)
+	}
+	if got, want := result.Warnings, []string{"memory file front matter is unterminated"}; !slices.Equal(got, want) {
+		t.Fatalf("unterminated-front-matter warnings = %#v, want %#v", got, want)
+	}
+}
+
+func TestMemorySearchInvalidUTF8LongLineUsesBoundedTemporaryStorage(t *testing.T) {
+	content := bytes.Repeat([]byte("x"), maxMemoryFileBytes)
+	content[len(content)/2] = 0xff
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if memorySearchBytesContains(content, []byte("absent search term")) {
+		t.Fatal("invalid UTF-8 fixture unexpectedly matched")
+	}
+	runtime.ReadMemStats(&after)
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 2*uint64(len(content)) {
+		t.Fatalf("invalid UTF-8 search allocated %d bytes for a %d-byte line, want bounded chunk allocation", allocated, len(content))
+	}
+}
+
+func TestMemorySearchInvalidUTF8PreservesNormalizedBoundaryMatch(t *testing.T) {
+	content := append(bytes.Repeat([]byte("x"), memorySearchChunkBytes-1), 0xff, 0xfe)
+	content = append(content, "MiXeD NEEDLE"...)
+	if !memorySearchBytesContains(content, []byte("\uFFFDmixed needle")) {
+		t.Fatal("invalid UTF-8 run and mixed-case match across a chunk boundary was lost")
 	}
 }
 

@@ -575,33 +575,93 @@ func parseMemorySearchFrontMatter(raw []byte) (map[string]string, int, []string)
 		return metadata, 0, warnings
 	}
 	first, offset, _ := memoryRawLine(raw, 0)
-	if strings.TrimSpace(strings.TrimPrefix(memoryNormalizedString(first), "\ufeff")) != "---" {
+	if !memoryFrontMatterDelimiter(first, true) {
 		return metadata, 0, warnings
 	}
 
-	for lineNumber := 2; offset < len(raw); lineNumber++ {
-		line, next, _ := memoryRawLine(raw, offset)
-		value := memoryNormalizedString(line)
-		if strings.TrimSpace(value) == "---" {
-			return metadata, next, warnings
+	endOffset := 0
+	for scanOffset := offset; scanOffset < len(raw); {
+		line, next, _ := memoryRawLine(raw, scanOffset)
+		if memoryFrontMatterDelimiter(line, false) {
+			endOffset = next
+			break
 		}
-		trimmed := strings.TrimSpace(value)
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			colon := strings.Index(trimmed, ":")
+		scanOffset = next
+	}
+	if endOffset == 0 {
+		appendMemoryWarning(&warnings, "memory file front matter is unterminated")
+		return metadata, 0, warnings
+	}
+
+	for lineNumber, parseOffset := 2, offset; parseOffset < endOffset; lineNumber++ {
+		line, next, _ := memoryRawLine(raw, parseOffset)
+		if memoryFrontMatterDelimiter(line, false) {
+			break
+		}
+		trimmed := memoryTrimSpaceBytes(line)
+		if len(trimmed) != 0 && trimmed[0] != '#' {
+			colon := bytes.IndexByte(trimmed, ':')
 			if colon <= 0 {
 				appendMemoryWarning(&warnings, fmt.Sprintf("memory file front matter line %d is malformed", lineNumber))
-			} else {
-				key := strings.ToLower(strings.TrimSpace(trimmed[:colon]))
-				if key == "name" || key == "title" || key == "summary" || key == "description" {
-					value := strings.TrimSpace(trimmed[colon+1:])
-					metadata[key] = strings.Trim(value, "\"'")
-				}
+			} else if key := memoryFrontMatterKey(memoryTrimSpaceBytes(trimmed[:colon])); key != "" {
+				value := strings.TrimSpace(memoryNormalizedString(memoryTrimSpaceBytes(trimmed[colon+1:])))
+				metadata[key] = strings.Trim(value, "\"'")
 			}
 		}
-		offset = next
+		parseOffset = next
 	}
-	appendMemoryWarning(&warnings, "memory file front matter is unterminated")
-	return metadata, 0, warnings
+	return metadata, endOffset, warnings
+}
+
+func memoryFrontMatterDelimiter(line []byte, first bool) bool {
+	if first && bytes.HasPrefix(line, []byte("\ufeff")) {
+		line = line[len("\ufeff"):]
+	}
+	return bytes.Equal(memoryTrimSpaceBytes(line), []byte("---"))
+}
+
+func memoryTrimSpaceBytes(value []byte) []byte {
+	start := 0
+	for start < len(value) {
+		r, size := utf8.DecodeRune(value[start:])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	end := len(value)
+	for end > start {
+		r, size := utf8.DecodeLastRune(value[:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		end -= size
+	}
+	return value[start:end]
+}
+
+func memoryFrontMatterKey(value []byte) string {
+	for _, key := range []string{"name", "title", "summary", "description"} {
+		if memoryASCIIEqualFold(value, key) {
+			return key
+		}
+	}
+	return ""
+}
+
+func memoryASCIIEqualFold(value []byte, lower string) bool {
+	if len(value) != len(lower) {
+		return false
+	}
+	for i, b := range value {
+		if 'A' <= b && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b != lower[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func memoryRawLine(data []byte, offset int) ([]byte, int, bool) {
@@ -711,7 +771,7 @@ func memorySearchFoldBytes(value []byte, matcher *memorySearchMatcher) {
 		return
 	}
 	if !utf8.Valid(value) {
-		matcher.feed([]byte(strings.ToLower(memoryNormalizedString(value))))
+		memorySearchFoldInvalidUTF8(value, matcher)
 		return
 	}
 	for offset := 0; offset < len(value) && !matcher.found; {
@@ -724,6 +784,48 @@ func memorySearchFoldBytes(value []byte, matcher *memorySearchMatcher) {
 		matcher.feed(bytes.ToLower(value[offset:end]))
 		offset = end
 	}
+}
+
+func memorySearchFoldInvalidUTF8(value []byte, matcher *memorySearchMatcher) {
+	normalized := make([]byte, 0, min(len(value), memorySearchChunkBytes))
+	invalidRun := false
+	flush := func() {
+		if len(normalized) == 0 || matcher.found {
+			return
+		}
+		matcher.feed(bytes.ToLower(normalized))
+		normalized = normalized[:0]
+	}
+	for len(value) > 0 && !matcher.found {
+		r, size := utf8.DecodeRune(value)
+		if r == utf8.RuneError && size == 1 {
+			if !invalidRun {
+				if len(normalized)+len("\uFFFD") > memorySearchChunkBytes {
+					flush()
+					if matcher.found {
+						break
+					}
+				}
+				normalized = append(normalized, "\uFFFD"...)
+				invalidRun = true
+			}
+			value = value[1:]
+			continue
+		}
+		invalidRun = false
+		if len(normalized) > 0 && len(normalized)+size > memorySearchChunkBytes {
+			flush()
+			if matcher.found {
+				break
+			}
+		}
+		normalized = append(normalized, value[:size]...)
+		value = value[size:]
+		if len(normalized) >= memorySearchChunkBytes {
+			flush()
+		}
+	}
+	flush()
 }
 
 type memorySearchMatcher struct {
