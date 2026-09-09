@@ -143,6 +143,14 @@ type agentDeleteTargetMsg struct {
 	err               error
 }
 
+type scheduleDeleteTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	schedule          client.ScheduleEntry
+	err               error
+}
+
 type webhookMutationTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
