@@ -964,8 +964,8 @@ const reviewCommentsHTML = `<div id="review-comments-list" data-task-id="t-1" da
 	<div class="review-comment-item flex" data-comment-id="rc-1" data-file-path="internal/client/tasks.go" data-line-number="42" data-line-type="new" data-state="open">
 		<div><div><span>alice</span><span>·</span><span>internal/client/tasks.go:42</span></div><p>Needs error handling</p></div>
 	</div>
-	<div class="review-comment-item flex" data-comment-id="rc-2" data-file-path="internal/tui/view.go" data-line-number="17" data-line-type="old" data-resolved="true">
-		<div><div><span>bob</span><span>·</span><span>internal/tui/view.go:17</span></div><p>Resolved note</p></div>
+	<div class="review-comment-item flex" data-comment-id="rc-2" data-file-path="internal/terminal/view.go" data-line-number="17" data-line-type="old" data-resolved="true">
+		<div><div><span>bob</span><span>·</span><span>internal/terminal/view.go:17</span></div><p>Resolved note</p></div>
 	</div>
 </div>`
 

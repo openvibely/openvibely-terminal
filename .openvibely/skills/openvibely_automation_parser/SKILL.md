@@ -10,7 +10,7 @@ skill:
 
 # OpenVibely Automation Parser Refactoring
 
-Use this skill when changing automation graph-node or detail-node HTML parsing in `openvibely-tui`, especially when consolidating duplicated extraction, adding config summaries, or optimizing large-automation parsing.
+Use this skill when changing automation graph-node or detail-node HTML parsing in `openvibely-terminal`, especially when consolidating duplicated extraction, adding config summaries, or optimizing large-automation parsing.
 
 ## Safe Refactor Boundary
 

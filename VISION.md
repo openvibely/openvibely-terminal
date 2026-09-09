@@ -1,6 +1,6 @@
-# OpenVibely TUI Vision
+# OpenVibely Terminal Vision
 
-OpenVibely TUI exists to make the full OpenVibely control plane available from
+OpenVibely Terminal exists to make the full OpenVibely control plane available from
 a terminal.
 
 The long-term goal is a local-first terminal UI and CLI that can operate any
@@ -44,7 +44,7 @@ resolution, and lightweight workflow convenience.
 
 ## The Product We Are Building
 
-OpenVibely TUI should become the terminal operations console for OpenVibely.
+OpenVibely Terminal should become the terminal operations console for OpenVibely.
 
 That means:
 
@@ -70,7 +70,7 @@ That means:
 
 The ideal experience is simple:
 
-1. Run `openvibely-tui`.
+1. Run `openvibely-terminal`.
 2. Connect to an existing backend, or bootstrap one if needed.
 3. Select or create a project.
 4. Get a short, useful set of suggested next actions based on the backend state.
@@ -141,7 +141,7 @@ The interactive TUI and one-shot CLI should share the same command registry,
 argument behavior, help text, resource resolution, and backend client methods.
 
 Anything typed as `/tasks run refactor` in the TUI should be invokable as
-`openvibely-tui tasks run refactor` in shell mode. New capabilities should be
+`openvibely-terminal tasks run refactor` in shell mode. New capabilities should be
 added once and exposed in both places unless there is a strong reason not to.
 
 ### Chat Is Still The Control Plane
@@ -307,7 +307,7 @@ Poor recursive improvements include:
 
 ## What We Will Not Optimize For
 
-OpenVibely TUI should not become:
+OpenVibely Terminal should not become:
 
 - A replacement for the OpenVibely backend.
 - A second source of truth for projects, tasks, agents, automations, memory, or

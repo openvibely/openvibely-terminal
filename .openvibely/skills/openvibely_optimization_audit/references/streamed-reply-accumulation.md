@@ -11,7 +11,7 @@ Use this procedure when auditing or implementing interactive output that arrives
 
 ## Evidence And Measurement Plan
 
-- Use a realistic matrix of final reply sizes, frame sizes, and retained transcript lengths. In `openvibely-tui`, cover 10, 100, and 500 entries; 4, 64, and 256 KiB replies; and 32-byte and 1-KiB chunks.
+- Use a realistic matrix of final reply sizes, frame sizes, and retained transcript lengths. In `openvibely-terminal`, cover 10, 100, and 500 entries; 4, 64, and 256 KiB replies; and 32-byte and 1-KiB chunks.
 - Benchmark the current and candidate production mutation path with identical chunk sequences. Record redraw count, per-update p95, total stream-processing time, allocations and bytes, and final-render latency. Save the unchanged baseline before implementation so the comparison is reproducible.
 - Drive benchmark chunks through the production `Model.Update` message path rather than calling only the accumulation helper. Simulate the production arrival cadence, deliver actual cadence-render messages, and terminate through a real done/error event so styling, wrapping, mutable-block replacement, viewport content replacement, bottom scrolling, and forced terminal flushing are included.
 - Measure render-update p95 from cadence-render `Update` calls, with ingestion outside each timed sample. A p95 of buffer appends alone does not substantiate user-visible render latency.

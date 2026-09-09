@@ -10,7 +10,7 @@ skill:
 
 # OpenVibely Optimization Audit
 
-Use this skill when auditing `openvibely-tui` for measurable build, test, coverage, CI, latency, throughput, memory, or workflow efficiency opportunities. Keep the audit read-only and report only opportunities backed by current measurements or a reproducible measurement plan.
+Use this skill when auditing `openvibely-terminal` for measurable build, test, coverage, CI, latency, throughput, memory, or workflow efficiency opportunities. Keep the audit read-only and report only opportunities backed by current measurements or a reproducible measurement plan.
 
 ## Runtime Rendering And Payload Previews
 

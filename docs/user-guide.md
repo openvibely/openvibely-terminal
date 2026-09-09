@@ -1,4 +1,4 @@
-# OpenVibely TUI User Guide
+# OpenVibely Terminal User Guide
 
 For a quick introduction and installation instructions, see the
 [project README](../README.md).
@@ -41,30 +41,30 @@ result and exits — no UI, no alt-screen.
 
 ```bash
 # With one backend project, project-scoped commands can omit -project.
-openvibely-tui tasks
+openvibely-terminal tasks
 # With multiple projects, provide a name, full ID, or unique ID prefix.
-openvibely-tui -project demo tasks run "release notes"
-openvibely-tui -project demo chat "why is that task taking so long?"
+openvibely-terminal -project demo tasks run "release notes"
+openvibely-terminal -project demo chat "why is that task taking so long?"
 # Project-independent commands do not need a project reference.
-openvibely-tui projects list
-openvibely-tui projects create demo /Users/me/src/demo
+openvibely-terminal projects list
+openvibely-terminal projects create demo /Users/me/src/demo
 ```
 
 ## Install and run
 
 ```bash
-make build          # → bin/openvibely-tui
-./bin/openvibely-tui
+make build          # → bin/openvibely-terminal
+./bin/openvibely-terminal
 
 # or in one step
 make run
 ```
 
-Requires Go 1.21+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, use `/setup` in the TUI or `openvibely-tui setup` in a shell for explicit, read-only recovery instructions. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
+Requires Go 1.26.4+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, use `/setup` in the TUI or `openvibely-terminal setup` in a shell for explicit, read-only recovery instructions. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
 
 ### Backend setup and recovery
 
-`/setup` and `openvibely-tui setup` are read-only guides. They do **not** install
+`/setup` and `openvibely-terminal setup` are read-only guides. They do **not** install
 OpenVibely, clone repositories, start processes, create projects, authenticate,
 or modify files or machine state. They work before a backend, project, or session
 exists, and show the same platform-specific commands below for you to choose and
@@ -93,7 +93,7 @@ curl -fsSL https://openvibely.ai/install.sh | bash -s -- --variant binary
 ```
 
 After the server starts, verify its health with `/status` in the TUI or
-`openvibely-tui status` in a shell. A local server normally listens at
+`openvibely-terminal status` in a shell. A local server normally listens at
 `http://localhost:3001`.
 
 For a remote backend, check its URL before starting a local server, then pass it
@@ -101,13 +101,13 @@ explicitly with `-server <url>` or set `OPENVIBELY_SERVER_URL`. The TUI only use
 that setting to connect; it never changes the setting or starts the remote server.
 
 ```bash
-openvibely-tui -server https://openvibely.example status
-OPENVIBELY_SERVER_URL=https://openvibely.example openvibely-tui status
+openvibely-terminal -server https://openvibely.example status
+OPENVIBELY_SERVER_URL=https://openvibely.example openvibely-terminal status
 ```
 
 ```powershell
 $env:OPENVIBELY_SERVER_URL = "https://openvibely.example"
-openvibely-tui status
+openvibely-terminal status
 ```
 
 ### Configuration
@@ -123,12 +123,12 @@ Flags override environment variables.
 
 ```bash
 # Interactive and safest for avoiding shell-history/process-list exposure:
-./bin/openvibely-tui
+./bin/openvibely-terminal
 # Then enter /login and type the username and masked password.
 
 # For headless CLI runs, prefer environment variables supplied by your secret manager:
 OPENVIBELY_AUTH_USERNAME=dubee OPENVIBELY_AUTH_PASSWORD="$OPENVIBELY_PASSWORD" \
-  ./bin/openvibely-tui -server http://192.168.1.20:3001 tasks
+  ./bin/openvibely-terminal -server http://192.168.1.20:3001 tasks
 ```
 
 `-user` and `-pass` remain supported for existing scripts, but command-line
@@ -204,7 +204,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
-| `/grades` | | — |
+| `/grades` | | `show`, `run` |
 | `/insights` | `suggestions` | `show`, `analyze` |
 | `/automations` | `automation` | `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, `delete` |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
@@ -229,8 +229,8 @@ files without changing them:
 /memory show managed_memory.md
 /memory search "provider architecture"
 
-openvibely-tui -project demo memory list
-openvibely-tui --json -project demo memory search "provider architecture"
+openvibely-terminal -project demo memory list
+openvibely-terminal --json -project demo memory search "provider architecture"
 ```
 
 `/memories` is a compatibility alias for `/memory`. The terminal reads only
@@ -249,11 +249,11 @@ The interactive TUI and one-shot CLI have different live-event lifecycles:
   or chat event until the server closes the stream or you press `Ctrl-C`:
 
 ```bash
-openvibely-tui -project demo events on
+openvibely-terminal -project demo events on
 ```
 
 Use `--json` before the command for newline-delimited JSON with stable event
-fields, for example `openvibely-tui --json -project demo events on`. One-shot
+fields, for example `openvibely-terminal --json -project demo events on`. One-shot
 `events off` cannot turn off a stream owned by another process; it exits nonzero
 and tells you to press `Ctrl-C` in that monitoring process. Use interactive
 `/events off` when you only want to hide events in the current TUI.
@@ -268,7 +268,7 @@ project immediately:
 ```
 
 The pipe form separates the name from the repository path when either contains
-spaces. The same syntax works in one-shot mode (`openvibely-tui projects create
+spaces. The same syntax works in one-shot mode (`openvibely-terminal projects create
 ...`); add `--json` for a machine-readable created-project record.
 
 Inspect or update an existing project's backend-owned settings without opening a
@@ -280,13 +280,13 @@ browser:
 /projects edit "Renamed Project" --repository-path "/Users/me/src/repo with spaces"
 /projects edit "Renamed Project" --default-agent Builder --max-workers 4
 
-openvibely-tui --json projects show "Renamed Project"
-openvibely-tui projects edit "Renamed Project" --max-workers inherit
-openvibely-tui projects edit "Release --name Candidate" '|' --description "Local checkout"
-openvibely-tui -- projects edit --json '|' --description "Project named like a global flag"
-openvibely-tui -f -- projects edit --force '|' \
+openvibely-terminal --json projects show "Renamed Project"
+openvibely-terminal projects edit "Renamed Project" --max-workers inherit
+openvibely-terminal projects edit "Release --name Candidate" '|' --description "Local checkout"
+openvibely-terminal -- projects edit --json '|' --description "Project named like a global flag"
+openvibely-terminal -f -- projects edit --force '|' \
   --repository-source github --github-url https://github.com/acme/repo
-openvibely-tui --force projects edit "Renamed Project" \
+openvibely-terminal --force projects edit "Renamed Project" \
   --repository-source github --github-url https://github.com/acme/repo
 ```
 
@@ -304,7 +304,7 @@ complete project reference and its edit options, as shown above (quote or escape
 it in a shell); equally strong boundaries fail as ambiguous rather than shortening or rebinding the target.
 In one-shot mode, if the project name itself is a registered global flag such as
 `--json`, `--force`, or `--project`, put the standard outer `--` before `projects`
-so the name reaches command parsing: `openvibely-tui [global flags] -- projects
+so the name reaches command parsing: `openvibely-terminal [global flags] -- projects
 edit --json '|' --description changed`. Put real global flags, such as `-f`,
 before that outer boundary.
 `--default-agent inherit` uses the global
@@ -363,9 +363,9 @@ more local files with the same command in the interactive TUI or one-shot CLI:
 /tasks attachments list refactor
 /tasks attachments delete refactor att-123
 
-openvibely-tui -project demo tasks attachments add refactor ./request.txt ./trace.json
-openvibely-tui -project demo tasks attachments list refactor
-openvibely-tui -project demo --force tasks attachments delete refactor att-123
+openvibely-terminal -project demo tasks attachments add refactor ./request.txt ./trace.json
+openvibely-terminal -project demo tasks attachments list refactor
+openvibely-terminal -project demo --force tasks attachments delete refactor att-123
 ```
 
 The refreshed attachment list prints each stable attachment ID, filename, and
@@ -401,14 +401,14 @@ Headless setup uses explicit integration options; output never echoes option
 values. Examples:
 
 ```bash
-openvibely-tui -project demo channels add telegram --token "$TELEGRAM_BOT_TOKEN"
-openvibely-tui -project demo channels add github --auth-mode pat --pat "$GITHUB_TOKEN"
-openvibely-tui -project demo channels add x --consumer-key "$X_CONSUMER_KEY" --consumer-secret "$X_CONSUMER_SECRET" --access-token "$X_ACCESS_TOKEN" --access-token-secret "$X_ACCESS_TOKEN_SECRET"
-openvibely-tui -project demo channels edit x --poll-interval 45 --send-responses true
-openvibely-tui -project demo channels edit discord --send-responses false
-openvibely-tui -project demo channels connect slack
-openvibely-tui -project demo channels test telegram
-openvibely-tui -project demo --force channels remove discord
+openvibely-terminal -project demo channels add telegram --token "$TELEGRAM_BOT_TOKEN"
+openvibely-terminal -project demo channels add github --auth-mode pat --pat "$GITHUB_TOKEN"
+openvibely-terminal -project demo channels add x --consumer-key "$X_CONSUMER_KEY" --consumer-secret "$X_CONSUMER_SECRET" --access-token "$X_ACCESS_TOKEN" --access-token-secret "$X_ACCESS_TOKEN_SECRET"
+openvibely-terminal -project demo channels edit x --poll-interval 45 --send-responses true
+openvibely-terminal -project demo channels edit discord --send-responses false
+openvibely-terminal -project demo channels connect slack
+openvibely-terminal -project demo channels test telegram
+openvibely-terminal -project demo --force channels remove discord
 ```
 
 Use `help channels` for integration-specific options. Email providers are
@@ -478,15 +478,15 @@ The same controls work as one-shot CLI commands. Put global flags before the
 command:
 
 ```bash
-openvibely-tui -project demo automations list
-openvibely-tui -project demo automations show "Nightly sweep"
-openvibely-tui -project demo automations open automation-id
-openvibely-tui -project demo automations edit "Nightly sweep" --export automation.yaml
-openvibely-tui -project demo automations edit "Nightly sweep" --file automation.yaml
-openvibely-tui -project demo automations run "Nightly sweep"
-openvibely-tui -project demo automations pause "Nightly sweep"
-openvibely-tui -project demo automations resume "Nightly sweep"
-openvibely-tui -project demo --force automations delete "Nightly sweep"
+openvibely-terminal -project demo automations list
+openvibely-terminal -project demo automations show "Nightly sweep"
+openvibely-terminal -project demo automations open automation-id
+openvibely-terminal -project demo automations edit "Nightly sweep" --export automation.yaml
+openvibely-terminal -project demo automations edit "Nightly sweep" --file automation.yaml
+openvibely-terminal -project demo automations run "Nightly sweep"
+openvibely-terminal -project demo automations pause "Nightly sweep"
+openvibely-terminal -project demo automations resume "Nightly sweep"
+openvibely-terminal -project demo --force automations delete "Nightly sweep"
 ```
 
 Interactive deletion requires typing `yes` to confirm, or `Esc` to cancel.
@@ -524,7 +524,7 @@ mutation commands for machine-readable records.
 ```
 /tasks lifecycle refactor
 /tasks lifecycle refactor exec-123
-openvibely-tui -project demo --json tasks lifecycle refactor exec-123
+openvibely-terminal -project demo --json tasks lifecycle refactor exec-123
 ```
 
 `tasks logs` is an alias for `tasks lifecycle`.
@@ -539,8 +539,8 @@ value:
 
 ```
 /agents votes step-exec-123
-openvibely-tui -project demo agents votes step-exec-123
-openvibely-tui -project demo --json agents votes step-exec-123
+openvibely-terminal -project demo agents votes step-exec-123
+openvibely-terminal -project demo --json agents votes step-exec-123
 ```
 
 The plain view names the step execution and shows an explicit no-records state
@@ -561,27 +561,27 @@ recurring failure patterns, and skill usage with follow-through rates.
 Anything you can type in the chat window can be run as a one-shot command:
 
 ```bash
-openvibely-tui tasks                              # print the board
-openvibely-tui -project demo tasks show refactor  # a task's detail tabs
-openvibely-tui -project demo tasks run refactor   # run it
-openvibely-tui -project demo agents votes step-exec-123 # inspect parallel votes
-openvibely-tui -project demo tasks attachments add refactor ./request.txt ./trace.json
-openvibely-tui -project demo --force tasks attachments delete refactor att-123
-openvibely-tui -project demo alerts               # list alerts
-openvibely-tui -project demo analytics usage      # one analytics section
-openvibely-tui -project demo chat "ship the docs" # ask the agent, print the reply
-openvibely-tui projects create demo /Users/me/src/demo # create; output includes its backend ID
-openvibely-tui --json projects create demo /Users/me/src/demo # JSON project record
-openvibely-tui projects show demo                  # authoritative project settings
-openvibely-tui projects edit demo --description "Local checkout" --max-workers 4
-openvibely-tui --force projects edit demo --repository-source github --github-url https://github.com/acme/demo
-openvibely-tui help                               # list every command
-openvibely-tui help tasks                         # full syntax of one command
-openvibely-tui --help                             # commands + flags
+openvibely-terminal tasks                              # print the board
+openvibely-terminal -project demo tasks show refactor  # a task's detail tabs
+openvibely-terminal -project demo tasks run refactor   # run it
+openvibely-terminal -project demo agents votes step-exec-123 # inspect parallel votes
+openvibely-terminal -project demo tasks attachments add refactor ./request.txt ./trace.json
+openvibely-terminal -project demo --force tasks attachments delete refactor att-123
+openvibely-terminal -project demo alerts               # list alerts
+openvibely-terminal -project demo analytics usage      # one analytics section
+openvibely-terminal -project demo chat "ship the docs" # ask the agent, print the reply
+openvibely-terminal projects create demo /Users/me/src/demo # create; output includes its backend ID
+openvibely-terminal --json projects create demo /Users/me/src/demo # JSON project record
+openvibely-terminal projects show demo                  # authoritative project settings
+openvibely-terminal projects edit demo --description "Local checkout" --max-workers 4
+openvibely-terminal --force projects edit demo --repository-source github --github-url https://github.com/acme/demo
+openvibely-terminal help                               # list every command
+openvibely-terminal help tasks                         # full syntax of one command
+openvibely-terminal --help                             # commands + flags
 ```
 
 The leading `/` is optional, so a line copied from the TUI works as-is
-(`openvibely-tui /tasks`). Output is plain text suitable for piping. One-shot
+(`openvibely-terminal /tasks`). Output is plain text suitable for piping. One-shot
 `chat <message>` and `tasks reply <task> | <message>` write model output as it
 arrives and remain attached through completion; Ctrl-C cancels the active
 stream. With `--json`, these two commands emit newline-delimited records with
@@ -598,7 +598,7 @@ implicit single-project mode, human output begins with `project: <name> (project
 
 Interactive `projects create` selects the new project immediately. In one-shot CLI
 mode, the process ends after creation; the plain result prints the backend project
-ID and a copyable next step such as `openvibely-tui -project <ID> tasks`. Use that
+ID and a copyable next step such as `openvibely-terminal -project <ID> tasks`. Use that
 ID (or the project name/unique prefix) with `-project` for later commands.
 
 ### Discovering commands
@@ -613,7 +613,7 @@ ID (or the project name/unique prefix) with `-project` for later commands.
 you the argument order:
 
 ```
-$ openvibely-tui help projects
+$ openvibely-terminal help projects
   projects [list]                              list projects with running/queued counts
   projects show <project>                     show authoritative project settings
   projects create <name> <path>                create and select a local-path project
@@ -623,7 +623,7 @@ $ openvibely-tui help projects
     --repository-source <local|github> --repository-path <path> --github-url <url>
     --default-agent <name|id|inherit> --max-workers <n|inherit>
 
-$ openvibely-tui help tasks
+$ openvibely-terminal help tasks
   tasks [filter]                             list the board, optionally filtered
   tasks open <task>                          enter the task's thread
   tasks show <task> [tab]                    details, thread, changes, schedules, …
@@ -641,7 +641,7 @@ $ openvibely-tui help tasks
   tasks activate                             activate the whole backlog
   tasks sweep                                sweep finished tasks
   tasks clear <backlog|completed>            clear a column
-$ openvibely-tui help channels
+$ openvibely-terminal help channels
   channels list                              list safe channel identity and connection state
   channels show <channel>                    show safe channel details
   channels add <type> <options>              configure a new channel
@@ -739,7 +739,7 @@ removes a `data-*` attribute will show up as an empty list rather than a crash.
 ## Layout
 
 ```
-cmd/tui/main.go              entry point: flags/env, optional or interactive login, program lifecycle
+cmd/openvibely-terminal/main.go              entry point: flags/env, optional or interactive login, program lifecycle
 internal/client/
   client.go                  base client, auth, projects, chat, capacity
   api.go                     remaining JSON endpoints (analytics, workflows, lifecycle…)
@@ -750,7 +750,7 @@ internal/client/
                              channels, personality, pulse, reflection, insights
   htmltext.go                HTML → text helpers
   sse.go                     /events/live stream client
-internal/tui/
+internal/terminal/
   model.go                   chat model: transcript, input, history, SSE, polling
   command.go                 command type, registry lookup, completion, arg helpers
   registry.go                every command and the backend calls behind it

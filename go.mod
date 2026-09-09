@@ -1,4 +1,4 @@
-module github.com/openvibely/openvibely-tui
+module github.com/openvibely/openvibely-terminal
 
 go 1.26.4
 

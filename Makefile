@@ -2,11 +2,11 @@
 
 # Build the TUI binary
 build:
-	go build -ldflags="-s -w" -o bin/openvibely-tui ./cmd/tui
+	go build -ldflags="-s -w" -o bin/openvibely-terminal ./cmd/openvibely-terminal
 
 # Run against a local server (default http://localhost:3001)
 run:
-	go run ./cmd/tui
+	go run ./cmd/openvibely-terminal
 
 # Run tests
 test:
