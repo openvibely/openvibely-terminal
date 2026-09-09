@@ -1,6 +1,6 @@
 # Safe Automation Definition Editing
 
-Use this reference when adding, auditing, or repairing `/automations edit` or an equivalent terminal workflow. Pair it with `automation-detail-parity.md` for graph parsing and rendering.
+Use this reference when adding, auditing, or repairing `/automations edit` or an equivalent terminal workflow.
 
 ## Source Of Truth
 
