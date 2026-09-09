@@ -1390,6 +1390,32 @@ func TestParseAutomationDetailRetainsDuplicateDetailEdgesBeforeCorrelation(t *te
 	}
 }
 
+func TestParseAutomationDetailPreservesSequentialEdgeHydrationSemantics(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-sequential-edge-hydration" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e1" aria-label="unknown, 1 transitions, 0 recent"></line>
+			<line class="automation-graph-edge" data-automation-live-edge-id="e2" data-automation-live-edge="shared" aria-label="unknown, 2 transitions, 0 recent"></line>
+		</svg></div>
+		<div data-automation-live-details-panel><div data-automation-live-edge-details>
+			<div data-automation-live-edge-detail="" data-automation-live-edge-id="e1" data-source-node-id="n1" data-target-node-id="n2" data-transition-count="3"><div>Start → Review</div><p>first</p></div>
+			<div data-automation-live-edge-detail="shared" data-source-node-id="n1" data-target-node-id="n2" data-transition-count="4"><div>Start → Review</div><p>second</p></div>
+		</div></div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Edges) != 2 || len(detail.UnmatchedEdgeDetails) != 0 {
+		t.Fatalf("sequentially hydrated edges = %+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
+	}
+	first, second := detail.Edges[0], detail.Edges[1]
+	if first.ID != "e1" || first.EdgeKey != "" || first.SourceNodeID != "n1" || first.TargetNodeID != "n2" || first.TransitionCount != 3 {
+		t.Fatalf("first sequential merge = %+v", first)
+	}
+	if second.ID != "e2" || second.EdgeKey != "shared" || second.SourceNodeID != "n1" || second.TargetNodeID != "n2" || second.TransitionCount != 4 {
+		t.Fatalf("second sequential merge = %+v", second)
+	}
+}
+
 func TestParseAutomationDetailRequiresGloballyUniqueEdgeCorrelation(t *testing.T) {
 	parse := func(details string) AutomationDetail {
 		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-global-edge-candidates" data-project-id="p1" data-automation-lifecycle-state="active">

@@ -1229,12 +1229,14 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	}
 	graphEdgesIndex := newAutomationLiveEdgeIndex(parsedExplicit)
 	detailEdgesIndex := newAutomationLiveEdgeIndex(parsedDetails)
+	detailAllowEndpointMerge := make([]bool, len(parsedDetails))
 	detailGraphMatch := make([]int, len(parsedDetails))
 	graphDetailCandidateCounts := make([]int, len(parsedExplicit))
 	marks := make([]int, len(parsedExplicit))
 	candidates := make([]int, 0)
 	for detailPosition, parsed := range parsedDetails {
 		allowEndpointMerge := graphEdgesIndex.endpointCount(parsed) == 1 && detailEdgesIndex.endpointCount(parsed) == 1 && automationEdgeEndpointKey(parsed) != ""
+		detailAllowEndpointMerge[detailPosition] = allowEndpointMerge
 		generation := detailPosition + 1
 		candidates = graphEdgesIndex.candidateIndices(parsed, allowEndpointMerge, marks, generation, candidates)
 		match := -1
@@ -1254,10 +1256,36 @@ func parseAutomationLiveEdges(detail *AutomationDetail, live *html.Node, nodes [
 	for detailPosition, parsed := range parsedDetails {
 		graphPosition := detailGraphMatch[detailPosition]
 		if graphPosition >= 0 && graphDetailCandidateCounts[graphPosition] == 1 {
-			// The candidate graph row is unique globally and within the detail
-			// representation, so it is the same row mergeAutomationLiveEdge would
-			// find after scanning the full collection.
-			mergeAutomationLiveEdgeAt(&out[graphPosition], parsed)
+			// The first pass establishes that the graph row has exactly one detail
+			// candidate. Re-evaluate the evolving authoritative collection before
+			// committing it, matching the original merger's conservative behavior:
+			// an earlier hydration can make this detail distinct or ambiguous.
+			allowEndpointMerge := detailAllowEndpointMerge[detailPosition]
+			generation := len(parsedDetails) + detailPosition + 1
+			candidates = graphEdgesIndex.candidateIndices(parsed, allowEndpointMerge, marks, generation, candidates)
+			match := -1
+			for _, outPosition := range candidates {
+				if !automationEdgesCanMerge(out[outPosition], parsed, allowEndpointMerge) {
+					continue
+				}
+				if match == -1 {
+					match = outPosition
+				} else {
+					match = -2
+				}
+			}
+			if match >= 0 {
+				mergeAutomationLiveEdgeAt(&out[match], parsed)
+				// Retain older keys as collision-preserving candidates and add any
+				// newly hydrated fields. The final predicate rejects stale keys.
+				graphEdgesIndex.add(match, out[match])
+				continue
+			}
+			// This detail was initially eligible but is no longer uniquely
+			// compatible in the stateful collection. The original merger retained
+			// it in the authoritative sequence rather than discarding its data.
+			out = append(out, parsed)
+			graphEdgesIndex.add(len(out)-1, parsed)
 			continue
 		}
 		if len(explicit) > 0 {
@@ -1614,6 +1642,15 @@ func mergeAutomationLiveEdgeAt(current *AutomationLiveEdge, parsed AutomationLiv
 		parsed.RecentTransitionCount, parsed.RecentTransitionCountAvailable, parsed.recentTransitionCountQuality)
 	current.Highlighted = current.Highlighted || parsed.Highlighted
 	current.edgeSource |= parsed.edgeSource
+}
+
+func automationEdgesCanMerge(current, parsed AutomationLiveEdge, allowEndpointMerge bool) bool {
+	if current.edgeSource != 0 && parsed.edgeSource != 0 && current.edgeSource&parsed.edgeSource != 0 {
+		// Multiple records from the same rendered representation are separate
+		// topology rows, even when a malformed fragment repeats a stable identity.
+		return false
+	}
+	return automationEdgeRecordsCanCorrelate(current, parsed, allowEndpointMerge)
 }
 
 func automationEdgeRecordsCanCorrelate(current, parsed AutomationLiveEdge, allowEndpointMerge bool) bool {
