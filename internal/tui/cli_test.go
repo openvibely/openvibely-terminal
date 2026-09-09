@@ -3722,6 +3722,31 @@ func TestCLIAlertActionsExactTitleBeatsLongerTitlePrefix(t *testing.T) {
 	}
 }
 
+func TestCLIAlertsDeleteForceGuidanceSanitizesReference(t *testing.T) {
+	const hostileRef = "Deploy\x1b[31m\nproduction\r\x00"
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+	})
+
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"alerts", "delete", hostileRef}, false, false)
+	if err == nil {
+		t.Fatal("unforced delete unexpectedly succeeded")
+	}
+	got := err.Error()
+	for _, unsafe := range []string{"\x1b", "\n", "\r", "\x00"} {
+		if strings.Contains(got, unsafe) {
+			t.Fatalf("unsafe force guidance contains %q: %q", unsafe, got)
+		}
+	}
+	if !strings.Contains(got, "Deploy production") || !strings.Contains(got, "--force") {
+		t.Fatalf("force guidance omitted sanitized reference or flag: %q", got)
+	}
+	if rec.count(http.MethodGet, "/alerts") != 0 || rec.count(http.MethodDelete, "/alerts/a-1") != 0 {
+		t.Fatalf("unforced delete made an alert request:\n%s", rec.all())
+	}
+}
+
 func TestCLIJSONAlertsDeleteUsesForceAndRefreshedResponse(t *testing.T) {
 	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build"><p class="font-semibold">Build failed</p></div>`
 	const refreshedAlerts = `<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="remaining"><p class="font-semibold">Remaining</p></div>`

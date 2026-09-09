@@ -1744,10 +1744,20 @@ func alertDeleteOutput(status string, alerts []client.Alert) (string, error) {
 	return status + "\n\n" + renderAlerts(alerts, ""), nil
 }
 
+func alertActionDisplayName(alert client.Alert) string {
+	for _, value := range []string{alert.Title, alert.ID} {
+		if display := sanitizeAlertDisplayText(value); strings.TrimSpace(display) != "" {
+			return display
+		}
+	}
+	return "(unknown alert)"
+}
+
 func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error) {
-	alert, err := matchRef(alerts, ref,
+	alert, err := matchRefWithDisplay(alerts, ref,
 		func(a client.Alert) string { return a.ID },
-		func(a client.Alert) string { return a.Title })
+		func(a client.Alert) string { return a.Title },
+		sanitizeAlertDisplayText)
 	if err == nil || !isMatchRefNotFound(err) {
 		return alert, err
 	}
@@ -1755,9 +1765,10 @@ func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error
 	// Searchable card text is useful when neither an ID nor a title matches, but
 	// it must never weaken a title match. Retain the historical title-plus-text
 	// fallback value only after the title matcher exhausted every tier.
-	return matchRef(alerts, ref,
+	return matchRefWithDisplay(alerts, ref,
 		func(client.Alert) string { return "" },
-		func(a client.Alert) string { return a.Title + " " + a.Text })
+		func(a client.Alert) string { return a.Title + " " + a.Text },
+		sanitizeAlertDisplayText)
 }
 
 func resolveAlertDeleteTarget(c *client.Client, projectID, ref string) tea.Cmd {
@@ -1923,19 +1934,20 @@ func alertsCommand() command {
 												if err != nil {
 													return "", err
 												}
-												return alertDeleteOutput("delete: "+a.Title, alerts)
+												return alertDeleteOutput("delete: "+alertActionDisplayName(a), alerts)
 											}
 											if err := c.AlertAction(ctx, a.ID, action, pid); err != nil {
 												return "", err
 											}
-											return refreshAndRender(action+": "+a.Title,
+											return refreshAndRender(action+": "+alertActionDisplayName(a),
 												func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
 												renderAlerts)
 										})
 										if action == "delete" {
+											display := alertActionDisplayName(a)
 											return confirmOr(m,
-												fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
-												fmt.Sprintf("use --force to confirm deletion of alert %q", a.ID),
+												fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", display),
+												fmt.Sprintf("use --force to confirm deletion of alert %q", display),
 												cmd)
 										}
 										m.busy = true
@@ -1963,19 +1975,20 @@ func alertsCommand() command {
 						if err != nil {
 							return "", err
 						}
-						return alertDeleteOutput("delete: "+a.Title, refreshed)
+						return alertDeleteOutput("delete: "+alertActionDisplayName(a), refreshed)
 					}
 					if err := c.AlertAction(ctx, a.ID, action, pid); err != nil {
 						return "", err
 					}
-					return refreshAndRender(action+": "+a.Title,
+					return refreshAndRender(action+": "+alertActionDisplayName(a),
 						func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
 						renderAlerts)
 				})
 				if action == "delete" {
+					display := sanitizeAlertDisplayText(ref)
 					return confirmOr(m,
-						fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", ref),
-						fmt.Sprintf("use --force to confirm deletion of alert %q", ref),
+						fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", display),
+						fmt.Sprintf("use --force to confirm deletion of alert %q", display),
 						cmd)
 				}
 				return m, cmd

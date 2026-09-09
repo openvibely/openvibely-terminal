@@ -2864,6 +2864,19 @@ func sanitizeAlertText(value string) string {
 	return sanitizeMemoryText(value)
 }
 
+// sanitizeAlertDisplayText keeps short alert identities safe for one-line
+// confirmations, statuses, and resolution diagnostics. It must not be used
+// for matching, which deliberately retains the raw backend values.
+func sanitizeAlertDisplayText(value string) string {
+	value = sanitizeAutomationDetailText(value)
+	return strings.Map(func(r rune) rune {
+		if r == '\u2028' || r == '\u2029' {
+			return ' '
+		}
+		return r
+	}, value)
+}
+
 func renderAlerts(alerts []client.Alert, filter string) string {
 	rows := [][]string{{"ID", "", "ALERT", "STATE"}}
 	unread := 0

@@ -1600,11 +1600,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				return "", err
 			}
-			return alertDeleteOutput("delete: "+alert.Title, alerts)
+			return alertDeleteOutput("delete: "+alertActionDisplayName(alert), alerts)
 		})
+		display := alertActionDisplayName(alert)
 		return confirmOr(m,
-			fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", firstNonEmpty(alert.Title, alert.ID)),
-			fmt.Sprintf("use --force to confirm deletion of alert %q", firstNonEmpty(alert.Title, alert.ID)),
+			fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", display),
+			fmt.Sprintf("use --force to confirm deletion of alert %q", display),
 			cmd)
 
 	case attachmentDeleteTargetMsg:

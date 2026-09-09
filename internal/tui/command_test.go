@@ -530,6 +530,50 @@ func TestMatchAlertActionRefRanksTitlesBeforeSearchText(t *testing.T) {
 	}
 }
 
+func TestMatchAlertActionRefSanitizesDiagnosticsWithoutChangingMatching(t *testing.T) {
+	const hostileTitle = "\x1b[31mDeploy\nproduction\r\x00"
+	const hostileRef = "missing\x1b[31m\nreference\r\x00"
+
+	for _, tc := range []struct {
+		name   string
+		alerts []client.Alert
+		ref    string
+		want   string
+	}{
+		{
+			name: "duplicate backend titles",
+			alerts: []client.Alert{
+				{ID: "one", Title: hostileTitle},
+				{ID: "two", Title: hostileTitle},
+			},
+			ref:  hostileTitle,
+			want: "Deploy production",
+		},
+		{
+			name:   "missing user reference",
+			alerts: []client.Alert{{ID: "one", Title: "Deploy"}},
+			ref:    hostileRef,
+			want:   "missing reference",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := matchAlertActionRef(tc.alerts, tc.ref)
+			if err == nil {
+				t.Fatal("matchAlertActionRef unexpectedly succeeded")
+			}
+			got := err.Error()
+			for _, unsafe := range []string{"\x1b", "\n", "\r", "\x00"} {
+				if strings.Contains(got, unsafe) {
+					t.Fatalf("unsafe diagnostic contains %q: %q", unsafe, got)
+				}
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("diagnostic %q missing sanitized text %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMatchRefByIDPrefixAndName(t *testing.T) {
 	tasks := []client.Task{
 		{ID: "abc123", Title: "Refactor the API"},

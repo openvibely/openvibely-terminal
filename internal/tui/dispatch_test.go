@@ -1737,6 +1737,75 @@ func TestAlertsDeleteResolvesTypedTargetBeforeConfirmation(t *testing.T) {
 	})
 }
 
+func TestAlertActionPresentationStripsTerminalControls(t *testing.T) {
+	assertSingleLineSafe := func(t *testing.T, value string) {
+		t.Helper()
+		for _, unsafe := range []string{"\x1b", "\n", "\r", "\x00"} {
+			if strings.Contains(value, unsafe) {
+				t.Fatalf("unsafe alert presentation contains %q: %q", unsafe, value)
+			}
+		}
+		if !strings.Contains(value, "Deploy production") {
+			t.Fatalf("alert presentation omitted readable title: %q", value)
+		}
+	}
+
+	t.Run("action success", func(t *testing.T) {
+		const hostileTitle = "\x1b[31mDeploy\nproduction\r"
+		const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><p class="font-semibold">` + hostileTitle + `</p></div>`
+		listRequests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+				listRequests++
+				if listRequests == 1 {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, alertsHTML)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":"refresh unavailable"}`)
+			case r.Method == http.MethodPost && r.URL.Path == "/alerts/a-1/approve":
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		m.selectedID, m.selectedName = "p1", "demo"
+		m = runLine(t, m, "/alerts approve a-1")
+		if len(m.log) == 0 {
+			t.Fatal("approve produced no transcript entries")
+		}
+		assertSingleLineSafe(t, m.log[len(m.log)-1].text)
+	})
+
+	t.Run("typed delete confirmation", func(t *testing.T) {
+		m, _ := dispatchModel(t, nil)
+		next, cmd := m.Update(alertDeleteTargetMsg{
+			projectID: "p1",
+			alert: client.Alert{
+				ID:    "a-1",
+				Title: "\x1b[31mDeploy\nproduction\r\x00",
+			},
+		})
+		if cmd != nil {
+			t.Fatal("resolved delete target unexpectedly returned follow-up work")
+		}
+		m = next.(Model)
+		if m.pendingConfirmation == nil {
+			t.Fatal("resolved delete target did not open confirmation")
+		}
+		assertSingleLineSafe(t, m.pendingConfirmation.message)
+	})
+}
+
 func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
 	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build failed"><p class="font-semibold">Build failed</p></div>
 		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="duplicate one"><p class="font-semibold">Duplicate</p></div>
