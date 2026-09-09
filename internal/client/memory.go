@@ -642,26 +642,28 @@ func memoryTrimSpaceBytes(value []byte) []byte {
 
 func memoryFrontMatterKey(value []byte) string {
 	for _, key := range []string{"name", "title", "summary", "description"} {
-		if memoryASCIIEqualFold(value, key) {
+		if memoryLowerKeyEqual(value, key) {
 			return key
 		}
 	}
 	return ""
 }
 
-func memoryASCIIEqualFold(value []byte, lower string) bool {
-	if len(value) != len(lower) {
-		return false
-	}
-	for i, b := range value {
-		if 'A' <= b && b <= 'Z' {
-			b += 'a' - 'A'
-		}
-		if b != lower[i] {
+// memoryLowerKeyEqual compares value as strings.ToLower would, but avoids
+// materializing a potentially long front-matter key just to compare it with a
+// small recognized ASCII key.
+func memoryLowerKeyEqual(value []byte, lower string) bool {
+	for _, expected := range lower {
+		if len(value) == 0 {
 			return false
 		}
+		r, size := utf8.DecodeRune(value)
+		if r == utf8.RuneError && size == 1 || unicode.ToLower(r) != expected {
+			return false
+		}
+		value = value[size:]
 	}
-	return true
+	return len(value) == 0
 }
 
 func memoryRawLine(data []byte, offset int) ([]byte, int, bool) {

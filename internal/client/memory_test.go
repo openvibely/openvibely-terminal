@@ -225,6 +225,33 @@ func TestMemorySearchPreservesUnterminatedFrontMatterBehavior(t *testing.T) {
 	}
 }
 
+func TestMemorySearchPreservesUnicodeFoldedFrontMatterKeys(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Indexed Title](unicode-keys.md) - Indexed summary\n", map[string]string{
+		"unicode-keys.md": "---\ntİtle: Unicode title\ndescrİption: Unicode description\n---\n\nSearchable body needle.\n",
+	})
+
+	client := &Client{}
+	project := Project{Path: repo}
+	document, err := client.ShowMemory(context.Background(), project, "unicode-keys.md")
+	if err != nil {
+		t.Fatalf("ShowMemory: %v", err)
+	}
+	result, err := client.SearchMemories(context.Background(), project, "body needle")
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(result.Memories) != 1 {
+		t.Fatalf("matches = %#v, want one result", result.Memories)
+	}
+	memory := result.Memories[0]
+	if memory.Title != "Unicode title" || memory.Summary != "Unicode description" {
+		t.Fatalf("search metadata = %#v, want Unicode-folded front-matter metadata", memory)
+	}
+	if memory.Title != document.Title || memory.Summary != document.Summary {
+		t.Fatalf("search metadata = %#v, want legacy document metadata %#v", memory, document)
+	}
+}
 func TestMemorySearchInvalidUTF8LongLineUsesBoundedTemporaryStorage(t *testing.T) {
 	content := bytes.Repeat([]byte("x"), maxMemoryFileBytes)
 	content[len(content)/2] = 0xff
