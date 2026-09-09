@@ -1841,33 +1841,81 @@ func TestCLIBriefingCommandsRequireProjectWhenProjectListIsEmpty(t *testing.T) {
 	}
 }
 
-func TestCLIBriefingCommandsAcceptShowAction(t *testing.T) {
+func TestCLIBriefingCommandsPreserveSupportedActions(t *testing.T) {
 	cases := []struct {
-		name      string
-		args      []string
-		fetchPath string
-		body      string
+		name        string
+		args        []string
+		fetchPath   string
+		triggerPath string
+		body        string
 	}{
-		{name: "pulse", args: []string{"pulse", "show"}, fetchPath: "/upcoming", body: "<div>upcoming briefing</div>"},
-		{name: "reflection", args: []string{"reflection", "show"}, fetchPath: "/history", body: "<div>history debrief</div>"},
-		{name: "grades", args: []string{"grades", "show"}, fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
-		{name: "insights", args: []string{"insights", "show"}, fetchPath: "/insights", body: "<div>insights</div>"},
+		{name: "pulse bare", args: []string{"pulse"}, fetchPath: "/upcoming", body: "<div>upcoming briefing</div>"},
+		{name: "pulse show", args: []string{"pulse", "show"}, fetchPath: "/upcoming", body: "<div>upcoming briefing</div>"},
+		{name: "pulse summary", args: []string{"pulse", "summary"}, fetchPath: "/upcoming", triggerPath: "/upcoming/summary", body: "<div>upcoming briefing</div>"},
+		{name: "reflection bare", args: []string{"reflection"}, fetchPath: "/history", body: "<div>history debrief</div>"},
+		{name: "reflection show", args: []string{"reflection", "show"}, fetchPath: "/history", body: "<div>history debrief</div>"},
+		{name: "reflection summary", args: []string{"reflection", "summary"}, fetchPath: "/history", triggerPath: "/history/summary", body: "<div>history debrief</div>"},
+		{name: "grades bare", args: []string{"grades"}, fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades show", args: []string{"grades", "show"}, fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/history", triggerPath: "/history/grade-ideas", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "insights bare", args: []string{"insights"}, fetchPath: "/insights", body: "<div>insights</div>"},
+		{name: "insights show", args: []string{"insights", "show"}, fetchPath: "/insights", body: "<div>insights</div>"},
+		{name: "insights analyze", args: []string{"insights", "analyze"}, fetchPath: "/insights", triggerPath: "/insights/analyze", body: "<div>insights</div>"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, rec := cliServer(t, map[string]string{
+			bodies := map[string]string{
 				"/api/projects": cliProjects,
 				tc.fetchPath:    tc.body,
-			})
+			}
+			if tc.triggerPath != "" {
+				bodies[tc.triggerPath] = "ok"
+			}
+			c, rec := cliServer(t, bodies)
+
 			if err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false); err != nil {
 				t.Fatalf("RunCLI(%v): %v", tc.args, err)
 			}
 			if got := rec.count("GET", tc.fetchPath); got != 1 {
 				t.Fatalf("RunCLI(%v) made %d GET requests to %s, want 1:\n%s", tc.args, got, tc.fetchPath, rec.all())
 			}
-			if calls := rec.all(); strings.Contains(calls, "POST ") {
-				t.Fatalf("RunCLI(%v) unexpectedly made a POST request:\n%s", tc.args, calls)
+
+			requests := rec.urlsSnapshot()
+			fetchIndex := -1
+			for i, request := range requests {
+				if strings.HasPrefix(request, "GET "+tc.fetchPath+"?") {
+					fetchIndex = i
+					if !strings.Contains(request, "project_id=p1") {
+						t.Fatalf("RunCLI(%v) sent an unscoped fetch request: %s", tc.args, request)
+					}
+				}
+			}
+			if fetchIndex == -1 {
+				t.Fatalf("RunCLI(%v) did not make the expected fetch request:\n%s", tc.args, strings.Join(requests, "\n"))
+			}
+
+			if tc.triggerPath == "" {
+				if calls := rec.all(); strings.Contains(calls, "POST ") {
+					t.Fatalf("RunCLI(%v) unexpectedly made a POST request:\n%s", tc.args, calls)
+				}
+				return
+			}
+
+			if got := rec.count("POST", tc.triggerPath); got != 1 {
+				t.Fatalf("RunCLI(%v) made %d POST requests to %s, want 1:\n%s", tc.args, got, tc.triggerPath, rec.all())
+			}
+			postIndex := -1
+			for i, request := range requests {
+				if strings.HasPrefix(request, "POST "+tc.triggerPath+"?") {
+					postIndex = i
+					if !strings.Contains(request, "project_id=p1") {
+						t.Fatalf("RunCLI(%v) sent an unscoped trigger request: %s", tc.args, request)
+					}
+				}
+			}
+			if postIndex == -1 || postIndex >= fetchIndex {
+				t.Fatalf("RunCLI(%v) requests = %s, want POST %s before one GET %s", tc.args, strings.Join(requests, "\n"), tc.triggerPath, tc.fetchPath)
 			}
 		})
 	}
