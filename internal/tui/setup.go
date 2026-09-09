@@ -17,7 +17,7 @@ const (
 )
 
 var (
-	connectionDiagnosticURL    = regexp.MustCompile(`https?://[^\s"'<>]+`)
+	connectionDiagnosticURL    = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
 	connectionDiagnosticSecret = regexp.MustCompile(`(?i)\b(?:access[_-]?token|api[_-]?key|authorization|cookie|credential|password|secret|token)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|(?:bearer\s+)?[^\s,;]+)`)
 )
 

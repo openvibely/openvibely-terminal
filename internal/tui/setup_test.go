@@ -291,7 +291,7 @@ func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 	)
 	transport := fmt.Errorf("loading projects: %w", &url.Error{
 		Op:  "Get",
-		URL: "https://configured-user:" + urlPassword + "@remote.example:3001/api/projects?token=" + queryToken + "#" + urlFragment,
+		URL: "HTTPS://configured-user:" + urlPassword + "@remote.example:3001/api/projects?diagnostic=" + queryToken + "#" + urlFragment,
 		Err: &net.OpError{
 			Op:  "dial",
 			Net: "tcp",
@@ -303,7 +303,7 @@ func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 	}
 	reachable := fmt.Errorf("loading capacity: %w", &client.HTTPStatusError{
 		StatusCode: http.StatusServiceUnavailable,
-		Message:    "token=" + apiToken + "\n\x1b[31m" + strings.Repeat("backend diagnostic ", 40),
+		Message:    "backend endpoint hTtPs://backend-user:" + urlPassword + "@remote.example:3001/health?diagnostic=" + queryToken + "#" + urlFragment + " token=" + apiToken + "\n\x1b[31m" + strings.Repeat("backend diagnostic ", 40),
 	})
 
 	for _, tc := range []struct {
