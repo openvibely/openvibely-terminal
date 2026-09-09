@@ -1138,6 +1138,89 @@ func TestParseAutomationDetailWarnsForNameOnlyGraphNodeIdentity(t *testing.T) {
 	}
 }
 
+func TestParseAutomationDetailPreservesUnicodeEqualFoldCorrelation(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unicode-correlation" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<g data-automation-live-node="Σ-node" data-automation-node-key="ſlow-key" data-counts='{"running":2}'><strong>Greek node</strong></g>
+			<line class="automation-graph-edge" data-automation-live-edge-id="Σ-edge" data-automation-live-edge="ſlow-edge"></line>
+		</svg></div>
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="Slow-key" data-automation-live-node-id="ς-node" data-counts='{"completed_recently":3}'><h3>Greek node</h3></section>
+			<div data-automation-live-edge-detail="Slow-edge" data-automation-live-edge-id="ς-edge" data-transition-count="5"><div>Greek node → Next</div><p>approved</p></div>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 || len(detail.UnmatchedNodeDetails) != 0 {
+		t.Fatalf("unicode node correlation = nodes=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+	}
+	if !detail.Nodes[0].Counts.RunningAvailable || detail.Nodes[0].Counts.Running != 2 || !detail.Nodes[0].Counts.CompletedRecentlyAvailable || detail.Nodes[0].Counts.CompletedRecently != 3 {
+		t.Fatalf("unicode node counts = %+v", detail.Nodes[0].Counts)
+	}
+	if len(detail.Edges) != 1 || len(detail.UnmatchedEdgeDetails) != 0 || !detail.Edges[0].TransitionCountAvailable || detail.Edges[0].TransitionCount != 5 {
+		t.Fatalf("unicode edge correlation = edges=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
+	}
+}
+
+func TestParseAutomationDetailTreatsUnicodeEqualFoldNodeCollisionsAsAmbiguous(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unicode-node-duplicate" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel>
+			<g data-automation-live-node="Σ-node" data-automation-node-key="first"><strong>First</strong></g>
+			<g data-automation-live-node="ς-node" data-automation-node-key="second"><strong>Second</strong></g>
+		</div>
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="" data-automation-live-node-id="σ-node" data-counts='{"running":7}'><h3>Ambiguous</h3></section>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 2 || len(detail.UnmatchedNodeDetails) != 1 {
+		t.Fatalf("unicode node collision = nodes=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+	}
+	if detail.Nodes[0].Counts.RunningAvailable || detail.Nodes[1].Counts.RunningAvailable || !detail.UnmatchedNodeDetails[0].Counts.RunningAvailable || detail.UnmatchedNodeDetails[0].Counts.Running != 7 {
+		t.Fatalf("unicode node collision changed graph or unmatched counts: nodes=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+	}
+	if !detail.Partial || !strings.Contains(strings.Join(detail.Warnings, "\n"), "node detail records could not be correlated") {
+		t.Fatalf("unicode node collision lacked correlation warning: partial=%t warnings=%v", detail.Partial, detail.Warnings)
+	}
+}
+
+func TestParseAutomationDetailSortsUnicodeEqualFoldDuplicateEdgesDeterministically(t *testing.T) {
+	parse := func(edges string) AutomationDetail {
+		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unicode-edge-duplicate" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><svg>` + edges + `</svg></div></div>`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	first := `<line class="automation-graph-edge" data-automation-live-edge-id="Σ-edge" data-transition-count="3"></line>`
+	second := `<line class="automation-graph-edge" data-automation-live-edge-id="ς-edge" data-transition-count="7"></line>`
+	forward := parse(first + second)
+	reverse := parse(second + first)
+	if len(forward.Edges) != 2 || len(reverse.Edges) != 2 {
+		t.Fatalf("unicode duplicate edges were collapsed: forward=%+v reverse=%+v", forward.Edges, reverse.Edges)
+	}
+	forwardJSON, err := json.Marshal(forward)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverseJSON, err := json.Marshal(reverse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(forwardJSON) != string(reverseJSON) {
+		t.Fatalf("unicode duplicate edge JSON depends on input order:\nforward: %s\nreverse: %s", forwardJSON, reverseJSON)
+	}
+	if forward.Edges[0].ID != "Σ-edge" || forward.Edges[0].TransitionCount != 3 || forward.Edges[1].ID != "ς-edge" || forward.Edges[1].TransitionCount != 7 {
+		t.Fatalf("unicode duplicate edge order = %+v", forward.Edges)
+	}
+	if !forward.Partial || !strings.Contains(strings.Join(forward.Warnings, "\n"), "duplicate edge") {
+		t.Fatalf("unicode duplicate edges lacked warning: partial=%t warnings=%v", forward.Partial, forward.Warnings)
+	}
+}
+
 func TestParseAutomationDetailHandlesDuplicateNodeDetailsDeterministically(t *testing.T) {
 	parse := func(details string) AutomationDetail {
 		detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-duplicate-node-details" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><g data-automation-live-node="n1" data-automation-node-key="first"><strong>First</strong></g></div><div data-automation-live-details-panel>` + details + `</div></div>`)

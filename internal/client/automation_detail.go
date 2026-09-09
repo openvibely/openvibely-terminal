@@ -594,8 +594,36 @@ func newAutomationLiveNodeReferenceIndex(nodes []AutomationLiveNode) *automation
 	return index
 }
 
+// automationCorrelationKey preserves strings.EqualFold identity semantics in a
+// map key. strings.ToLower is not sufficient because SimpleFold equivalence
+// classes can include multiple lower-case runes, such as Greek sigma forms.
 func automationCorrelationKey(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	for i := 0; i < len(value); i++ {
+		if value[i] >= utf8.RuneSelf {
+			return automationUnicodeEqualFoldKey(value)
+		}
+	}
+	return strings.ToLower(value)
+}
+
+func automationUnicodeEqualFoldKey(value string) string {
+	var key strings.Builder
+	key.Grow(len(value))
+	for _, r := range value {
+		if r < utf8.RuneSelf {
+			key.WriteRune(unicode.ToLower(r))
+			continue
+		}
+		canonical := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < canonical {
+				canonical = folded
+			}
+		}
+		key.WriteRune(canonical)
+	}
+	return key.String()
 }
 
 func appendAutomationIndexEntry(index map[string][]int, key string, value int) {
@@ -678,8 +706,8 @@ func automationLiveNodeCorrelationIdentity(index *automationLiveNodeIndex, nodes
 }
 
 func automationLiveNodeStableIdentity(node AutomationLiveNode) string {
-	id := strings.ToLower(strings.TrimSpace(node.ID))
-	key := strings.ToLower(strings.TrimSpace(node.NodeKey))
+	id := automationCorrelationKey(node.ID)
+	key := automationCorrelationKey(node.NodeKey)
 	switch {
 	case id != "" && key != "":
 		return "both\x00" + id + "\x00" + key
@@ -1339,10 +1367,10 @@ func automationLiveEdgeDeterministicKey(edge AutomationLiveEdge) string {
 
 func automationEdgeEndpointKey(edge AutomationLiveEdge) string {
 	if edge.SourceNodeID != "" && edge.TargetNodeID != "" {
-		return "id\x00" + strings.ToLower(edge.SourceNodeID) + "\x00" + strings.ToLower(edge.TargetNodeID)
+		return "id\x00" + automationCorrelationKey(edge.SourceNodeID) + "\x00" + automationCorrelationKey(edge.TargetNodeID)
 	}
 	if edge.SourceName != "" && edge.TargetName != "" {
-		return "name\x00" + strings.ToLower(edge.SourceName) + "\x00" + strings.ToLower(edge.TargetName)
+		return "name\x00" + automationCorrelationKey(edge.SourceName) + "\x00" + automationCorrelationKey(edge.TargetName)
 	}
 	return ""
 }
