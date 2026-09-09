@@ -7824,6 +7824,98 @@ func TestChannelsInteractiveSetupCompletesEverySupportedType(t *testing.T) {
 	}
 }
 
+func TestChannelAddEditCompletionAcrossGuidedAndHeadlessFlows(t *testing.T) {
+	const storedSecret = "stored-channel-credential"
+	const submittedSecret = "submitted-channel-credential"
+	const channelsPage = `<div data-channel-type="telegram" data-channel-token="` + storedSecret + `" data-channel-running="true" data-search-text="Telegram Bot Connected"></div><form><input type="checkbox" name="telegram_rich_messages_v2" checked></form>`
+
+	flows := []struct {
+		name       string
+		guided     bool
+		action     string
+		priorLists int
+	}{
+		{name: "guided add", guided: true, action: "add"},
+		{name: "guided edit", guided: true, action: "edit", priorLists: 2},
+		{name: "headless add", action: "add"},
+		{name: "headless edit", action: "edit", priorLists: 1},
+	}
+	outcomes := []string{"success", "mutation failure", "refresh failure"}
+
+	for _, flow := range flows {
+		for _, outcome := range outcomes {
+			flow, outcome := flow, outcome
+			t.Run(flow.name+"/"+outcome, func(t *testing.T) {
+				oldCLIMode := cliMode
+				cliMode = !flow.guided
+				t.Cleanup(func() { cliMode = oldCLIMode })
+
+				var listCalls, mutationCalls int
+				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/channels":
+						listCalls++
+						if outcome == "refresh failure" && listCalls == flow.priorLists+1 {
+							http.Error(w, "refresh failed", http.StatusInternalServerError)
+							return
+						}
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = io.WriteString(w, channelsPage)
+					case r.Method == http.MethodPost && r.URL.Path == "/channels/telegram":
+						mutationCalls++
+						if outcome == "mutation failure" {
+							http.Error(w, "mutation failed", http.StatusInternalServerError)
+							return
+						}
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				})
+
+				if flow.guided {
+					m = runLine(t, m, "/channels "+flow.action+" tele")
+					if m.channelWizard == nil {
+						t.Fatalf("guided %s did not start the channel wizard:\n%s", flow.action, transcript(m))
+					}
+					for _, value := range []string{submittedSecret, "false"} {
+						m = runLine(t, m, value)
+					}
+				} else {
+					m = runLine(t, m, "/channels "+flow.action+" tele --token "+submittedSecret+" --rich-messages false")
+				}
+
+				wantLists := flow.priorLists + 1
+				if outcome == "mutation failure" {
+					wantLists = flow.priorLists
+				}
+				if listCalls != wantLists || mutationCalls != 1 {
+					t.Fatalf("GET /channels = %d, POST /channels/telegram = %d; want %d and 1", listCalls, mutationCalls, wantLists)
+				}
+
+				out := transcript(m)
+				if strings.Contains(out, storedSecret) || strings.Contains(out, submittedSecret) || strings.Contains(m.View(), storedSecret) || strings.Contains(m.View(), submittedSecret) {
+					t.Fatalf("channel completion exposed credentials:\n%s", out)
+				}
+				switch outcome {
+				case "success":
+					if !strings.Contains(out, flow.action+"ed Telegram Bot") || !strings.Contains(out, "TYPE       NAME") || strings.Contains(out, "error:") {
+						t.Fatalf("successful completion output = %q", out)
+					}
+				case "mutation failure":
+					if strings.Contains(out, flow.action+"ed Telegram Bot") || !strings.Contains(out, "error:") {
+						t.Fatalf("mutation failure output = %q", out)
+					}
+				case "refresh failure":
+					if !strings.Contains(out, flow.action+"ed Telegram Bot") || strings.Contains(out, "TYPE       NAME") || strings.Contains(out, "error:") || strings.Contains(out, "refresh failed") {
+						t.Fatalf("refresh failure output = %q", out)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestChannelsCommandListsPage(t *testing.T) {
 	const channelsPage = structuredChannelsPage
 	m, rec := dispatchModel(t, map[string]string{"/channels": channelsPage})

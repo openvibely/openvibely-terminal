@@ -3464,12 +3464,7 @@ func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				return "", err
 			}
-			channels, err := c.ListChannels(ctx, projectID)
-			status := action + "ed " + channel.Name
-			if err != nil {
-				return status, nil
-			}
-			return status + "\n\n" + renderChannels(channels), nil
+			return completeChannelMutation(ctx, c, projectID, action, channel)
 		})
 	}
 	var cmd tea.Cmd
@@ -3634,6 +3629,15 @@ func validateChannelsArgs(args []string) error {
 		return err
 	}
 	return errors.New(commandUsage("channels", ""))
+}
+
+func completeChannelMutation(ctx context.Context, c *client.Client, projectID, action string, channel client.Channel) (string, error) {
+	status := action + "ed " + channel.Name
+	channels, err := c.ListChannels(ctx, projectID)
+	if err != nil {
+		return status, nil
+	}
+	return status + "\n\n" + renderChannels(channels), nil
 }
 
 func renderChannels(channels []client.Channel) string {
@@ -3806,12 +3810,7 @@ func channelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					channels, err := c.ListChannels(ctx, pid)
-					status := action + "ed " + ch.Name
-					if err != nil {
-						return status, nil
-					}
-					return status + "\n\n" + renderChannels(channels), nil
+					return completeChannelMutation(ctx, c, pid, action, ch)
 				})
 			}
 			ch, _ := matchChannelRef(strings.Join(rest, " "))
