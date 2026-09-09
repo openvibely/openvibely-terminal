@@ -24,7 +24,7 @@ The same commands also work as one-shot shell commands.
 
 ## Getting started
 
-Requires Go 1.26.4+ and a running OpenVibely backend. The default backend URL is
+Requires Go 1.27.1+ and a running OpenVibely backend. The default backend URL is
 `http://localhost:3001`.
 
 ```bash

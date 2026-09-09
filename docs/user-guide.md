@@ -60,7 +60,7 @@ make build          # → bin/openvibely-terminal
 make run
 ```
 
-Requires Go 1.26.4+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, use `/setup` in the TUI or `openvibely-terminal setup` in a shell for explicit, read-only recovery instructions. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
+Requires Go 1.27.1+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, use `/setup` in the TUI or `openvibely-terminal setup` in a shell for explicit, read-only recovery instructions. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
 
 ### Backend setup and recovery
 
