@@ -598,23 +598,13 @@ func newAutomationLiveNodeReferenceIndex(nodes []AutomationLiveNode) *automation
 // map key. strings.ToLower is not sufficient because SimpleFold equivalence
 // classes can include multiple lower-case runes, such as Greek sigma forms.
 func automationCorrelationKey(value string) string {
-	value = strings.TrimSpace(value)
-	for i := 0; i < len(value); i++ {
-		if value[i] >= utf8.RuneSelf {
-			return automationUnicodeEqualFoldKey(value)
-		}
-	}
-	return strings.ToLower(value)
+	return automationUnicodeEqualFoldKey(strings.TrimSpace(value))
 }
 
 func automationUnicodeEqualFoldKey(value string) string {
 	var key strings.Builder
 	key.Grow(len(value))
 	for _, r := range value {
-		if r < utf8.RuneSelf {
-			key.WriteRune(unicode.ToLower(r))
-			continue
-		}
 		canonical := r
 		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
 			if folded < canonical {

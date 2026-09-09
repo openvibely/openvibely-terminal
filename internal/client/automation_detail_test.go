@@ -1138,6 +1138,93 @@ func TestParseAutomationDetailWarnsForNameOnlyGraphNodeIdentity(t *testing.T) {
 	}
 }
 
+func TestAutomationCorrelationKeyPreservesMixedUnicodeEqualFold(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"ſlow-key", "Slow-key"},
+		{"Key-edge", "key-edge"},
+	} {
+		if !strings.EqualFold(pair[0], pair[1]) {
+			t.Fatalf("test pair %q and %q is not EqualFold-equivalent", pair[0], pair[1])
+		}
+		if left, right := automationCorrelationKey(pair[0]), automationCorrelationKey(pair[1]); left != right {
+			t.Fatalf("EqualFold values %q and %q have different correlation keys %q and %q", pair[0], pair[1], left, right)
+		}
+	}
+}
+
+func TestParseAutomationDetailCorrelatesMixedUnicodeEqualFoldKeys(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unicode-key-correlation" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel><svg>
+			<g data-automation-live-node="" data-automation-node-key="ſlow-key" data-counts='{"running":2}'><strong>Long s node</strong></g>
+			<line class="automation-graph-edge" data-automation-live-edge="Key-edge"></line>
+		</svg></div>
+		<div data-automation-live-details-panel>
+			<section data-automation-live-node-detail="Slow-key" data-counts='{"completed_recently":3}'><h3>Long s node</h3></section>
+			<div data-automation-live-edge-detail="key-edge" data-transition-count="5"><div>Long s node → Next</div><p>approved</p></div>
+		</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Nodes) != 1 || len(detail.UnmatchedNodeDetails) != 0 {
+		t.Fatalf("mixed Unicode key node correlation = nodes=%+v unmatched=%+v", detail.Nodes, detail.UnmatchedNodeDetails)
+	}
+	if !detail.Nodes[0].Counts.RunningAvailable || detail.Nodes[0].Counts.Running != 2 || !detail.Nodes[0].Counts.CompletedRecentlyAvailable || detail.Nodes[0].Counts.CompletedRecently != 3 {
+		t.Fatalf("mixed Unicode key node counts = %+v", detail.Nodes[0].Counts)
+	}
+	if len(detail.Edges) != 1 || len(detail.UnmatchedEdgeDetails) != 0 || !detail.Edges[0].TransitionCountAvailable || detail.Edges[0].TransitionCount != 5 {
+		t.Fatalf("mixed Unicode key edge correlation = edges=%+v unmatched=%+v", detail.Edges, detail.UnmatchedEdgeDetails)
+	}
+}
+
+func TestParseAutomationDetailSortsMixedUnicodeEqualFoldDuplicateKeysDeterministically(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{
+			name:   "long s",
+			first:  `<line class="automation-graph-edge" data-automation-live-edge="ſlow-edge" data-transition-count="3"></line>`,
+			second: `<line class="automation-graph-edge" data-automation-live-edge="Slow-edge" data-transition-count="7"></line>`,
+		},
+		{
+			name:   "Kelvin sign",
+			first:  `<line class="automation-graph-edge" data-automation-live-edge="Key-edge" data-transition-count="3"></line>`,
+			second: `<line class="automation-graph-edge" data-automation-live-edge="key-edge" data-transition-count="7"></line>`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parse := func(edges string) AutomationDetail {
+				detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unicode-key-duplicate" data-project-id="p1" data-automation-lifecycle-state="active"><div data-automation-graph-panel><svg>` + edges + `</svg></div></div>`)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return detail
+			}
+			forward := parse(tc.first + tc.second)
+			reverse := parse(tc.second + tc.first)
+			if len(forward.Edges) != 2 || len(reverse.Edges) != 2 {
+				t.Fatalf("Unicode duplicate key edges were collapsed: forward=%+v reverse=%+v", forward.Edges, reverse.Edges)
+			}
+			forwardJSON, err := json.Marshal(forward)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reverseJSON, err := json.Marshal(reverse)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(forwardJSON) != string(reverseJSON) {
+				t.Fatalf("Unicode duplicate key edge JSON depends on input order:\nforward: %s\nreverse: %s", forwardJSON, reverseJSON)
+			}
+			if !forward.Partial || !strings.Contains(strings.Join(forward.Warnings, "\n"), "duplicate edge") {
+				t.Fatalf("Unicode duplicate key edges lacked warning: partial=%t warnings=%v", forward.Partial, forward.Warnings)
+			}
+		})
+	}
+}
+
 func TestParseAutomationDetailPreservesUnicodeEqualFoldCorrelation(t *testing.T) {
 	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-unicode-correlation" data-project-id="p1" data-automation-lifecycle-state="active">
 		<div data-automation-graph-panel><svg>
