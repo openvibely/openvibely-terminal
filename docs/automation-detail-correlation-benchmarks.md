@@ -40,24 +40,24 @@ git worktree remove --force "$baseline_dir"
 ```
 
 The optimized parser revision is
-`5a42c533a341be1b8d85763b07d2051e756bdf5a` (`Preserve stateful automation
-edge correlation`). The fixture hash was verified before each run.
+`62ed1532c50f3235624d81a294190b29382dcb23` (`Retain ASCII correlation
+key fast path`). The fixture hash was verified before each run.
 
 ## Raw Results
 
 Each list preserves the ten samples in Go benchmark output order. `ns/op` and
 `B/op` are the acceptance metrics; `allocs/op` was constant within each record
-size (`2,773` baseline versus `2,958` optimized at 10; `44,675–44,676` versus
-`27,848–27,849` at 100; `622,973–622,975` versus `138,548–138,551` at 500).
+size (`2,773` baseline versus `2,958–2,959` optimized at 10; `44,675–44,676` versus
+`27,848` at 100; `622,973–622,975` versus `138,547–138,549` at 500).
 
 | Records | Parser | ns/op samples | B/op samples |
 | --- | --- | --- | --- |
 | 10 | Baseline | 245994, 208948, 230488, 234107, 219466, 233525, 228508, 233743, 227367, 226520 | 155113, 155349, 155512, 155422, 155538, 155514, 155330, 155469, 155563, 155569 |
-| 10 | Optimized | 203633, 219024, 221829, 222302, 219138, 251549, 237463, 230445, 220606, 198247 | 169386, 169704, 169612, 169740, 169806, 169530, 169733, 169912, 169865, 169796 |
+| 10 | Optimized | 194116, 199873, 229413, 189603, 191844, 197667, 191098, 189822, 191780, 192378 | 169423, 169579, 170040, 169529, 169487, 169935, 169517, 169464, 169742, 169806 |
 | 100 | Baseline | 3772520, 3696559, 3695287, 3741689, 3548365, 3632294, 3698001, 3475065, 3630164, 3566769 | 1920605, 1921831, 1924560, 1923301, 1922576, 1923504, 1920454, 1922396, 1920162, 1922221 |
-| 100 | Optimized | 2008662, 1976456, 1791532, 2430251, 2976453, 2818101, 2876053, 2110876, 1857419, 2064797 | 1579393, 1578906, 1577444, 1577969, 1576711, 1575366, 1577674, 1578494, 1578176, 1577867 |
+| 100 | Optimized | 1880945, 1953935, 1868717, 1807868, 1799102, 1826017, 1800452, 2069552, 1924504, 2031465 | 1578788, 1579259, 1579022, 1577908, 1578107, 1578749, 1578274, 1578453, 1578847, 1579380 |
 | 500 | Baseline | 49745311, 49985652, 49150008, 47894502, 48324102, 49004276, 48640988, 48230953, 48560158, 49336510 | 19070442, 19070353, 19076137, 19070400, 19070035, 19074210, 19084799, 19071130, 19066130, 19069285 |
-| 500 | Optimized | 10520033, 10713772, 10914902, 11140133, 10153544, 10160538, 10798479, 11221998, 11604325, 11747571 | 8143437, 8145758, 8161115, 8148276, 8146401, 8146876, 8153856, 8151680, 8145336, 8152021 |
+| 500 | Optimized | 10329304, 10280072, 11038108, 12449687, 12093042, 12320054, 12295348, 11302977, 12057918, 10916382 | 8147553, 8145316, 8149715, 8143035, 8138104, 8141511, 8143291, 8147656, 8139668, 8146667 |
 
 Medians are the mean of sorted samples five and six, computed independently
 for `ns/op` and `B/op`. For example, the following standard-library-only
@@ -68,18 +68,18 @@ from statistics import median
 
 assert median([49745311, 49985652, 49150008, 47894502, 48324102,
                49004276, 48640988, 48230953, 48560158, 49336510]) == 48822632
-assert median([10520033, 10713772, 10914902, 11140133, 10153544,
-               10160538, 10798479, 11221998, 11604325, 11747571]) == 10856690.5
+assert median([10329304, 10280072, 11038108, 12449687, 12093042,
+               12320054, 12295348, 11302977, 12057918, 10916382]) == 11680447.5
 ```
 
 | Records | Baseline median ns/op | Optimized median ns/op | Time change | Baseline median B/op | Optimized median B/op | B/op change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 229,498.0 | 221,217.5 | -3.6% | 155,490.5 | 169,736.5 | +9.2% |
-| 100 | 3,663,790.5 | 2,087,836.5 | -43.0% | 1,922,308.5 | 1,577,918.0 | -17.9% |
-| 500 | 48,822,632.0 | 10,856,690.5 | -77.8% | 19,070,421.0 | 8,147,576.0 | -57.3% |
+| 10 | 229,498.0 | 192,111.0 | -16.3% | 155,490.5 | 169,554.0 | +9.0% |
+| 100 | 3,663,790.5 | 1,874,831.0 | -48.8% | 1,922,308.5 | 1,578,768.5 | -17.9% |
+| 500 | 48,822,632.0 | 11,680,447.5 | -76.1% | 19,070,421.0 | 8,144,303.5 | -57.3% |
 
-The optimized unique sparse 100-to-500 time scaling is `5.20x`. At 500
-records, median time improves by `77.8%` and median allocated bytes improve by
+The optimized unique sparse 100-to-500 time scaling is `6.23x`. At 500
+records, median time improves by `76.1%` and median allocated bytes improve by
 `57.3%`, satisfying the required at-least-50% and at-least-30% reductions.
-At 10 records, time improves by `3.6%` and allocated bytes increase by `9.2%`,
+At 10 records, time improves by `16.3%` and allocated bytes increase by `9.0%`,
 within the maximum 10% regression allowance.
