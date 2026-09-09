@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ const (
 	maxMemoryWarningRunes            = 240
 	maxMemoryAmbiguityCandidates     = 8
 	maxMemoryAmbiguityCandidateRunes = 64
+	memorySearchChunkBytes           = 64 << 10
 )
 
 var (
@@ -157,13 +159,14 @@ func (c *Client) SearchMemories(ctx context.Context, project Project, query stri
 	}
 
 	lowerQuery := strings.ToLower(query)
+	lowerQueryBytes := []byte(lowerQuery)
 	for _, entry := range entries {
 		base := Memory{File: entry.File, Title: entry.Title, Summary: entry.Summary}
 		metadataMatch := strings.Contains(strings.ToLower(entry.File), lowerQuery) ||
 			strings.Contains(strings.ToLower(entry.Title), lowerQuery) ||
 			strings.Contains(strings.ToLower(entry.Summary), lowerQuery)
 
-		memory, content, fileWarnings, readErr := readIndexedMemory(ctx, root, entry)
+		memory, bodyMatch, fileWarnings, readErr := readIndexedMemoryForSearch(ctx, root, entry, lowerQueryBytes, metadataMatch)
 		for _, warning := range fileWarnings {
 			appendMemoryWarning(&result.Warnings, warning)
 		}
@@ -177,12 +180,9 @@ func (c *Client) SearchMemories(ctx context.Context, project Project, query stri
 			continue
 		}
 
-		searchText := newMemorySearchText(content)
-		if !metadataMatch && !searchText.contains(lowerQuery) {
+		if !metadataMatch && !bodyMatch {
 			continue
 		}
-		memory.Body = ""
-		memory.Snippet = searchText.snippet(lowerQuery)
 		result.Memories = append(result.Memories, memory)
 	}
 	return result, nil
@@ -505,6 +505,266 @@ func readIndexedMemory(ctx context.Context, root string, entry memoryIndexEntry)
 	return memory, content, warnings, nil
 }
 
+func readIndexedMemoryForSearch(ctx context.Context, root string, entry memoryIndexEntry, lowerQuery []byte, metadataMatch bool) (Memory, bool, []string, error) {
+	base := Memory{File: entry.File, Title: entry.Title, Summary: entry.Summary, Snippet: "", Body: ""}
+	// readMemoryTarget validates the target before opening it and revalidates it
+	// after statting it, so search does not need a separate stale path check.
+	data, err := readMemoryTarget(ctx, root, entry.File, maxMemoryFileBytes)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return base, false, nil, err
+		}
+		if errors.Is(err, errMemoryPathUnsafe) || errors.Is(err, errMemoryFileChanged) {
+			return base, false, []string{memoryFileUnsafeWarning(entry.File)}, errors.New("memory: unable to read indexed memory file")
+		}
+		return base, false, []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
+	}
+	memory, bodyMatch, warnings := parseMemorySearchDocument(entry, data, lowerQuery, metadataMatch)
+	return memory, bodyMatch, warnings, nil
+}
+
+// parseMemorySearchDocument extracts only the metadata and bounded text that a
+// search result can expose. Unlike parseMemoryDocument, it deliberately does
+// not materialize a normalized copy of the complete document body.
+func parseMemorySearchDocument(entry memoryIndexEntry, raw []byte, lowerQuery []byte, metadataMatch bool) (Memory, bool, []string) {
+	metadata, bodyOffset, warnings := parseMemorySearchFrontMatter(raw)
+	content := raw[bodyOffset:]
+	memory := Memory{
+		File:    entry.File,
+		Title:   strings.TrimSpace(entry.Title),
+		Summary: strings.TrimSpace(entry.Summary),
+		Snippet: "",
+		Body:    "",
+	}
+	if value := strings.TrimSpace(metadata["title"]); value != "" {
+		memory.Title = value
+	}
+	if memory.Title == "" {
+		memory.Title = strings.TrimSpace(metadata["name"])
+	}
+	if memory.Title == "" {
+		memory.Title = firstMemoryHeadingBytes(content)
+	}
+	if memory.Title == "" {
+		memory.Title = memoryTitleFromFile(entry.File)
+	}
+	if value := strings.TrimSpace(metadata["summary"]); value != "" {
+		memory.Summary = value
+	} else if value := strings.TrimSpace(metadata["description"]); value != "" {
+		memory.Summary = value
+	}
+	if memory.Summary == "" {
+		memory.Summary = firstMemoryParagraphBytes(content)
+	}
+
+	if metadataMatch {
+		memory.Snippet = memorySearchSnippetBytes(content, lowerQuery)
+		return memory, false, warnings
+	}
+	bodyMatch := memorySearchBytesContains(content, lowerQuery)
+	if bodyMatch {
+		memory.Snippet = memorySearchSnippetBytes(content, lowerQuery)
+	}
+	return memory, bodyMatch, warnings
+}
+
+func parseMemorySearchFrontMatter(raw []byte) (map[string]string, int, []string) {
+	metadata := map[string]string{}
+	warnings := make([]string, 0)
+	if len(raw) == 0 {
+		return metadata, 0, warnings
+	}
+	first, offset, _ := memoryRawLine(raw, 0)
+	if strings.TrimSpace(strings.TrimPrefix(memoryNormalizedString(first), "\ufeff")) != "---" {
+		return metadata, 0, warnings
+	}
+
+	for lineNumber := 2; offset < len(raw); lineNumber++ {
+		line, next, _ := memoryRawLine(raw, offset)
+		value := memoryNormalizedString(line)
+		if strings.TrimSpace(value) == "---" {
+			return metadata, next, warnings
+		}
+		trimmed := strings.TrimSpace(value)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			colon := strings.Index(trimmed, ":")
+			if colon <= 0 {
+				appendMemoryWarning(&warnings, fmt.Sprintf("memory file front matter line %d is malformed", lineNumber))
+			} else {
+				key := strings.ToLower(strings.TrimSpace(trimmed[:colon]))
+				if key == "name" || key == "title" || key == "summary" || key == "description" {
+					value := strings.TrimSpace(trimmed[colon+1:])
+					metadata[key] = strings.Trim(value, "\"'")
+				}
+			}
+		}
+		offset = next
+	}
+	appendMemoryWarning(&warnings, "memory file front matter is unterminated")
+	return metadata, 0, warnings
+}
+
+func memoryRawLine(data []byte, offset int) ([]byte, int, bool) {
+	if newline := bytes.IndexByte(data[offset:], '\n'); newline >= 0 {
+		end := offset + newline
+		line := data[offset:end]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		return line, end + 1, true
+	}
+	return data[offset:], len(data), false
+}
+
+func memoryNormalizedString(data []byte) string {
+	return strings.ToValidUTF8(string(data), "\uFFFD")
+}
+
+func firstMemoryHeadingBytes(content []byte) string {
+	for offset := 0; offset < len(content); {
+		line, next, _ := memoryRawLine(content, offset)
+		trimmed := bytes.TrimSpace(line)
+		if bytes.HasPrefix(trimmed, []byte("#")) {
+			lineText := memoryNormalizedString(trimmed)
+			heading := strings.TrimSpace(strings.TrimLeft(lineText, "#"))
+			heading = strings.TrimSpace(strings.TrimRight(heading, "#"))
+			if heading != "" {
+				return heading
+			}
+		}
+		offset = next
+	}
+	return ""
+}
+
+func firstMemoryParagraphBytes(content []byte) string {
+	truncated := memoryTextTruncator{max: 220}
+	started := false
+	for offset := 0; offset < len(content); {
+		line, next, _ := memoryRawLine(content, offset)
+		trimmed := bytes.TrimSpace(line)
+		if len(trimmed) == 0 {
+			if started {
+				break
+			}
+		} else if !bytes.HasPrefix(trimmed, []byte("#")) && !bytes.HasPrefix(trimmed, []byte("```")) {
+			if started {
+				truncated.appendRune(' ')
+			}
+			started = true
+			truncated.appendBytes(trimmed)
+		}
+		offset = next
+	}
+	return truncated.string()
+}
+
+func memorySearchSnippetBytes(content []byte, lowerQuery []byte) string {
+	for offset := 0; offset < len(content); {
+		line, next, _ := memoryRawLine(content, offset)
+		if memoryLineHasNonSpace(line) && memorySearchBytesContains(line, lowerQuery) {
+			return truncateMemorySearchBytes(line, 220)
+		}
+		offset = next
+	}
+	return firstMemoryParagraphBytes(content)
+}
+
+func memorySearchBytesContains(content, lowerQuery []byte) bool {
+	if len(lowerQuery) == 0 {
+		return true
+	}
+	matcher := memorySearchMatcher{query: lowerQuery}
+	for offset := 0; offset < len(content); {
+		line, next, hasNewline := memoryRawLine(content, offset)
+		memorySearchFoldBytes(line, &matcher)
+		if matcher.found {
+			return true
+		}
+		if hasNewline {
+			matcher.feed([]byte("\n"))
+			if matcher.found {
+				return true
+			}
+		}
+		offset = next
+	}
+	return false
+}
+
+func memoryLineHasNonSpace(value []byte) bool {
+	for len(value) > 0 {
+		r, size := utf8.DecodeRune(value)
+		if r == utf8.RuneError && size == 1 {
+			return true
+		}
+		if !unicode.IsSpace(r) {
+			return true
+		}
+		value = value[size:]
+	}
+	return false
+}
+
+func memorySearchFoldBytes(value []byte, matcher *memorySearchMatcher) {
+	if len(value) == 0 || matcher.found {
+		return
+	}
+	if !utf8.Valid(value) {
+		matcher.feed([]byte(strings.ToLower(memoryNormalizedString(value))))
+		return
+	}
+	for offset := 0; offset < len(value) && !matcher.found; {
+		end := min(offset+memorySearchChunkBytes, len(value))
+		if end < len(value) {
+			for end > offset && !utf8.RuneStart(value[end]) {
+				end--
+			}
+		}
+		matcher.feed(bytes.ToLower(value[offset:end]))
+		offset = end
+	}
+}
+
+type memorySearchMatcher struct {
+	query []byte
+	tail  []byte
+	found bool
+}
+
+func (matcher *memorySearchMatcher) feed(value []byte) {
+	if matcher.found || len(value) == 0 {
+		return
+	}
+	if bytes.Contains(value, matcher.query) {
+		matcher.found = true
+		return
+	}
+	limit := len(matcher.query) - 1
+	if limit <= 0 {
+		return
+	}
+	if len(matcher.tail) > 0 {
+		prefix := value[:min(len(value), limit)]
+		boundary := make([]byte, 0, len(matcher.tail)+len(prefix))
+		boundary = append(boundary, matcher.tail...)
+		boundary = append(boundary, prefix...)
+		if bytes.Contains(boundary, matcher.query) {
+			matcher.found = true
+			return
+		}
+	}
+	if len(value) >= limit {
+		matcher.tail = append(matcher.tail[:0], value[len(value)-limit:]...)
+		return
+	}
+	matcher.tail = append(matcher.tail, value...)
+	if len(matcher.tail) > limit {
+		copy(matcher.tail, matcher.tail[len(matcher.tail)-limit:])
+		matcher.tail = matcher.tail[:limit]
+	}
+}
+
 func memoryFileUnsafeWarning(handle string) string {
 	return sanitizeMemoryWarning(fmt.Sprintf("memory file %q has an unsafe path", handle))
 }
@@ -660,6 +920,74 @@ func memorySearchLine(value string, offset int) (string, int) {
 		return value[offset : offset+newline], offset + newline + 1
 	}
 	return value[offset:], len(value) + 1
+}
+
+type memoryTextTruncator struct {
+	max          int
+	runes        []rune
+	pendingSpace bool
+	overflow     bool
+}
+
+func (truncated *memoryTextTruncator) appendBytes(value []byte) {
+	for len(value) > 0 {
+		r, size := utf8.DecodeRune(value)
+		if r == utf8.RuneError && size == 1 {
+			truncated.appendTextRune(utf8.RuneError)
+			value = value[1:]
+			for len(value) > 0 {
+				r, size = utf8.DecodeRune(value)
+				if r != utf8.RuneError || size != 1 {
+					break
+				}
+				value = value[1:]
+			}
+			continue
+		}
+		truncated.appendTextRune(r)
+		value = value[size:]
+	}
+}
+
+func (truncated *memoryTextTruncator) appendTextRune(r rune) {
+	if unicode.IsSpace(r) {
+		if len(truncated.runes) > 0 {
+			truncated.pendingSpace = true
+		}
+		return
+	}
+	if truncated.pendingSpace {
+		truncated.appendRune(' ')
+		truncated.pendingSpace = false
+	}
+	truncated.appendRune(r)
+}
+
+func (truncated *memoryTextTruncator) appendRune(r rune) {
+	if len(truncated.runes) >= truncated.max {
+		truncated.overflow = true
+		return
+	}
+	truncated.runes = append(truncated.runes, r)
+}
+
+func (truncated memoryTextTruncator) string() string {
+	if truncated.max <= 0 || len(truncated.runes) == 0 {
+		return ""
+	}
+	if truncated.overflow {
+		return string(truncated.runes[:truncated.max-1]) + "…"
+	}
+	return string(truncated.runes)
+}
+
+func truncateMemorySearchBytes(value []byte, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	truncated := memoryTextTruncator{max: max}
+	truncated.appendBytes(value)
+	return truncated.string()
 }
 
 func truncateMemoryText(value string, max int) string {

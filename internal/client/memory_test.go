@@ -12,7 +12,7 @@ import (
 	"unicode"
 )
 
-func writeProjectMemory(t *testing.T, repo, index string, files map[string]string) {
+func writeProjectMemory(t testing.TB, repo, index string, files map[string]string) {
 	t.Helper()
 	dir := filepath.Join(repo, ".openvibely", "memories")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -143,6 +143,14 @@ func TestMemorySearchPreservesResultsAndSnippets(t *testing.T) {
 			wantSnippets:  []string{"İstanbul has a MiXeD ÜNICODE Needle"},
 		},
 		{
+			name:          "turkish unicode body match",
+			query:         "istanbul",
+			wantFiles:     []string{"mixed.md"},
+			wantTitles:    []string{"Front Matter Title"},
+			wantSummaries: []string{"Front Matter Description"},
+			wantSnippets:  []string{"İstanbul has a MiXeD ÜNICODE Needle"},
+		},
+		{
 			name:          "indexed metadata match uses first paragraph fallback",
 			query:         "METADATA NEEDLE",
 			wantFiles:     []string{"fallback.md", "missing.md"},
@@ -186,6 +194,59 @@ func TestMemorySearchPreservesResultsAndSnippets(t *testing.T) {
 			if got := strings.Join(result.Warnings, "\n"); !strings.Contains(got, "front matter line 4 is malformed") ||
 				!strings.Contains(got, `memory file "missing.md" is missing`) {
 				t.Fatalf("warnings = %#v, want front matter and missing-file warnings", result.Warnings)
+			}
+		})
+	}
+}
+
+func TestMemorySearchKeepsMetadataAndBodyMatchModesDistinct(t *testing.T) {
+	repo := t.TempDir()
+	longLine := strings.Repeat("long unicode content ", 2_000) + "MiXeD ÜNICODE body needle"
+	writeProjectMemory(t, repo, `# Memory Index
+- [Metadata Only](metadata.md) - metadata needle
+- [Body Only](body.md) - unrelated
+- [Both](both.md) - combined needle
+- [Neither](neither.md) - unrelated
+- [Malformed](malformed.md) - unrelated
+`, map[string]string{
+		"metadata.md":  "---\ntitle: Metadata title\nsummary: Metadata summary\n---\n\nFirst metadata fallback paragraph.\nContinued metadata fallback text.\n",
+		"body.md":      "---\ntitle: Body title\ndescription: Body description\n---\n\n" + longLine + "\n",
+		"both.md":      "---\ntitle: Combined needle title\nsummary: Combined summary\n---\n\nCombined needle body line.\n",
+		"neither.md":   "---\ntitle: Neither\nsummary: Nothing useful\n---\n\nNo matching text.\n",
+		"malformed.md": "---\ntitle: Malformed\nthis is not front matter\n\nMalformed body remains searchable.\n",
+	})
+
+	client := &Client{}
+	project := Project{Path: repo}
+	for _, tt := range []struct {
+		query        string
+		wantFiles    []string
+		wantSnippets []string
+	}{
+		{query: "METADATA NEEDLE", wantFiles: []string{"metadata.md"}, wantSnippets: []string{"First metadata fallback paragraph. Continued metadata fallback text."}},
+		{query: "ünicode BODY needle", wantFiles: []string{"body.md"}, wantSnippets: []string{truncateMemoryText(longLine, 220)}},
+		{query: "combined needle", wantFiles: []string{"both.md"}, wantSnippets: []string{"Combined needle body line."}},
+		{query: "not found", wantFiles: []string{}, wantSnippets: []string{}},
+		{query: "malformed body", wantFiles: []string{"malformed.md"}, wantSnippets: []string{"Malformed body remains searchable."}},
+	} {
+		t.Run(tt.query, func(t *testing.T) {
+			result, err := client.SearchMemories(context.Background(), project, tt.query)
+			if err != nil {
+				t.Fatalf("SearchMemories: %v", err)
+			}
+			if len(result.Memories) != len(tt.wantFiles) {
+				t.Fatalf("matches = %#v, want files %#v", result.Memories, tt.wantFiles)
+			}
+			for i, memory := range result.Memories {
+				if memory.File != tt.wantFiles[i] || memory.Snippet != tt.wantSnippets[i] || memory.Body != "" {
+					t.Errorf("match %d = %#v, want file %q and snippet %q", i, memory, tt.wantFiles[i], tt.wantSnippets[i])
+				}
+				if len([]rune(memory.Snippet)) > 220 {
+					t.Errorf("match %d snippet has %d runes, want at most 220", i, len([]rune(memory.Snippet)))
+				}
+			}
+			if tt.query == "malformed body" && !strings.Contains(strings.Join(result.Warnings, "\n"), "unterminated") {
+				t.Fatalf("malformed-front-matter warnings = %#v", result.Warnings)
 			}
 		})
 	}
@@ -266,6 +327,71 @@ func BenchmarkMemorySearchText(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkSearchMemories(b *testing.B) {
+	fixtures := []struct {
+		name          string
+		documents     int
+		documentBytes int
+	}{
+		{name: "256KiB/10", documents: 10, documentBytes: 256 << 10},
+		{name: "256KiB/100", documents: 100, documentBytes: 256 << 10},
+		{name: "256KiB/500", documents: 500, documentBytes: 256 << 10},
+		{name: "16KiB/10", documents: 10, documentBytes: 16 << 10},
+	}
+	for _, fixture := range fixtures {
+		for _, match := range []struct {
+			name  string
+			query string
+			found bool
+		}{
+			{name: "no-match", query: "absent search term"},
+			{name: "final-document-match", query: "ünicode benchmark needle", found: true},
+		} {
+			b.Run(fixture.name+"/"+match.name, func(b *testing.B) {
+				repo := b.TempDir()
+				index, files := benchmarkMemorySearchFixture(fixture.documents, fixture.documentBytes, match.found)
+				writeProjectMemory(b, repo, index, files)
+				project := Project{Path: repo}
+				client := &Client{}
+
+				b.ReportAllocs()
+				b.SetBytes(int64(fixture.documents * fixture.documentBytes))
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					result, err := client.SearchMemories(context.Background(), project, match.query)
+					if err != nil {
+						b.Fatalf("SearchMemories: %v", err)
+					}
+					if got := len(result.Memories); (got == 1) != match.found {
+						b.Fatalf("matches = %d, want final match %t", got, match.found)
+					}
+					benchmarkMemorySearchFound = len(result.Memories) == 1
+				}
+			})
+		}
+	}
+}
+
+func benchmarkMemorySearchFixture(documents, documentBytes int, finalDocumentMatch bool) (string, map[string]string) {
+	var index strings.Builder
+	files := make(map[string]string, documents)
+	for i := 0; i < documents; i++ {
+		name := fmt.Sprintf("fixture-%03d.md", i)
+		prefix := fmt.Sprintf("---\ntitle: Fixture %03d Ünicode\nsummary: Representative MiXeD-case Ünicode fixture\n---\n\n# MiXeD Ünicode Fixture %03d\n\nMiXeD Ünicode long-line content ", i, i)
+		suffix := "\n"
+		if finalDocumentMatch && i == documents-1 {
+			suffix = "\nMiXeD ÜNICODE Benchmark Needle\n"
+		}
+		if remaining := documentBytes - len(prefix) - len(suffix); remaining < 0 {
+			panic("benchmark document size is too small")
+		} else {
+			files[name] = prefix + strings.Repeat("x", remaining) + suffix
+		}
+		fmt.Fprintf(&index, "- [Fixture %03d](%s) - benchmark corpus entry\n", i, name)
+	}
+	return index.String(), files
 }
 
 func TestMemoryEmptyAndMalformedStatesStayMachineReadable(t *testing.T) {
