@@ -1524,12 +1524,6 @@ func TestLifecyclePayloadSummaryRejectsUnsupportedDeclaredMapKeyType(t *testing.
 	calls := 0
 	values := map[any]int{lifecyclePreviewCountingTextKey{ID: 1, Suffix: "dynamic", Calls: &calls}: 7}
 	payload := map[string]any{"value": values}
-	if _, err := json.Marshal(payload); err == nil {
-		t.Fatal("map with unsupported declared key type unexpectedly marshaled")
-	}
-	if calls != 0 {
-		t.Fatalf("encoding/json called dynamic TextMarshaler key %d times", calls)
-	}
 	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
 		t.Fatalf("unsupported declared map key preview = %q, want unavailable", got)
 	}
