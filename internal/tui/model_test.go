@@ -1884,7 +1884,7 @@ func TestCompletedRequestHandlersShareErrorPolicyAndPreserveBehavior(t *testing.
 				next, cmd := m.Update(tc.message(m, transportErr))
 				m = next.(Model)
 				guidance := OfflineRecoveryMessage(m.client.BaseURL(), transportErr)
-				if cmd != nil || m.connected || !m.connChecked || m.connErr != transportErr.Error() || m.busy {
+				if cmd != nil || m.connected || !m.connChecked || m.connErr != safeConnectionDiagnostic(transportErr) || m.busy {
 					t.Fatalf("transport result state: connected=%t checked=%t connErr=%q busy=%t cmd=%v", m.connected, m.connChecked, m.connErr, m.busy, cmd)
 				}
 				if got := strings.Count(transcript(m), guidance); got != 1 {

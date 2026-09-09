@@ -3,14 +3,18 @@ package tui
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/openvibely/openvibely-tui/internal/client"
 )
 
@@ -275,5 +279,92 @@ func TestSetupREADMEParity(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("README setup guidance missing %q", want)
 		}
+	}
+}
+
+func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
+	const (
+		urlPassword = "url-password-must-not-appear"
+		queryToken  = "query-token-must-not-appear"
+		urlFragment = "fragment-must-not-appear"
+		apiToken    = "api-token-must-not-appear"
+	)
+	transport := fmt.Errorf("loading projects: %w", &url.Error{
+		Op:  "Get",
+		URL: "https://configured-user:" + urlPassword + "@remote.example:3001/api/projects?token=" + queryToken + "#" + urlFragment,
+		Err: &net.OpError{
+			Op:  "dial",
+			Net: "tcp",
+			Err: errors.New("connection refused\n\x1b[31minjected"),
+		},
+	})
+	if !client.IsTransportError(transport) {
+		t.Fatalf("wrapped transport error was not classified as transport: %v", transport)
+	}
+	reachable := fmt.Errorf("loading capacity: %w", &client.HTTPStatusError{
+		StatusCode: http.StatusServiceUnavailable,
+		Message:    "token=" + apiToken + "\n\x1b[31m" + strings.Repeat("backend diagnostic ", 40),
+	})
+
+	for _, tc := range []struct {
+		name   string
+		err    error
+		format func(string, error) string
+		want   string
+	}{
+		{name: "transport", err: transport, format: OfflineRecoveryMessage, want: "dial tcp"},
+		{name: "reachable", err: reachable, format: ReachableBackendErrorMessage, want: "server error (503)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			output := tc.format("https://display-user:"+urlPassword+"@remote.example:3001?token="+queryToken, tc.err)
+			detailsAt := strings.LastIndex(output, "\nDetails: ")
+			if detailsAt < 0 {
+				t.Fatalf("diagnostic omitted details:\n%s", output)
+			}
+			details := output[detailsAt+len("\nDetails: "):]
+			for _, secret := range []string{urlPassword, queryToken, urlFragment, apiToken} {
+				if strings.Contains(output, secret) {
+					t.Errorf("diagnostic leaked %q:\n%s", secret, output)
+				}
+			}
+			if strings.ContainsAny(details, "\n\r\x1b") {
+				t.Errorf("diagnostic contains terminal control or a line break: %q", details)
+			}
+			if width := lipgloss.Width(details); width > maxConnectionDiagnosticWidth {
+				t.Errorf("diagnostic is not bounded (%d cells): %q", width, details)
+			}
+			if !strings.Contains(details, tc.want) {
+				t.Errorf("diagnostic lost useful context %q: %q", tc.want, details)
+			}
+		})
+	}
+
+	c, err := client.New("https://display-user:" + urlPassword + "@remote.example:3001?token=" + queryToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		err       error
+		reachable bool
+	}{
+		{name: "transport", err: transport},
+		{name: "reachable", err: reachable, reachable: true},
+	} {
+		t.Run("status "+tc.name, func(t *testing.T) {
+			m := New(c)
+			m.connChecked = true
+			m.connErr = tc.err.Error()
+			m.connReachableError = tc.reachable
+			status := stripANSI(m.renderStatus())
+			for _, secret := range []string{urlPassword, queryToken, urlFragment, apiToken} {
+				if strings.Contains(status, secret) {
+					t.Errorf("status diagnostic leaked %q:\n%s", secret, status)
+				}
+			}
+			if strings.ContainsAny(status, "\x1b\r") {
+				t.Errorf("status retained terminal control text: %q", status)
+			}
+		})
 	}
 }

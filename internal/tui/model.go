@@ -1305,7 +1305,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !wasAuthRequired {
 				m.authRequired = false
 			}
-			m.connErr = msg.err.Error()
+			m.connErr = safeConnectionDiagnostic(msg.err)
 			m.connReachableError = client.IsReachableError(msg.err)
 		} else {
 			// Capacity proves that the backend is reachable, but it does not
@@ -1359,7 +1359,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.connected = false
 			m.connChecked = true
-			m.connErr = msg.err.Error()
+			m.connErr = safeConnectionDiagnostic(msg.err)
 			m.connReachableError = client.IsReachableError(msg.err)
 			m.append(entry{role: "error", text: "loading projects: " + connectionErrorMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
@@ -1880,7 +1880,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if client.IsLoginTransportError(msg.err) {
 				m.connected = false
 				m.connChecked = true
-				m.connErr = msg.err.Error()
+				m.connErr = safeConnectionDiagnostic(msg.err)
 				m.connReachableError = false
 				m.auth = nil
 				m.sseConnected = false
@@ -2969,7 +2969,7 @@ func (m *Model) handleTransportError(err error) bool {
 	wasOffline := !m.connected && m.connErr != ""
 	m.connected = false
 	m.connChecked = true
-	m.connErr = err.Error()
+	m.connErr = safeConnectionDiagnostic(err)
 	m.connReachableError = false
 	// Preserve known auth-required precedence while also retaining the network
 	// details needed to explain a temporary offline condition.
@@ -3012,7 +3012,7 @@ func ReachableBackendErrorMessage(baseURL string, err error) string {
 	b.WriteString("  - Use -server <url> or OPENVIBELY_SERVER_URL to verify the configured backend.")
 	if err != nil {
 		b.WriteString("\nDetails: ")
-		b.WriteString(err.Error())
+		b.WriteString(safeConnectionDiagnostic(err))
 	}
 	return b.String()
 }
@@ -3037,7 +3037,7 @@ func OfflineRecoveryMessage(baseURL string, err error) string {
 	b.WriteString("  - Setup never installs, starts, or changes anything automatically.")
 	if err != nil {
 		b.WriteString("\nDetails: ")
-		b.WriteString(err.Error())
+		b.WriteString(safeConnectionDiagnostic(err))
 	}
 	return b.String()
 }

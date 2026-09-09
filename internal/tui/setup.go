@@ -4,13 +4,22 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"runtime"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-const backendInstallationGuideURL = "https://docs.openvibely.ai/installation"
+const (
+	backendInstallationGuideURL  = "https://docs.openvibely.ai/installation"
+	maxConnectionDiagnosticWidth = 240
+)
+
+var (
+	connectionDiagnosticURL    = regexp.MustCompile(`https?://[^\s"'<>]+`)
+	connectionDiagnosticSecret = regexp.MustCompile(`(?i)\b(?:access[_-]?token|api[_-]?key|authorization|cookie|credential|password|secret|token)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|(?:bearer\s+)?[^\s,;]+)`)
+)
 
 // setupGuidance renders only instructions that the user may choose to run. It
 // intentionally performs no backend, project, authentication, process, or file
@@ -62,6 +71,29 @@ func serverURLDisplay(baseURL string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return sanitizeAutomationDetailText(u.String())
+}
+
+// safeConnectionDiagnostic returns one bounded terminal-safe line from a
+// transport or backend error. URLs and common credential assignments are
+// redacted because net/http and backend errors can include user-controlled
+// endpoint URLs or response text.
+func safeConnectionDiagnostic(err error) string {
+	if err == nil {
+		return ""
+	}
+	return safeConnectionDiagnosticText(err.Error())
+}
+
+func safeConnectionDiagnosticText(value string) string {
+	value = sanitizeAutomationDetailText(strings.TrimSpace(value))
+	value = connectionDiagnosticURL.ReplaceAllStringFunc(value, serverURLDisplay)
+	value = connectionDiagnosticSecret.ReplaceAllStringFunc(value, func(match string) string {
+		if separator := strings.IndexAny(match, "=:"); separator >= 0 {
+			return match[:separator+1] + "[redacted]"
+		}
+		return "[redacted]"
+	})
+	return truncate(strings.TrimSpace(value), maxConnectionDiagnosticWidth)
 }
 
 func isRemoteServerURL(baseURL string) bool {

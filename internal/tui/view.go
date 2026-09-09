@@ -234,11 +234,11 @@ func (m Model) renderStatus() string {
 		if m.connErr != "" {
 			if m.connReachableError {
 				row("network", statusErrStyle.Render("backend error (unhealthy)"))
-				row("error", m.connErr)
+				row("error", safeConnectionDiagnosticText(m.connErr))
 				row("try", "check backend logs, then run /status")
 			} else {
 				row("network", statusErrStyle.Render("offline"))
-				row("error", m.connErr)
+				row("error", safeConnectionDiagnosticText(m.connErr))
 				row("try", "start/check your local backend, then run /status")
 			}
 		}
@@ -253,7 +253,7 @@ func (m Model) renderStatus() string {
 		case connectionPhaseOffline:
 			row("server", statusErrStyle.Render("offline")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 			if m.connErr != "" {
-				row("error", m.connErr)
+				row("error", safeConnectionDiagnosticText(m.connErr))
 			}
 			if isRemoteServerURL(m.client.BaseURL()) {
 				row("try", "check or correct the configured remote server URL, then run /status")
@@ -267,7 +267,7 @@ func (m Model) renderStatus() string {
 		case connectionPhaseUnhealthy:
 			row("server", statusErrStyle.Render("backend error (unhealthy)")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 			if m.connErr != "" {
-				row("error", m.connErr)
+				row("error", safeConnectionDiagnosticText(m.connErr))
 			}
 			row("try", "backend responded but is unhealthy; check backend logs, then run /status")
 			row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
