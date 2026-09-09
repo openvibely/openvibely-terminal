@@ -61,7 +61,9 @@ func setupGuidance(platform, baseURL string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func serverURLDisplay(baseURL string) string {
+// ServerURLDisplay returns a terminal-safe configured server URL without
+// userinfo, query, fragment, or terminal control characters.
+func ServerURLDisplay(baseURL string) string {
 	raw := sanitizeAutomationDetailText(strings.TrimSpace(baseURL))
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
@@ -71,6 +73,10 @@ func serverURLDisplay(baseURL string) string {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return sanitizeAutomationDetailText(u.String())
+}
+
+func serverURLDisplay(baseURL string) string {
+	return ServerURLDisplay(baseURL)
 }
 
 // safeConnectionDiagnostic returns one bounded terminal-safe line from a

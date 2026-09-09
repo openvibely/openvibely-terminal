@@ -232,7 +232,7 @@ func loginWithConfiguredCredentials(c *client.Client, username, password string)
 				cause:   err,
 			}
 		}
-		return fmt.Errorf("authenticating with %s: %w", c.BaseURL(), err)
+		return fmt.Errorf("authenticating with %s: %w", tui.ServerURLDisplay(c.BaseURL()), err)
 	}
 	return nil
 }

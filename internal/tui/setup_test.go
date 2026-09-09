@@ -258,6 +258,16 @@ func TestAuthRequiredRemoteOfflineStatusPrioritizesURLCorrection(t *testing.T) {
 	if strings.Contains(status, "start/check your local backend") {
 		t.Fatalf("auth-required remote status suggests local startup:\n%s", status)
 	}
+
+	hint := m.hint()
+	remoteHintAction := strings.Index(hint, "check/correct -server or OPENVIBELY_SERVER_URL")
+	signInHint := strings.Index(hint, "sign-in required")
+	if remoteHintAction < 0 || signInHint < 0 {
+		t.Fatalf("auth-required remote hint omitted recovery guidance: %q", hint)
+	}
+	if remoteHintAction > signInHint {
+		t.Fatalf("auth-required remote hint does not prioritize URL correction: %q", hint)
+	}
 }
 
 func TestSetupGuidanceIsTerminalSafe(t *testing.T) {
@@ -447,7 +457,8 @@ func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 			m.connChecked = true
 			m.connErr = tc.err.Error()
 			m.connReachableError = tc.reachable
-			status := stripANSI(m.renderStatus())
+			rawStatus := m.renderStatus()
+			status := stripANSI(rawStatus)
 			for _, secret := range []string{urlPassword, queryToken, urlFragment, apiToken} {
 				if strings.Contains(status, secret) {
 					t.Errorf("status diagnostic leaked %q:\n%s", secret, status)
@@ -455,6 +466,11 @@ func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 			}
 			if strings.ContainsAny(status, "\x1b\r") {
 				t.Errorf("status retained terminal control text: %q", status)
+			}
+			for _, unsafe := range []string{"\x1b[31m", "\n\x1b[31minjected"} {
+				if strings.Contains(rawStatus, unsafe) {
+					t.Errorf("raw status retained injected diagnostic control text %q: %q", unsafe, rawStatus)
+				}
 			}
 		})
 	}

@@ -199,6 +199,9 @@ func (m Model) hint() string {
 	}
 	phase := m.connectionPhase()
 	if m.authRequired {
+		if m.connErr != "" && !m.connReachableError && isRemoteServerURL(m.client.BaseURL()) {
+			return "offline remote server: check/correct -server or OPENVIBELY_SERVER_URL · /setup · /status · sign-in required: /login"
+		}
 		return "sign-in required: /login · help works without backend"
 	}
 	switch phase {
