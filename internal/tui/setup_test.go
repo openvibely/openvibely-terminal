@@ -385,10 +385,12 @@ func TestSetupREADMEParity(t *testing.T) {
 
 func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 	const (
-		urlPassword = "url-password-must-not-appear"
-		queryToken  = "query-token-must-not-appear"
-		urlFragment = "fragment-must-not-appear"
-		apiToken    = "api-token-must-not-appear"
+		urlPassword      = "url-password-must-not-appear"
+		queryToken       = "query-token-must-not-appear"
+		urlFragment      = "fragment-must-not-appear"
+		basicCredential  = "basic-credential-must-not-appear"
+		bearerCredential = "bearer-credential-must-not-appear"
+		apiToken         = "api-token-must-not-appear"
 	)
 	transport := fmt.Errorf("loading projects: %w", &url.Error{
 		Op:  "Get",
@@ -404,7 +406,9 @@ func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 	}
 	reachable := fmt.Errorf("loading capacity: %w", &client.HTTPStatusError{
 		StatusCode: http.StatusServiceUnavailable,
-		Message:    "backend endpoint hTtPs://backend-user:" + urlPassword + "@remote.example:3001/health?diagnostic=" + queryToken + "#" + urlFragment + " token=" + apiToken + "\n\x1b[31m" + strings.Repeat("backend diagnostic ", 40),
+		Message: "backend endpoint hTtPs://backend-user:" + urlPassword + "@remote.example:3001/health?diagnostic=" + queryToken + "#" + urlFragment +
+			" Authorization: Basic " + basicCredential + " Authorization: Bearer " + bearerCredential + " token=" + apiToken +
+			"\n\x1b[31m" + strings.Repeat("backend diagnostic ", 40),
 	})
 
 	for _, tc := range []struct {
@@ -423,7 +427,7 @@ func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 				t.Fatalf("diagnostic omitted details:\n%s", output)
 			}
 			details := output[detailsAt+len("\nDetails: "):]
-			for _, secret := range []string{urlPassword, queryToken, urlFragment, apiToken} {
+			for _, secret := range []string{urlPassword, queryToken, urlFragment, basicCredential, bearerCredential, apiToken} {
 				if strings.Contains(output, secret) {
 					t.Errorf("diagnostic leaked %q:\n%s", secret, output)
 				}
@@ -459,9 +463,9 @@ func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {
 			m.connReachableError = tc.reachable
 			rawStatus := m.renderStatus()
 			status := stripANSI(rawStatus)
-			for _, secret := range []string{urlPassword, queryToken, urlFragment, apiToken} {
-				if strings.Contains(status, secret) {
-					t.Errorf("status diagnostic leaked %q:\n%s", secret, status)
+			for _, secret := range []string{urlPassword, queryToken, urlFragment, basicCredential, bearerCredential, apiToken} {
+				if strings.Contains(rawStatus, secret) {
+					t.Errorf("raw status diagnostic leaked %q:\n%s", secret, rawStatus)
 				}
 			}
 			if strings.ContainsAny(status, "\x1b\r") {

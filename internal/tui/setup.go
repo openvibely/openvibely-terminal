@@ -18,7 +18,7 @@ const (
 
 var (
 	connectionDiagnosticURL    = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
-	connectionDiagnosticSecret = regexp.MustCompile(`(?i)\b(?:access[_-]?token|api[_-]?key|authorization|cookie|credential|password|secret|token)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|(?:bearer\s+)?[^\s,;]+)`)
+	connectionDiagnosticSecret = regexp.MustCompile(`(?i)\b(?:access[_-]?token|api[_-]?key|authorization|cookie|credential|password|secret|token)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic)\s+)?[^\s,;]+)`)
 )
 
 // setupGuidance renders only instructions that the user may choose to run. It
