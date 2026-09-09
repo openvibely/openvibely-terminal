@@ -236,6 +236,30 @@ func TestOfflineRemoteStatusPrioritizesURLCorrection(t *testing.T) {
 	}
 }
 
+func TestAuthRequiredRemoteOfflineStatusPrioritizesURLCorrection(t *testing.T) {
+	c, err := client.New("https://ops.example:3001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.authRequired = true
+	m.connChecked = true
+	m.connErr = "dial refused"
+	status := stripANSI(m.renderStatus())
+
+	remoteAction := strings.Index(status, "check or correct the configured remote server URL")
+	loginAction := strings.Index(status, "use /login to enter credentials")
+	if remoteAction < 0 || loginAction < 0 {
+		t.Fatalf("auth-required remote status omitted recovery guidance:\n%s", status)
+	}
+	if remoteAction > loginAction {
+		t.Fatalf("auth-required remote status does not prioritize URL correction:\n%s", status)
+	}
+	if strings.Contains(status, "start/check your local backend") {
+		t.Fatalf("auth-required remote status suggests local startup:\n%s", status)
+	}
+}
+
 func TestSetupGuidanceIsTerminalSafe(t *testing.T) {
 	const secret = "very-secret-password"
 	baseURL := "https://user:" + secret + "@remote.example:3001/path?token=also-secret#fragment\x1b[31m"
@@ -265,7 +289,7 @@ func TestConfiguredMixedCaseServerURLsRemainUsableAndTerminalSafe(t *testing.T) 
 	}{
 		{
 			name:     "server flag uppercase scheme",
-			server:   "HTTPS://flag-user:flag-password-must-not-appear@remote.example:3001/base?token=flag-token-must-not-appear#flag-fragment-must-not-appear\x1b[31m",
+			server:   "HTTPS://flag-user:flag-password-must-not-appear@remote.example:3001/base?token=flag-token-must-not-appear#flag-fragment-must-not-appear\x1b[8m",
 			username: "flag-user",
 			password: "flag-password-must-not-appear",
 			token:    "flag-token-must-not-appear",
@@ -273,7 +297,7 @@ func TestConfiguredMixedCaseServerURLsRemainUsableAndTerminalSafe(t *testing.T) 
 		},
 		{
 			name:     "environment mixed case scheme",
-			server:   "hTtPs://environment-user:environment-password-must-not-appear@remote.example:3001/base?token=environment-token-must-not-appear#environment-fragment-must-not-appear\x1b[31m",
+			server:   "hTtPs://environment-user:environment-password-must-not-appear@remote.example:3001/base?token=environment-token-must-not-appear#environment-fragment-must-not-appear\x1b[8m",
 			username: "environment-user",
 			password: "environment-password-must-not-appear",
 			token:    "environment-token-must-not-appear",
@@ -292,11 +316,12 @@ func TestConfiguredMixedCaseServerURLsRemainUsableAndTerminalSafe(t *testing.T) 
 			m := New(c)
 			m.connChecked = true
 			m.connErr = "dial refused"
+			rawStatus := m.renderStatus()
 			outputs := []string{
 				m.log[0].text,
 				setupGuidance("linux", c.BaseURL()),
 				OfflineRecoveryMessage(c.BaseURL(), errors.New("dial refused")),
-				stripANSI(m.renderStatus()),
+				stripANSI(rawStatus),
 			}
 			for _, output := range outputs {
 				for _, secret := range []string{tc.username, tc.password, tc.token, tc.fragment} {
@@ -310,6 +335,11 @@ func TestConfiguredMixedCaseServerURLsRemainUsableAndTerminalSafe(t *testing.T) 
 				if !strings.Contains(output, "remote.example:3001/base") {
 					t.Errorf("configured server display lost its safe endpoint: %s", output)
 				}
+			}
+			// /status intentionally contains renderer-owned ANSI styles. Check the
+			// exact injected sequence without stripping that raw output first.
+			if strings.Contains(rawStatus, "\x1b[8m") {
+				t.Errorf("raw status retained injected configured-server control sequence: %q", rawStatus)
 			}
 		})
 	}

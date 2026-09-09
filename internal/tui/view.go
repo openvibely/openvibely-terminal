@@ -239,7 +239,15 @@ func (m Model) renderStatus() string {
 			} else {
 				row("network", statusErrStyle.Render("offline"))
 				row("error", safeConnectionDiagnosticText(m.connErr))
-				row("try", "start/check your local backend, then run /status")
+				if isRemoteServerURL(m.client.BaseURL()) {
+					row("try", "check or correct the configured remote server URL, then run /status")
+					row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+					row("try", "run /setup or openvibely-tui setup for read-only connection guidance")
+				} else {
+					row("try", "run /setup or openvibely-tui setup for read-only setup steps")
+					row("try", "start/check your local backend, then run /status")
+					row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+				}
 			}
 		}
 		row("try", "use /login to enter credentials")
