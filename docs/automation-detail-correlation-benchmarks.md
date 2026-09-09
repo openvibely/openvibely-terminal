@@ -18,16 +18,17 @@ Environment: `go version go1.26.4 darwin/arm64`, Apple M5 Pro.
 Baseline parser revision: `0de87ecffa41a4f806a370ee061f74f6aa59a335`
 (`Rank project edit separator candidates canonically`). The baseline was
 measured with the benchmark fixture added but before the correlation-index
-implementation. Optimized measurements are from this worktree after the
-indexed parser changes.
+implementation. Optimized measurements were rerun after the EqualFold audit
+fix at parser revision `d5610fce922a2bdabb9512126a9fe85294f581ef`
+(`Preserve EqualFold automation correlation`).
 
 | Records | Baseline median ns/op | Optimized median ns/op | Time change | Baseline median B/op | Optimized median B/op | B/op change |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 10 | 205,804 | 198,853 | -3.4% | 155,420 | 169,348 | +9.0% |
-| 100 | 3,569,546 | 1,885,642 | -47.2% | 1,922,568 | 1,573,910 | -18.1% |
-| 500 | 49,907,707 | 10,409,537 | -79.1% | 19,065,338 | 8,124,558 | -57.4% |
+| 10 | 205,804 | 177,468 | -13.8% | 155,420 | 168,722 | +8.6% |
+| 100 | 3,569,546 | 1,852,353 | -48.1% | 1,922,568 | 1,573,829 | -18.1% |
+| 500 | 49,907,707 | 9,349,060 | -81.3% | 19,065,338 | 8,119,314 | -57.4% |
 
-The optimized unique sparse 100-to-500 time scaling is `5.52x`. At 500
+The optimized unique sparse 100-to-500 time scaling is `5.05x`. At 500
 records, both the required median time reduction of at least 50% and allocated
 bytes reduction of at least 30% are met. The 10-record time and allocation
 changes remain within the allowed 10% regression cap.
