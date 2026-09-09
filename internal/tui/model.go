@@ -1099,6 +1099,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case alertDeleteTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case threadOpenedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1557,6 +1561,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return confirmWebhookMutation(m, msg.projectID, msg.action, msg.webhook)
+
+	case alertDeleteTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		projectID := msg.projectID
+		if projectID == "" {
+			projectID = m.selectedID
+		}
+		alert := msg.alert
+		cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
+			alerts, err := m.client.DeleteAlertAndList(ctx, alert.ID, projectID)
+			if err != nil {
+				return "", err
+			}
+			return alertDeleteOutput("delete: "+alert.Title, alerts)
+		})
+		return confirmOr(m,
+			fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", firstNonEmpty(alert.Title, alert.ID)),
+			fmt.Sprintf("use --force to confirm deletion of alert %q", firstNonEmpty(alert.Title, alert.ID)),
+			cmd)
 
 	case attachmentDeleteTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {

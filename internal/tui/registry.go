@@ -1740,6 +1740,19 @@ func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error
 		func(a client.Alert) string { return a.Title + " " + a.Text })
 }
 
+func resolveAlertDeleteTarget(c *client.Client, projectID, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		alerts, err := c.ListAlerts(ctx, projectID)
+		if err != nil {
+			return alertDeleteTargetMsg{projectID: projectID, err: err}
+		}
+		alert, err := matchAlertActionRef(alerts, ref)
+		return alertDeleteTargetMsg{projectID: projectID, alert: alert, err: err}
+	}
+}
+
 func alertsCommand() command {
 	actions := []string{"list", "show", "read", "approve", "reject", "dismiss", "delete", "read-all", "clear"}
 	return command{
@@ -1912,6 +1925,9 @@ func alertsCommand() command {
 								}
 								return items, nil
 							}))
+				}
+				if action == "delete" && !cliMode {
+					return m, resolveAlertDeleteTarget(c, pid, ref)
 				}
 				cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
 					alerts, err := c.ListAlerts(ctx, pid)

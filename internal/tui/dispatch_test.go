@@ -1636,6 +1636,106 @@ func TestAlertActionResolutionFailuresNeverMutate(t *testing.T) {
 	}
 }
 
+func TestAlertsDeleteResolvesTypedTargetBeforeConfirmation(t *testing.T) {
+	const originalAlert = `<div data-alert-id="a-original" data-alert-scroll-anchor="a-original"><p class="font-semibold">Deploy original</p></div>`
+	const replacementAlert = `<div data-alert-id="a-rebound" data-alert-scroll-anchor="a-rebound"><p class="font-semibold">Deploy replacement</p></div>`
+	const duplicateAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><p class="font-semibold">Duplicate</p></div>
+		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2"><p class="font-semibold">Duplicate</p></div>`
+	const partialAlert = `<div data-alert-id="a-partial" data-alert-scroll-anchor="a-partial"><p class="font-semibold">Deploy production</p></div>`
+
+	type testServer struct {
+		m            Model
+		setList      func(string)
+		listRequests *int
+		deletes      *[]string
+	}
+	newTestServer := func(t *testing.T, initialList string) testServer {
+		t.Helper()
+		list := initialList
+		listRequests := 0
+		deletes := []string(nil)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+				listRequests++
+				_, _ = io.WriteString(w, list)
+			case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/alerts/"):
+				deletes = append(deletes, r.URL.Path)
+				_, _ = io.WriteString(w, `<div></div>`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		m.selectedID, m.selectedName = "p1", "demo"
+		return testServer{
+			m:            m,
+			setList:      func(next string) { list = next },
+			listRequests: &listRequests,
+			deletes:      &deletes,
+		}
+	}
+
+	t.Run("unknown does not prompt", func(t *testing.T) {
+		ts := newTestServer(t, originalAlert)
+		m := runLine(t, ts.m, "/alerts delete missing")
+		if m.pendingConfirmation != nil || *ts.listRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("unknown delete state: pending=%v lists=%d deletes=%v", m.pendingConfirmation != nil, *ts.listRequests, *ts.deletes)
+		}
+		if out := stripANSI(transcript(m)); !strings.Contains(out, `nothing matches "missing"`) {
+			t.Fatalf("unknown delete did not report resolution error:\n%s", out)
+		}
+	})
+
+	t.Run("ambiguous does not prompt", func(t *testing.T) {
+		ts := newTestServer(t, duplicateAlerts)
+		m := runLine(t, ts.m, "/alerts delete Duplicate")
+		if m.pendingConfirmation != nil || *ts.listRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("ambiguous delete state: pending=%v lists=%d deletes=%v", m.pendingConfirmation != nil, *ts.listRequests, *ts.deletes)
+		}
+		if out := stripANSI(transcript(m)); !strings.Contains(out, `"Duplicate" is ambiguous:`) {
+			t.Fatalf("ambiguous delete did not report resolution error:\n%s", out)
+		}
+	})
+
+	t.Run("unique partial uses canonical prompt", func(t *testing.T) {
+		ts := newTestServer(t, partialAlert)
+		m := runLine(t, ts.m, "/alerts delete product")
+		if m.pendingConfirmation == nil || *ts.listRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("partial delete state: pending=%v lists=%d deletes=%v", m.pendingConfirmation != nil, *ts.listRequests, *ts.deletes)
+		}
+		if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `"Deploy production"`) {
+			t.Fatalf("partial delete prompt = %q, want canonical title", prompt)
+		}
+		m = runLine(t, m, "no")
+		if m.pendingConfirmation != nil || *ts.listRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("cancelled partial delete state: pending=%v lists=%d deletes=%v", m.pendingConfirmation != nil, *ts.listRequests, *ts.deletes)
+		}
+	})
+
+	t.Run("confirmation captures the resolved ID", func(t *testing.T) {
+		ts := newTestServer(t, originalAlert)
+		m := runLine(t, ts.m, "/alerts delete deploy")
+		if m.pendingConfirmation == nil || *ts.listRequests != 1 {
+			t.Fatalf("original alert was not resolved before confirmation: pending=%v lists=%d", m.pendingConfirmation != nil, *ts.listRequests)
+		}
+		if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `"Deploy original"`) {
+			t.Fatalf("confirmation prompt = %q, want original canonical title", prompt)
+		}
+		ts.setList(replacementAlert)
+		m = runLine(t, m, "yes")
+		if *ts.listRequests != 1 || len(*ts.deletes) != 1 || (*ts.deletes)[0] != "/alerts/a-original" {
+			t.Fatalf("confirmed delete rebound after list changed: lists=%d deletes=%v", *ts.listRequests, *ts.deletes)
+		}
+	})
+}
+
 func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
 	const initialAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="build failed"><p class="font-semibold">Build failed</p></div>
 		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="duplicate one"><p class="font-semibold">Duplicate</p></div>
@@ -1670,16 +1770,16 @@ func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
 	m.selectedID, m.selectedName = "p1", "demo"
 
 	m = runLine(t, m, "/alerts delete a-1")
-	if m.pendingConfirmation == nil || gets != 0 || deletes != 0 {
-		t.Fatalf("delete was not parked before confirmation: pending=%v gets=%d deletes=%d", m.pendingConfirmation != nil, gets, deletes)
+	if m.pendingConfirmation == nil || gets != 1 || deletes != 0 {
+		t.Fatalf("delete was not resolved before confirmation: pending=%v gets=%d deletes=%d", m.pendingConfirmation != nil, gets, deletes)
 	}
 	m = runLine(t, m, "no")
-	if m.pendingConfirmation != nil || gets != 0 || deletes != 0 {
+	if m.pendingConfirmation != nil || gets != 1 || deletes != 0 {
 		t.Fatalf("cancelled delete performed work: pending=%v gets=%d deletes=%d", m.pendingConfirmation != nil, gets, deletes)
 	}
 
-	m = confirmDestructive(t, m, "/alerts delete missing")
-	m = confirmDestructive(t, m, "/alerts delete Duplicate")
+	m = runLine(t, m, "/alerts delete missing")
+	m = runLine(t, m, "/alerts delete Duplicate")
 	if deletes != 0 {
 		t.Fatalf("missing or ambiguous references deleted an alert: deletes=%d", deletes)
 	}

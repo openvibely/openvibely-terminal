@@ -161,6 +161,16 @@ type channelWizardStartMsg struct {
 	err               error
 }
 
+// alertDeleteTargetMsg carries the project-scoped alert resolved before an
+// interactive delete confirmation is shown.
+type alertDeleteTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	alert             client.Alert
+	err               error
+}
+
 // attachmentDeleteTargetMsg carries the project-scoped task and attachment
 // resolved before an interactive delete confirmation is shown.
 type attachmentDeleteTargetMsg struct {
