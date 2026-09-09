@@ -254,6 +254,67 @@ func TestSetupGuidanceIsTerminalSafe(t *testing.T) {
 	}
 }
 
+func TestConfiguredMixedCaseServerURLsRemainUsableAndTerminalSafe(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		server   string
+		username string
+		password string
+		token    string
+		fragment string
+	}{
+		{
+			name:     "server flag uppercase scheme",
+			server:   "HTTPS://flag-user:flag-password-must-not-appear@remote.example:3001/base?token=flag-token-must-not-appear#flag-fragment-must-not-appear\x1b[31m",
+			username: "flag-user",
+			password: "flag-password-must-not-appear",
+			token:    "flag-token-must-not-appear",
+			fragment: "flag-fragment-must-not-appear",
+		},
+		{
+			name:     "environment mixed case scheme",
+			server:   "hTtPs://environment-user:environment-password-must-not-appear@remote.example:3001/base?token=environment-token-must-not-appear#environment-fragment-must-not-appear\x1b[31m",
+			username: "environment-user",
+			password: "environment-password-must-not-appear",
+			token:    "environment-token-must-not-appear",
+			fragment: "environment-fragment-must-not-appear",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := client.New(tc.server)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(c.BaseURL(), "https://") {
+				t.Fatalf("BaseURL did not preserve an HTTPS endpoint: %q", c.BaseURL())
+			}
+
+			m := New(c)
+			m.connChecked = true
+			m.connErr = "dial refused"
+			outputs := []string{
+				m.log[0].text,
+				setupGuidance("linux", c.BaseURL()),
+				OfflineRecoveryMessage(c.BaseURL(), errors.New("dial refused")),
+				stripANSI(m.renderStatus()),
+			}
+			for _, output := range outputs {
+				for _, secret := range []string{tc.username, tc.password, tc.token, tc.fragment} {
+					if strings.Contains(output, secret) {
+						t.Errorf("configured server value leaked %q:\n%s", secret, output)
+					}
+				}
+				if strings.ContainsAny(output, "\x1b\r") {
+					t.Errorf("configured server value retained terminal control text: %q", output)
+				}
+				if !strings.Contains(output, "remote.example:3001/base") {
+					t.Errorf("configured server display lost its safe endpoint: %s", output)
+				}
+			}
+		})
+	}
+}
+
 func TestSetupREADMEParity(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {

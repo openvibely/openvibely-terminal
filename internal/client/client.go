@@ -156,7 +156,13 @@ func New(baseURL string) (*Client, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("server URL is required")
 	}
-	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+	lowerBaseURL := strings.ToLower(baseURL)
+	switch {
+	case strings.HasPrefix(lowerBaseURL, "http://"):
+		baseURL = "http://" + baseURL[len("http://"):]
+	case strings.HasPrefix(lowerBaseURL, "https://"):
+		baseURL = "https://" + baseURL[len("https://"):]
+	default:
 		baseURL = "http://" + baseURL
 	}
 	jar, err := cookiejar.New(nil)

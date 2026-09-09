@@ -37,6 +37,29 @@ func TestNewNormalizesURL(t *testing.T) {
 	}
 }
 
+func TestNewNormalizesMixedCaseHTTPSSchemeForRequests(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/api/projects"; got != want {
+			t.Errorf("path = %q, want %q", got, want)
+		}
+		_, _ = w.Write([]byte(`{"projects":[]}`))
+	}))
+	defer srv.Close()
+
+	mixedCaseURL := "hTtPs" + strings.TrimPrefix(srv.URL, "https")
+	c, err := New(mixedCaseURL)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.http = srv.Client()
+	if got, want := c.BaseURL(), srv.URL; got != want {
+		t.Fatalf("BaseURL = %q, want %q", got, want)
+	}
+	if _, err := c.ListProjects(context.Background()); err != nil {
+		t.Fatalf("ListProjects through mixed-case HTTPS server URL: %v", err)
+	}
+}
+
 func TestListProjects(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/projects" {
