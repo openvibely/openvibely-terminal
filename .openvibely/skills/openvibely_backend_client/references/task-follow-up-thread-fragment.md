@@ -1,0 +1,11 @@
+# Task Follow-Up Thread Fragment Contract
+
+Use this reference when implementing or auditing a client method used by `/tasks open` or another task follow-up view.
+
+- Treat the follow-up thread as a project-scoped HTML/HTMX resource, not a full task-detail read. Request the dedicated `GET /tasks/<taskID>/thread?project_id=<selectedID>` fragment and preserve the selected project in the client contract.
+- Do not reuse a full-detail loader when the caller needs only the thread: full detail may fan out to changes and lifecycle endpoints and can expose unrelated model or form controls. Add request-count coverage proving task-thread entry performs only the board/task lookup required for identity and the thread fragment read.
+- Parse/render the fragment in the client layer with `x/net/html`. Preserve the repository's established block and line structure, while skipping entire interactive `form`/`button` controls and their descendants so model selectors and mutation controls cannot leak into terminal follow-up output.
+- Keep an empty successful thread distinct from a failed or unavailable fragment. Preserve useful partial text and existing authentication/transport error classification when parsing or fetching fails.
+- Pair the route/parser test with a non-default-project fixture that asserts the exact `project_id` query and with a regression containing unrelated model controls in the returned HTML.
+- A successful swarm-parent `POST /tasks/<taskID>/thread` may return `TaskThreadQueuedFollowupResponse` without either `data-exec-id` or `data-thread-input-id`. Treat that response as an intentional accepted, non-streamable orchestration outcome, not as a malformed or empty-ack transport failure. Preserve a non-nil acceptance result with both identities empty so the caller can report acceptance without inventing an execution or queue identity.
+- Keep identity-less swarm-parent acceptance separate from ordinary queued promotion. Do not poll `/api/chat/message/<taskID>`, open `/events/chat/<taskID>`, wait for a missed `/events/live` promotion, or retry the already-successful mutation unless the current backend exposes a documented recovery identity. Add a contract fixture asserting one scoped POST, no speculative status/stream requests, and the explicit accepted outcome.

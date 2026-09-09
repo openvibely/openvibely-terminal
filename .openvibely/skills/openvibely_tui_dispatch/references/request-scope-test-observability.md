@@ -1,0 +1,3 @@
+# Request-Scope Test Observability
+
+When asserting that a TUI or CLI request is global or carries a selected-project query, inspect the recorder's full-URI collection (for example `sawQuery` or an exact URL snapshot), not only its summarized call list. The call recorder may intentionally strip `?project_id=...` when recording method and path, so checks such as `strings.Contains(rec.all(), "project_id=")` cannot detect an accidental scoped request. Pair global-command tests with an assertion that no full URI contains `project_id`, and pair project-scoped tests with an exact query assertion; keep mutation/root-path assertions separate from query-scope assertions.

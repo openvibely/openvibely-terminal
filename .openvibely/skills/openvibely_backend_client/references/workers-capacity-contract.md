@@ -1,0 +1,10 @@
+# Worker Capacity Contract And Parity
+
+Use this reference when a TUI or CLI renders worker-capacity data or introduces a `/works`/`/workers` compatibility surface.
+
+- Inspect the current backend worker handlers, capacity payloads, and web templates before coding. If the backend has a Workers presentation but no separate `/works` resource, treat `/works show` as a client-side compatibility alias rather than inventing a new backend endpoint or unrelated work-item resource.
+- Model the capacity response as structured global, project, and model records at the client boundary. Do not use whole-page text extraction as the primary data source when the backend exposes the fields needed for a table; preserve backend project/model order and the global-first presentation contract.
+- Keep the terminal contract narrower than backend payloads: expose only the web-parity capacity columns and stable status data, and omit internal capacity fields that are not displayed. Use explicit JSON tags and non-nil empty slices so machine output remains stable (`workers`, `models`, and `warnings`, with `[]` rather than `null` when empty).
+- Treat independent capacity sections as best-effort only after preserving the primary global result. A project/model transport or decode error should become a warning while the global result remains usable; a global capacity failure should remain a command error. Verify these semantics against current backend routes and payloads rather than assuming all endpoints have identical failure behavior.
+- Keep the client repository boundary strict when backend changes are out of scope: backend source/templates may be inspected read-only for parity, but do not add a backend route merely to support the alias or terminal table.
+- Validate the integration with request-count/order tests for independent reads, representative backend fixtures, JSON marshal assertions for lowercase/snake_case keys and empty collections, and a fresh shipped-binary smoke test for plain and JSON output when runtime behavior changes.

@@ -1,0 +1,11 @@
+# Per-Execution Chat Streaming Contract
+
+Use this reference when a client or TUI must display asynchronous chat output before terminal completion.
+
+- Verify this contract against the current backend emitter before coding. The per-execution stream is `GET /events/chat/<exec_id>?offset=<UTF-8-byte-count>`, distinct from the general `GET /events/live` stream. It emits durable output chunks and terminal `done` or `error` frames for that execution; parse the actual SSE framing and payloads rather than treating live task events as token output.
+- The `offset` is the number of UTF-8 bytes already incorporated into the client transcript, not a rune count, Unicode code-point count, or display-column count. Reconnect with the exact byte offset so replay is durable and does not duplicate multibyte or previously rendered output.
+- Keep status polling as the terminal source of truth. A stream `done` or `error` frame should trigger an immediate status refresh, while normal polling remains active for disconnects, missed frames, and queued execution promotion. Do not declare completion from a stream frame alone when the status endpoint is authoritative.
+- Status responses in `processing` may contain durable partial output. Use that output only as a truthful recovery/fallback path while the dedicated stream is disconnected or has not started; reconcile it with the current byte offset and never synthesize missing text.
+- Queued chat submission and execution streaming are separate phases. Retain the accepted queue/message ID, begin the per-execution stream only after an authoritative status response supplies a promoted execution ID, and preserve the alias through terminal polling and SSE correlation.
+- Keep stream transport cancellation, reconnect backoff, response-body closure, and parser errors scoped to the owning execution. A stream failure must preserve already received output and leave polling able to finish the turn.
+- Add contract tests for chunk, `done`, and `error` frames; UTF-8 offset reconnect; processing-status partial-output fallback; queue-to-execution promotion; and status reconciliation after terminal frames. Keep the backend repository read-only when only client behavior is in scope.
