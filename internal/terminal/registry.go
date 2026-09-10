@@ -2022,6 +2022,49 @@ func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd
 		}))
 }
 
+// isCanonicalSkillHandle accepts exactly the backend's standalone-skill handle
+// grammar. These values can use the selected project's direct detail endpoint
+// before falling back to catalog matching for global or missing references.
+func isCanonicalSkillHandle(value string) bool {
+	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		isAlphaNum := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9'
+		if (i == 0 && !isAlphaNum) || (!isAlphaNum && ch != '_' && ch != '-' && ch != '.') {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveSkillForShow finds summary metadata when matching is necessary, then
+// reads only the selected instruction document. A canonical handle first uses
+// the selected project's scoped detail route, avoiding a catalog scan.
+func resolveSkillForShow(ctx context.Context, c *client.Client, projectID, ref string) (client.Skill, error) {
+	if isCanonicalSkillHandle(ref) {
+		skill, err := c.GetSkillDetail(ctx, projectID, ref, "project")
+		if err == nil {
+			return skill, nil
+		}
+		if !client.IsNotFoundError(err) {
+			return client.Skill{}, err
+		}
+	}
+	skills, err := c.ListSkills(ctx, projectID)
+	if err != nil {
+		return client.Skill{}, err
+	}
+	skill, err := matchRef(skills, ref,
+		func(s client.Skill) string { return s.Handle },
+		func(s client.Skill) string { return s.Name })
+	if err != nil {
+		return client.Skill{}, err
+	}
+	return c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
+}
+
 func skillsCommand() command {
 	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always", "load"}
 	return command{
@@ -2060,12 +2103,16 @@ func skillsCommand() command {
 			switch action {
 			case "", "list":
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
+					if jsonMode {
+						skills, err := c.ListSkillsWithContent(ctx, pid)
+						if err != nil {
+							return "", err
+						}
+						return marshalJSON(skills)
+					}
 					skills, err := c.ListSkills(ctx, pid)
 					if err != nil {
 						return "", err
-					}
-					if jsonMode {
-						return marshalJSON(skills)
 					}
 					return renderSkills(skills, ref), nil
 				})
@@ -2074,13 +2121,7 @@ func skillsCommand() command {
 					return skillSelector(m, "usage: /skills show <skill>", "skills show", false)
 				}
 				return m, run("Skill", cmdTimeout, func(ctx context.Context) (string, error) {
-					skills, err := c.ListSkills(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					s, err := matchRef(skills, ref,
-						func(s client.Skill) string { return s.Handle },
-						func(s client.Skill) string { return s.Name })
+					s, err := resolveSkillForShow(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}

@@ -463,7 +463,9 @@ type Skill struct {
 	AlwaysUse   bool   `json:"always_use"`
 }
 
-// ListSkills scrapes the skills screen.
+// ListSkills scrapes metadata-only cards from the skills screen. Skill bodies are
+// deliberately deferred to GetSkillDetail so ordinary list and picker reads do
+// not retain instruction documents.
 func (c *Client) ListSkills(ctx context.Context, projectID string) ([]Skill, error) {
 	pages, err := c.getCardPages(ctx, "/skills"+query("project_id", projectID))
 	if err != nil {
@@ -486,12 +488,43 @@ func (c *Client) ListSkills(ctx context.Context, projectID string) ([]Skill, err
 			Description: card.Get("skill-description"),
 			Scope:       card.Get("skill-scope"),
 			Source:      card.Get("skill-source"),
-			Content:     card.Get("skill-content"),
 			Enabled:     card.Bool("skill-enabled"),
 			AlwaysUse:   card.Bool("skill-always-use"),
 		})
 	}
 	return out, nil
+}
+
+// GetSkillDetail fetches one selected skill's full instruction document from
+// the backend's scoped detail endpoint.
+func (c *Client) GetSkillDetail(ctx context.Context, projectID, handle, scope string) (Skill, error) {
+	var skill Skill
+	path := "/skills/" + url.PathEscape(handle) + "/details" + query("project_id", projectID, "scope", scope)
+	if err := c.getJSON(ctx, path, &skill); err != nil {
+		return Skill{}, err
+	}
+	if skill.Handle != handle || skill.Scope != scope {
+		return Skill{}, fmt.Errorf("mismatched skill detail for %q", handle)
+	}
+	return skill, nil
+}
+
+// ListSkillsWithContent retains the full-content JSON list contract by loading
+// the instruction body for each summary after the paginated catalog resolves.
+// Ordinary terminal lists and selectors must use ListSkills instead.
+func (c *Client) ListSkillsWithContent(ctx context.Context, projectID string) ([]Skill, error) {
+	skills, err := c.ListSkills(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i, skill := range skills {
+		detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
+		if err != nil {
+			return nil, err
+		}
+		skills[i] = detail
+	}
+	return skills, nil
 }
 
 // CreateSkill adds a skill. body is the skill markdown/front-matter document.

@@ -10022,3 +10022,161 @@ func TestWebhooksRequireSelectedProjectBeforeDiscovery(t *testing.T) {
 		}
 	}
 }
+
+func TestSkillsShowCanonicalHandleUsesOneScopedDetailRequest(t *testing.T) {
+	var listRequests, detailRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/skills":
+			listRequests++
+			http.Error(w, "catalog scan should not be needed", http.StatusInternalServerError)
+		case "/skills/deploy/details":
+			detailRequests++
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Errorf("project_id = %q, want p1", got)
+			}
+			if got := r.URL.Query().Get("scope"); got != "project" {
+				t.Errorf("scope = %q, want project", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"handle":"deploy","name":"Deploy","description":"ship safely","scope":"project","source":"project","content":"# Deploy\nRun the release checklist.","enabled":true,"always_use":false}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "project one"
+
+	m = runLine(t, m, "/skills show deploy")
+	if listRequests != 0 || detailRequests != 1 {
+		t.Fatalf("list requests = %d, detail requests = %d; want 0 and 1", listRequests, detailRequests)
+	}
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Deploy", "Run the release checklist.", "scope project", "source project"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("show output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestSkillsShowResolvesSummaryThenFetchesOnlySelectedDetail(t *testing.T) {
+	var listRequests int
+	var detailHandles []string
+	const listBody = `<div>
+		<div data-skill-handle="deploy" data-skill-name="Deploy Skill" data-skill-description="releases" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-content="list body must not render"></div>
+		<div data-skill-handle="review" data-skill-name="Review Skill" data-skill-description="reviews" data-skill-scope="global" data-skill-source="global" data-skill-enabled="false"></div>
+	</div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/skills":
+			listRequests++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, listBody)
+		case "/skills/deploy/details":
+			detailHandles = append(detailHandles, "deploy")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"handle":"deploy","name":"Deploy Skill","scope":"project","source":"project","content":"selected detail body","enabled":true}`)
+		case "/skills/review/details":
+			detailHandles = append(detailHandles, "review")
+			http.Error(w, "unselected detail", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	m := New(c)
+	m.selectedID = "p1"
+
+	m = runLine(t, m, "/skills show Deploy Skill")
+	if listRequests != 1 || !reflect.DeepEqual(detailHandles, []string{"deploy"}) {
+		t.Fatalf("list requests = %d, detail handles = %v", listRequests, detailHandles)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "selected detail body") || strings.Contains(out, "list body must not render") {
+		t.Fatalf("show output did not use deferred selected body:\n%s", out)
+	}
+}
+
+func TestSkillsShowUnknownAndAmbiguousReferencesDoNotFetchSelectedBodies(t *testing.T) {
+	const listBody = `<div>
+		<div data-skill-handle="deploy-one" data-skill-name="Deploy One" data-skill-scope="project"></div>
+		<div data-skill-handle="deploy-two" data-skill-name="Deploy Two" data-skill-scope="project"></div>
+	</div>`
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "ambiguous", ref: "deploy", want: "ambiguous"},
+		{name: "unknown", ref: "missing", want: "nothing matches"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var selectedDetails int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/skills":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, listBody)
+				case "/skills/deploy/details", "/skills/missing/details":
+					http.Error(w, `{"error":"skill not found"}`, http.StatusNotFound)
+				default:
+					selectedDetails++
+					http.Error(w, "unexpected selected detail", http.StatusInternalServerError)
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			m := New(c)
+			m.selectedID = "p1"
+
+			m = runLine(t, m, "/skills show "+tc.ref)
+			if selectedDetails != 0 {
+				t.Fatalf("selected detail requests = %d, want 0", selectedDetails)
+			}
+			if out := stripANSI(transcript(m)); !strings.Contains(strings.ToLower(out), tc.want) {
+				t.Fatalf("output = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
+func TestSkillsListJSONKeepsFullContentContract(t *testing.T) {
+	var listRequests, detailRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"project one"}]}`)
+		case "/skills":
+			listRequests++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div><div data-skill-handle="deploy" data-skill-name="Deploy" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true"></div></div>`)
+		case "/skills/deploy/details":
+			detailRequests++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"handle":"deploy","name":"Deploy","scope":"project","source":"project","content":"complete instruction body","enabled":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	var out strings.Builder
+
+	if err := RunCLI(c, &out, "p1", []string{"skills", "list"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var skills []client.Skill
+	if err := json.Unmarshal([]byte(out.String()), &skills); err != nil {
+		t.Fatalf("JSON output = %q: %v", out.String(), err)
+	}
+	if len(skills) != 1 || skills[0].Content != "complete instruction body" {
+		t.Fatalf("JSON skills = %+v", skills)
+	}
+	if listRequests != 1 || detailRequests != 1 {
+		t.Fatalf("list requests = %d, detail requests = %d", listRequests, detailRequests)
+	}
+}
