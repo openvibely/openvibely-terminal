@@ -3321,7 +3321,7 @@ func renderModels(list []client.LLMModel, filter string) string {
 		return dimStyle.Render(fmt.Sprintf("no models match %q", safeFilter))
 	}
 	return table(append([][]string{{"NAME", "PROVIDER", "MODEL"}}, rows...)) + "\n\n" +
-		dimStyle.Render("/models add · /models default <name> · /models delete <name> · /models capacity")
+		dimStyle.Render("/models add · /models edit <name> · /models default <name> · /models delete <name> · /models capacity")
 }
 
 func renderModelCapacity(caps []client.ModelCapacity) string {

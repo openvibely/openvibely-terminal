@@ -147,6 +147,48 @@ func TestModelsEditRejectsAmbiguousReferenceBeforeDetailsOrMutation(t *testing.T
 	}
 }
 
+func TestModelsEditPrefersExactConfigurationNameAndFallsBackToModelText(t *testing.T) {
+	var detailPaths, updatePaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /models":
+			_, _ = io.WriteString(w, `<div data-model-id="model-1" data-model-name="OpenAI" data-model-provider="openai" data-model-model="gpt-4o"></div><div data-model-id="model-2" data-model-name="OpenAI Backup" data-model-provider="openai" data-model-model="gpt-4.1"></div>`)
+		case "GET /models/model-1/edit-details":
+			detailPaths = append(detailPaths, r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"model-1","name":"OpenAI","provider":"openai","model":"gpt-4o","auth_method":"api_key"}`)
+		case "GET /models/model-2/edit-details":
+			detailPaths = append(detailPaths, r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"model-2","name":"OpenAI Backup","provider":"openai","model":"gpt-4.1","auth_method":"api_key"}`)
+		case "PUT /models/model-1", "PUT /models/model-2":
+			updatePaths = append(updatePaths, r.URL.Path)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+
+	m = runLine(t, m, "/models edit OpenAI --max-workers 3")
+	m = runLine(t, m, "/models edit gpt-4.1 --max-workers 4")
+
+	wantDetails := "/models/model-1/edit-details,/models/model-2/edit-details"
+	if got := strings.Join(detailPaths, ","); got != wantDetails {
+		t.Errorf("edit detail paths = %q, want %q", got, wantDetails)
+	}
+	wantUpdates := "/models/model-1,/models/model-2"
+	if got := strings.Join(updatePaths, ","); got != wantUpdates {
+		t.Errorf("edit update paths = %q, want %q", got, wantUpdates)
+	}
+}
+
 func TestModelsEditOAuthReportsBackendStatusWithoutPrematureSuccess(t *testing.T) {
 	var lists, statusReads int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

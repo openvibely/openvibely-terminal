@@ -2908,6 +2908,11 @@ func TestRenderModelsDistinguishesEmptyFromNoFilterMatches(t *testing.T) {
 		t.Fatalf("empty model list retained non-terminal setup guidance: %q", empty)
 	}
 
+	modelList := stripANSI(renderModels(models, ""))
+	if !strings.Contains(modelList, "/models edit <name>") {
+		t.Fatalf("model list missing edit hint: %q", modelList)
+	}
+
 	for _, filter := range []string{"sonNET", "CLAUDE-SONNET", "anthROPIC"} {
 		out := stripANSI(renderModels(models, filter))
 		if !strings.Contains(out, "Sonnet") || !strings.Contains(out, "Anthropic") || !strings.Contains(out, "claude-sonnet-4") {

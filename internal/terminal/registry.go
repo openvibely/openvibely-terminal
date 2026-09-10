@@ -3253,7 +3253,16 @@ func modelEditResult(ctx context.Context, c *client.Client, projectID string, sp
 	}
 	model, err := matchRef(models, spec.Ref,
 		func(item client.LLMModel) string { return item.ID },
-		func(item client.LLMModel) string { return item.Name + " " + item.Model })
+		func(item client.LLMModel) string { return item.Name })
+	if isMatchRefNotFound(err) {
+		// A configured model ID remains an alternate reference only after the
+		// canonical configuration ID/name lookup found nothing. In particular,
+		// an exact configuration name must not become ambiguous merely because
+		// another configuration's name starts with it.
+		model, err = matchRef(models, spec.Ref,
+			func(item client.LLMModel) string { return item.ID },
+			func(item client.LLMModel) string { return item.Model })
+	}
 	if err != nil {
 		return "", err
 	}
