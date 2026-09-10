@@ -179,6 +179,18 @@ type alertDeleteTargetMsg struct {
 	err               error
 }
 
+// alertBulkTargetMsg carries all project-scoped alerts selected for a bulk
+// mutation. The resolved IDs are retained so a confirmation cannot rebind to a
+// changed alert list.
+type alertBulkTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	action            string
+	alerts            []client.Alert
+	err               error
+}
+
 // attachmentDeleteTargetMsg carries the project-scoped task and attachment
 // resolved before an interactive delete confirmation is shown.
 type attachmentDeleteTargetMsg struct {

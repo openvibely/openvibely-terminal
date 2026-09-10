@@ -812,10 +812,15 @@ func TestAlertsShowHelpAndCompletion(t *testing.T) {
 	if got := completeSlashInput("/alerts sh", *cmd); got != "/alerts show " {
 		t.Fatalf("alerts show completion = %q, want %q", got, "/alerts show ")
 	}
+	if got := completeSlashInput("/alerts read-b", *cmd); got != "/alerts read-bulk " {
+		t.Fatalf("alerts read-bulk completion = %q, want %q", got, "/alerts read-bulk ")
+	}
 	help := renderCommandHelp(*cmd)
 	for _, want := range []string{
 		"/alerts show <id|title>",
 		"inspect full alert context",
+		"/alerts read-bulk <id|title>...",
+		"/alerts delete-bulk <id|title>...",
 		"alerts show \"Add retry logic to HTTP client\"",
 	} {
 		if !strings.Contains(help, want) {

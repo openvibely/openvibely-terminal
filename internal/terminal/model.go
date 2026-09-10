@@ -1107,6 +1107,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case alertBulkTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case threadOpenedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1607,6 +1611,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", display),
 			fmt.Sprintf("use --force to confirm deletion of alert %q", display),
 			cmd)
+
+	case alertBulkTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		projectID := msg.projectID
+		if projectID == "" {
+			projectID = m.selectedID
+		}
+		alerts := append([]client.Alert(nil), msg.alerts...)
+		cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
+			return alertBulkActionOutput(ctx, m.client, projectID, msg.action, alerts)
+		})
+		if msg.action == "delete-bulk" {
+			count := len(alerts)
+			return confirmOr(m,
+				fmt.Sprintf("Delete %d selected alerts? Type 'yes' to confirm or Esc to cancel.", count),
+				fmt.Sprintf("use --force to confirm deletion of %d selected alerts", count),
+				cmd)
+		}
+		m.busy = true
+		return m, cmd
 
 	case attachmentDeleteTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {

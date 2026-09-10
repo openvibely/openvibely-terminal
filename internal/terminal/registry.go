@@ -1785,8 +1785,85 @@ func resolveAlertDeleteTarget(c *client.Client, projectID, ref string) tea.Cmd {
 	}
 }
 
+func resolveAlertBulkTargets(c *client.Client, projectID, action string, refs []string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		alerts, err := c.ListAlerts(ctx, projectID)
+		if err != nil {
+			return alertBulkTargetMsg{projectID: projectID, action: action, err: err}
+		}
+		resolved := make([]client.Alert, 0, len(refs))
+		seen := make(map[string]struct{}, len(refs))
+		for _, ref := range refs {
+			alert, err := matchAlertActionRef(alerts, ref)
+			if err != nil {
+				return alertBulkTargetMsg{projectID: projectID, action: action, err: err}
+			}
+			if _, duplicate := seen[alert.ID]; duplicate {
+				return alertBulkTargetMsg{
+					projectID: projectID,
+					action:    action,
+					err:       fmt.Errorf("alert %q was selected more than once", sanitizeAlertDisplayText(ref)),
+				}
+			}
+			seen[alert.ID] = struct{}{}
+			resolved = append(resolved, alert)
+		}
+		if len(resolved) == 0 {
+			return alertBulkTargetMsg{projectID: projectID, action: action, err: fmt.Errorf("select at least one alert")}
+		}
+		return alertBulkTargetMsg{projectID: projectID, action: action, alerts: resolved}
+	}
+}
+
+func alertBulkActionOutput(ctx context.Context, c *client.Client, projectID, action string, alerts []client.Alert) (string, error) {
+	ids := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		ids = append(ids, alert.ID)
+	}
+
+	var (
+		count  int
+		status string
+		err    error
+	)
+	switch action {
+	case "read-bulk":
+		count, err = c.MarkAlertsReadBulk(ctx, projectID, ids)
+		status = fmt.Sprintf("marked %d alerts read", count)
+		if jsonMode {
+			if err != nil {
+				return "", err
+			}
+			return marshalJSON(struct {
+				Updated int `json:"updated"`
+			}{Updated: count})
+		}
+	case "delete-bulk":
+		count, err = c.DeleteAlertsBulk(ctx, projectID, ids)
+		status = fmt.Sprintf("deleted %d alerts", count)
+		if jsonMode {
+			if err != nil {
+				return "", err
+			}
+			return marshalJSON(struct {
+				Deleted int `json:"deleted"`
+			}{Deleted: count})
+		}
+	default:
+		return "", fmt.Errorf("unsupported bulk alert action %q", action)
+	}
+	if err != nil {
+		return "", err
+	}
+	return refreshAndRender(status,
+		func() ([]client.Alert, error) { return c.ListAlerts(ctx, projectID) },
+		renderAlerts)
+}
+
 func alertsCommand() command {
-	actions := []string{"list", "show", "read", "approve", "reject", "dismiss", "delete", "read-all", "clear"}
+	actions := []string{"list", "show", "read", "read-bulk", "approve", "reject", "dismiss", "delete", "delete-bulk", "read-all", "clear"}
 	return command{
 		name:          "alerts",
 		aliases:       []string{"alert"},
@@ -1798,13 +1875,17 @@ func alertsCommand() command {
 			"alerts [filter]                            list alerts",
 			"alerts show <alert>                         inspect full body and metadata",
 			"alerts read|approve|reject|dismiss <alert>",
-			"alerts delete <alert>                      delete one alert",
+			"alerts read-bulk <id|title>...              mark selected alerts read",
+			"alerts delete <alert>                       delete one alert",
+			"alerts delete-bulk <id|title>...            delete selected alerts",
 			"omit <alert> on show/read/approve/reject/dismiss/delete → interactive selector",
-			"alerts read-all                            mark every alert read",
-			"alerts clear                               delete every alert",
+			"alerts read-all                             mark every alert read",
+			"alerts clear                                delete every alert",
 		},
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<id|title>", description: "inspect full alert context"},
+			{action: "read-bulk", args: "<id|title>...", description: "mark selected alerts read"},
+			{action: "delete-bulk", args: "<id|title>...", description: "delete selected alerts"},
 		},
 		examples: []string{
 			`alerts show "Add retry logic to HTTP client"`,
@@ -1890,6 +1971,11 @@ func alertsCommand() command {
 					}
 					return alertInspectionOutput(ctx, c, pid, a)
 				})
+			case "read-bulk", "delete-bulk":
+				if len(rest) == 0 {
+					return m, errCmd(commandUsage("alerts", action))
+				}
+				return m, resolveAlertBulkTargets(c, pid, action, rest)
 			case "read-all":
 				return m, run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
 					if err := c.MarkAllAlertsRead(ctx, pid); err != nil {

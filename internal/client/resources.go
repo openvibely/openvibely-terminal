@@ -413,6 +413,82 @@ func (c *Client) AlertAction(ctx context.Context, alertID, action, projectID str
 		"/alerts/"+url.PathEscape(alertID)+"/"+action+query("project_id", projectID), nil)
 }
 
+// MarkAlertsReadBulk marks the supplied project-scoped alerts read and returns
+// the backend's affected count. IDs are trimmed and deduplicated before the
+// atomic request is sent.
+func (c *Client) MarkAlertsReadBulk(ctx context.Context, projectID string, ids []string) (int, error) {
+	var response struct {
+		Updated int `json:"updated"`
+	}
+	if err := c.alertBulkMutation(ctx, http.MethodPost, "/alerts/read-bulk", projectID, ids, &response); err != nil {
+		return 0, err
+	}
+	return response.Updated, nil
+}
+
+// DeleteAlertsBulk removes the supplied project-scoped alerts and returns the
+// backend's affected count. IDs are trimmed and deduplicated before the atomic
+// request is sent.
+func (c *Client) DeleteAlertsBulk(ctx context.Context, projectID string, ids []string) (int, error) {
+	var response struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := c.alertBulkMutation(ctx, http.MethodDelete, "/alerts/bulk", projectID, ids, &response); err != nil {
+		return 0, err
+	}
+	return response.Deleted, nil
+}
+
+func (c *Client) alertBulkMutation(ctx context.Context, method, path, projectID string, ids []string, response any) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Errorf("project ID is required for bulk alert mutations")
+	}
+	ids, err := dedupeAlertIDs(ids)
+	if err != nil {
+		return err
+	}
+	resp, err := c.doJSONResponse(ctx, method, path+query("project_id", projectID), struct {
+		IDs []string `json:"ids"`
+	}{IDs: ids})
+	if err != nil {
+		return err
+	}
+	defer drainAndClose(resp.Body)
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(response); err != nil {
+		return fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
+		return fmt.Errorf("decoding %s response: trailing JSON data: %w", path, err)
+	}
+	return nil
+}
+
+func dedupeAlertIDs(ids []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, fmt.Errorf("alert IDs must not be empty")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return nil, fmt.Errorf("at least one alert ID is required")
+	}
+	return unique, nil
+}
+
 // DeleteAlert removes one alert.
 func (c *Client) DeleteAlert(ctx context.Context, alertID, projectID string) error {
 	_, err := c.DeleteAlertAndList(ctx, alertID, projectID)

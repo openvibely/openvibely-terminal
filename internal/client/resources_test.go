@@ -1101,6 +1101,99 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	}
 }
 
+func TestAlertBulkMutationsSendScopedDeduplicatedJSONAndReturnCounts(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		call      func(*Client) (int, error)
+		response  string
+		wantCount int
+	}{
+		{
+			name:      "mark read",
+			method:    http.MethodPost,
+			path:      "/alerts/read-bulk",
+			response:  `{"updated":2}`,
+			wantCount: 2,
+			call: func(c *Client) (int, error) {
+				return c.MarkAlertsReadBulk(context.Background(), "project-2", []string{" a-1 ", "a-2", "a-1"})
+			},
+		},
+		{
+			name:      "delete",
+			method:    http.MethodDelete,
+			path:      "/alerts/bulk",
+			response:  `{"deleted":2}`,
+			wantCount: 2,
+			call: func(c *Client) (int, error) {
+				return c.DeleteAlertsBulk(context.Background(), "project-2", []string{" a-1 ", "a-2", "a-1"})
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != tc.method || r.URL.Path != tc.path || r.URL.Query().Get("project_id") != "project-2" {
+					t.Errorf("request = %s %s", r.Method, r.URL.RequestURI())
+				}
+				if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+					t.Errorf("Content-Type = %q, want application/json", got)
+				}
+				var payload struct {
+					IDs []string `json:"ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				if want := []string{"a-1", "a-2"}; !reflect.DeepEqual(payload.IDs, want) {
+					t.Errorf("ids = %#v, want %#v", payload.IDs, want)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.response)
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, err := tc.call(c)
+			if err != nil {
+				t.Fatalf("bulk mutation: %v", err)
+			}
+			if count != tc.wantCount {
+				t.Errorf("count = %d, want %d", count, tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestAlertBulkMutationsRejectBadInputAndBackendFailures(t *testing.T) {
+	c := htmlServer(t, "")
+	if _, err := c.MarkAlertsReadBulk(context.Background(), "", []string{"a-1"}); err == nil || !strings.Contains(err.Error(), "project ID") {
+		t.Fatalf("empty project error = %v", err)
+	}
+	if _, err := c.DeleteAlertsBulk(context.Background(), "p1", []string{""}); err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("empty ID error = %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"all selected alerts must belong to the current project"}`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeleteAlertsBulk(context.Background(), "p1", []string{"own", "foreign"}); err == nil || !strings.Contains(err.Error(), "all selected alerts") {
+		t.Fatalf("backend error = %v", err)
+	}
+}
+
 func TestDeleteAlertAndListParsesProjectScopedHTMXRefresh(t *testing.T) {
 	var gotMethod, gotQuery, gotHX string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

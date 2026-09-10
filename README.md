@@ -72,7 +72,7 @@ Common commands include:
 | Command | Purpose |
 |---|---|
 | `/tasks` | Inspect and manage tasks and task threads |
-| `/alerts` | Review and act on alerts |
+| `/alerts` | Review alerts, including selected bulk read/delete actions |
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
 | `/agents`, `/models`, `/workers` | Inspect execution resources |
@@ -81,6 +81,16 @@ Common commands include:
 | `/analytics` | View usage and execution statistics |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/help <command>` | Show complete command syntax |
+
+Mark or remove selected alerts by supplying one or more IDs or quoted titles. Bulk
+removal follows the normal confirmation safety rule and needs `--force` in
+one-shot CLI mode:
+
+```bash
+/alerts read-bulk a1b2 "Release approval"
+/alerts delete-bulk a1b2 "Release approval"
+openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release approval"
+```
 
 ## Configuration
 
