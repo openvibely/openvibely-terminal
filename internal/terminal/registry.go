@@ -3951,6 +3951,12 @@ func redactModelCommandSecrets(commandLine string) string {
 				if tokens[i+1].value == "" || modelSensitiveOption(nextName) {
 					return "/models add <redacted sensitive options>"
 				}
+				if i+2 < len(tokens) {
+					// A separated sensitive option accepts at most one operand. Any
+					// remaining token makes the command malformed and may be a pasted
+					// credential, so do not render its tail before local validation.
+					return "/models add <redacted sensitive options>"
+				}
 				i++
 				parts = append(parts, "<redacted>")
 			}
