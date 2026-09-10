@@ -3937,7 +3937,7 @@ func redactModelCommandSecrets(commandLine string) string {
 
 func modelSensitiveOption(name string) bool {
 	switch name {
-	case "--api-key", "--api-key-file", "--secret", "--oauth-client-secret", "--signing-secret", "--endpoint":
+	case "--api-key", "--api-key-stdin", "--api-key-file", "--secret", "--oauth-client-secret", "--signing-secret", "--endpoint":
 		return true
 	default:
 		return false

@@ -5150,6 +5150,43 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 		}
 	})
 
+	t.Run("API-key stdin misuse is redacted", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			line func(secret string) string
+		}{
+			{
+				name: "normal command",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin ` + secret
+				},
+			},
+			{
+				name: "unmatched quote",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin "` + secret
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				secret := "api-key-stdin-misuse-" + strings.ReplaceAll(tc.name, " ", "-")
+				m, rec := dispatchModel(t, nil)
+				m = runLine(t, m, tc.line(secret))
+				if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+					t.Fatalf("API-key stdin misuse exposed the secret:\n%s", transcript(m))
+				}
+				for _, item := range m.history {
+					if strings.Contains(item, secret) {
+						t.Fatalf("API-key stdin misuse exposed the secret in history: %q", item)
+					}
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("API-key stdin misuse made requests:\n%s", calls)
+				}
+			})
+		}
+	})
+
 	t.Run("malformed quoted option API key is redacted", func(t *testing.T) {
 		secret := "quoted-option-unmatched-quote-model-secret"
 		m, rec := dispatchModel(t, nil)
