@@ -1632,10 +1632,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return alertBulkActionOutput(ctx, m.client, projectID, msg.action, alerts)
 		})
 		if msg.action == "delete-bulk" {
-			count := len(alerts)
 			return confirmOr(m,
-				fmt.Sprintf("Delete %d selected alerts? Type 'yes' to confirm or Esc to cancel.", count),
-				fmt.Sprintf("use --force to confirm deletion of %d selected alerts", count),
+				alertBulkDeleteConfirmation(alerts),
+				fmt.Sprintf("use --force to confirm deletion of %d selected alerts", len(alerts)),
 				cmd)
 		}
 		m.busy = true

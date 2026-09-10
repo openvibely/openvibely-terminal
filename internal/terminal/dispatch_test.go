@@ -4716,22 +4716,26 @@ func TestAlertReadBulkResolvesPaginatedSelectionAndRefreshes(t *testing.T) {
 }
 
 func TestAlertDeleteBulkConfirmsAndCapturesSelectedIDs(t *testing.T) {
-	const selected = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>
-		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two"><p class="font-semibold">Two</p></div>`
+	const selected = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">First selected</p></div>
+		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two"><p class="font-semibold">Second selected</p></div>`
+	const changed = `<div data-alert-id="a-rebound" data-alert-scroll-anchor="a-rebound"><p class="font-semibold">Changed after confirmation</p></div>`
 	const refreshed = `<div data-alert-id="a-three" data-alert-scroll-anchor="a-three"><p class="font-semibold">Remaining</p></div>`
 	var lists, deletes int
+	catalog := selected
+	mutationStarted := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
 			lists++
 			w.Header().Set("Content-Type", "text/html")
-			if lists <= 2 {
-				_, _ = io.WriteString(w, selected)
-			} else {
+			if mutationStarted {
 				_, _ = io.WriteString(w, refreshed)
+			} else {
+				_, _ = io.WriteString(w, catalog)
 			}
 		case r.Method == http.MethodDelete && r.URL.Path == "/alerts/bulk":
 			deletes++
+			mutationStarted = true
 			if r.URL.Query().Get("project_id") != "p1" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
 				t.Errorf("bulk delete request = %s content-type=%q", r.URL.RequestURI(), r.Header.Get("Content-Type"))
 			}
@@ -4742,7 +4746,7 @@ func TestAlertDeleteBulkConfirmsAndCapturesSelectedIDs(t *testing.T) {
 				t.Fatalf("decode bulk delete body: %v", err)
 			}
 			if want := []string{"a-one", "a-two"}; !reflect.DeepEqual(payload.IDs, want) {
-				t.Errorf("bulk delete IDs = %#v, want %#v", payload.IDs, want)
+				t.Errorf("bulk delete IDs = %#v, want captured selection %#v", payload.IDs, want)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"deleted":2}`)
@@ -4758,16 +4762,28 @@ func TestAlertDeleteBulkConfirmsAndCapturesSelectedIDs(t *testing.T) {
 	m := New(c)
 	m.selectedID, m.selectedName = "p1", "demo"
 
-	m = runLine(t, m, "/alerts delete-bulk a-one a-two")
-	if m.pendingConfirmation == nil || deletes != 0 || !strings.Contains(m.pendingConfirmation.message, "Delete 2 selected alerts") {
-		t.Fatalf("bulk delete was not parked for confirmation: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
+	const command = `/alerts delete-bulk Fir "Second selected"`
+	const prompt = `Delete 2 selected alerts: "First selected" (a-one), "Second selected" (a-two)? Type 'yes' to confirm or Esc to cancel.`
+	m = runLine(t, m, command)
+	if m.pendingConfirmation == nil || deletes != 0 || m.pendingConfirmation.message != prompt {
+		got := ""
+		if m.pendingConfirmation != nil {
+			got = m.pendingConfirmation.message
+		}
+		t.Fatalf("bulk delete confirmation = %q, want %q; deletes=%d", got, prompt, deletes)
 	}
 	m = runLine(t, m, "no")
 	if m.pendingConfirmation != nil || deletes != 0 {
 		t.Fatalf("cancelled bulk delete mutated or stayed pending: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
 	}
 
-	m = runLine(t, m, "/alerts delete-bulk a-one a-two")
+	m = runLine(t, m, command)
+	if m.pendingConfirmation == nil || m.pendingConfirmation.message != prompt {
+		t.Fatalf("bulk delete confirmation = %#v, want %q", m.pendingConfirmation, prompt)
+	}
+	// The list may change after the user reviews the resolved targets. Confirming
+	// must retain those targets rather than resolving the refs again.
+	catalog = changed
 	m = runLine(t, m, "yes")
 	if deletes != 1 || lists != 3 {
 		t.Fatalf("confirmed bulk delete requests = lists %d deletes %d, want 3 and 1", lists, deletes)

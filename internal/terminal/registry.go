@@ -1754,6 +1754,31 @@ func alertActionDisplayName(alert client.Alert) string {
 	return "(unknown alert)"
 }
 
+// alertBulkDeleteConfirmation names every resolved target so an interactive
+// confirmation describes the canonical alerts captured for deletion.
+func alertBulkDeleteConfirmation(alerts []client.Alert) string {
+	targets := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		title := strings.TrimSpace(sanitizeAlertDisplayText(alert.Title))
+		id := strings.TrimSpace(sanitizeAlertDisplayText(alert.ID))
+		switch {
+		case title != "" && id != "":
+			targets = append(targets, fmt.Sprintf("%q (%s)", title, id))
+		case id != "":
+			targets = append(targets, id)
+		case title != "":
+			targets = append(targets, fmt.Sprintf("%q", title))
+		default:
+			targets = append(targets, "(unknown alert)")
+		}
+	}
+	noun := "alerts"
+	if len(alerts) == 1 {
+		noun = "alert"
+	}
+	return fmt.Sprintf("Delete %d selected %s: %s? Type 'yes' to confirm or Esc to cancel.", len(alerts), noun, strings.Join(targets, ", "))
+}
+
 func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error) {
 	alert, err := matchRefWithDisplay(alerts, ref,
 		func(a client.Alert) string { return a.ID },
