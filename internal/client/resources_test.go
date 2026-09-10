@@ -1962,7 +1962,7 @@ func TestScheduleEditLoadsSelectedConfigAndPreservesOmittedValues(t *testing.T) 
 	if err := c.UpdateSchedule(context.Background(), config, ScheduleUpdate{RepeatType: ptr("hours")}); err != nil {
 		t.Fatal(err)
 	}
-	want := url.Values{"run_at": {"2026-02-03T10:30"}, "repeat_type": {"hours"}, "repeat_interval": {"3"}}
+	want := url.Values{"run_at": {"2026-02-03T10:30"}, "repeat_type": {"hours"}, "repeat_interval": {"3"}, "clear_context_on_start": {"false"}}
 	if !reflect.DeepEqual(gotForm, want) {
 		t.Fatalf("form = %#v, want %#v", gotForm, want)
 	}
@@ -1971,6 +1971,90 @@ func TestScheduleEditLoadsSelectedConfigAndPreservesOmittedValues(t *testing.T) 
 	}
 }
 
+func TestUpdateScheduleSubmitsContextForPartialEdits(t *testing.T) {
+	checked, unchecked := true, false
+	timeChange := "2026-02-03T10:30"
+	weekly := "weekly"
+	intervalChange := 2
+	cases := []struct {
+		name        string
+		current     ScheduleConfig
+		update      ScheduleUpdate
+		wantContext string
+	}{
+		{
+			name:        "checked schedule time change",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: true},
+			update:      ScheduleUpdate{RunAt: &timeChange},
+			wantContext: "true",
+		},
+		{
+			name:        "unchecked schedule time change",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: false},
+			update:      ScheduleUpdate{RunAt: &timeChange},
+			wantContext: "false",
+		},
+		{
+			name:        "checked schedule repeat change",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: true},
+			update:      ScheduleUpdate{RepeatType: &weekly},
+			wantContext: "true",
+		},
+		{
+			name:        "unchecked schedule repeat change",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: false},
+			update:      ScheduleUpdate{RepeatType: &weekly},
+			wantContext: "false",
+		},
+		{
+			name:        "checked schedule interval change",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: true},
+			update:      ScheduleUpdate{RepeatInterval: &intervalChange},
+			wantContext: "true",
+		},
+		{
+			name:        "unchecked schedule interval change",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: false},
+			update:      ScheduleUpdate{RepeatInterval: &intervalChange},
+			wantContext: "false",
+		},
+		{
+			name:        "explicit true overrides unchecked schedule",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: false},
+			update:      ScheduleUpdate{ClearContextOnStart: &checked},
+			wantContext: "true",
+		},
+		{
+			name:        "explicit false overrides checked schedule",
+			current:     ScheduleConfig{ID: "s1", ProjectID: "p1", RunAt: "2026-01-02T09:00", RepeatType: "daily", RepeatInterval: 1, ClearContextOnStart: true},
+			update:      ScheduleUpdate{ClearContextOnStart: &unchecked},
+			wantContext: "false",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var form url.Values
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut || r.URL.Path != "/schedules/s1" || r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request = %s %s", r.Method, r.URL.RequestURI())
+				}
+				_ = r.ParseForm()
+				form = r.PostForm
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer srv.Close()
+
+			c, _ := New(srv.URL)
+			if err := c.UpdateSchedule(context.Background(), tc.current, tc.update); err != nil {
+				t.Fatal(err)
+			}
+			if got := form.Get("clear_context_on_start"); got != tc.wantContext {
+				t.Fatalf("clear_context_on_start = %q, want %q; form = %#v", got, tc.wantContext, form)
+			}
+		})
+	}
+}
 func TestUpdateScheduleSupportsEveryRecurrenceAndExplicitContext(t *testing.T) {
 	for _, repeat := range []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours", "hourly"} {
 		t.Run(repeat, func(t *testing.T) {

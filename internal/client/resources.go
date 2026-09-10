@@ -1112,9 +1112,11 @@ func (c *Client) UpdateSchedule(ctx context.Context, current ScheduleConfig, upd
 	v.Set("run_at", runAt)
 	v.Set("repeat_type", repeat)
 	v.Set("repeat_interval", strconv.Itoa(interval))
+	clearContextOnStart := current.ClearContextOnStart
 	if update.ClearContextOnStart != nil {
-		v.Set("clear_context_on_start", strconv.FormatBool(*update.ClearContextOnStart))
+		clearContextOnStart = *update.ClearContextOnStart
 	}
+	v.Set("clear_context_on_start", strconv.FormatBool(clearContextOnStart))
 	return c.doForm(ctx, http.MethodPut, "/schedules/"+url.PathEscape(current.ID)+query("project_id", current.ProjectID), v)
 }
 

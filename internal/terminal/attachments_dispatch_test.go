@@ -299,6 +299,74 @@ func TestTasksAttachmentsDeleteConfirmationUsesResolvedTarget(t *testing.T) {
 	}
 }
 
+func TestTasksAttachmentsDeleteTypedAndPickerHaveIdenticalConfirmationAndResult(t *testing.T) {
+	paths := map[string]string{
+		"/tasks":             attachmentTaskBoardHTML,
+		"/tasks/t-1":         attachmentRowsHTML,
+		"/attachments/att-1": refreshedAttachmentRowsHTML,
+	}
+
+	typed, typedRec := dispatchModel(t, paths)
+	typed = runLine(t, typed, "/tasks attachments delete Refactor att-1")
+	if typed.pendingConfirmation == nil {
+		t.Fatal("typed delete must set a pending confirmation")
+	}
+	if typedRec.saw("DELETE", "/attachments/att-1") {
+		t.Fatal("typed delete ran before confirmation")
+	}
+
+	picked, pickerRec := dispatchModel(t, paths)
+	picked = runLine(t, picked, "/tasks attachments delete Refactor")
+	if !picked.selectorActive {
+		t.Fatal("attachment delete must open the picker when multiple attachments are available")
+	}
+	picked = selKey(t, picked, tea.KeyMsg{Type: tea.KeyEnter})
+	if picked.pendingConfirmation == nil {
+		t.Fatal("picker selection must set a pending confirmation")
+	}
+	if pickerRec.saw("DELETE", "/attachments/att-1") {
+		t.Fatal("picker delete ran before confirmation")
+	}
+	if got, want := picked.pendingConfirmation.message, typed.pendingConfirmation.message; got != want {
+		t.Fatalf("picker confirmation = %q, want typed confirmation %q", got, want)
+	}
+
+	typed = runLine(t, typed, "yes")
+	picked = runLine(t, picked, "yes")
+	for name, model := range map[string]Model{"typed": typed, "picker": picked} {
+		out := stripANSI(transcript(model))
+		if !strings.Contains(out, "deleted attachment \"request.txt\" from Refactor the API") || !strings.Contains(out, "trace.json") {
+			t.Fatalf("%s delete result did not render the refreshed attachment list:\n%s", name, out)
+		}
+	}
+	for name, rec := range map[string]*recorder{"typed": typedRec, "picker": pickerRec} {
+		if !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") {
+			t.Fatalf("%s confirmed delete was not project-scoped:\n%s", name, strings.Join(rec.urls, "\n"))
+		}
+	}
+}
+
+func TestConfirmTaskAttachmentDeletionUsesCanonicalFallbackLabels(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/attachments/attachment-1": `<div id="attachment-list" data-project-id="p1"></div>`,
+	})
+	m, cmd := confirmTaskAttachmentDeletion(m, "p1", client.Task{ID: "task-1"}, client.Attachment{ID: "attachment-1"})
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("confirmation setup = cmd:%v pending:%v, want pending confirmation", cmd, m.pendingConfirmation != nil)
+	}
+	if got, want := m.pendingConfirmation.message, `Delete attachment "attachment-1" from task "task-1"? Type 'yes' to confirm or Esc to cancel.`; got != want {
+		t.Fatalf("fallback confirmation = %q, want %q", got, want)
+	}
+	if rec.saw("DELETE", "/attachments/attachment-1") {
+		t.Fatal("fallback delete ran before confirmation")
+	}
+
+	m = runLine(t, m, "yes")
+	if !rec.sawQuery("DELETE /attachments/attachment-1?project_id=p1") {
+		t.Fatalf("fallback confirmed delete was not project-scoped:\n%s", strings.Join(rec.urls, "\n"))
+	}
+}
+
 func TestTasksAttachmentsConfirmedDeleteErrorIsVisibleWithoutSuccess(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

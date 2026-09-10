@@ -1655,16 +1655,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if projectID == "" {
 			projectID = m.selectedID
 		}
-		task := msg.task
-		attachment := msg.attachment
-		cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-			return deleteTaskAttachmentResult(ctx, m.client, projectID, task, attachment)
-		})
-		return confirmOr(m,
-			fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", firstNonEmpty(attachment.FileName, attachment.ID), firstNonEmpty(task.Title, task.ID)),
-			fmt.Sprintf("use --force to confirm deletion of attachment %q", firstNonEmpty(attachment.FileName, attachment.ID)),
-			cmd)
-
+		return confirmTaskAttachmentDeletion(m, projectID, msg.task, msg.attachment)
 	case chatSentMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale chat acknowledgement from an older session or project

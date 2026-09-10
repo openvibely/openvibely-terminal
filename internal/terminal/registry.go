@@ -1094,6 +1094,18 @@ func resolveTaskAttachmentTarget(c *client.Client, projectID string, args []stri
 	}
 }
 
+func confirmTaskAttachmentDeletion(m Model, projectID string, task client.Task, attachment client.Attachment) (Model, tea.Cmd) {
+	attachmentLabel := firstNonEmpty(attachment.FileName, attachment.ID)
+	taskLabel := firstNonEmpty(task.Title, task.ID)
+	cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+		return deleteTaskAttachmentResult(ctx, m.client, projectID, task, attachment)
+	})
+	return confirmOr(m,
+		fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachmentLabel, taskLabel),
+		fmt.Sprintf("use --force to confirm deletion of attachment %q", attachmentLabel),
+		cmd)
+}
+
 func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
 	if len(args) == 0 {
 		listUsage := commandUsage("tasks", "attachments list")
@@ -1139,13 +1151,7 @@ func taskAttachmentSelector(m Model, c *client.Client, projectID, taskRef, usage
 					detail: attachmentSizeText(attachment.FileSize),
 				}
 				item.dispatch = func(mm Model) (Model, tea.Cmd) {
-					cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-						return deleteTaskAttachmentResult(ctx, c, projectID, task, attachment)
-					})
-					return confirmOr(mm,
-						fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachment.FileName, firstNonEmpty(task.Title, task.ID)),
-						fmt.Sprintf("use --force to confirm deletion of attachment %q", attachment.FileName),
-						cmd)
+					return confirmTaskAttachmentDeletion(mm, projectID, task, attachment)
 				}
 				items = append(items, item)
 			}
