@@ -5260,13 +5260,15 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			name string
 			root string
 		}{
-			{name: "double quoted root", root: `"models"`},
-			{name: "single quoted root", root: `'models'`},
+			{name: "slash then double quoted root", root: `/"models"`},
+			{name: "slash then single quoted root", root: `/'models'`},
+			{name: "fully double quoted root", root: `"/models"`},
+			{name: "fully single quoted root", root: `'/models'`},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				secret := "quoted-root-unmatched-quote-model-secret-" + strings.ReplaceAll(tc.name, " ", "-")
 				m, rec := dispatchModel(t, nil)
-				m = runLine(t, m, "/"+tc.root+` add openai OpenAI gpt-4o --api-key "`+secret)
+				m = runLine(t, m, tc.root+` add openai OpenAI gpt-4o --api-key "`+secret)
 				if !strings.Contains(transcript(m), "unmatched double quote") {
 					t.Fatalf("malformed command did not report its parse error:\n%s", transcript(m))
 				}

@@ -3894,7 +3894,12 @@ func redactModelCommandSecrets(commandLine string) string {
 		// history.
 		fields := strings.Fields(commandLine)
 		if len(fields) > 0 {
-			root := strings.Trim(strings.TrimPrefix(strings.ToLower(fields[0]), "/"), "\"'")
+			// A quoted root can contain its leading slash ("/models") or
+			// follow it (/"models"). Normalize quote delimiters on both
+			// sides of slash removal before checking the command name.
+			root := strings.Trim(strings.ToLower(fields[0]), "\"'")
+			root = strings.TrimPrefix(root, "/")
+			root = strings.Trim(root, "\"'")
 			if root == "models" || root == "model" {
 				for _, field := range fields[1:] {
 					field = strings.Trim(strings.ToLower(field), "\"'")

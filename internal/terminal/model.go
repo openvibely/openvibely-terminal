@@ -2390,6 +2390,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// isSlashCommandInput recognizes ordinary slash commands and quoted slash roots.
+// The latter are accepted by the command tokenizer once dispatched; recognizing
+// them here ensures malformed forms reach command redaction rather than chat.
+func isSlashCommandInput(text string) bool {
+	return strings.HasPrefix(text, "/") || strings.HasPrefix(text, `"/`) || strings.HasPrefix(text, `'/`)
+}
+
 // submit handles Enter: either run a slash command or send a chat message.
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
@@ -2410,13 +2417,14 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 	m.input.SetValue("")
 	m.menu = nil
+	commandInput := isSlashCommandInput(text)
 	displayText := text
-	if strings.HasPrefix(text, "/") {
+	if commandInput {
 		displayText = redactModelCommandSecrets(redactChannelCommandSecrets(text))
 	}
 	m.pushHistory(displayText)
 
-	if strings.HasPrefix(text, "/") {
+	if commandInput {
 		// Stream bytes were accepted before this command was submitted. Render them
 		// before recording the command so cadence batching cannot reorder the
 		// assistant output behind a later user action.
