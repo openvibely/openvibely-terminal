@@ -5482,13 +5482,7 @@ func automationsCommand() command {
 					}
 				}
 				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
-					automations, err := c.ListAutomations(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(automations, editRef,
-						func(a client.Automation) string { return a.ID },
-						func(a client.Automation) string { return a.Name })
+					a, err := resolveAutomationRef(ctx, c, pid, editRef)
 					if err != nil {
 						return "", err
 					}
@@ -5513,7 +5507,6 @@ func automationsCommand() command {
 					}
 					return "updated automation " + sanitizeAutomationDetailText(firstNonEmpty(a.Name, a.ID)), nil
 				})
-
 			case "show", "open":
 				if ref == "" {
 					usage := commandUsage("automations", action)
@@ -5546,19 +5539,12 @@ func automationsCommand() command {
 							}))
 				}
 				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
-					automations, err := c.ListAutomations(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(automations, ref,
-						func(a client.Automation) string { return a.ID },
-						func(a client.Automation) string { return a.Name })
+					a, err := resolveAutomationRef(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
 					return loadAutomationDetail(ctx, c, pid, a)
 				})
-
 			default:
 				if ref == "" {
 					return selectorOr(m, fmt.Sprintf("usage: %sautomations %s <automation>", cmdPrefix, action),
@@ -5596,13 +5582,7 @@ func automationsCommand() command {
 							}))
 				}
 				cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
-					automations, err := c.ListAutomations(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(automations, ref,
-						func(a client.Automation) string { return a.ID },
-						func(a client.Automation) string { return a.Name })
+					a, err := resolveAutomationRef(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
@@ -5618,6 +5598,18 @@ func automationsCommand() command {
 			}
 		},
 	}
+}
+
+// resolveAutomationRef fetches the selected project's catalog exactly once and
+// preserves the shared reference-matching policy for typed automation commands.
+func resolveAutomationRef(ctx context.Context, c *client.Client, projectID, ref string) (client.Automation, error) {
+	automations, err := c.ListAutomations(ctx, projectID)
+	if err != nil {
+		return client.Automation{}, err
+	}
+	return matchRef(automations, ref,
+		func(a client.Automation) string { return a.ID },
+		func(a client.Automation) string { return a.Name })
 }
 
 func loadAutomationDetail(ctx context.Context, c *client.Client, projectID string, automation client.Automation) (string, error) {
@@ -5697,13 +5689,7 @@ func beginAutomationInteractiveEditResolver(m Model, c *client.Client, projectID
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		automations, err := c.ListAutomations(ctx, projectID)
-		if err != nil {
-			return automationEditLoadedMsg{projectID: projectID, requestID: requestID, err: err}
-		}
-		automation, err := matchRef(automations, ref,
-			func(a client.Automation) string { return a.ID },
-			func(a client.Automation) string { return a.Name })
+		automation, err := resolveAutomationRef(ctx, c, projectID, ref)
 		if err != nil {
 			return automationEditLoadedMsg{projectID: projectID, requestID: requestID, err: err}
 		}

@@ -6083,6 +6083,71 @@ func automationDetailHTML(id, projectID, name string) string {
 	</div>`
 }
 
+func TestResolveAutomationRefPreservesMatchRefPrecedenceAndScope(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Primary", "active") +
+		automationCardHTML("au-2", "AU-1", "paused") +
+		automationCardHTML("au-3", "Native SDLC", "active") +
+		automationCardHTML("au-4", "Build cleanup", "active") +
+		automationCardHTML("au-5", "Run nightly cleanup", "active") +
+		"</div>"
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+		id   string
+	}{
+		{name: "exact ID outranks name", ref: "au-1", id: "au-1"},
+		{name: "case insensitive exact name", ref: "native sdlc", id: "au-3"},
+		{name: "unique prefix", ref: "build", id: "au-4"},
+		{name: "unique substring", ref: "nightly", id: "au-5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+			got, err := resolveAutomationRef(context.Background(), m.client, "p1", tc.ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID != tc.id {
+				t.Fatalf("resolved %q as %q, want %q", tc.ref, got.ID, tc.id)
+			}
+			if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+				t.Fatalf("catalog requests = %d, want 1: %s", got, rec.all())
+			}
+			if !rec.sawQuery("GET /automations?project_id=p1") {
+				t.Fatalf("resolver catalog request lost selected project: %s", rec.urlsSnapshot())
+			}
+		})
+	}
+}
+
+func TestResolveAutomationRefFailsWithoutExtraCatalogRequests(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "unknown", ref: "missing", want: "nothing matches"},
+		{name: "ambiguous", ref: "SDLC", want: "ambiguous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+			_, err := resolveAutomationRef(context.Background(), m.client, "p1", tc.ref)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("resolve error = %v, want %q", err, tc.want)
+			}
+			if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+				t.Fatalf("catalog requests = %d, want 1: %s", got, rec.all())
+			}
+		})
+	}
+}
+
 func TestAutomationsShowResolvesReferencesAndLoadsScopedDetail(t *testing.T) {
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +
@@ -6153,6 +6218,9 @@ func TestAutomationsShowReferenceFailuresDoNotLoadDetailOrMutate(t *testing.T) {
 				"/automations/au-1": automationDetailHTML("au-1", "p1", "Native SDLC"),
 			})
 			m = runLine(t, m, "/automations show "+tc.ref)
+			if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+				t.Fatalf("reference failure catalog requests = %d, want 1: %s", got, rec.all())
+			}
 			if rec.count("GET", "/automations/au-1") != 0 || rec.count("GET", "/automations/au-2") != 0 {
 				t.Fatalf("reference failure loaded detail:\n%s", rec.all())
 			}
@@ -6649,6 +6717,30 @@ func TestAutomationDeleteConfirmationTimingAndCancellationRemainRouteSpecific(t 
 	}
 }
 
+func TestAutomationTypedDeleteCapturesResolvedCanonicalIDAfterConfirmation(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+
+	m = runLine(t, m, "/automations delete Native")
+	if m.pendingConfirmation == nil || rec.count(http.MethodGet, "/automations") != 0 {
+		t.Fatalf("typed delete resolved before confirmation: confirmation=%v calls=%s", m.pendingConfirmation, rec.all())
+	}
+	m = runLine(t, m, "yes")
+
+	if got := rec.count(http.MethodPost, "/automations/au-1/delete"); got != 1 {
+		t.Fatalf("captured delete ID calls = %d, want 1: %s", got, rec.all())
+	}
+	if rec.count(http.MethodPost, "/automations/au-2/delete") != 0 {
+		t.Fatalf("delete rebound to a different automation: %s", rec.all())
+	}
+	if got := rec.count(http.MethodGet, "/automations"); got != 2 {
+		t.Fatalf("catalog requests = %d, want resolution plus refresh: %s", got, rec.all())
+	}
+}
+
 func TestAutomationsReloadFailureAfterActionIsSwallowed(t *testing.T) {
 	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
 	var gets int
@@ -6745,6 +6837,12 @@ func TestAutomationEditExportPreservesCompleteDefinitionWithoutMutation(t *testi
 	})
 	path := filepath.Join(t.TempDir(), "automation.yaml")
 	m = runLine(t, m, "/automations edit Original --export "+path)
+	if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+		t.Fatalf("typed export catalog requests = %d, want 1: %s", got, rec.all())
+	}
+	if got := rec.count(http.MethodGet, "/automations/au-1/builder"); got != 1 {
+		t.Fatalf("typed export definition loads = %d, want 1: %s", got, rec.all())
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -6829,6 +6927,12 @@ func TestAutomationInteractiveEditLoadsSavesAndDoesNotEchoDefinition(t *testing.
 		"/automations/au-1/builder": builder,
 	})
 	m = runLine(t, m, "/automations edit Original")
+	if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+		t.Fatalf("interactive edit catalog requests = %d, want 1: %s", got, rec.all())
+	}
+	if got := rec.count(http.MethodGet, "/automations/au-1/builder"); got != 1 {
+		t.Fatalf("interactive edit definition loads = %d, want 1: %s", got, rec.all())
+	}
 	if !m.automationEditActive || m.automationEditor.Value() != current {
 		t.Fatalf("editor did not load authoritative definition: active=%v value=%q", m.automationEditActive, m.automationEditor.Value())
 	}
