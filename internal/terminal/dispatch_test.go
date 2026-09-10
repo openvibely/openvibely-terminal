@@ -5198,6 +5198,69 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			})
 		}
 	})
+	t.Run("empty quoted sensitive operands are redacted", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			line func(secret string) string
+		}{
+			{
+				name: "API key stdin empty double quoted operand",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin "" ` + secret
+				},
+			},
+			{
+				name: "API key stdin empty single quoted operand",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin '' ` + secret
+				},
+			},
+			{
+				name: "API key empty double quoted operand",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key "" ` + secret
+				},
+			},
+			{
+				name: "API key empty single quoted operand",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key '' ` + secret
+				},
+			},
+			{
+				name: "endpoint empty double quoted operand",
+				line: func(secret string) string {
+					return `/models add ollama Local llama3 --endpoint "" http://user:` + secret + `@localhost:11434`
+				},
+			},
+			{
+				name: "endpoint empty single quoted operand",
+				line: func(secret string) string {
+					return `/models add ollama Local llama3 --endpoint '' http://user:` + secret + `@localhost:11434`
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				secret := "empty-quoted-sensitive-operand-" + strings.ReplaceAll(tc.name, " ", "-")
+				m, rec := dispatchModel(t, nil)
+				m = runLine(t, m, tc.line(secret))
+				if !strings.Contains(transcript(m), "unsupported models add option") {
+					t.Fatalf("empty quoted operand did not report its parse error:\n%s", transcript(m))
+				}
+				if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+					t.Fatalf("empty quoted sensitive operand exposed the secret:\n%s", transcript(m))
+				}
+				for _, item := range m.history {
+					if strings.Contains(item, secret) {
+						t.Fatalf("empty quoted sensitive operand exposed the secret in history: %q", item)
+					}
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("empty quoted sensitive operand made requests:\n%s", calls)
+				}
+			})
+		}
+	})
 	t.Run("malformed quoted option API key is redacted", func(t *testing.T) {
 		secret := "quoted-option-unmatched-quote-model-secret"
 		m, rec := dispatchModel(t, nil)

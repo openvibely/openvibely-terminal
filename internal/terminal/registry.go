@@ -3383,6 +3383,9 @@ func modelsCommand() command {
 					return m.beginModelWizard()
 				}
 				if !cliMode {
+					if _, err := parseModelAddArgs(rest); err != nil {
+						return m, errCmd(err.Error())
+					}
 					return m, errCmd("interactive model configuration uses masked prompts; run /models add")
 				}
 				spec, err := parseModelAddArgs(rest)
@@ -3939,6 +3942,14 @@ func redactModelCommandSecrets(commandLine string) string {
 			if i+1 < len(tokens) {
 				i++
 				parts = append(parts, "<redacted>")
+				// Empty quoted operands are preserved by the tokenizer. They
+				// cannot be valid sensitive values, so consume the following
+				// token too: it may be a pasted credential before local
+				// validation rejects the command.
+				if tokens[i].value == "" && i+1 < len(tokens) {
+					i++
+					parts = append(parts, "<redacted>")
+				}
 			}
 			continue
 		}
