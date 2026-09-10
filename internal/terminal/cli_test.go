@@ -1538,6 +1538,253 @@ func TestCLIGlobalModelsListWorksAcrossProjectStates(t *testing.T) {
 	}
 }
 
+func TestCLIModelsHelpDocumentsSafeAddWorkflow(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"help", "models"}, false, false); err != nil {
+		t.Fatalf("models help failed without a backend: %v", err)
+	}
+	for _, want := range []string{"models add", "--api-key-stdin", "--oauth", "ollama"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("CLI models help missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestCLIModelsAddUsesStdinAndRefreshesWithoutLeakingAPIKey(t *testing.T) {
+	secret := "cli-model-api-key"
+	var postForm url.Values
+	var postCount, listCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			switch r.Method {
+			case http.MethodPost:
+				postCount++
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				postForm = r.PostForm
+				w.WriteHeader(http.StatusOK)
+			case http.MethodGet:
+				listCount++
+				_, _ = io.WriteString(w, `<div data-model-id="m-openai" data-model-name="OpenAI" data-model-provider="openai" data-model-model="gpt-4o"></div>`)
+			default:
+				t.Fatalf("unexpected models method %s", r.Method)
+			}
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLIWithInput(c, &out, strings.NewReader(secret+"\n"), "", []string{
+		"models", "add", "openai", "OpenAI", "gpt-4o", "--api-key-stdin",
+	}, false, true)
+	if err != nil {
+		t.Fatalf("models add failed: %v", err)
+	}
+	if postCount != 1 || listCount != 1 {
+		t.Fatalf("POST/refresh counts = %d/%d, want 1/1", postCount, listCount)
+	}
+	for key, want := range map[string]string{
+		"name": "OpenAI", "provider": "openai", "model": "gpt-4o", "openai_auth_type": "api_key", "api_key": secret,
+	} {
+		if got := postForm.Get(key); got != want {
+			t.Errorf("form[%q] = %q, want %q", key, got, want)
+		}
+	}
+	if strings.Contains(out.String(), secret) {
+		t.Fatalf("API key leaked in JSON output: %s", out.String())
+	}
+	var result modelAddOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+		t.Fatalf("invalid add JSON: %v\n%s", err, out.String())
+	}
+	if result.Status != "added OpenAI" || len(result.Models) != 1 || result.Models[0].ID != "m-openai" {
+		t.Fatalf("add JSON = %+v", result)
+	}
+}
+
+func TestCLIModelsAddOllamaAndOAuthHandoff(t *testing.T) {
+	t.Run("ollama", func(t *testing.T) {
+		var postForm url.Values
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /models":
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				postForm = r.PostForm
+				w.WriteHeader(http.StatusOK)
+			case "GET /models":
+				_, _ = io.WriteString(w, `<div data-model-id="m-ollama" data-model-name="Local Ollama" data-model-provider="ollama" data-model-model="llama3.1:8b"></div>`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLIWithInput(c, &out, nil, "", []string{"models", "add", "ollama", "Local Ollama", "llama3.1:8b", "--endpoint", "http://localhost:11434"}, false, false); err != nil {
+			t.Fatalf("ollama add failed: %v", err)
+		}
+		if postForm.Get("provider") != "ollama" || postForm.Get("ollama_base_url") != "http://localhost:11434" || postForm.Get("api_key") != "" {
+			t.Fatalf("ollama form = %v", postForm)
+		}
+		if !strings.Contains(stripANSI(out.String()), "Local Ollama") {
+			t.Fatalf("refreshed Ollama list missing from output:\n%s", out.String())
+		}
+	})
+
+	t.Run("oauth", func(t *testing.T) {
+		var postForm url.Values
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /models":
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				postForm = r.PostForm
+				w.WriteHeader(http.StatusOK)
+			case "GET /models":
+				_, _ = io.WriteString(w, `<div data-model-id="m-oauth" data-model-name="Claude OAuth" data-model-provider="anthropic" data-model-model="claude-sonnet-4-6"></div>`)
+			case "GET /models/m-oauth/oauth/status":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"status":"not_connected"}`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLIWithInput(c, &out, nil, "", []string{"models", "add", "anthropic", "Claude OAuth", "claude-sonnet-4-6", "--oauth"}, false, true); err != nil {
+			t.Fatalf("oauth add failed: %v", err)
+		}
+		if postForm.Get("anthropic_auth_type") != "oauth" || postForm.Get("auth_method") != "oauth" || postForm.Get("api_key") != "" {
+			t.Fatalf("OAuth form = %v", postForm)
+		}
+		var result modelAddOutput
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+			t.Fatalf("invalid OAuth JSON: %v\n%s", err, out.String())
+		}
+		if result.OAuthStatus != "not_connected" || result.AuthorizationURL == "" || !strings.Contains(result.AuthorizationURL, "/models/m-oauth/oauth/initiate") {
+			t.Fatalf("OAuth result = %+v", result)
+		}
+		if strings.Contains(result.Status, "connected") {
+			t.Fatalf("OAuth result incorrectly claims connection: %+v", result)
+		}
+	})
+}
+
+func TestCLIModelsAddRejectsInvalidInputAndBackendFailuresWithoutRefresh(t *testing.T) {
+	t.Run("local validation", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"models", "add", "openai", "OpenAI", "gpt-4o"},
+			{"models", "add", "ollama", "Local", "llama3", "--endpoint", "http:/missing-host"},
+			{"models", "add", "ollama", "Local", "llama3", "--api-key-stdin"},
+			{"models", "add", "openai", "OpenAI", "gpt-4o", "--api-key", "visible-secret"},
+		} {
+			c, rec := cliServer(t, nil)
+			var out bytes.Buffer
+			err := RunCLIWithInput(c, &out, strings.NewReader("unused"), "", args, false, false)
+			if err == nil {
+				t.Fatalf("%v unexpectedly succeeded", args)
+			}
+			if strings.Contains(err.Error(), "visible-secret") || strings.Contains(out.String(), "visible-secret") {
+				t.Fatalf("%v echoed an unsupported secret: error=%v output=%s", args, err, out.String())
+			}
+			if strings.Contains(rec.all(), "POST /models") || strings.Contains(rec.all(), "GET /models") || out.Len() != 0 {
+				t.Fatalf("%v made a mutation/refresh or wrote output:\n%s\n%s", args, rec.all(), out.String())
+			}
+		}
+	})
+
+	t.Run("authentication failure skips refresh and redacts secret", func(t *testing.T) {
+		secret := "authentication-model-secret"
+		var postCount, listCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /models":
+				postCount++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":"rejected `+secret+`"}`)
+			case "GET /models":
+				listCount++
+				_, _ = io.WriteString(w, `<div></div>`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLIWithInput(c, &out, strings.NewReader(secret), "", []string{"models", "add", "openai", "OpenAI", "gpt-4o", "--api-key-stdin"}, false, true)
+		if err == nil || !strings.Contains(err.Error(), "requires sign-in") {
+			t.Fatalf("authentication failure error = %v", err)
+		}
+		if postCount != 1 || listCount != 0 {
+			t.Fatalf("POST/refresh counts = %d/%d, want 1/0", postCount, listCount)
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(out.String(), secret) {
+			t.Fatalf("secret leaked after authentication failure:\nerror: %v\noutput: %s", err, out.String())
+		}
+	})
+
+	t.Run("backend validation redacts secret", func(t *testing.T) {
+		secret := "backend-reflected-model-secret"
+		var postCount, listCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /models":
+				postCount++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"rejected `+secret+`"}`)
+			case "GET /models":
+				listCount++
+				_, _ = io.WriteString(w, `<div></div>`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLIWithInput(c, &out, strings.NewReader(secret), "", []string{"models", "add", "openai", "OpenAI", "gpt-4o", "--api-key-stdin"}, false, true)
+		if err == nil {
+			t.Fatal("backend rejection unexpectedly succeeded")
+		}
+		if postCount != 1 || listCount != 0 {
+			t.Fatalf("POST/refresh counts = %d/%d, want 1/0", postCount, listCount)
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(out.String(), secret) {
+			t.Fatalf("secret leaked after backend rejection:\nerror: %v\noutput: %s", err, out.String())
+		}
+	})
+}
+
 func TestCLIGlobalModelsEmptyJSONIsRawArray(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

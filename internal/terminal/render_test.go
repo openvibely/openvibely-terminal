@@ -2901,8 +2901,11 @@ func TestRenderModelsDistinguishesEmptyFromNoFilterMatches(t *testing.T) {
 	}}
 
 	empty := stripANSI(renderModels(nil, ""))
-	if !strings.Contains(empty, "no models configured") {
-		t.Fatalf("empty model list missing configuration guidance: %q", empty)
+	if !strings.Contains(empty, "no models configured") || !strings.Contains(empty, "/models add") {
+		t.Fatalf("empty model list missing terminal setup guidance: %q", empty)
+	}
+	if strings.Contains(empty, "web UI") || strings.Contains(empty, "API") {
+		t.Fatalf("empty model list retained non-terminal setup guidance: %q", empty)
 	}
 
 	for _, filter := range []string{"sonNET", "CLAUDE-SONNET", "anthROPIC"} {
@@ -2948,7 +2951,7 @@ func TestEmptyStateHints(t *testing.T) {
 		{
 			name: "models",
 			out:  stripANSI(renderModels(nil, "")),
-			hint: "web UI",
+			hint: "/models add",
 		},
 	}
 	for _, c := range cases {

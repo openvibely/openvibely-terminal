@@ -4989,6 +4989,168 @@ func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
 	}
 }
 
+func TestModelsInteractiveAddMasksCredentialsRefreshesAndSupportsDefault(t *testing.T) {
+	secret := "interactive-model-api-key"
+	var postForm url.Values
+	var postCount, listCount, defaultCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			postCount++
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			postForm = r.PostForm
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			listCount++
+			_, _ = io.WriteString(w, `<div data-model-id="m-openai" data-model-name="OpenAI" data-model-provider="openai" data-model-model="gpt-4o"></div>`)
+		case "POST /models/m-openai/set-default":
+			defaultCount++
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/models add")
+	if m.modelWizard == nil {
+		t.Fatalf("model wizard did not start:\n%s", transcript(m))
+	}
+	for _, value := range []string{"openai", "OpenAI", "gpt-4o", "api_key", secret} {
+		m = runLine(t, m, value)
+	}
+	if postCount != 1 || listCount != 1 || m.modelWizard != nil || m.input.EchoMode != textinput.EchoNormal {
+		t.Fatalf("model wizard did not complete cleanly: POST/list=%d/%d wizard=%v echo=%v\n%s", postCount, listCount, m.modelWizard != nil, m.input.EchoMode, transcript(m))
+	}
+	for key, want := range map[string]string{
+		"name": "OpenAI", "provider": "openai", "model": "gpt-4o", "openai_auth_type": "api_key", "api_key": secret,
+	} {
+		if got := postForm.Get(key); got != want {
+			t.Errorf("form[%q] = %q, want %q", key, got, want)
+		}
+	}
+	if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+		t.Fatal("model API key appeared in terminal output")
+	}
+	for _, item := range m.history {
+		if strings.Contains(item, secret) {
+			t.Fatalf("model API key appeared in command history: %q", item)
+		}
+	}
+	m = runLine(t, m, "/models default OpenAI")
+	if defaultCount != 1 || listCount != 3 {
+		t.Fatalf("default flow did not use refreshed model list: defaults=%d lists=%d", defaultCount, listCount)
+	}
+}
+
+func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *testing.T) {
+	t.Run("ollama endpoint", func(t *testing.T) {
+		var postForm url.Values
+		var postCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /models":
+				postCount++
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				postForm = r.PostForm
+				w.WriteHeader(http.StatusOK)
+			case "GET /models":
+				_, _ = io.WriteString(w, `<div data-model-id="m-ollama" data-model-name="Local Ollama" data-model-provider="ollama" data-model-model="llama3"></div>`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		m = runLine(t, m, "/models add")
+		for _, value := range []string{"ollama", "Local Ollama", "llama3", "http://localhost:11434"} {
+			m = runLine(t, m, value)
+		}
+		if postCount != 1 || postForm.Get("ollama_base_url") != "http://localhost:11434" || postForm.Get("api_key") != "" {
+			t.Fatalf("unexpected Ollama setup form: %v", postForm)
+		}
+
+		m = runLine(t, m, "/models add")
+		for _, value := range []string{"ollama", "Broken Ollama", "llama3", "http:/missing-host"} {
+			m = runLine(t, m, value)
+		}
+		if postCount != 1 || m.modelWizard == nil || !strings.Contains(transcript(m), "--endpoint must be an absolute HTTP(S) URL") {
+			t.Fatalf("malformed endpoint was not rejected before POST:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("backend validation", func(t *testing.T) {
+		secret := "interactive-backend-reflected-secret"
+		var postCount, listCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /models":
+				postCount++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"rejected `+secret+`"}`)
+			case "GET /models":
+				listCount++
+				_, _ = io.WriteString(w, `<div></div>`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		m = runLine(t, m, "/models add")
+		for _, value := range []string{"openai", "OpenAI", "gpt-4o", "api_key", secret} {
+			m = runLine(t, m, value)
+		}
+		if postCount != 1 || listCount != 0 {
+			t.Fatalf("backend validation POST/list counts = %d/%d, want 1/0", postCount, listCount)
+		}
+		if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+			t.Fatalf("backend-reflected secret leaked:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("inline secret is redacted", func(t *testing.T) {
+		apiKey := "inline-model-secret"
+		endpointSecret := "inline-endpoint-secret"
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, `/models add openai OpenAI gpt-4o --api-key "`+apiKey+`"`)
+		m = runLine(t, m, `/models add ollama Local llama3 --endpoint "http://user:`+endpointSecret+`@localhost:11434"`)
+		for _, secret := range []string{apiKey, endpointSecret} {
+			if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+				t.Fatalf("inline model secret %q appeared in terminal output", secret)
+			}
+			for _, item := range m.history {
+				if strings.Contains(item, secret) {
+					t.Fatalf("inline model secret %q appeared in history: %q", secret, item)
+				}
+			}
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("rejected inline secret made requests:\n%s", calls)
+		}
+	})
+}
+
 func TestModelsListFilterOutputDistinguishesMatchesFromNoMatches(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="Anthropic" data-model-model="claude-sonnet-4"></div>`

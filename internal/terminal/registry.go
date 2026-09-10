@@ -2934,27 +2934,391 @@ func fetchModelCapacityWithUsage(ctx context.Context, c *client.Client, projectI
 	return caps, usage, nil
 }
 
+type modelAddSpec struct {
+	Provider string
+	Name     string
+	Model    string
+	APIKey   string
+	OAuth    bool
+	Endpoint string
+}
+
+type modelAddOutput struct {
+	Status           string            `json:"status"`
+	Models           []client.LLMModel `json:"models,omitempty"`
+	OAuthStatus      string            `json:"oauth_status,omitempty"`
+	AuthorizationURL string            `json:"authorization_url,omitempty"`
+}
+
+func normalizeModelAddProvider(value string) (string, error) {
+	provider := strings.ToLower(strings.TrimSpace(value))
+	switch provider {
+	case "anthropic", "openai", "ollama":
+		return provider, nil
+	default:
+		return "", errors.New("provider must be anthropic, openai, or ollama")
+	}
+}
+
+func validateOllamaEndpoint(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("--endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	return value, nil
+}
+
+func parseModelAddArgs(args []string) (modelAddSpec, error) {
+	if len(args) < 3 {
+		return modelAddSpec{}, errors.New(commandUsage("models", "add"))
+	}
+	spec := modelAddSpec{
+		Name:  strings.TrimSpace(args[1]),
+		Model: strings.TrimSpace(args[2]),
+	}
+	var err error
+	if spec.Provider, err = normalizeModelAddProvider(args[0]); err != nil {
+		return modelAddSpec{}, err
+	}
+	if spec.Name == "" || spec.Model == "" {
+		return modelAddSpec{}, errors.New("model name and model ID are required")
+	}
+	apiKeyStdin := false
+	endpointSet := false
+	for i := 3; i < len(args); i++ {
+		switch strings.ToLower(args[i]) {
+		case "--api-key-stdin":
+			if apiKeyStdin {
+				return modelAddSpec{}, errors.New("--api-key-stdin may only be provided once")
+			}
+			apiKeyStdin = true
+		case "--oauth":
+			if spec.OAuth {
+				return modelAddSpec{}, errors.New("--oauth may only be provided once")
+			}
+			spec.OAuth = true
+		case "--endpoint":
+			if endpointSet {
+				return modelAddSpec{}, errors.New("--endpoint may only be provided once")
+			}
+			endpointSet = true
+			if i+1 >= len(args) {
+				return modelAddSpec{}, errors.New("--endpoint requires a value")
+			}
+			i++
+			if spec.Endpoint, err = validateOllamaEndpoint(args[i]); err != nil {
+				return modelAddSpec{}, err
+			}
+		default:
+			return modelAddSpec{}, errors.New("unsupported models add option")
+		}
+	}
+
+	switch spec.Provider {
+	case "ollama":
+		if spec.OAuth || apiKeyStdin {
+			return modelAddSpec{}, errors.New("ollama does not support --oauth or --api-key-stdin")
+		}
+	case "anthropic", "openai":
+		if spec.Endpoint != "" {
+			return modelAddSpec{}, errors.New("--endpoint is supported only for ollama")
+		}
+		if spec.OAuth && apiKeyStdin {
+			return modelAddSpec{}, errors.New("--oauth and --api-key-stdin cannot be used together")
+		}
+		if !spec.OAuth && !apiKeyStdin {
+			return modelAddSpec{}, errors.New("API-key providers require --api-key-stdin; do not pass secrets as command arguments")
+		}
+	}
+	return spec, nil
+}
+
+func validateModelsArgs(args []string) error {
+	if len(args) == 0 || !strings.EqualFold(args[0], "add") {
+		return nil
+	}
+	_, err := parseModelAddArgs(args[1:])
+	return err
+}
+
+func readModelAPIKey(input io.Reader) (string, error) {
+	if input == nil {
+		return "", errors.New("--api-key-stdin requires a non-echoing standard-input source")
+	}
+	data, err := io.ReadAll(io.LimitReader(input, 64<<10))
+	if err != nil {
+		return "", errors.New("reading API key from standard input failed")
+	}
+	key := strings.TrimSpace(string(data))
+	if key == "" {
+		return "", errors.New("API key from standard input is required")
+	}
+	return key, nil
+}
+
+func modelOAuthHandoffURL(c *client.Client, modelID, projectID string) string {
+	base, err := url.Parse(ServerURLDisplay(c.BaseURL()))
+	if err != nil || base.Host == "" {
+		return "the backend Models page"
+	}
+	base.User = nil
+	base.RawQuery = ""
+	base.Fragment = ""
+	base.Path = strings.TrimRight(base.Path, "/") + "/models/" + url.PathEscape(modelID) + "/oauth/initiate"
+	if projectID != "" {
+		query := base.Query()
+		query.Set("project_id", projectID)
+		base.RawQuery = query.Encode()
+	}
+	return base.String()
+}
+
+func modelAddResult(ctx context.Context, c *client.Client, projectID string, spec modelAddSpec) (string, error) {
+	defer func() { spec.APIKey = "" }()
+	if err := c.CreateModel(ctx, projectID, client.ModelCreateRequest{
+		Name:          spec.Name,
+		Provider:      spec.Provider,
+		Model:         spec.Model,
+		APIKey:        spec.APIKey,
+		OAuth:         spec.OAuth,
+		OllamaBaseURL: spec.Endpoint,
+	}); err != nil {
+		return "", err
+	}
+
+	status := "added " + spec.Name
+	models, err := c.ListModels(ctx, projectID)
+	if err != nil {
+		if jsonMode {
+			return marshalJSON(modelAddOutput{Status: status})
+		}
+		return status, nil
+	}
+	if !spec.OAuth {
+		if jsonMode {
+			return marshalJSON(modelAddOutput{Status: status, Models: models})
+		}
+		return status + "\n\n" + renderModels(models, ""), nil
+	}
+
+	output := modelAddOutput{Status: status, Models: models, OAuthStatus: "unknown"}
+	model, findErr := matchRef(models, spec.Name,
+		func(item client.LLMModel) string { return item.ID },
+		func(item client.LLMModel) string { return item.Name })
+	if findErr == nil {
+		output.AuthorizationURL = modelOAuthHandoffURL(c, model.ID, projectID)
+		if oauth, statusErr := c.GetModelOAuthStatus(ctx, model.ID); statusErr == nil && oauth != nil && strings.TrimSpace(oauth.Status) != "" {
+			output.OAuthStatus = strings.TrimSpace(oauth.Status)
+		}
+	}
+	if jsonMode {
+		return marshalJSON(output)
+	}
+	if output.OAuthStatus == "connected" {
+		return status + "; OAuth connected (backend confirmed)\n\n" + renderModels(models, ""), nil
+	}
+	message := status + "; OAuth authorization is required (status: " + output.OAuthStatus + ")"
+	if output.AuthorizationURL != "" {
+		message += ". Open " + output.AuthorizationURL + " in a browser and complete authorization; the backend Models page confirms the resulting status."
+	} else {
+		message += ". Open the backend Models page, complete authorization, and confirm the resulting status there."
+	}
+	return message + "\n\n" + renderModels(models, ""), nil
+}
+
+type modelWizardStep struct {
+	field       string
+	label       string
+	secret      bool
+	placeholder string
+}
+
+type modelWizardState struct {
+	spec               modelAddSpec
+	steps              []modelWizardStep
+	index              int
+	restorePrompt      string
+	restorePlaceholder string
+}
+
+func modelWizardSteps(provider string) []modelWizardStep {
+	steps := []modelWizardStep{
+		{field: "provider", label: "Provider (anthropic/openai/ollama)", placeholder: "openai"},
+		{field: "name", label: "Configuration name", placeholder: "My Model"},
+		{field: "model", label: "Model ID", placeholder: "gpt-4o"},
+	}
+	if provider == "anthropic" || provider == "openai" {
+		return append(steps,
+			modelWizardStep{field: "auth", label: "Authentication (api_key/oauth)", placeholder: "api_key"},
+			modelWizardStep{field: "api_key", label: "API key", secret: true, placeholder: "required for API-key authentication"},
+		)
+	}
+	return append(steps, modelWizardStep{field: "endpoint", label: "Ollama base URL", placeholder: "blank uses http://localhost:11434"})
+}
+
+func (m Model) beginModelWizard() (Model, tea.Cmd) {
+	m.modelWizard = &modelWizardState{
+		steps:              []modelWizardStep{{field: "provider", label: "Provider (anthropic/openai/ollama)", placeholder: "openai"}},
+		restorePrompt:      m.input.Prompt,
+		restorePlaceholder: m.input.Placeholder,
+	}
+	m.menu = nil
+	m.input.SetValue("")
+	m.append(entry{role: "system", text: "model setup: enter each field; API keys are masked and never stored in history. Esc cancels."})
+	m.setModelWizardPrompt()
+	return m, nil
+}
+
+func (m *Model) setModelWizardPrompt() {
+	wizard := m.modelWizard
+	if wizard == nil || wizard.index >= len(wizard.steps) {
+		return
+	}
+	step := wizard.steps[wizard.index]
+	m.input.SetValue("")
+	m.input.Prompt = step.label + ": "
+	m.input.Placeholder = step.placeholder
+	m.input.EchoMode = textinput.EchoNormal
+	if step.secret {
+		m.input.EchoMode = textinput.EchoPassword
+	}
+	m.input.Focus()
+}
+
+func (m *Model) resetModelWizard() {
+	if m.modelWizard == nil {
+		return
+	}
+	m.modelWizard.spec.APIKey = ""
+	m.input.SetValue("")
+	m.input.Prompt = m.modelWizard.restorePrompt
+	m.input.Placeholder = m.modelWizard.restorePlaceholder
+	m.input.EchoMode = textinput.EchoNormal
+	m.modelWizard = nil
+	m.input.Focus()
+}
+
+func (m Model) handleModelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "ctrl+d":
+		m.quitting = true
+		m.Cleanup()
+		return m, tea.Quit
+	case "esc":
+		m.resetModelWizard()
+		m.append(entry{role: "system", text: "model setup cancelled"})
+		return m, nil
+	case "enter":
+		wizard := m.modelWizard
+		step := wizard.steps[wizard.index]
+		value := strings.TrimSpace(m.input.Value())
+		m.input.SetValue("")
+		switch step.field {
+		case "provider":
+			provider, err := normalizeModelAddProvider(value)
+			if err != nil {
+				m.append(entry{role: "error", text: err.Error()})
+				m.setModelWizardPrompt()
+				return m, nil
+			}
+			wizard.spec.Provider = provider
+			wizard.steps = modelWizardSteps(provider)
+		case "name":
+			if value == "" {
+				m.append(entry{role: "error", text: "configuration name is required"})
+				m.setModelWizardPrompt()
+				return m, nil
+			}
+			wizard.spec.Name = value
+		case "model":
+			if value == "" {
+				m.append(entry{role: "error", text: "model ID is required"})
+				m.setModelWizardPrompt()
+				return m, nil
+			}
+			wizard.spec.Model = value
+		case "auth":
+			value = strings.ToLower(value)
+			if value != "api_key" && value != "oauth" {
+				m.append(entry{role: "error", text: "authentication must be api_key or oauth"})
+				m.setModelWizardPrompt()
+				return m, nil
+			}
+			wizard.spec.OAuth = value == "oauth"
+			if wizard.spec.OAuth {
+				wizard.steps = wizard.steps[:wizard.index+1]
+			}
+		case "api_key":
+			if value == "" {
+				m.append(entry{role: "error", text: "API key is required"})
+				m.setModelWizardPrompt()
+				return m, nil
+			}
+			wizard.spec.APIKey = value
+		case "endpoint":
+			endpoint, err := validateOllamaEndpoint(value)
+			if err != nil {
+				m.append(entry{role: "error", text: err.Error()})
+				m.setModelWizardPrompt()
+				return m, nil
+			}
+			wizard.spec.Endpoint = endpoint
+		}
+		wizard.index++
+		if wizard.index < len(wizard.steps) {
+			m.setModelWizardPrompt()
+			return m, nil
+		}
+		spec, projectID := wizard.spec, m.selectedID
+		wizard.spec.APIKey = ""
+		m.resetModelWizard()
+		m.busy = true
+		c := m.client
+		return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
+			return modelAddResult(ctx, c, projectID, spec)
+		})
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
 func modelsCommand() command {
-	actions := []string{"list", "default", "delete", "capacity"}
+	actions := []string{"list", "add", "default", "delete", "capacity"}
 	return command{
 		name:          "models",
 		aliases:       []string{"model"},
 		args:          "[name]",
 		actions:       actions,
 		selectorPaths: [][]string{{"default"}, {"delete"}},
-		desc:          "configured LLM models, worker capacity and provider health",
+		desc:          "configured LLM models, provider setup, worker capacity and health",
 		usage: []string{
 			"models [filter]                            list configured models",
+			"models add                                  guided provider setup with masked API-key input",
+			"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
+			"  providers: anthropic, openai, ollama; API keys require piped --api-key-stdin", "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>",
 			"models default <model>                     set the default model",
 			"models delete <model>                      remove a model",
 			"omit <model> on default/delete → interactive selector",
 			"models capacity                            worker capacity plus provider/account-limit health (see analytics usage)",
 		},
+		actionUsages: []commandActionUsage{
+			{action: "add", args: "<provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>]", description: "add a provider (guided when interactive)"},
+		},
 		examples: []string{
+			`models add`,
+			`printf '%s' "$OPENAI_API_KEY" | models add openai "OpenAI" gpt-4o --api-key-stdin`,
+			`models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434`,
+			`models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth`,
 			`models default gpt-4o`,
 			`models capacity`,
 			`models delete claude-haiku`,
 		},
+		validateArgs: validateModelsArgs,
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c := m.client
@@ -2970,6 +3334,30 @@ func modelsCommand() command {
 						return marshalJSON(list)
 					}
 					return renderModels(list, ref), nil
+				})
+			}
+
+			if action == "add" {
+				if len(rest) == 0 && !cliMode {
+					return m.beginModelWizard()
+				}
+				if !cliMode {
+					return m, errCmd("interactive model configuration uses masked prompts; run /models add")
+				}
+				spec, err := parseModelAddArgs(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				if !spec.OAuth && (spec.Provider == "anthropic" || spec.Provider == "openai") {
+					key, err := readModelAPIKey(m.cliSecretInput)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+					spec.APIKey = key
+				}
+				pid := m.selectedID
+				return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
+					return modelAddResult(ctx, c, pid, spec)
 				})
 			}
 
@@ -3004,9 +3392,9 @@ func modelsCommand() command {
 				})
 			default:
 				if ref == "" {
-					return selectorOr(m, "usage: /models "+action+" <model>",
+					return selectorOr(m, commandUsage("models", action),
 						selectorFor("Models", "models "+action,
-							"no models configured — add a model via the web UI or API", false,
+							"no models configured — run /models add", false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								list, err := c.ListModels(ctx, pid)
 								if err != nil {
@@ -3452,6 +3840,40 @@ func redactChannelCommandSecrets(commandLine string) string {
 			i++
 			parts = append(parts, "<redacted>")
 		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func redactModelCommandSecrets(commandLine string) string {
+	tokens, err := tokenizeCommandTokens(commandLine)
+	if err != nil || len(tokens) < 2 {
+		return commandLine
+	}
+	root := strings.TrimPrefix(strings.ToLower(tokens[0].value), "/")
+	if (root != "models" && root != "model") || !strings.EqualFold(tokens[1].value, "add") {
+		return commandLine
+	}
+	secretOptions := map[string]bool{
+		"--api-key": true, "--api-key-file": true, "--secret": true,
+		"--oauth-client-secret": true, "--signing-secret": true,
+	}
+	parts := make([]string, 0, len(tokens))
+	for i := 0; i < len(tokens); i++ {
+		value := tokens[i].value
+		name, _, hasValue := strings.Cut(strings.ToLower(value), "=")
+		if secretOptions[name] || name == "--endpoint" {
+			if hasValue {
+				parts = append(parts, name+"=<redacted>")
+				continue
+			}
+			parts = append(parts, value)
+			if i+1 < len(tokens) {
+				i++
+				parts = append(parts, "<redacted>")
+			}
+			continue
+		}
+		parts = append(parts, value)
 	}
 	return strings.Join(parts, " ")
 }

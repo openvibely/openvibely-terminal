@@ -209,7 +209,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
-| `/models` | `model` | `list`, `default`, `delete`, `capacity` |
+| `/models` | `model` | `list`, `add`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `webhooks list|show|create|edit|test|rotate|delete` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
@@ -229,6 +229,40 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/help` | `?`, `commands` | `/help <command>` details one |
 | `/chat` | `back`, `leave` | return to project chat; `/chat <message>` also sends it |
 | `/quit` | `q`, `exit` | |
+
+### Model providers
+
+`/models add` is the shared terminal action for configuring `anthropic`,
+`openai`, and `ollama` models. Run the bare action in the interactive TUI to
+answer guided prompts. API-key prompts are masked and never enter the transcript
+or command history.
+
+```text
+/models add
+```
+
+One-shot API-key configuration accepts a secret only through piped or redirected
+standard input with `--api-key-stdin`. The key must never be put in an argument, pasted into a
+command-history entry, or included in `--json` output.
+
+```bash
+printf '%s' "$OPENAI_API_KEY" | openvibely-terminal models add openai "OpenAI" gpt-4o --api-key-stdin
+openvibely-terminal models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434
+```
+
+`--endpoint` is only for Ollama and must be an absolute HTTP(S) URL without
+credentials, query parameters, or fragments. Omit it to
+use the backend's local Ollama default. `--oauth` is available for Anthropic and
+OpenAI. It saves an OAuth configuration, refreshes the model list, then reports
+the backend's authorization status and a browser handoff URL. OAuth is connected
+only when that backend status is `connected`; terminal setup alone does not claim
+completion.
+
+```bash
+openvibely-terminal models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth
+```
+
+After a successful addition, choose it with `/models default <name>` as usual.
 
 ### Project memory
 

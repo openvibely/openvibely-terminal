@@ -3315,13 +3315,13 @@ func renderModels(list []client.LLMModel, filter string) string {
 	}
 	if len(rows) == 0 {
 		if len(list) == 0 {
-			return dimStyle.Render("no models configured — add a model via the web UI or API")
+			return dimStyle.Render("no models configured — run /models add to configure a provider")
 		}
 		safeFilter := truncate(compactProviderText(sanitizeMemoryText(filter)), 80)
 		return dimStyle.Render(fmt.Sprintf("no models match %q", safeFilter))
 	}
 	return table(append([][]string{{"NAME", "PROVIDER", "MODEL"}}, rows...)) + "\n\n" +
-		dimStyle.Render("/models default <name> · /models delete <name> · /models capacity")
+		dimStyle.Render("/models add · /models default <name> · /models delete <name> · /models capacity")
 }
 
 func renderModelCapacity(caps []client.ModelCapacity) string {

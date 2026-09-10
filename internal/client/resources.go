@@ -673,6 +673,96 @@ func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle, scope
 		"/skills/"+url.PathEscape(handle)+"/always_use"+query("project_id", projectID), payload)
 }
 
+// ModelCreateRequest is the supported terminal subset of the backend's
+// browser model-create form. APIKey is deliberately excluded from every JSON
+// representation and is only sent in the form body.
+type ModelCreateRequest struct {
+	Name          string
+	Provider      string
+	Model         string
+	APIKey        string
+	OAuth         bool
+	OllamaBaseURL string
+}
+
+// ModelOAuthStatus is the backend-confirmed authorization state for an
+// OAuth-configured model.
+type ModelOAuthStatus struct {
+	Status string `json:"status"`
+}
+
+// CreateModel creates a model through the same form contract used by the
+// backend Models screen. Server-side normalization and validation remain
+// authoritative.
+func (c *Client) CreateModel(ctx context.Context, projectID string, request ModelCreateRequest) error {
+	form := url.Values{}
+	form.Set("name", request.Name)
+	form.Set("provider", request.Provider)
+	form.Set("model", request.Model)
+	switch request.Provider {
+	case "anthropic":
+		if request.OAuth {
+			form.Set("anthropic_auth_type", "oauth")
+			form.Set("auth_method", "oauth")
+		} else {
+			form.Set("anthropic_auth_type", "api_key")
+			form.Set("api_key", request.APIKey)
+		}
+	case "openai":
+		if request.OAuth {
+			form.Set("openai_auth_type", "oauth")
+			form.Set("auth_method", "oauth")
+		} else {
+			form.Set("openai_auth_type", "api_key")
+			form.Set("api_key", request.APIKey)
+		}
+	case "ollama":
+		if request.OllamaBaseURL != "" {
+			form.Set("ollama_base_url", request.OllamaBaseURL)
+		}
+	}
+	err := c.doForm(ctx, http.MethodPost, "/models"+query("project_id", projectID), form)
+	return redactModelCreateError(err, request.APIKey)
+}
+
+// GetModelOAuthStatus returns the backend-confirmed OAuth status. A model is
+// connected only when this endpoint reports "connected".
+func (c *Client) GetModelOAuthStatus(ctx context.Context, modelID string) (*ModelOAuthStatus, error) {
+	var out ModelOAuthStatus
+	if err := c.getJSON(ctx, "/models/"+url.PathEscape(modelID)+"/oauth/status", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// redactModelCreateError ensures an unexpected backend validation response can
+// never reflect a submitted API key into terminal output.
+func redactModelCreateError(err error, secret string) error {
+	if err == nil || secret == "" || IsAuthRequired(err) {
+		return err
+	}
+	message := err.Error()
+	for _, value := range []string{secret, url.QueryEscape(secret)} {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, "[redacted]")
+		}
+	}
+	if message == err.Error() {
+		return err
+	}
+	var statusErr *HTTPStatusError
+	if errors.As(err, &statusErr) {
+		redacted := statusErr.Message
+		for _, value := range []string{secret, url.QueryEscape(secret)} {
+			if value != "" {
+				redacted = strings.ReplaceAll(redacted, value, "[redacted]")
+			}
+		}
+		return &HTTPStatusError{StatusCode: statusErr.StatusCode, Message: redacted}
+	}
+	return errors.New(message)
+}
+
 // --- models ---
 
 // LLMModel is one card on the Models screen.

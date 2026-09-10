@@ -75,7 +75,7 @@ Common commands include:
 | `/alerts` | Review alerts, including selected bulk read/delete actions |
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
-| `/agents`, `/models`, `/workers` | Inspect execution resources |
+| `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures API-key providers or local Ollama |
 | `/channels` | Manage integrations and inbound webhooks |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
@@ -91,6 +91,28 @@ one-shot CLI mode:
 /alerts delete-bulk a1b2 "Release approval"
 openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release approval"
 ```
+
+## Model providers
+
+Use one shared `models add` action in the TUI or CLI. In the TUI, `/models add`
+collects configuration details and masks API-key input. In one-shot mode, API keys
+are accepted only from piped or redirected standard input with `--api-key-stdin`; never place a key in
+an argument, shell history, or an example.
+
+```bash
+# API-key provider: the key is read from standard input, not argv.
+printf '%s' "$OPENAI_API_KEY" | openvibely-terminal models add openai "OpenAI" gpt-4o --api-key-stdin
+
+# Local Ollama: the endpoint is optional and defaults to localhost in the backend.
+openvibely-terminal models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434
+
+# OAuth saves the configuration, then reports the backend authorization status and browser handoff.
+openvibely-terminal models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth
+```
+
+OAuth is not terminal-only completion: open the reported authorization URL in a
+browser, complete the provider flow, and rely on the backend-confirmed status
+before treating the model as connected.
 
 ## Configuration
 

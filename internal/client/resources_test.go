@@ -858,6 +858,92 @@ func TestListSkillsReadsDataAttributes(t *testing.T) {
 	}
 }
 
+func TestModelCreateFormAndOAuthStatus(t *testing.T) {
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			if r.Method != http.MethodPost {
+				t.Fatalf("method = %s, want POST", r.Method)
+			}
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Fatalf("project_id = %q, want p1", got)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			posted = r.PostForm
+			w.WriteHeader(http.StatusOK)
+		case "/models/m1/oauth/status":
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			_, _ = io.WriteString(w, `{"status":"not_connected"}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "model-create-secret"
+	if err := c.CreateModel(context.Background(), "p1", ModelCreateRequest{
+		Name: "OpenAI", Provider: "openai", Model: "gpt-4o", APIKey: secret,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := posted.Get("name"); got != "OpenAI" {
+		t.Errorf("name = %q", got)
+	}
+	if got := posted.Get("provider"); got != "openai" {
+		t.Errorf("provider = %q", got)
+	}
+	if got := posted.Get("model"); got != "gpt-4o" {
+		t.Errorf("model = %q", got)
+	}
+	if got := posted.Get("openai_auth_type"); got != "api_key" {
+		t.Errorf("openai_auth_type = %q, want api_key", got)
+	}
+	if got := posted.Get("api_key"); got != secret {
+		t.Errorf("api_key was not sent in the form")
+	}
+	status, err := c.GetModelOAuthStatus(context.Background(), "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "not_connected" {
+		t.Errorf("status = %q, want not_connected", status.Status)
+	}
+}
+
+func TestModelCreateRedactsReflectedAPIKeyErrors(t *testing.T) {
+	secret := "reflected-model-api-key"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"invalid key `+secret+`"}`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.CreateModel(context.Background(), "", ModelCreateRequest{
+		Name: "OpenAI", Provider: "openai", Model: "gpt-4o", APIKey: secret,
+	})
+	if err == nil {
+		t.Fatal("CreateModel unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("credential leaked into error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("error did not indicate redaction: %v", err)
+	}
+}
+
 func TestListModelsAndAgents(t *testing.T) {
 	t.Run("models", func(t *testing.T) {
 		c := htmlServer(t, `<div data-model-id="m1" data-model-name="Sonnet"

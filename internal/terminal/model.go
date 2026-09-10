@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -137,6 +138,14 @@ type Model struct {
 	// exist only in the masked input/form while needed for the mutation and are
 	// never appended to transcript or command history.
 	channelWizard *channelWizardState
+
+	// modelWizard holds terminal-native provider setup state. API keys use the
+	// masked input and are cleared before the backend mutation is started.
+	modelWizard *modelWizardState
+
+	// cliSecretInput is supplied only by the one-shot runner for commands that
+	// explicitly opt into a non-echoing standard-input credential source.
+	cliSecretInput io.Reader
 
 	// projectsLoaded is true only after a successful project-list response (or
 	// project creation installs the first known project). It remains false while
@@ -2243,6 +2252,9 @@ func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleKey routes keys; the input owns almost everything.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.modelWizard != nil {
+		return m.handleModelWizardKey(msg)
+	}
 	if m.channelWizard != nil {
 		return m.handleChannelWizardKey(msg)
 	}
@@ -2400,7 +2412,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.menu = nil
 	displayText := text
 	if strings.HasPrefix(text, "/") {
-		displayText = redactChannelCommandSecrets(text)
+		displayText = redactModelCommandSecrets(redactChannelCommandSecrets(text))
 	}
 	m.pushHistory(displayText)
 

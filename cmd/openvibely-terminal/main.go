@@ -172,7 +172,7 @@ func runCLI(c *client.Client, project string, args []string, force, jsonOutput b
 		// Preserve the original CLI behavior for short-lived commands: Ctrl-C keeps
 		// its normal process-interrupt semantics instead of being consumed by a
 		// context that those commands do not use.
-		return terminal.RunCLI(c, os.Stdout, project, args, force, jsonOutput)
+		return terminal.RunCLIWithInput(c, os.Stdout, cliCredentialInput(), project, args, force, jsonOutput)
 	}
 
 	// Live events, chat, and task follow-ups own long-lived streaming requests.
@@ -180,6 +180,18 @@ func runCLI(c *client.Client, project string, args []string, force, jsonOutput b
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	return terminal.RunCLIContext(ctx, c, os.Stdout, project, args, force, jsonOutput)
+}
+
+func cliCredentialInput() *os.File {
+	info, err := os.Stdin.Stat()
+	if err != nil || !canUseCLISecretInput(info.Mode()) {
+		return nil
+	}
+	return os.Stdin
+}
+
+func canUseCLISecretInput(mode os.FileMode) bool {
+	return mode&os.ModeCharDevice == 0
 }
 
 func isForegroundCLICommand(args []string) bool {

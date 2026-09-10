@@ -54,12 +54,24 @@ var jsonMode bool
 // json corresponds to the --json CLI flag: when true list/show commands emit
 // raw JSON instead of styled text.
 func RunCLI(c *client.Client, out io.Writer, projectRef string, args []string, force bool, json bool) error {
-	return RunCLIContext(context.Background(), c, out, projectRef, args, force, json)
+	return RunCLIWithInput(c, out, nil, projectRef, args, force, json)
+}
+
+// RunCLIWithInput executes one command with an optional non-echoing credential
+// source for commands that explicitly request it. Callers must not pass secrets
+// as command arguments.
+func RunCLIWithInput(c *client.Client, out io.Writer, input io.Reader, projectRef string, args []string, force bool, json bool) error {
+	return RunCLIContextWithInput(context.Background(), c, out, input, projectRef, args, force, json)
 }
 
 // RunCLIContext is RunCLI with a caller-owned lifetime. Long-running commands
 // such as the foreground events stream use this context for cancellation.
 func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, projectRef string, args []string, force bool, json bool) error {
+	return RunCLIContextWithInput(ctx, c, out, nil, projectRef, args, force, json)
+}
+
+// RunCLIContextWithInput is RunCLIContext with an optional credential reader.
+func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer, input io.Reader, projectRef string, args []string, force bool, json bool) error {
 	if len(args) == 0 {
 		return errors.New("no command given")
 	}
@@ -97,6 +109,7 @@ func RunCLIContext(ctx context.Context, c *client.Client, out io.Writer, project
 
 	m := New(c)
 	m.cliContext = ctx
+	m.cliSecretInput = input
 	m.width, m.height = 100, 40
 	m.transcript.Width = m.width
 	m.log = nil // drop the interactive banner

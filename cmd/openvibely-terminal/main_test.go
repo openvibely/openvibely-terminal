@@ -19,6 +19,18 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/terminal"
 )
 
+func TestCLISecretInputRejectsEchoingTerminal(t *testing.T) {
+	if canUseCLISecretInput(os.ModeCharDevice) {
+		t.Fatal("character-device stdin must not be used for a one-shot credential")
+	}
+	if !canUseCLISecretInput(os.ModeNamedPipe) {
+		t.Fatal("piped stdin must be accepted as a non-echoing credential source")
+	}
+	if !canUseCLISecretInput(0) {
+		t.Fatal("redirected regular-file stdin must be accepted as a credential source")
+	}
+}
+
 func TestParseInterspersedFlags(t *testing.T) {
 	tests := []struct {
 		name        string
