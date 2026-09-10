@@ -4902,6 +4902,95 @@ func TestAlertBulkMutationFailureDoesNotRefreshOrReportSuccess(t *testing.T) {
 	}
 }
 
+func TestAlertBulkMalformedMutationResponsesDoNotRefreshOrReportSuccess(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>`
+	const refreshedHTML = `<div data-alert-id="a-remaining" data-alert-scroll-anchor="a-remaining"><p class="font-semibold">Remaining</p></div>`
+	endpoints := []struct {
+		name       string
+		action     string
+		method     string
+		path       string
+		countName  string
+		successMsg string
+	}{
+		{name: "read", action: "read-bulk", method: http.MethodPost, path: "/alerts/read-bulk", countName: "updated", successMsg: "marked 0 alerts read"},
+		{name: "delete", action: "delete-bulk", method: http.MethodDelete, path: "/alerts/bulk", countName: "deleted", successMsg: "deleted 0 alerts"},
+	}
+	responses := []struct {
+		name      string
+		body      func(string) string
+		wantError string
+	}{
+		{name: "missing count", body: func(string) string { return `{}` }, wantError: "missing required"},
+		{name: "null count", body: func(field string) string { return fmt.Sprintf(`{%q:null}`, field) }, wantError: "missing required"},
+		{name: "negative count", body: func(field string) string { return fmt.Sprintf(`{%q:-1}`, field) }, wantError: "must not be negative"},
+		{name: "error object with count", body: func(field string) string { return fmt.Sprintf(`{"error":"bulk mutation rejected",%q:0}`, field) }, wantError: "received an error object"},
+		{name: "explicit zero", body: func(field string) string { return fmt.Sprintf(`{%q:0}`, field) }},
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			for _, response := range responses {
+				t.Run(response.name, func(t *testing.T) {
+					var lists, mutations int
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						switch {
+						case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+							lists++
+							w.Header().Set("Content-Type", "text/html")
+							if lists == 1 {
+								_, _ = io.WriteString(w, alertsHTML)
+								return
+							}
+							_, _ = io.WriteString(w, refreshedHTML)
+						case r.Method == endpoint.method && r.URL.Path == endpoint.path:
+							mutations++
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, response.body(endpoint.countName))
+						default:
+							http.NotFound(w, r)
+						}
+					}))
+					t.Cleanup(srv.Close)
+					c, err := client.New(srv.URL)
+					if err != nil {
+						t.Fatal(err)
+					}
+					m := New(c)
+					m.selectedID, m.selectedName = "p1", "demo"
+					line := "/alerts " + endpoint.action + " a-one"
+					if endpoint.action == "delete-bulk" {
+						m = runLine(t, m, line)
+						if m.pendingConfirmation == nil {
+							t.Fatal("bulk delete did not request confirmation")
+						}
+						m = runLine(t, m, "yes")
+					} else {
+						m = runLineWithFollowUp(t, m, line)
+					}
+
+					out := stripANSI(transcript(m))
+					if response.wantError != "" {
+						if mutations != 1 || lists != 1 {
+							t.Fatalf("malformed response requests = lists %d mutations %d, want 1 each", lists, mutations)
+						}
+						if !strings.Contains(out, response.wantError) || strings.Contains(out, endpoint.successMsg) || strings.Contains(out, "Remaining") {
+							t.Fatalf("malformed response output = %q", out)
+						}
+						return
+					}
+					if mutations != 1 || lists != 2 {
+						t.Fatalf("zero count requests = lists %d mutations %d, want 2 and 1", lists, mutations)
+					}
+					if !strings.Contains(out, endpoint.successMsg) || !strings.Contains(out, "Remaining") {
+						t.Fatalf("zero count output = %q", out)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestAlertsCommandsRequireProject(t *testing.T) {
 	cases := []struct {
 		name              string

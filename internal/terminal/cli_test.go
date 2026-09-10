@@ -4358,6 +4358,85 @@ func TestCLIAlertBulkCommandsForceJSONAndResolution(t *testing.T) {
 	}
 }
 
+func TestCLIAlertBulkJSONRejectsMalformedCounts(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>`
+	endpoints := []struct {
+		name      string
+		action    string
+		method    string
+		path      string
+		countName string
+	}{
+		{name: "read", action: "read-bulk", method: http.MethodPost, path: "/alerts/read-bulk", countName: "updated"},
+		{name: "delete", action: "delete-bulk", method: http.MethodDelete, path: "/alerts/bulk", countName: "deleted"},
+	}
+	responses := []struct {
+		name    string
+		body    func(string) string
+		wantErr bool
+	}{
+		{name: "missing count", body: func(string) string { return `{}` }, wantErr: true},
+		{name: "null count", body: func(field string) string { return fmt.Sprintf(`{%q:null}`, field) }, wantErr: true},
+		{name: "negative count", body: func(field string) string { return fmt.Sprintf(`{%q:-1}`, field) }, wantErr: true},
+		{name: "error object with count", body: func(field string) string { return fmt.Sprintf(`{"error":"bulk mutation rejected",%q:0}`, field) }, wantErr: true},
+		{name: "explicit zero", body: func(field string) string { return fmt.Sprintf(`{%q:0}`, field) }},
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			for _, response := range responses {
+				t.Run(response.name, func(t *testing.T) {
+					var lists, mutations int
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						switch {
+						case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, cliProjects)
+						case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+							lists++
+							w.Header().Set("Content-Type", "text/html")
+							_, _ = io.WriteString(w, alertsHTML)
+						case r.Method == endpoint.method && r.URL.Path == endpoint.path:
+							mutations++
+							assertCLIAlertBulkRequest(t, r, []string{"a-one"})
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, response.body(endpoint.countName))
+						default:
+							http.NotFound(w, r)
+						}
+					}))
+					t.Cleanup(srv.Close)
+					c, err := client.New(srv.URL)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var out bytes.Buffer
+					err = RunCLI(c, &out, "demo", []string{"alerts", endpoint.action, "a-one"}, endpoint.action == "delete-bulk", true)
+					if lists != 1 || mutations != 1 {
+						t.Fatalf("requests = lists %d mutations %d, want 1 each", lists, mutations)
+					}
+					if response.wantErr {
+						if err == nil {
+							t.Fatal("malformed count response succeeded")
+						}
+						if got := strings.TrimSpace(out.String()); got != "" {
+							t.Fatalf("malformed JSON output = %q, want no success count", got)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("explicit zero failed: %v", err)
+					}
+					want := fmt.Sprintf(`{%q:0}`, endpoint.countName)
+					if got := strings.TrimSpace(out.String()); got != want {
+						t.Fatalf("explicit zero JSON = %q, want %q", got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func assertCLIAlertBulkRequest(t *testing.T, r *http.Request, want []string) {
 	t.Helper()
 	if r.URL.Query().Get("project_id") != "p1" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {

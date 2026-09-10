@@ -418,12 +418,13 @@ func (c *Client) AlertAction(ctx context.Context, alertID, action, projectID str
 // atomic request is sent.
 func (c *Client) MarkAlertsReadBulk(ctx context.Context, projectID string, ids []string) (int, error) {
 	var response struct {
-		Updated int `json:"updated"`
+		Updated *int            `json:"updated"`
+		Error   json.RawMessage `json:"error"`
 	}
 	if err := c.alertBulkMutation(ctx, http.MethodPost, "/alerts/read-bulk", projectID, ids, &response); err != nil {
 		return 0, err
 	}
-	return response.Updated, nil
+	return validateAlertBulkMutationCount("/alerts/read-bulk", "updated", response.Updated, response.Error)
 }
 
 // DeleteAlertsBulk removes the supplied project-scoped alerts and returns the
@@ -431,12 +432,26 @@ func (c *Client) MarkAlertsReadBulk(ctx context.Context, projectID string, ids [
 // request is sent.
 func (c *Client) DeleteAlertsBulk(ctx context.Context, projectID string, ids []string) (int, error) {
 	var response struct {
-		Deleted int `json:"deleted"`
+		Deleted *int            `json:"deleted"`
+		Error   json.RawMessage `json:"error"`
 	}
 	if err := c.alertBulkMutation(ctx, http.MethodDelete, "/alerts/bulk", projectID, ids, &response); err != nil {
 		return 0, err
 	}
-	return response.Deleted, nil
+	return validateAlertBulkMutationCount("/alerts/bulk", "deleted", response.Deleted, response.Error)
+}
+
+func validateAlertBulkMutationCount(path, field string, count *int, responseError json.RawMessage) (int, error) {
+	if len(responseError) > 0 && strings.TrimSpace(string(responseError)) != "null" {
+		return 0, fmt.Errorf("decoding %s response: received an error object", path)
+	}
+	if count == nil {
+		return 0, fmt.Errorf("decoding %s response: missing required %s count", path, field)
+	}
+	if *count < 0 {
+		return 0, fmt.Errorf("decoding %s response: %s count must not be negative", path, field)
+	}
+	return *count, nil
 }
 
 func (c *Client) alertBulkMutation(ctx context.Context, method, path, projectID string, ids []string, response any) error {

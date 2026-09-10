@@ -1258,6 +1258,76 @@ func TestAlertBulkMutationsSendScopedDeduplicatedJSONAndReturnCounts(t *testing.
 	}
 }
 
+func TestAlertBulkMutationsRequireNonNegativeResponseCounts(t *testing.T) {
+	endpoints := []struct {
+		name      string
+		method    string
+		path      string
+		countName string
+		call      func(*Client) (int, error)
+	}{
+		{
+			name:      "mark read",
+			method:    http.MethodPost,
+			path:      "/alerts/read-bulk",
+			countName: "updated",
+			call: func(c *Client) (int, error) {
+				return c.MarkAlertsReadBulk(context.Background(), "project-2", []string{"a-1"})
+			},
+		},
+		{
+			name:      "delete",
+			method:    http.MethodDelete,
+			path:      "/alerts/bulk",
+			countName: "deleted",
+			call: func(c *Client) (int, error) {
+				return c.DeleteAlertsBulk(context.Background(), "project-2", []string{"a-1"})
+			},
+		},
+	}
+	for _, endpoint := range endpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name     string
+				response string
+				wantErr  bool
+			}{
+				{name: "missing count", response: `{}`, wantErr: true},
+				{name: "null count", response: fmt.Sprintf(`{%q:null}`, endpoint.countName), wantErr: true},
+				{name: "negative count", response: fmt.Sprintf(`{%q:-1}`, endpoint.countName), wantErr: true},
+				{name: "error object with count", response: fmt.Sprintf(`{"error":"bulk mutation rejected",%q:0}`, endpoint.countName), wantErr: true},
+				{name: "explicit zero", response: fmt.Sprintf(`{%q:0}`, endpoint.countName)},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if r.Method != endpoint.method || r.URL.Path != endpoint.path || r.URL.Query().Get("project_id") != "project-2" {
+							t.Errorf("request = %s %s", r.Method, r.URL.RequestURI())
+						}
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, tc.response)
+					}))
+					t.Cleanup(srv.Close)
+					c, err := New(srv.URL)
+					if err != nil {
+						t.Fatal(err)
+					}
+
+					count, err := endpoint.call(c)
+					if tc.wantErr {
+						if err == nil {
+							t.Fatalf("response %s succeeded with count %d", tc.response, count)
+						}
+						return
+					}
+					if err != nil || count != 0 {
+						t.Fatalf("explicit zero result = %d, %v", count, err)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestAlertBulkMutationsRejectBadInputAndBackendFailures(t *testing.T) {
 	c := htmlServer(t, "")
 	if _, err := c.MarkAlertsReadBulk(context.Background(), "", []string{"a-1"}); err == nil || !strings.Contains(err.Error(), "project ID") {
