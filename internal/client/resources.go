@@ -691,6 +691,401 @@ type ModelOAuthStatus struct {
 	Status string `json:"status"`
 }
 
+// ModelEditDetails is the safe, authoritative state needed to edit an existing
+// model configuration. Credentials and provider-specific secret values are held
+// privately so callers cannot accidentally render or marshal them.
+type ModelEditDetails struct {
+	ID                    string
+	Name                  string
+	Provider              string
+	Model                 string
+	ReasoningEffort       string
+	Temperature           float64
+	IsDefault             bool
+	AuthMethod            string
+	MaxWorkers            int
+	WorkerTimeout         int
+	OllamaBaseURL         string
+	BaseURL               string
+	Transport             string
+	PresetSlug            string
+	ModelsURL             string
+	AuthHeaderName        string
+	AuthHeaderValuePrefix string
+	AutoStartTasks        bool
+
+	secrets modelEditSecrets
+}
+
+// ModelEditRequest contains only the terminal-supported explicit edits. Nil
+// fields leave the authoritative value untouched.
+type ModelEditRequest struct {
+	Name          *string
+	Model         *string
+	IsDefault     *bool
+	MaxWorkers    *int
+	WorkerTimeout *int
+	Endpoint      *string
+}
+
+type modelEditDetailsPayload struct {
+	ID                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	Provider              string  `json:"provider"`
+	Model                 string  `json:"model"`
+	ReasoningEffort       string  `json:"reasoning_effort"`
+	Temperature           float64 `json:"temperature"`
+	IsDefault             bool    `json:"is_default"`
+	APIKey                string  `json:"api_key"`
+	AuthMethod            string  `json:"auth_method"`
+	MaxWorkers            int     `json:"max_workers"`
+	WorkerTimeout         int     `json:"worker_timeout"`
+	OAuthClientID         string  `json:"oauth_client_id"`
+	OAuthClientSecret     string  `json:"oauth_client_secret"`
+	OAuthAuthorizeURL     string  `json:"oauth_authorize_url"`
+	OAuthTokenURL         string  `json:"oauth_token_url"`
+	OAuthScopes           string  `json:"oauth_scopes"`
+	OllamaBaseURL         string  `json:"ollama_base_url"`
+	BaseURL               string  `json:"base_url"`
+	Transport             string  `json:"transport"`
+	PresetSlug            string  `json:"preset_slug"`
+	ModelsURL             string  `json:"models_url"`
+	AuthHeaderName        string  `json:"auth_header_name"`
+	AuthHeaderValuePrefix string  `json:"auth_header_value_prefix"`
+	ExtraHeadersJSON      string  `json:"extra_headers_json"`
+	ExtraBodyJSON         string  `json:"extra_body_json"`
+	CustomAuthConfigJSON  string  `json:"custom_auth_config_json"`
+	MixtureConfigJSON     string  `json:"mixture_config_json"`
+	AutoStartTasks        bool    `json:"auto_start_tasks"`
+}
+
+type modelEditSecrets struct {
+	apiKey               string
+	oauthClientID        string
+	oauthClientSecret    string
+	oauthAuthorizeURL    string
+	oauthTokenURL        string
+	oauthScopes          string
+	extraHeadersJSON     string
+	extraBodyJSON        string
+	customAuthConfigJSON string
+	mixtureConfigJSON    string
+}
+
+// modelCustomAuthConfig mirrors the backend's saved OpenAI-compatible
+// authentication settings. It is deliberately private because several fields
+// may contain credentials. The edit client needs it only to retain settings the
+// browser form otherwise replaces wholesale.
+type modelCustomAuthConfig struct {
+	RefreshURL              string            `json:"refresh_url,omitempty"`
+	PKCE                    bool              `json:"pkce"`
+	TokenRequestFormat      string            `json:"token_request_format,omitempty"`
+	AccessTokenField        string            `json:"access_token_field,omitempty"`
+	RefreshTokenField       string            `json:"refresh_token_field,omitempty"`
+	ExpiresInField          string            `json:"expires_in_field,omitempty"`
+	AuthorizationMode       string            `json:"authorization_mode,omitempty"`
+	AccessTokenHeader       string            `json:"access_token_header,omitempty"`
+	AccessTokenPrefix       string            `json:"access_token_prefix,omitempty"`
+	UserAgent               string            `json:"user_agent,omitempty"`
+	StaticHeaders           map[string]string `json:"static_headers,omitempty"`
+	ProfileURL              string            `json:"profile_url,omitempty"`
+	ProfileInstancePath     string            `json:"profile_instance_path,omitempty"`
+	ProfileTeamPath         string            `json:"profile_team_path,omitempty"`
+	InstanceHeader          string            `json:"instance_header,omitempty"`
+	TeamHeader              string            `json:"team_header,omitempty"`
+	SigningSecret           string            `json:"signing_secret,omitempty"`
+	TimestampHeader         string            `json:"timestamp_header,omitempty"`
+	SignatureHeader         string            `json:"signature_header,omitempty"`
+	ModelsArrayPath         string            `json:"models_array_path,omitempty"`
+	ModelIDField            string            `json:"model_id_field,omitempty"`
+	AuthorizationParameters map[string]string `json:"authorization_parameters,omitempty"`
+	StandardTokenFields     bool              `json:"standard_token_fields"`
+	CallbackParameter       string            `json:"callback_parameter,omitempty"`
+	LocalCallbackHost       string            `json:"local_callback_host,omitempty"`
+	LocalCallbackPath       string            `json:"local_callback_path,omitempty"`
+	AllowPrivateEndpoints   bool              `json:"allow_private_endpoints"`
+	TokenHeaders            map[string]string `json:"token_headers,omitempty"`
+	RefreshRequestFormat    string            `json:"refresh_request_format,omitempty"`
+	RefreshParameters       map[string]string `json:"refresh_parameters,omitempty"`
+	RefreshHeaders          map[string]string `json:"refresh_headers,omitempty"`
+	RefreshIncludeGrantType bool              `json:"refresh_include_grant_type"`
+	RefreshIncludeClient    bool              `json:"refresh_include_client"`
+}
+
+// GetModelEditDetails reads the backend's authoritative edit state. The route
+// is intentionally separate from model cards because cards omit credentials and
+// provider-specific configuration.
+func (c *Client) GetModelEditDetails(ctx context.Context, projectID, modelID string) (ModelEditDetails, error) {
+	var payload modelEditDetailsPayload
+	path := "/models/" + url.PathEscape(modelID) + "/edit-details" + query("project_id", projectID)
+	if err := c.getJSON(ctx, path, &payload); err != nil {
+		return ModelEditDetails{}, err
+	}
+	if strings.TrimSpace(payload.ID) == "" || payload.ID != modelID {
+		return ModelEditDetails{}, fmt.Errorf("model edit details did not match requested model")
+	}
+	return ModelEditDetails{
+		ID:                    payload.ID,
+		Name:                  payload.Name,
+		Provider:              payload.Provider,
+		Model:                 payload.Model,
+		ReasoningEffort:       payload.ReasoningEffort,
+		Temperature:           payload.Temperature,
+		IsDefault:             payload.IsDefault,
+		AuthMethod:            payload.AuthMethod,
+		MaxWorkers:            payload.MaxWorkers,
+		WorkerTimeout:         payload.WorkerTimeout,
+		OllamaBaseURL:         payload.OllamaBaseURL,
+		BaseURL:               payload.BaseURL,
+		Transport:             payload.Transport,
+		PresetSlug:            payload.PresetSlug,
+		ModelsURL:             payload.ModelsURL,
+		AuthHeaderName:        payload.AuthHeaderName,
+		AuthHeaderValuePrefix: payload.AuthHeaderValuePrefix,
+		AutoStartTasks:        payload.AutoStartTasks,
+		secrets: modelEditSecrets{
+			apiKey:               payload.APIKey,
+			oauthClientID:        payload.OAuthClientID,
+			oauthClientSecret:    payload.OAuthClientSecret,
+			oauthAuthorizeURL:    payload.OAuthAuthorizeURL,
+			oauthTokenURL:        payload.OAuthTokenURL,
+			oauthScopes:          payload.OAuthScopes,
+			extraHeadersJSON:     payload.ExtraHeadersJSON,
+			extraBodyJSON:        payload.ExtraBodyJSON,
+			customAuthConfigJSON: payload.CustomAuthConfigJSON,
+			mixtureConfigJSON:    payload.MixtureConfigJSON,
+		},
+	}, nil
+}
+
+// UpdateModel merges explicit terminal edits into authoritative details and
+// submits the backend's browser-form update contract. apiKey is intentionally
+// separate from ModelEditRequest so normal edit values cannot accidentally carry
+// a credential into a printable request value.
+func (c *Client) UpdateModel(ctx context.Context, projectID string, details ModelEditDetails, update ModelEditRequest, apiKey string) error {
+	if strings.TrimSpace(details.ID) == "" {
+		return errors.New("model ID is required")
+	}
+	if update.Name != nil {
+		details.Name = strings.TrimSpace(*update.Name)
+	}
+	if update.Model != nil {
+		details.Model = strings.TrimSpace(*update.Model)
+	}
+	if update.IsDefault != nil {
+		details.IsDefault = *update.IsDefault
+	}
+	if update.MaxWorkers != nil {
+		if *update.MaxWorkers < 0 {
+			return errors.New("max workers must be nonnegative")
+		}
+		details.MaxWorkers = *update.MaxWorkers
+	}
+	if update.WorkerTimeout != nil {
+		if *update.WorkerTimeout < 0 {
+			return errors.New("worker timeout must be nonnegative")
+		}
+		details.WorkerTimeout = *update.WorkerTimeout
+	}
+	if update.Endpoint != nil {
+		endpoint, err := validateModelEditEndpoint(*update.Endpoint)
+		if err != nil {
+			return err
+		}
+		switch strings.ToLower(strings.TrimSpace(details.Provider)) {
+		case "ollama":
+			details.OllamaBaseURL = endpoint
+		case "openai_compatible":
+			details.BaseURL = endpoint
+		default:
+			return errors.New("--endpoint is supported only for Ollama or OpenAI-compatible models")
+		}
+	}
+	if apiKey != "" && !modelAllowsAPIKeyReplacement(details) {
+		return errors.New("API-key replacement is supported only for API-key model configurations")
+	}
+
+	form, err := modelEditForm(details, apiKey)
+	if err != nil {
+		return redactModelEditError(err, modelEditSensitiveValues(details, apiKey)...)
+	}
+	err = c.doForm(ctx, http.MethodPut, "/models/"+url.PathEscape(details.ID)+query("project_id", projectID), form)
+	return redactModelEditError(err, modelEditSensitiveValues(details, apiKey)...)
+}
+
+func modelAllowsAPIKeyReplacement(details ModelEditDetails) bool {
+	switch strings.ToLower(strings.TrimSpace(details.Provider)) {
+	case "anthropic", "openai", "openai_compatible":
+		return !strings.EqualFold(strings.TrimSpace(details.AuthMethod), "oauth")
+	default:
+		return false
+	}
+}
+
+func validateModelEditEndpoint(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errors.New("--endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	u, err := url.Parse(value)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("--endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	return value, nil
+}
+
+func modelEditForm(details ModelEditDetails, apiKey string) (url.Values, error) {
+	form := url.Values{}
+	form.Set("name", details.Name)
+	form.Set("provider", details.Provider)
+	form.Set("model", details.Model)
+	form.Set("reasoning_effort", details.ReasoningEffort)
+	form.Set("temperature", strconv.FormatFloat(details.Temperature, 'f', -1, 64))
+	form.Set("model_max_workers", strconv.Itoa(details.MaxWorkers))
+	form.Set("worker_timeout", strconv.Itoa(details.WorkerTimeout))
+	if details.IsDefault {
+		form.Set("is_default", "on")
+	}
+	if details.AutoStartTasks {
+		form.Set("auto_start_tasks", "on")
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(details.Provider))
+	oauth := strings.EqualFold(strings.TrimSpace(details.AuthMethod), "oauth")
+	switch provider {
+	case "anthropic":
+		if oauth {
+			form.Set("anthropic_auth_type", "oauth")
+			form.Set("auth_method", "oauth")
+		} else {
+			form.Set("anthropic_auth_type", "api_key")
+		}
+	case "openai":
+		if oauth {
+			form.Set("openai_auth_type", "oauth")
+			form.Set("auth_method", "oauth")
+		} else {
+			form.Set("openai_auth_type", "api_key")
+		}
+	case "ollama":
+		form.Set("ollama_base_url", details.OllamaBaseURL)
+	case "mixture":
+		form.Set("mixture_config_json", details.secrets.mixtureConfigJSON)
+	case "openai_compatible":
+		form.Set("base_url", details.BaseURL)
+		form.Set("transport", details.Transport)
+		form.Set("preset_slug", details.PresetSlug)
+		form.Set("models_url", details.ModelsURL)
+		form.Set("auth_header_name", details.AuthHeaderName)
+		form.Set("auth_header_value_prefix", details.AuthHeaderValuePrefix)
+		if oauth {
+			form.Set("custom_auth_method", "oauth")
+			form.Set("auth_method", "oauth")
+		}
+		if err := appendModelCustomAuthForm(form, details.secrets.customAuthConfigJSON); err != nil {
+			return nil, err
+		}
+	}
+	if apiKey != "" {
+		form.Set("api_key", apiKey)
+	}
+	return form, nil
+}
+
+func appendModelCustomAuthForm(form url.Values, raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var cfg modelCustomAuthConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return fmt.Errorf("invalid saved provider-specific authentication configuration: %w", err)
+	}
+	form.Set("custom_refresh_url", cfg.RefreshURL)
+	form.Set("custom_token_request_format", cfg.TokenRequestFormat)
+	form.Set("custom_access_token_field", cfg.AccessTokenField)
+	form.Set("custom_refresh_token_field", cfg.RefreshTokenField)
+	form.Set("custom_expires_in_field", cfg.ExpiresInField)
+	form.Set("custom_authorization_mode", cfg.AuthorizationMode)
+	form.Set("custom_access_token_header", cfg.AccessTokenHeader)
+	form.Set("custom_access_token_prefix", cfg.AccessTokenPrefix)
+	form.Set("custom_user_agent", cfg.UserAgent)
+	form.Set("custom_profile_url", cfg.ProfileURL)
+	form.Set("custom_profile_instance_path", cfg.ProfileInstancePath)
+	form.Set("custom_profile_team_path", cfg.ProfileTeamPath)
+	form.Set("custom_instance_header", cfg.InstanceHeader)
+	form.Set("custom_team_header", cfg.TeamHeader)
+	form.Set("custom_signing_secret", cfg.SigningSecret)
+	form.Set("custom_timestamp_header", cfg.TimestampHeader)
+	form.Set("custom_signature_header", cfg.SignatureHeader)
+	form.Set("custom_models_array_path", cfg.ModelsArrayPath)
+	form.Set("custom_model_id_field", cfg.ModelIDField)
+	form.Set("custom_callback_parameter", cfg.CallbackParameter)
+	form.Set("custom_local_callback_host", cfg.LocalCallbackHost)
+	form.Set("custom_local_callback_path", cfg.LocalCallbackPath)
+	form.Set("custom_refresh_request_format", cfg.RefreshRequestFormat)
+	if cfg.PKCE {
+		form.Set("custom_oauth_pkce", "on")
+	}
+	if cfg.StandardTokenFields {
+		form.Set("custom_standard_token_fields", "on")
+	}
+	if cfg.AllowPrivateEndpoints {
+		form.Set("custom_allow_private_endpoints", "on")
+	}
+	if cfg.RefreshIncludeGrantType {
+		form.Set("custom_refresh_include_grant_type", "on")
+	}
+	if cfg.RefreshIncludeClient {
+		form.Set("custom_refresh_include_client", "on")
+	}
+	for _, item := range []struct {
+		name  string
+		value map[string]string
+	}{
+		{"custom_static_headers_json", cfg.StaticHeaders},
+		{"custom_authorization_parameters_json", cfg.AuthorizationParameters},
+		{"custom_token_headers_json", cfg.TokenHeaders},
+		{"custom_refresh_parameters_json", cfg.RefreshParameters},
+		{"custom_refresh_headers_json", cfg.RefreshHeaders},
+	} {
+		if item.value == nil {
+			continue
+		}
+		encoded, err := json.Marshal(item.value)
+		if err != nil {
+			return fmt.Errorf("encoding saved provider-specific authentication configuration: %w", err)
+		}
+		form.Set(item.name, string(encoded))
+	}
+	return nil
+}
+
+func modelEditSensitiveValues(details ModelEditDetails, apiKey string) []string {
+	values := []string{
+		apiKey,
+		details.secrets.apiKey,
+		details.secrets.oauthClientID,
+		details.secrets.oauthClientSecret,
+		details.secrets.oauthAuthorizeURL,
+		details.secrets.oauthTokenURL,
+		details.secrets.oauthScopes,
+		details.secrets.extraHeadersJSON,
+		details.secrets.extraBodyJSON,
+		details.secrets.customAuthConfigJSON,
+		details.secrets.mixtureConfigJSON,
+	}
+	var cfg modelCustomAuthConfig
+	if json.Unmarshal([]byte(details.secrets.customAuthConfigJSON), &cfg) == nil {
+		values = append(values, cfg.SigningSecret)
+		for _, group := range []map[string]string{cfg.StaticHeaders, cfg.AuthorizationParameters, cfg.TokenHeaders, cfg.RefreshParameters, cfg.RefreshHeaders} {
+			for _, value := range group {
+				values = append(values, value)
+			}
+		}
+	}
+	return values
+}
+
 // CreateModel creates a model through the same form contract used by the
 // backend Models screen. Server-side normalization and validation remain
 // authoritative.
@@ -738,13 +1133,26 @@ func (c *Client) GetModelOAuthStatus(ctx context.Context, modelID string) (*Mode
 // redactModelCreateError ensures an unexpected backend validation response can
 // never reflect a submitted API key into terminal output.
 func redactModelCreateError(err error, secret string) error {
-	if err == nil || secret == "" || IsAuthRequired(err) {
+	return redactModelMutationError(err, secret)
+}
+
+func redactModelEditError(err error, secrets ...string) error {
+	return redactModelMutationError(err, secrets...)
+}
+
+func redactModelMutationError(err error, secrets ...string) error {
+	if err == nil || IsAuthRequired(err) {
 		return err
 	}
 	message := err.Error()
-	for _, value := range []string{secret, url.QueryEscape(secret)} {
-		if value != "" {
-			message = strings.ReplaceAll(message, value, "[redacted]")
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		for _, value := range []string{secret, url.QueryEscape(secret)} {
+			if value != "" {
+				message = strings.ReplaceAll(message, value, "[redacted]")
+			}
 		}
 	}
 	if message == err.Error() {
@@ -753,9 +1161,14 @@ func redactModelCreateError(err error, secret string) error {
 	var statusErr *HTTPStatusError
 	if errors.As(err, &statusErr) {
 		redacted := statusErr.Message
-		for _, value := range []string{secret, url.QueryEscape(secret)} {
-			if value != "" {
-				redacted = strings.ReplaceAll(redacted, value, "[redacted]")
+		for _, secret := range secrets {
+			if secret == "" {
+				continue
+			}
+			for _, value := range []string{secret, url.QueryEscape(secret)} {
+				if value != "" {
+					redacted = strings.ReplaceAll(redacted, value, "[redacted]")
+				}
 			}
 		}
 		return &HTTPStatusError{StatusCode: statusErr.StatusCode, Message: redacted}

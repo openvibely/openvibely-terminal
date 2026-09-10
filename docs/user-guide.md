@@ -209,7 +209,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
-| `/models` | `model` | `list`, `add`, `default`, `delete`, `capacity` |
+| `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `webhooks list|show|create|edit|test|rotate|delete` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
@@ -232,29 +232,43 @@ Every screen in the OpenVibely web UI sidebar has a command.
 
 ### Model providers
 
-`/models add` is the shared terminal action for configuring `anthropic`,
-`openai`, and `ollama` models. Run the bare action in the interactive TUI to
-answer guided prompts. API-key prompts are masked and never enter the transcript
-or command history.
+`/models add` and `/models edit <model>` are shared terminal actions for model
+providers. `add` configures `anthropic`, `openai`, and `ollama`; run the bare
+add action in the interactive TUI to answer guided prompts. API-key prompts are
+masked and never enter the transcript or command history.
+
+`edit` reads the backend-authoritative existing configuration, then applies only
+the supplied options: `--name`, `--model`, `--default <true|false>`,
+`--max-workers`, `--worker-timeout`, and `--endpoint`. `--endpoint` supports
+local Ollama and OpenAI-compatible configurations, must be an absolute HTTP(S)
+URL without credentials, query parameters, or fragments, and is checked again
+by the backend's provider policy. Unspecified credentials and provider-specific
+settings remain unchanged.
 
 ```text
 /models add
 ```
 
-One-shot API-key configuration accepts a secret only through piped or redirected
-standard input with `--api-key-stdin`. The key must never be put in an argument, pasted into a
-command-history entry, or included in `--json` output.
+One-shot API-key configuration or replacement accepts a secret only through
+piped or redirected standard input with `--api-key-stdin`. The key must never be
+put in an argument, pasted into a command-history entry, or included in `--json`
+output. For an interactive edit, use `--api-key` with no value; it opens the
+same masked input safeguard and leaves the saved credential unchanged until a
+nonempty replacement is submitted.
 
 ```bash
 printf '%s' "$OPENAI_API_KEY" | openvibely-terminal models add openai "OpenAI" gpt-4o --api-key-stdin
 openvibely-terminal models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434
+openvibely-terminal -project demo models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434
+printf '%s' "$OPENAI_API_KEY" | openvibely-terminal -project demo models edit OpenAI --api-key-stdin
 ```
 
-`--endpoint` is only for Ollama and must be an absolute HTTP(S) URL without
-credentials, query parameters, or fragments. Omit it to
-use the backend's local Ollama default. `--oauth` is available for Anthropic and
-OpenAI. It saves an OAuth configuration, refreshes the model list, then reports
-the backend's authorization status and a browser handoff URL. OAuth is connected
+For `add`, `--endpoint` is only for Ollama. For `edit`, it additionally supports
+saved OpenAI-compatible configurations. It must be an absolute HTTP(S) URL
+without credentials, query parameters, or fragments. Omit it on add to use the
+backend's local Ollama default. `--oauth` is available for Anthropic and OpenAI.
+It saves an OAuth configuration, refreshes the model list, then reports the
+backend's authorization status and a browser handoff URL. OAuth is connected
 only when that backend status is `connected`; terminal setup alone does not claim
 completion.
 

@@ -1547,7 +1547,7 @@ func TestCLIModelsHelpDocumentsSafeAddWorkflow(t *testing.T) {
 	if err := RunCLI(c, &out, "", []string{"help", "models"}, false, false); err != nil {
 		t.Fatalf("models help failed without a backend: %v", err)
 	}
-	for _, want := range []string{"models add", "--api-key-stdin", "--oauth", "ollama"} {
+	for _, want := range []string{"models add", "models edit", "--api-key", "--api-key-stdin", "--oauth", "ollama"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("CLI models help missing %q:\n%s", want, out.String())
 		}

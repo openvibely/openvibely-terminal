@@ -3037,63 +3037,6 @@ func parseModelAddArgs(args []string) (modelAddSpec, error) {
 	return spec, nil
 }
 
-func validateModelsArgs(args []string) error {
-	if len(args) == 0 || !strings.EqualFold(args[0], "add") {
-		return nil
-	}
-	_, err := parseModelAddArgs(args[1:])
-	return err
-}
-
-func readModelAPIKey(input io.Reader) (string, error) {
-	if input == nil {
-		return "", errors.New("--api-key-stdin requires a non-echoing standard-input source")
-	}
-	data, err := io.ReadAll(io.LimitReader(input, 64<<10))
-	if err != nil {
-		return "", errors.New("reading API key from standard input failed")
-	}
-	key := strings.TrimSpace(string(data))
-	if key == "" {
-		return "", errors.New("API key from standard input is required")
-	}
-	return key, nil
-}
-
-func modelModelsPageURL(c *client.Client, projectID string) string {
-	base, err := url.Parse(ServerURLDisplay(c.BaseURL()))
-	if err != nil || base.Host == "" {
-		return ""
-	}
-	base.User = nil
-	base.RawQuery = ""
-	base.Fragment = ""
-	base.Path = strings.TrimRight(base.Path, "/") + "/models"
-	if projectID != "" {
-		query := base.Query()
-		query.Set("project_id", projectID)
-		base.RawQuery = query.Encode()
-	}
-	return base.String()
-}
-
-func modelOAuthHandoffURL(c *client.Client, modelID, projectID string) string {
-	base, err := url.Parse(ServerURLDisplay(c.BaseURL()))
-	if err != nil || base.Host == "" {
-		return "the backend Models page"
-	}
-	base.User = nil
-	base.RawQuery = ""
-	base.Fragment = ""
-	base.Path = strings.TrimRight(base.Path, "/") + "/models/" + url.PathEscape(modelID) + "/oauth/initiate"
-	if projectID != "" {
-		query := base.Query()
-		query.Set("project_id", projectID)
-		base.RawQuery = query.Encode()
-	}
-	return base.String()
-}
-
 func modelAddResult(ctx context.Context, c *client.Client, projectID string, spec modelAddSpec) (string, error) {
 	defer func() { spec.APIKey = "" }()
 	if err := c.CreateModel(ctx, projectID, client.ModelCreateRequest{
@@ -3169,6 +3112,336 @@ func modelAddResult(ctx context.Context, c *client.Client, projectID string, spe
 		message += ". Open the backend Models page, complete authorization, and confirm the resulting status there."
 	}
 	return message + "\n\n" + renderModels(models, ""), nil
+}
+
+type modelEditSpec struct {
+	Ref             string
+	Update          client.ModelEditRequest
+	APIKeyFromStdin bool
+	APIKeyPrompt    bool
+}
+
+func parseModelEditArgs(args []string, interactive bool) (modelEditSpec, error) {
+	if len(args) == 0 {
+		return modelEditSpec{}, errors.New(commandUsage("models", "edit"))
+	}
+	boundary := len(args)
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			boundary = i
+			break
+		}
+	}
+	spec := modelEditSpec{Ref: strings.TrimSpace(strings.Join(args[:boundary], " "))}
+	if spec.Ref == "" {
+		return modelEditSpec{}, errors.New(commandUsage("models", "edit"))
+	}
+	if boundary == len(args) {
+		return modelEditSpec{}, errors.New("at least one models edit option is required")
+	}
+
+	seen := make(map[string]bool)
+	nextValue := func(i *int, option string) (string, error) {
+		if *i+1 >= len(args) || strings.HasPrefix(args[*i+1], "--") {
+			return "", fmt.Errorf("%s requires a value", option)
+		}
+		*i++
+		return args[*i], nil
+	}
+	for i := boundary; i < len(args); i++ {
+		option := strings.ToLower(args[i])
+		if seen[option] {
+			return modelEditSpec{}, fmt.Errorf("%s may only be provided once", option)
+		}
+		seen[option] = true
+		switch option {
+		case "--name":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
+			spec.Update.Name = &value
+		case "--model":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
+			spec.Update.Model = &value
+		case "--default":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
+			parsed, err := parseModelEditBool(value)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
+			spec.Update.IsDefault = &parsed
+		case "--max-workers", "--worker-timeout":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 0 {
+				return modelEditSpec{}, fmt.Errorf("%s must be a nonnegative integer", option)
+			}
+			if option == "--max-workers" {
+				spec.Update.MaxWorkers = &parsed
+			} else {
+				spec.Update.WorkerTimeout = &parsed
+			}
+		case "--endpoint":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
+			endpoint, err := validateOllamaEndpoint(value)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
+			spec.Update.Endpoint = &endpoint
+		case "--api-key-stdin":
+			if interactive {
+				return modelEditSpec{}, errors.New("interactive API-key replacement uses --api-key and a masked prompt")
+			}
+			spec.APIKeyFromStdin = true
+		case "--api-key":
+			if !interactive {
+				return modelEditSpec{}, errors.New("API-key replacement requires --api-key-stdin from non-terminal standard input")
+			}
+			spec.APIKeyPrompt = true
+		default:
+			return modelEditSpec{}, errors.New("unsupported models edit option")
+		}
+	}
+	return spec, nil
+}
+
+func parseModelEditBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, errors.New("--default must be true or false")
+	}
+}
+
+func validateModelsArgs(args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "add":
+		_, err := parseModelAddArgs(args[1:])
+		return err
+	case "edit":
+		_, err := parseModelEditArgs(args[1:], false)
+		return err
+	default:
+		return nil
+	}
+}
+
+func modelEditResult(ctx context.Context, c *client.Client, projectID string, spec modelEditSpec, apiKey string) (string, error) {
+	defer func() { apiKey = "" }()
+	models, err := c.ListModels(ctx, projectID)
+	if err != nil {
+		return "", err
+	}
+	model, err := matchRef(models, spec.Ref,
+		func(item client.LLMModel) string { return item.ID },
+		func(item client.LLMModel) string { return item.Name + " " + item.Model })
+	if err != nil {
+		return "", err
+	}
+	details, err := c.GetModelEditDetails(ctx, projectID, model.ID)
+	if err != nil {
+		return "", err
+	}
+	if err := c.UpdateModel(ctx, projectID, details, spec.Update, apiKey); err != nil {
+		return "", err
+	}
+
+	statusName := details.Name
+	if spec.Update.Name != nil {
+		statusName = strings.TrimSpace(*spec.Update.Name)
+	}
+	status := "updated " + statusName
+	refreshed, err := c.ListModels(ctx, projectID)
+	if err != nil {
+		if client.IsAuthRequired(err) {
+			return "", err
+		}
+		if !strings.EqualFold(details.AuthMethod, "oauth") {
+			if jsonMode {
+				return marshalJSON(modelAddOutput{Status: status})
+			}
+			return status, nil
+		}
+		return modelOAuthMutationOutput(status, nil, "unknown", modelModelsPageURL(c, projectID))
+	}
+	if !strings.EqualFold(details.AuthMethod, "oauth") {
+		if jsonMode {
+			return marshalJSON(modelAddOutput{Status: status, Models: refreshed})
+		}
+		return status + "\n\n" + renderModels(refreshed, ""), nil
+	}
+
+	oauthStatus := "unknown"
+	authorizationURL := modelOAuthHandoffURL(c, model.ID, projectID)
+	oauth, oauthErr := c.GetModelOAuthStatus(ctx, model.ID)
+	if client.IsAuthRequired(oauthErr) {
+		return "", oauthErr
+	}
+	if oauthErr == nil && oauth != nil && strings.TrimSpace(oauth.Status) != "" {
+		oauthStatus = strings.TrimSpace(oauth.Status)
+	}
+	return modelOAuthMutationOutput(status, refreshed, oauthStatus, authorizationURL)
+}
+
+func modelOAuthMutationOutput(status string, models []client.LLMModel, oauthStatus, authorizationURL string) (string, error) {
+	output := modelAddOutput{
+		Status:           status,
+		Models:           models,
+		OAuthStatus:      oauthStatus,
+		AuthorizationURL: authorizationURL,
+	}
+	if jsonMode {
+		return marshalJSON(output)
+	}
+	if oauthStatus == "connected" {
+		message := status + "; OAuth connected (backend confirmed)"
+		if models == nil {
+			return message, nil
+		}
+		return message + "\n\n" + renderModels(models, ""), nil
+	}
+	message := status + "; OAuth authorization is required (status: " + oauthStatus + ")"
+	if authorizationURL != "" {
+		message += ". Open " + authorizationURL + " in a browser and complete authorization; the backend Models page confirms the resulting status."
+	} else {
+		message += ". Open the backend Models page, complete authorization, and confirm the resulting status there."
+	}
+	if models == nil {
+		return message, nil
+	}
+	return message + "\n\n" + renderModels(models, ""), nil
+}
+
+type modelEditWizardState struct {
+	spec               modelEditSpec
+	restorePrompt      string
+	restorePlaceholder string
+}
+
+func (m Model) beginModelEditAPIKeyPrompt(spec modelEditSpec) (Model, tea.Cmd) {
+	m.modelEditWizard = &modelEditWizardState{
+		spec:               spec,
+		restorePrompt:      m.input.Prompt,
+		restorePlaceholder: m.input.Placeholder,
+	}
+	m.menu = nil
+	m.input.SetValue("")
+	m.input.Prompt = "Replacement API key: "
+	m.input.Placeholder = "saved key remains unchanged unless a replacement is entered"
+	m.input.EchoMode = textinput.EchoPassword
+	m.input.Focus()
+	m.append(entry{role: "system", text: "model API-key replacement: enter a masked value; Esc cancels."})
+	return m, nil
+}
+
+func (m *Model) resetModelEditWizard() {
+	if m.modelEditWizard == nil {
+		return
+	}
+	m.input.SetValue("")
+	m.input.Prompt = m.modelEditWizard.restorePrompt
+	m.input.Placeholder = m.modelEditWizard.restorePlaceholder
+	m.input.EchoMode = textinput.EchoNormal
+	m.modelEditWizard = nil
+	m.input.Focus()
+}
+
+func (m Model) handleModelEditWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "ctrl+d":
+		m.quitting = true
+		m.Cleanup()
+		return m, tea.Quit
+	case "esc":
+		m.resetModelEditWizard()
+		m.append(entry{role: "system", text: "model edit cancelled"})
+		return m, nil
+	case "enter":
+		apiKey := strings.TrimSpace(m.input.Value())
+		if apiKey == "" {
+			m.input.SetValue("")
+			m.append(entry{role: "error", text: "replacement API key is required"})
+			return m, nil
+		}
+		spec, projectID := m.modelEditWizard.spec, m.selectedID
+		m.resetModelEditWizard()
+		m.busy = true
+		c := m.client
+		return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
+			return modelEditResult(ctx, c, projectID, spec, apiKey)
+		})
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func readModelAPIKey(input io.Reader) (string, error) {
+	if input == nil {
+		return "", errors.New("--api-key-stdin requires a non-echoing standard-input source")
+	}
+	data, err := io.ReadAll(io.LimitReader(input, 64<<10))
+	if err != nil {
+		return "", errors.New("reading API key from standard input failed")
+	}
+	key := strings.TrimSpace(string(data))
+	if key == "" {
+		return "", errors.New("API key from standard input is required")
+	}
+	return key, nil
+}
+
+func modelModelsPageURL(c *client.Client, projectID string) string {
+	base, err := url.Parse(ServerURLDisplay(c.BaseURL()))
+	if err != nil || base.Host == "" {
+		return ""
+	}
+	base.User = nil
+	base.RawQuery = ""
+	base.Fragment = ""
+	base.Path = strings.TrimRight(base.Path, "/") + "/models"
+	if projectID != "" {
+		query := base.Query()
+		query.Set("project_id", projectID)
+		base.RawQuery = query.Encode()
+	}
+	return base.String()
+}
+
+func modelOAuthHandoffURL(c *client.Client, modelID, projectID string) string {
+	base, err := url.Parse(ServerURLDisplay(c.BaseURL()))
+	if err != nil || base.Host == "" {
+		return "the backend Models page"
+	}
+	base.User = nil
+	base.RawQuery = ""
+	base.Fragment = ""
+	base.Path = strings.TrimRight(base.Path, "/") + "/models/" + url.PathEscape(modelID) + "/oauth/initiate"
+	if projectID != "" {
+		query := base.Query()
+		query.Set("project_id", projectID)
+		base.RawQuery = query.Encode()
+	}
+	return base.String()
 }
 
 type modelWizardStep struct {
@@ -3329,32 +3602,41 @@ func (m Model) handleModelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func modelsCommand() command {
-	actions := []string{"list", "add", "default", "delete", "capacity"}
+	actions := []string{"list", "add", "edit", "default", "delete", "capacity"}
 	return command{
-		name:          "models",
-		aliases:       []string{"model"},
-		args:          "[name]",
-		actions:       actions,
-		selectorPaths: [][]string{{"default"}, {"delete"}},
+		name:    "models",
+		aliases: []string{"model"},
+		args:    "[name]",
+		actions: actions,
+		completions: []commandCompletion{
+			{after: []string{"edit", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"--name", "--model", "--default", "--max-workers", "--worker-timeout", "--endpoint", "--api-key", "--api-key-stdin"}},
+		},
+		selectorPaths: [][]string{{"edit"}, {"default"}, {"delete"}},
 		desc:          "configured LLM models, provider setup, worker capacity and health",
 		usage: []string{
 			"models [filter]                            list configured models",
 			"models add                                  guided provider setup with masked API-key input",
 			"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
 			"  providers: anthropic, openai, ollama; API keys require piped --api-key-stdin", "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>",
+			"models edit <model> [options]               safely update explicit fields of an existing model",
+			"  options: --name <name> --model <id> --default <true|false> --max-workers <n> --worker-timeout <seconds>",
+			"           --endpoint <http(s)://host> --api-key (interactive masked prompt) | --api-key-stdin (CLI)",
 			"models default <model>                     set the default model",
 			"models delete <model>                      remove a model",
-			"omit <model> on default/delete → interactive selector",
+			"omit <model> on edit/default/delete → interactive selector",
 			"models capacity                            worker capacity plus provider/account-limit health (see analytics usage)",
 		},
 		actionUsages: []commandActionUsage{
 			{action: "add", args: "<provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>]", description: "add a provider (guided when interactive)"},
+			{action: "edit", args: "<model> [--name <name>|--model <id>|--default <true|false>|--max-workers <n>|--worker-timeout <seconds>|--endpoint <url>|--api-key|--api-key-stdin]", description: "update explicit saved settings"},
 		},
 		examples: []string{
 			`models add`,
 			`printf '%s' "$OPENAI_API_KEY" | models add openai "OpenAI" gpt-4o --api-key-stdin`,
 			`models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434`,
 			`models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth`,
+			`models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434`,
+			`printf '%s' "$OPENAI_API_KEY" | models edit OpenAI --api-key-stdin`,
 			`models default gpt-4o`,
 			`models capacity`,
 			`models delete claude-haiku`,
@@ -3402,6 +3684,53 @@ func modelsCommand() command {
 				pid := m.selectedID
 				return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
 					return modelAddResult(ctx, c, pid, spec)
+				})
+			}
+
+			if action == "edit" {
+				mm, cmd, ok := m.needProject()
+				if !ok {
+					return mm, cmd
+				}
+				m = mm
+				spec, err := parseModelEditArgs(rest, !cliMode)
+				if err != nil {
+					if len(rest) == 0 {
+						return selectorOr(m, commandUsage("models", "edit"),
+							selectorForWithSuffix("Models", "models edit",
+								"no models configured — run /models add", " ",
+								func(ctx context.Context) ([]selectorItem, error) {
+									list, err := c.ListModels(ctx, m.selectedID)
+									if err != nil {
+										return nil, err
+									}
+									items := make([]selectorItem, 0, len(list))
+									for _, mo := range list {
+										items = append(items, selectorItem{
+											ref:    mo.ID,
+											label:  firstNonEmpty(mo.Name, mo.Model, shortID(mo.ID)),
+											detail: strings.TrimSpace(mo.Provider + " " + mo.Model),
+										})
+									}
+									return items, nil
+								}))
+					}
+					return m, errCmd(err.Error())
+				}
+				if spec.APIKeyPrompt {
+					return m.beginModelEditAPIKeyPrompt(spec)
+				}
+				apiKey := ""
+				if spec.APIKeyFromStdin {
+					key, err := readModelAPIKey(m.cliSecretInput)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+					apiKey = key
+				}
+				projectID := m.selectedID
+				return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
+					return modelEditResult(ctx, c, projectID, spec, apiKey)
 				})
 			}
 
@@ -3910,12 +4239,19 @@ func redactModelCommandSecrets(commandLine string) string {
 			root = strings.ReplaceAll(strings.ReplaceAll(root, `"`, ""), "'", "")
 			root = strings.TrimLeft(root, "/")
 			if root == "models" || root == "model" {
+				action := ""
+				if len(rootFields) > 1 {
+					action = strings.Trim(strings.ToLower(rootFields[1]), "\"'")
+				}
+				if action != "add" && action != "edit" {
+					return commandLine
+				}
 				for _, field := range fields[1:] {
 					field = strings.Trim(strings.ToLower(field), "\"'")
 					name, _, _ := strings.Cut(field, "=")
 					name = strings.ReplaceAll(strings.ReplaceAll(name, `"`, ""), "'", "")
 					if modelSensitiveOption(name) {
-						return "/models add <redacted sensitive options>"
+						return "/models " + action + " <redacted sensitive options>"
 					}
 				}
 			}
@@ -3926,7 +4262,8 @@ func redactModelCommandSecrets(commandLine string) string {
 		return commandLine
 	}
 	root := strings.TrimPrefix(strings.ToLower(tokens[0].value), "/")
-	if (root != "models" && root != "model") || !strings.EqualFold(tokens[1].value, "add") {
+	action := strings.ToLower(tokens[1].value)
+	if (root != "models" && root != "model") || (action != "add" && action != "edit") {
 		return commandLine
 	}
 	parts := make([]string, 0, len(tokens))
@@ -3938,7 +4275,7 @@ func redactModelCommandSecrets(commandLine string) string {
 			// a malformed assignment's remaining tokens: they may be pasted
 			// credentials before local validation rejects the command.
 			if hasAssignment {
-				return "/models add <redacted sensitive options>"
+				return "/models " + action + " <redacted sensitive options>"
 			}
 			parts = append(parts, value)
 			if i+1 < len(tokens) {
@@ -3949,13 +4286,13 @@ func redactModelCommandSecrets(commandLine string) string {
 				// either malformed sequence, so redact its entire tail rather than
 				// risking a later pasted credential in the rendered command.
 				if tokens[i+1].value == "" || modelSensitiveOption(nextName) {
-					return "/models add <redacted sensitive options>"
+					return "/models " + action + " <redacted sensitive options>"
 				}
 				if i+2 < len(tokens) {
 					// A separated sensitive option accepts at most one operand. Any
 					// remaining token makes the command malformed and may be a pasted
 					// credential, so do not render its tail before local validation.
-					return "/models add <redacted sensitive options>"
+					return "/models " + action + " <redacted sensitive options>"
 				}
 				i++
 				parts = append(parts, "<redacted>")

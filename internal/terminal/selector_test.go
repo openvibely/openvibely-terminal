@@ -162,6 +162,7 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"agents_edit", "/agents edit", "agents edit"},
 		{"agents_delete", "/agents delete", "agents delete"},
 		// models
+		{"models_edit", "/models edit", "models edit"},
 		{"models_default", "/models default", "models default"},
 		{"models_delete", "/models delete", "models delete"},
 		// automations

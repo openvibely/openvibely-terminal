@@ -827,7 +827,7 @@ func (c command) cliProjectScoped(args []string) bool {
 		return action != "metrics"
 	case "models":
 		action, _ := splitAction(c.actions, args)
-		return action == "capacity" || action == "default" || action == "delete"
+		return action == "capacity" || action == "edit" || action == "default" || action == "delete"
 	case "workers":
 		action, _ := splitAction(c.actions, args)
 		return action == "project"
@@ -847,7 +847,7 @@ func cliProjectPreflight(c command, args []string, projectRef string, m Model) e
 	}
 	if m.selectedID == "" {
 		if c.name == "models" {
-			return errors.New("no project selected — models capacity, default, and delete require -project <name|id>; create one first with projects create <name> <path>")
+			return errors.New("no project selected — models capacity, edit, default, and delete require -project <name|id>; create one first with projects create <name> <path>")
 		}
 		return errors.New("no project selected — use /project <name>")
 	}

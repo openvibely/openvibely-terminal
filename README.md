@@ -75,7 +75,7 @@ Common commands include:
 | `/alerts` | Review alerts, including selected bulk read/delete actions |
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
-| `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures API-key providers or local Ollama |
+| `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |
 | `/channels` | Manage integrations and inbound webhooks |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
@@ -94,10 +94,15 @@ openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release appro
 
 ## Model providers
 
-Use one shared `models add` action in the TUI or CLI. In the TUI, `/models add`
-collects configuration details and masks API-key input. In one-shot mode, API keys
-are accepted only from piped or redirected standard input with `--api-key-stdin`; never place a key in
-an argument, shell history, or an example.
+Use shared `models add` and `models edit <model>` actions in the TUI or CLI.
+`/models add` collects new configuration details and masks API-key input. Edits
+first read the backend-authoritative configuration, apply only named options,
+and retain credentials and provider-specific settings that were not changed.
+
+In one-shot mode, API keys are accepted only from piped or redirected standard
+input with `--api-key-stdin`; never place a key in an argument, shell history,
+or an example. In the TUI, append `--api-key` to `models edit` to open a masked
+replacement prompt.
 
 ```bash
 # API-key provider: the key is read from standard input, not argv.
@@ -105,6 +110,12 @@ printf '%s' "$OPENAI_API_KEY" | openvibely-terminal models add openai "OpenAI" g
 
 # Local Ollama: the endpoint is optional and defaults to localhost in the backend.
 openvibely-terminal models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434
+
+# Existing model: only supplied options change; unchanged credentials are retained.
+openvibely-terminal -project demo models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434
+
+# Replace an existing API key without placing it in argv.
+printf '%s' "$OPENAI_API_KEY" | openvibely-terminal -project demo models edit OpenAI --api-key-stdin
 
 # OAuth saves the configuration, then reports the backend authorization status and browser handoff.
 openvibely-terminal models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth

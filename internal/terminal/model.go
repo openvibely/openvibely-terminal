@@ -142,6 +142,10 @@ type Model struct {
 	// modelWizard holds terminal-native provider setup state. API keys use the
 	// masked input and are cleared before the backend mutation is started.
 	modelWizard *modelWizardState
+	// modelEditWizard holds only an edit reference and option set while a
+	// replacement API key is collected through the masked input. The key itself
+	// is cleared from the input before dispatch and is never retained here.
+	modelEditWizard *modelEditWizardState
 
 	// cliSecretInput is supplied only by the one-shot runner for commands that
 	// explicitly opt into a non-echoing standard-input credential source.
@@ -2252,6 +2256,9 @@ func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleKey routes keys; the input owns almost everything.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.modelEditWizard != nil {
+		return m.handleModelEditWizardKey(msg)
+	}
 	if m.modelWizard != nil {
 		return m.handleModelWizardKey(msg)
 	}

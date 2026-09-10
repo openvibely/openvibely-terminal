@@ -5613,8 +5613,10 @@ func TestModelsListDoesNotRequireSelectedProject(t *testing.T) {
 func TestProjectScopedModelsCommandsRequireSelectedProject(t *testing.T) {
 	cases := []string{
 		"/models capacity",
+		"/models edit Sonnet --model claude-sonnet-4-6",
 		"/models default Sonnet",
 		"/models delete Sonnet",
+		"/models edit",
 		"/models default",
 		"/models delete",
 	}

@@ -1419,8 +1419,8 @@ func TestModelsHelpDocumentsProviderLimitHealth(t *testing.T) {
 	}
 	help := renderCommandHelp(*cmd)
 	for _, want := range []string{
-		"provider/account-limit health", "analytics usage", "models add",
-		"--api-key-stdin", "--oauth", "ollama", "masked API-key input",
+		"provider/account-limit health", "analytics usage", "models add", "models edit",
+		"--api-key", "--api-key-stdin", "--oauth", "ollama", "masked API-key input",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("models help missing %q:\n%s", want, help)
@@ -1436,8 +1436,11 @@ func TestModelsCompletionAndHelpDocumentAdd(t *testing.T) {
 	if got := completeSlashInput("/models ad", *cmd); got != "/models add " {
 		t.Fatalf("models add completion = %q", got)
 	}
+	if got := completeSlashInput("/models ed", *cmd); got != "/models edit " {
+		t.Fatalf("models edit completion = %q", got)
+	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"models add", "--api-key-stdin", "models add ollama"} {
+	for _, want := range []string{"models add", "models edit", "--api-key", "--api-key-stdin", "models add ollama", "models edit \"Local Ollama\""} {
 		if !strings.Contains(help, want) {
 			t.Errorf("models help missing %q:\n%s", want, help)
 		}
