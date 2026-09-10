@@ -10061,6 +10061,83 @@ func TestSkillsShowCanonicalHandleUsesOneScopedDetailRequest(t *testing.T) {
 	}
 }
 
+func TestSkillsShowCanonicalGlobalSkillFallsBackWhenProjectScopeUnavailable(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/skills/global-review/details":
+			switch r.URL.Query().Get("scope") {
+			case "project":
+				w.Header().Set("Content-Type", "application/json")
+				http.Error(w, `{"message":"project skill root not configured"}`, http.StatusServiceUnavailable)
+			case "global":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"handle":"global-review","name":"Global Review","scope":"global","source":"global","content":"global instruction body","enabled":true}`)
+			default:
+				http.Error(w, "unexpected detail scope", http.StatusBadRequest)
+			}
+		case "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div><div data-skill-handle="global-review" data-skill-name="Global Review" data-skill-scope="global" data-skill-source="global" data-skill-enabled="true"></div></div>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	m := New(c)
+	m.selectedID = "p1"
+
+	m = runLine(t, m, "/skills show global-review")
+	if want := []string{
+		"/skills/global-review/details?project_id=p1&scope=project",
+		"/skills?project_id=p1",
+		"/skills/global-review/details?project_id=p1&scope=global",
+	}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "global instruction body") {
+		t.Fatalf("show output = %q, want global detail", out)
+	}
+}
+
+func TestResolveSkillForShowDoesNotFallbackFromAuthenticationOrTransport(t *testing.T) {
+	t.Run("authentication", func(t *testing.T) {
+		var listRequests int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/skills" {
+				listRequests++
+			}
+			http.Redirect(w, r, "/login?next=%2Fskills", http.StatusFound)
+		}))
+		defer srv.Close()
+		c, _ := client.New(srv.URL)
+
+		_, err := resolveSkillForShow(context.Background(), c, "p1", "global-review")
+		if !client.IsAuthRequired(err) {
+			t.Fatalf("error = %v, want authentication required", err)
+		}
+		if listRequests != 0 {
+			t.Fatalf("list requests = %d, want 0", listRequests)
+		}
+	})
+
+	t.Run("transport", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		c, _ := client.New(srv.URL)
+		srv.Close()
+
+		_, err := resolveSkillForShow(context.Background(), c, "p1", "global-review")
+		if !client.IsTransportError(err) {
+			t.Fatalf("error = %v, want transport error", err)
+		}
+		if !strings.Contains(err.Error(), "/skills/global-review/details") {
+			t.Fatalf("error = %v, want initial detail request failure", err)
+		}
+	})
+}
+
 func TestSkillsShowResolvesSummaryThenFetchesOnlySelectedDetail(t *testing.T) {
 	var listRequests int
 	var detailHandles []string

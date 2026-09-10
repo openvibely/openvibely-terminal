@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/mail"
 	"net/url"
 	"os"
@@ -2039,6 +2040,18 @@ func isCanonicalSkillHandle(value string) bool {
 	return true
 }
 
+// fallbackFromProjectSkillDetail reports whether a canonical project-scope
+// lookup can safely continue with catalog matching. A missing project skill or
+// an unavailable project skill root may still resolve to a global skill; auth,
+// transport, decoding, and all other backend failures remain visible.
+func fallbackFromProjectSkillDetail(err error) bool {
+	if client.IsNotFoundError(err) {
+		return true
+	}
+	var statusErr *client.HTTPStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusServiceUnavailable
+}
+
 // resolveSkillForShow finds summary metadata when matching is necessary, then
 // reads only the selected instruction document. A canonical handle first uses
 // the selected project's scoped detail route, avoiding a catalog scan.
@@ -2048,7 +2061,7 @@ func resolveSkillForShow(ctx context.Context, c *client.Client, projectID, ref s
 		if err == nil {
 			return skill, nil
 		}
-		if !client.IsNotFoundError(err) {
+		if !fallbackFromProjectSkillDetail(err) {
 			return client.Skill{}, err
 		}
 	}
