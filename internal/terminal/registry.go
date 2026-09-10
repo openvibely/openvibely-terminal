@@ -3846,22 +3846,37 @@ func redactChannelCommandSecrets(commandLine string) string {
 
 func redactModelCommandSecrets(commandLine string) string {
 	tokens, err := tokenizeCommandTokens(commandLine)
-	if err != nil || len(tokens) < 2 {
+	if err != nil {
+		// submit records the displayed command before reporting parser errors.
+		// Fall back to a conservative, tokenization-independent check so a
+		// malformed quote cannot put a model credential in the transcript or
+		// history.
+		fields := strings.Fields(commandLine)
+		if len(fields) > 0 {
+			root := strings.TrimPrefix(strings.ToLower(fields[0]), "/")
+			if root == "models" || root == "model" {
+				for _, field := range fields[1:] {
+					name, _, _ := strings.Cut(strings.ToLower(field), "=")
+					if modelSensitiveOption(name) {
+						return "/models add <redacted sensitive options>"
+					}
+				}
+			}
+		}
+		return commandLine
+	}
+	if len(tokens) < 2 {
 		return commandLine
 	}
 	root := strings.TrimPrefix(strings.ToLower(tokens[0].value), "/")
 	if (root != "models" && root != "model") || !strings.EqualFold(tokens[1].value, "add") {
 		return commandLine
 	}
-	secretOptions := map[string]bool{
-		"--api-key": true, "--api-key-file": true, "--secret": true,
-		"--oauth-client-secret": true, "--signing-secret": true,
-	}
 	parts := make([]string, 0, len(tokens))
 	for i := 0; i < len(tokens); i++ {
 		value := tokens[i].value
 		name, _, hasValue := strings.Cut(strings.ToLower(value), "=")
-		if secretOptions[name] || name == "--endpoint" {
+		if modelSensitiveOption(name) {
 			if hasValue {
 				parts = append(parts, name+"=<redacted>")
 				continue
@@ -3876,6 +3891,15 @@ func redactModelCommandSecrets(commandLine string) string {
 		parts = append(parts, value)
 	}
 	return strings.Join(parts, " ")
+}
+
+func modelSensitiveOption(name string) bool {
+	switch name {
+	case "--api-key", "--api-key-file", "--secret", "--oauth-client-secret", "--signing-secret", "--endpoint":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m Model) beginChannelWizard(action string, channel client.Channel) (Model, tea.Cmd) {

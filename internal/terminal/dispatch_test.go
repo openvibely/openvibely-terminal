@@ -5149,6 +5149,26 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			t.Fatalf("rejected inline secret made requests:\n%s", calls)
 		}
 	})
+
+	t.Run("malformed quoted API key is redacted", func(t *testing.T) {
+		secret := "unmatched-quote-model-secret"
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, `/models add openai OpenAI gpt-4o --api-key "`+secret)
+		if !strings.Contains(transcript(m), "unmatched double quote") {
+			t.Fatalf("malformed command did not report its parse error:\n%s", transcript(m))
+		}
+		if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+			t.Fatalf("malformed command exposed the API key:\n%s", transcript(m))
+		}
+		for _, item := range m.history {
+			if strings.Contains(item, secret) {
+				t.Fatalf("malformed command exposed the API key in history: %q", item)
+			}
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("malformed command made requests:\n%s", calls)
+		}
+	})
 }
 
 func TestModelsListFilterOutputDistinguishesMatchesFromNoMatches(t *testing.T) {
