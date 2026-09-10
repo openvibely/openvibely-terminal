@@ -3940,16 +3940,15 @@ func redactModelCommandSecrets(commandLine string) string {
 			}
 			parts = append(parts, value)
 			if i+1 < len(tokens) {
+				// Empty quoted operands are preserved by the tokenizer. They
+				// cannot be valid sensitive values, and the parser will reject
+				// the remaining sequence. Redact that entire tail rather than
+				// guessing how many empty values or sensitive options it holds.
+				if tokens[i+1].value == "" {
+					return "/models add <redacted sensitive options>"
+				}
 				i++
 				parts = append(parts, "<redacted>")
-				// Empty quoted operands are preserved by the tokenizer. They
-				// cannot be valid sensitive values, so consume the following
-				// token too: it may be a pasted credential before local
-				// validation rejects the command.
-				if tokens[i].value == "" && i+1 < len(tokens) {
-					i++
-					parts = append(parts, "<redacted>")
-				}
 			}
 			continue
 		}

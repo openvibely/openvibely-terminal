@@ -5239,6 +5239,30 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 					return `/models add ollama Local llama3 --endpoint '' http://user:` + secret + `@localhost:11434`
 				},
 			},
+			{
+				name: "API key stdin repeated empty double quoted operands",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin "" "" ` + secret
+				},
+			},
+			{
+				name: "API key stdin repeated empty single quoted operands",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin '' '' ` + secret
+				},
+			},
+			{
+				name: "API key stdin empty double quoted operand before API key",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin "" --api-key ` + secret
+				},
+			},
+			{
+				name: "API key stdin empty single quoted operand before API key",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin '' --api-key ` + secret
+				},
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				secret := "empty-quoted-sensitive-operand-" + strings.ReplaceAll(tc.name, " ", "-")
