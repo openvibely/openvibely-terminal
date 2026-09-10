@@ -5218,6 +5218,43 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 		}
 	})
 
+	t.Run("malformed embedded-quote option API key is redacted", func(t *testing.T) {
+		for _, tc := range []struct {
+			name      string
+			option    string
+			quoteName string
+		}{
+			{name: "API key double quote", option: `--api-key"`, quoteName: "double"},
+			{name: "API key stdin double quote", option: `--api-key-stdin"`, quoteName: "double"},
+			{name: "API key single quote", option: `--api-key'`, quoteName: "single"},
+			{name: "API key stdin single quote", option: `--api-key-stdin'`, quoteName: "single"},
+			{name: "API key embedded double quote", option: `--api"-key`, quoteName: "double"},
+			{name: "API key stdin embedded double quote", option: `--api"-key-stdin`, quoteName: "double"},
+			{name: "API key embedded single quote", option: `--api'-key`, quoteName: "single"},
+			{name: "API key stdin embedded single quote", option: `--api'-key-stdin`, quoteName: "single"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				secret := "embedded-quote-model-secret-" + strings.ReplaceAll(tc.name, " ", "-")
+				m, rec := dispatchModel(t, nil)
+				m = runLine(t, m, "/models add openai OpenAI gpt-4o "+tc.option+"="+secret)
+				if !strings.Contains(transcript(m), "unmatched "+tc.quoteName+" quote") {
+					t.Fatalf("malformed command did not report its parse error:\n%s", transcript(m))
+				}
+				if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+					t.Fatalf("malformed embedded-quote option exposed the API key:\n%s", transcript(m))
+				}
+				for _, item := range m.history {
+					if strings.Contains(item, secret) {
+						t.Fatalf("malformed embedded-quote option exposed the API key in history: %q", item)
+					}
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("malformed embedded-quote option made requests:\n%s", calls)
+				}
+			})
+		}
+	})
+
 	t.Run("malformed quoted root API key is redacted", func(t *testing.T) {
 		for _, tc := range []struct {
 			name string
