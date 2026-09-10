@@ -3060,6 +3060,23 @@ func readModelAPIKey(input io.Reader) (string, error) {
 	return key, nil
 }
 
+func modelModelsPageURL(c *client.Client, projectID string) string {
+	base, err := url.Parse(ServerURLDisplay(c.BaseURL()))
+	if err != nil || base.Host == "" {
+		return ""
+	}
+	base.User = nil
+	base.RawQuery = ""
+	base.Fragment = ""
+	base.Path = strings.TrimRight(base.Path, "/") + "/models"
+	if projectID != "" {
+		query := base.Query()
+		query.Set("project_id", projectID)
+		base.RawQuery = query.Encode()
+	}
+	return base.String()
+}
+
 func modelOAuthHandoffURL(c *client.Client, modelID, projectID string) string {
 	base, err := url.Parse(ServerURLDisplay(c.BaseURL()))
 	if err != nil || base.Host == "" {
@@ -3093,10 +3110,27 @@ func modelAddResult(ctx context.Context, c *client.Client, projectID string, spe
 	status := "added " + spec.Name
 	models, err := c.ListModels(ctx, projectID)
 	if err != nil {
-		if jsonMode {
-			return marshalJSON(modelAddOutput{Status: status})
+		if !spec.OAuth {
+			if jsonMode {
+				return marshalJSON(modelAddOutput{Status: status})
+			}
+			return status, nil
 		}
-		return status, nil
+		output := modelAddOutput{
+			Status:           status,
+			OAuthStatus:      "unknown",
+			AuthorizationURL: modelModelsPageURL(c, projectID),
+		}
+		if jsonMode {
+			return marshalJSON(output)
+		}
+		message := status + "; OAuth authorization is required (status: unknown; model refresh unavailable)."
+		if output.AuthorizationURL != "" {
+			message += " Open " + output.AuthorizationURL + " in a browser, complete authorization, and confirm the resulting status there."
+		} else {
+			message += " Open the backend Models page, complete authorization, and confirm the resulting status there."
+		}
+		return message, nil
 	}
 	if !spec.OAuth {
 		if jsonMode {

@@ -1691,6 +1691,66 @@ func TestCLIModelsAddOllamaAndOAuthHandoff(t *testing.T) {
 	})
 }
 
+func TestCLIModelsAddOAuthRefreshFailureStillProvidesHandoff(t *testing.T) {
+	var postCount, listCount, oauthStatusCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			postCount++
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			listCount++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"models temporarily unavailable"}`)
+		case "GET /models/m-oauth/oauth/status":
+			oauthStatusCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"not_connected"}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, jsonOutput := range []bool{false, true} {
+		var out bytes.Buffer
+		if err := RunCLIWithInput(c, &out, nil, "", []string{"models", "add", "anthropic", "Claude OAuth", "claude-sonnet-4-6", "--oauth"}, false, jsonOutput); err != nil {
+			t.Fatalf("OAuth add with refresh failure failed: %v", err)
+		}
+		if !jsonOutput {
+			plain := stripANSI(out.String())
+			for _, want := range []string{"OAuth authorization is required", "status: unknown; model refresh unavailable", srv.URL + "/models"} {
+				if !strings.Contains(plain, want) {
+					t.Fatalf("OAuth refresh-failure output missing %q:\n%s", want, plain)
+				}
+			}
+			if strings.Contains(plain, "OAuth connected") {
+				t.Fatalf("OAuth refresh-failure output incorrectly claims connection:\n%s", plain)
+			}
+			continue
+		}
+
+		var result modelAddOutput
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+			t.Fatalf("invalid OAuth refresh-failure JSON: %v\n%s", err, out.String())
+		}
+		if result.Status != "added Claude OAuth" || result.OAuthStatus != "unknown" {
+			t.Fatalf("OAuth refresh-failure result = %+v", result)
+		}
+		if want := srv.URL + "/models"; result.AuthorizationURL != want {
+			t.Fatalf("authorization URL = %q, want %q", result.AuthorizationURL, want)
+		}
+	}
+	if postCount != 2 || listCount != 2 || oauthStatusCount != 0 {
+		t.Fatalf("POST/list/status counts = %d/%d/%d, want 2/2/0", postCount, listCount, oauthStatusCount)
+	}
+}
+
 func TestCLIModelsAddRejectsInvalidInputAndBackendFailuresWithoutRefresh(t *testing.T) {
 	t.Run("local validation", func(t *testing.T) {
 		for _, args := range [][]string{
