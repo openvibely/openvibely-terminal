@@ -8551,9 +8551,10 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 const structuredChannelsPage = `<div data-channel-type="github" data-search-text="GitHub Connected"></div><div data-channel-type="slack" data-search-text="Slack Configured"></div><div data-channel-type="telegram" data-channel-running="true" data-search-text="Telegram Bot Connected"></div><div data-channel-type="discord" data-search-text="Discord Not configured"></div><div data-channel-type="x" data-search-text="X formerly Twitter mentions posts"><span class="badge badge-success">Connected</span></div><div data-channel-type="email" data-search-text="Email Running"><input name="email_address" value="bot@example.com"></div><form action="/channels/x/configure"><input name="x_poll_interval_seconds" value="30"><input type="checkbox" name="x_send_responses" checked></form>`
 
 type channelAccessTestRow struct {
-	id       string
-	name     string
-	identity string
+	id        string
+	projectID string
+	name      string
+	identity  string
 }
 
 func channelAccessTestRoute(provider string) (route, container string) {
@@ -8576,14 +8577,18 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 	var b strings.Builder
 	fmt.Fprintf(&b, `<div id="%s">`, container)
 	for _, row := range rows {
-		b.WriteString(`<div><div>`)
+		projectID := row.projectID
+		if projectID == "" {
+			projectID = "p1"
+		}
+		fmt.Fprintf(&b, `<div data-project-id="%s"><div>`, projectID)
 		switch provider {
 		case "telegram":
 			fmt.Fprintf(&b, `<span>%s</span><span>@%s</span><span>ID: 987</span>`, row.name, strings.TrimPrefix(row.identity, "@"))
 		case "slack", "discord":
 			fmt.Fprintf(&b, `<span>%s</span><span>ID: %s</span>`, row.name, row.identity)
 		case "email":
-			fmt.Fprintf(&b, `<span>%s</span><span>%s</span>`, row.name, row.identity)
+			fmt.Fprintf(&b, `<span class="text-sm font-medium truncate">%s</span><span class="text-xs opacity-50 truncate">%s</span>`, row.name, row.identity)
 		}
 		b.WriteString(`<input value="channel-access-backend-secret"></div>`)
 		fmt.Fprintf(&b, `<button hx-delete="%s/%s?project_id=p1">remove</button></div>`, route, row.id)
@@ -8722,6 +8727,68 @@ func TestChannelAccessTUICommandsValidateScopeProvidersAndCapturedRemoval(t *tes
 		m = next.(Model)
 		if rec.saw(http.MethodDelete, route+"/row-1") {
 			t.Fatalf("canceled access removal mutated backend: %s", rec.all())
+		}
+	})
+
+	t.Run("foreign rows are rejected before confirmation or deletion", func(t *testing.T) {
+		route, _ := channelAccessTestRoute("slack")
+		page := channelAccessTestPage("slack", channelAccessTestRow{id: "foreign-row", projectID: "other-project", name: "Foreign User", identity: "U12345678"})
+		m, rec := dispatchModel(t, map[string]string{route: page})
+		m = runLine(t, m, "/channels access slack remove U12345678")
+		if m.pendingConfirmation != nil || rec.saw(http.MethodDelete, route+"/foreign-row") || !strings.Contains(transcript(m), "authorized channel access list unavailable") {
+			t.Fatalf("foreign access removal was not rejected safely: output=%s calls=%s", transcript(m), rec.all())
+		}
+	})
+
+	t.Run("owner changes after resolution block deletion", func(t *testing.T) {
+		route, _ := channelAccessTestRoute("slack")
+		var listCalls, deletes int
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != route {
+				http.NotFound(w, r)
+				return
+			}
+			if r.Method == http.MethodGet {
+				listCalls++
+				owner := "p1"
+				if listCalls > 1 {
+					owner = "other-project"
+				}
+				_, _ = io.WriteString(w, channelAccessTestPage("slack", channelAccessTestRow{id: "row-1", projectID: owner, name: "Visible User", identity: "U12345678"}))
+				return
+			}
+			if r.Method == http.MethodDelete {
+				deletes++
+			}
+		})
+		m = runLine(t, m, "/channels access slack remove U12345678")
+		if m.pendingConfirmation == nil || listCalls != 1 {
+			t.Fatalf("initial access target was not resolved safely: lists=%d output=%s", listCalls, transcript(m))
+		}
+		m = runLine(t, m, "yes")
+		if deletes != 0 || listCalls != 2 || !strings.Contains(transcript(m), "authorized channel access list unavailable") {
+			t.Fatalf("ownership revalidation did not block deletion: lists=%d deletes=%d output=%s", listCalls, deletes, transcript(m))
+		}
+	})
+
+	t.Run("email display text cannot replace sender identity", func(t *testing.T) {
+		route, _ := channelAccessTestRoute("email")
+		page := channelAccessTestPage("email", channelAccessTestRow{id: "email-row", name: "support@example.com Team", identity: "real.sender@example.com"})
+
+		m, rec := dispatchModel(t, map[string]string{route: page})
+		m = runLine(t, m, "/channels access email add REAL.SENDER@EXAMPLE.COM")
+		if rec.saw(http.MethodPost, route) || !strings.Contains(transcript(m), "already exists") {
+			t.Fatalf("canonical email duplicate was not rejected: output=%s calls=%s", transcript(m), rec.all())
+		}
+
+		m, rec = dispatchModel(t, map[string]string{route: page})
+		m = runLine(t, m, "/channels access email remove real.sender@example.com")
+		if m.pendingConfirmation == nil || rec.saw(http.MethodDelete, route+"/email-row") {
+			t.Fatalf("canonical email removal was not resolved before confirmation: %s", rec.all())
+		}
+		m = runLine(t, m, "yes")
+		if !rec.saw(http.MethodDelete, route+"/email-row") {
+			t.Fatalf("canonical email removal used the wrong target: %s", rec.all())
 		}
 	})
 

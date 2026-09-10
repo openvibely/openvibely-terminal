@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1845,8 +1846,8 @@ func requireChannelAccessProject(projectID string) (string, error) {
 	return projectID, nil
 }
 
-func channelAccessIdentity(provider, text string) (displayName, identity string, references []string) {
-	text = strings.TrimSpace(text)
+func channelAccessIdentity(provider string, row *html.Node) (displayName, identity string, references []string) {
+	text := strings.TrimSpace(NodeText(row))
 	fields := strings.Fields(text)
 	switch provider {
 	case "telegram":
@@ -1882,14 +1883,31 @@ func channelAccessIdentity(provider, text string) (displayName, identity string,
 			}
 		}
 	case "email":
-		for _, field := range fields {
-			field = strings.Trim(field, "<>()[]{}.,;:")
-			if strings.Contains(field, "@") {
-				identity = strings.ToLower(field)
-				references = append(references, identity)
-				text = strings.TrimSpace(strings.Replace(text, field, "", 1))
-				break
+		var identities []string
+		for _, span := range findAll(row, func(n *html.Node) bool {
+			return n.Data == "span"
+		}) {
+			classes := make(map[string]bool)
+			for _, class := range strings.Fields(attr(span, "class")) {
+				classes[class] = true
 			}
+			value := strings.TrimSpace(NodeText(span))
+			if classes["text-sm"] && classes["font-medium"] && displayName == "" {
+				displayName = value
+			}
+			if !classes["text-xs"] || !classes["opacity-50"] {
+				continue
+			}
+			address, err := mail.ParseAddress(value)
+			if err == nil && address != nil && address.Address == value && strings.Contains(address.Address, "@") {
+				identities = append(identities, strings.ToLower(address.Address))
+			}
+		}
+		if len(identities) == 1 {
+			identity = identities[0]
+			references = append(references, identity)
+		} else {
+			return "", "", nil
 		}
 	}
 	if identity == "" {
@@ -1898,7 +1916,10 @@ func channelAccessIdentity(provider, text string) (displayName, identity string,
 	if identity != "" {
 		references = append(references, identity)
 	}
-	return strings.TrimSpace(text), identity, references
+	if provider != "email" {
+		displayName = strings.TrimSpace(text)
+	}
+	return strings.TrimSpace(displayName), identity, references
 }
 
 func (u ChannelAuthorizedUser) matchesIdentity(value string) bool {
@@ -1946,19 +1967,31 @@ func (c *Client) ListChannelAuthorizedUsers(ctx context.Context, provider, proje
 	for _, button := range findAll(container, func(n *html.Node) bool {
 		return n.Data == "button" && strings.HasPrefix(attr(n, "hx-delete"), route.path+"/")
 	}) {
+		row := button.Parent
+		ownerProjectID := strings.TrimSpace(attr(row, "data-project-id"))
+		if ownerProjectID == "" {
+			return nil, errors.New("authorized channel access ownership unavailable")
+		}
+		if ownerProjectID != projectID {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+
 		location, parseErr := url.Parse(strings.TrimSpace(attr(button, "hx-delete")))
+		// The link scope verifies the backend route contract but cannot prove row
+		// ownership: the backend renders it from the current request. Ownership
+		// is accepted only from the row's explicit project marker above.
 		if parseErr != nil || location == nil || location.Query().Get("project_id") != projectID {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		id := strings.TrimPrefix(location.Path, route.path+"/")
-		if id == "" || strings.Contains(id, "/") {
+		if id == "" || id == "." || id == ".." || strings.Contains(id, "/") {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		if _, duplicate := seen[id]; duplicate {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		seen[id] = struct{}{}
-		displayName, identity, references := channelAccessIdentity(provider, NodeText(button.Parent))
+		displayName, identity, references := channelAccessIdentity(provider, row)
 		if strings.TrimSpace(identity) == "" {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
@@ -1993,8 +2026,9 @@ func (c *Client) AddChannelAuthorizedUser(ctx context.Context, provider, project
 }
 
 // RemoveChannelAuthorizedUser revokes one previously resolved, project-scoped
-// inbound identity. Callers must resolve and capture the row ID from
-// ListChannelAuthorizedUsers before this mutation.
+// inbound identity. It revalidates the captured row ID against the current
+// ownership-verified list immediately before deletion so a backend that accepts
+// global delete IDs cannot turn a stale or foreign reference into a mutation.
 func (c *Client) RemoveChannelAuthorizedUser(ctx context.Context, provider, projectID, id string) error {
 	projectID, err := requireChannelAccessProject(projectID)
 	if err != nil {
@@ -2008,8 +2042,17 @@ func (c *Client) RemoveChannelAuthorizedUser(ctx context.Context, provider, proj
 	if id == "" {
 		return errors.New("authorized channel access ID is required")
 	}
-	return safeChannelError(c.doForm(ctx, http.MethodDelete,
-		route.path+"/"+url.PathEscape(id)+query("project_id", projectID), nil))
+	users, err := c.ListChannelAuthorizedUsers(ctx, provider, projectID)
+	if err != nil {
+		return err
+	}
+	for _, user := range users {
+		if user.ID == id && user.ProjectID == projectID {
+			return safeChannelError(c.doForm(ctx, http.MethodDelete,
+				route.path+"/"+url.PathEscape(id)+query("project_id", projectID), nil))
+		}
+	}
+	return errors.New("authorized channel access user does not belong to selected project")
 }
 
 // --- channels & personality ---

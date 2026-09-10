@@ -3352,13 +3352,24 @@ func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
 		})
 	}
 
+	t.Run("foreign rows cannot be forced to delete", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			route:           channelAccessTestPage("slack", channelAccessTestRow{id: "foreign-row", projectID: "other-project", name: "Foreign User", identity: "U12345678"}),
+		})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "access", "slack", "remove", "U12345678"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "authorized channel access list unavailable") || rec.saw(http.MethodDelete, route+"/foreign-row") {
+			t.Fatalf("forced foreign removal was not rejected safely: err=%v calls=%s", err, rec.all())
+		}
+	})
+
 	t.Run("duplicate add is rejected before mutation", func(t *testing.T) {
 		emailRoute, _ := channelAccessTestRoute("email")
 		c, rec := cliServer(t, map[string]string{
 			"/api/projects": cliProjects,
-			emailRoute:      channelAccessTestPage("email", channelAccessTestRow{id: "row-1", name: "Visible User", identity: "person@example.com"}),
+			emailRoute:      channelAccessTestPage("email", channelAccessTestRow{id: "row-1", name: "support@example.com Team", identity: "real.sender@example.com"}),
 		})
-		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "access", "email", "add", "Person@Example.COM"}, false, false)
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "access", "email", "add", "Real.Sender@Example.COM"}, false, false)
 		if err == nil || !strings.Contains(err.Error(), "already exists") || rec.saw(http.MethodPost, emailRoute) {
 			t.Fatalf("duplicate add was not stopped before mutation: err=%v calls=%s", err, rec.all())
 		}

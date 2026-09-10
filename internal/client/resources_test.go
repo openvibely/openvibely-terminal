@@ -1485,7 +1485,7 @@ func TestChannelAuthorizedUsersUseScopedRoutesAndSecretFreeModels(t *testing.T) 
 		{provider: "telegram", route: "/channels/telegram/authorized-users", container: "telegram-authorized-users", input: "user_id_or_username", identity: "telegram_user", row: `<span>Telegram User</span><span>@telegram_user</span><span>ID: 987</span>`},
 		{provider: "slack", route: "/channels/slack/authorized-users", container: "slack-authorized-users", input: "slack_user_id", identity: "U12345678", row: `<span>Slack User</span><span>ID: U12345678</span>`},
 		{provider: "discord", route: "/channels/discord/authorized-users", container: "discord-authorized-users", input: "discord_user_id", identity: "123456789012345678", row: `<span>Discord User</span><span>ID: 123456789012345678</span>`},
-		{provider: "email", route: "/channels/email/authorized-senders", container: "email-authorized-senders", input: "authorized_email_address", identity: "person@example.com", row: `<span>Email User</span><span>person@example.com</span>`},
+		{provider: "email", route: "/channels/email/authorized-senders", container: "email-authorized-senders", input: "authorized_email_address", identity: "person@example.com", row: `<span class="text-sm font-medium truncate">Email User</span><span class="text-xs opacity-50 truncate">person@example.com</span>`},
 	}
 
 	for _, tc := range cases {
@@ -1515,7 +1515,7 @@ func TestChannelAuthorizedUsersUseScopedRoutesAndSecretFreeModels(t *testing.T) 
 					}
 				}
 				w.Header().Set("Content-Type", "text/html")
-				_, _ = io.WriteString(w, `<div id="`+tc.container+`"><div><div>`+tc.row+`<input value="backend-secret"></div><button hx-delete="`+tc.route+`/row-1?project_id=project%2Ftwo">remove</button></div></div>`)
+				_, _ = io.WriteString(w, `<div id="`+tc.container+`"><div data-project-id="project/two"><div>`+tc.row+`<input value="backend-secret"></div><button hx-delete="`+tc.route+`/row-1?project_id=project%2Ftwo">remove</button></div></div>`)
 			}))
 			defer srv.Close()
 			c, err := New(srv.URL)
@@ -1543,7 +1543,7 @@ func TestChannelAuthorizedUsersUseScopedRoutesAndSecretFreeModels(t *testing.T) 
 			if err := c.RemoveChannelAuthorizedUser(context.Background(), tc.provider, projectID, users[0].ID); err != nil {
 				t.Fatalf("RemoveChannelAuthorizedUser: %v", err)
 			}
-			if want := []string{"GET " + tc.route, "POST " + tc.route, "DELETE " + tc.route + "/row-1"}; !reflect.DeepEqual(methods, want) {
+			if want := []string{"GET " + tc.route, "POST " + tc.route, "GET " + tc.route, "DELETE " + tc.route + "/row-1"}; !reflect.DeepEqual(methods, want) {
 				t.Fatalf("methods = %#v, want %#v", methods, want)
 			}
 		})
@@ -1559,9 +1559,30 @@ func TestChannelAuthorizedUsersRejectMalformedScopesAndPreserveSafeDiagnostics(t
 		t.Fatalf("unsupported provider error = %v", err)
 	}
 
-	foreign := htmlServer(t, `<div id="telegram-authorized-users"><div><span>Foreign</span><button hx-delete="/channels/telegram/authorized-users/other-row?project_id=other-project">remove</button></div></div>`)
+	foreign := htmlServer(t, `<div id="telegram-authorized-users"><div data-project-id="other-project"><span>Foreign</span><button hx-delete="/channels/telegram/authorized-users/other-row?project_id=p1">remove</button></div></div>`)
 	if _, err := foreign.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || err.Error() != "authorized channel access list unavailable" {
 		t.Fatalf("foreign row was accepted: %v", err)
+	}
+
+	unproven := htmlServer(t, `<div id="telegram-authorized-users"><div><span>Unproven</span><button hx-delete="/channels/telegram/authorized-users/unproven-row?project_id=p1">remove</button></div></div>`)
+	if _, err := unproven.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || err.Error() != "authorized channel access ownership unavailable" {
+		t.Fatalf("unproven row was accepted: %v", err)
+	}
+
+	deletes := 0
+	foreignDelete := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes++
+		}
+		_, _ = io.WriteString(w, `<div id="telegram-authorized-users"><div data-project-id="other-project"><span>Foreign</span><button hx-delete="/channels/telegram/authorized-users/foreign-row?project_id=p1">remove</button></div></div>`)
+	}))
+	defer foreignDelete.Close()
+	c, err := New(foreignDelete.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RemoveChannelAuthorizedUser(context.Background(), "telegram", "p1", "foreign-row"); err == nil || deletes != 0 {
+		t.Fatalf("foreign removal error = %v, DELETE requests = %d", err, deletes)
 	}
 
 	const secret = "authorization-backend-secret"
@@ -1569,7 +1590,7 @@ func TestChannelAuthorizedUsersRejectMalformedScopesAndPreserveSafeDiagnostics(t
 		http.Error(w, secret, http.StatusBadGateway)
 	}))
 	defer srv.Close()
-	c, err := New(srv.URL)
+	c, err = New(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1588,6 +1609,55 @@ func TestChannelAuthorizedUsersRejectMalformedScopesAndPreserveSafeDiagnostics(t
 	}
 	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || !IsAuthRequired(err) {
 		t.Fatalf("authentication diagnostic was not preserved: %v", err)
+	}
+}
+
+func TestChannelAuthorizedUserMutationsPreserveAuthAndTransportDiagnostics(t *testing.T) {
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer auth.Close()
+	c, err := New(auth.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []func() error{
+		func() error {
+			return c.AddChannelAuthorizedUser(context.Background(), "email", "p1", "sender@example.com", "")
+		},
+		func() error { return c.RemoveChannelAuthorizedUser(context.Background(), "email", "p1", "row-1") },
+	} {
+		if err := check(); !IsAuthRequired(err) {
+			t.Fatalf("error = %v, want authentication required", err)
+		}
+	}
+
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+	c, err = New(closedURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddChannelAuthorizedUser(context.Background(), "email", "p1", "sender@example.com", ""); !IsTransportError(err) {
+		t.Fatalf("transport error = %v", err)
+	}
+}
+
+func TestChannelAuthorizedUsersParseEmailIdentityStructurally(t *testing.T) {
+	const page = `<div id="email-authorized-senders"><div data-project-id="p1"><div><span class="text-sm font-medium truncate">support@example.com Team</span><span class="text-xs opacity-50 truncate">real.sender@example.com</span></div><button hx-delete="/channels/email/authorized-senders/email-row?project_id=p1">remove</button></div></div>`
+	c := htmlServer(t, page)
+
+	users, err := c.ListChannelAuthorizedUsers(context.Background(), "email", "p1")
+	if err != nil {
+		t.Fatalf("ListChannelAuthorizedUsers: %v", err)
+	}
+	if len(users) != 1 || users[0].Identity != "real.sender@example.com" || users[0].DisplayName != "support@example.com Team" {
+		t.Fatalf("email users = %#v", users)
+	}
+	if users[0].MatchesIdentity("support@example.com") || !users[0].MatchesIdentity("REAL.SENDER@EXAMPLE.COM") {
+		t.Fatalf("email aliases = %#v", users[0])
 	}
 }
 
