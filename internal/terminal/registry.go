@@ -3893,13 +3893,17 @@ func redactModelCommandSecrets(commandLine string) string {
 		// malformed quote cannot put a model credential in the transcript or
 		// history.
 		fields := strings.Fields(commandLine)
-		if len(fields) > 0 {
+		rootInput := strings.TrimSpace(commandLine)
+		rootInput = strings.TrimSpace(strings.TrimPrefix(rootInput, "/"))
+		rootFields := strings.Fields(rootInput)
+		if len(fields) > 0 && len(rootFields) > 0 {
 			// A quoted root can contain its leading slash ("/models"),
 			// follow it (/"models"), be assembled from quoted fragments
-			// ("/m"odels), or have repeated slashes (//models). Normalize
+			// ("/m"odels), follow a slash-separated whitespace field
+			// (/ "models"), or have repeated slashes (//models). Normalize
 			// quote delimiters and leading slashes before checking the command
 			// name.
-			root := strings.ToLower(fields[0])
+			root := strings.ToLower(rootFields[0])
 			root = strings.ReplaceAll(strings.ReplaceAll(root, `"`, ""), "'", "")
 			root = strings.TrimLeft(root, "/")
 			if root == "models" || root == "model" {
