@@ -5167,6 +5167,18 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 					return `/models add openai OpenAI gpt-4o --api-key-stdin "` + secret
 				},
 			},
+			{
+				name: "empty stdin assignment",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin= ` + secret
+				},
+			},
+			{
+				name: "empty API key assignment",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key= ` + secret
+				},
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				secret := "api-key-stdin-misuse-" + strings.ReplaceAll(tc.name, " ", "-")
@@ -5186,7 +5198,6 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			})
 		}
 	})
-
 	t.Run("malformed quoted option API key is redacted", func(t *testing.T) {
 		secret := "quoted-option-unmatched-quote-model-secret"
 		m, rec := dispatchModel(t, nil)

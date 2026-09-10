@@ -3917,9 +3917,9 @@ func redactModelCommandSecrets(commandLine string) string {
 	parts := make([]string, 0, len(tokens))
 	for i := 0; i < len(tokens); i++ {
 		value := tokens[i].value
-		name, _, hasValue := strings.Cut(strings.ToLower(value), "=")
+		name, inlineValue, hasAssignment := strings.Cut(strings.ToLower(value), "=")
 		if modelSensitiveOption(name) {
-			if hasValue {
+			if hasAssignment && inlineValue != "" {
 				parts = append(parts, name+"=<redacted>")
 				continue
 			}
