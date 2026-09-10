@@ -1096,7 +1096,9 @@ func appendModelCustomAuthForm(form url.Values, raw string) error {
 	form.Set("custom_profile_team_path", cfg.ProfileTeamPath)
 	form.Set("custom_instance_header", cfg.InstanceHeader)
 	form.Set("custom_team_header", cfg.TeamHeader)
-	form.Set("custom_signing_secret", cfg.SigningSecret)
+	if cfg.SigningSecret != "" {
+		form.Set("custom_signing_secret", cfg.SigningSecret)
+	}
 	form.Set("custom_timestamp_header", cfg.TimestampHeader)
 	form.Set("custom_signature_header", cfg.SignatureHeader)
 	form.Set("custom_models_array_path", cfg.ModelsArrayPath)
