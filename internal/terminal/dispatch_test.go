@@ -3618,6 +3618,32 @@ func TestScheduleEditSettingsTakePrecedenceOverUnquotedTitleText(t *testing.T) {
 	}
 }
 
+func TestScheduleEditRepeatRetainsEnabledContextReset(t *testing.T) {
+	var gotForm url.Values
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+			_, _ = io.WriteString(w, selScheduleHTML)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			_, _ = io.WriteString(w, scheduleEditDetail("p1"))
+		case r.Method == http.MethodPut && r.URL.Path == "/schedules/s-1":
+			_ = r.ParseForm()
+			gotForm = r.PostForm
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+
+	m = runLine(t, m, "/schedule edit s-1 repeat weekly")
+	if got := gotForm.Get("clear_context_on_start"); got != "true" {
+		t.Fatalf("clear_context_on_start = %q, want true; form = %#v", got, gotForm)
+	}
+	if got := gotForm.Get("repeat_type"); got != "weekly" {
+		t.Fatalf("repeat_type = %q, want weekly; form = %#v", got, gotForm)
+	}
+}
+
 func TestScheduleEditHourlyAliasUsesBackendHours(t *testing.T) {
 	var gotForm url.Values
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
