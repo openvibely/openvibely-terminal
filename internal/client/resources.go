@@ -419,12 +419,13 @@ func (c *Client) AlertAction(ctx context.Context, alertID, action, projectID str
 // atomic request is sent.
 func (c *Client) MarkAlertsReadBulk(ctx context.Context, projectID string, ids []string) (int, error) {
 	var response struct {
-		Updated int `json:"updated"`
+		Updated *int            `json:"updated"`
+		Error   json.RawMessage `json:"error"`
 	}
 	if err := c.alertBulkMutation(ctx, http.MethodPost, "/alerts/read-bulk", projectID, ids, &response); err != nil {
 		return 0, err
 	}
-	return response.Updated, nil
+	return validateAlertBulkMutationCount("/alerts/read-bulk", "updated", response.Updated, response.Error)
 }
 
 // DeleteAlertsBulk removes the supplied project-scoped alerts and returns the
@@ -432,12 +433,26 @@ func (c *Client) MarkAlertsReadBulk(ctx context.Context, projectID string, ids [
 // request is sent.
 func (c *Client) DeleteAlertsBulk(ctx context.Context, projectID string, ids []string) (int, error) {
 	var response struct {
-		Deleted int `json:"deleted"`
+		Deleted *int            `json:"deleted"`
+		Error   json.RawMessage `json:"error"`
 	}
 	if err := c.alertBulkMutation(ctx, http.MethodDelete, "/alerts/bulk", projectID, ids, &response); err != nil {
 		return 0, err
 	}
-	return response.Deleted, nil
+	return validateAlertBulkMutationCount("/alerts/bulk", "deleted", response.Deleted, response.Error)
+}
+
+func validateAlertBulkMutationCount(path, field string, count *int, responseError json.RawMessage) (int, error) {
+	if len(responseError) > 0 && strings.TrimSpace(string(responseError)) != "null" {
+		return 0, fmt.Errorf("decoding %s response: received an error object", path)
+	}
+	if count == nil {
+		return 0, fmt.Errorf("decoding %s response: missing required %s count", path, field)
+	}
+	if *count < 0 {
+		return 0, fmt.Errorf("decoding %s response: %s count must not be negative", path, field)
+	}
+	return *count, nil
 }
 
 func (c *Client) alertBulkMutation(ctx context.Context, method, path, projectID string, ids []string, response any) error {
@@ -2250,30 +2265,38 @@ func (c *Client) ListWebhooks(ctx context.Context, projectID string) ([]Webhook,
 // returned by the backend detail route.
 func (c *Client) GetWebhook(ctx context.Context, projectID, id string) (*Webhook, error) {
 	var raw struct {
-		ID                 string   `json:"id"`
-		ProjectID          string   `json:"project_id"`
-		Name               string   `json:"name"`
-		Enabled            bool     `json:"enabled"`
-		PathToken          string   `json:"path_token"`
-		SystemInstructions string   `json:"system_instructions"`
-		TitleTemplate      string   `json:"title_template"`
-		PromptTemplate     string   `json:"prompt_template"`
-		DefaultPriority    int      `json:"default_priority"`
-		AgentIDs           []string `json:"agent_ids"`
+		ID                 *string   `json:"id"`
+		ProjectID          *string   `json:"project_id"`
+		Name               *string   `json:"name"`
+		Enabled            *bool     `json:"enabled"`
+		PathToken          *string   `json:"path_token"`
+		SystemInstructions *string   `json:"system_instructions"`
+		TitleTemplate      *string   `json:"title_template"`
+		PromptTemplate     *string   `json:"prompt_template"`
+		DefaultPriority    *int      `json:"default_priority"`
+		AgentIDs           *[]string `json:"agent_ids"`
 	}
 	path := "/channels/webhooks/" + url.PathEscape(id) + query("project_id", projectID)
 	if err := c.getJSON(ctx, path, &raw); err != nil {
 		return nil, err
 	}
-	if raw.ProjectID != projectID {
+	if raw.ID == nil || raw.ProjectID == nil || raw.Name == nil || raw.Enabled == nil || raw.PathToken == nil ||
+		raw.SystemInstructions == nil || raw.TitleTemplate == nil || raw.PromptTemplate == nil || raw.DefaultPriority == nil || raw.AgentIDs == nil ||
+		strings.TrimSpace(*raw.PathToken) == "" || *raw.DefaultPriority < 1 || *raw.DefaultPriority > 4 {
+		return nil, fmt.Errorf("webhook detail response is malformed")
+	}
+	if *raw.ID != id {
+		return nil, fmt.Errorf("webhook detail does not match requested webhook %q", id)
+	}
+	if *raw.ProjectID != projectID {
 		return nil, fmt.Errorf("webhook %q does not belong to selected project", id)
 	}
-	endpointPath, endpointURL := c.webhookLocation(raw.PathToken)
+	endpointPath, endpointURL := c.webhookLocation(*raw.PathToken)
 	return &Webhook{
-		ID: raw.ID, ProjectID: raw.ProjectID, Name: raw.Name, Enabled: raw.Enabled,
-		Path: endpointPath, URL: endpointURL, SystemInstructions: raw.SystemInstructions,
-		TitleTemplate: raw.TitleTemplate, PromptTemplate: raw.PromptTemplate,
-		DefaultPriority: raw.DefaultPriority, AgentIDs: nonNilStrings(raw.AgentIDs),
+		ID: *raw.ID, ProjectID: *raw.ProjectID, Name: *raw.Name, Enabled: *raw.Enabled,
+		Path: endpointPath, URL: endpointURL, SystemInstructions: *raw.SystemInstructions,
+		TitleTemplate: *raw.TitleTemplate, PromptTemplate: *raw.PromptTemplate,
+		DefaultPriority: *raw.DefaultPriority, AgentIDs: nonNilStrings(*raw.AgentIDs),
 	}, nil
 }
 

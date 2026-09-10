@@ -4358,6 +4358,85 @@ func TestCLIAlertBulkCommandsForceJSONAndResolution(t *testing.T) {
 	}
 }
 
+func TestCLIAlertBulkJSONRejectsMalformedCounts(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>`
+	endpoints := []struct {
+		name      string
+		action    string
+		method    string
+		path      string
+		countName string
+	}{
+		{name: "read", action: "read-bulk", method: http.MethodPost, path: "/alerts/read-bulk", countName: "updated"},
+		{name: "delete", action: "delete-bulk", method: http.MethodDelete, path: "/alerts/bulk", countName: "deleted"},
+	}
+	responses := []struct {
+		name    string
+		body    func(string) string
+		wantErr bool
+	}{
+		{name: "missing count", body: func(string) string { return `{}` }, wantErr: true},
+		{name: "null count", body: func(field string) string { return fmt.Sprintf(`{%q:null}`, field) }, wantErr: true},
+		{name: "negative count", body: func(field string) string { return fmt.Sprintf(`{%q:-1}`, field) }, wantErr: true},
+		{name: "error object with count", body: func(field string) string { return fmt.Sprintf(`{"error":"bulk mutation rejected",%q:0}`, field) }, wantErr: true},
+		{name: "explicit zero", body: func(field string) string { return fmt.Sprintf(`{%q:0}`, field) }},
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			for _, response := range responses {
+				t.Run(response.name, func(t *testing.T) {
+					var lists, mutations int
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						switch {
+						case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, cliProjects)
+						case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+							lists++
+							w.Header().Set("Content-Type", "text/html")
+							_, _ = io.WriteString(w, alertsHTML)
+						case r.Method == endpoint.method && r.URL.Path == endpoint.path:
+							mutations++
+							assertCLIAlertBulkRequest(t, r, []string{"a-one"})
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, response.body(endpoint.countName))
+						default:
+							http.NotFound(w, r)
+						}
+					}))
+					t.Cleanup(srv.Close)
+					c, err := client.New(srv.URL)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var out bytes.Buffer
+					err = RunCLI(c, &out, "demo", []string{"alerts", endpoint.action, "a-one"}, endpoint.action == "delete-bulk", true)
+					if lists != 1 || mutations != 1 {
+						t.Fatalf("requests = lists %d mutations %d, want 1 each", lists, mutations)
+					}
+					if response.wantErr {
+						if err == nil {
+							t.Fatal("malformed count response succeeded")
+						}
+						if got := strings.TrimSpace(out.String()); got != "" {
+							t.Fatalf("malformed JSON output = %q, want no success count", got)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("explicit zero failed: %v", err)
+					}
+					want := fmt.Sprintf(`{%q:0}`, endpoint.countName)
+					if got := strings.TrimSpace(out.String()); got != want {
+						t.Fatalf("explicit zero JSON = %q, want %q", got, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 func assertCLIAlertBulkRequest(t *testing.T, r *http.Request, want []string) {
 	t.Helper()
 	if r.URL.Query().Get("project_id") != "p1" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
@@ -6035,6 +6114,63 @@ func TestEventsHelpDistinguishesInteractiveAndCLI(t *testing.T) {
 	}
 }
 
+func TestCLIWebhookCanonicalIDAliasesUseScopedDetailWithoutCatalog(t *testing.T) {
+	for _, root := range [][]string{{"channels", "webhooks"}, {"webhooks"}, {"inbound-webhooks"}} {
+		t.Run(strings.Join(root, " "), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels/webhooks/" + canonicalWebhookID:           canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Canonical Hook"),
+				"/channels/webhooks/" + canonicalWebhookID + "/test": `{"task_id":"canonical-alias-test"}`,
+			})
+			var out bytes.Buffer
+			args := append(append([]string(nil), root...), "test", canonicalWebhookID)
+			if err := RunCLI(c, &out, "demo", args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.count(http.MethodGet, "/channels"); got != 0 {
+				t.Fatalf("catalog requests = %d, want 0; calls: %s", got, rec.all())
+			}
+			if got := rec.count(http.MethodGet, "/channels/webhooks/"+canonicalWebhookID); got != 1 {
+				t.Fatalf("detail requests = %d, want 1; calls: %s", got, rec.all())
+			}
+			if got := rec.count(http.MethodPost, "/channels/webhooks/"+canonicalWebhookID+"/test"); got != 1 {
+				t.Fatalf("test requests = %d, want 1; calls: %s", got, rec.all())
+			}
+		})
+	}
+}
+
+func TestCLIWebhookCanonicalShowPreservesPlainAndJSONOutput(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", jsonOutput), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels":     `<div data-webhook-id="` + canonicalWebhookID + `" data-webhook-name="Canonical Hook" data-webhook-token="safe-token"></div>`,
+				"/channels/webhooks/" + canonicalWebhookID: canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Canonical Hook"),
+			})
+			var direct, named bytes.Buffer
+			if err := RunCLI(c, &direct, "demo", []string{"webhooks", "show", canonicalWebhookID}, false, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.count(http.MethodGet, "/channels"); got != 0 {
+				t.Fatalf("direct catalog requests = %d, want 0; calls: %s", got, rec.all())
+			}
+			if err := RunCLI(c, &named, "demo", []string{"webhooks", "show", "Canonical Hook"}, false, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.count(http.MethodGet, "/channels"); got != 1 {
+				t.Fatalf("named catalog requests = %d, want 1; calls: %s", got, rec.all())
+			}
+			if direct.String() != named.String() {
+				t.Fatalf("show output changed for direct ID\ndirect: %q\nnamed:  %q", direct.String(), named.String())
+			}
+			if jsonOutput && !json.Valid(direct.Bytes()) {
+				t.Fatalf("direct JSON output is invalid: %q", direct.String())
+			}
+		})
+	}
+}
+
 func TestCLIChannelsWebhooksCanonicalAndAliasParity(t *testing.T) {
 	roots := [][]string{{"channels", "webhooks"}, {"webhooks"}, {"inbound-webhooks"}}
 	var wantOutput string
@@ -6070,7 +6206,7 @@ func TestCLIChannelsWebhooksCanonicalAndAliasParity(t *testing.T) {
 
 func TestCLIChannelsWebhooksPreservesOptionLikeExactName(t *testing.T) {
 	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
-	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","enabled":true,"path_token":"opt-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":            cliProjects,
 		"/channels":                cards,
@@ -6125,7 +6261,7 @@ func TestCLIWebhooksTrailingOptionTokensRemainInReference(t *testing.T) {
 	}
 
 	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
-	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","enabled":true,"path_token":"opt-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
 	for _, action := range []string{"show", "test", "rotate", "delete"} {
 		t.Run("exact option-token name "+action, func(t *testing.T) {
 			bodies := map[string]string{

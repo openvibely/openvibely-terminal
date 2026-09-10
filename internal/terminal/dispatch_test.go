@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -4902,6 +4903,95 @@ func TestAlertBulkMutationFailureDoesNotRefreshOrReportSuccess(t *testing.T) {
 	}
 }
 
+func TestAlertBulkMalformedMutationResponsesDoNotRefreshOrReportSuccess(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>`
+	const refreshedHTML = `<div data-alert-id="a-remaining" data-alert-scroll-anchor="a-remaining"><p class="font-semibold">Remaining</p></div>`
+	endpoints := []struct {
+		name       string
+		action     string
+		method     string
+		path       string
+		countName  string
+		successMsg string
+	}{
+		{name: "read", action: "read-bulk", method: http.MethodPost, path: "/alerts/read-bulk", countName: "updated", successMsg: "marked 0 alerts read"},
+		{name: "delete", action: "delete-bulk", method: http.MethodDelete, path: "/alerts/bulk", countName: "deleted", successMsg: "deleted 0 alerts"},
+	}
+	responses := []struct {
+		name      string
+		body      func(string) string
+		wantError string
+	}{
+		{name: "missing count", body: func(string) string { return `{}` }, wantError: "missing required"},
+		{name: "null count", body: func(field string) string { return fmt.Sprintf(`{%q:null}`, field) }, wantError: "missing required"},
+		{name: "negative count", body: func(field string) string { return fmt.Sprintf(`{%q:-1}`, field) }, wantError: "must not be negative"},
+		{name: "error object with count", body: func(field string) string { return fmt.Sprintf(`{"error":"bulk mutation rejected",%q:0}`, field) }, wantError: "received an error object"},
+		{name: "explicit zero", body: func(field string) string { return fmt.Sprintf(`{%q:0}`, field) }},
+	}
+
+	for _, endpoint := range endpoints {
+		t.Run(endpoint.name, func(t *testing.T) {
+			for _, response := range responses {
+				t.Run(response.name, func(t *testing.T) {
+					var lists, mutations int
+					srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						switch {
+						case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+							lists++
+							w.Header().Set("Content-Type", "text/html")
+							if lists == 1 {
+								_, _ = io.WriteString(w, alertsHTML)
+								return
+							}
+							_, _ = io.WriteString(w, refreshedHTML)
+						case r.Method == endpoint.method && r.URL.Path == endpoint.path:
+							mutations++
+							w.Header().Set("Content-Type", "application/json")
+							_, _ = io.WriteString(w, response.body(endpoint.countName))
+						default:
+							http.NotFound(w, r)
+						}
+					}))
+					t.Cleanup(srv.Close)
+					c, err := client.New(srv.URL)
+					if err != nil {
+						t.Fatal(err)
+					}
+					m := New(c)
+					m.selectedID, m.selectedName = "p1", "demo"
+					line := "/alerts " + endpoint.action + " a-one"
+					if endpoint.action == "delete-bulk" {
+						m = runLine(t, m, line)
+						if m.pendingConfirmation == nil {
+							t.Fatal("bulk delete did not request confirmation")
+						}
+						m = runLine(t, m, "yes")
+					} else {
+						m = runLineWithFollowUp(t, m, line)
+					}
+
+					out := stripANSI(transcript(m))
+					if response.wantError != "" {
+						if mutations != 1 || lists != 1 {
+							t.Fatalf("malformed response requests = lists %d mutations %d, want 1 each", lists, mutations)
+						}
+						if !strings.Contains(out, response.wantError) || strings.Contains(out, endpoint.successMsg) || strings.Contains(out, "Remaining") {
+							t.Fatalf("malformed response output = %q", out)
+						}
+						return
+					}
+					if mutations != 1 || lists != 2 {
+						t.Fatalf("zero count requests = lists %d mutations %d, want 2 and 1", lists, mutations)
+					}
+					if !strings.Contains(out, endpoint.successMsg) || !strings.Contains(out, "Remaining") {
+						t.Fatalf("zero count output = %q", out)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestAlertsCommandsRequireProject(t *testing.T) {
 	cases := []struct {
 		name              string
@@ -5996,6 +6086,71 @@ func automationDetailHTML(id, projectID, name string) string {
 	</div>`
 }
 
+func TestResolveAutomationRefPreservesMatchRefPrecedenceAndScope(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Primary", "active") +
+		automationCardHTML("au-2", "AU-1", "paused") +
+		automationCardHTML("au-3", "Native SDLC", "active") +
+		automationCardHTML("au-4", "Build cleanup", "active") +
+		automationCardHTML("au-5", "Run nightly cleanup", "active") +
+		"</div>"
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+		id   string
+	}{
+		{name: "exact ID outranks name", ref: "au-1", id: "au-1"},
+		{name: "case insensitive exact name", ref: "native sdlc", id: "au-3"},
+		{name: "unique prefix", ref: "build", id: "au-4"},
+		{name: "unique substring", ref: "nightly", id: "au-5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+			got, err := resolveAutomationRef(context.Background(), m.client, "p1", tc.ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ID != tc.id {
+				t.Fatalf("resolved %q as %q, want %q", tc.ref, got.ID, tc.id)
+			}
+			if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+				t.Fatalf("catalog requests = %d, want 1: %s", got, rec.all())
+			}
+			if !rec.sawQuery("GET /automations?project_id=p1") {
+				t.Fatalf("resolver catalog request lost selected project: %s", rec.urlsSnapshot())
+			}
+		})
+	}
+}
+
+func TestResolveAutomationRefFailsWithoutExtraCatalogRequests(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+
+	for _, tc := range []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "unknown", ref: "missing", want: "nothing matches"},
+		{name: "ambiguous", ref: "SDLC", want: "ambiguous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+			_, err := resolveAutomationRef(context.Background(), m.client, "p1", tc.ref)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("resolve error = %v, want %q", err, tc.want)
+			}
+			if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+				t.Fatalf("catalog requests = %d, want 1: %s", got, rec.all())
+			}
+		})
+	}
+}
+
 func TestAutomationsShowResolvesReferencesAndLoadsScopedDetail(t *testing.T) {
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +
@@ -6066,6 +6221,9 @@ func TestAutomationsShowReferenceFailuresDoNotLoadDetailOrMutate(t *testing.T) {
 				"/automations/au-1": automationDetailHTML("au-1", "p1", "Native SDLC"),
 			})
 			m = runLine(t, m, "/automations show "+tc.ref)
+			if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+				t.Fatalf("reference failure catalog requests = %d, want 1: %s", got, rec.all())
+			}
 			if rec.count("GET", "/automations/au-1") != 0 || rec.count("GET", "/automations/au-2") != 0 {
 				t.Fatalf("reference failure loaded detail:\n%s", rec.all())
 			}
@@ -6562,6 +6720,30 @@ func TestAutomationDeleteConfirmationTimingAndCancellationRemainRouteSpecific(t 
 	}
 }
 
+func TestAutomationTypedDeleteCapturesResolvedCanonicalIDAfterConfirmation(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("au-1", "Native SDLC", "active") +
+		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		"</div>"
+	m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+
+	m = runLine(t, m, "/automations delete Native")
+	if m.pendingConfirmation == nil || rec.count(http.MethodGet, "/automations") != 0 {
+		t.Fatalf("typed delete resolved before confirmation: confirmation=%v calls=%s", m.pendingConfirmation, rec.all())
+	}
+	m = runLine(t, m, "yes")
+
+	if got := rec.count(http.MethodPost, "/automations/au-1/delete"); got != 1 {
+		t.Fatalf("captured delete ID calls = %d, want 1: %s", got, rec.all())
+	}
+	if rec.count(http.MethodPost, "/automations/au-2/delete") != 0 {
+		t.Fatalf("delete rebound to a different automation: %s", rec.all())
+	}
+	if got := rec.count(http.MethodGet, "/automations"); got != 2 {
+		t.Fatalf("catalog requests = %d, want resolution plus refresh: %s", got, rec.all())
+	}
+}
+
 func TestAutomationsReloadFailureAfterActionIsSwallowed(t *testing.T) {
 	automationsHTML := "<div>" + automationCardHTML("au-1", "Native SDLC", "active") + "</div>"
 	var gets int
@@ -6658,6 +6840,12 @@ func TestAutomationEditExportPreservesCompleteDefinitionWithoutMutation(t *testi
 	})
 	path := filepath.Join(t.TempDir(), "automation.yaml")
 	m = runLine(t, m, "/automations edit Original --export "+path)
+	if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+		t.Fatalf("typed export catalog requests = %d, want 1: %s", got, rec.all())
+	}
+	if got := rec.count(http.MethodGet, "/automations/au-1/builder"); got != 1 {
+		t.Fatalf("typed export definition loads = %d, want 1: %s", got, rec.all())
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -6742,6 +6930,12 @@ func TestAutomationInteractiveEditLoadsSavesAndDoesNotEchoDefinition(t *testing.
 		"/automations/au-1/builder": builder,
 	})
 	m = runLine(t, m, "/automations edit Original")
+	if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+		t.Fatalf("interactive edit catalog requests = %d, want 1: %s", got, rec.all())
+	}
+	if got := rec.count(http.MethodGet, "/automations/au-1/builder"); got != 1 {
+		t.Fatalf("interactive edit definition loads = %d, want 1: %s", got, rec.all())
+	}
 	if !m.automationEditActive || m.automationEditor.Value() != current {
 		t.Fatalf("editor did not load authoritative definition: active=%v value=%q", m.automationEditActive, m.automationEditor.Value())
 	}
@@ -10287,6 +10481,67 @@ func TestTaskReviewReadPathsHaveEquivalentPlainOutputAndSingleFetch(t *testing.T
 	}
 }
 
+func TestTaskReviewReadPathsHaveEquivalentJSONOutputAndCanonicalRouting(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	board := `<div data-task-id="` + taskID + `" data-task-status="running" data-task-category="active">
+		<a href="/tasks/` + taskID + `" title="Exact task">Exact task</a>
+	</div>`
+	reviews := strings.Replace(taskReviewHTML, `data-task-id="t-1"`, `data-task-id="`+taskID+`"`, 1)
+	tests := []struct {
+		name      string
+		line      string
+		canonical bool
+	}{
+		{name: "show review tab", line: "/tasks show Exact task review"},
+		{name: "reviews default list", line: "/tasks reviews Exact task"},
+		{name: "reviews list subcommand", line: "/tasks reviews list Exact task"},
+		{name: "canonical full ID review", line: "/tasks show " + taskID + " review", canonical: true},
+	}
+
+	previousJSON := jsonMode
+	jsonMode = true
+	defer func() { jsonMode = previousJSON }()
+
+	var want string
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":                        board,
+				"/tasks/" + taskID:              canonicalTaskDetailHTML(taskID, "p1"),
+				"/tasks/" + taskID + "/reviews": reviews,
+			})
+			m = runLine(t, m, tc.line)
+
+			got := taskReviewsResultText(m)
+			var decoded []client.ReviewComment
+			if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+				t.Fatalf("review output is not a JSON array: %v\n%s", err, transcript(m))
+			}
+			if len(decoded) != 1 || decoded[0].ID != "rc-1" || decoded[0].CommentText != "Needs error handling" {
+				t.Fatalf("review JSON = %+v, want parsed review comment", decoded)
+			}
+			if want == "" {
+				want = got
+			} else if got != want {
+				t.Errorf("review JSON differs from the first read path:\n%s\nwant:\n%s", got, want)
+			}
+			if got := rec.count("GET", "/tasks/"+taskID+"/reviews"); got != 1 {
+				t.Fatalf("review display should make exactly one review request, got %d:\n%s", got, rec.all())
+			}
+			if tc.canonical {
+				if got := rec.count("GET", "/tasks"); got != 0 {
+					t.Fatalf("canonical review made %d board requests:\n%s", got, rec.all())
+				}
+				if !rec.sawQuery("GET /tasks/" + taskID + "/reviews?project_id=p1") {
+					t.Fatalf("canonical review request was not project scoped: %v", rec.urlsSnapshot())
+				}
+			} else if got := rec.count("GET", "/tasks"); got != 1 {
+				t.Fatalf("ordinary review resolution should make exactly one board request, got %d:\n%s", got, rec.all())
+			}
+		})
+	}
+}
+
 func TestTaskReviewReadPathsPreserveEmptyPlainOutput(t *testing.T) {
 	tests := []struct {
 		name string
@@ -10372,6 +10627,49 @@ func TestTaskReviewReadPathsPropagateFetchErrorsIdentically(t *testing.T) {
 				t.Fatalf("review error = %q, want %q; transcript:\n%s", got, wantError, transcript(m))
 			}
 		})
+	}
+}
+
+func TestCanonicalTaskReviewPropagatesScopedFetchErrorWithoutBoard(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/tasks/" + taskID:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(canonicalTaskDetailHTML(taskID, "p1")))
+		case "/tasks/" + taskID + "/reviews":
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Errorf("review project_id = %q, want p1", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"review fetch failed"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/tasks show "+taskID+" review")
+
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("canonical review made %d board requests:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks/"+taskID+"/reviews"); got != 1 {
+		t.Fatalf("canonical review made %d review requests, want 1:\n%s", got, rec.all())
+	}
+	if got, want := taskReviewErrorText(m), "server error (502): review fetch failed"; got != want {
+		t.Fatalf("review error = %q, want %q; transcript:\n%s", got, want, transcript(m))
 	}
 }
 
@@ -10576,10 +10874,439 @@ const webhookCardsHTML = `<div data-card-pagination-root data-card-pagination-ca
 
 const webhookDetailJSON = `{"id":"w1","project_id":"p1","name":"Pager Duty","enabled":false,"path_token":"safe-token","secret":"never-print-this","system_instructions":"keep system","title_template":"keep title","prompt_template":"keep prompt","default_priority":4,"agent_ids":["a1","a2"]}`
 
+const canonicalWebhookID = "0123456789abcdef0123456789abcdef"
+
+func canonicalWebhookDetailJSON(id, projectID, name string) string {
+	return fmt.Sprintf(`{"id":%q,"project_id":%q,"name":%q,"enabled":true,"path_token":"safe-token","secret":"never-rendered","system_instructions":"keep system","title_template":"keep title","prompt_template":"keep prompt","default_priority":2,"agent_ids":["a1","a2"]}`, id, projectID, name)
+}
+
+func TestIsCanonicalWebhookIDMatchesBackendGrammar(t *testing.T) {
+	for _, tc := range []struct {
+		ref  string
+		want bool
+	}{
+		{ref: canonicalWebhookID, want: true},
+		{ref: strings.ToUpper(canonicalWebhookID), want: false},
+		{ref: canonicalWebhookID[:31], want: false},
+		{ref: canonicalWebhookID[:31] + "g", want: false},
+		{ref: "wh-" + canonicalWebhookID[:29], want: false},
+	} {
+		if got := isCanonicalWebhookID(tc.ref); got != tc.want {
+			t.Errorf("isCanonicalWebhookID(%q) = %t, want %t", tc.ref, got, tc.want)
+		}
+	}
+}
+
+func TestWebhooksCanonicalIDUsesScopedDetailWithoutCatalog(t *testing.T) {
+	for _, tc := range []struct {
+		action       string
+		line         string
+		wantMutation string
+		wantDetails  int
+	}{
+		{action: "show", line: "/channels webhooks show " + canonicalWebhookID, wantDetails: 1},
+		{action: "edit", line: "/channels webhooks edit " + canonicalWebhookID + " --name Renamed", wantMutation: "PUT", wantDetails: 2},
+		{action: "test", line: "/channels webhooks test " + canonicalWebhookID, wantMutation: "POST", wantDetails: 1},
+		{action: "rotate", line: "/channels webhooks rotate " + canonicalWebhookID, wantMutation: "POST", wantDetails: 1},
+		{action: "delete", line: "/channels webhooks delete " + canonicalWebhookID, wantMutation: "DELETE", wantDetails: 1},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			var catalogRequests, detailRequests, mutationRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/channels":
+					catalogRequests++
+					http.Error(w, "canonical ID must not scan catalog", http.StatusInternalServerError)
+				case "/channels/webhooks/" + canonicalWebhookID:
+					switch r.Method {
+					case http.MethodGet:
+						detailRequests++
+						if got := r.URL.Query().Get("project_id"); got != "p1" {
+							t.Errorf("detail project_id = %q, want p1", got)
+						}
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Canonical Hook"))
+					case http.MethodPut, http.MethodDelete:
+						mutationRequests++
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				case "/channels/webhooks/" + canonicalWebhookID + "/test":
+					mutationRequests++
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"task_id":"webhook-test-task"}`)
+				case "/channels/webhooks/" + canonicalWebhookID + "/rotate-secret":
+					mutationRequests++
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"secret":"replacement"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			if tc.action == "rotate" || tc.action == "delete" {
+				m = confirmDestructive(t, m, tc.line)
+			} else {
+				m = runLine(t, m, tc.line)
+			}
+			if catalogRequests != 0 || detailRequests != tc.wantDetails || mutationRequests != map[bool]int{true: 1, false: 0}[tc.wantMutation != ""] {
+				t.Fatalf("catalog/details/mutations = %d/%d/%d, want 0/%d/%d", catalogRequests, detailRequests, mutationRequests, tc.wantDetails, map[bool]int{true: 1, false: 0}[tc.wantMutation != ""])
+			}
+			if tc.action == "edit" && !strings.Contains(transcript(m), "updated webhook") {
+				t.Fatalf("edit did not complete:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
+func TestWebhooksCanonicalIDNotFoundFallsBackToCatalog(t *testing.T) {
+	var detailRequests, catalogRequests, testRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/channels/webhooks/" + canonicalWebhookID:
+			detailRequests++
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"webhook not found"}`, http.StatusNotFound)
+		case "/channels":
+			catalogRequests++
+			_, _ = io.WriteString(w, `<div data-webhook-id="`+canonicalWebhookID+`" data-webhook-name="Fallback Hook" data-webhook-token="token"></div>`)
+		case "/channels/webhooks/" + canonicalWebhookID + "/test":
+			testRequests++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"task_id":"fallback-test"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/webhooks test "+canonicalWebhookID)
+	if detailRequests != 1 || catalogRequests != 1 || testRequests != 1 {
+		t.Fatalf("detail/catalog/test = %d/%d/%d, want 1/1/1", detailRequests, catalogRequests, testRequests)
+	}
+	if out := transcript(m); !strings.Contains(out, "fallback-test") {
+		t.Fatalf("fallback action output = %q", out)
+	}
+}
+
+func TestWebhooksCanonicalDetailFailuresDoNotFallbackOrMutate(t *testing.T) {
+	cases := []struct {
+		name  string
+		write func(http.ResponseWriter)
+	}{
+		{name: "authentication", write: func(w http.ResponseWriter) { w.Header().Set("Location", "/login"); w.WriteHeader(http.StatusFound) }},
+		{name: "server", write: func(w http.ResponseWriter) {
+			http.Error(w, `{"error":"backend unavailable"}`, http.StatusInternalServerError)
+		}},
+		{name: "malformed JSON", write: func(w http.ResponseWriter) { _, _ = io.WriteString(w, `{`) }},
+		{name: "foreign project", write: func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, canonicalWebhookDetailJSON(canonicalWebhookID, "p2", "Foreign Hook"))
+		}},
+		{name: "mismatched identity", write: func(w http.ResponseWriter) {
+			_, _ = io.WriteString(w, canonicalWebhookDetailJSON("fedcba9876543210fedcba9876543210", "p1", "Wrong Hook"))
+		}},
+		{name: "transport", write: func(w http.ResponseWriter) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var catalogRequests, mutationRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/channels/webhooks/" + canonicalWebhookID:
+					tc.write(w)
+				case "/channels":
+					catalogRequests++
+					_, _ = io.WriteString(w, webhookCardsHTML)
+				case "/channels/webhooks/" + canonicalWebhookID + "/test":
+					mutationRequests++
+					_, _ = io.WriteString(w, `{"task_id":"must-not-run"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, "/webhooks test "+canonicalWebhookID)
+			if catalogRequests != 0 || mutationRequests != 0 {
+				t.Fatalf("terminal detail failure fell back or mutated: catalog=%d mutations=%d\n%s", catalogRequests, mutationRequests, transcript(m))
+			}
+		})
+	}
+}
+
+func TestWebhooksCanonicalMismatchedDetailCannotMutate(t *testing.T) {
+	for _, tc := range []struct {
+		action string
+		line   string
+	}{
+		{action: "edit", line: "/webhooks edit " + canonicalWebhookID + " --name Renamed"},
+		{action: "test", line: "/webhooks test " + canonicalWebhookID},
+		{action: "rotate", line: "/webhooks rotate " + canonicalWebhookID},
+		{action: "delete", line: "/webhooks delete " + canonicalWebhookID},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			var catalogRequests, mutationRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/channels/webhooks/" + canonicalWebhookID:
+					if r.Method == http.MethodGet {
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, canonicalWebhookDetailJSON("fedcba9876543210fedcba9876543210", "p1", "Wrong Hook"))
+						return
+					}
+					mutationRequests++
+				case "/channels/webhooks/" + canonicalWebhookID + "/test", "/channels/webhooks/" + canonicalWebhookID + "/rotate-secret":
+					mutationRequests++
+				case "/channels":
+					catalogRequests++
+				}
+				http.NotFound(w, r)
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, tc.line)
+			if catalogRequests != 0 || mutationRequests != 0 || m.pendingConfirmation != nil {
+				t.Fatalf("mismatched detail reached catalog/mutation/confirmation: %d/%d/%#v", catalogRequests, mutationRequests, m.pendingConfirmation)
+			}
+			if out := strings.ToLower(transcript(m)); !strings.Contains(out, "does not match requested webhook") {
+				t.Fatalf("missing mismatched-detail error:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
+func TestWebhooksCanonicalDeleteCapturesVerifiedTarget(t *testing.T) {
+	var catalogRequests int
+	var deletedID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/channels/webhooks/" + canonicalWebhookID:
+			if r.Method == http.MethodGet {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Captured Hook"))
+				return
+			}
+			if r.Method == http.MethodDelete {
+				deletedID = canonicalWebhookID
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		case "/channels":
+			catalogRequests++
+			_, _ = io.WriteString(w, `<div data-webhook-id="replacement" data-webhook-name="Replacement Hook"></div>`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/webhooks delete "+canonicalWebhookID)
+	if m.pendingConfirmation == nil || !strings.Contains(m.pendingConfirmation.message, `"Captured Hook"`) {
+		t.Fatalf("confirmation did not capture verified detail: %#v", m.pendingConfirmation)
+	}
+	m = runLine(t, m, "yes")
+	if catalogRequests != 0 || deletedID != canonicalWebhookID {
+		t.Fatalf("catalog/deleted ID = %d/%q, want 0/%q", catalogRequests, deletedID, canonicalWebhookID)
+	}
+}
+
+func TestWebhooksNoncanonicalReferencesKeepCatalogResolution(t *testing.T) {
+	cases := []struct {
+		name string
+		ref  string
+		id   string
+	}{
+		{name: "name", ref: "Named Hook", id: "name-id"},
+		{name: "partial", ref: "unique", id: "partial-id"},
+		{name: "uppercase ID", ref: strings.ToUpper(canonicalWebhookID), id: canonicalWebhookID},
+		{name: "malformed ID", ref: "0123456789abcdef0123456789abcdeg", id: "malformed-id"},
+		{name: "option-like reference", ref: canonicalWebhookID + " --priority 3", id: "option-id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var catalogRequests, detailRequests, testRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/channels":
+					catalogRequests++
+					_, _ = io.WriteString(w, `<div data-webhook-id="name-id" data-webhook-name="Named Hook"></div><div data-webhook-id="partial-id" data-webhook-name="Unique Partial Hook"></div><div data-webhook-id="`+canonicalWebhookID+`" data-webhook-name="Uppercase ID Hook"></div><div data-webhook-id="malformed-id" data-webhook-name="0123456789abcdef0123456789abcdeg"></div><div data-webhook-id="option-id" data-webhook-name="`+canonicalWebhookID+` --priority 3"></div>`)
+				case "/channels/webhooks/" + canonicalWebhookID:
+					detailRequests++
+					http.Error(w, "unexpected direct detail", http.StatusInternalServerError)
+				case "/channels/webhooks/" + tc.id + "/test":
+					testRequests++
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"task_id":"catalog-test"}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, "/webhooks test "+tc.ref)
+			if catalogRequests != 1 || detailRequests != 0 || testRequests != 1 {
+				t.Fatalf("catalog/detail/test = %d/%d/%d, want 1/0/1\n%s", catalogRequests, detailRequests, testRequests, transcript(m))
+			}
+		})
+	}
+}
+
+func webhookCatalogPageHTML(total, offset int) string {
+	end := min(offset+50, total)
+	var b strings.Builder
+	b.Grow((end - offset) * 180)
+	b.WriteString(`<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id">`)
+	for i := offset; i < end; i++ {
+		id, name := fmt.Sprintf("%032x", i+100000), fmt.Sprintf("Catalog Hook %04d", i)
+		if i == total-1 {
+			id, name = canonicalWebhookID, "Target Catalog Hook"
+		}
+		fmt.Fprintf(&b, `<div data-webhook-id=%q data-webhook-name=%q data-webhook-enabled="true" data-webhook-token="token-%04d" data-webhook-default-priority="2"></div>`, id, name, i)
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+func TestWebhooksCanonicalIDCatalogPerformanceEvidence(t *testing.T) {
+	const pageDelay = 5 * time.Millisecond
+	for _, cards := range []int{10, 100, 1000} {
+		t.Run(fmt.Sprintf("%d cards", cards), func(t *testing.T) {
+			var catalogRequests atomic.Int64
+			var catalogBytes atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/channels":
+					catalogRequests.Add(1)
+					offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+					if err != nil && r.URL.Query().Get("offset") != "" {
+						t.Errorf("invalid catalog offset: %v", err)
+					}
+					body := webhookCatalogPageHTML(cards, offset)
+					catalogBytes.Add(int64(len(body)))
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(offset+50 < cards))
+					time.Sleep(pageDelay)
+					_, _ = io.WriteString(w, body)
+				case "/channels/webhooks/" + canonicalWebhookID:
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Target Catalog Hook"))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runShow := func(ref string) {
+				m := New(c)
+				m.selectedID, m.selectedName = "p1", "demo"
+				m = runLine(t, m, "/webhooks show "+ref)
+				if out := strings.ToLower(transcript(m)); strings.Contains(out, "error:") {
+					t.Fatalf("show %q failed:\n%s", ref, transcript(m))
+				}
+			}
+			measure := func(ref string) (time.Duration, int64, int64) {
+				beforeRequests, beforeBytes := catalogRequests.Load(), catalogBytes.Load()
+				start := time.Now()
+				runShow(ref)
+				return time.Since(start), catalogRequests.Load() - beforeRequests, catalogBytes.Load() - beforeBytes
+			}
+
+			directLatency, directRequests, directBytes := measure(canonicalWebhookID)
+			catalogLatency, nameRequests, nameBytes := measure("Target Catalog Hook")
+			wantPages := int64((cards + 49) / 50)
+			if directRequests != 0 || directBytes != 0 {
+				t.Fatalf("known canonical ID catalog requests/bytes = %d/%d, want 0/0", directRequests, directBytes)
+			}
+			if nameRequests != wantPages || nameBytes <= 0 {
+				t.Fatalf("name catalog requests/bytes = %d/%d, want %d/>0", nameRequests, nameBytes, wantPages)
+			}
+			if catalogLatency <= directLatency {
+				t.Fatalf("controlled-delay latency did not improve: direct=%v catalog=%v", directLatency, catalogLatency)
+			}
+
+			directAllocs := testing.AllocsPerRun(1, func() { runShow(canonicalWebhookID) })
+			catalogAllocs := testing.AllocsPerRun(1, func() { runShow("Target Catalog Hook") })
+			if directAllocs >= catalogAllocs {
+				t.Fatalf("canonical allocations %.0f, want less than catalog %.0f", directAllocs, catalogAllocs)
+			}
+			t.Logf("%d-card webhook catalog evidence: requests %d -> %d; bytes %d -> %d; latency %v -> %v; allocations %.0f -> %.0f", cards, nameRequests, directRequests, nameBytes, directBytes, catalogLatency, directLatency, catalogAllocs, directAllocs)
+		})
+	}
+}
+
+func BenchmarkWebhooksCanonicalIDCatalogScale(b *testing.B) {
+	for _, cards := range []int{10, 100, 1000} {
+		b.Run(fmt.Sprintf("%d-cards", cards), func(b *testing.B) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/channels":
+					offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(offset+50 < cards))
+					_, _ = io.WriteString(w, webhookCatalogPageHTML(cards, offset))
+				case "/channels/webhooks/" + canonicalWebhookID:
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Target Catalog Hook"))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				b.Fatal(err)
+			}
+			run := func(ref string) {
+				m := New(c)
+				m.selectedID, m.selectedName = "p1", "demo"
+				_, cmd := runWebhooks(m, []string{"show", ref})
+				if cmd != nil {
+					_ = cmd()
+				}
+			}
+			b.Run("canonical-detail", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					run(canonicalWebhookID)
+				}
+			})
+			b.Run("catalog-name", func(b *testing.B) {
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					run("Target Catalog Hook")
+				}
+			})
+		})
+	}
+}
+
 func TestWebhooksDispatchCreate(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"POST /channels/webhooks":   `{"id":"w3","project_id":"p1","secret":"create-secret-must-not-print"}`,
-		"GET /channels/webhooks/w3": `{"id":"w3","project_id":"p1","name":"Incident Hook","enabled":true,"path_token":"incident-token","secret":"create-secret-must-not-print","default_priority":3,"agent_ids":["agent-1"]}`,
+		"GET /channels/webhooks/w3": `{"id":"w3","project_id":"p1","name":"Incident Hook","enabled":true,"path_token":"incident-token","secret":"create-secret-must-not-print","system_instructions":"","title_template":"","prompt_template":"","default_priority":3,"agent_ids":["agent-1"]}`,
 	})
 	m = runLine(t, m, `/webhooks create "Incident Hook" --priority 3 --agents agent-1`)
 	out := stripANSI(transcript(m))
@@ -10663,7 +11390,7 @@ func TestWebhooksOptionLikeTrailingOperandsAreNotDiscarded(t *testing.T) {
 
 func TestWebhooksOptionLikeTokensRemainPartOfExactName(t *testing.T) {
 	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
-	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","enabled":true,"path_token":"opt-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
 	for _, action := range []string{"show", "test", "rotate", "delete"} {
 		t.Run(action, func(t *testing.T) {
 			m, rec := dispatchModel(t, map[string]string{

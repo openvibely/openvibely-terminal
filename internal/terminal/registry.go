@@ -170,19 +170,10 @@ func confirmScheduleDeletion(m Model, projectID string, schedule client.Schedule
 }
 
 // taskReviewsOutput fetches and formats the read-only review view for a task.
-func taskReviewsOutput(ctx context.Context, c *client.Client, t client.Task) (string, error) {
-	reviews, err := c.ListTaskReviews(ctx, t.ID)
-	if err != nil {
-		return "", err
-	}
-	if jsonMode {
-		return marshalJSON(reviews)
-	}
-	return renderTaskReviews(t, reviews), nil
-}
-
-func taskReviewsOutputForProject(ctx context.Context, c *client.Client, t client.Task, projectID string) (string, error) {
-	reviews, err := c.ListTaskReviewsForProject(ctx, t.ID, projectID)
+// Callers supply the fetch function so their intentional ordinary-versus-scoped
+// request behavior remains unchanged.
+func taskReviewsOutput(ctx context.Context, t client.Task, fetch func(context.Context, string) ([]client.ReviewComment, error)) (string, error) {
+	reviews, err := fetch(ctx, t.ID)
 	if err != nil {
 		return "", err
 	}
@@ -444,7 +435,9 @@ func tasksCommand() command {
 								return "", err
 							}
 							if isReviewTab(tab) {
-								return taskReviewsOutputForProject(ctx, c, d.Task, pid)
+								return taskReviewsOutput(ctx, d.Task, func(ctx context.Context, taskID string) ([]client.ReviewComment, error) {
+									return c.ListTaskReviewsForProject(ctx, taskID, pid)
+								})
 							}
 							return marshalJSON(d.Task)
 						}
@@ -464,7 +457,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					if isReviewTab(tab) {
-						return taskReviewsOutput(ctx, c, t)
+						return taskReviewsOutput(ctx, t, c.ListTaskReviews)
 					}
 					if jsonMode {
 						return marshalJSON(t)
@@ -506,7 +499,7 @@ func tasksCommand() command {
 						if err != nil {
 							return "", err
 						}
-						return taskReviewsOutput(ctx, c, t)
+						return taskReviewsOutput(ctx, t, c.ListTaskReviews)
 					})
 				case "add":
 					if len(reviewRest) == 0 {
@@ -5055,23 +5048,51 @@ func validateWebhooksArgs(args []string) error {
 	}
 }
 
-func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string) (client.Webhook, error) {
+// isCanonicalWebhookID accepts only the backend-generated inbound-webhook ID
+// grammar. The webhook_endpoints primary key is lower(hex(randomblob(16))), so
+// these 32 lowercase hexadecimal IDs are globally unique and case-sensitive.
+func isCanonicalWebhookID(ref string) bool {
+	return isCanonicalFullID(ref)
+}
+
+type webhookResolution struct {
+	webhook client.Webhook
+	detail  *client.Webhook
+}
+
+func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string) (webhookResolution, error) {
+	if isCanonicalWebhookID(ref) {
+		detail, err := c.GetWebhook(ctx, projectID, ref)
+		if err == nil {
+			return webhookResolution{webhook: *detail, detail: detail}, nil
+		}
+		// A scoped 404 is the only direct-detail result that might be an exact
+		// name or another catalog reference. Every other failure establishes a
+		// terminal backend error and must not be hidden by a catalog scan.
+		if !client.IsNotFoundError(err) {
+			return webhookResolution{}, err
+		}
+	}
 	webhooks, err := c.ListWebhooks(ctx, projectID)
 	if err != nil {
-		return client.Webhook{}, err
+		return webhookResolution{}, err
 	}
-	return matchRefWithDisplay(webhooks, ref,
+	webhook, err := matchRefWithDisplay(webhooks, ref,
 		func(w client.Webhook) string { return w.ID },
 		func(w client.Webhook) string { return w.Name },
 		sanitizeAutomationDetailText)
+	if err != nil {
+		return webhookResolution{}, err
+	}
+	return webhookResolution{webhook: webhook}, nil
 }
 
 func resolveWebhookMutation(c *client.Client, projectID, action, ref string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		webhook, err := resolveWebhook(ctx, c, projectID, ref)
-		return webhookMutationTargetMsg{projectID: projectID, action: action, webhook: webhook, err: err}
+		resolution, err := resolveWebhook(ctx, c, projectID, ref)
+		return webhookMutationTargetMsg{projectID: projectID, action: action, webhook: resolution.webhook, err: err}
 	}
 }
 
@@ -5162,25 +5183,31 @@ func renderWebhookDetail(webhook client.Webhook) string {
 
 func webhookResolvedCommand(c *client.Client, projectID, action string, webhook client.Webhook, options map[string]string) tea.Cmd {
 	return run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
-		return webhookResolvedResult(ctx, c, projectID, action, webhook, options)
+		return webhookResolvedResult(ctx, c, projectID, action, webhook, nil, options)
 	})
 }
 
-func webhookResolvedResult(ctx context.Context, c *client.Client, projectID, action string, webhook client.Webhook, options map[string]string) (string, error) {
+func webhookResolvedResult(ctx context.Context, c *client.Client, projectID, action string, webhook client.Webhook, detail *client.Webhook, options map[string]string) (string, error) {
 	switch action {
 	case "show":
-		detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
-		if err != nil {
-			return "", err
+		if detail == nil {
+			var err error
+			detail, err = c.GetWebhook(ctx, projectID, webhook.ID)
+			if err != nil {
+				return "", err
+			}
 		}
 		if jsonMode {
 			return marshalJSON(detail)
 		}
 		return renderWebhookDetail(*detail), nil
 	case "edit":
-		detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
-		if err != nil {
-			return "", err
+		if detail == nil {
+			var err error
+			detail, err = c.GetWebhook(ctx, projectID, webhook.ID)
+			if err != nil {
+				return "", err
+			}
 		}
 		applyWebhookOptions(detail, options)
 		updated, err := c.UpdateWebhook(ctx, projectID, *detail)
@@ -5278,11 +5305,11 @@ func runWebhooks(m Model, args []string) (Model, tea.Cmd) {
 		return m, resolveWebhookMutation(c, projectID, action, ref)
 	}
 	return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
-		webhook, err := resolveWebhook(ctx, c, projectID, ref)
+		resolution, err := resolveWebhook(ctx, c, projectID, ref)
 		if err != nil {
 			return "", err
 		}
-		return webhookResolvedResult(ctx, c, projectID, action, webhook, options)
+		return webhookResolvedResult(ctx, c, projectID, action, resolution.webhook, resolution.detail, options)
 	})
 }
 
@@ -5856,13 +5883,7 @@ func automationsCommand() command {
 					}
 				}
 				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
-					automations, err := c.ListAutomations(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(automations, editRef,
-						func(a client.Automation) string { return a.ID },
-						func(a client.Automation) string { return a.Name })
+					a, err := resolveAutomationRef(ctx, c, pid, editRef)
 					if err != nil {
 						return "", err
 					}
@@ -5887,7 +5908,6 @@ func automationsCommand() command {
 					}
 					return "updated automation " + sanitizeAutomationDetailText(firstNonEmpty(a.Name, a.ID)), nil
 				})
-
 			case "show", "open":
 				if ref == "" {
 					usage := commandUsage("automations", action)
@@ -5920,19 +5940,12 @@ func automationsCommand() command {
 							}))
 				}
 				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
-					automations, err := c.ListAutomations(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(automations, ref,
-						func(a client.Automation) string { return a.ID },
-						func(a client.Automation) string { return a.Name })
+					a, err := resolveAutomationRef(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
 					return loadAutomationDetail(ctx, c, pid, a)
 				})
-
 			default:
 				if ref == "" {
 					return selectorOr(m, fmt.Sprintf("usage: %sautomations %s <automation>", cmdPrefix, action),
@@ -5970,13 +5983,7 @@ func automationsCommand() command {
 							}))
 				}
 				cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
-					automations, err := c.ListAutomations(ctx, pid)
-					if err != nil {
-						return "", err
-					}
-					a, err := matchRef(automations, ref,
-						func(a client.Automation) string { return a.ID },
-						func(a client.Automation) string { return a.Name })
+					a, err := resolveAutomationRef(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
@@ -5992,6 +5999,18 @@ func automationsCommand() command {
 			}
 		},
 	}
+}
+
+// resolveAutomationRef fetches the selected project's catalog exactly once and
+// preserves the shared reference-matching policy for typed automation commands.
+func resolveAutomationRef(ctx context.Context, c *client.Client, projectID, ref string) (client.Automation, error) {
+	automations, err := c.ListAutomations(ctx, projectID)
+	if err != nil {
+		return client.Automation{}, err
+	}
+	return matchRef(automations, ref,
+		func(a client.Automation) string { return a.ID },
+		func(a client.Automation) string { return a.Name })
 }
 
 func loadAutomationDetail(ctx context.Context, c *client.Client, projectID string, automation client.Automation) (string, error) {
@@ -6071,13 +6090,7 @@ func beginAutomationInteractiveEditResolver(m Model, c *client.Client, projectID
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		automations, err := c.ListAutomations(ctx, projectID)
-		if err != nil {
-			return automationEditLoadedMsg{projectID: projectID, requestID: requestID, err: err}
-		}
-		automation, err := matchRef(automations, ref,
-			func(a client.Automation) string { return a.ID },
-			func(a client.Automation) string { return a.Name })
+		automation, err := resolveAutomationRef(ctx, c, projectID, ref)
 		if err != nil {
 			return automationEditLoadedMsg{projectID: projectID, requestID: requestID, err: err}
 		}
