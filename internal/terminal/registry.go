@@ -3940,11 +3940,13 @@ func redactModelCommandSecrets(commandLine string) string {
 			}
 			parts = append(parts, value)
 			if i+1 < len(tokens) {
+				nextName, _, _ := strings.Cut(strings.ToLower(tokens[i+1].value), "=")
 				// Empty quoted operands are preserved by the tokenizer. They
-				// cannot be valid sensitive values, and the parser will reject
-				// the remaining sequence. Redact that entire tail rather than
-				// guessing how many empty values or sensitive options it holds.
-				if tokens[i+1].value == "" {
+				// cannot be valid sensitive values, and a sensitive option cannot
+				// be another sensitive option's operand. The parser will reject
+				// either malformed sequence, so redact its entire tail rather than
+				// risking a later pasted credential in the rendered command.
+				if tokens[i+1].value == "" || modelSensitiveOption(nextName) {
 					return "/models add <redacted sensitive options>"
 				}
 				i++

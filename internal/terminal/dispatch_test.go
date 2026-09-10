@@ -5285,6 +5285,63 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			})
 		}
 	})
+	t.Run("direct adjacent sensitive options are redacted", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			line    func(secret string) string
+			wantErr string
+		}{
+			{
+				name: "API key stdin before API key",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin --api-key ` + secret
+				},
+				wantErr: "unsupported models add option",
+			},
+			{
+				name: "endpoint before API key",
+				line: func(secret string) string {
+					return `/models add ollama Local llama3 --endpoint --api-key ` + secret
+				},
+				wantErr: "--endpoint must be an absolute HTTP(S) URL",
+			},
+			{
+				name: "empty API key stdin assignment before API key",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin= --api-key ` + secret
+				},
+				wantErr: "unsupported models add option",
+			},
+			{
+				name: "empty endpoint assignment before API key",
+				line: func(secret string) string {
+					return `/models add ollama Local llama3 --endpoint= --api-key ` + secret
+				},
+				wantErr: "unsupported models add option",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				secret := "adjacent-sensitive-option-" + strings.ReplaceAll(tc.name, " ", "-")
+				m, rec := dispatchModel(t, nil)
+				m = runLine(t, m, tc.line(secret))
+				if !strings.Contains(transcript(m), tc.wantErr) {
+					t.Fatalf("adjacent sensitive options did not report local rejection:\n%s", transcript(m))
+				}
+				if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+					t.Fatalf("adjacent sensitive options exposed the secret:\n%s", transcript(m))
+				}
+				for _, item := range m.history {
+					if strings.Contains(item, secret) {
+						t.Fatalf("adjacent sensitive options exposed the secret in history: %q", item)
+					}
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("adjacent sensitive options made requests:\n%s", calls)
+				}
+			})
+		}
+	})
+
 	t.Run("malformed quoted option API key is redacted", func(t *testing.T) {
 		secret := "quoted-option-unmatched-quote-model-secret"
 		m, rec := dispatchModel(t, nil)
