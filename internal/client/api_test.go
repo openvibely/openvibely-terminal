@@ -529,6 +529,9 @@ func TestGetAvgExecutionTimeByTask(t *testing.T) {
 		if got := r.URL.Query().Get("project_id"); got != "p1" {
 			t.Errorf("project_id = %q", got)
 		}
+		if got := r.URL.Query().Get("limit"); got != "" {
+			t.Errorf("unbounded request limit = %q, want omitted", got)
+		}
 		json.NewEncoder(w).Encode([]AvgExecutionTime{
 			{ID: "t1", Name: "Triage", AvgMs: 1234.5, Count: 10},
 		})
@@ -537,6 +540,31 @@ func TestGetAvgExecutionTimeByTask(t *testing.T) {
 	items, err := c.GetAvgExecutionTimeByTask(context.Background(), "p1")
 	if err != nil {
 		t.Fatalf("GetAvgExecutionTimeByTask: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "Triage" {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetAvgExecutionTimeByTaskWithLimit(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/avg-execution-time-by-task" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q, want p1", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "12" {
+			t.Errorf("limit = %q, want 12", got)
+		}
+		json.NewEncoder(w).Encode([]AvgExecutionTime{
+			{ID: "t1", Name: "Triage", AvgMs: 1234.5, Count: 10},
+		})
+	}))
+
+	items, err := c.GetAvgExecutionTimeByTaskWithLimit(context.Background(), "p1", 12)
+	if err != nil {
+		t.Fatalf("GetAvgExecutionTimeByTaskWithLimit: %v", err)
 	}
 	if len(items) != 1 || items[0].Name != "Triage" {
 		t.Errorf("unexpected items: %+v", items)
@@ -562,6 +590,9 @@ func TestGetAvgExecutionTimeByAgent(t *testing.T) {
 		if got := r.URL.Query().Get("project_id"); got != "p2" {
 			t.Errorf("project_id = %q", got)
 		}
+		if got := r.URL.Query().Get("limit"); got != "" {
+			t.Errorf("unbounded request limit = %q, want omitted", got)
+		}
 		json.NewEncoder(w).Encode([]AvgExecutionTime{
 			{ID: "a1", Name: "claude-sonnet", AvgMs: 800.0, Count: 5},
 		})
@@ -570,6 +601,31 @@ func TestGetAvgExecutionTimeByAgent(t *testing.T) {
 	items, err := c.GetAvgExecutionTimeByAgent(context.Background(), "p2")
 	if err != nil {
 		t.Fatalf("GetAvgExecutionTimeByAgent: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "claude-sonnet" {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetAvgExecutionTimeByAgentWithLimit(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/avg-execution-time-by-agent" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p2" {
+			t.Errorf("project_id = %q, want p2", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "12" {
+			t.Errorf("limit = %q, want 12", got)
+		}
+		json.NewEncoder(w).Encode([]AvgExecutionTime{
+			{ID: "a1", Name: "claude-sonnet", AvgMs: 800.0, Count: 5},
+		})
+	}))
+
+	items, err := c.GetAvgExecutionTimeByAgentWithLimit(context.Background(), "p2", 12)
+	if err != nil {
+		t.Fatalf("GetAvgExecutionTimeByAgentWithLimit: %v", err)
 	}
 	if len(items) != 1 || items[0].Name != "claude-sonnet" {
 		t.Errorf("unexpected items: %+v", items)

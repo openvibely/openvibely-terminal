@@ -3738,13 +3738,13 @@ func loadAnalytics(ctx context.Context, c *client.Client, projectID, section str
 					slots[i].err = err
 				}
 			case "agents":
-				if a, err := c.GetAvgExecutionTimeByAgent(ctx, projectID); err == nil {
+				if a, err := c.GetAvgExecutionTimeByAgentWithLimit(ctx, projectID, maxExecTimeRows); err == nil {
 					slots[i].out = renderExecTimes("Avg execution time by agent", a) + "\n\n"
 				} else {
 					slots[i].err = err
 				}
 			case "trends":
-				if t, err := c.GetAvgExecutionTimeByTask(ctx, projectID); err == nil {
+				if t, err := c.GetAvgExecutionTimeByTaskWithLimit(ctx, projectID, maxExecTimeRows); err == nil {
 					slots[i].out = renderExecTimes("Avg execution time by task", t) + "\n\n"
 				} else {
 					slots[i].err = err
