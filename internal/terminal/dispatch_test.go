@@ -8520,8 +8520,8 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 		line      string
 		wantUsage string
 	}{
-		{line: "/channels nonsense", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|webhooks]"},
-		{line: "/channels list extra", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|webhooks]"},
+		{line: "/channels nonsense", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
+		{line: "/channels list extra", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
 		{line: "/channels test telegram extra", wantUsage: "nothing matches"},
 		{line: "/channels remove slack extra", wantUsage: "nothing matches"},
 	}
@@ -8549,6 +8549,48 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 }
 
 const structuredChannelsPage = `<div data-channel-type="github" data-search-text="GitHub Connected"></div><div data-channel-type="slack" data-search-text="Slack Configured"></div><div data-channel-type="telegram" data-channel-running="true" data-search-text="Telegram Bot Connected"></div><div data-channel-type="discord" data-search-text="Discord Not configured"></div><div data-channel-type="x" data-search-text="X formerly Twitter mentions posts"><span class="badge badge-success">Connected</span></div><div data-channel-type="email" data-search-text="Email Running"><input name="email_address" value="bot@example.com"></div><form action="/channels/x/configure"><input name="x_poll_interval_seconds" value="30"><input type="checkbox" name="x_send_responses" checked></form>`
+
+type channelAccessTestRow struct {
+	id       string
+	name     string
+	identity string
+}
+
+func channelAccessTestRoute(provider string) (route, container string) {
+	switch provider {
+	case "telegram":
+		return "/channels/telegram/authorized-users", "telegram-authorized-users"
+	case "slack":
+		return "/channels/slack/authorized-users", "slack-authorized-users"
+	case "discord":
+		return "/channels/discord/authorized-users", "discord-authorized-users"
+	case "email":
+		return "/channels/email/authorized-senders", "email-authorized-senders"
+	default:
+		panic("unsupported test channel access provider")
+	}
+}
+
+func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string {
+	route, container := channelAccessTestRoute(provider)
+	var b strings.Builder
+	fmt.Fprintf(&b, `<div id="%s">`, container)
+	for _, row := range rows {
+		b.WriteString(`<div><div>`)
+		switch provider {
+		case "telegram":
+			fmt.Fprintf(&b, `<span>%s</span><span>@%s</span><span>ID: 987</span>`, row.name, strings.TrimPrefix(row.identity, "@"))
+		case "slack", "discord":
+			fmt.Fprintf(&b, `<span>%s</span><span>ID: %s</span>`, row.name, row.identity)
+		case "email":
+			fmt.Fprintf(&b, `<span>%s</span><span>%s</span>`, row.name, row.identity)
+		}
+		b.WriteString(`<input value="channel-access-backend-secret"></div>`)
+		fmt.Fprintf(&b, `<button hx-delete="%s/%s?project_id=p1">remove</button></div>`, route, row.id)
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
 
 func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
 	const channelsPage = structuredChannelsPage
@@ -8612,6 +8654,102 @@ func TestChannelsCommandsRequireProjectAndPreserveScope(t *testing.T) {
 			}
 			if tc.confirmation && m.pendingConfirmation != nil {
 				t.Fatalf("%s left a pending confirmation after confirmation", tc.line)
+			}
+		})
+	}
+}
+
+func TestChannelAccessTUICommandsValidateScopeProvidersAndCapturedRemoval(t *testing.T) {
+	providers := []struct {
+		provider string
+		identity string
+		addInput string
+	}{
+		{provider: "telegram", identity: "telegram_user", addInput: "@New_User"},
+		{provider: "slack", identity: "U12345678", addInput: "u87654321"},
+		{provider: "discord", identity: "123456789012345678", addInput: "987654321098765432"},
+		{provider: "email", identity: "person@example.com", addInput: " New@Example.COM "},
+	}
+	for _, tc := range providers {
+		t.Run(tc.provider, func(t *testing.T) {
+			route, _ := channelAccessTestRoute(tc.provider)
+			page := channelAccessTestPage(tc.provider, channelAccessTestRow{id: "row-1", name: "Visible User", identity: tc.identity})
+
+			m, rec := dispatchModel(t, map[string]string{route: page})
+			m = runLine(t, m, "/channels access "+tc.provider+" list")
+			if !rec.saw(http.MethodGet, route) || !rec.sawQuery("project_id=p1") {
+				t.Fatalf("unscoped access list: %s", rec.all())
+			}
+			if output := transcript(m); !strings.Contains(output, "Visible User") || strings.Contains(output, "channel-access-backend-secret") {
+				t.Fatalf("unsafe list output: %s", output)
+			}
+
+			m, rec = dispatchModel(t, map[string]string{route: page})
+			m = runLine(t, m, "/channels access "+tc.provider+" add "+tc.addInput+` "New User"`)
+			if !rec.saw(http.MethodPost, route) || !rec.sawQuery("project_id=p1") {
+				t.Fatalf("add did not use scoped %s route: %s", tc.provider, rec.all())
+			}
+			if tc.provider == "email" && !rec.sawForm("authorized_email_address=new%40example.com") {
+				t.Fatalf("email access was not normalized: %v", rec.forms)
+			}
+			if output := transcript(m); !strings.Contains(output, "authorized "+titleFor(tc.provider)+" access") || strings.Contains(output, "channel-access-backend-secret") {
+				t.Fatalf("unsafe add output: %s", output)
+			}
+
+			m, rec = dispatchModel(t, map[string]string{route: page})
+			m = runLine(t, m, "/channels access "+tc.provider+" remove "+tc.identity)
+			if m.pendingConfirmation == nil || rec.saw(http.MethodDelete, route+"/row-1") {
+				t.Fatalf("remove did not resolve before confirmation: %s", rec.all())
+			}
+			m = runLine(t, m, "yes")
+			if !rec.saw(http.MethodDelete, route+"/row-1") || !rec.sawQuery("project_id=p1") {
+				t.Fatalf("confirmed remove did not use captured scoped target: %s", rec.all())
+			}
+		})
+	}
+
+	t.Run("remove selector and cancellation", func(t *testing.T) {
+		route, _ := channelAccessTestRoute("slack")
+		page := channelAccessTestPage("slack",
+			channelAccessTestRow{id: "row-1", name: "Visible User", identity: "U12345678"},
+			channelAccessTestRow{id: "row-2", name: "Other User", identity: "U87654321"})
+		m, rec := dispatchModel(t, map[string]string{route: page})
+		m = runLine(t, m, "/channels access slack remove")
+		if !m.selectorActive || rec.saw(http.MethodDelete, route+"/row-1") {
+			t.Fatalf("missing remove reference did not safely open a selector: %s", rec.all())
+		}
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if rec.saw(http.MethodDelete, route+"/row-1") {
+			t.Fatalf("canceled access removal mutated backend: %s", rec.all())
+		}
+	})
+
+	t.Run("unselected project", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m.selectedID, m.selectedName = "", ""
+		m = runLine(t, m, "/channels access telegram list")
+		if !strings.Contains(transcript(m), "no project selected") || rec.all() != "" {
+			t.Fatalf("unselected access command made requests or hid guidance: %s", transcript(m))
+		}
+	})
+
+	for _, tc := range []struct {
+		line string
+		want string
+	}{
+		{"/channels access github list", "provider"},
+		{"/channels access telegram add not-valid!", "numeric user ID or username"},
+		{"/channels access slack add alice", "Slack user ID"},
+		{"/channels access discord add username", "numeric user ID"},
+		{"/channels access email add not-an-email", "valid email"},
+		{"/channels access telegram list surplus", "usage:"},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.line)
+			if !strings.Contains(transcript(m), tc.want) || rec.all() != "" || m.pendingConfirmation != nil {
+				t.Fatalf("invalid access command was not rejected locally: output=%s calls=%s", transcript(m), rec.all())
 			}
 		})
 	}

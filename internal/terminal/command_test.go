@@ -1153,6 +1153,8 @@ func TestChannelsCompletionDocumentsManagementOptions(t *testing.T) {
 		{[]string{"add", "email", "--provider"}, "yahoo"},
 		{[]string{"edit", "email", "--provider"}, "icloud"},
 		{[]string{"add", "email"}, "--skip-attachments"},
+		{[]string{"access"}, "telegram"},
+		{[]string{"access", "telegram"}, "remove"},
 	} {
 		values := registryCompletionValues("channels", tc.after...)
 		if !slices.Contains(values, tc.want) {
@@ -1167,7 +1169,7 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		t.Fatal("channels command missing")
 	}
 
-	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "webhooks"}; !reflect.DeepEqual(cmd.actions, want) {
+	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "webhooks"}; !reflect.DeepEqual(cmd.actions, want) {
 		t.Fatalf("channels actions = %#v, want %#v", cmd.actions, want)
 	}
 
@@ -1181,6 +1183,11 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		"/channels test <channel>",
 		"/channels remove <channel>",
 		"/channels disconnect <github|slack>",
+		"/channels access <telegram|slack|discord|email> <list|add|remove> [identity] [display name]",
+		"Telegram accepts a numeric ID or username",
+		"Discord requires a numeric ID",
+		"Email is normalized before it is authorized",
+		"headless removal requires --force",
 		"--skip-attachments",
 		"--mark-existing-seen",
 		"gmail, outlook, yahoo, fastmail, icloud, custom",

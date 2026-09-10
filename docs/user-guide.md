@@ -223,7 +223,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `webhooks list|show|create|edit|test|rotate|delete` |
+| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|email> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
@@ -496,6 +496,29 @@ other remove actions delete that integration's stored configuration. Interactive
 GitHub App setup accepts pasted multiline PEM keys and reconstructs line breaks
 flattened by terminal input.
 
+Authorized inbound access is managed independently from channel credentials and
+outbound message targets. The selected project's access rows are secret-free in
+both plain and `--json` output. Telegram accepts a numeric user ID or username,
+Slack accepts a Slack user ID, Discord accepts only a numeric user ID, and Email
+addresses are normalized before they are added:
+
+```
+/channels access telegram list
+/channels access telegram add @release_user "Release User"
+/channels access slack add U12345678 "Slack User"
+/channels access discord add 123456789012345678
+/channels access email add Person@Example.COM "Person"
+/channels access email remove person@example.com
+openvibely-terminal -project demo --json channels access slack list
+openvibely-terminal -project demo --force channels access email remove person@example.com
+```
+
+`remove` resolves one listed identity before it prompts, captures that row ID,
+and then requires `yes` in the TUI or `--force`/`-f` in one-shot CLI mode.
+Unknown, ambiguous, duplicate, foreign, malformed, and surplus references are
+rejected before a deletion request is sent. GitHub and X authorization remain
+outside this initial access workflow.
+
 Inbound webhooks use the nested `/channels webhooks` registry:
 
 ```
@@ -725,6 +748,8 @@ $ openvibely-terminal help channels
   channels test <channel>                    test Slack, Telegram, Discord, X, or Email
   channels remove <channel>                  remove configuration; Slack disconnects safely (confirmation required)
   channels disconnect <github|slack>         clear connection credentials but keep other settings (confirmation required)
+  channels access <telegram|slack|discord|email> <list|add|remove> [identity] [display name]
+                                            manage authorized inbound access identities
   channels webhooks list                     list inbound webhooks
   channels webhooks show <webhook>           show secret-free webhook detail
   channels webhooks create <name> [options]  create an inbound webhook

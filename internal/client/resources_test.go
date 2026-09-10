@@ -1472,6 +1472,125 @@ func TestDeleteAlertAndListReportsBackendFailure(t *testing.T) {
 	}
 }
 
+func TestChannelAuthorizedUsersUseScopedRoutesAndSecretFreeModels(t *testing.T) {
+	type providerCase struct {
+		provider  string
+		route     string
+		container string
+		input     string
+		row       string
+		identity  string
+	}
+	cases := []providerCase{
+		{provider: "telegram", route: "/channels/telegram/authorized-users", container: "telegram-authorized-users", input: "user_id_or_username", identity: "telegram_user", row: `<span>Telegram User</span><span>@telegram_user</span><span>ID: 987</span>`},
+		{provider: "slack", route: "/channels/slack/authorized-users", container: "slack-authorized-users", input: "slack_user_id", identity: "U12345678", row: `<span>Slack User</span><span>ID: U12345678</span>`},
+		{provider: "discord", route: "/channels/discord/authorized-users", container: "discord-authorized-users", input: "discord_user_id", identity: "123456789012345678", row: `<span>Discord User</span><span>ID: 123456789012345678</span>`},
+		{provider: "email", route: "/channels/email/authorized-senders", container: "email-authorized-senders", input: "authorized_email_address", identity: "person@example.com", row: `<span>Email User</span><span>person@example.com</span>`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			const projectID = "project/two"
+			var methods []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				methods = append(methods, r.Method+" "+r.URL.Path)
+				if r.URL.Path != tc.route && r.URL.Path != tc.route+"/row-1" {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Method == http.MethodGet && r.URL.Query().Get("project_id") != projectID {
+					t.Errorf("GET project_id = %q", r.URL.Query().Get("project_id"))
+				}
+				if r.Method == http.MethodPost {
+					if err := r.ParseForm(); err != nil {
+						t.Fatal(err)
+					}
+					if r.PostForm.Get("project_id") != projectID || r.PostForm.Get(tc.input) != tc.identity || r.PostForm.Get("display_name") != "Visible User" {
+						t.Errorf("add form = %v", r.PostForm)
+					}
+				}
+				if r.Method == http.MethodDelete {
+					if r.URL.Query().Get("project_id") != projectID || !strings.HasSuffix(r.URL.Path, "/row-1") {
+						t.Errorf("delete request = %s", r.URL.RequestURI())
+					}
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div id="`+tc.container+`"><div><div>`+tc.row+`<input value="backend-secret"></div><button hx-delete="`+tc.route+`/row-1?project_id=project%2Ftwo">remove</button></div></div>`)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			users, err := c.ListChannelAuthorizedUsers(context.Background(), tc.provider, projectID)
+			if err != nil {
+				t.Fatalf("ListChannelAuthorizedUsers: %v", err)
+			}
+			if len(users) != 1 || users[0].ID != "row-1" || users[0].Provider != tc.provider || users[0].ProjectID != projectID {
+				t.Fatalf("users = %#v", users)
+			}
+			encoded, err := json.Marshal(users)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "backend-secret") || strings.Contains(string(encoded), "added_by") {
+				t.Fatalf("authorization JSON leaked unmodeled fields: %s", encoded)
+			}
+			if err := c.AddChannelAuthorizedUser(context.Background(), tc.provider, projectID, tc.identity, "Visible User"); err != nil {
+				t.Fatalf("AddChannelAuthorizedUser: %v", err)
+			}
+			if err := c.RemoveChannelAuthorizedUser(context.Background(), tc.provider, projectID, users[0].ID); err != nil {
+				t.Fatalf("RemoveChannelAuthorizedUser: %v", err)
+			}
+			if want := []string{"GET " + tc.route, "POST " + tc.route, "DELETE " + tc.route + "/row-1"}; !reflect.DeepEqual(methods, want) {
+				t.Fatalf("methods = %#v, want %#v", methods, want)
+			}
+		})
+	}
+}
+
+func TestChannelAuthorizedUsersRejectMalformedScopesAndPreserveSafeDiagnostics(t *testing.T) {
+	c := htmlServer(t, `<div id="telegram-authorized-users"></div>`)
+	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", ""); err == nil {
+		t.Fatal("empty project scope listed channel access")
+	}
+	if err := c.AddChannelAuthorizedUser(context.Background(), "github", "p1", "actor", ""); err == nil || strings.Contains(err.Error(), "actor") {
+		t.Fatalf("unsupported provider error = %v", err)
+	}
+
+	foreign := htmlServer(t, `<div id="telegram-authorized-users"><div><span>Foreign</span><button hx-delete="/channels/telegram/authorized-users/other-row?project_id=other-project">remove</button></div></div>`)
+	if _, err := foreign.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || err.Error() != "authorized channel access list unavailable" {
+		t.Fatalf("foreign row was accepted: %v", err)
+	}
+
+	const secret = "authorization-backend-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, secret, http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || err.Error() != "channel request failed" || strings.Contains(err.Error(), secret) {
+		t.Fatalf("unsafe list failure = %v", err)
+	}
+
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer auth.Close()
+	c, err = New(auth.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || !IsAuthRequired(err) {
+		t.Fatalf("authentication diagnostic was not preserved: %v", err)
+	}
+}
+
 func TestResourceMutationRoutes(t *testing.T) {
 	var gotMethod, gotPath string
 	var gotForm url.Values

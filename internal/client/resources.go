@@ -1803,6 +1803,215 @@ func (c *Client) SetProjectWorkerLimit(ctx context.Context, projectID string, li
 	return c.setWorkerLimit(ctx, "/workers/projects/"+url.PathEscape(projectID)+"/limit", limit)
 }
 
+// ChannelAuthorizedUser is a secret-free authorized inbound-channel identity.
+// It is intentionally limited to the row ID and visible authorization identity;
+// channel credentials, actor metadata, and backend form state are never retained.
+type ChannelAuthorizedUser struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	ProjectID   string `json:"project_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Identity    string `json:"identity"`
+
+	references []string
+}
+
+type channelAccessRoute struct {
+	path      string
+	container string
+	inputName string
+}
+
+func authorizedChannelAccessRoute(provider string) (channelAccessRoute, error) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "telegram":
+		return channelAccessRoute{path: "/channels/telegram/authorized-users", container: "telegram-authorized-users", inputName: "user_id_or_username"}, nil
+	case "slack":
+		return channelAccessRoute{path: "/channels/slack/authorized-users", container: "slack-authorized-users", inputName: "slack_user_id"}, nil
+	case "discord":
+		return channelAccessRoute{path: "/channels/discord/authorized-users", container: "discord-authorized-users", inputName: "discord_user_id"}, nil
+	case "email":
+		return channelAccessRoute{path: "/channels/email/authorized-senders", container: "email-authorized-senders", inputName: "authorized_email_address"}, nil
+	default:
+		return channelAccessRoute{}, errors.New("unsupported channel access provider")
+	}
+}
+
+func requireChannelAccessProject(projectID string) (string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", errors.New("project ID is required")
+	}
+	return projectID, nil
+}
+
+func channelAccessIdentity(provider, text string) (displayName, identity string, references []string) {
+	text = strings.TrimSpace(text)
+	fields := strings.Fields(text)
+	switch provider {
+	case "telegram":
+		var username, numericID string
+		for i, field := range fields {
+			if strings.HasPrefix(field, "@") && len(field) > 1 {
+				username = strings.ToLower(field)
+			}
+			if field == "ID:" && i+1 < len(fields) {
+				numericID = fields[i+1]
+			}
+		}
+		if numericID != "" {
+			identity = numericID
+		} else {
+			identity = username
+		}
+		if username != "" {
+			references = append(references, username, strings.TrimPrefix(username, "@"))
+			text = strings.TrimSpace(strings.ReplaceAll(text, username, ""))
+		}
+		if numericID != "" {
+			references = append(references, numericID)
+			text = strings.TrimSpace(strings.ReplaceAll(text, "ID: "+numericID, ""))
+		}
+	case "slack", "discord":
+		for i := len(fields) - 1; i > 0; i-- {
+			if fields[i-1] == "ID:" {
+				identity = fields[i]
+				references = append(references, identity)
+				text = strings.TrimSpace(strings.TrimSuffix(text, "ID: "+identity))
+				break
+			}
+		}
+	case "email":
+		for _, field := range fields {
+			field = strings.Trim(field, "<>()[]{}.,;:")
+			if strings.Contains(field, "@") {
+				identity = strings.ToLower(field)
+				references = append(references, identity)
+				text = strings.TrimSpace(strings.Replace(text, field, "", 1))
+				break
+			}
+		}
+	}
+	if identity == "" {
+		identity = text
+	}
+	if identity != "" {
+		references = append(references, identity)
+	}
+	return strings.TrimSpace(text), identity, references
+}
+
+func (u ChannelAuthorizedUser) matchesIdentity(value string) bool {
+	value = strings.TrimSpace(value)
+	for _, reference := range u.references {
+		if strings.EqualFold(strings.TrimSpace(reference), value) {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesIdentity reports whether value is one of the provider identities
+// represented by this secret-free authorization row. Telegram rows can expose
+// both a username and a numeric ID while still having one canonical row ID.
+func (u ChannelAuthorizedUser) MatchesIdentity(value string) bool {
+	return u.matchesIdentity(value)
+}
+
+// ListChannelAuthorizedUsers returns the current project's visible authorized
+// inbound identities for Telegram, Slack, Discord, or Email. The backend
+// serves an HTMX fragment, so row IDs are taken only from its canonical delete
+// controls and their project scope is verified before returning any record.
+func (c *Client) ListChannelAuthorizedUsers(ctx context.Context, provider, projectID string) ([]ChannelAuthorizedUser, error) {
+	projectID, err := requireChannelAccessProject(projectID)
+	if err != nil {
+		return nil, err
+	}
+	route, err := authorizedChannelAccessRoute(provider)
+	if err != nil {
+		return nil, err
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	root, err := c.getHTML(ctx, route.path+query("project_id", projectID))
+	if err != nil {
+		return nil, safeChannelError(err)
+	}
+	container := findByID(root, route.container)
+	if container == nil {
+		return nil, errors.New("authorized channel access list unavailable")
+	}
+
+	users := make([]ChannelAuthorizedUser, 0)
+	seen := make(map[string]struct{})
+	for _, button := range findAll(container, func(n *html.Node) bool {
+		return n.Data == "button" && strings.HasPrefix(attr(n, "hx-delete"), route.path+"/")
+	}) {
+		location, parseErr := url.Parse(strings.TrimSpace(attr(button, "hx-delete")))
+		if parseErr != nil || location == nil || location.Query().Get("project_id") != projectID {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		id := strings.TrimPrefix(location.Path, route.path+"/")
+		if id == "" || strings.Contains(id, "/") {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		seen[id] = struct{}{}
+		displayName, identity, references := channelAccessIdentity(provider, NodeText(button.Parent))
+		if strings.TrimSpace(identity) == "" {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		users = append(users, ChannelAuthorizedUser{
+			ID: id, Provider: provider, ProjectID: projectID,
+			DisplayName: displayName, Identity: identity, references: references,
+		})
+	}
+	return users, nil
+}
+
+// AddChannelAuthorizedUser grants an inbound identity access in one selected
+// project. Identity validation and normalization belong to the command layer;
+// this client method owns the provider route, field name, HTMX transport, and
+// explicit project form scope.
+func (c *Client) AddChannelAuthorizedUser(ctx context.Context, provider, projectID, identity, displayName string) error {
+	projectID, err := requireChannelAccessProject(projectID)
+	if err != nil {
+		return err
+	}
+	route, err := authorizedChannelAccessRoute(provider)
+	if err != nil {
+		return err
+	}
+	form := url.Values{}
+	form.Set("project_id", projectID)
+	form.Set(route.inputName, identity)
+	if displayName = strings.TrimSpace(displayName); displayName != "" {
+		form.Set("display_name", displayName)
+	}
+	return safeChannelError(c.doForm(ctx, http.MethodPost, route.path, form))
+}
+
+// RemoveChannelAuthorizedUser revokes one previously resolved, project-scoped
+// inbound identity. Callers must resolve and capture the row ID from
+// ListChannelAuthorizedUsers before this mutation.
+func (c *Client) RemoveChannelAuthorizedUser(ctx context.Context, provider, projectID, id string) error {
+	projectID, err := requireChannelAccessProject(projectID)
+	if err != nil {
+		return err
+	}
+	route, err := authorizedChannelAccessRoute(provider)
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("authorized channel access ID is required")
+	}
+	return safeChannelError(c.doForm(ctx, http.MethodDelete,
+		route.path+"/"+url.PathEscape(id)+query("project_id", projectID), nil))
+}
+
 // --- channels & personality ---
 
 // Channel is one project-scoped integration from the Channels screen. Only

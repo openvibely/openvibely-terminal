@@ -160,6 +160,15 @@ type webhookMutationTargetMsg struct {
 	err               error
 }
 
+type channelAccessRemovalTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	provider          string
+	user              client.ChannelAuthorizedUser
+	err               error
+}
+
 type channelWizardStartMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
