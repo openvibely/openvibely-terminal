@@ -5264,6 +5264,8 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			{name: "slash then single quoted root", root: `/'models'`},
 			{name: "fully double quoted root", root: `"/models"`},
 			{name: "fully single quoted root", root: `'/models'`},
+			{name: "double quoted root fragment", root: `"/m"odels`},
+			{name: "single quoted root fragment", root: `'/m'odels`},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				secret := "quoted-root-unmatched-quote-model-secret-" + strings.ReplaceAll(tc.name, " ", "-")
