@@ -3856,8 +3856,9 @@ func redactModelCommandSecrets(commandLine string) string {
 			root := strings.TrimPrefix(strings.ToLower(fields[0]), "/")
 			if root == "models" || root == "model" {
 				for _, field := range fields[1:] {
-					name, _, _ := strings.Cut(strings.ToLower(field), "=")
-					if modelSensitiveOption(name) {
+					field = strings.Trim(strings.ToLower(field), "\"'")
+					name, _, _ := strings.Cut(field, "=")
+					if modelSensitiveOption(strings.Trim(name, "\"'")) {
 						return "/models add <redacted sensitive options>"
 					}
 				}

@@ -5150,10 +5150,10 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 		}
 	})
 
-	t.Run("malformed quoted API key is redacted", func(t *testing.T) {
-		secret := "unmatched-quote-model-secret"
+	t.Run("malformed quoted option API key is redacted", func(t *testing.T) {
+		secret := "quoted-option-unmatched-quote-model-secret"
 		m, rec := dispatchModel(t, nil)
-		m = runLine(t, m, `/models add openai OpenAI gpt-4o --api-key "`+secret)
+		m = runLine(t, m, `/models add openai OpenAI gpt-4o "--api-key" "`+secret)
 		if !strings.Contains(transcript(m), "unmatched double quote") {
 			t.Fatalf("malformed command did not report its parse error:\n%s", transcript(m))
 		}
