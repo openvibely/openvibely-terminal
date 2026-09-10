@@ -1785,30 +1785,38 @@ func (c *Client) ListWebhooks(ctx context.Context, projectID string) ([]Webhook,
 // returned by the backend detail route.
 func (c *Client) GetWebhook(ctx context.Context, projectID, id string) (*Webhook, error) {
 	var raw struct {
-		ID                 string   `json:"id"`
-		ProjectID          string   `json:"project_id"`
-		Name               string   `json:"name"`
-		Enabled            bool     `json:"enabled"`
-		PathToken          string   `json:"path_token"`
-		SystemInstructions string   `json:"system_instructions"`
-		TitleTemplate      string   `json:"title_template"`
-		PromptTemplate     string   `json:"prompt_template"`
-		DefaultPriority    int      `json:"default_priority"`
-		AgentIDs           []string `json:"agent_ids"`
+		ID                 *string   `json:"id"`
+		ProjectID          *string   `json:"project_id"`
+		Name               *string   `json:"name"`
+		Enabled            *bool     `json:"enabled"`
+		PathToken          *string   `json:"path_token"`
+		SystemInstructions *string   `json:"system_instructions"`
+		TitleTemplate      *string   `json:"title_template"`
+		PromptTemplate     *string   `json:"prompt_template"`
+		DefaultPriority    *int      `json:"default_priority"`
+		AgentIDs           *[]string `json:"agent_ids"`
 	}
 	path := "/channels/webhooks/" + url.PathEscape(id) + query("project_id", projectID)
 	if err := c.getJSON(ctx, path, &raw); err != nil {
 		return nil, err
 	}
-	if raw.ProjectID != projectID {
+	if raw.ID == nil || raw.ProjectID == nil || raw.Name == nil || raw.Enabled == nil || raw.PathToken == nil ||
+		raw.SystemInstructions == nil || raw.TitleTemplate == nil || raw.PromptTemplate == nil || raw.DefaultPriority == nil || raw.AgentIDs == nil ||
+		strings.TrimSpace(*raw.PathToken) == "" || *raw.DefaultPriority < 1 || *raw.DefaultPriority > 4 {
+		return nil, fmt.Errorf("webhook detail response is malformed")
+	}
+	if *raw.ID != id {
+		return nil, fmt.Errorf("webhook detail does not match requested webhook %q", id)
+	}
+	if *raw.ProjectID != projectID {
 		return nil, fmt.Errorf("webhook %q does not belong to selected project", id)
 	}
-	endpointPath, endpointURL := c.webhookLocation(raw.PathToken)
+	endpointPath, endpointURL := c.webhookLocation(*raw.PathToken)
 	return &Webhook{
-		ID: raw.ID, ProjectID: raw.ProjectID, Name: raw.Name, Enabled: raw.Enabled,
-		Path: endpointPath, URL: endpointURL, SystemInstructions: raw.SystemInstructions,
-		TitleTemplate: raw.TitleTemplate, PromptTemplate: raw.PromptTemplate,
-		DefaultPriority: raw.DefaultPriority, AgentIDs: nonNilStrings(raw.AgentIDs),
+		ID: *raw.ID, ProjectID: *raw.ProjectID, Name: *raw.Name, Enabled: *raw.Enabled,
+		Path: endpointPath, URL: endpointURL, SystemInstructions: *raw.SystemInstructions,
+		TitleTemplate: *raw.TitleTemplate, PromptTemplate: *raw.PromptTemplate,
+		DefaultPriority: *raw.DefaultPriority, AgentIDs: nonNilStrings(*raw.AgentIDs),
 	}, nil
 }
 

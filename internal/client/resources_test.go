@@ -3260,7 +3260,7 @@ func TestCreateWebhookReturnsSecretFreeScopedDetail(t *testing.T) {
 			_, _ = fmt.Fprintf(w, `{"id":"new-id","project_id":"p1","secret":%q}`, secret)
 		case r.Method == http.MethodGet && r.URL.Path == "/channels/webhooks/new-id":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w, `{"id":"new-id","project_id":"p1","name":"Created","enabled":true,"path_token":"new-token","secret":%q,"default_priority":2,"agent_ids":[]}`, secret)
+			_, _ = fmt.Fprintf(w, `{"id":"new-id","project_id":"p1","name":"Created","enabled":true,"path_token":"new-token","secret":%q,"system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`, secret)
 		default:
 			http.Error(w, "unexpected", http.StatusNotFound)
 		}
@@ -3309,6 +3309,43 @@ func TestListWebhooksPaginatesStablyAndPreservesScope(t *testing.T) {
 	}
 	if len(requests) != 2 || !strings.Contains(requests[1], "offset=2") || !strings.Contains(requests[1], "project_id=project+two") {
 		t.Fatalf("requests = %#v", requests)
+	}
+}
+
+func TestWebhookDetailRejectsMismatchedIdentity(t *testing.T) {
+	const requestedID = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "same project different webhook",
+			body: `{"id":"fedcba9876543210fedcba9876543210","project_id":"p1","name":"Other Hook","enabled":true,"path_token":"other-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
+		},
+		{
+			name: "foreign project",
+			body: `{"id":"0123456789abcdef0123456789abcdef","project_id":"p2","name":"Foreign Hook","enabled":true,"path_token":"foreign-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "p1" {
+					t.Errorf("project_id = %q, want p1", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail, err := c.GetWebhook(context.Background(), "p1", requestedID)
+			if err == nil || detail != nil {
+				t.Fatalf("GetWebhook = (%#v, %v), want nil identity error", detail, err)
+			}
+		})
 	}
 }
 

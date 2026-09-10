@@ -4681,23 +4681,51 @@ func validateWebhooksArgs(args []string) error {
 	}
 }
 
-func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string) (client.Webhook, error) {
+// isCanonicalWebhookID accepts only the backend-generated inbound-webhook ID
+// grammar. The webhook_endpoints primary key is lower(hex(randomblob(16))), so
+// these 32 lowercase hexadecimal IDs are globally unique and case-sensitive.
+func isCanonicalWebhookID(ref string) bool {
+	return isCanonicalFullID(ref)
+}
+
+type webhookResolution struct {
+	webhook client.Webhook
+	detail  *client.Webhook
+}
+
+func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string) (webhookResolution, error) {
+	if isCanonicalWebhookID(ref) {
+		detail, err := c.GetWebhook(ctx, projectID, ref)
+		if err == nil {
+			return webhookResolution{webhook: *detail, detail: detail}, nil
+		}
+		// A scoped 404 is the only direct-detail result that might be an exact
+		// name or another catalog reference. Every other failure establishes a
+		// terminal backend error and must not be hidden by a catalog scan.
+		if !client.IsNotFoundError(err) {
+			return webhookResolution{}, err
+		}
+	}
 	webhooks, err := c.ListWebhooks(ctx, projectID)
 	if err != nil {
-		return client.Webhook{}, err
+		return webhookResolution{}, err
 	}
-	return matchRefWithDisplay(webhooks, ref,
+	webhook, err := matchRefWithDisplay(webhooks, ref,
 		func(w client.Webhook) string { return w.ID },
 		func(w client.Webhook) string { return w.Name },
 		sanitizeAutomationDetailText)
+	if err != nil {
+		return webhookResolution{}, err
+	}
+	return webhookResolution{webhook: webhook}, nil
 }
 
 func resolveWebhookMutation(c *client.Client, projectID, action, ref string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		webhook, err := resolveWebhook(ctx, c, projectID, ref)
-		return webhookMutationTargetMsg{projectID: projectID, action: action, webhook: webhook, err: err}
+		resolution, err := resolveWebhook(ctx, c, projectID, ref)
+		return webhookMutationTargetMsg{projectID: projectID, action: action, webhook: resolution.webhook, err: err}
 	}
 }
 
@@ -4788,25 +4816,31 @@ func renderWebhookDetail(webhook client.Webhook) string {
 
 func webhookResolvedCommand(c *client.Client, projectID, action string, webhook client.Webhook, options map[string]string) tea.Cmd {
 	return run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
-		return webhookResolvedResult(ctx, c, projectID, action, webhook, options)
+		return webhookResolvedResult(ctx, c, projectID, action, webhook, nil, options)
 	})
 }
 
-func webhookResolvedResult(ctx context.Context, c *client.Client, projectID, action string, webhook client.Webhook, options map[string]string) (string, error) {
+func webhookResolvedResult(ctx context.Context, c *client.Client, projectID, action string, webhook client.Webhook, detail *client.Webhook, options map[string]string) (string, error) {
 	switch action {
 	case "show":
-		detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
-		if err != nil {
-			return "", err
+		if detail == nil {
+			var err error
+			detail, err = c.GetWebhook(ctx, projectID, webhook.ID)
+			if err != nil {
+				return "", err
+			}
 		}
 		if jsonMode {
 			return marshalJSON(detail)
 		}
 		return renderWebhookDetail(*detail), nil
 	case "edit":
-		detail, err := c.GetWebhook(ctx, projectID, webhook.ID)
-		if err != nil {
-			return "", err
+		if detail == nil {
+			var err error
+			detail, err = c.GetWebhook(ctx, projectID, webhook.ID)
+			if err != nil {
+				return "", err
+			}
 		}
 		applyWebhookOptions(detail, options)
 		updated, err := c.UpdateWebhook(ctx, projectID, *detail)
@@ -4904,11 +4938,11 @@ func runWebhooks(m Model, args []string) (Model, tea.Cmd) {
 		return m, resolveWebhookMutation(c, projectID, action, ref)
 	}
 	return m, run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
-		webhook, err := resolveWebhook(ctx, c, projectID, ref)
+		resolution, err := resolveWebhook(ctx, c, projectID, ref)
 		if err != nil {
 			return "", err
 		}
-		return webhookResolvedResult(ctx, c, projectID, action, webhook, options)
+		return webhookResolvedResult(ctx, c, projectID, action, resolution.webhook, resolution.detail, options)
 	})
 }
 

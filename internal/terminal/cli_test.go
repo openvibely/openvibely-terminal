@@ -6114,6 +6114,63 @@ func TestEventsHelpDistinguishesInteractiveAndCLI(t *testing.T) {
 	}
 }
 
+func TestCLIWebhookCanonicalIDAliasesUseScopedDetailWithoutCatalog(t *testing.T) {
+	for _, root := range [][]string{{"channels", "webhooks"}, {"webhooks"}, {"inbound-webhooks"}} {
+		t.Run(strings.Join(root, " "), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels/webhooks/" + canonicalWebhookID:           canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Canonical Hook"),
+				"/channels/webhooks/" + canonicalWebhookID + "/test": `{"task_id":"canonical-alias-test"}`,
+			})
+			var out bytes.Buffer
+			args := append(append([]string(nil), root...), "test", canonicalWebhookID)
+			if err := RunCLI(c, &out, "demo", args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.count(http.MethodGet, "/channels"); got != 0 {
+				t.Fatalf("catalog requests = %d, want 0; calls: %s", got, rec.all())
+			}
+			if got := rec.count(http.MethodGet, "/channels/webhooks/"+canonicalWebhookID); got != 1 {
+				t.Fatalf("detail requests = %d, want 1; calls: %s", got, rec.all())
+			}
+			if got := rec.count(http.MethodPost, "/channels/webhooks/"+canonicalWebhookID+"/test"); got != 1 {
+				t.Fatalf("test requests = %d, want 1; calls: %s", got, rec.all())
+			}
+		})
+	}
+}
+
+func TestCLIWebhookCanonicalShowPreservesPlainAndJSONOutput(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", jsonOutput), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/channels":     `<div data-webhook-id="` + canonicalWebhookID + `" data-webhook-name="Canonical Hook" data-webhook-token="safe-token"></div>`,
+				"/channels/webhooks/" + canonicalWebhookID: canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Canonical Hook"),
+			})
+			var direct, named bytes.Buffer
+			if err := RunCLI(c, &direct, "demo", []string{"webhooks", "show", canonicalWebhookID}, false, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.count(http.MethodGet, "/channels"); got != 0 {
+				t.Fatalf("direct catalog requests = %d, want 0; calls: %s", got, rec.all())
+			}
+			if err := RunCLI(c, &named, "demo", []string{"webhooks", "show", "Canonical Hook"}, false, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if got := rec.count(http.MethodGet, "/channels"); got != 1 {
+				t.Fatalf("named catalog requests = %d, want 1; calls: %s", got, rec.all())
+			}
+			if direct.String() != named.String() {
+				t.Fatalf("show output changed for direct ID\ndirect: %q\nnamed:  %q", direct.String(), named.String())
+			}
+			if jsonOutput && !json.Valid(direct.Bytes()) {
+				t.Fatalf("direct JSON output is invalid: %q", direct.String())
+			}
+		})
+	}
+}
+
 func TestCLIChannelsWebhooksCanonicalAndAliasParity(t *testing.T) {
 	roots := [][]string{{"channels", "webhooks"}, {"webhooks"}, {"inbound-webhooks"}}
 	var wantOutput string
@@ -6149,7 +6206,7 @@ func TestCLIChannelsWebhooksCanonicalAndAliasParity(t *testing.T) {
 
 func TestCLIChannelsWebhooksPreservesOptionLikeExactName(t *testing.T) {
 	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
-	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","enabled":true,"path_token":"opt-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":            cliProjects,
 		"/channels":                cards,
@@ -6204,7 +6261,7 @@ func TestCLIWebhooksTrailingOptionTokensRemainInReference(t *testing.T) {
 	}
 
 	const cards = `<div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div><div data-webhook-id="w-short" data-webhook-name="Hook" data-webhook-token="short-token"></div>`
-	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","path_token":"opt-token","default_priority":2,"agent_ids":[]}`
+	const detail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","enabled":true,"path_token":"opt-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
 	for _, action := range []string{"show", "test", "rotate", "delete"} {
 		t.Run("exact option-token name "+action, func(t *testing.T) {
 			bodies := map[string]string{
