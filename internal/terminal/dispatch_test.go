@@ -5260,6 +5260,7 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			name string
 			root string
 		}{
+			{name: "double slash root", root: `//models`},
 			{name: "slash then double quoted root", root: `/"models"`},
 			{name: "slash then single quoted root", root: `/'models'`},
 			{name: "fully double quoted root", root: `"/models"`},
