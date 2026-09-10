@@ -3894,7 +3894,7 @@ func redactModelCommandSecrets(commandLine string) string {
 		// history.
 		fields := strings.Fields(commandLine)
 		if len(fields) > 0 {
-			root := strings.TrimPrefix(strings.ToLower(fields[0]), "/")
+			root := strings.Trim(strings.TrimPrefix(strings.ToLower(fields[0]), "/"), "\"'")
 			if root == "models" || root == "model" {
 				for _, field := range fields[1:] {
 					field = strings.Trim(strings.ToLower(field), "\"'")
