@@ -3110,6 +3110,9 @@ func modelAddResult(ctx context.Context, c *client.Client, projectID string, spe
 	status := "added " + spec.Name
 	models, err := c.ListModels(ctx, projectID)
 	if err != nil {
+		if client.IsAuthRequired(err) {
+			return "", err
+		}
 		if !spec.OAuth {
 			if jsonMode {
 				return marshalJSON(modelAddOutput{Status: status})
@@ -3145,7 +3148,11 @@ func modelAddResult(ctx context.Context, c *client.Client, projectID string, spe
 		func(item client.LLMModel) string { return item.Name })
 	if findErr == nil {
 		output.AuthorizationURL = modelOAuthHandoffURL(c, model.ID, projectID)
-		if oauth, statusErr := c.GetModelOAuthStatus(ctx, model.ID); statusErr == nil && oauth != nil && strings.TrimSpace(oauth.Status) != "" {
+		oauth, statusErr := c.GetModelOAuthStatus(ctx, model.ID)
+		if client.IsAuthRequired(statusErr) {
+			return "", statusErr
+		}
+		if statusErr == nil && oauth != nil && strings.TrimSpace(oauth.Status) != "" {
 			output.OAuthStatus = strings.TrimSpace(oauth.Status)
 		}
 	}

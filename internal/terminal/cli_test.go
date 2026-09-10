@@ -1751,6 +1751,71 @@ func TestCLIModelsAddOAuthRefreshFailureStillProvidesHandoff(t *testing.T) {
 	}
 }
 
+func TestCLIModelsAddOAuthPostCreateAuthenticationFailuresDoNotClaimSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		failurePath     string
+		wantListCount   int
+		wantStatusCount int
+	}{
+		{name: "list refresh", failurePath: "/models", wantListCount: 1},
+		{name: "oauth status", failurePath: "/models/m-oauth/oauth/status", wantListCount: 1, wantStatusCount: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var postCount, listCount, oauthStatusCount int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "POST /models":
+					postCount++
+					w.WriteHeader(http.StatusOK)
+				case "GET /models":
+					listCount++
+					if tc.failurePath == r.URL.Path {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusUnauthorized)
+						_, _ = io.WriteString(w, `{"error":"session expired"}`)
+						return
+					}
+					_, _ = io.WriteString(w, `<div data-model-id="m-oauth" data-model-name="Claude OAuth" data-model-provider="anthropic" data-model-model="claude-sonnet-4-6"></div>`)
+				case "GET /models/m-oauth/oauth/status":
+					oauthStatusCount++
+					if tc.failurePath == r.URL.Path {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusUnauthorized)
+						_, _ = io.WriteString(w, `{"error":"session expired"}`)
+						return
+					}
+					t.Fatalf("unexpected OAuth status request")
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			err = RunCLIWithInput(c, &out, nil, "", []string{"models", "add", "anthropic", "Claude OAuth", "claude-sonnet-4-6", "--oauth"}, false, true)
+			if err == nil || !strings.Contains(err.Error(), "requires sign-in") {
+				t.Fatalf("post-create authentication error = %v", err)
+			}
+			if postCount != 1 || listCount != tc.wantListCount || oauthStatusCount != tc.wantStatusCount {
+				t.Fatalf("POST/list/status counts = %d/%d/%d, want 1/%d/%d", postCount, listCount, oauthStatusCount, tc.wantListCount, tc.wantStatusCount)
+			}
+			for _, forbidden := range []string{"added Claude OAuth", "authorization_url", "oauth_status", "OAuth authorization"} {
+				if strings.Contains(out.String(), forbidden) || strings.Contains(err.Error(), forbidden) {
+					t.Fatalf("post-create authentication failure claimed success/handoff %q:\nerror: %v\noutput: %s", forbidden, err, out.String())
+				}
+			}
+			if out.Len() != 0 {
+				t.Fatalf("post-create authentication failure wrote JSON output: %s", out.String())
+			}
+		})
+	}
+}
+
 func TestCLIModelsAddRejectsInvalidInputAndBackendFailuresWithoutRefresh(t *testing.T) {
 	t.Run("local validation", func(t *testing.T) {
 		for _, args := range [][]string{
