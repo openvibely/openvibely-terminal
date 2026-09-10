@@ -104,13 +104,13 @@ func TestUpdateModelReadsAuthoritativeDetailsAndPreservesSecrets(t *testing.T) {
 	}
 }
 
-func TestUpdateModelPreservesRedactedCustomAPIKeyConfiguration(t *testing.T) {
+func TestUpdateModelPreservesCustomAPIKeyConfigurationServerSide(t *testing.T) {
 	var updateForm url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
 		case "GET /models/model-1/edit-details":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"model-1","name":"Custom API key","provider":"openai_compatible","model":"custom-model","auth_method":"api_key","base_url":"https://provider.example/v1","transport":"chat_completions","preset_slug":"custom","models_url":"https://provider.example/models","auth_header_name":"Authorization","auth_header_value_prefix":"Bearer ","default_max_tokens":4096,"custom_auth_config_json":"{\"models_array_path\":\"inventory.items\",\"model_id_field\":\"slug\",\"allow_private_endpoints\":false}"}`)
+			_, _ = io.WriteString(w, `{"id":"model-1","name":"Custom API key","provider":"openai_compatible","model":"custom-model","auth_method":"api_key","base_url":"https://provider.example/v1","transport":"chat_completions","preset_slug":"custom","models_url":"https://provider.example/models","auth_header_name":"Authorization","auth_header_value_prefix":"Bearer ","default_max_tokens":4096}`)
 		case "PUT /models/model-1":
 			if err := r.ParseForm(); err != nil {
 				t.Fatal(err)
@@ -136,16 +136,20 @@ func TestUpdateModelPreservesRedactedCustomAPIKeyConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	for key, want := range map[string]string{
-		"custom_models_array_path": "inventory.items",
-		"custom_model_id_field":    "slug",
-		"default_max_tokens":       "4096",
-		"model_max_workers":        "3",
+		"model_edit_preserve_custom_auth": "on",
+		"default_max_tokens":              "4096",
+		"model_max_workers":               "3",
 	} {
 		if got := updateForm.Get(key); got != want {
 			t.Errorf("form[%q] = %q, want %q", key, got, want)
 		}
 	}
-	for _, absent := range []string{"custom_signing_secret", "custom_static_headers_json", "custom_authorization_parameters_json", "custom_token_headers_json", "custom_refresh_parameters_json", "custom_refresh_headers_json"} {
+	for _, absent := range []string{
+		"custom_refresh_url", "custom_access_token_prefix", "custom_profile_url",
+		"custom_models_array_path", "custom_model_id_field", "custom_signing_secret",
+		"custom_static_headers_json", "custom_authorization_parameters_json",
+		"custom_token_headers_json", "custom_refresh_parameters_json", "custom_refresh_headers_json",
+	} {
 		if got := updateForm.Get(absent); got != "" {
 			t.Errorf("form unexpectedly supplied protected custom setting %q = %q", absent, got)
 		}

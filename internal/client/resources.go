@@ -1063,6 +1063,11 @@ func modelEditForm(details ModelEditDetails, apiKey string) (url.Values, error) 
 		if oauth {
 			form.Set("custom_auth_method", "oauth")
 			form.Set("auth_method", "oauth")
+		} else {
+			// API-key custom-auth settings are preserved server-side because their
+			// authoritative form values may contain secrets and are intentionally
+			// omitted from edit details.
+			form.Set("model_edit_preserve_custom_auth", "on")
 		}
 		if err := appendModelCustomAuthForm(form, details.secrets.customAuthConfigJSON); err != nil {
 			return nil, err
