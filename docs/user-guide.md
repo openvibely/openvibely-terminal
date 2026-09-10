@@ -168,6 +168,8 @@ Commands take a resource, an optional action, and arguments:
 /alerts                       list alerts
 /alerts show a1b2             inspect full body and metadata
 /alerts delete a1b2           delete one
+/alerts read-bulk a1b2 "Release approval"     mark selected alerts read
+/alerts delete-bulk a1b2 "Release approval"   delete selected alerts (confirm)
 /skills add notes | writes release notes
 /tasks move Refactor active   move a task between columns
 /tasks attachments add Refactor ./request.txt ./trace.json
@@ -186,6 +188,15 @@ Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
 prefix or by a substring of their name/title** — `/tasks run refactor` works.
 Ambiguous references report the candidates instead of guessing.
 
+`/alerts read-bulk <id|title>...` and `/alerts delete-bulk <id|title>...`
+resolve every supplied reference within the selected project before making one
+atomic bulk request. Quote multiword titles. Repeating a reference, using an
+ambiguous or missing reference, or naming an alert outside the selected project
+fails without changing any alert. Read bulk refreshes the alert list; selective
+delete asks for `yes` interactively and requires `--force` headlessly. In
+`--json` mode the commands emit the returned count as `{"updated":n}` or
+`{"deleted":n}`.
+
 ## Commands
 
 Every screen in the OpenVibely web UI sidebar has a command.
@@ -194,7 +205,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 |---|---|---|
 | `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
-| `/alerts` | `alert` | `list`, `show`, `read`, `approve`, `reject`, `dismiss`, `delete`, `read-all`, `clear` |
+| `/alerts` | `alert` | `list`, `show`, `read`, `read-bulk`, `approve`, `reject`, `dismiss`, `delete`, `delete-bulk`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
@@ -568,6 +579,8 @@ openvibely-terminal -project demo agents votes step-exec-123 # inspect parallel 
 openvibely-terminal -project demo tasks attachments add refactor ./request.txt ./trace.json
 openvibely-terminal -project demo --force tasks attachments delete refactor att-123
 openvibely-terminal -project demo alerts               # list alerts
+openvibely-terminal -project demo alerts read-bulk a1b2 "Release approval"
+openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release approval"
 openvibely-terminal -project demo analytics usage      # one analytics section
 openvibely-terminal -project demo chat "ship the docs" # ask the agent, print the reply
 openvibely-terminal projects create demo /Users/me/src/demo # create; output includes its backend ID

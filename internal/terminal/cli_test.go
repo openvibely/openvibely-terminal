@@ -3908,6 +3908,100 @@ func TestCLIJSONAlertsDeleteUsesForceAndRefreshedResponse(t *testing.T) {
 	}
 }
 
+func TestCLIAlertBulkCommandsForceJSONAndResolution(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>
+		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two"><p class="font-semibold">Two alert</p></div>`
+	var reads, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("alert resolution lost project scope: %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, alertsHTML)
+		case r.Method == http.MethodPost && r.URL.Path == "/alerts/read-bulk":
+			reads++
+			assertCLIAlertBulkRequest(t, r, []string{"a-one", "a-two"})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"updated":2}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/alerts/bulk":
+			deletes++
+			assertCLIAlertBulkRequest(t, r, []string{"a-one", "a-two"})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "delete-bulk", "a-one", "a-two"}, false, false); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("unforced bulk delete error = %v", err)
+	}
+	if deletes != 0 {
+		t.Fatalf("unforced bulk delete mutated backend: %d", deletes)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"alerts", "delete-bulk", "a-one", "Two alert"}, true, true); err != nil {
+		t.Fatalf("forced JSON bulk delete: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != `{"deleted":2}` {
+		t.Fatalf("bulk delete JSON = %q, want stable count object", got)
+	}
+	if deletes != 1 {
+		t.Fatalf("forced bulk delete requests = %d, want 1", deletes)
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"alerts", "read-bulk", "a-one", "Two alert"}, false, true); err != nil {
+		t.Fatalf("JSON bulk read: %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != `{"updated":2}` {
+		t.Fatalf("bulk read JSON = %q, want stable count object", got)
+	}
+	if reads != 1 {
+		t.Fatalf("bulk read requests = %d, want 1", reads)
+	}
+
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "read-bulk", "a-one", "One"}, false, false); err == nil || !strings.Contains(err.Error(), "selected more than once") {
+		t.Fatalf("duplicate bulk reference error = %v", err)
+	}
+	if reads != 1 || deletes != 1 {
+		t.Fatalf("duplicate bulk reference mutated backend: reads=%d deletes=%d", reads, deletes)
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"alerts", "delete-bulk", "foreign-alert"}, true, false); err == nil || !strings.Contains(err.Error(), "nothing matches") {
+		t.Fatalf("foreign bulk reference error = %v", err)
+	}
+	if deletes != 1 {
+		t.Fatalf("foreign bulk reference mutated backend: deletes=%d", deletes)
+	}
+}
+
+func assertCLIAlertBulkRequest(t *testing.T, r *http.Request, want []string) {
+	t.Helper()
+	if r.URL.Query().Get("project_id") != "p1" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		t.Errorf("bulk request = %s content-type=%q", r.URL.RequestURI(), r.Header.Get("Content-Type"))
+	}
+	var payload struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode bulk request: %v", err)
+	}
+	if !reflect.DeepEqual(payload.IDs, want) {
+		t.Errorf("bulk IDs = %#v, want %#v", payload.IDs, want)
+	}
+}
+
 func TestCLIAlertsDeleteResolutionAndBackendErrors(t *testing.T) {
 	const duplicateAlerts = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1" data-search-text="first"><p class="font-semibold">Duplicate</p></div>
 		<div data-alert-id="a-2" data-alert-scroll-anchor="a-2" data-search-text="second"><p class="font-semibold">Duplicate</p></div>`

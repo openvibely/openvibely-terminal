@@ -413,6 +413,31 @@ func runLine(t *testing.T, m Model, line string) Model {
 	return m
 }
 
+// runLineWithFollowUp executes the one additional command that a resolver
+// returns after feeding its target message back through the model.
+func runLineWithFollowUp(t *testing.T, m Model, line string) Model {
+	t.Helper()
+	m, cmd := typeLine(t, m, line)
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if msg == nil {
+		return m
+	}
+	next, followUp := m.Update(msg)
+	m = next.(Model)
+	if followUp == nil {
+		return m
+	}
+	result := followUp()
+	if result == nil {
+		return m
+	}
+	next, _ = m.Update(result)
+	return next.(Model)
+}
+
 func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	rec := &recorder{}
 	requestURI := make(chan string, 1)
@@ -4632,9 +4657,248 @@ func TestPersonalityDeleteConfirmationCancellationDoesNotMutate(t *testing.T) {
 
 func TestAlertsBulkActions(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
-	runLine(t, m, "/alerts read-all")
+	m = runLine(t, m, "/alerts read-all")
 	if !rec.saw("POST", "/alerts/read-all") {
 		t.Errorf("calls:\n%s", rec.all())
+	}
+	m = runLine(t, m, "/alerts clear")
+	if m.pendingConfirmation == nil || rec.saw("DELETE", "/alerts") {
+		t.Fatalf("clear must remain confirmation-gated: pending=%v calls:\n%s", m.pendingConfirmation != nil, rec.all())
+	}
+	m = runLine(t, m, "yes")
+	if !rec.saw("DELETE", "/alerts") {
+		t.Errorf("clear did not retain its all-alert delete route:\n%s", rec.all())
+	}
+}
+
+func TestAlertReadBulkResolvesPaginatedSelectionAndRefreshes(t *testing.T) {
+	const firstPage = `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true">
+		<div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div>
+		<div data-alert-id="a-unselected" data-alert-scroll-anchor="a-unselected"><p class="font-semibold">Not selected</p></div>
+	</div>`
+	const laterPage = `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false">
+		<div data-alert-id="a-later" data-alert-scroll-anchor="a-later"><p class="font-semibold">Later page alert</p></div>
+	</div>`
+	const refreshedPage = `<div data-alert-id="a-remaining" data-alert-scroll-anchor="a-remaining"><p class="font-semibold">Remaining alert</p></div>`
+
+	var listRequests, mutations int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("alert list lost project scope: %s", r.URL.RequestURI())
+			}
+			listRequests++
+			w.Header().Set("Content-Type", "text/html")
+			switch listRequests {
+			case 1:
+				_, _ = io.WriteString(w, firstPage)
+			case 2:
+				if r.URL.Query().Get("card_page") != "1" {
+					t.Errorf("continuation query = %s", r.URL.RawQuery)
+				}
+				w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+				_, _ = io.WriteString(w, laterPage)
+			case 3:
+				_, _ = io.WriteString(w, refreshedPage)
+			default:
+				t.Fatalf("unexpected alert list request %d", listRequests)
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/alerts/read-bulk":
+			mutations++
+			if r.URL.Query().Get("project_id") != "p1" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+				t.Errorf("bulk read request = %s %s content-type=%q", r.Method, r.URL.RequestURI(), r.Header.Get("Content-Type"))
+			}
+			var payload struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode bulk read body: %v", err)
+			}
+			if want := []string{"a-first", "a-later"}; !reflect.DeepEqual(payload.IDs, want) {
+				t.Errorf("bulk read IDs = %#v, want %#v", payload.IDs, want)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"updated":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLineWithFollowUp(t, m, `/alerts read-bulk a-first "Later page alert"`)
+
+	if mutations != 1 || listRequests != 3 {
+		t.Fatalf("requests = lists %d mutations %d, want 3 and 1; transcript:\n%s", listRequests, mutations, stripANSI(transcript(m)))
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "marked 2 alerts read") || !strings.Contains(out, "Remaining alert") {
+		t.Fatalf("bulk read output did not report count and refreshed list:\n%s", out)
+	}
+}
+
+func TestAlertDeleteBulkConfirmsAndCapturesSelectedIDs(t *testing.T) {
+	const selected = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">First selected</p></div>
+		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two"><p class="font-semibold">Second selected</p></div>`
+	const changed = `<div data-alert-id="a-rebound" data-alert-scroll-anchor="a-rebound"><p class="font-semibold">Changed after confirmation</p></div>`
+	const refreshed = `<div data-alert-id="a-three" data-alert-scroll-anchor="a-three"><p class="font-semibold">Remaining</p></div>`
+	var lists, deletes int
+	catalog := selected
+	mutationStarted := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			lists++
+			w.Header().Set("Content-Type", "text/html")
+			if mutationStarted {
+				_, _ = io.WriteString(w, refreshed)
+			} else {
+				_, _ = io.WriteString(w, catalog)
+			}
+		case r.Method == http.MethodDelete && r.URL.Path == "/alerts/bulk":
+			deletes++
+			mutationStarted = true
+			if r.URL.Query().Get("project_id") != "p1" || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+				t.Errorf("bulk delete request = %s content-type=%q", r.URL.RequestURI(), r.Header.Get("Content-Type"))
+			}
+			var payload struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode bulk delete body: %v", err)
+			}
+			if want := []string{"a-one", "a-two"}; !reflect.DeepEqual(payload.IDs, want) {
+				t.Errorf("bulk delete IDs = %#v, want captured selection %#v", payload.IDs, want)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+
+	const command = `/alerts delete-bulk Fir "Second selected"`
+	const prompt = `Delete 2 selected alerts: "First selected" (a-one), "Second selected" (a-two)? Type 'yes' to confirm or Esc to cancel.`
+	m = runLine(t, m, command)
+	if m.pendingConfirmation == nil || deletes != 0 || m.pendingConfirmation.message != prompt {
+		got := ""
+		if m.pendingConfirmation != nil {
+			got = m.pendingConfirmation.message
+		}
+		t.Fatalf("bulk delete confirmation = %q, want %q; deletes=%d", got, prompt, deletes)
+	}
+	m = runLine(t, m, "no")
+	if m.pendingConfirmation != nil || deletes != 0 {
+		t.Fatalf("cancelled bulk delete mutated or stayed pending: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
+	}
+
+	m = runLine(t, m, command)
+	if m.pendingConfirmation == nil || m.pendingConfirmation.message != prompt {
+		t.Fatalf("bulk delete confirmation = %#v, want %q", m.pendingConfirmation, prompt)
+	}
+	// The list may change after the user reviews the resolved targets. Confirming
+	// must retain those targets rather than resolving the refs again.
+	catalog = changed
+	m = runLine(t, m, "yes")
+	if deletes != 1 || lists != 3 {
+		t.Fatalf("confirmed bulk delete requests = lists %d deletes %d, want 3 and 1", lists, deletes)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "deleted 2 alerts") || !strings.Contains(out, "Remaining") {
+		t.Fatalf("bulk delete output did not report count and refreshed list:\n%s", out)
+	}
+}
+
+func TestAlertBulkActionsRejectInvalidOrForeignReferencesBeforeMutation(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-own" data-alert-scroll-anchor="a-own"><p class="font-semibold">Own</p></div>
+		<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">Duplicate</p></div>
+		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two"><p class="font-semibold">duplicate</p></div>`
+	cases := []struct {
+		name   string
+		action string
+		refs   string
+		want   string
+	}{
+		{name: "duplicate read", action: "read-bulk", refs: "a-own Own", want: "selected more than once"},
+		{name: "duplicate delete", action: "delete-bulk", refs: "a-own Own", want: "selected more than once"},
+		{name: "ambiguous read", action: "read-bulk", refs: "Duplicate", want: "is ambiguous"},
+		{name: "missing read", action: "read-bulk", refs: "missing-alert", want: "nothing matches"},
+		{name: "foreign delete", action: "delete-bulk", refs: "foreign-alert", want: "nothing matches"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mutations := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, alertsHTML)
+				case (r.Method == http.MethodPost && r.URL.Path == "/alerts/read-bulk") || (r.Method == http.MethodDelete && r.URL.Path == "/alerts/bulk"):
+					mutations++
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, "/alerts "+tc.action+" "+tc.refs)
+			if mutations != 0 || m.pendingConfirmation != nil {
+				t.Fatalf("invalid selection mutated or prompted: mutations=%d pending=%v", mutations, m.pendingConfirmation != nil)
+			}
+			if out := strings.ToLower(stripANSI(transcript(m))); !strings.Contains(out, strings.ToLower(tc.want)) {
+				t.Fatalf("invalid selection output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+func TestAlertBulkMutationFailureDoesNotRefreshOrReportSuccess(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>`
+	var lists, mutations int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			lists++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, alertsHTML)
+		case r.Method == http.MethodPost && r.URL.Path == "/alerts/read-bulk":
+			mutations++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":"bulk read rejected"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLineWithFollowUp(t, m, "/alerts read-bulk a-one")
+	if mutations != 1 || lists != 1 {
+		t.Fatalf("failed bulk read requests = lists %d mutations %d, want 1 each", lists, mutations)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "bulk read rejected") || strings.Contains(out, "marked 1 alerts read") {
+		t.Fatalf("backend failure output = %s", out)
 	}
 }
 
@@ -4653,7 +4917,9 @@ func TestAlertsCommandsRequireProject(t *testing.T) {
 		{name: "reject", line: "/alerts reject a-1"},
 		{name: "dismiss", line: "/alerts dismiss a-1"},
 		{name: "read", line: "/alerts read a-1"},
+		{name: "read_bulk", line: "/alerts read-bulk a-1 a-2"},
 		{name: "delete", line: "/alerts delete a-1", checkConfirmation: true},
+		{name: "delete_bulk", line: "/alerts delete-bulk a-1 a-2", checkConfirmation: true},
 		{name: "delete_without_ref", line: "/alerts delete", checkConfirmation: true, checkSelector: true},
 	}
 

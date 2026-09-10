@@ -2928,7 +2928,7 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 		out = noticeStyle.Render(fmt.Sprintf("%d unread", unread)) + "\n" + out
 	}
 	return out + "\n\n" +
-		dimStyle.Render("/alerts approve|reject|dismiss|delete <id> · /alerts read-all")
+		dimStyle.Render("/alerts read-bulk|delete-bulk <id|title>... · /alerts read-all")
 }
 
 // --- personalities ---
