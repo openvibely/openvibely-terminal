@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 // --- Analytics (/api/analytics/*) ---
@@ -119,35 +120,51 @@ func (c *Client) GetUsageAnalytics(ctx context.Context, projectID string) (*Usag
 
 // analyticsSlice is the shared fetch/decode helper for analytics endpoints that
 // return a JSON array. segment is the URL path segment after /api/analytics/.
-func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID string) ([]T, error) {
+// A positive limit opts into the endpoint's bounded-result contract; zero keeps
+// the endpoint's full-array behavior.
+func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID string, limit int) ([]T, error) {
 	var out []T
-	err := c.getJSON(ctx, "/api/analytics/"+segment+query("project_id", projectID), &out)
+	limitValue := ""
+	if limit > 0 {
+		limitValue = strconv.Itoa(limit)
+	}
+	err := c.getJSON(ctx, "/api/analytics/"+segment+query("project_id", projectID, "limit", limitValue), &out)
 	return out, err
 }
 
 // GetSuccessFailureRates fetches execution success/failure rates.
 func (c *Client) GetSuccessFailureRates(ctx context.Context, projectID string) ([]SuccessFailureRate, error) {
-	return analyticsSlice[SuccessFailureRate](ctx, c, "success-failure-rates", projectID)
+	return analyticsSlice[SuccessFailureRate](ctx, c, "success-failure-rates", projectID, 0)
 }
 
-// GetAvgExecutionTimeByTask fetches per-task average execution times.
+// GetAvgExecutionTimeByTask fetches the complete per-task average execution-time history.
 func (c *Client) GetAvgExecutionTimeByTask(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID, 0)
 }
 
-// GetAvgExecutionTimeByAgent fetches per-model average execution times.
+// GetAvgExecutionTimeByTaskWithLimit fetches a bounded per-task average execution-time result.
+func (c *Client) GetAvgExecutionTimeByTaskWithLimit(ctx context.Context, projectID string, limit int) ([]AvgExecutionTime, error) {
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID, limit)
+}
+
+// GetAvgExecutionTimeByAgent fetches the complete per-agent average execution-time history.
 func (c *Client) GetAvgExecutionTimeByAgent(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID, 0)
+}
+
+// GetAvgExecutionTimeByAgentWithLimit fetches a bounded per-agent average execution-time result.
+func (c *Client) GetAvgExecutionTimeByAgentWithLimit(ctx context.Context, projectID string, limit int) ([]AvgExecutionTime, error) {
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID, limit)
 }
 
 // GetMostFrequentTasks fetches the most frequently executed tasks.
 func (c *Client) GetMostFrequentTasks(ctx context.Context, projectID string) ([]TaskFrequency, error) {
-	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID)
+	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID, 0)
 }
 
 // GetFailedTaskPatterns fetches recurring task failure patterns.
 func (c *Client) GetFailedTaskPatterns(ctx context.Context, projectID string) ([]FailedTaskPattern, error) {
-	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID)
+	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID, 0)
 }
 
 // --- Skill analytics (/api/analytics/skills) ---

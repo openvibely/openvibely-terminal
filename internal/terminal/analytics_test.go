@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
@@ -96,34 +98,89 @@ func TestLoadAnalyticsSingleSectionErrorSurfaced(t *testing.T) {
 	}
 }
 
-func TestLoadAnalyticsRendersIndependentAgentAndTaskExecutionTimes(t *testing.T) {
-	execTimes := func(prefix string, count int) []client.AvgExecutionTime {
-		items := make([]client.AvgExecutionTime, count)
-		for i := range items {
-			items[i] = client.AvgExecutionTime{
-				ID:    prefix + "-" + strconv.Itoa(i),
-				Name:  prefix + "-" + strconv.Itoa(i),
-				AvgMs: float64(i),
-			}
-		}
-		return items
+// boundedExecutionTimeResult models the endpoint contract: preserve source order
+// for equal averages, order by average execution time descending, then limit.
+func boundedExecutionTimeResult(history []client.AvgExecutionTime) []client.AvgExecutionTime {
+	ordered := append([]client.AvgExecutionTime(nil), history...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].AvgMs > ordered[j].AvgMs
+	})
+	if len(ordered) > maxExecTimeRows {
+		ordered = ordered[:maxExecTimeRows]
 	}
+	return ordered
+}
 
+func TestLoadAnalyticsRendersIndependentAgentAndTaskExecutionTimes(t *testing.T) {
+	execTimes := func(prefix string) []client.AvgExecutionTime {
+		return []client.AvgExecutionTime{
+			{ID: prefix + "-1000", Name: prefix + "-1000", AvgMs: 1000},
+			{ID: prefix + "-900", Name: prefix + "-900", AvgMs: 900},
+			{ID: prefix + "-800", Name: prefix + "-800", AvgMs: 800},
+			{ID: prefix + "-700", Name: prefix + "-700", AvgMs: 700},
+			{ID: prefix + "-600", Name: prefix + "-600", AvgMs: 600},
+			{ID: prefix + "-500", Name: prefix + "-500", AvgMs: 500},
+			{ID: prefix + "-400", Name: prefix + "-400", AvgMs: 400},
+			{ID: prefix + "-300", Name: prefix + "-300", AvgMs: 300},
+			{ID: prefix + "-200", Name: prefix + "-200", AvgMs: 200},
+			{ID: prefix + "-100", Name: prefix + "-100", AvgMs: 100},
+			{ID: prefix + "-zero-id", AvgMs: 0},
+			{ID: prefix + "-tie-early", Name: prefix + "-tie-early", AvgMs: -10},
+			{ID: prefix + "-tie-late", Name: prefix + "-tie-late", AvgMs: -10},
+			{ID: prefix + "-negative-20", Name: prefix + "-negative-20", AvgMs: -20},
+			{ID: prefix + "-negative-30", Name: prefix + "-negative-30", AvgMs: -30},
+		}
+	}
+	agents := execTimes("agent")
+	tasks := execTimes("task")
+
+	var mu sync.Mutex
+	requests := make(map[string]int)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "project-1" {
+			t.Errorf("%s project_id = %q, want project-1", r.URL.Path, got)
+		}
 		switch r.URL.Path {
 		case "/api/analytics/avg-execution-time-by-agent":
-			_ = json.NewEncoder(w).Encode(execTimes("agent", 13))
+			if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxExecTimeRows) {
+				t.Errorf("agent limit = %q, want %d", got, maxExecTimeRows)
+			}
+			mu.Lock()
+			requests[r.URL.Path]++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(boundedExecutionTimeResult(agents))
 		case "/api/analytics/avg-execution-time-by-task":
-			_ = json.NewEncoder(w).Encode(execTimes("task", 14))
+			if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxExecTimeRows) {
+				t.Errorf("task limit = %q, want %d", got, maxExecTimeRows)
+			}
+			mu.Lock()
+			requests[r.URL.Path]++
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(boundedExecutionTimeResult(tasks))
 		case "/api/analytics/usage":
+			if got := r.URL.Query().Get("limit"); got != "" {
+				t.Errorf("usage limit = %q, want omitted", got)
+			}
 			_ = json.NewEncoder(w).Encode(client.UsageAnalytics{})
 		case "/api/analytics/success-failure-rates":
+			if got := r.URL.Query().Get("limit"); got != "" {
+				t.Errorf("rates limit = %q, want omitted", got)
+			}
 			_ = json.NewEncoder(w).Encode([]client.SuccessFailureRate{})
 		case "/api/analytics/most-frequent-tasks":
+			if got := r.URL.Query().Get("limit"); got != "" {
+				t.Errorf("frequent limit = %q, want omitted", got)
+			}
 			_ = json.NewEncoder(w).Encode([]client.TaskFrequency{})
 		case "/api/analytics/failed-task-patterns":
+			if got := r.URL.Query().Get("limit"); got != "" {
+				t.Errorf("failures limit = %q, want omitted", got)
+			}
 			_ = json.NewEncoder(w).Encode([]client.FailedTaskPattern{})
 		case "/api/analytics/skills":
+			if got := r.URL.Query().Get("limit"); got != "" {
+				t.Errorf("skills limit = %q, want omitted", got)
+			}
 			_ = json.NewEncoder(w).Encode(client.SkillAnalytics{})
 		default:
 			http.NotFound(w, r)
@@ -135,36 +192,59 @@ func TestLoadAnalyticsRendersIndependentAgentAndTaskExecutionTimes(t *testing.T)
 		t.Fatalf("client.New: %v", err)
 	}
 
+	wantAgent := renderExecTimes("Avg execution time by agent", agents)
 	agentOut, err := loadAnalytics(context.Background(), c, "project-1", "agents")
 	if err != nil {
 		t.Fatalf("loadAnalytics agents: %v", err)
 	}
-	if !strings.Contains(agentOut, "\n  agent-12 ") || strings.Contains(agentOut, "\n  agent-0 ") {
-		t.Fatalf("agent section did not render its independent top 12:\n%s", agentOut)
-	}
-	if strings.Contains(agentOut, "task-") {
-		t.Fatalf("agent section rendered task records:\n%s", agentOut)
+	if agentOut != wantAgent {
+		t.Fatalf("bounded agent output changed visible rows\n got: %s\nwant: %s", agentOut, wantAgent)
 	}
 
+	wantTask := renderExecTimes("Avg execution time by task", tasks)
 	taskOut, err := loadAnalytics(context.Background(), c, "project-1", "trends")
 	if err != nil {
 		t.Fatalf("loadAnalytics trends: %v", err)
 	}
-	if !strings.Contains(taskOut, "\n  task-13 ") || strings.Contains(taskOut, "\n  task-0 ") || strings.Contains(taskOut, "agent-") {
-		t.Fatalf("task section did not render its independent top 12:\n%s", taskOut)
+	if taskOut != wantTask {
+		t.Fatalf("bounded task output changed visible rows\n got: %s\nwant: %s", taskOut, wantTask)
+	}
+
+	for _, tc := range []struct {
+		name string
+		out  string
+	}{
+		{name: "agent", out: agentOut},
+		{name: "task", out: taskOut},
+	} {
+		if !strings.Contains(tc.out, tc.name+"-zero-id") || !strings.Contains(tc.out, tc.name+"-tie-early") || !strings.Contains(tc.out, "-10ms") {
+			t.Fatalf("%s output lost ID fallback, zero, or negative value:\n%s", tc.name, tc.out)
+		}
+		if strings.Contains(tc.out, tc.name+"-tie-late") {
+			t.Fatalf("%s output did not preserve source-order cutoff tie:\n%s", tc.name, tc.out)
+		}
 	}
 
 	allOut, err := loadAnalytics(context.Background(), c, "project-1", "")
 	if err != nil {
 		t.Fatalf("loadAnalytics all sections: %v", err)
 	}
-	for _, want := range []string{"Avg execution time by agent", "Avg execution time by task", "agent-12", "task-13"} {
-		if !strings.Contains(allOut, want) {
-			t.Fatalf("full analytics output missing %q:\n%s", want, allOut)
-		}
+	if !strings.Contains(allOut, wantAgent) || !strings.Contains(allOut, wantTask) {
+		t.Fatalf("all-section output changed bounded execution-time rows:\n%s", allOut)
 	}
 	if strings.Index(allOut, "Avg execution time by agent") > strings.Index(allOut, "Avg execution time by task") {
 		t.Fatalf("execution-time sections changed order:\n%s", allOut)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range []string{
+		"/api/analytics/avg-execution-time-by-agent",
+		"/api/analytics/avg-execution-time-by-task",
+	} {
+		if got := requests[path]; got != 2 {
+			t.Errorf("%s request count = %d, want 2 (single section and all sections)", path, got)
+		}
 	}
 }
 
