@@ -5261,6 +5261,8 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			root string
 		}{
 			{name: "double slash root", root: `//models`},
+			{name: "empty double quoted fragment before slash root", root: `""/models`},
+			{name: "empty single quoted fragment before slash root", root: `''/models`},
 			{name: "slash then double quoted root", root: `/"models"`},
 			{name: "slash then single quoted root", root: `/'models'`},
 			{name: "fully double quoted root", root: `"/models"`},

@@ -2390,11 +2390,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// isSlashCommandInput recognizes ordinary slash commands and quoted slash roots.
-// The latter are accepted by the command tokenizer once dispatched; recognizing
-// them here ensures malformed forms reach command redaction rather than chat.
+// isSlashCommandInput recognizes inputs whose first token becomes slash-prefixed
+// after the command tokenizer removes quote delimiters. This also routes malformed
+// quoted commands through command redaction before their parser error is displayed.
 func isSlashCommandInput(text string) bool {
-	return strings.HasPrefix(text, "/") || strings.HasPrefix(text, `"/`) || strings.HasPrefix(text, `'/`)
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return false
+	}
+	root := strings.ReplaceAll(strings.ReplaceAll(fields[0], `"`, ""), "'", "")
+	return strings.HasPrefix(root, "/")
 }
 
 // submit handles Enter: either run a slash command or send a chat message.
