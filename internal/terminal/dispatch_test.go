@@ -10374,6 +10374,67 @@ func TestTaskReviewReadPathsHaveEquivalentPlainOutputAndSingleFetch(t *testing.T
 	}
 }
 
+func TestTaskReviewReadPathsHaveEquivalentJSONOutputAndCanonicalRouting(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	board := `<div data-task-id="` + taskID + `" data-task-status="running" data-task-category="active">
+		<a href="/tasks/` + taskID + `" title="Exact task">Exact task</a>
+	</div>`
+	reviews := strings.Replace(taskReviewHTML, `data-task-id="t-1"`, `data-task-id="`+taskID+`"`, 1)
+	tests := []struct {
+		name      string
+		line      string
+		canonical bool
+	}{
+		{name: "show review tab", line: "/tasks show Exact task review"},
+		{name: "reviews default list", line: "/tasks reviews Exact task"},
+		{name: "reviews list subcommand", line: "/tasks reviews list Exact task"},
+		{name: "canonical full ID review", line: "/tasks show " + taskID + " review", canonical: true},
+	}
+
+	previousJSON := jsonMode
+	jsonMode = true
+	defer func() { jsonMode = previousJSON }()
+
+	var want string
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":                        board,
+				"/tasks/" + taskID:              canonicalTaskDetailHTML(taskID, "p1"),
+				"/tasks/" + taskID + "/reviews": reviews,
+			})
+			m = runLine(t, m, tc.line)
+
+			got := taskReviewsResultText(m)
+			var decoded []client.ReviewComment
+			if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+				t.Fatalf("review output is not a JSON array: %v\n%s", err, transcript(m))
+			}
+			if len(decoded) != 1 || decoded[0].ID != "rc-1" || decoded[0].CommentText != "Needs error handling" {
+				t.Fatalf("review JSON = %+v, want parsed review comment", decoded)
+			}
+			if want == "" {
+				want = got
+			} else if got != want {
+				t.Errorf("review JSON differs from the first read path:\n%s\nwant:\n%s", got, want)
+			}
+			if got := rec.count("GET", "/tasks/"+taskID+"/reviews"); got != 1 {
+				t.Fatalf("review display should make exactly one review request, got %d:\n%s", got, rec.all())
+			}
+			if tc.canonical {
+				if got := rec.count("GET", "/tasks"); got != 0 {
+					t.Fatalf("canonical review made %d board requests:\n%s", got, rec.all())
+				}
+				if !rec.sawQuery("GET /tasks/" + taskID + "/reviews?project_id=p1") {
+					t.Fatalf("canonical review request was not project scoped: %v", rec.urlsSnapshot())
+				}
+			} else if got := rec.count("GET", "/tasks"); got != 1 {
+				t.Fatalf("ordinary review resolution should make exactly one board request, got %d:\n%s", got, rec.all())
+			}
+		})
+	}
+}
+
 func TestTaskReviewReadPathsPreserveEmptyPlainOutput(t *testing.T) {
 	tests := []struct {
 		name string
@@ -10459,6 +10520,49 @@ func TestTaskReviewReadPathsPropagateFetchErrorsIdentically(t *testing.T) {
 				t.Fatalf("review error = %q, want %q; transcript:\n%s", got, wantError, transcript(m))
 			}
 		})
+	}
+}
+
+func TestCanonicalTaskReviewPropagatesScopedFetchErrorWithoutBoard(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/tasks/" + taskID:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(canonicalTaskDetailHTML(taskID, "p1")))
+		case "/tasks/" + taskID + "/reviews":
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Errorf("review project_id = %q, want p1", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"review fetch failed"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/tasks show "+taskID+" review")
+
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("canonical review made %d board requests:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks/"+taskID+"/reviews"); got != 1 {
+		t.Fatalf("canonical review made %d review requests, want 1:\n%s", got, rec.all())
+	}
+	if got, want := taskReviewErrorText(m), "server error (502): review fetch failed"; got != want {
+		t.Fatalf("review error = %q, want %q; transcript:\n%s", got, want, transcript(m))
 	}
 }
 

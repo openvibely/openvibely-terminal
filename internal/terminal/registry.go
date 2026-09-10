@@ -169,19 +169,10 @@ func confirmScheduleDeletion(m Model, projectID string, schedule client.Schedule
 }
 
 // taskReviewsOutput fetches and formats the read-only review view for a task.
-func taskReviewsOutput(ctx context.Context, c *client.Client, t client.Task) (string, error) {
-	reviews, err := c.ListTaskReviews(ctx, t.ID)
-	if err != nil {
-		return "", err
-	}
-	if jsonMode {
-		return marshalJSON(reviews)
-	}
-	return renderTaskReviews(t, reviews), nil
-}
-
-func taskReviewsOutputForProject(ctx context.Context, c *client.Client, t client.Task, projectID string) (string, error) {
-	reviews, err := c.ListTaskReviewsForProject(ctx, t.ID, projectID)
+// Callers supply the fetch function so their intentional ordinary-versus-scoped
+// request behavior remains unchanged.
+func taskReviewsOutput(ctx context.Context, t client.Task, fetch func(context.Context, string) ([]client.ReviewComment, error)) (string, error) {
+	reviews, err := fetch(ctx, t.ID)
 	if err != nil {
 		return "", err
 	}
@@ -443,7 +434,9 @@ func tasksCommand() command {
 								return "", err
 							}
 							if isReviewTab(tab) {
-								return taskReviewsOutputForProject(ctx, c, d.Task, pid)
+								return taskReviewsOutput(ctx, d.Task, func(ctx context.Context, taskID string) ([]client.ReviewComment, error) {
+									return c.ListTaskReviewsForProject(ctx, taskID, pid)
+								})
 							}
 							return marshalJSON(d.Task)
 						}
@@ -463,7 +456,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					if isReviewTab(tab) {
-						return taskReviewsOutput(ctx, c, t)
+						return taskReviewsOutput(ctx, t, c.ListTaskReviews)
 					}
 					if jsonMode {
 						return marshalJSON(t)
@@ -505,7 +498,7 @@ func tasksCommand() command {
 						if err != nil {
 							return "", err
 						}
-						return taskReviewsOutput(ctx, c, t)
+						return taskReviewsOutput(ctx, t, c.ListTaskReviews)
 					})
 				case "add":
 					if len(reviewRest) == 0 {
