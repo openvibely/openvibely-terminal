@@ -3932,11 +3932,13 @@ func redactModelCommandSecrets(commandLine string) string {
 	parts := make([]string, 0, len(tokens))
 	for i := 0; i < len(tokens); i++ {
 		value := tokens[i].value
-		name, inlineValue, hasAssignment := strings.Cut(strings.ToLower(value), "=")
+		name, _, hasAssignment := strings.Cut(strings.ToLower(value), "=")
 		if modelSensitiveOption(name) {
-			if hasAssignment && inlineValue != "" {
-				parts = append(parts, name+"=<redacted>")
-				continue
+			// Model add does not accept inline sensitive assignments. Do not render
+			// a malformed assignment's remaining tokens: they may be pasted
+			// credentials before local validation rejects the command.
+			if hasAssignment {
+				return "/models add <redacted sensitive options>"
 			}
 			parts = append(parts, value)
 			if i+1 < len(tokens) {

@@ -5341,6 +5341,55 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 			})
 		}
 	})
+	t.Run("inline sensitive assignments redact their tail", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			line    func(secret string) string
+			wantErr string
+		}{
+			{
+				name: "API key assignment",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key=placeholder ` + secret
+				},
+				wantErr: "unsupported models add option",
+			},
+			{
+				name: "API key stdin assignment",
+				line: func(secret string) string {
+					return `/models add openai OpenAI gpt-4o --api-key-stdin=placeholder ` + secret
+				},
+				wantErr: "unsupported models add option",
+			},
+			{
+				name: "endpoint assignment",
+				line: func(secret string) string {
+					return `/models add ollama Local llama3 --endpoint=http://localhost:11434 ` + secret
+				},
+				wantErr: "unsupported models add option",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				secret := "inline-sensitive-assignment-" + strings.ReplaceAll(tc.name, " ", "-")
+				m, rec := dispatchModel(t, nil)
+				m = runLine(t, m, tc.line(secret))
+				if !strings.Contains(transcript(m), tc.wantErr) {
+					t.Fatalf("inline sensitive assignment did not report local rejection:\n%s", transcript(m))
+				}
+				if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+					t.Fatalf("inline sensitive assignment exposed the secret:\n%s", transcript(m))
+				}
+				for _, item := range m.history {
+					if strings.Contains(item, secret) {
+						t.Fatalf("inline sensitive assignment exposed the secret in history: %q", item)
+					}
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("inline sensitive assignment made requests:\n%s", calls)
+				}
+			})
+		}
+	})
 
 	t.Run("malformed quoted option API key is redacted", func(t *testing.T) {
 		secret := "quoted-option-unmatched-quote-model-secret"
