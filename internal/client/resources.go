@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -713,8 +714,10 @@ type ModelEditDetails struct {
 	AuthHeaderName        string
 	AuthHeaderValuePrefix string
 	AutoStartTasks        bool
+	DefaultMaxTokens      int
 
-	secrets modelEditSecrets
+	hasDefaultMaxTokens bool
+	secrets             modelEditSecrets
 }
 
 // ModelEditRequest contains only the terminal-supported explicit edits. Nil
@@ -757,6 +760,7 @@ type modelEditDetailsPayload struct {
 	CustomAuthConfigJSON  string  `json:"custom_auth_config_json"`
 	MixtureConfigJSON     string  `json:"mixture_config_json"`
 	AutoStartTasks        bool    `json:"auto_start_tasks"`
+	DefaultMaxTokens      *int    `json:"default_max_tokens"`
 }
 
 type modelEditSecrets struct {
@@ -843,6 +847,8 @@ func (c *Client) GetModelEditDetails(ctx context.Context, projectID, modelID str
 		AuthHeaderName:        payload.AuthHeaderName,
 		AuthHeaderValuePrefix: payload.AuthHeaderValuePrefix,
 		AutoStartTasks:        payload.AutoStartTasks,
+		DefaultMaxTokens:      derefModelEditInt(payload.DefaultMaxTokens),
+		hasDefaultMaxTokens:   payload.DefaultMaxTokens != nil,
 		secrets: modelEditSecrets{
 			apiKey:               payload.APIKey,
 			oauthClientID:        payload.OAuthClientID,
@@ -856,6 +862,13 @@ func (c *Client) GetModelEditDetails(ctx context.Context, projectID, modelID str
 			mixtureConfigJSON:    payload.MixtureConfigJSON,
 		},
 	}, nil
+}
+
+func derefModelEditInt(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 // UpdateModel merges explicit terminal edits into authoritative details and
@@ -901,6 +914,22 @@ func (c *Client) UpdateModel(ctx context.Context, projectID string, details Mode
 			return errors.New("--endpoint is supported only for Ollama or OpenAI-compatible models")
 		}
 	}
+	name, err := validateModelEditName(details.Name)
+	if err != nil {
+		return err
+	}
+	details.Name = name
+	provider := strings.ToLower(strings.TrimSpace(details.Provider))
+	if provider == "openai" {
+		model, err := validateOpenAIModelEdit(details.Model)
+		if err != nil {
+			return err
+		}
+		details.Model = model
+	}
+	if provider == "openai_compatible" && !details.hasDefaultMaxTokens {
+		return errors.New("backend did not return default max tokens; cannot safely edit this OpenAI-compatible model")
+	}
 	if apiKey != "" && !modelAllowsAPIKeyReplacement(details) {
 		return errors.New("API-key replacement is supported only for API-key model configurations")
 	}
@@ -919,6 +948,43 @@ func modelAllowsAPIKeyReplacement(details ModelEditDetails) bool {
 		return !strings.EqualFold(strings.TrimSpace(details.AuthMethod), "oauth")
 	default:
 		return false
+	}
+}
+
+func validateModelEditName(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", errors.New("model name is required")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return "", errors.New("model name must not contain terminal control characters")
+		}
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func validateOpenAIModelEdit(value string) (string, error) {
+	model := strings.TrimSpace(value)
+	switch model {
+	case "gpt-6-astra",
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.6-luna",
+		"gpt-5.5",
+		"gpt-5.5-pro",
+		"gpt-5.4",
+		"gpt-5.4-mini",
+		"gpt-5.3-codex",
+		"gpt-5.3-codex-spark",
+		"gpt-5.2-codex",
+		"gpt-5.1-codex-max",
+		"gpt-5.1-codex",
+		"gpt-5.1-codex-mini",
+		"gpt-5-codex",
+		"gpt-5-codex-mini":
+		return model, nil
+	default:
+		return "", errors.New("unsupported OpenAI model")
 	}
 }
 
@@ -978,6 +1044,7 @@ func modelEditForm(details ModelEditDetails, apiKey string) (url.Values, error) 
 		form.Set("models_url", details.ModelsURL)
 		form.Set("auth_header_name", details.AuthHeaderName)
 		form.Set("auth_header_value_prefix", details.AuthHeaderValuePrefix)
+		form.Set("default_max_tokens", strconv.Itoa(details.DefaultMaxTokens))
 		if oauth {
 			form.Set("custom_auth_method", "oauth")
 			form.Set("auth_method", "oauth")

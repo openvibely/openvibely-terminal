@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -3160,6 +3161,10 @@ func parseModelEditArgs(args []string, interactive bool) (modelEditSpec, error) 
 			if err != nil {
 				return modelEditSpec{}, err
 			}
+			value, err = validateTerminalModelEditName(value)
+			if err != nil {
+				return modelEditSpec{}, err
+			}
 			spec.Update.Name = &value
 		case "--model":
 			value, err := nextValue(&i, option)
@@ -3229,6 +3234,18 @@ func parseModelEditBool(value string) (bool, error) {
 	}
 }
 
+func validateTerminalModelEditName(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return "", errors.New("--name requires a nonempty value")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return "", errors.New("--name must not contain terminal control characters")
+		}
+	}
+	return strings.TrimSpace(value), nil
+}
+
 func validateModelsArgs(args []string) error {
 	if len(args) == 0 {
 		return nil
@@ -3277,6 +3294,10 @@ func modelEditResult(ctx context.Context, c *client.Client, projectID string, sp
 	statusName := details.Name
 	if spec.Update.Name != nil {
 		statusName = strings.TrimSpace(*spec.Update.Name)
+	}
+	statusName = sanitizeAutomationDetailText(statusName)
+	if statusName == "" {
+		statusName = model.ID
 	}
 	status := "updated " + statusName
 	refreshed, err := c.ListModels(ctx, projectID)

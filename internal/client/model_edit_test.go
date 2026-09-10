@@ -26,7 +26,7 @@ func TestUpdateModelReadsAuthoritativeDetailsAndPreservesSecrets(t *testing.T) {
 				t.Errorf("edit details project_id = %q, want project-1", got)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"model-1","name":"Saved compatible","provider":"openai_compatible","model":"saved-model","reasoning_effort":"high","temperature":0.4,"is_default":true,"api_key":"`+apiKey+`","auth_method":"oauth","max_workers":3,"worker_timeout":42,"base_url":"https://provider.example/v1","transport":"responses","preset_slug":"custom","models_url":"https://provider.example/models","auth_header_name":"Authorization","auth_header_value_prefix":"Bearer ","oauth_client_id":"client-id","oauth_client_secret":"client-secret","oauth_authorize_url":"https://provider.example/authorize","oauth_token_url":"https://provider.example/token","oauth_scopes":"profile","extra_headers_json":"{\"X-Secret\":\"`+staticToken+`\"}","custom_auth_config_json":"{\"refresh_url\":\"https://provider.example/refresh\",\"pkce\":true,\"signing_secret\":\"`+signingSecret+`\",\"static_headers\":{\"X-Secret\":\"`+staticToken+`\"},\"token_headers\":{\"X-Token\":\"token-value\"}}","auto_start_tasks":true}`)
+			_, _ = io.WriteString(w, `{"id":"model-1","name":"Saved compatible","provider":"openai_compatible","model":"saved-model","reasoning_effort":"high","temperature":0.4,"is_default":true,"api_key":"`+apiKey+`","auth_method":"oauth","max_workers":3,"worker_timeout":42,"base_url":"https://provider.example/v1","transport":"responses","preset_slug":"custom","models_url":"https://provider.example/models","auth_header_name":"Authorization","auth_header_value_prefix":"Bearer ","oauth_client_id":"client-id","oauth_client_secret":"client-secret","oauth_authorize_url":"https://provider.example/authorize","oauth_token_url":"https://provider.example/token","oauth_scopes":"profile","extra_headers_json":"{\"X-Secret\":\"`+staticToken+`\"}","custom_auth_config_json":"{\"refresh_url\":\"https://provider.example/refresh\",\"pkce\":true,\"signing_secret\":\"`+signingSecret+`\",\"static_headers\":{\"X-Secret\":\"`+staticToken+`\"},\"token_headers\":{\"X-Token\":\"token-value\"}}","auto_start_tasks":true,"default_max_tokens":8192}`)
 		case "PUT /models/model-1":
 			updates++
 			if got := r.URL.Query().Get("project_id"); got != "project-1" {
@@ -54,7 +54,7 @@ func TestUpdateModelReadsAuthoritativeDetailsAndPreservesSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetModelEditDetails: %v", err)
 	}
-	if details.Name != "Saved compatible" || details.BaseURL != "https://provider.example/v1" || details.MaxWorkers != 3 {
+	if details.Name != "Saved compatible" || details.BaseURL != "https://provider.example/v1" || details.MaxWorkers != 3 || details.DefaultMaxTokens != 8192 {
 		t.Fatalf("safe authoritative details = %#v", details)
 	}
 	encoded, err := json.Marshal(details)
@@ -86,6 +86,7 @@ func TestUpdateModelReadsAuthoritativeDetailsAndPreservesSecrets(t *testing.T) {
 		"transport":                  "responses",
 		"preset_slug":                "custom",
 		"models_url":                 "https://provider.example/models",
+		"default_max_tokens":         "8192",
 		"custom_auth_method":         "oauth",
 		"auth_method":                "oauth",
 		"custom_refresh_url":         "https://provider.example/refresh",
@@ -109,7 +110,7 @@ func TestUpdateModelValidationFailureRedactsReplacementSecret(t *testing.T) {
 		switch r.Method + " " + r.URL.Path {
 		case "GET /models/model-1/edit-details":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"id":"model-1","name":"OpenAI","provider":"openai","model":"gpt-4o","auth_method":"api_key"}`)
+			_, _ = io.WriteString(w, `{"id":"model-1","name":"OpenAI","provider":"openai","model":"gpt-5.6-sol","auth_method":"api_key"}`)
 		case "PUT /models/model-1":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -155,8 +156,91 @@ func TestUpdateModelRejectsUnsupportedEndpointWithoutMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	endpoint := "https://example.test/v1"
-	err = c.UpdateModel(context.Background(), "p1", ModelEditDetails{ID: "model-1", Provider: "openai", Model: "gpt-4o"}, ModelEditRequest{Endpoint: &endpoint}, "")
+	err = c.UpdateModel(context.Background(), "p1", ModelEditDetails{ID: "model-1", Provider: "openai", Model: "gpt-5.6-sol"}, ModelEditRequest{Endpoint: &endpoint}, "")
 	if err == nil || !strings.Contains(err.Error(), "supported only") {
 		t.Fatalf("unsupported endpoint error = %v", err)
+	}
+}
+
+func TestUpdateModelRejectsUnsupportedOpenAIModelWithoutMutation(t *testing.T) {
+	var updates int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			updates++
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsupported := "gpt-4o"
+	err = c.UpdateModel(context.Background(), "p1", ModelEditDetails{
+		ID: "model-1", Name: "OpenAI", Provider: "openai", Model: "gpt-5.6-sol",
+	}, ModelEditRequest{Model: &unsupported}, "")
+	if err == nil || !strings.Contains(err.Error(), "unsupported OpenAI model") {
+		t.Fatalf("unsupported model error = %v", err)
+	}
+	if updates != 0 {
+		t.Fatalf("unsupported OpenAI model made %d mutations, want zero", updates)
+	}
+}
+
+func TestUpdateModelRejectsCompatibleDetailsWithoutDefaultMaxTokens(t *testing.T) {
+	var updates int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /models/model-1/edit-details":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"model-1","name":"Compatible","provider":"openai_compatible","model":"provider/model","auth_method":"api_key","base_url":"https://provider.example/v1","transport":"chat_completions","preset_slug":"custom"}`)
+		case "PUT /models/model-1":
+			updates++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	details, err := c.GetModelEditDetails(context.Background(), "p1", "model-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workers := 2
+	err = c.UpdateModel(context.Background(), "p1", details, ModelEditRequest{MaxWorkers: &workers}, "")
+	if err == nil || !strings.Contains(err.Error(), "did not return default max tokens") {
+		t.Fatalf("missing default max tokens error = %v", err)
+	}
+	if updates != 0 {
+		t.Fatalf("missing default max tokens made %d mutations, want zero", updates)
+	}
+}
+
+func TestUpdateModelRejectsUnsafeNameWithoutMutation(t *testing.T) {
+	var updates int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			updates++
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsafe := "Unsafe\x1b[31m\nName"
+	err = c.UpdateModel(context.Background(), "p1", ModelEditDetails{
+		ID: "model-1", Name: "OpenAI", Provider: "openai", Model: "gpt-5.6-sol",
+	}, ModelEditRequest{Name: &unsafe}, "")
+	if err == nil || !strings.Contains(err.Error(), "terminal control") {
+		t.Fatalf("unsafe name error = %v", err)
+	}
+	if updates != 0 {
+		t.Fatalf("unsafe name made %d mutations, want zero", updates)
 	}
 }

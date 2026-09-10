@@ -2433,6 +2433,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	displayText := text
 	if commandInput {
 		displayText = redactModelCommandSecrets(redactChannelCommandSecrets(text))
+		displayText = sanitizeAutomationDetailText(displayText)
 	}
 	m.pushHistory(displayText)
 
