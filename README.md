@@ -75,7 +75,7 @@ Common commands include:
 
 | Command | Purpose |
 |---|---|
-| `/tasks` | Inspect and manage tasks, threads, and completion goals. Use `tasks goal <task> | <objective>` to set one, `tasks goal <task> | clear` to remove it, and `tasks goal pause <task>` or `tasks goal resume <task>` to preserve its objective while changing its lifecycle state. |
+| `/tasks` | Inspect and manage tasks, threads, and completion goals. See the task-goal lifecycle examples below. |
 | `/alerts` | Review alerts, including selected bulk read/delete actions |
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
@@ -85,6 +85,15 @@ Common commands include:
 | `/analytics` | View usage and execution statistics |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/help <command>` | Show complete command syntax |
+
+Task goal lifecycle forms include:
+
+```text
+tasks goal <task> | <objective>
+tasks goal <task> | clear
+tasks goal pause <task>
+tasks goal resume <task>
+```
 
 Mark or remove selected alerts by supplying one or more IDs or quoted titles. To
 inspect an exact workflow queue, add `--decision-state` and optionally
