@@ -5978,6 +5978,55 @@ func TestFormatCLIEventJSONNormalizesWhitespaceEscapesAndOmitsMalformedData(t *t
 	}
 }
 
+func TestFormatCLIEventJSONRetainsValidDataAfterPayloadDecodeError(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      json.RawMessage
+		wantData string
+	}{
+		{
+			name:     "array",
+			raw:      json.RawMessage(` [ 1, 2 ] `),
+			wantData: `[1,2]`,
+		},
+		{
+			name:     "string",
+			raw:      json.RawMessage(` "value" `),
+			wantData: `"value"`,
+		},
+		{
+			name:     "number",
+			raw:      json.RawMessage(` 42 `),
+			wantData: `42`,
+		},
+		{
+			name:     "null",
+			raw:      json.RawMessage(` null `),
+			wantData: `null`,
+		},
+		{
+			name:     "type-mismatched known field",
+			raw:      json.RawMessage(` { "type": 123, "project_id": "p1", "task_id": "t1", "extra": [ 1, 2 ] } `),
+			wantData: `{"type":123,"project_id":"p1","task_id":"t1","extra":[1,2]}`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, include, err := formatCLIEvent(client.Event{Name: "task_status_changed", Data: tc.raw}, "p1", true)
+			if err != nil {
+				t.Fatalf("formatCLIEvent() error = %v", err)
+			}
+			if !include {
+				t.Fatal("formatCLIEvent() unexpectedly filtered valid JSON data")
+			}
+			if !strings.Contains(got, `"data":`+tc.wantData) {
+				t.Fatalf("formatCLIEvent() = %q, missing compact data %s", got, tc.wantData)
+			}
+		})
+	}
+}
+
 func BenchmarkFormatCLIEventRecognizedJSON(b *testing.B) {
 	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {

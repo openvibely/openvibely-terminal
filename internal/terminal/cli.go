@@ -734,7 +734,7 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 		record.Type = record.Event
 	}
 	if jsonOutput {
-		if payloadErr == nil {
+		if payloadErr == nil || json.Valid(ev.Data) {
 			record.Data = ev.Data
 		}
 		encoded, err := json.Marshal(record)
