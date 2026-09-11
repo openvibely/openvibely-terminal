@@ -2365,6 +2365,9 @@ func skillsCommand() command {
 					if err != nil {
 						return "", err
 					}
+					if jsonMode {
+						return marshalJSON(s)
+					}
 					return renderSkillDetail(s), nil
 				})
 			case "add":

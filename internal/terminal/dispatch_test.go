@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -12178,6 +12179,190 @@ func TestSkillsShowUnknownAndAmbiguousReferencesDoNotFetchSelectedBodies(t *test
 			}
 			if out := stripANSI(transcript(m)); !strings.Contains(strings.ToLower(out), tc.want) {
 				t.Fatalf("output = %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
+func TestCLISkillsShowJSONResolvesReferencesAndPreservesCompleteContent(t *testing.T) {
+	const listBody = `<div>
+		<div data-skill-handle="deploy" data-skill-name="Deploy" data-skill-description="release" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false"></div>
+		<div data-skill-handle="review" data-skill-name="Review Skill" data-skill-description="review" data-skill-scope="global" data-skill-source="global" data-skill-enabled="false" data-skill-always-use="true"></div>
+		<div data-skill-handle="shipping-checklist" data-skill-name="Shipping Checklist Skill" data-skill-description="ship" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false"></div>
+		<div data-skill-handle="release-gate" data-skill-name="Release Gate for Production" data-skill-description="gate" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false"></div>
+	</div>`
+	const completeContent = "# Selected skill\n\nRun step one.\nRun step two.\n"
+	cases := []struct {
+		name          string
+		ref           string
+		wantHandle    string
+		wantScope     string
+		wantList      bool
+		wantDetailRef string
+	}{
+		{name: "exact handle", ref: "deploy", wantHandle: "deploy", wantScope: "project", wantDetailRef: "deploy"},
+		{name: "exact name", ref: "Review Skill", wantHandle: "review", wantScope: "global", wantList: true, wantDetailRef: "review"},
+		{name: "unique prefix", ref: "Shipping Checklist", wantHandle: "shipping-checklist", wantScope: "project", wantList: true, wantDetailRef: "shipping-checklist"},
+		{name: "unique substring", ref: "Gate for", wantHandle: "release-gate", wantScope: "project", wantList: true, wantDetailRef: "release-gate"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var listRequests, detailRequests int
+			var detailHandle, detailScope string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case "/skills":
+					listRequests++
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, listBody)
+				case "/skills/" + tc.wantDetailRef + "/details":
+					detailRequests++
+					detailHandle = r.URL.Path[len("/skills/") : len(r.URL.Path)-len("/details")]
+					detailScope = r.URL.Query().Get("scope")
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprintf(w, `{"handle":%q,"name":%q,"description":"selected","scope":%q,"source":%q,"content":%q,"enabled":true,"always_use":false}`,
+						tc.wantHandle, tc.name, tc.wantScope, tc.wantScope, completeContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"skills", "show", tc.ref}, false, true); err != nil {
+				t.Fatalf("skills show --json failed: %v", err)
+			}
+			wantListRequests := 0
+			if tc.wantList {
+				wantListRequests = 1
+			}
+			if listRequests != wantListRequests || detailRequests != 1 {
+				t.Fatalf("list requests = %d, detail requests = %d; want %d and 1", listRequests, detailRequests, wantListRequests)
+			}
+			if detailHandle != tc.wantDetailRef || detailScope != tc.wantScope {
+				t.Fatalf("detail request = %s scope %s; want %s scope %s", detailHandle, detailScope, tc.wantDetailRef, tc.wantScope)
+			}
+			raw := out.String()
+			if strings.Contains(raw, "\x1b") || !strings.HasPrefix(strings.TrimSpace(raw), "{") {
+				t.Fatalf("JSON output contains styling or an extra header: %q", raw)
+			}
+			var skill client.Skill
+			if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &skill); err != nil {
+				t.Fatalf("output is not one JSON skill object: %q: %v", raw, err)
+			}
+			if skill.Handle != tc.wantHandle || skill.Scope != tc.wantScope || skill.Content != completeContent {
+				t.Fatalf("skill = %+v; want handle %q scope %q and complete content", skill, tc.wantHandle, tc.wantScope)
+			}
+			for _, key := range []string{`"handle"`, `"description"`, `"scope"`, `"source"`, `"content"`, `"enabled"`, `"always_use"`} {
+				if !strings.Contains(raw, key) {
+					t.Errorf("JSON output missing stable key %s: %s", key, raw)
+				}
+			}
+		})
+	}
+
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":          cliProjects,
+		"/skills":                listBody,
+		"/skills/deploy/details": `{"handle":"deploy","name":"Deploy","scope":"project","source":"project","content":"plain body","enabled":true}`,
+	})
+	var plain bytes.Buffer
+	if err := RunCLI(c, &plain, "demo", []string{"skills", "show", "deploy"}, false, false); err != nil {
+		t.Fatalf("plain skills show failed: %v", err)
+	}
+	if got := plain.String(); strings.HasPrefix(strings.TrimSpace(got), "{") || !strings.Contains(stripANSI(got), "plain body") {
+		t.Fatalf("plain show output = %q", got)
+	}
+}
+
+func TestCLISkillsShowJSONFailuresDoNotEmitSuccessfulPayload(t *testing.T) {
+	const listBody = `<div>
+		<div data-skill-handle="deploy-one" data-skill-name="Deploy One" data-skill-scope="project" data-skill-source="project"></div>
+		<div data-skill-handle="deploy-two" data-skill-name="Deploy Two" data-skill-scope="project" data-skill-source="project"></div>
+	</div>`
+	for _, tc := range []struct {
+		name      string
+		ref       string
+		handler   func(http.ResponseWriter, *http.Request)
+		wantError string
+	}{
+		{
+			name: "ambiguous reference",
+			ref:  "deploy",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/skills" {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, listBody)
+					return
+				}
+				http.NotFound(w, r)
+			},
+			wantError: "ambiguous",
+		},
+		{
+			name: "unknown reference",
+			ref:  "missing",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/skills" {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, listBody)
+					return
+				}
+				http.NotFound(w, r)
+			},
+			wantError: "nothing matches",
+		},
+		{
+			name: "authentication failure",
+			ref:  "deploy",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Location", "/login")
+				w.WriteHeader(http.StatusFound)
+			},
+			wantError: "requires sign-in",
+		},
+		{
+			name: "detail identity mismatch",
+			ref:  "deploy",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/skills/deploy/details" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"handle":"other","name":"Other","scope":"project","content":"must not render"}`)
+			},
+			wantError: "mismatched skill detail",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/projects" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+					return
+				}
+				tc.handler(w, r)
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", []string{"skills", "show", tc.ref}, false, true)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.wantError)) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantError)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("failure emitted misleading successful payload: %q", out.String())
 			}
 		})
 	}
