@@ -49,25 +49,6 @@ func BenchmarkChatStreamMutation(b *testing.B) {
 	}
 }
 
-// BenchmarkChatStreamLegacyMutation reproduces the pre-change production
-// mutation path for the acceptance-critical and short-response comparisons.
-func BenchmarkChatStreamLegacyMutation(b *testing.B) {
-	for _, responseKiB := range []int{4, 64} {
-		b.Run(fmt.Sprintf("entries=500/response=%dKiB/chunk=32B", responseKiB), func(b *testing.B) {
-			responseBytes := responseKiB * 1024
-			chunk := strings.Repeat("x", 32)
-			b.ReportAllocs()
-			b.SetBytes(int64(responseBytes))
-			for i := 0; i < b.N; i++ {
-				m := streamBenchmarkModel(500)
-				for remaining := responseBytes; remaining > 0; remaining -= len(chunk) {
-					legacyUpdateChatStreamOutput(&m, chunk)
-				}
-			}
-		})
-	}
-}
-
 // BenchmarkChatStreamUpdateLatencyP95 measures the user-visible transcript
 // update itself. Delta ingestion is intentionally outside each sample; every
 // recorded duration includes Model.Update, styling/wrapping, cache replacement,
@@ -145,16 +126,4 @@ func renderBenchmarkStream(m Model) Model {
 		execID:           "exec-1",
 	})
 	return next.(Model)
-}
-
-func legacyUpdateChatStreamOutput(m *Model, delta string) {
-	m.chatStreamOutput += delta
-	m.chatStreamOffset += len(delta)
-	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
-		m.log[m.chatStreamLogIndex].text = m.chatStreamOutput
-		m.refreshTranscript()
-		return
-	}
-	m.appendTranscriptEntry(entry{role: "agent", text: m.chatStreamOutput})
-	m.chatStreamLogIndex = len(m.log) - 1
 }

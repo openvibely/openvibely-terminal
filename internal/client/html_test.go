@@ -784,9 +784,6 @@ func TestHTMXMutationPathsHandleAPIErrorsAndTransportFailures(t *testing.T) {
 // Run with: go test -bench=. -benchmem ./internal/client/
 //
 // BenchmarkGetHTML exercises the full getHTML path with bytes.NewReader.
-// BenchmarkStringReaderOld and BenchmarkBytesReaderNew isolate the specific
-// allocation difference between the old and new patterns, so the reduction
-// is visible without a separate before/after binary.
 // ---------------------------------------------------------------------------
 
 // BenchmarkGetHTML measures the allocation profile of a complete getHTML call.
@@ -905,23 +902,8 @@ func TestDedupedCardsWithoutTextSkipsNodeText(t *testing.T) {
 	}
 }
 
-// BenchmarkStringReaderOld isolates the old extra-copy pattern:
-// string(body) allocates a full N-byte copy; strings.NewReader wraps it.
-// This is what each HTML fetch cost before the fix.
-func BenchmarkStringReaderOld(b *testing.B) {
-	const bodySize = 16 * 1024
-	body := []byte(strings.Repeat("x", bodySize))
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		r := strings.NewReader(string(body)) // 1 alloc: copies bodySize bytes
-		_ = r
-	}
-}
-
-// BenchmarkBytesReaderNew isolates the new zero-copy pattern:
-// bytes.NewReader wraps the existing slice with no allocation.
-func BenchmarkBytesReaderNew(b *testing.B) {
+// BenchmarkBytesReader measures the zero-copy reader used by getHTML.
+func BenchmarkBytesReader(b *testing.B) {
 	const bodySize = 16 * 1024
 	body := []byte(strings.Repeat("x", bodySize))
 	b.ResetTimer()

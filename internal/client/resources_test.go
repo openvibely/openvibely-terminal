@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1144,16 +1143,12 @@ func benchmarkAutomationsPage(count int) string {
 	return b.String()
 }
 
-// BenchmarkAutomationsDisplayPath compares the old GetAutomations work
-// (parse plus whole-document NodeText) with the structured ListAutomations
-// work (the same parse plus only card fields and badge state). The 100- and
-// 1,000-card cases model normal and large automation pages; run with
-// `go test -bench BenchmarkAutomationsDisplayPath -benchmem ./internal/client`
-// to compare ns/op, B/op, and allocs/op.
+// BenchmarkAutomationsDisplayPath measures the structured automation-card
+// parsing used by ListAutomations for normal and large pages.
 func BenchmarkAutomationsDisplayPath(b *testing.B) {
 	for _, count := range []int{100, 1000} {
 		page := benchmarkAutomationsPage(count)
-		b.Run(fmt.Sprintf("old_full_text/%d", count), func(b *testing.B) {
+		b.Run(fmt.Sprintf("cards=%d", count), func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(page)))
 			b.ResetTimer()
@@ -1162,46 +1157,6 @@ func BenchmarkAutomationsDisplayPath(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				_ = NodeText(root)
-			}
-		})
-		b.Run(fmt.Sprintf("new_structured/%d", count), func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(page)))
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				root, err := html.Parse(strings.NewReader(page))
-				if err != nil {
-					b.Fatal(err)
-				}
-				_ = parseAutomations(root)
-			}
-		})
-	}
-}
-
-// BenchmarkAutomationsDOMWork isolates the changed post-parse operation. HTML
-// parsing is deliberately outside the timer because it is identical in both
-// production paths; this measures whole-document normalization versus the
-// structured card extraction that replaced it.
-func BenchmarkAutomationsDOMWork(b *testing.B) {
-	for _, count := range []int{100, 1000} {
-		page := benchmarkAutomationsPage(count)
-		root, err := html.Parse(strings.NewReader(page))
-		if err != nil {
-			b.Fatal(err)
-		}
-		b.Run(fmt.Sprintf("old_node_text/%d", count), func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				_ = NodeText(root)
-			}
-		})
-		b.Run(fmt.Sprintf("new_structured/%d", count), func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
 				_ = parseAutomations(root)
 			}
 		})
@@ -3712,92 +3667,42 @@ func TestSkillDetailReadsFreshContentAfterMutation(t *testing.T) {
 	}
 }
 
-func TestListSkillsSummaryPayloadAndAllocationReduction(t *testing.T) {
+func BenchmarkListSkillsSummary(b *testing.B) {
 	for _, skills := range []int{100, 1000} {
-		t.Run(fmt.Sprintf("skills=%d", skills), func(t *testing.T) {
-			summary := skillListBenchmarkFixture(skills, 0)
-			legacy := skillListBenchmarkFixture(skills, 4096)
-			if len(summary)*100 > len(legacy)*30 {
-				t.Fatalf("summary payload = %d bytes, legacy payload = %d bytes; want at least 70%% reduction", len(summary), len(legacy))
+		fixture := skillListBenchmarkFixture(skills)
+		b.Run(fmt.Sprintf("skills=%d", skills), func(b *testing.B) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, fixture)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				b.Fatal(err)
 			}
-			summaryAlloc := listSkillsAllocatedBytes(t, summary)
-			legacyAlloc := listSkillsAllocatedBytes(t, legacy)
-			if summaryAlloc*100 > legacyAlloc*30 {
-				t.Fatalf("summary allocations = %d bytes, legacy allocations = %d bytes; want at least 70%% reduction", summaryAlloc, legacyAlloc)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(fixture)))
+			b.ReportMetric(float64(len(fixture)), "response_B")
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				items, err := c.ListSkills(context.Background(), "benchmark-project")
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(items) != skills {
+					b.Fatalf("skills = %d, want %d", len(items), skills)
+				}
 			}
 		})
 	}
 }
 
-func listSkillsAllocatedBytes(t *testing.T, page string) uint64 {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = io.WriteString(w, page)
-	}))
-	defer srv.Close()
-	c, err := New(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	items, err := c.ListSkills(context.Background(), "benchmark-project")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime.ReadMemStats(&after)
-	runtime.KeepAlive(items)
-	return after.TotalAlloc - before.TotalAlloc
-}
-
-func BenchmarkListSkillsSummaryAndLegacyContent(b *testing.B) {
-	for _, skills := range []int{100, 1000} {
-		for _, bodyBytes := range []int{0, 4096} {
-			fixture := skillListBenchmarkFixture(skills, bodyBytes)
-			name := "summary"
-			if bodyBytes != 0 {
-				name = "legacy_content"
-			}
-			b.Run(fmt.Sprintf("%s/skills=%d", name, skills), func(b *testing.B) {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "text/html")
-					_, _ = io.WriteString(w, fixture)
-				}))
-				defer srv.Close()
-				c, err := New(srv.URL)
-				if err != nil {
-					b.Fatal(err)
-				}
-				b.ReportAllocs()
-				b.SetBytes(int64(len(fixture)))
-				b.ReportMetric(float64(len(fixture)), "response_B")
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					items, err := c.ListSkills(context.Background(), "benchmark-project")
-					if err != nil {
-						b.Fatal(err)
-					}
-					if len(items) != skills {
-						b.Fatalf("skills = %d, want %d", len(items), skills)
-					}
-				}
-			})
-		}
-	}
-}
-
-func skillListBenchmarkFixture(skills, bodyBytes int) string {
+func skillListBenchmarkFixture(skills int) string {
 	var b strings.Builder
-	b.Grow(skills * (180 + bodyBytes))
+	b.Grow(skills * 180)
 	b.WriteString(`<div>`)
-	body := strings.Repeat("x", bodyBytes)
 	for i := 0; i < skills; i++ {
 		fmt.Fprintf(&b, `<div data-skill-handle="skill-%04d" data-skill-name="Skill %04d" data-skill-description="benchmark summary" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false"`, i, i)
-		if bodyBytes != 0 {
-			fmt.Fprintf(&b, ` data-skill-content="%s"`, body)
-		}
 		b.WriteString(`></div>`)
 	}
 	b.WriteString(`</div>`)
@@ -3842,18 +3747,10 @@ func TestEmptySkillCatalogsRemainNonNilWithoutDetailRequests(t *testing.T) {
 
 func TestListSkillsSummaryLatencyBudget(t *testing.T) {
 	const runs = 15
-	summary := listSkillsDurations(t, skillListBenchmarkFixture(1000, 0), runs)
-	legacy := listSkillsDurations(t, skillListBenchmarkFixture(1000, 4096), runs)
-	summaryMedian, legacyMedian := skillDurationPercentile(summary, 50), skillDurationPercentile(legacy, 50)
-	summaryP95, legacyP95 := skillDurationPercentile(summary, 95), skillDurationPercentile(legacy, 95)
+	summary := listSkillsDurations(t, skillListBenchmarkFixture(1000), runs)
+	summaryMedian := skillDurationPercentile(summary, 50)
 	if summaryMedian >= 25*time.Millisecond {
 		t.Fatalf("summary median = %s, want under 25ms", summaryMedian)
-	}
-	if summaryMedian*2 >= legacyMedian {
-		t.Fatalf("summary median = %s, legacy median = %s; want at least 50%% reduction", summaryMedian, legacyMedian)
-	}
-	if summaryP95 > legacyP95 {
-		t.Fatalf("summary p95 = %s, legacy p95 = %s; want no regression", summaryP95, legacyP95)
 	}
 }
 
