@@ -8678,7 +8678,11 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 		if projectID == "" {
 			projectID = "p1"
 		}
-		fmt.Fprintf(&b, `<div data-project-id="%s"><div>`, projectID)
+		if provider == "x" {
+			b.WriteString(`<div><div>`)
+		} else {
+			fmt.Fprintf(&b, `<div data-project-id="%s"><div>`, projectID)
+		}
 		switch provider {
 		case "telegram":
 			fmt.Fprintf(&b, `<span class="text-sm font-medium">%s</span><span class="text-xs opacity-50">@%s</span><span class="text-xs opacity-50">ID: 987</span>`, row.name, strings.TrimPrefix(row.identity, "@"))
