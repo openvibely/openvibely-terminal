@@ -1991,11 +1991,9 @@ func (u ChannelAuthorizedUser) MatchesIdentity(value string) bool {
 
 // listXAuthorizedUsers parses the structured X settings representation. The
 // page-level project marker comes from the authorization form, while each row's
-// canonical ID and project binding come from its matching delete control. The
-// current web contract does not emit a redundant row data-* marker; when one
-// is present, it must agree with both structured bindings. Identity markers are
-// preferred, with the current web contract's dedicated username/ID spans as
-// the compatibility representation.
+// persisted canonical ID, project binding, numeric identity, and optional
+// username come from explicit data-* markers on that row. The canonical delete
+// control must agree with the persisted row ID and project binding.
 func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser, error) {
 	container := findByID(root, "x_config_modal")
 	if container == nil {
@@ -2029,20 +2027,17 @@ func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser,
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		row := button.Parent
-		if recordID, hasRecordID := xAuthorizationRecordID(row, container); hasRecordID && recordID != id {
+		recordID, hasRecordID, markerErr := xAuthorizationMarker(row, container, "data-x-authorized-user-id", "data-x-authorization-id")
+		if markerErr != nil || !hasRecordID || recordID != id {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
-		rowProjectID, hasRowProject := xAuthorizationRowProject(row, container)
-		if hasRowProject && rowProjectID != projectID {
+		rowProjectID, hasRowProject, markerErr := xAuthorizationMarker(row, container, "data-x-authorized-project-id", "data-project-id")
+		if markerErr != nil || !hasRowProject || rowProjectID != projectID {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
-		xUserID, username, hasStructuredIdentity := xAuthorizationData(row, container)
-		if !hasStructuredIdentity {
-			var identityErr error
-			xUserID, username, identityErr = xAuthorizationSpans(row)
-			if identityErr != nil {
-				return nil, errors.New("authorized channel access list unavailable")
-			}
+		xUserID, username, hasStructuredIdentity, identityErr := xAuthorizationData(row, container)
+		if identityErr != nil || !hasStructuredIdentity {
+			return nil, errors.New("authorized channel access list unavailable")
 		}
 		xUserID, err = normalizeXAuthorizedUserID(xUserID)
 		if err != nil {
@@ -2090,75 +2085,45 @@ func xAuthorizationDeleteTarget(raw, route, projectID string) (string, error) {
 	return id, nil
 }
 
-func xAuthorizationRecordID(row, container *html.Node) (string, bool) {
+func xAuthorizationMarker(row, container *html.Node, names ...string) (string, bool, error) {
+	var value string
+	found := false
 	for node := row; node != nil && node != container; node = node.Parent {
-		for _, name := range []string{"data-x-authorized-user-id", "data-x-authorization-id"} {
-			if hasHTMLAttr(node, name) {
-				return strings.TrimSpace(attr(node, name)), true
+		for _, name := range names {
+			if !hasHTMLAttr(node, name) {
+				continue
 			}
+			candidate := strings.TrimSpace(attr(node, name))
+			if candidate == "" || found {
+				return "", false, errors.New("duplicate or missing X authorization marker")
+			}
+			value = candidate
+			found = true
 		}
 	}
-	return "", false
+	return value, found, nil
 }
 
-func xAuthorizationRowProject(row, container *html.Node) (string, bool) {
-	for node := row; node != nil && node != container; node = node.Parent {
-		for _, name := range []string{"data-x-authorized-project-id", "data-project-id"} {
-			if hasHTMLAttr(node, name) {
-				return strings.TrimSpace(attr(node, name)), true
-			}
-		}
-	}
-	return "", false
-}
-
-func xAuthorizationData(row, container *html.Node) (xUserID, username string, complete bool) {
+func xAuthorizationData(row, container *html.Node) (xUserID, username string, complete bool, err error) {
 	var hasID, hasUsername bool
 	for node := row; node != nil && node != container; node = node.Parent {
-		if !hasID {
-			for _, name := range []string{"data-x-user-id"} {
-				if hasHTMLAttr(node, name) {
-					xUserID, hasID = strings.TrimSpace(attr(node, name)), true
-					break
-				}
+		if hasHTMLAttr(node, "data-x-user-id") {
+			if hasID {
+				return "", "", false, errors.New("duplicate X user ID")
+			}
+			xUserID, hasID = strings.TrimSpace(attr(node, "data-x-user-id")), true
+			if xUserID == "" {
+				return "", "", false, errors.New("missing X user ID")
 			}
 		}
-		if !hasUsername && hasHTMLAttr(node, "data-x-username") {
+		if hasHTMLAttr(node, "data-x-username") {
+			if hasUsername {
+				return "", "", false, errors.New("duplicate X username")
+			}
 			username, hasUsername = strings.TrimSpace(attr(node, "data-x-username")), true
 		}
 	}
-	return xUserID, username, hasID
-}
-
-func xAuthorizationSpans(row *html.Node) (xUserID, username string, err error) {
-	for _, span := range findAll(row, func(n *html.Node) bool {
-		if n.Data != "span" {
-			return false
-		}
-		return findNode(n, func(child *html.Node) bool {
-			return child != n && child.Data == "span"
-		}) == nil
-	}) {
-		value := strings.TrimSpace(NodeText(span))
-		if strings.HasPrefix(value, "ID ") || strings.HasPrefix(value, "ID:") {
-			candidate := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(value, "ID "), "ID:"))
-			if xUserID != "" || candidate == "" {
-				return "", "", errors.New("duplicate or missing X user ID")
-			}
-			xUserID = candidate
-			continue
-		}
-		if strings.HasPrefix(value, "@") {
-			if username != "" {
-				return "", "", errors.New("duplicate X username")
-			}
-			username = value
-		}
-	}
-	if xUserID == "" {
-		return "", "", errors.New("missing X user ID")
-	}
-	return xUserID, username, nil
+	return xUserID, username, hasID, nil
 }
 
 func normalizeXAuthorizedUserID(value string) (string, error) {

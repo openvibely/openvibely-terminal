@@ -8679,7 +8679,7 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 			projectID = "p1"
 		}
 		if provider == "x" {
-			b.WriteString(`<div><div>`)
+			fmt.Fprintf(&b, `<div data-x-authorized-user-id="%s" data-x-authorized-project-id="%s" data-x-user-id="%s" data-x-username="%s"><div>`, row.id, projectID, row.identity, strings.TrimPrefix(row.name, "@"))
 		} else {
 			fmt.Fprintf(&b, `<div data-project-id="%s"><div>`, projectID)
 		}
