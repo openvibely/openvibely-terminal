@@ -174,6 +174,67 @@ func TestListAlertsTraversesPagesInStableScopedOrder(t *testing.T) {
 	}
 }
 
+func TestListAlertsWithFilterPreservesPredicatesAcrossPages(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		q := r.URL.Query()
+		if r.URL.Path != "/alerts" || q.Get("project_id") != "project-2" || q.Get("decision_state") != "pending" || q.Get("processing_state") != "unclaimed" {
+			t.Errorf("filtered request = %s", r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if requests == 1 {
+			if q.Get("card_page") != "" {
+				t.Errorf("initial request unexpectedly used continuation parameters: %s", r.URL.RequestURI())
+			}
+			_, _ = io.WriteString(w, alertListPage([]string{"a-first"}, true))
+			return
+		}
+		if q.Get("card_page") != "1" || q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "1" {
+			t.Errorf("continuation query = %s", r.URL.RawQuery)
+		}
+		w.Header().Set(cardPageMoreHeader, "false")
+		_, _ = io.WriteString(w, alertListPage([]string{"a-later"}, false))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := c.ListAlertsWithFilter(context.Background(), "project-2", AlertListFilter{
+		DecisionState:   "pending",
+		ProcessingState: "unclaimed",
+	})
+	if err != nil {
+		t.Fatalf("ListAlertsWithFilter: %v", err)
+	}
+	if got := []string{alerts[0].ID, alerts[1].ID}; !reflect.DeepEqual(got, []string{"a-first", "a-later"}) {
+		t.Fatalf("alert order = %#v", got)
+	}
+	if requests != 2 {
+		t.Fatalf("requests = %d, want 2", requests)
+	}
+}
+
+func TestListAlertsWithFilterEmptyResultUsesStableJSONShape(t *testing.T) {
+	c := htmlServer(t, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"></div>`)
+	alerts, err := c.ListAlertsWithFilter(context.Background(), "p1", AlertListFilter{DecisionState: "dismissed"})
+	if err != nil {
+		t.Fatalf("ListAlertsWithFilter: %v", err)
+	}
+	if alerts == nil || len(alerts) != 0 {
+		t.Fatalf("alerts = %#v, want non-nil empty slice", alerts)
+	}
+	encoded, err := json.Marshal(alerts)
+	if err != nil {
+		t.Fatalf("marshal alerts: %v", err)
+	}
+	if string(encoded) != "[]" {
+		t.Fatalf("empty JSON = %s, want []", encoded)
+	}
+}
+
 func TestFindAlertByIDStopsOnMatchingPageBoundaries(t *testing.T) {
 	const total = 151
 	ids := make([]string, total)

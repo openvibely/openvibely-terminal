@@ -817,6 +817,9 @@ func TestAlertsShowHelpAndCompletion(t *testing.T) {
 	}
 	help := renderCommandHelp(*cmd)
 	for _, want := range []string{
+		"/alerts list [filter] --decision-state <state> [--processing-state <state>]",
+		"decision states: pending, approved, rejected, dismissed",
+		"processing states: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed",
 		"/alerts show <id|title>",
 		"inspect full alert context",
 		"/alerts read-bulk <id|title>...",
@@ -826,6 +829,65 @@ func TestAlertsShowHelpAndCompletion(t *testing.T) {
 		if !strings.Contains(help, want) {
 			t.Fatalf("alerts help missing %q:\n%s", want, help)
 		}
+	}
+}
+
+func TestParseAlertListArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantFilter client.AlertListFilter
+		wantText   string
+		wantErr    string
+	}{
+		{
+			name:       "combined exact predicates",
+			args:       []string{"--decision-state", "pending", "--processing-state=unclaimed"},
+			wantFilter: client.AlertListFilter{DecisionState: "pending", ProcessingState: "unclaimed"},
+		},
+		{
+			name:     "state words remain free text",
+			args:     []string{"approved", "deployment"},
+			wantText: "approved deployment",
+		},
+		{
+			name:    "invalid decision state",
+			args:    []string{"--decision-state", "not_required"},
+			wantErr: "valid values: pending, approved, rejected, dismissed",
+		},
+		{
+			name:    "missing processing state",
+			args:    []string{"--processing-state"},
+			wantErr: "--processing-state requires a value",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filter, text, err := parseAlertListArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parse error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseAlertListArgs: %v", err)
+			}
+			if !reflect.DeepEqual(filter, tt.wantFilter) || text != tt.wantText {
+				t.Fatalf("parsed filter=%+v text=%q, want %+v and %q", filter, text, tt.wantFilter, tt.wantText)
+			}
+		})
+	}
+	for _, state := range []string{"pending", "approved", "rejected", "dismissed"} {
+		t.Run("accepted decision state "+state, func(t *testing.T) {
+			filter, text, err := parseAlertListArgs([]string{"--decision-state", state})
+			if err != nil {
+				t.Fatalf("parseAlertListArgs: %v", err)
+			}
+			if filter.DecisionState != state || filter.ProcessingState != "" || text != "" {
+				t.Fatalf("parsed filter=%+v text=%q", filter, text)
+			}
+		})
 	}
 }
 

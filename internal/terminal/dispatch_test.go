@@ -7287,6 +7287,102 @@ func TestTasksActivateSweepClear(t *testing.T) {
 	})
 }
 
+func TestAlertsWorkflowStatusFilters(t *testing.T) {
+	t.Run("combined predicates preserve project scope and later page", func(t *testing.T) {
+		requests := 0
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/alerts" {
+				http.NotFound(w, r)
+				return
+			}
+			requests++
+			q := r.URL.Query()
+			if q.Get("project_id") != "p-filter" || q.Get("decision_state") != "pending" || q.Get("processing_state") != "unclaimed" {
+				t.Errorf("filtered request = %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			if requests == 1 {
+				_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true"><div data-alert-id="first" data-alert-scroll-anchor="first"><p class="font-semibold">First pending alert</p></div></div>`)
+				return
+			}
+			if q.Get("card_page") != "1" || q.Get("page") != "1" || q.Get("page_size") != "50" || q.Get("offset") != "1" {
+				t.Errorf("continuation query = %s", r.URL.RawQuery)
+			}
+			w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="later" data-alert-scroll-anchor="later"><p class="font-semibold">Later pending alert</p></div></div>`)
+		})
+		m.selectedID, m.selectedName = "p-filter", "filter demo"
+		m = runLine(t, m, "/alerts list --decision-state pending --processing-state unclaimed")
+		if out := stripANSI(transcript(m)); !strings.Contains(out, "First pending alert") || !strings.Contains(out, "Later pending alert") {
+			t.Fatalf("filtered output = %s", out)
+		}
+		if requests != 2 {
+			t.Fatalf("requests = %d, want 2", requests)
+		}
+	})
+
+	t.Run("state words remain free text", func(t *testing.T) {
+		requests := 0
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/alerts" {
+				http.NotFound(w, r)
+				return
+			}
+			requests++
+			if q := r.URL.Query(); q.Get("project_id") != "p-filter" || q.Get("decision_state") != "" || q.Get("processing_state") != "" {
+				t.Errorf("free-text request unexpectedly used workflow predicates: %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div data-alert-id="text-match" data-alert-scroll-anchor="text-match" data-search-text="approved deployment notice"><p class="font-semibold">Deployment notice</p></div><div data-alert-id="other" data-alert-scroll-anchor="other" data-search-text="waiting on review"><p class="font-semibold">Other alert</p></div>`)
+		})
+		m.selectedID, m.selectedName = "p-filter", "filter demo"
+		m = runLine(t, m, "/alerts approved")
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "Deployment notice") || strings.Contains(out, "Other alert") {
+			t.Fatalf("free-text output = %s", out)
+		}
+		if requests != 1 {
+			t.Fatalf("requests = %d, want 1", requests)
+		}
+	})
+
+	t.Run("empty predicate result is explicit", func(t *testing.T) {
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/alerts" {
+				http.NotFound(w, r)
+				return
+			}
+			q := r.URL.Query()
+			if q.Get("project_id") != "p-filter" || q.Get("decision_state") != "dismissed" {
+				t.Errorf("empty filtered request = %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"></div>`)
+		})
+		m.selectedID, m.selectedName = "p-filter", "filter demo"
+		m = runLine(t, m, "/alerts list --decision-state dismissed")
+		if out := stripANSI(transcript(m)); !strings.Contains(out, "no alerts match decision_state=dismissed") {
+			t.Fatalf("empty filtered output = %s", out)
+		}
+	})
+
+	t.Run("invalid predicates make no request", func(t *testing.T) {
+		requests := 0
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			http.NotFound(w, r)
+		})
+		m.selectedID = "p-filter"
+		m = runLine(t, m, "/alerts list --decision-state not_required")
+		if out := stripANSI(transcript(m)); !strings.Contains(out, "valid values: pending, approved, rejected, dismissed") {
+			t.Fatalf("invalid predicate output = %s", out)
+		}
+		if requests != 0 {
+			t.Fatalf("invalid predicate sent %d requests", requests)
+		}
+	})
+}
+
 func TestAlertsLaterPageInteractiveCommands(t *testing.T) {
 	tests := []struct {
 		name        string

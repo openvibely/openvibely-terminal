@@ -166,6 +166,8 @@ Commands take a resource, an optional action, and arguments:
 
 ```
 /alerts                       list alerts
+/alerts list --decision-state pending --processing-state unclaimed
+/alerts "approved deployment" # free-text matching, not a workflow predicate
 /alerts show a1b2             inspect full body and metadata
 /alerts delete a1b2           delete one
 /alerts read-bulk a1b2 "Release approval"     mark selected alerts read
@@ -188,6 +190,17 @@ Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
 prefix or by a substring of their name/title** — `/tasks run refactor` works.
 Ambiguous references report the candidates instead of guessing.
 
+`/alerts list [filter] --decision-state <state> [--processing-state <state>]`
+uses exact backend workflow predicates on the selected project. Valid decision
+states are `pending`, `approved`, `rejected`, and `dismissed`; valid processing
+states are `not_applicable`, `unclaimed`, `claimed`,
+`implementation_task_linked`, `completed`, and `failed`. For example,
+`/alerts list --decision-state pending --processing-state unclaimed` isolates
+unclaimed approval work. The optional unflagged `[filter]` continues to be a
+separate case-insensitive free-text match against alert content: `/alerts
+approved deployment` searches those words and does not select the `approved`
+decision state.
+
 `/alerts read-bulk <id|title>...` and `/alerts delete-bulk <id|title>...`
 resolve every supplied reference within the selected project before making one
 atomic bulk request. Quote multiword titles. Repeating a reference, using an
@@ -196,7 +209,6 @@ fails without changing any alert. Read bulk refreshes the alert list; selective
 delete asks for `yes` interactively and requires `--force` headlessly. In
 `--json` mode the commands emit the returned count as `{"updated":n}` or
 `{"deleted":n}`.
-
 ## Commands
 
 Every screen in the OpenVibely web UI sidebar has a command.
@@ -627,6 +639,8 @@ openvibely-terminal -project demo agents votes step-exec-123 # inspect parallel 
 openvibely-terminal -project demo tasks attachments add refactor ./request.txt ./trace.json
 openvibely-terminal -project demo --force tasks attachments delete refactor att-123
 openvibely-terminal -project demo alerts               # list alerts
+openvibely-terminal -project demo alerts list --decision-state pending --processing-state unclaimed
+openvibely-terminal -project demo alerts "approved deployment" # free-text alert search
 openvibely-terminal -project demo alerts read-bulk a1b2 "Release approval"
 openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release approval"
 openvibely-terminal -project demo analytics usage      # one analytics section

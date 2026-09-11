@@ -80,13 +80,26 @@ type AlertInspection struct {
 	Detail  AlertDetail  `json:"detail"`
 }
 
-// ListAlerts scrapes the alerts screen for a project.
-//
-// An alert row renders its title in a <p class="font-semibold">, its message in
-// the following muted paragraph, and marks read rows with an "opacity-60" card
-// class.
+// AlertListFilter contains optional exact backend predicates for alert card lists.
+// Empty fields are omitted so callers can preserve the existing all-alert view.
+type AlertListFilter struct {
+	DecisionState   string
+	ProcessingState string
+}
+
+// ListAlerts scrapes every alert card for a project without workflow predicates.
 func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, error) {
-	pages, err := c.getCardPages(ctx, "/alerts"+query("project_id", projectID))
+	return c.ListAlertsWithFilter(ctx, projectID, AlertListFilter{})
+}
+
+// ListAlertsWithFilter scrapes alert cards for a project, optionally narrowed by
+// exact backend workflow predicates. Card pagination preserves all query values.
+func (c *Client) ListAlertsWithFilter(ctx context.Context, projectID string, filter AlertListFilter) ([]Alert, error) {
+	pages, err := c.getCardPages(ctx, "/alerts"+query(
+		"project_id", projectID,
+		"decision_state", filter.DecisionState,
+		"processing_state", filter.ProcessingState,
+	))
 	if err != nil {
 		return nil, err
 	}

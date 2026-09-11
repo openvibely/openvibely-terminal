@@ -1798,6 +1798,66 @@ func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error
 		sanitizeAlertDisplayText)
 }
 
+var validAlertDecisionStates = map[string]struct{}{
+	"pending": {}, "approved": {}, "rejected": {}, "dismissed": {},
+}
+
+var validAlertProcessingStates = map[string]struct{}{
+	"not_applicable": {}, "unclaimed": {}, "claimed": {},
+	"implementation_task_linked": {}, "completed": {}, "failed": {},
+}
+
+// parseAlertListArgs keeps free-text matching distinct from exact workflow
+// predicates. Only the documented flags are sent to the backend; all other
+// terms retain the existing client-side text-filter behavior.
+func parseAlertListArgs(args []string) (client.AlertListFilter, string, error) {
+	var filter client.AlertListFilter
+	text := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		name, value, matched := alertListOption(arg, "--decision-state")
+		if !matched {
+			name, value, matched = alertListOption(arg, "--processing-state")
+		}
+		if !matched {
+			text = append(text, arg)
+			continue
+		}
+		if value == "" {
+			if i+1 >= len(args) {
+				return client.AlertListFilter{}, "", fmt.Errorf("%s requires a value", name)
+			}
+			i++
+			value = args[i]
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		switch name {
+		case "--decision-state":
+			if _, ok := validAlertDecisionStates[value]; !ok {
+				return client.AlertListFilter{}, "", fmt.Errorf("invalid %s %q; valid values: pending, approved, rejected, dismissed", name, value)
+			}
+			filter.DecisionState = value
+		case "--processing-state":
+			if _, ok := validAlertProcessingStates[value]; !ok {
+				return client.AlertListFilter{}, "", fmt.Errorf("invalid %s %q; valid values: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed", name, value)
+			}
+			filter.ProcessingState = value
+		}
+	}
+	return filter, strings.Join(text, " "), nil
+}
+
+// alertListOption recognizes either "--name value" or "--name=value".
+func alertListOption(arg, name string) (option, value string, matched bool) {
+	if arg == name {
+		return name, "", true
+	}
+	if value, ok := strings.CutPrefix(arg, name+"="); ok {
+		return name, value, true
+	}
+	return "", "", false
+}
+
 func resolveAlertDeleteTarget(c *client.Client, projectID, ref string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
@@ -1898,7 +1958,10 @@ func alertsCommand() command {
 		selectorPaths: [][]string{{"show"}, {"read"}, {"approve"}, {"reject"}, {"dismiss"}, {"delete"}},
 		desc:          "notifications awaiting review",
 		usage: []string{
-			"alerts [filter]                            list alerts",
+			"alerts [filter]                            list alerts with optional free-text matching",
+			"alerts list [filter] --decision-state <state> [--processing-state <state>]",
+			"  decision states: pending, approved, rejected, dismissed",
+			"  processing states: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed",
 			"alerts show <alert>                         inspect full body and metadata",
 			"alerts read|approve|reject|dismiss <alert>",
 			"alerts read-bulk <id|title>...              mark selected alerts read",
@@ -1930,15 +1993,19 @@ func alertsCommand() command {
 
 			switch action {
 			case "", "list":
+				workflowFilter, textFilter, err := parseAlertListArgs(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
 				return m, run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
-					alerts, err := c.ListAlerts(ctx, pid)
+					alerts, err := c.ListAlertsWithFilter(ctx, pid, workflowFilter)
 					if err != nil {
 						return "", err
 					}
 					if jsonMode {
 						return marshalJSON(alerts)
 					}
-					return renderAlerts(alerts, ref), nil
+					return renderAlertsWithWorkflowFilter(alerts, textFilter, workflowFilter), nil
 				})
 			case "show":
 				if ref == "" {

@@ -82,11 +82,19 @@ Common commands include:
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/help <command>` | Show complete command syntax |
 
-Mark or remove selected alerts by supplying one or more IDs or quoted titles. Bulk
-removal follows the normal confirmation safety rule and needs `--force` in
+Mark or remove selected alerts by supplying one or more IDs or quoted titles. To
+inspect an exact workflow queue, add `--decision-state` and optionally
+`--processing-state` after `alerts list`; these are backend predicates, while
+unflagged alert terms remain free-text matching. Decision states are `pending`,
+`approved`, `rejected`, and `dismissed`. Processing states are `not_applicable`,
+`unclaimed`, `claimed`, `implementation_task_linked`, `completed`, and `failed`.
+Bulk removal follows the normal confirmation safety rule and needs `--force` in
 one-shot CLI mode:
 
 ```bash
+/alerts list --decision-state pending --processing-state unclaimed
+/alerts "approved deployment"                    # free-text, not a state predicate
+openvibely-terminal -project demo alerts list --decision-state approved
 /alerts read-bulk a1b2 "Release approval"
 /alerts delete-bulk a1b2 "Release approval"
 openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release approval"

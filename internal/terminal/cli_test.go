@@ -4521,6 +4521,88 @@ func TestCLIAlertsDeleteResolutionAndBackendErrors(t *testing.T) {
 	})
 }
 
+func TestCLIAlertsWorkflowStatusFilterOutput(t *testing.T) {
+	t.Run("plain output includes later filtered page", func(t *testing.T) {
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/alerts":
+				requests++
+				q := r.URL.Query()
+				if q.Get("project_id") != "p1" || q.Get("decision_state") != "pending" || q.Get("processing_state") != "unclaimed" {
+					t.Errorf("filtered request = %s", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				if requests == 1 {
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true"><div data-alert-id="first" data-alert-scroll-anchor="first"><p class="font-semibold">First queued alert</p></div></div>`)
+					return
+				}
+				if q.Get("card_page") != "1" || q.Get("offset") != "1" {
+					t.Errorf("continuation query = %s", r.URL.RawQuery)
+				}
+				w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+				_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="later" data-alert-scroll-anchor="later"><p class="font-semibold">Later queued alert</p></div></div>`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"alerts", "list", "--decision-state", "pending", "--processing-state", "unclaimed"}, false, false); err != nil {
+			t.Fatalf("filtered alerts: %v", err)
+		}
+		plain := stripANSI(out.String())
+		if !strings.Contains(plain, "First queued alert") || !strings.Contains(plain, "Later queued alert") {
+			t.Fatalf("plain output = %s", plain)
+		}
+		if requests != 2 {
+			t.Fatalf("requests = %d, want 2", requests)
+		}
+	})
+
+	t.Run("empty JSON remains an array", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/alerts":
+				q := r.URL.Query()
+				if q.Get("project_id") != "p1" || q.Get("decision_state") != "dismissed" || q.Get("processing_state") != "completed" {
+					t.Errorf("empty filtered request = %s", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"></div>`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"alerts", "list", "--decision-state=dismissed", "--processing-state", "completed"}, false, true); err != nil {
+			t.Fatalf("filtered JSON alerts: %v", err)
+		}
+		if got := strings.TrimSpace(out.String()); got != "[]" {
+			t.Fatalf("empty JSON output = %q, want []", got)
+		}
+		var alerts []client.Alert
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &alerts); err != nil || alerts == nil || len(alerts) != 0 {
+			t.Fatalf("empty JSON decode = %#v, %v", alerts, err)
+		}
+	})
+}
+
 func TestCLIJSONAlertsList(t *testing.T) {
 	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="1" data-search-text="bug pending">
 		<p class="font-semibold">Login broken</p>

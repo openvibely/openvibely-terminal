@@ -2899,10 +2899,14 @@ func sanitizeAlertDisplayText(value string) string {
 }
 
 func renderAlerts(alerts []client.Alert, filter string) string {
+	return renderAlertsWithWorkflowFilter(alerts, filter, client.AlertListFilter{})
+}
+
+func renderAlertsWithWorkflowFilter(alerts []client.Alert, textFilter string, workflowFilter client.AlertListFilter) string {
 	rows := [][]string{{"ID", "", "ALERT", "STATE"}}
 	unread := 0
 	for _, a := range alerts {
-		if !filterMatch(filter, a.Title, a.Text, a.Message, a.ID) {
+		if !filterMatch(textFilter, a.Title, a.Text, a.Message, a.ID) {
 			continue
 		}
 		mark := noticeStyle.Render("●") // unread
@@ -2918,7 +2922,7 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 		rows = append(rows, []string{shortID(a.ID), mark, title, renderBadges(a.Badges)})
 	}
 	if len(rows) == 1 {
-		if filter != "" {
+		if filter := alertListFilterDescription(textFilter, workflowFilter); filter != "" {
 			return dimStyle.Render("no alerts match " + filter)
 		}
 		return dimStyle.Render("no alerts — /alerts approve|reject|dismiss <id> acts on pending ones")
@@ -2929,6 +2933,20 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 	}
 	return out + "\n\n" +
 		dimStyle.Render("/alerts read-bulk|delete-bulk <id|title>... · /alerts read-all")
+}
+
+func alertListFilterDescription(textFilter string, workflowFilter client.AlertListFilter) string {
+	parts := make([]string, 0, 3)
+	if textFilter != "" {
+		parts = append(parts, textFilter)
+	}
+	if workflowFilter.DecisionState != "" {
+		parts = append(parts, "decision_state="+workflowFilter.DecisionState)
+	}
+	if workflowFilter.ProcessingState != "" {
+		parts = append(parts, "processing_state="+workflowFilter.ProcessingState)
+	}
+	return strings.Join(parts, " ")
 }
 
 // --- personalities ---
