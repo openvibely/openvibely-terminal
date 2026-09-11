@@ -1014,15 +1014,45 @@ func (c *Client) SendTaskThreadMessage(ctx context.Context, taskID, message stri
 
 // SetTaskGoal sets a task's completion goal.
 func (c *Client) SetTaskGoal(ctx context.Context, taskID, objective string) error {
+	return c.SetTaskGoalForProject(ctx, taskID, "", objective)
+}
+
+// SetTaskGoalForProject sets a task's completion goal in the selected project.
+func (c *Client) SetTaskGoalForProject(ctx context.Context, taskID, projectID, objective string) error {
 	v := url.Values{}
 	v.Set("objective", objective)
 	v.Set("goal", objective)
-	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/goal", v)
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/goal"+query("project_id", projectID), v)
 }
 
 // ClearTaskGoal removes a task's goal.
 func (c *Client) ClearTaskGoal(ctx context.Context, taskID string) error {
-	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/goal/clear", nil)
+	return c.ClearTaskGoalForProject(ctx, taskID, "")
+}
+
+// ClearTaskGoalForProject removes a task's goal from the selected project.
+func (c *Client) ClearTaskGoalForProject(ctx context.Context, taskID, projectID string) error {
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/goal/clear"+query("project_id", projectID), nil)
+}
+
+// PauseTaskGoal pauses a task's completion goal.
+func (c *Client) PauseTaskGoal(ctx context.Context, taskID string) error {
+	return c.PauseTaskGoalForProject(ctx, taskID, "")
+}
+
+// PauseTaskGoalForProject pauses a task's completion goal in the selected project.
+func (c *Client) PauseTaskGoalForProject(ctx context.Context, taskID, projectID string) error {
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/goal/pause"+query("project_id", projectID), nil)
+}
+
+// ResumeTaskGoal resumes a task's completion goal.
+func (c *Client) ResumeTaskGoal(ctx context.Context, taskID string) error {
+	return c.ResumeTaskGoalForProject(ctx, taskID, "")
+}
+
+// ResumeTaskGoalForProject resumes a task's completion goal in the selected project.
+func (c *Client) ResumeTaskGoalForProject(ctx context.Context, taskID, projectID string) error {
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/goal/resume"+query("project_id", projectID), nil)
 }
 
 // SweepCompletedTasks moves finished active tasks into the completed column.

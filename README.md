@@ -47,6 +47,9 @@ Interactive input is either a chat message or a slash command:
 summarize the current project
 /tasks
 /tasks show refactor
+/tasks goal refactor | all tests pass
+/tasks goal pause refactor
+/tasks goal resume refactor
 /automations show "Nightly sweep"
 /status
 /help tasks
@@ -60,6 +63,7 @@ For one-shot CLI use, omit the leading slash:
 ```bash
 openvibely-terminal tasks
 openvibely-terminal -project demo tasks show refactor
+openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo chat "summarize the current project"
 openvibely-terminal --json -project demo automations list
 ```
@@ -71,7 +75,7 @@ Common commands include:
 
 | Command | Purpose |
 |---|---|
-| `/tasks` | Inspect and manage tasks and task threads |
+| `/tasks` | Inspect and manage tasks, threads, and completion goals. Use `tasks goal <task> | <objective>` to set one, `tasks goal <task> | clear` to remove it, and `tasks goal pause <task>` or `tasks goal resume <task>` to preserve its objective while changing its lifecycle state. |
 | `/alerts` | Review alerts, including selected bulk read/delete actions |
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |

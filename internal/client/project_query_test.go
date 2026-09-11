@@ -17,6 +17,10 @@ func TestProjectQueryAcrossJSONLifecycleAndHTMLCalls(t *testing.T) {
 		"GET /api/tasks/task%2Fone/lifecycle-executions?" + encodedProject,
 		"GET /api/lifecycle-executions/exec%2Fone/events?" + encodedProject,
 		"GET /tasks?" + encodedProject,
+		"POST /tasks/task%2Fone/goal?" + encodedProject,
+		"POST /tasks/task%2Fone/goal/clear?" + encodedProject,
+		"POST /tasks/task%2Fone/goal/pause?" + encodedProject,
+		"POST /tasks/task%2Fone/goal/resume?" + encodedProject,
 		"POST /tasks/move-completed?" + encodedProject,
 	}
 	var gotRequests []string
@@ -32,7 +36,11 @@ func TestProjectQueryAcrossJSONLifecycleAndHTMLCalls(t *testing.T) {
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<html><body></body></html>`))
-		case "/tasks/move-completed":
+		case "/tasks/move-completed",
+			"/tasks/task/one/goal",
+			"/tasks/task/one/goal/clear",
+			"/tasks/task/one/goal/pause",
+			"/tasks/task/one/goal/resume":
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.NotFound(w, r)
@@ -54,6 +62,18 @@ func TestProjectQueryAcrossJSONLifecycleAndHTMLCalls(t *testing.T) {
 	}
 	if _, err := c.ListTasks(ctx, projectID); err != nil {
 		t.Fatalf("ListTasks: %v", err)
+	}
+	if err := c.SetTaskGoalForProject(ctx, "task/one", projectID, "finish safely"); err != nil {
+		t.Fatalf("SetTaskGoalForProject: %v", err)
+	}
+	if err := c.ClearTaskGoalForProject(ctx, "task/one", projectID); err != nil {
+		t.Fatalf("ClearTaskGoalForProject: %v", err)
+	}
+	if err := c.PauseTaskGoalForProject(ctx, "task/one", projectID); err != nil {
+		t.Fatalf("PauseTaskGoalForProject: %v", err)
+	}
+	if err := c.ResumeTaskGoalForProject(ctx, "task/one", projectID); err != nil {
+		t.Fatalf("ResumeTaskGoalForProject: %v", err)
 	}
 	if err := c.SweepCompletedTasks(ctx, projectID); err != nil {
 		t.Fatalf("SweepCompletedTasks: %v", err)

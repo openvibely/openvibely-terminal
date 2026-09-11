@@ -1509,6 +1509,52 @@ func TestModelsCompletionAndHelpDocumentAdd(t *testing.T) {
 	}
 }
 
+func TestTaskGoalLifecycleHelpCompletionAndDocumentation(t *testing.T) {
+	cmd := lookupCommand("tasks")
+	if cmd == nil {
+		t.Fatal("tasks command missing")
+	}
+	if got := completeSlashInput("/tasks goal pa", *cmd); got != "/tasks goal pause " {
+		t.Fatalf("pause completion = %q", got)
+	}
+	for _, want := range []string{"pause", "resume"} {
+		if !containsString(registryCompletionValues("tasks", "goal"), want) {
+			t.Errorf("goal completions missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"tasks goal <task> | <objective>",
+		"tasks goal pause <task>",
+		"tasks goal resume <task>",
+		"tasks goal \"Fix login bug\" | pause",
+	} {
+		if help := renderCommandHelp(*cmd); !strings.Contains(help, want) {
+			t.Errorf("tasks help missing %q:\n%s", want, help)
+		}
+	}
+
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed while locating documentation")
+	}
+	root := filepath.Join(filepath.Dir(source), "..", "..")
+	for _, path := range []string{"README.md", filepath.Join("docs", "user-guide.md")} {
+		body, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, want := range []string{
+			"tasks goal <task> | <objective>",
+			"tasks goal pause <task>",
+			"tasks goal resume <task>",
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("%s missing %q", path, want)
+			}
+		}
+	}
+}
+
 func TestTasksHelpDocumentsReviewSupport(t *testing.T) {
 	cmd := lookupCommand("tasks")
 	if cmd == nil {

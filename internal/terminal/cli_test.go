@@ -6374,6 +6374,74 @@ func TestCLIWebhooksTrailingOptionTokensRemainInReference(t *testing.T) {
 	}
 }
 
+func TestCLITaskGoalLifecycleUsesProjectScopedRoutes(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantURL string
+		wantOut string
+	}{
+		{name: "set", args: []string{"tasks", "goal", "Refactor", "|", "all tests pass"}, wantURL: "POST /tasks/t-1/goal?project_id=p1", wantOut: "goal set on Refactor the API: all tests pass"},
+		{name: "clear", args: []string{"tasks", "goal", "Refactor", "|", "clear"}, wantURL: "POST /tasks/t-1/goal/clear?project_id=p1", wantOut: "cleared goal on Refactor the API"},
+		{name: "pause", args: []string{"tasks", "goal", "pause", "Refactor"}, wantURL: "POST /tasks/t-1/goal/pause?project_id=p1", wantOut: "paused goal on Refactor the API"},
+		{name: "resume", args: []string{"tasks", "goal", "resume", "Refactor"}, wantURL: "POST /tasks/t-1/goal/resume?project_id=p1", wantOut: "resumed goal on Refactor the API"},
+		{name: "pause is an objective", args: []string{"tasks", "goal", "Refactor", "|", "pause"}, wantURL: "POST /tasks/t-1/goal?project_id=p1", wantOut: "goal set on Refactor the API: pause"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/tasks":        taskBoardHTML,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, false); err != nil {
+				t.Fatal(err)
+			}
+			if !rec.sawQuery(tc.wantURL) {
+				t.Fatalf("requests = %q, want %q", rec.urlsSnapshot(), tc.wantURL)
+			}
+			if got := stripANSI(out.String()); !strings.Contains(got, tc.wantOut) {
+				t.Fatalf("output missing %q:\n%s", tc.wantOut, got)
+			}
+		})
+	}
+}
+
+func TestCLITaskGoalPauseFailureHasNoSuccessOutput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		case "/tasks/t-1/goal/pause":
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Errorf("project_id = %q, want p1", got)
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"pause denied"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"tasks", "goal", "pause", "Refactor"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "pause denied") {
+		t.Fatalf("error = %v, want pause denial", err)
+	}
+	if strings.Contains(stripANSI(out.String()), "paused goal on") {
+		t.Fatalf("backend failure claimed success:\n%s", out.String())
+	}
+}
+
 func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 	t.Run("list JSON is secret-free", func(t *testing.T) {
 		c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})

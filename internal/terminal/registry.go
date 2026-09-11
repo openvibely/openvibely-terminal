@@ -299,6 +299,7 @@ func tasksCommand() command {
 		args:    "[filter|id]",
 		actions: actions,
 		completions: []commandCompletion{
+			{after: []string{"goal"}, values: []string{"pause", "resume"}},
 			{after: []string{"reviews"}, values: []string{"list", "add"}},
 			{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
 			{after: []string{"attach"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
@@ -310,9 +311,10 @@ func tasksCommand() command {
 		selectorPaths: [][]string{
 			{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
 			{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
-			{"order"}, {"goal"}, {"reply"}, {"attachments"}, {"attachments", "add"},
-			{"attachments", "upload"}, {"attachments", "list"}, {"attachments", "show"},
-			{"attachments", "delete"}, {"attachments", "remove"},
+			{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"},
+			{"attachments"}, {"attachments", "add"}, {"attachments", "upload"},
+			{"attachments", "list"}, {"attachments", "show"}, {"attachments", "delete"},
+			{"attachments", "remove"},
 			{"attach"}, {"attach", "add"}, {"attach", "upload"}, {"attach", "list"}, {"attach", "show"}, {"attach", "delete"}, {"attach", "remove"},
 			{"attachment"}, {"attachment", "add"}, {"attachment", "upload"}, {"attachment", "list"}, {"attachment", "show"}, {"attachment", "delete"}, {"attachment", "remove"},
 		},
@@ -320,7 +322,7 @@ func tasksCommand() command {
 		usage: []string{
 			"tasks [filter]                             list the board, optionally filtered",
 			"tasks open <task>                          enter the task's thread",
-			"omit <task> on open/show/reviews/edit/run/stop/delete/move/order/goal/reply/lifecycle/logs → interactive selector",
+			"omit <task> on task-reference actions, including goal, goal pause, and goal resume → interactive selector",
 			"tasks show <task> [tab]                    " + detailTabUsageList(),
 			"tasks reviews [list] <task>                list inline review comments",
 			"tasks reviews add <task> <file>:<line> <comment>",
@@ -334,13 +336,15 @@ func tasksCommand() command {
 			"tasks run|stop|delete <task>               run, cancel or delete",
 			"tasks move <task> <backlog|active|completed>",
 			"tasks order <task> <position>              reorder within its column",
-			"tasks goal <task> | <objective>            set a goal (\"clear\" removes it)",
 			"tasks reply <task> | <message>             post to the task thread",
 			"tasks activate                             activate the whole backlog",
 			"tasks sweep                                sweep finished tasks",
 			"tasks clear <backlog|completed>            clear a column",
 		},
 		actionUsages: []commandActionUsage{
+			{action: "goal", args: "<task> | <objective>", description: "set a goal (\"clear\" removes it)"},
+			{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
+			{action: "goal resume", args: "<task>", description: "resume a paused goal"},
 			{action: "reviews add", args: "<task> <file>:<line> <comment>"},
 			{action: "attachments add", args: "<task> <file>...", description: "upload local files"},
 			{action: "attachments delete", args: "<task> <attachment>", description: "delete by ID or filename"},
@@ -351,6 +355,9 @@ func tasksCommand() command {
 			`tasks new Fix login bug | Investigate and resolve the OAuth redirect failure`,
 			`tasks move "Fix login bug" active`,
 			`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
+			`tasks goal "Fix login bug" | pause`,
+			`tasks goal pause "Fix login bug"`,
+			`tasks goal resume "Fix login bug"`,
 			`tasks show "Fix login bug" review`,
 			`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
 			`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
@@ -688,28 +695,59 @@ func tasksCommand() command {
 				})
 
 			case "goal":
-				if len(rest) < 1 {
-					return taskSelector(m, "usage: /tasks goal <task> | <objective>  (objective \"clear\" removes it)", "tasks goal", true)
+				rawGoal := strings.Join(rest, " ")
+				target, objective := splitPipe(rawGoal)
+				// A pipe always selects the established set/clear syntax. In
+				// particular, "tasks goal <task> | pause" sets "pause" as the
+				// objective instead of invoking the pause lifecycle action.
+				if strings.Contains(rawGoal, "|") {
+					if target == "" || objective == "" {
+						return m, errCmd(commandUsage("tasks", "goal") + "\nhint: separate the task reference and objective with a | character")
+					}
+					return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+						t, err := resolveTask(ctx, c, pid, target)
+						if err != nil {
+							return "", err
+						}
+						if strings.EqualFold(objective, "clear") {
+							if err := c.ClearTaskGoalForProject(ctx, t.ID, pid); err != nil {
+								return "", err
+							}
+							return "cleared goal on " + t.Title, nil
+						}
+						if err := c.SetTaskGoalForProject(ctx, t.ID, pid, objective); err != nil {
+							return "", err
+						}
+						return "goal set on " + t.Title + ": " + objective, nil
+					})
 				}
-				target, objective := splitPipe(strings.Join(rest, " "))
-				if objective == "" {
-					return m, errCmd("usage: /tasks goal <task> | <objective>  (objective \"clear\" removes it)\nhint: separate the task reference and objective with a | character")
+
+				if len(rest) == 0 {
+					return taskSelector(m, commandUsage("tasks", "goal"), "tasks goal", true)
+				}
+				goalAction := strings.ToLower(rest[0])
+				if goalAction != "pause" && goalAction != "resume" {
+					return m, errCmd(commandUsage("tasks", "goal") + "\nhint: separate the task reference and objective with a | character")
+				}
+				target = strings.Join(rest[1:], " ")
+				if target == "" {
+					return taskSelector(m, commandUsage("tasks", "goal "+goalAction), "tasks goal "+goalAction, false)
 				}
 				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)
 					if err != nil {
 						return "", err
 					}
-					if strings.EqualFold(objective, "clear") {
-						if err := c.ClearTaskGoal(ctx, t.ID); err != nil {
-							return "", err
-						}
-						return "cleared goal on " + t.Title, nil
+					switch goalAction {
+					case "pause":
+						err = c.PauseTaskGoalForProject(ctx, t.ID, pid)
+					case "resume":
+						err = c.ResumeTaskGoalForProject(ctx, t.ID, pid)
 					}
-					if err := c.SetTaskGoal(ctx, t.ID, objective); err != nil {
+					if err != nil {
 						return "", err
 					}
-					return "goal set on " + t.Title + ": " + objective, nil
+					return goalAction + "d goal on " + t.Title, nil
 				})
 
 			case "reply":

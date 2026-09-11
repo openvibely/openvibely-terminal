@@ -174,6 +174,9 @@ Commands take a resource, an optional action, and arguments:
 /alerts delete-bulk a1b2 "Release approval"   delete selected alerts (confirm)
 /skills add notes | writes release notes
 /tasks move Refactor active   move a task between columns
+/tasks goal Refactor | all checks pass
+/tasks goal pause Refactor
+/tasks goal resume Refactor
 /tasks attachments add Refactor ./request.txt ./trace.json
 /tasks attachments delete Refactor att-123
 /agents edit reviewer description "Reviews Go and SQL" enabled true
@@ -215,7 +218,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 
 | Command | Aliases | Actions |
 |---|---|---|
-| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal`, `reply`, `activate`, `sweep`, `clear` |
+| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `show`, `read`, `read-bulk`, `approve`, `reject`, `dismiss`, `delete`, `delete-bulk`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
@@ -423,6 +426,34 @@ one:
 Tabs: `details`, `thread`, `changes`, `schedules`, `chaining`, `attachments`,
 `lifecycle`. Lazy thread, changes, and lifecycle failures are shown as explicit
 errors rather than empty tabs; successfully loaded sections remain visible.
+
+### Task goal lifecycle
+
+Completion-goal commands resolve the task in the selected project before changing
+anything. Set an objective with the existing pipe form; `clear` removes it.
+Pause and resume keep that objective intact while changing only its lifecycle
+state:
+
+```
+/tasks goal <task> | <objective>
+/tasks goal <task> | clear
+/tasks goal pause <task>
+/tasks goal resume <task>
+
+/tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh
+/tasks goal "Fix login bug" | pause
+/tasks goal pause "Fix login bug"
+/tasks goal resume "Fix login bug"
+
+openvibely-terminal -project demo tasks goal "Fix login bug" | "Reproduce on staging then patch the token refresh"
+openvibely-terminal -project demo tasks goal pause "Fix login bug"
+openvibely-terminal -project demo tasks goal resume "Fix login bug"
+```
+
+A pipe always denotes a set-goal request, so `tasks goal <task> | pause` sets
+`pause` as the objective rather than pausing the goal. Unknown, ambiguous, or
+out-of-project task references fail before any goal mutation. All four actions
+use the selected project scope.
 
 ### Task attachments
 
@@ -635,6 +666,9 @@ Anything you can type in the chat window can be run as a one-shot command:
 openvibely-terminal tasks                              # print the board
 openvibely-terminal -project demo tasks show refactor  # a task's detail tabs
 openvibely-terminal -project demo tasks run refactor   # run it
+openvibely-terminal -project demo tasks goal refactor '|' "all checks pass"
+openvibely-terminal -project demo tasks goal pause refactor
+openvibely-terminal -project demo tasks goal resume refactor
 openvibely-terminal -project demo agents votes step-exec-123 # inspect parallel votes
 openvibely-terminal -project demo tasks attachments add refactor ./request.txt ./trace.json
 openvibely-terminal -project demo --force tasks attachments delete refactor att-123
@@ -711,7 +745,9 @@ $ openvibely-terminal help tasks
   tasks run|stop|delete <task>               run, cancel or delete
   tasks move <task> <backlog|active|completed>
   tasks order <task> <position>              reorder within its column
-  tasks goal <task> <objective>              set a goal ("clear" removes it)
+  tasks goal <task> | <objective>            set a goal ("clear" removes it)
+  tasks goal pause <task>                    pause a goal without changing its objective
+  tasks goal resume <task>                   resume a paused goal
   tasks reply <task> | <message>             post to the task thread
   tasks activate                             activate the whole backlog
   tasks sweep                                sweep finished tasks

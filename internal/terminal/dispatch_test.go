@@ -2625,6 +2625,98 @@ func TestTaskEditAndOrder(t *testing.T) {
 	})
 }
 
+func TestTaskGoalLifecycleUsesScopedRoutesAndKeepsPauseAsObjective(t *testing.T) {
+	tests := []struct {
+		name     string
+		line     string
+		wantURL  string
+		wantOut  string
+		wantForm string
+	}{
+		{name: "set", line: "/tasks goal Refactor | all tests pass", wantURL: "POST /tasks/t-1/goal?project_id=p1", wantOut: "goal set on Refactor the API: all tests pass", wantForm: "objective=all+tests+pass"},
+		{name: "clear", line: "/tasks goal Refactor | clear", wantURL: "POST /tasks/t-1/goal/clear?project_id=p1", wantOut: "cleared goal on Refactor the API"},
+		{name: "pause", line: "/tasks goal pause Refactor", wantURL: "POST /tasks/t-1/goal/pause?project_id=p1", wantOut: "paused goal on Refactor the API"},
+		{name: "resume", line: "/tasks goal resume Refactor", wantURL: "POST /tasks/t-1/goal/resume?project_id=p1", wantOut: "resumed goal on Refactor the API"},
+		{name: "pause objective", line: "/tasks goal Refactor | pause", wantURL: "POST /tasks/t-1/goal?project_id=p1", wantOut: "goal set on Refactor the API: pause", wantForm: "objective=pause"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+			m = runLine(t, m, tc.line)
+			if !rec.sawQuery(tc.wantURL) {
+				t.Fatalf("requests = %q, want %q", rec.urlsSnapshot(), tc.wantURL)
+			}
+			if tc.wantForm != "" && !rec.sawForm(tc.wantForm) {
+				t.Fatalf("forms = %q, want %q", rec.forms, tc.wantForm)
+			}
+			if out := transcript(m); !strings.Contains(out, tc.wantOut) {
+				t.Fatalf("output missing %q:\n%s", tc.wantOut, out)
+			}
+		})
+	}
+}
+
+func TestTaskGoalLifecycleRejectsUnresolvableReferencesBeforeMutation(t *testing.T) {
+	const duplicateTitlesHTML = `<div>
+		<div class="card" data-task-id="t-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-1" title="Deploy">Deploy</a></div>
+		<div class="card" data-task-id="t-2" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-2" title="deploy">deploy</a></div>
+	</div>`
+
+	for _, tc := range []struct {
+		name  string
+		board string
+		line  string
+		want  string
+	}{
+		{name: "missing", board: taskBoardHTML, line: "/tasks goal pause foreign-task", want: "nothing matches"},
+		{name: "ambiguous", board: duplicateTitlesHTML, line: "/tasks goal resume DEPLOY", want: "ambiguous"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": tc.board})
+			m = runLine(t, m, tc.line)
+			if rec.saw("POST", "/tasks/t-1/goal/pause") || rec.saw("POST", "/tasks/t-1/goal/resume") || rec.saw("POST", "/tasks/t-2/goal/pause") || rec.saw("POST", "/tasks/t-2/goal/resume") {
+				t.Fatalf("unresolvable reference mutated a goal:\n%s", rec.all())
+			}
+			if out := strings.ToLower(transcript(m)); !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+func TestTaskGoalLifecycleFailureDoesNotClaimSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(taskBoardHTML))
+		case "/tasks/t-1/goal/pause":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"pause denied"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m = runLine(t, m, "/tasks goal pause Refactor")
+	out := transcript(m)
+	if !strings.Contains(out, "pause denied") {
+		t.Fatalf("backend failure was not shown:\n%s", out)
+	}
+	if strings.Contains(out, "paused goal on") {
+		t.Fatalf("backend failure claimed success:\n%s", out)
+	}
+}
+
 // TestTasksGoalAndReplyRequirePipe verifies that omitting the | separator in
 // /tasks goal and /tasks reply produces a clear error rather than silently
 // mis-splitting a multi-word task title.

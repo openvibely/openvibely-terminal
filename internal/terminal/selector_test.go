@@ -142,6 +142,8 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"tasks_move", "/tasks move", "tasks move"},
 		{"tasks_order", "/tasks order", "tasks order"},
 		{"tasks_goal", "/tasks goal", "tasks goal"},
+		{"tasks_goal_pause", "/tasks goal pause", "tasks goal pause"},
+		{"tasks_goal_resume", "/tasks goal resume", "tasks goal resume"},
 		{"tasks_reply", "/tasks reply", "tasks reply"},
 		{"tasks_lifecycle", "/tasks lifecycle", "tasks lifecycle"},
 		{"tasks_logs", "/tasks logs", "tasks logs"},
