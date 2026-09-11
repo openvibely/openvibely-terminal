@@ -1990,12 +1990,12 @@ func (u ChannelAuthorizedUser) MatchesIdentity(value string) bool {
 }
 
 // listXAuthorizedUsers parses the structured X settings representation. The
-// page-level project marker comes from the X authorization form, while each
-// row's canonical ID and project scope come from its matching delete control.
-// Optional data-* row markers are accepted and validated when present; the
-// current web contract does not emit them. Identity markers are preferred when
-// present, with the current web contract's dedicated username/ID spans as the
-// compatibility representation.
+// page-level project marker comes from the authorization form, while each row's
+// canonical ID and project binding come from its matching delete control. The
+// current web contract does not emit a redundant row data-* marker; when one
+// is present, it must agree with both structured bindings. Identity markers are
+// preferred, with the current web contract's dedicated username/ID spans as
+// the compatibility representation.
 func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser, error) {
 	container := findByID(root, "x_config_modal")
 	if container == nil {
@@ -2021,12 +2021,8 @@ func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser,
 	for _, button := range findAll(container, func(n *html.Node) bool {
 		return n.Data == "button" && strings.HasPrefix(attr(n, "hx-delete"), route+"/")
 	}) {
-		location, err := url.Parse(strings.TrimSpace(attr(button, "hx-delete")))
-		if err != nil || location == nil || location.Query().Get("project_id") != projectID {
-			return nil, errors.New("authorized channel access list unavailable")
-		}
-		id := strings.TrimPrefix(location.Path, route+"/")
-		if id == "" || id == "." || id == ".." || strings.Contains(id, "/") {
+		id, err := xAuthorizationDeleteTarget(attr(button, "hx-delete"), route, projectID)
+		if err != nil {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		if _, exists := seenIDs[id]; exists {
@@ -2069,6 +2065,29 @@ func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser,
 		users = append(users, XAuthorizedUser{ID: id, ProjectID: projectID, XUserID: xUserID, Username: username, references: references})
 	}
 	return users, nil
+}
+
+func xAuthorizationDeleteTarget(raw, route, projectID string) (string, error) {
+	location, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || location == nil || location.Scheme != "" || location.Host != "" || location.Fragment != "" {
+		return "", errors.New("invalid X authorization delete target")
+	}
+	if !strings.HasPrefix(location.Path, route+"/") {
+		return "", errors.New("invalid X authorization delete target")
+	}
+	query, err := url.ParseQuery(location.RawQuery)
+	if err != nil {
+		return "", errors.New("invalid X authorization delete scope")
+	}
+	projectValues, ok := query["project_id"]
+	if !ok || len(projectValues) != 1 || projectValues[0] != projectID || len(query) != 1 {
+		return "", errors.New("invalid X authorization delete scope")
+	}
+	id := strings.TrimPrefix(location.Path, route+"/")
+	if id == "" || id == "." || id == ".." || strings.Contains(id, "/") {
+		return "", errors.New("invalid X authorization delete target")
+	}
+	return id, nil
 }
 
 func xAuthorizationRecordID(row, container *html.Node) (string, bool) {
