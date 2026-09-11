@@ -4815,7 +4815,11 @@ func normalizeChannelAccessIdentity(provider, value string) (string, error) {
 	switch provider {
 	case "telegram":
 		if numericAccessUserID.MatchString(value) {
-			return value, nil
+			userID, err := strconv.ParseInt(value, 10, 64)
+			if err == nil && userID > 0 {
+				return strconv.FormatInt(userID, 10), nil
+			}
+			return "", errors.New("Telegram access requires a numeric user ID or username")
 		}
 		if telegramAccessUsername.MatchString(value) {
 			return strings.ToLower(strings.TrimPrefix(value, "@")), nil

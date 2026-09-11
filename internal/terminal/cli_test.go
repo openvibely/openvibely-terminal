@@ -3393,6 +3393,8 @@ func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
 
 	for _, args := range [][]string{
 		{"channels", "access", "telegram", "add", "invalid!"},
+		{"channels", "access", "telegram", "add", "0"},
+		{"channels", "access", "telegram", "add", "9223372036854775808"},
 		{"channels", "access", "slack", "add", "alice"},
 		{"channels", "access", "discord", "add", "alice"},
 		{"channels", "access", "email", "add", "not-an-email"},

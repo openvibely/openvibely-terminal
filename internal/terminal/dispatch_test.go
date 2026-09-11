@@ -8807,6 +8807,8 @@ func TestChannelAccessTUICommandsValidateScopeProvidersAndCapturedRemoval(t *tes
 	}{
 		{"/channels access github list", "provider"},
 		{"/channels access telegram add not-valid!", "numeric user ID or username"},
+		{"/channels access telegram add 0", "numeric user ID or username"},
+		{"/channels access telegram add 9223372036854775808", "numeric user ID or username"},
 		{"/channels access slack add alice", "Slack user ID"},
 		{"/channels access discord add username", "numeric user ID"},
 		{"/channels access email add not-an-email", "valid email"},
