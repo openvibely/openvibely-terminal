@@ -20,6 +20,64 @@ import (
 
 const projectEditFixture = `<dialog id="edit_project_modal" data-local-repo-path-enabled="true"><form hx-put="/projects/p1"><input name="name" value="Alpha Project"><textarea name="description">kept</textarea><select name="repo_source"><option value="local" selected>Local</option><option value="github">GitHub</option></select><input name="repo_path" value="/tmp/alpha path"><input name="repo_url" value=""><select name="default_agent_config_id"><option value="" selected>Global</option><option value="agent-1">Builder</option></select><input name="max_workers" value="3"></form></dialog>`
 
+func TestRenderProjectSettingsPreservesWorkerLimitStates(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		max  *int
+		want string
+		no   string
+	}{
+		{name: "unset inherits", want: "Max workers: inherit", no: "Max workers: No limit"},
+		{name: "explicit zero has no limit", max: intPointerForTUI(0), want: "Max workers: No limit", no: "Max workers: inherit"},
+		{name: "positive is numeric", max: intPointerForTUI(7), want: "Max workers: 7", no: "Max workers: No limit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := renderProjectSettings(client.ProjectSettings{ID: "p1", MaxWorkers: tc.max})
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("rendered settings = %q, want %q", out, tc.want)
+			}
+			if strings.Contains(out, tc.no) {
+				t.Fatalf("rendered settings = %q, unexpectedly contains %q", out, tc.no)
+			}
+		})
+	}
+}
+
+func TestProjectsEditZeroWorkerLimitShowsNoLimitInSuccessTranscript(t *testing.T) {
+	saved := false
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+			html := projectEditFixture
+			if saved {
+				html = strings.Replace(html, `value="3"`, `value="0"`, 1)
+			}
+			_, _ = io.WriteString(w, html)
+		case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse form: %v", err)
+			}
+			if got := r.PostForm.Get("max_workers"); got != "0" {
+				t.Fatalf("submitted max_workers = %q, want 0", got)
+			}
+			saved = true
+			w.Header().Set("HX-Refresh", "true")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	m.projects = []client.Project{{ID: "p1", Name: "Alpha Project"}}
+	m.projectsLoaded = true
+
+	m = runLine(t, m, `/projects edit p1 --max-workers 0`)
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "Max workers: No limit") {
+		t.Fatalf("success transcript = %q, want no-limit label", out)
+	}
+	if strings.Contains(out, "Max workers: inherit") {
+		t.Fatalf("success transcript = %q, incorrectly reports inherit", out)
+	}
+}
 func TestProjectsShowAndEditPreserveOmittedSettingsAndSameIDContext(t *testing.T) {
 	var putForm url.Values
 	saved := false

@@ -7315,8 +7315,12 @@ func renderProjectSettings(settings client.ProjectSettings) string {
 		defaultAgent = firstNonEmpty(settings.DefaultAgentName, settings.DefaultAgentID)
 	}
 	maxWorkers := "inherit"
-	if settings.MaxWorkers != nil && *settings.MaxWorkers > 0 {
-		maxWorkers = strconv.Itoa(*settings.MaxWorkers)
+	if settings.MaxWorkers != nil {
+		if *settings.MaxWorkers == 0 {
+			maxWorkers = "No limit"
+		} else if *settings.MaxWorkers > 0 {
+			maxWorkers = strconv.Itoa(*settings.MaxWorkers)
+		}
 	}
 	rows := []string{
 		"ID: " + safe(settings.ID),
