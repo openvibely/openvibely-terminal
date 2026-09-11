@@ -967,12 +967,36 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 		wantListCalls int
 	}{
 		{
+			name:       "alerts read",
+			command:    "/alerts read",
+			method:     "POST",
+			path:       "/alerts/a-1/read",
+			listPath:   "/alerts",
+			wantOutput: "read: Add retry logic",
+		},
+		{
 			name:       "alerts approve",
 			command:    "/alerts approve",
 			method:     "POST",
 			path:       "/alerts/a-1/approve",
 			listPath:   "/alerts",
 			wantOutput: "approve: Add retry logic",
+		},
+		{
+			name:       "alerts reject",
+			command:    "/alerts reject",
+			method:     "POST",
+			path:       "/alerts/a-1/reject",
+			listPath:   "/alerts",
+			wantOutput: "reject: Add retry logic",
+		},
+		{
+			name:       "alerts dismiss",
+			command:    "/alerts dismiss",
+			method:     "POST",
+			path:       "/alerts/a-1/dismiss",
+			listPath:   "/alerts",
+			wantOutput: "dismiss: Add retry logic",
 		},
 		{
 			name:          "alerts delete",
@@ -1093,6 +1117,76 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 				t.Fatalf("unexpected error after %s:\n%s", tc.command, out)
 			} else if !strings.Contains(out, tc.wantOutput) {
 				t.Errorf("output after %s missing %q:\n%s", tc.command, tc.wantOutput, out)
+			}
+		})
+	}
+}
+
+func TestAlertPickerAndTypedActionsHaveEquivalentResolvedOutput(t *testing.T) {
+	const deleteResponse = `<div data-alert-id="a-remaining" data-alert-scroll-anchor="a-remaining"><p class="font-semibold">Remaining alert</p></div>`
+
+	actions := []struct {
+		action string
+		method string
+		path   string
+	}{
+		{action: "read", method: http.MethodPost, path: "/alerts/a-1/read"},
+		{action: "approve", method: http.MethodPost, path: "/alerts/a-1/approve"},
+		{action: "reject", method: http.MethodPost, path: "/alerts/a-1/reject"},
+		{action: "dismiss", method: http.MethodPost, path: "/alerts/a-1/dismiss"},
+		{action: "delete", method: http.MethodDelete, path: "/alerts/a-1"},
+	}
+
+	for _, action := range actions {
+		action := action
+		t.Run(action.action, func(t *testing.T) {
+			runAction := func(t *testing.T, picker bool) (string, *recorder) {
+				t.Helper()
+				m, rec := dispatchModel(t, map[string]string{
+					"/alerts":            selAlertsHTML,
+					"DELETE /alerts/a-1": deleteResponse,
+				})
+				command := "/alerts " + action.action
+				if picker {
+					m = runLine(t, m, command)
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+					if action.action == "delete" {
+						m = runLine(t, m, "yes")
+					}
+				} else if action.action == "delete" {
+					m = confirmDestructive(t, m, command+" a-1")
+				} else {
+					m = runLine(t, m, command+" a-1")
+				}
+				if !rec.saw(action.method, action.path) {
+					t.Fatalf("%s path missing from %s dispatch:\n%s", action.path, map[bool]string{true: "picker", false: "typed"}[picker], rec.all())
+				}
+				if !rec.sawQuery(action.method + " " + action.path + "?project_id=p1") {
+					t.Fatalf("%s action lost project scope:\n%s", map[bool]string{true: "picker", false: "typed"}[picker], strings.Join(rec.urlsSnapshot(), "\n"))
+				}
+				if len(m.log) == 0 {
+					t.Fatal("alert action produced no result")
+				}
+				return stripANSI(m.log[len(m.log)-1].text), rec
+			}
+
+			typedOutput, _ := runAction(t, false)
+			pickerOutput, pickerRec := runAction(t, true)
+			if typedOutput != pickerOutput {
+				t.Fatalf("typed and picker output differ:\ntyped:\n%s\npicker:\n%s", typedOutput, pickerOutput)
+			}
+			if !strings.Contains(typedOutput, action.action+": Add retry logic") {
+				t.Fatalf("action status missing from output:\n%s", typedOutput)
+			}
+			if action.action == "delete" {
+				if !strings.Contains(typedOutput, "Remaining alert") {
+					t.Fatalf("delete did not render its DELETE response:\n%s", typedOutput)
+				}
+				if got := selectorCallCount(pickerRec, http.MethodGet, "/alerts"); got != 1 {
+					t.Fatalf("picker delete list calls = %d, want only its initial selection fetch:\n%s", got, pickerRec.all())
+				}
+			} else if got := selectorCallCount(pickerRec, http.MethodGet, "/alerts"); got != 2 {
+				t.Fatalf("picker %s list calls = %d, want selection and refresh only:\n%s", action.action, got, pickerRec.all())
 			}
 		})
 	}

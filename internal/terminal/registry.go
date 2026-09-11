@@ -1784,6 +1784,27 @@ func alertDeleteOutput(status string, alerts []client.Alert) (string, error) {
 	return status + "\n\n" + renderAlerts(alerts, ""), nil
 }
 
+// resolvedAlertActionOutput performs a single-alert action only after the
+// caller has resolved and captured its canonical alert target. Deletes render
+// the refreshed list returned by their DELETE response; other actions retain
+// their best-effort list refresh after a successful mutation.
+func resolvedAlertActionOutput(ctx context.Context, c *client.Client, projectID, action string, alert client.Alert) (string, error) {
+	status := action + ": " + alertActionDisplayName(alert)
+	if action == "delete" {
+		alerts, err := c.DeleteAlertAndList(ctx, alert.ID, projectID)
+		if err != nil {
+			return "", err
+		}
+		return alertDeleteOutput(status, alerts)
+	}
+	if err := c.AlertAction(ctx, alert.ID, action, projectID); err != nil {
+		return "", err
+	}
+	return refreshAndRender(status,
+		func() ([]client.Alert, error) { return c.ListAlerts(ctx, projectID) },
+		renderAlerts)
+}
+
 func alertActionDisplayName(alert client.Alert) string {
 	for _, value := range []string{alert.Title, alert.ID} {
 		if display := sanitizeAlertDisplayText(value); strings.TrimSpace(display) != "" {
@@ -2147,19 +2168,7 @@ func alertsCommand() command {
 									}
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
-											if action == "delete" {
-												alerts, err := c.DeleteAlertAndList(ctx, a.ID, pid)
-												if err != nil {
-													return "", err
-												}
-												return alertDeleteOutput("delete: "+alertActionDisplayName(a), alerts)
-											}
-											if err := c.AlertAction(ctx, a.ID, action, pid); err != nil {
-												return "", err
-											}
-											return refreshAndRender(action+": "+alertActionDisplayName(a),
-												func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
-												renderAlerts)
+											return resolvedAlertActionOutput(ctx, c, pid, action, a)
 										})
 										if action == "delete" {
 											display := alertActionDisplayName(a)
@@ -2188,19 +2197,7 @@ func alertsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if action == "delete" {
-						refreshed, err := c.DeleteAlertAndList(ctx, a.ID, pid)
-						if err != nil {
-							return "", err
-						}
-						return alertDeleteOutput("delete: "+alertActionDisplayName(a), refreshed)
-					}
-					if err := c.AlertAction(ctx, a.ID, action, pid); err != nil {
-						return "", err
-					}
-					return refreshAndRender(action+": "+alertActionDisplayName(a),
-						func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
-						renderAlerts)
+					return resolvedAlertActionOutput(ctx, c, pid, action, a)
 				})
 				if action == "delete" {
 					display := sanitizeAlertDisplayText(ref)
