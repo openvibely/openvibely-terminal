@@ -3285,6 +3285,193 @@ func TestCLIAutomationsRunMissingReferenceUsesCanonicalUsageWithoutList(t *testi
 	}
 }
 
+func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
+	providers := []struct {
+		provider string
+		identity string
+	}{
+		{"telegram", "telegram_user"},
+		{"slack", "U12345678"},
+		{"discord", "123456789012345678"},
+		{"email", "person@example.com"},
+	}
+	for _, tc := range providers {
+		t.Run("json list "+tc.provider, func(t *testing.T) {
+			route, _ := channelAccessTestRoute(tc.provider)
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				route:           channelAccessTestPage(tc.provider, channelAccessTestRow{id: "row-1", name: "Visible User", identity: tc.identity}),
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"channels", "access", tc.provider, "list"}, false, true); err != nil {
+				t.Fatalf("access list: %v", err)
+			}
+			var users []channelAccessOutputUser
+			if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &users); err != nil {
+				t.Fatalf("access JSON = %q: %v", out.String(), err)
+			}
+			if len(users) != 1 || users[0].Provider != tc.provider || users[0].ProjectID != "p1" || strings.Contains(out.String(), "channel-access-backend-secret") {
+				t.Fatalf("unsafe access JSON = %q", out.String())
+			}
+			if !rec.saw(http.MethodGet, route) || !rec.sawQuery("project_id=p1") {
+				t.Fatalf("unscoped access list calls:\n%s", rec.all())
+			}
+		})
+	}
+
+	route, _ := channelAccessTestRoute("slack")
+	rows := []channelAccessTestRow{{id: "row-1", name: "Shared User", identity: "U12345678"}, {id: "row-2", name: "Shared User", identity: "U87654321"}}
+	for _, tc := range []struct {
+		name       string
+		refs       []string
+		force      bool
+		wantError  string
+		wantDelete bool
+	}{
+		{name: "unforced", refs: []string{"row-1"}, wantError: "--force to confirm removal", wantDelete: false},
+		{name: "unknown foreign", refs: []string{"foreign-row"}, wantError: "nothing matches", wantDelete: false},
+		{name: "ambiguous", refs: []string{"U"}, wantError: "ambiguous", wantDelete: false},
+		{name: "duplicate", refs: []string{"row-1", "row-1"}, wantError: "more than once", wantDelete: false},
+		{name: "surplus", refs: []string{"row-1", "row-2"}, wantError: "exactly one", wantDelete: false},
+		{name: "forced captured row", refs: []string{"row-1"}, force: true, wantDelete: true},
+	} {
+		t.Run("remove "+tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, route: channelAccessTestPage("slack", rows...)})
+			args := append([]string{"channels", "access", "slack", "remove"}, tc.refs...)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", args, tc.force, false)
+			if tc.wantError != "" && (err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.wantError))) {
+				t.Fatalf("remove error = %v, want %q", err, tc.wantError)
+			}
+			if tc.wantError == "" && err != nil {
+				t.Fatalf("forced removal: %v", err)
+			}
+			if got := rec.saw(http.MethodDelete, route+"/row-1"); got != tc.wantDelete || rec.saw(http.MethodDelete, route+"/row-2") {
+				t.Fatalf("delete guard/captured target failure: calls:\n%s", rec.all())
+			}
+		})
+	}
+
+	t.Run("foreign rows cannot be forced to delete", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			route:           channelAccessTestPage("slack", channelAccessTestRow{id: "foreign-row", projectID: "other-project", name: "Foreign User", identity: "U12345678"}),
+		})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "access", "slack", "remove", "U12345678"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "authorized channel access list unavailable") || rec.saw(http.MethodDelete, route+"/foreign-row") {
+			t.Fatalf("forced foreign removal was not rejected safely: err=%v calls=%s", err, rec.all())
+		}
+	})
+
+	t.Run("duplicate add is rejected before mutation", func(t *testing.T) {
+		emailRoute, _ := channelAccessTestRoute("email")
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			emailRoute:      channelAccessTestPage("email", channelAccessTestRow{id: "row-1", name: "support@example.com Team", identity: "real.sender@example.com"}),
+		})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "access", "email", "add", "Real.Sender@Example.COM"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "already exists") || rec.saw(http.MethodPost, emailRoute) {
+			t.Fatalf("duplicate add was not stopped before mutation: err=%v calls=%s", err, rec.all())
+		}
+	})
+
+	t.Run("mutation JSON is secret-free", func(t *testing.T) {
+		emailRoute, _ := channelAccessTestRoute("email")
+		c, _ := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			emailRoute:      channelAccessTestPage("email", channelAccessTestRow{id: "row-1", name: "Visible User", identity: "person@example.com"}),
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"channels", "access", "email", "add", "new@example.com"}, false, true); err != nil {
+			t.Fatalf("JSON add: %v", err)
+		}
+		var action channelAccessActionJSON
+		if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &action); err != nil || action.Action != "add" || action.User.Identity != "new@example.com" || strings.Contains(out.String(), "channel-access-backend-secret") {
+			t.Fatalf("unsafe mutation JSON = %q, err=%v", out.String(), err)
+		}
+	})
+
+	for _, args := range [][]string{
+		{"channels", "access", "telegram", "add", "invalid!"},
+		{"channels", "access", "telegram", "add", "0"},
+		{"channels", "access", "telegram", "add", "9223372036854775808"},
+		{"channels", "access", "slack", "add", "alice"},
+		{"channels", "access", "discord", "add", "alice"},
+		{"channels", "access", "email", "add", "not-an-email"},
+		{"channels", "access", "github", "list"},
+	} {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err == nil || rec.all() != "" {
+			t.Fatalf("invalid access command %v made requests or succeeded: %s", args, rec.all())
+		}
+	}
+}
+
+func TestCLIChannelAccessMutationFailureAndRefreshFailureRemainSafe(t *testing.T) {
+	const secret = "channel-access-backend-secret"
+	route, _ := channelAccessTestRoute("email")
+	page := channelAccessTestPage("email", channelAccessTestRow{id: "row-1", name: "Visible User", identity: "person@example.com"})
+
+	t.Run("mutation failure", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case route:
+				if r.Method == http.MethodPost {
+					http.Error(w, secret, http.StatusBadGateway)
+					return
+				}
+				_, _ = io.WriteString(w, page)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, _ := client.New(srv.URL)
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", []string{"channels", "access", "email", "add", "New@Example.COM"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "channel request failed") || strings.Contains(err.Error(), secret) || strings.Contains(out.String(), secret) || strings.Contains(out.String(), "authorized Email access") {
+			t.Fatalf("unsafe mutation failure: err=%v output=%q", err, out.String())
+		}
+	})
+
+	t.Run("refresh failure retains success", func(t *testing.T) {
+		lists := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case route:
+				switch r.Method {
+				case http.MethodGet:
+					lists++
+					if lists > 1 {
+						http.Error(w, secret, http.StatusBadGateway)
+						return
+					}
+					_, _ = io.WriteString(w, page)
+				case http.MethodPost:
+					w.WriteHeader(http.StatusNoContent)
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, _ := client.New(srv.URL)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"channels", "access", "email", "add", "New@Example.COM"}, false, false); err != nil {
+			t.Fatalf("successful mutation with failed refresh: %v", err)
+		}
+		if !strings.Contains(out.String(), "authorized Email access") || strings.Contains(out.String(), secret) {
+			t.Fatalf("refresh failure did not preserve safe success: %q", out.String())
+		}
+	})
+}
+
 func TestCLIChannelsConfigureEverySupportedTypeWithoutEchoingSecrets(t *testing.T) {
 	tests := []struct {
 		name string
@@ -3465,8 +3652,8 @@ func TestCLIChannelsRejectMalformedArgumentsBeforeRequests(t *testing.T) {
 		args      []string
 		wantUsage string
 	}{
-		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|webhooks]"},
-		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|webhooks]"},
+		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
+		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
 		{args: []string{"channels", "test", "telegram", "extra"}, wantUsage: "nothing matches"},
 		{args: []string{"channels", "remove", "slack", "extra"}, wantUsage: "nothing matches"},
 	}

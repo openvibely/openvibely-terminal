@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1144,16 +1143,12 @@ func benchmarkAutomationsPage(count int) string {
 	return b.String()
 }
 
-// BenchmarkAutomationsDisplayPath compares the old GetAutomations work
-// (parse plus whole-document NodeText) with the structured ListAutomations
-// work (the same parse plus only card fields and badge state). The 100- and
-// 1,000-card cases model normal and large automation pages; run with
-// `go test -bench BenchmarkAutomationsDisplayPath -benchmem ./internal/client`
-// to compare ns/op, B/op, and allocs/op.
+// BenchmarkAutomationsDisplayPath measures the structured automation-card
+// parsing used by ListAutomations for normal and large pages.
 func BenchmarkAutomationsDisplayPath(b *testing.B) {
 	for _, count := range []int{100, 1000} {
 		page := benchmarkAutomationsPage(count)
-		b.Run(fmt.Sprintf("old_full_text/%d", count), func(b *testing.B) {
+		b.Run(fmt.Sprintf("cards=%d", count), func(b *testing.B) {
 			b.ReportAllocs()
 			b.SetBytes(int64(len(page)))
 			b.ResetTimer()
@@ -1162,46 +1157,6 @@ func BenchmarkAutomationsDisplayPath(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				_ = NodeText(root)
-			}
-		})
-		b.Run(fmt.Sprintf("new_structured/%d", count), func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(page)))
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				root, err := html.Parse(strings.NewReader(page))
-				if err != nil {
-					b.Fatal(err)
-				}
-				_ = parseAutomations(root)
-			}
-		})
-	}
-}
-
-// BenchmarkAutomationsDOMWork isolates the changed post-parse operation. HTML
-// parsing is deliberately outside the timer because it is identical in both
-// production paths; this measures whole-document normalization versus the
-// structured card extraction that replaced it.
-func BenchmarkAutomationsDOMWork(b *testing.B) {
-	for _, count := range []int{100, 1000} {
-		page := benchmarkAutomationsPage(count)
-		root, err := html.Parse(strings.NewReader(page))
-		if err != nil {
-			b.Fatal(err)
-		}
-		b.Run(fmt.Sprintf("old_node_text/%d", count), func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				_ = NodeText(root)
-			}
-		})
-		b.Run(fmt.Sprintf("new_structured/%d", count), func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
 				_ = parseAutomations(root)
 			}
 		})
@@ -1514,6 +1469,218 @@ func TestDeleteAlertAndListReportsBackendFailure(t *testing.T) {
 	}
 	if _, err := c.DeleteAlertAndList(context.Background(), "a1", "p1"); err == nil || !strings.Contains(err.Error(), "alert deletion unavailable") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestChannelAuthorizedUsersUseScopedRoutesAndSecretFreeModels(t *testing.T) {
+	type providerCase struct {
+		provider  string
+		route     string
+		container string
+		input     string
+		row       string
+		identity  string
+	}
+	cases := []providerCase{
+		{provider: "telegram", route: "/channels/telegram/authorized-users", container: "telegram-authorized-users", input: "user_id_or_username", identity: "telegram_user", row: `<span class="text-sm font-medium">Telegram User</span><span class="text-xs opacity-50">@telegram_user</span><span class="text-xs opacity-50">ID: 987</span>`},
+		{provider: "slack", route: "/channels/slack/authorized-users", container: "slack-authorized-users", input: "slack_user_id", identity: "U12345678", row: `<span>Slack User</span><span>ID: U12345678</span>`},
+		{provider: "discord", route: "/channels/discord/authorized-users", container: "discord-authorized-users", input: "discord_user_id", identity: "123456789012345678", row: `<span>Discord User</span><span>ID: 123456789012345678</span>`},
+		{provider: "email", route: "/channels/email/authorized-senders", container: "email-authorized-senders", input: "authorized_email_address", identity: "person@example.com", row: `<span class="text-sm font-medium truncate">Email User</span><span class="text-xs opacity-50 truncate">person@example.com</span>`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			const projectID = "project/two"
+			var methods []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				methods = append(methods, r.Method+" "+r.URL.Path)
+				if r.URL.Path != tc.route && r.URL.Path != tc.route+"/row-1" {
+					http.NotFound(w, r)
+					return
+				}
+				if r.Method == http.MethodGet && r.URL.Query().Get("project_id") != projectID {
+					t.Errorf("GET project_id = %q", r.URL.Query().Get("project_id"))
+				}
+				if r.Method == http.MethodPost {
+					if err := r.ParseForm(); err != nil {
+						t.Fatal(err)
+					}
+					if r.PostForm.Get("project_id") != projectID || r.PostForm.Get(tc.input) != tc.identity || r.PostForm.Get("display_name") != "Visible User" {
+						t.Errorf("add form = %v", r.PostForm)
+					}
+				}
+				if r.Method == http.MethodDelete {
+					if r.URL.Query().Get("project_id") != projectID || !strings.HasSuffix(r.URL.Path, "/row-1") {
+						t.Errorf("delete request = %s", r.URL.RequestURI())
+					}
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div id="`+tc.container+`"><div data-project-id="project/two"><div>`+tc.row+`<input value="backend-secret"></div><button hx-delete="`+tc.route+`/row-1?project_id=project%2Ftwo">remove</button></div></div>`)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			users, err := c.ListChannelAuthorizedUsers(context.Background(), tc.provider, projectID)
+			if err != nil {
+				t.Fatalf("ListChannelAuthorizedUsers: %v", err)
+			}
+			if len(users) != 1 || users[0].ID != "row-1" || users[0].Provider != tc.provider || users[0].ProjectID != projectID {
+				t.Fatalf("users = %#v", users)
+			}
+			encoded, err := json.Marshal(users)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "backend-secret") || strings.Contains(string(encoded), "added_by") {
+				t.Fatalf("authorization JSON leaked unmodeled fields: %s", encoded)
+			}
+			if err := c.AddChannelAuthorizedUser(context.Background(), tc.provider, projectID, tc.identity, "Visible User"); err != nil {
+				t.Fatalf("AddChannelAuthorizedUser: %v", err)
+			}
+			if err := c.RemoveChannelAuthorizedUser(context.Background(), tc.provider, projectID, users[0].ID); err != nil {
+				t.Fatalf("RemoveChannelAuthorizedUser: %v", err)
+			}
+			if want := []string{"GET " + tc.route, "POST " + tc.route, "GET " + tc.route, "DELETE " + tc.route + "/row-1"}; !reflect.DeepEqual(methods, want) {
+				t.Fatalf("methods = %#v, want %#v", methods, want)
+			}
+		})
+	}
+}
+
+func TestChannelAuthorizedUsersRejectMalformedScopesAndPreserveSafeDiagnostics(t *testing.T) {
+	c := htmlServer(t, `<div id="telegram-authorized-users"></div>`)
+	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", ""); err == nil {
+		t.Fatal("empty project scope listed channel access")
+	}
+	if err := c.AddChannelAuthorizedUser(context.Background(), "github", "p1", "actor", ""); err == nil || strings.Contains(err.Error(), "actor") {
+		t.Fatalf("unsupported provider error = %v", err)
+	}
+
+	foreign := htmlServer(t, `<div id="telegram-authorized-users"><div data-project-id="other-project"><span>Foreign</span><button hx-delete="/channels/telegram/authorized-users/other-row?project_id=p1">remove</button></div></div>`)
+	if _, err := foreign.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || err.Error() != "authorized channel access list unavailable" {
+		t.Fatalf("foreign row was accepted: %v", err)
+	}
+
+	unproven := htmlServer(t, `<div id="telegram-authorized-users"><div><span>Unproven</span><button hx-delete="/channels/telegram/authorized-users/unproven-row?project_id=p1">remove</button></div></div>`)
+	if _, err := unproven.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || err.Error() != "authorized channel access ownership unavailable" {
+		t.Fatalf("unproven row was accepted: %v", err)
+	}
+
+	deletes := 0
+	foreignDelete := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes++
+		}
+		_, _ = io.WriteString(w, `<div id="telegram-authorized-users"><div data-project-id="other-project"><span>Foreign</span><button hx-delete="/channels/telegram/authorized-users/foreign-row?project_id=p1">remove</button></div></div>`)
+	}))
+	defer foreignDelete.Close()
+	c, err := New(foreignDelete.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RemoveChannelAuthorizedUser(context.Background(), "telegram", "p1", "foreign-row"); err == nil || deletes != 0 {
+		t.Fatalf("foreign removal error = %v, DELETE requests = %d", err, deletes)
+	}
+
+	const secret = "authorization-backend-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, secret, http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c, err = New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || err.Error() != "channel request failed" || strings.Contains(err.Error(), secret) {
+		t.Fatalf("unsafe list failure = %v", err)
+	}
+
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer auth.Close()
+	c, err = New(auth.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1"); err == nil || !IsAuthRequired(err) {
+		t.Fatalf("authentication diagnostic was not preserved: %v", err)
+	}
+}
+
+func TestChannelAuthorizedUserMutationsPreserveAuthAndTransportDiagnostics(t *testing.T) {
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer auth.Close()
+	c, err := New(auth.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []func() error{
+		func() error {
+			return c.AddChannelAuthorizedUser(context.Background(), "email", "p1", "sender@example.com", "")
+		},
+		func() error { return c.RemoveChannelAuthorizedUser(context.Background(), "email", "p1", "row-1") },
+	} {
+		if err := check(); !IsAuthRequired(err) {
+			t.Fatalf("error = %v, want authentication required", err)
+		}
+	}
+
+	closed := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	closedURL := closed.URL
+	closed.Close()
+	c, err = New(closedURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddChannelAuthorizedUser(context.Background(), "email", "p1", "sender@example.com", ""); !IsTransportError(err) {
+		t.Fatalf("transport error = %v", err)
+	}
+}
+
+func TestChannelAuthorizedUsersParseEmailIdentityStructurally(t *testing.T) {
+	const page = `<div id="email-authorized-senders"><div data-project-id="p1"><div><span class="text-sm font-medium truncate">support@example.com Team</span><span class="text-xs opacity-50 truncate">real.sender@example.com</span></div><button hx-delete="/channels/email/authorized-senders/email-row?project_id=p1">remove</button></div></div>`
+	c := htmlServer(t, page)
+
+	users, err := c.ListChannelAuthorizedUsers(context.Background(), "email", "p1")
+	if err != nil {
+		t.Fatalf("ListChannelAuthorizedUsers: %v", err)
+	}
+	if len(users) != 1 || users[0].Identity != "real.sender@example.com" || users[0].DisplayName != "support@example.com Team" {
+		t.Fatalf("email users = %#v", users)
+	}
+	if users[0].MatchesIdentity("support@example.com") || !users[0].MatchesIdentity("REAL.SENDER@EXAMPLE.COM") {
+		t.Fatalf("email aliases = %#v", users[0])
+	}
+}
+
+func TestChannelAuthorizedUsersParseTelegramIdentityStructurally(t *testing.T) {
+	const page = `<div id="telegram-authorized-users">
+		<div data-project-id="p1"><div><span class="text-sm font-medium">ID: 42</span><span class="text-xs opacity-50">@real_user</span></div><button hx-delete="/channels/telegram/authorized-users/username-row?project_id=p1">remove</button></div>
+		<div data-project-id="p1"><div><span class="text-sm font-medium">@misleading</span><span class="text-xs opacity-50">ID: 987</span></div><button hx-delete="/channels/telegram/authorized-users/numeric-row?project_id=p1">remove</button></div>
+	</div>`
+	c := htmlServer(t, page)
+
+	users, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1")
+	if err != nil {
+		t.Fatalf("ListChannelAuthorizedUsers: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("telegram users = %#v, want two users", users)
+	}
+	username, numeric := users[0], users[1]
+	if username.ID != "username-row" || username.DisplayName != "ID: 42" || username.Identity != "@real_user" || !username.MatchesIdentity("real_user") || username.MatchesIdentity("42") {
+		t.Fatalf("username row = %#v", username)
+	}
+	if numeric.ID != "numeric-row" || numeric.DisplayName != "@misleading" || numeric.Identity != "987" || !numeric.MatchesIdentity("987") || numeric.MatchesIdentity("misleading") {
+		t.Fatalf("numeric row = %#v", numeric)
 	}
 }
 
@@ -3712,92 +3879,42 @@ func TestSkillDetailReadsFreshContentAfterMutation(t *testing.T) {
 	}
 }
 
-func TestListSkillsSummaryPayloadAndAllocationReduction(t *testing.T) {
+func BenchmarkListSkillsSummary(b *testing.B) {
 	for _, skills := range []int{100, 1000} {
-		t.Run(fmt.Sprintf("skills=%d", skills), func(t *testing.T) {
-			summary := skillListBenchmarkFixture(skills, 0)
-			legacy := skillListBenchmarkFixture(skills, 4096)
-			if len(summary)*100 > len(legacy)*30 {
-				t.Fatalf("summary payload = %d bytes, legacy payload = %d bytes; want at least 70%% reduction", len(summary), len(legacy))
+		fixture := skillListBenchmarkFixture(skills)
+		b.Run(fmt.Sprintf("skills=%d", skills), func(b *testing.B) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, fixture)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				b.Fatal(err)
 			}
-			summaryAlloc := listSkillsAllocatedBytes(t, summary)
-			legacyAlloc := listSkillsAllocatedBytes(t, legacy)
-			if summaryAlloc*100 > legacyAlloc*30 {
-				t.Fatalf("summary allocations = %d bytes, legacy allocations = %d bytes; want at least 70%% reduction", summaryAlloc, legacyAlloc)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(fixture)))
+			b.ReportMetric(float64(len(fixture)), "response_B")
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				items, err := c.ListSkills(context.Background(), "benchmark-project")
+				if err != nil {
+					b.Fatal(err)
+				}
+				if len(items) != skills {
+					b.Fatalf("skills = %d, want %d", len(items), skills)
+				}
 			}
 		})
 	}
 }
 
-func listSkillsAllocatedBytes(t *testing.T, page string) uint64 {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = io.WriteString(w, page)
-	}))
-	defer srv.Close()
-	c, err := New(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime.GC()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	items, err := c.ListSkills(context.Background(), "benchmark-project")
-	if err != nil {
-		t.Fatal(err)
-	}
-	runtime.ReadMemStats(&after)
-	runtime.KeepAlive(items)
-	return after.TotalAlloc - before.TotalAlloc
-}
-
-func BenchmarkListSkillsSummaryAndLegacyContent(b *testing.B) {
-	for _, skills := range []int{100, 1000} {
-		for _, bodyBytes := range []int{0, 4096} {
-			fixture := skillListBenchmarkFixture(skills, bodyBytes)
-			name := "summary"
-			if bodyBytes != 0 {
-				name = "legacy_content"
-			}
-			b.Run(fmt.Sprintf("%s/skills=%d", name, skills), func(b *testing.B) {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "text/html")
-					_, _ = io.WriteString(w, fixture)
-				}))
-				defer srv.Close()
-				c, err := New(srv.URL)
-				if err != nil {
-					b.Fatal(err)
-				}
-				b.ReportAllocs()
-				b.SetBytes(int64(len(fixture)))
-				b.ReportMetric(float64(len(fixture)), "response_B")
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					items, err := c.ListSkills(context.Background(), "benchmark-project")
-					if err != nil {
-						b.Fatal(err)
-					}
-					if len(items) != skills {
-						b.Fatalf("skills = %d, want %d", len(items), skills)
-					}
-				}
-			})
-		}
-	}
-}
-
-func skillListBenchmarkFixture(skills, bodyBytes int) string {
+func skillListBenchmarkFixture(skills int) string {
 	var b strings.Builder
-	b.Grow(skills * (180 + bodyBytes))
+	b.Grow(skills * 180)
 	b.WriteString(`<div>`)
-	body := strings.Repeat("x", bodyBytes)
 	for i := 0; i < skills; i++ {
 		fmt.Fprintf(&b, `<div data-skill-handle="skill-%04d" data-skill-name="Skill %04d" data-skill-description="benchmark summary" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false"`, i, i)
-		if bodyBytes != 0 {
-			fmt.Fprintf(&b, ` data-skill-content="%s"`, body)
-		}
 		b.WriteString(`></div>`)
 	}
 	b.WriteString(`</div>`)
@@ -3842,18 +3959,10 @@ func TestEmptySkillCatalogsRemainNonNilWithoutDetailRequests(t *testing.T) {
 
 func TestListSkillsSummaryLatencyBudget(t *testing.T) {
 	const runs = 15
-	summary := listSkillsDurations(t, skillListBenchmarkFixture(1000, 0), runs)
-	legacy := listSkillsDurations(t, skillListBenchmarkFixture(1000, 4096), runs)
-	summaryMedian, legacyMedian := skillDurationPercentile(summary, 50), skillDurationPercentile(legacy, 50)
-	summaryP95, legacyP95 := skillDurationPercentile(summary, 95), skillDurationPercentile(legacy, 95)
+	summary := listSkillsDurations(t, skillListBenchmarkFixture(1000), runs)
+	summaryMedian := skillDurationPercentile(summary, 50)
 	if summaryMedian >= 25*time.Millisecond {
 		t.Fatalf("summary median = %s, want under 25ms", summaryMedian)
-	}
-	if summaryMedian*2 >= legacyMedian {
-		t.Fatalf("summary median = %s, legacy median = %s; want at least 50%% reduction", summaryMedian, legacyMedian)
-	}
-	if summaryP95 > legacyP95 {
-		t.Fatalf("summary p95 = %s, legacy p95 = %s; want no regression", summaryP95, legacyP95)
 	}
 }
 

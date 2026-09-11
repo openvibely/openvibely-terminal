@@ -80,7 +80,7 @@ Common commands include:
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
 | `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |
-| `/channels` | Manage integrations and inbound webhooks |
+| `/channels` | Manage integrations, inbound webhooks, and project-scoped Telegram, Slack, Discord, and Email authorized access with `channels access <provider> list\|add\|remove` |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |

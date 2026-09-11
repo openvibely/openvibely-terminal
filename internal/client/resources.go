@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strconv"
 	"strings"
@@ -1801,6 +1802,280 @@ func (c *Client) SetGlobalWorkerLimit(ctx context.Context, limit int) error {
 // SetProjectWorkerLimit updates one project's worker limit.
 func (c *Client) SetProjectWorkerLimit(ctx context.Context, projectID string, limit int) error {
 	return c.setWorkerLimit(ctx, "/workers/projects/"+url.PathEscape(projectID)+"/limit", limit)
+}
+
+// ChannelAuthorizedUser is a secret-free authorized inbound-channel identity.
+// It is intentionally limited to the row ID and visible authorization identity;
+// channel credentials, actor metadata, and backend form state are never retained.
+type ChannelAuthorizedUser struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	ProjectID   string `json:"project_id"`
+	DisplayName string `json:"display_name,omitempty"`
+	Identity    string `json:"identity"`
+
+	references []string
+}
+
+type channelAccessRoute struct {
+	path      string
+	container string
+	inputName string
+}
+
+func authorizedChannelAccessRoute(provider string) (channelAccessRoute, error) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "telegram":
+		return channelAccessRoute{path: "/channels/telegram/authorized-users", container: "telegram-authorized-users", inputName: "user_id_or_username"}, nil
+	case "slack":
+		return channelAccessRoute{path: "/channels/slack/authorized-users", container: "slack-authorized-users", inputName: "slack_user_id"}, nil
+	case "discord":
+		return channelAccessRoute{path: "/channels/discord/authorized-users", container: "discord-authorized-users", inputName: "discord_user_id"}, nil
+	case "email":
+		return channelAccessRoute{path: "/channels/email/authorized-senders", container: "email-authorized-senders", inputName: "authorized_email_address"}, nil
+	default:
+		return channelAccessRoute{}, errors.New("unsupported channel access provider")
+	}
+}
+
+func requireChannelAccessProject(projectID string) (string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", errors.New("project ID is required")
+	}
+	return projectID, nil
+}
+
+func channelAccessIdentity(provider string, row *html.Node) (displayName, identity string, references []string) {
+	text := strings.TrimSpace(NodeText(row))
+	fields := strings.Fields(text)
+	switch provider {
+	case "telegram":
+		var username, numericID string
+		for _, span := range findAll(row, func(n *html.Node) bool {
+			return n.Data == "span"
+		}) {
+			classes := make(map[string]bool)
+			for _, class := range strings.Fields(attr(span, "class")) {
+				classes[class] = true
+			}
+			value := strings.TrimSpace(NodeText(span))
+			if classes["text-sm"] && classes["font-medium"] && displayName == "" {
+				displayName = value
+				continue
+			}
+			if !classes["text-xs"] || !classes["opacity-50"] {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(value, "@"):
+				if username != "" || len(value) == 1 {
+					return "", "", nil
+				}
+				username = "@" + strings.ToLower(strings.TrimPrefix(value, "@"))
+			case strings.HasPrefix(value, "ID:"):
+				if numericID != "" {
+					return "", "", nil
+				}
+				parsedID, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(value, "ID:")), 10, 64)
+				if err != nil || parsedID <= 0 {
+					return "", "", nil
+				}
+				numericID = strconv.FormatInt(parsedID, 10)
+			}
+		}
+		if username != "" {
+			references = append(references, username, strings.TrimPrefix(username, "@"))
+		}
+		if numericID != "" {
+			identity = numericID
+			references = append(references, numericID)
+		} else {
+			identity = username
+		}
+		if identity == "" {
+			return "", "", nil
+		}
+	case "slack", "discord":
+		for i := len(fields) - 1; i > 0; i-- {
+			if fields[i-1] == "ID:" {
+				identity = fields[i]
+				references = append(references, identity)
+				text = strings.TrimSpace(strings.TrimSuffix(text, "ID: "+identity))
+				break
+			}
+		}
+	case "email":
+		var identities []string
+		for _, span := range findAll(row, func(n *html.Node) bool {
+			return n.Data == "span"
+		}) {
+			classes := make(map[string]bool)
+			for _, class := range strings.Fields(attr(span, "class")) {
+				classes[class] = true
+			}
+			value := strings.TrimSpace(NodeText(span))
+			if classes["text-sm"] && classes["font-medium"] && displayName == "" {
+				displayName = value
+			}
+			if !classes["text-xs"] || !classes["opacity-50"] {
+				continue
+			}
+			address, err := mail.ParseAddress(value)
+			if err == nil && address != nil && address.Address == value && strings.Contains(address.Address, "@") {
+				identities = append(identities, strings.ToLower(address.Address))
+			}
+		}
+		if len(identities) == 1 {
+			identity = identities[0]
+			references = append(references, identity)
+		} else {
+			return "", "", nil
+		}
+	}
+	if identity == "" {
+		identity = text
+	}
+	if identity != "" {
+		references = append(references, identity)
+	}
+	if provider == "slack" || provider == "discord" {
+		displayName = strings.TrimSpace(text)
+	}
+	return strings.TrimSpace(displayName), identity, references
+}
+
+func (u ChannelAuthorizedUser) matchesIdentity(value string) bool {
+	value = strings.TrimSpace(value)
+	for _, reference := range u.references {
+		if strings.EqualFold(strings.TrimSpace(reference), value) {
+			return true
+		}
+	}
+	return false
+}
+
+// MatchesIdentity reports whether value is one of the provider identities
+// represented by this secret-free authorization row. Telegram rows can expose
+// both a username and a numeric ID while still having one canonical row ID.
+func (u ChannelAuthorizedUser) MatchesIdentity(value string) bool {
+	return u.matchesIdentity(value)
+}
+
+// ListChannelAuthorizedUsers returns the current project's visible authorized
+// inbound identities for Telegram, Slack, Discord, or Email. The backend
+// serves an HTMX fragment, so row IDs are taken only from its canonical delete
+// controls and their project scope is verified before returning any record.
+func (c *Client) ListChannelAuthorizedUsers(ctx context.Context, provider, projectID string) ([]ChannelAuthorizedUser, error) {
+	projectID, err := requireChannelAccessProject(projectID)
+	if err != nil {
+		return nil, err
+	}
+	route, err := authorizedChannelAccessRoute(provider)
+	if err != nil {
+		return nil, err
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	root, err := c.getHTML(ctx, route.path+query("project_id", projectID))
+	if err != nil {
+		return nil, safeChannelError(err)
+	}
+	container := findByID(root, route.container)
+	if container == nil {
+		return nil, errors.New("authorized channel access list unavailable")
+	}
+
+	users := make([]ChannelAuthorizedUser, 0)
+	seen := make(map[string]struct{})
+	for _, button := range findAll(container, func(n *html.Node) bool {
+		return n.Data == "button" && strings.HasPrefix(attr(n, "hx-delete"), route.path+"/")
+	}) {
+		row := button.Parent
+		ownerProjectID := strings.TrimSpace(attr(row, "data-project-id"))
+		if ownerProjectID == "" {
+			return nil, errors.New("authorized channel access ownership unavailable")
+		}
+		if ownerProjectID != projectID {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+
+		location, parseErr := url.Parse(strings.TrimSpace(attr(button, "hx-delete")))
+		// The link scope verifies the backend route contract but cannot prove row
+		// ownership: the backend renders it from the current request. Ownership
+		// is accepted only from the row's explicit project marker above.
+		if parseErr != nil || location == nil || location.Query().Get("project_id") != projectID {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		id := strings.TrimPrefix(location.Path, route.path+"/")
+		if id == "" || id == "." || id == ".." || strings.Contains(id, "/") {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		seen[id] = struct{}{}
+		displayName, identity, references := channelAccessIdentity(provider, row)
+		if strings.TrimSpace(identity) == "" {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		users = append(users, ChannelAuthorizedUser{
+			ID: id, Provider: provider, ProjectID: projectID,
+			DisplayName: displayName, Identity: identity, references: references,
+		})
+	}
+	return users, nil
+}
+
+// AddChannelAuthorizedUser grants an inbound identity access in one selected
+// project. Identity validation and normalization belong to the command layer;
+// this client method owns the provider route, field name, HTMX transport, and
+// explicit project form scope.
+func (c *Client) AddChannelAuthorizedUser(ctx context.Context, provider, projectID, identity, displayName string) error {
+	projectID, err := requireChannelAccessProject(projectID)
+	if err != nil {
+		return err
+	}
+	route, err := authorizedChannelAccessRoute(provider)
+	if err != nil {
+		return err
+	}
+	form := url.Values{}
+	form.Set("project_id", projectID)
+	form.Set(route.inputName, identity)
+	if displayName = strings.TrimSpace(displayName); displayName != "" {
+		form.Set("display_name", displayName)
+	}
+	return safeChannelError(c.doForm(ctx, http.MethodPost, route.path, form))
+}
+
+// RemoveChannelAuthorizedUser revokes one previously resolved, project-scoped
+// inbound identity. It revalidates the captured row ID against the current
+// ownership-verified list immediately before deletion so a backend that accepts
+// global delete IDs cannot turn a stale or foreign reference into a mutation.
+func (c *Client) RemoveChannelAuthorizedUser(ctx context.Context, provider, projectID, id string) error {
+	projectID, err := requireChannelAccessProject(projectID)
+	if err != nil {
+		return err
+	}
+	route, err := authorizedChannelAccessRoute(provider)
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("authorized channel access ID is required")
+	}
+	users, err := c.ListChannelAuthorizedUsers(ctx, provider, projectID)
+	if err != nil {
+		return err
+	}
+	for _, user := range users {
+		if user.ID == id && user.ProjectID == projectID {
+			return safeChannelError(c.doForm(ctx, http.MethodDelete,
+				route.path+"/"+url.PathEscape(id)+query("project_id", projectID), nil))
+		}
+	}
+	return errors.New("authorized channel access user does not belong to selected project")
 }
 
 // --- channels & personality ---

@@ -86,8 +86,8 @@ func TestTableHandlesEmptyAndRaggedRows(t *testing.T) {
 }
 
 // tableWithoutWidthCache mirrors the pre-optimization implementation for exact
-// output regression tests and before/after benchmarks. It intentionally measures
-// every non-final cell again while rendering its padding.
+// output regression tests. It intentionally measures every non-final cell again
+// while rendering its padding.
 func tableWithoutWidthCache(rows [][]string) string {
 	if len(rows) == 0 {
 		return ""
@@ -145,20 +145,10 @@ var tableBenchmarkSink string
 
 func BenchmarkTable10KRows4Columns(b *testing.B) {
 	rows := benchmarkTableRows(10_000)
-	for _, benchmark := range []struct {
-		name  string
-		table func([][]string) string
-	}{
-		{name: "cached_widths", table: table},
-		{name: "uncached_widths", table: tableWithoutWidthCache},
-	} {
-		b.Run(benchmark.name, func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				tableBenchmarkSink = benchmark.table(rows)
-			}
-		})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tableBenchmarkSink = table(rows)
 	}
 }
 
@@ -238,14 +228,7 @@ func BenchmarkTruncateLargeFixtures(b *testing.B) {
 		fixture := fixture
 		for _, limit := range limits {
 			limit := limit
-			b.Run(fmt.Sprintf("%s/limit_%d/baseline", fixture.name, limit), func(b *testing.B) {
-				b.ReportAllocs()
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					truncateBenchmarkSink = truncateBaseline(fixture.input, limit)
-				}
-			})
-			b.Run(fmt.Sprintf("%s/limit_%d/bounded", fixture.name, limit), func(b *testing.B) {
+			b.Run(fmt.Sprintf("%s/limit_%d", fixture.name, limit), func(b *testing.B) {
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -470,7 +453,7 @@ func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
 }
 
 // truncateBaseline mirrors the pre-optimization helper for exact output
-// comparisons and paired benchmark measurements.
+// comparisons in correctness tests.
 func truncateBaseline(s string, n int) string {
 	s = strings.ReplaceAll(s, "\n", " ")
 	if n <= 0 {
@@ -3338,7 +3321,7 @@ func TestRenderExecTimesMatchesFullSortBaseline(t *testing.T) {
 }
 
 // renderExecTimesFullSort is the pre-optimization implementation used only for
-// output regression and paired benchmark comparisons.
+// output regression comparisons.
 func renderExecTimesFullSort(title string, times []client.AvgExecutionTime) string {
 	if len(times) == 0 {
 		return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
@@ -3385,14 +3368,7 @@ func BenchmarkRenderExecTimesLargeInput(b *testing.B) {
 
 	for _, fixture := range fixtures {
 		fixture := fixture
-		b.Run(fixture.name+"/full_copy_sort", func(b *testing.B) {
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				renderExecTimesBenchmarkSink = renderExecTimesFullSort("Execution time", fixture.times)
-			}
-		})
-		b.Run(fixture.name+"/bounded_top_12", func(b *testing.B) {
+		b.Run(fixture.name, func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
