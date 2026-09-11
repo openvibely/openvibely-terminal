@@ -260,6 +260,21 @@ type ProjectCapacity struct {
 	HasCapacity bool   `json:"has_capacity"`
 }
 
+// TaskStatusCounts is the compact project-scoped task state projection used by
+// terminal status. It intentionally contains only the predicates status renders;
+// full task-card fields remain owned by ListTasks.
+type TaskStatusCounts struct {
+	ActiveTasks int `json:"active_tasks"`
+	QueuedTasks int `json:"queued_tasks"`
+}
+
+// PendingAlertCount is the compact project-scoped alert projection used by
+// terminal status. It counts the same pending decision badge represented by
+// alert cards, without returning alert card HTML or detail fields.
+type PendingAlertCount struct {
+	Count int `json:"count"`
+}
+
 // ChatAccepted mirrors handler.ChatMessageAcceptedResponse.
 type ChatAccepted struct {
 	MessageID string `json:"message_id"`
@@ -347,6 +362,34 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 		return nil, err
 	}
 	return out.Projects, nil
+}
+
+// GetPendingAlertCount fetches the number of pending decision alerts for one
+// project. The backend response is intentionally compact and contains no alert
+// cards or detail fields.
+func (c *Client) GetPendingAlertCount(ctx context.Context, projectID string) (int, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return 0, fmt.Errorf("project ID is required for pending alert counts")
+	}
+	var out PendingAlertCount
+	if err := c.getJSON(ctx, "/api/alerts/pending-count"+query("project_id", projectID), &out); err != nil {
+		return 0, err
+	}
+	return out.Count, nil
+}
+
+// GetTaskStatusCounts fetches the active-category and queued-status counts for
+// one project. The response is intentionally independent from full task-card
+// pagination so status cannot fall back to downloading the board.
+func (c *Client) GetTaskStatusCounts(ctx context.Context, projectID string) (*TaskStatusCounts, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task status counts")
+	}
+	var out TaskStatusCounts
+	if err := c.getJSON(ctx, "/api/tasks/status-counts"+query("project_id", projectID), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // CreateProject creates a local-path project through the backend's public

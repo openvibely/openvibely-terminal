@@ -1379,22 +1379,12 @@ func TestCLIStatusPreservesAuthRequiredAndOfflineOutput(t *testing.T) {
 }
 
 func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
-	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1">
-		<p class="font-semibold">Needs approval</p>
-		<span class="badge">pending</span>
-	</div>`
-	const tasksHTML = `<div>
-		<div class="card" data-task-id="t-1" data-task-status="running" data-task-category="active" data-display-order="0">
-			<div class="card-body"><a href="/tasks/t-1" title="Task A">Task A</a></div>
-		</div>
-		<div class="card" data-task-id="t-2" data-task-status="queued" data-task-category="active" data-display-order="1">
-			<div class="card-body"><a href="/tasks/t-2" title="Task B">Task B</a></div>
-		</div>
-	</div>`
+	const alertsJSON = `{"count":1}`
+	const tasksJSON = `{"active_tasks":2,"queued_tasks":1}`
 	c, rec := cliServer(t, map[string]string{
-		"/api/projects": cliProjects,
-		"/alerts":       alertsHTML,
-		"/tasks":        tasksHTML,
+		"/api/projects":             cliProjects,
+		"/api/alerts/pending-count": alertsJSON,
+		"/api/tasks/status-counts":  tasksJSON,
 	})
 
 	var out bytes.Buffer
@@ -1402,17 +1392,19 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 		t.Fatalf("status failed: %v", err)
 	}
 	got := out.String()
-	if !rec.saw("GET", "/alerts") {
-		t.Errorf("expected alerts fetch during CLI status:\n%s", rec.all())
+	if !rec.saw("GET", "/api/alerts/pending-count") {
+		t.Errorf("expected compact pending-alert fetch during CLI status:\n%s", rec.all())
 	}
-	if !rec.saw("GET", "/tasks") {
-		t.Errorf("expected tasks fetch during CLI status:\n%s", rec.all())
+	if !rec.saw("GET", "/api/tasks/status-counts") {
+		t.Errorf("expected compact task-count fetch during CLI status:\n%s", rec.all())
 	}
-	if got := rec.count("GET", "/alerts"); got != 1 {
-		t.Errorf("CLI status made %d /alerts requests, want exactly 1:\n%s", got, rec.all())
+	if rec.saw("GET", "/alerts") || rec.saw("GET", "/tasks") {
+		t.Errorf("CLI status fetched a full collection:\n%s", rec.all())
 	}
-	if got := rec.count("GET", "/tasks"); got != 1 {
-		t.Errorf("CLI status made %d /tasks requests, want exactly 1:\n%s", got, rec.all())
+	for _, path := range []string{"/api/alerts/pending-count", "/api/tasks/status-counts"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("CLI status made %d GET requests to %s, want exactly 1:\n%s", got, path, rec.all())
+		}
 	}
 	if !strings.Contains(got, "1 pending approvals") {
 		t.Errorf("status missing pending alert count:\n%s", got)
@@ -1452,14 +1444,18 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 			case "/auth/me":
 				_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
 			}
-		case "/alerts", "/tasks":
+		case "/api/alerts/pending-count", "/api/tasks/status-counts":
 			mu.Lock()
 			if !projectCompleted {
 				scopedStartedEarly = true
 			}
 			mu.Unlock()
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = io.WriteString(w, `<div></div>`)
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/alerts/pending-count" {
+				_, _ = io.WriteString(w, `{"count":0}`)
+			} else {
+				_, _ = io.WriteString(w, `{"active_tasks":0,"queued_tasks":0}`)
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -1502,7 +1498,7 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 	if early {
 		t.Fatal("project-scoped counts started before project selection completed")
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/alerts", "/tasks"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -1511,8 +1507,8 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 
 func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
 	const endpointDelay = 100 * time.Millisecond
-	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><span class="badge">pending</span></div>`
-	const tasksHTML = `<div><div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Task A">Task A</a></div></div>`
+	const alertsJSON = `{"count":1}`
+	const tasksJSON = `{"active_tasks":1,"queued_tasks":0}`
 
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1522,12 +1518,12 @@ func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"demo"}]}`))
-		case "/alerts":
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(alertsHTML))
-		case "/tasks":
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(tasksHTML))
+		case "/api/alerts/pending-count":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(alertsJSON))
+		case "/api/tasks/status-counts":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(tasksJSON))
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
@@ -1551,7 +1547,7 @@ func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
 	slices.Sort(durations)
 	median := durations[len(durations)/2]
 
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/alerts", "/tasks"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
 		if got := rec.count("GET", path); got != runs {
 			t.Errorf("delayed status made %d GET requests to %s, want %d:\n%s", got, path, runs, rec.all())
 		}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -410,6 +411,115 @@ func TestCreateProjectPreservesPlatformRepositoryPaths(t *testing.T) {
 				t.Errorf("project path = %q, want %q", project.Path, path)
 			}
 		})
+	}
+}
+
+func TestProjectStatusCountsUseCompactProjectScopedJSON(t *testing.T) {
+	var requests []string
+	var totalBytes int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		if got := r.URL.Query().Get("project_id"); got != "project-2" {
+			t.Fatalf("project_id = %q, want project-2", got)
+		}
+		var body string
+		switch r.URL.Path {
+		case "/api/alerts/pending-count":
+			body = `{"count":17}`
+		case "/api/tasks/status-counts":
+			body = `{"active_tasks":23,"queued_tasks":11}`
+		default:
+			t.Fatalf("unexpected status-count path %q", r.URL.Path)
+		}
+		totalBytes += len(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}))
+
+	pending, err := c.GetPendingAlertCount(context.Background(), "project-2")
+	if err != nil {
+		t.Fatalf("GetPendingAlertCount: %v", err)
+	}
+	tasks, err := c.GetTaskStatusCounts(context.Background(), "project-2")
+	if err != nil {
+		t.Fatalf("GetTaskStatusCounts: %v", err)
+	}
+	if pending != 17 || tasks.ActiveTasks != 23 || tasks.QueuedTasks != 11 {
+		t.Fatalf("compact counts = %d/%+v, want 17/{active_tasks:23 queued_tasks:11}", pending, tasks)
+	}
+	if len(requests) != 2 || totalBytes >= 1024 {
+		t.Fatalf("compact requests/response bytes = %d/%d, want two small JSON responses: %v", len(requests), totalBytes, requests)
+	}
+}
+
+func TestProjectStatusCountsDoNotAcceptAnUnscopedProject(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unscoped count request %s", r.URL.RequestURI())
+	}))
+	if _, err := c.GetPendingAlertCount(context.Background(), ""); err == nil {
+		t.Fatal("GetPendingAlertCount accepted an empty project ID")
+	}
+	if _, err := c.GetTaskStatusCounts(context.Background(), " "); err == nil {
+		t.Fatal("GetTaskStatusCounts accepted a blank project ID")
+	}
+}
+
+func TestProjectStatusCountsPreserveAuthTransportAndCancellationErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(http.ResponseWriter, *http.Request)
+		call  func(*Client, context.Context) error
+		check func(error) bool
+	}{
+		{
+			name:  "authentication",
+			setup: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) },
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.GetPendingAlertCount(ctx, "project-2")
+				return err
+			},
+			check: IsAuthRequired,
+		},
+		{
+			name: "cancellation",
+			setup: func(w http.ResponseWriter, r *http.Request) {
+				<-r.Context().Done()
+			},
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.GetTaskStatusCounts(ctx, "project-2")
+				return err
+			},
+			check: func(err error) bool { return errors.Is(err, context.Canceled) },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(tc.setup))
+			ctx := context.Background()
+			if tc.name == "cancellation" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			err := tc.call(c, ctx)
+			if err == nil || !tc.check(err) {
+				t.Fatalf("error = %v, classification check failed", err)
+			}
+		})
+	}
+}
+
+func TestProjectStatusCountsPreserveTransportErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	baseURL := srv.URL
+	srv.Close()
+
+	c, err := New(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetPendingAlertCount(context.Background(), "project-2"); err == nil || !IsTransportError(err) {
+		t.Fatalf("closed-server count error = %v, want transport error", err)
 	}
 }
 
@@ -956,6 +1066,43 @@ func TestStreamEventsClassifiesUnauthorizedResponses(t *testing.T) {
 				}
 			case <-ctx.Done():
 				t.Fatal("timed out waiting for stream close")
+			}
+		})
+	}
+}
+
+// BenchmarkCompactStatusCountRetrieval records the allocation profile for the
+// compact status contract at the same 100/1,000/5,000 card-equivalent workload
+// sizes used by the status collection regression. The response is deliberately
+// constant-size at every size; the benchmark must not scale with card history.
+func BenchmarkCompactStatusCountRetrieval(b *testing.B) {
+	for _, cards := range []int{100, 1000, 5000} {
+		b.Run(fmt.Sprintf("%d-card-equivalent", cards), func(b *testing.B) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/alerts/pending-count":
+					_, _ = io.WriteString(w, `{"count":17}`)
+				case "/api/tasks/status-counts":
+					_, _ = io.WriteString(w, `{"active_tasks":23,"queued_tasks":11}`)
+				default:
+					b.Errorf("unexpected path %q", r.URL.Path)
+				}
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := c.GetPendingAlertCount(context.Background(), "project-2"); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := c.GetTaskStatusCounts(context.Background(), "project-2"); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}

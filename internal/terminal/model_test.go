@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -3035,6 +3036,167 @@ func TestStatusCountsAuthFailureEntersSignInRequired(t *testing.T) {
 	}
 	if m.pendingAlertCount != 4 || m.activeTaskCount != 3 || m.queuedTaskCount != 2 {
 		t.Fatalf("auth failure overwrote cached counts: alerts=%d active=%d queued=%d", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount)
+	}
+}
+
+func TestStatusCountsPreserveSuccessfulSideOnOrdinaryPartialFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "project-1" {
+			t.Fatalf("project_id = %q, want project-1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/alerts/pending-count":
+			_, _ = io.WriteString(w, `{"count":4}`)
+		case "/api/tasks/status-counts":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"task count unavailable"}`)
+		default:
+			t.Fatalf("unexpected status-count path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "project-1"
+
+	msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+	if !ok {
+		t.Fatalf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+	}
+	if msg.err != nil {
+		t.Fatalf("ordinary count failure became status error: %v", msg.err)
+	}
+	if msg.pendingAlerts != 4 || msg.activeTasks != 0 || msg.queuedTasks != 0 {
+		t.Fatalf("partial counts = alerts=%d active=%d queued=%d, want 4/0/0", msg.pendingAlerts, msg.activeTasks, msg.queuedTasks)
+	}
+}
+
+func TestStatusCountsUseConcurrentCompactRequests(t *testing.T) {
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	var started int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "project-1" {
+			t.Errorf("project_id = %q, want project-1", got)
+		}
+		entered <- r.URL.Path
+		if atomic.AddInt32(&started, 1) == 2 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/alerts/pending-count":
+			_, _ = io.WriteString(w, `{"count":2}`)
+		case "/api/tasks/status-counts":
+			_, _ = io.WriteString(w, `{"active_tasks":3,"queued_tasks":1}`)
+		default:
+			t.Errorf("unexpected status-count path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "project-1"
+
+	result := make(chan statusCountsMsg, 1)
+	go func() {
+		msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+		if !ok {
+			t.Errorf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+			return
+		}
+		result <- msg
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("compact status requests did not start concurrently")
+		}
+	}
+	select {
+	case msg := <-result:
+		if msg.err != nil || msg.pendingAlerts != 2 || msg.activeTasks != 3 || msg.queuedTasks != 1 {
+			t.Fatalf("concurrent compact counts = %+v, want 2/3/1 without error", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("concurrent compact status requests did not complete")
+	}
+}
+
+func TestStatusCountsCancellationStopsBothCompactRequests(t *testing.T) {
+	started := make(chan string, 2)
+	canceled := make(chan string, 2)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/alerts/pending-count", "/api/tasks/status-counts":
+			started <- r.URL.Path
+			<-r.Context().Done()
+			canceled <- r.URL.Path
+		default:
+			t.Errorf("unexpected status-count path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := New(c)
+	m.cliContext = ctx
+	m.selectedID = "project-1"
+
+	result := make(chan statusCountsMsg, 1)
+	go func() {
+		msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+		if !ok {
+			t.Errorf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+			return
+		}
+		result <- msg
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("compact status request did not start before cancellation")
+		}
+	}
+	cancel()
+
+	select {
+	case msg := <-result:
+		if msg.err != nil || msg.pendingAlerts != 0 || msg.activeTasks != 0 || msg.queuedTasks != 0 {
+			t.Fatalf("canceled compact counts = %+v, want zero counts without auth error", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled compact status requests did not complete")
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-canceled:
+		case <-time.After(time.Second):
+			t.Fatal("canceled compact request remained blocked")
+		}
 	}
 }
 

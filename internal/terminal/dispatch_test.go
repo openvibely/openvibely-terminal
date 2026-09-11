@@ -10662,39 +10662,32 @@ func TestDestructiveNonEmptyRefStillConfirms(t *testing.T) {
 }
 
 func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
-	// An alert with a "pending" badge.
-	const alertsHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1">
-	  <p class="font-semibold">Needs approval</p>
-	  <span class="badge">pending</span>
-	</div>`
-	// Two active tasks: one running, one queued.
-	const tasksHTML = `<div>
-	  <div class="card" data-task-id="t-1" data-task-status="running" data-task-category="active" data-display-order="0">
-	    <div class="card-body"><a href="/tasks/t-1" title="Task A">Task A</a></div>
-	  </div>
-	  <div class="card" data-task-id="t-2" data-task-status="queued" data-task-category="active" data-display-order="1">
-	    <div class="card-body"><a href="/tasks/t-2" title="Task B">Task B</a></div>
-	  </div>
-	</div>`
-
+	// The status path uses only compact JSON projections, not the ordinary HTML
+	// alert/task collections. The responses deliberately represent mixed states
+	// that the old card parser would have counted as one pending, two active,
+	// and one queued.
 	m, rec := dispatchModel(t, map[string]string{
-		"/alerts": alertsHTML,
-		"/tasks":  tasksHTML,
+		"/api/alerts/pending-count": `{"count":1}`,
+		"/api/tasks/status-counts":  `{"active_tasks":2,"queued_tasks":1}`,
 	})
 
 	// First /status call triggers fetchStatusCounts and processes the result
 	// (runLine follows one level of chaining, so statusCountsMsg is applied).
 	m = runLine(t, m, "/status")
 
-	// Verify the backend was called for both resources.
-	if !rec.saw("GET", "/alerts") {
-		t.Errorf("expected GET /alerts during status counts fetch:\n%s", rec.all())
+	if !rec.saw("GET", "/api/alerts/pending-count") {
+		t.Errorf("expected compact pending-alert request during status counts fetch:\n%s", rec.all())
 	}
-	if !rec.saw("GET", "/tasks") {
-		t.Errorf("expected GET /tasks during status counts fetch:\n%s", rec.all())
+	if !rec.saw("GET", "/api/tasks/status-counts") {
+		t.Errorf("expected compact task-count request during status counts fetch:\n%s", rec.all())
+	}
+	if rec.saw("GET", "/alerts") || rec.saw("GET", "/tasks") {
+		t.Errorf("status counts must not fetch full collections:\n%s", rec.all())
+	}
+	if !rec.sawQuery("project_id=p1") {
+		t.Errorf("compact status requests must carry selected project_id: %v", rec.urlsSnapshot())
 	}
 
-	// Verify model fields were populated.
 	if m.pendingAlertCount != 1 {
 		t.Errorf("pendingAlertCount = %d, want 1", m.pendingAlertCount)
 	}

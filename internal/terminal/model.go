@@ -425,35 +425,16 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 
 		go func() {
 			defer wg.Done()
-			alerts, err := c.ListAlerts(ctx, pid)
-			if err != nil {
-				alertsErr = err
-				return
-			}
-			for _, a := range alerts {
-				for _, b := range a.Badges {
-					if strings.Contains(strings.ToLower(b), "pending") {
-						pendingAlerts++
-						break
-					}
-				}
-			}
+			pendingAlerts, alertsErr = c.GetPendingAlertCount(ctx, pid)
 		}()
 
 		go func() {
 			defer wg.Done()
-			tasks, err := c.ListTasks(ctx, pid)
-			if err != nil {
-				tasksErr = err
-				return
-			}
-			for _, t := range tasks {
-				if t.Category == "active" {
-					activeTasks++
-				}
-				if t.Status == "queued" {
-					queuedTasks++
-				}
+			var counts *client.TaskStatusCounts
+			counts, tasksErr = c.GetTaskStatusCounts(ctx, pid)
+			if counts != nil {
+				activeTasks = counts.ActiveTasks
+				queuedTasks = counts.QueuedTasks
 			}
 		}()
 
