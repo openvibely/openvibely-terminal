@@ -1183,7 +1183,7 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		"/channels test <channel>",
 		"/channels remove <channel>",
 		"/channels disconnect <github|slack>",
-		"/channels access <telegram|slack|discord|email> <list|add|remove> [identity] [display name]",
+		"/channels access <telegram|slack|discord|x|email> <list|add|remove> [identity] [display name]",
 		"Telegram accepts a numeric ID or username",
 		"Discord requires a numeric ID",
 		"Email is normalized before it is authorized",

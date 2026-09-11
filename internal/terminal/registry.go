@@ -5335,7 +5335,7 @@ func channelsCommand() command {
 			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, X, or Email"},
 			{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
 			{action: "disconnect", args: "<github|slack>", description: "disconnect credentials without removing other configuration (confirmation required)"},
-			{action: "access", args: "<telegram|slack|discord|email> <list|add|remove> [identity] [display name]", description: "manage authorized inbound access identities"},
+			{action: "access", args: "<telegram|slack|discord|x|email> <list|add|remove> [identity] [display name]", description: "manage authorized inbound access identities"},
 			{action: "webhooks", args: "[action]", description: "manage inbound webhook endpoints"},
 			{action: "webhooks list", description: "list inbound webhooks"},
 			{action: "webhooks show", args: "<webhook>", description: "show secret-free webhook detail"},
