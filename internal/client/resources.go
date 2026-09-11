@@ -2302,7 +2302,7 @@ func (c *Client) GetWebhook(ctx context.Context, projectID, id string) (*Webhook
 	}
 	if raw.ID == nil || raw.ProjectID == nil || raw.Name == nil || raw.Enabled == nil || raw.PathToken == nil ||
 		raw.SystemInstructions == nil || raw.TitleTemplate == nil || raw.PromptTemplate == nil || raw.DefaultPriority == nil || raw.AgentIDs == nil ||
-		strings.TrimSpace(*raw.PathToken) == "" || *raw.DefaultPriority < 1 || *raw.DefaultPriority > 4 {
+		strings.TrimSpace(*raw.ID) == "" || strings.TrimSpace(*raw.PathToken) == "" || *raw.DefaultPriority < 1 || *raw.DefaultPriority > 4 {
 		return nil, fmt.Errorf("webhook detail response is malformed")
 	}
 	if *raw.ID != id {

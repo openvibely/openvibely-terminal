@@ -3374,18 +3374,31 @@ func TestListWebhooksPaginatesStablyAndPreservesScope(t *testing.T) {
 }
 
 func TestWebhookDetailRejectsMismatchedIdentity(t *testing.T) {
-	const requestedID = "0123456789abcdef0123456789abcdef"
+	const canonicalRequestedID = "0123456789abcdef0123456789abcdef"
 	for _, tc := range []struct {
-		name string
-		body string
+		name        string
+		requestedID string
+		body        string
 	}{
 		{
-			name: "same project different webhook",
-			body: `{"id":"fedcba9876543210fedcba9876543210","project_id":"p1","name":"Other Hook","enabled":true,"path_token":"other-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
+			name:        "same project different webhook",
+			requestedID: canonicalRequestedID,
+			body:        `{"id":"fedcba9876543210fedcba9876543210","project_id":"p1","name":"Other Hook","enabled":true,"path_token":"other-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
 		},
 		{
-			name: "foreign project",
-			body: `{"id":"0123456789abcdef0123456789abcdef","project_id":"p2","name":"Foreign Hook","enabled":true,"path_token":"foreign-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
+			name:        "missing webhook ID",
+			requestedID: canonicalRequestedID,
+			body:        `{"project_id":"p1","name":"Missing ID Hook","enabled":true,"path_token":"missing-id-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
+		},
+		{
+			name:        "empty webhook ID",
+			requestedID: "",
+			body:        `{"id":"","project_id":"p1","name":"Empty ID Hook","enabled":true,"path_token":"empty-id-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
+		},
+		{
+			name:        "foreign project",
+			requestedID: canonicalRequestedID,
+			body:        `{"id":"0123456789abcdef0123456789abcdef","project_id":"p2","name":"Foreign Hook","enabled":true,"path_token":"foreign-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3402,7 +3415,7 @@ func TestWebhookDetailRejectsMismatchedIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			detail, err := c.GetWebhook(context.Background(), "p1", requestedID)
+			detail, err := c.GetWebhook(context.Background(), "p1", tc.requestedID)
 			if err == nil || detail != nil {
 				t.Fatalf("GetWebhook = (%#v, %v), want nil identity error", detail, err)
 			}
