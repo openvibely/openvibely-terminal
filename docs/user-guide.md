@@ -445,7 +445,7 @@ state:
 /tasks goal pause "Fix login bug"
 /tasks goal resume "Fix login bug"
 
-openvibely-terminal -project demo tasks goal "Fix login bug" | "Reproduce on staging then patch the token refresh"
+openvibely-terminal -project demo tasks goal "Fix login bug" '|' "Reproduce on staging then patch the token refresh"
 openvibely-terminal -project demo tasks goal pause "Fix login bug"
 openvibely-terminal -project demo tasks goal resume "Fix login bug"
 ```
