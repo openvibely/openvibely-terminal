@@ -1197,6 +1197,139 @@ func TestCLIStatusUsesInvalidServerURLRecovery(t *testing.T) {
 	}
 }
 
+func TestCLITaskCancellationPropagatesToBlockedBoardRequest(t *testing.T) {
+	boardStarted := make(chan struct{})
+	requestCanceled := make(chan struct{})
+	var startOnce, cancelOnce sync.Once
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/tasks":
+			startOnce.Do(func() { close(boardStarted) })
+			<-r.Context().Done()
+			cancelOnce.Do(func() { close(requestCanceled) })
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, io.Discard, "demo", []string{"tasks"}, false, false)
+	}()
+
+	select {
+	case <-boardStarted:
+	case <-time.After(time.Second):
+		t.Fatal("tasks board request did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("canceled tasks command returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled tasks command did not return promptly")
+	}
+	select {
+	case <-requestCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("tasks board request did not observe caller cancellation")
+	}
+}
+
+func TestCLICanceledForcedTaskDeleteDoesNotMutateAfterLookupRelease(t *testing.T) {
+	const taskBoard = `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	lookupCanceled := make(chan struct{})
+	lookupDone := make(chan struct{})
+	var startOnce, cancelOnce sync.Once
+	var deleteCalls int
+	var deleteMu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+			startOnce.Do(func() { close(lookupStarted) })
+			go func() {
+				<-r.Context().Done()
+				cancelOnce.Do(func() { close(lookupCanceled) })
+			}()
+			<-releaseLookup
+			defer close(lookupDone)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, taskBoard)
+		case r.Method == http.MethodDelete && r.URL.Path == "/tasks/t-1":
+			deleteMu.Lock()
+			deleteCalls++
+			deleteMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, io.Discard, "demo", []string{"tasks", "delete", "Refactor"}, true, false)
+	}()
+
+	select {
+	case <-lookupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("task lookup did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("canceled forced delete returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled forced delete did not return promptly")
+	}
+	select {
+	case <-lookupCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("task lookup did not observe caller cancellation")
+	}
+	close(releaseLookup)
+	select {
+	case <-lookupDone:
+	case <-time.After(time.Second):
+		t.Fatal("released task lookup did not finish")
+	}
+	deleteMu.Lock()
+	gotDeletes := deleteCalls
+	deleteMu.Unlock()
+	if gotDeletes != 0 {
+		t.Fatalf("canceled forced delete sent %d DELETE requests after lookup release", gotDeletes)
+	}
+}
+
 func TestCLIStatusPreservesAuthRequiredAndOfflineOutput(t *testing.T) {
 	t.Run("auth required", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

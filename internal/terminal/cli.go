@@ -200,10 +200,18 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 		m = drain(m, m.fetchStatusCounts())
 	}
 
+	if ctx.Err() != nil {
+		return cliContextResult(ctx)
+	}
+
 	start := len(m.log)
 	next, cmd := m.runCommandFields(fields)
 	m = next.(Model)
 	m = drain(m, cmd)
+
+	if ctx.Err() != nil {
+		return cliContextResult(ctx)
+	}
 
 	commandErr := firstError(m)
 	if commandErr == nil && hasImplicitProject {

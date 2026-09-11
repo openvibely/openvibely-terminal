@@ -388,7 +388,7 @@ func tasksCommand() command {
 
 			switch action {
 			case "", "list":
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					tasks, err := c.ListTasks(ctx, pid)
 					if err != nil {
 						return "", err
@@ -409,7 +409,7 @@ func tasksCommand() command {
 				}
 				requestID := m.threadOpenRequestID
 				return m, func() tea.Msg {
-					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+					ctx, cancel := m.commandContext(cmdTimeout)
 					defer cancel()
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
@@ -445,7 +445,7 @@ func tasksCommand() command {
 				if showRef == "" {
 					return taskSelector(m, "usage: /tasks show <id|title> [tab]", "tasks show", false)
 				}
-				return m, run("Task", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Task", cmdTimeout, func(ctx context.Context) (string, error) {
 					if isCanonicalFullTaskID(showRef) {
 						if isReviewTab(tab) || jsonMode {
 							d, err := c.GetTaskMetadataForProjectExact(ctx, showRef, pid)
@@ -512,7 +512,7 @@ func tasksCommand() command {
 					if reviewRef == "" {
 						return taskSelector(m, "usage: /tasks reviews <task>", "tasks reviews", false)
 					}
-					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
+					return m, m.run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
 						t, err := resolveTask(ctx, c, pid, reviewRef)
 						if err != nil {
 							return "", err
@@ -526,7 +526,7 @@ func tasksCommand() command {
 					if len(reviewRest) < 3 || len(reviewLocationCandidates(reviewRest)) == 0 {
 						return m, errCmd(commandUsage("tasks", "reviews add"))
 					}
-					return m, run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
+					return m, m.run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
 						tasks, err := m.reviewTaskCandidates(ctx, c, pid)
 						if err != nil {
 							return "", err
@@ -559,7 +559,7 @@ func tasksCommand() command {
 				if len(rest) == 0 {
 					return taskSelector(m, "usage: /tasks "+action+" <task> [execution]", "tasks "+action, false)
 				}
-				return m, lifecycleCommand(c, pid, action, rest)
+				return m, lifecycleCommand(m, c, pid, action, rest)
 
 			case "new":
 				if ref == "" {
@@ -569,7 +569,7 @@ func tasksCommand() command {
 				if title == "" {
 					return m, errCmd(commandUsage("tasks", "new"))
 				}
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					form := client.TaskForm{Title: title, Prompt: prompt, Category: "backlog"}
 					if form.Prompt == "" {
 						form.Prompt = title
@@ -594,7 +594,7 @@ func tasksCommand() command {
 				if title == "" {
 					return m, errCmd(commandUsage("tasks", "edit"))
 				}
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
 						return "", err
@@ -623,7 +623,7 @@ func tasksCommand() command {
 					return m, errCmd("position must be a number")
 				}
 				target := strings.Join(rest[:len(rest)-1], " ")
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)
 					if err != nil {
 						return "", err
@@ -640,9 +640,12 @@ func tasksCommand() command {
 				if ref == "" {
 					return taskSelector(m, "usage: /tasks "+action+" <task>", "tasks "+action, false)
 				}
-				cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, ref)
 					if err != nil {
+						return "", err
+					}
+					if err := ctx.Err(); err != nil {
 						return "", err
 					}
 					switch action {
@@ -692,7 +695,7 @@ func tasksCommand() command {
 					return m, errCmd("usage: /tasks move <task> <backlog|active|completed>")
 				}
 				target := strings.Join(rest[:len(rest)-1], " ")
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)
 					if err != nil {
 						return "", err
@@ -715,7 +718,7 @@ func tasksCommand() command {
 					if target == "" || objective == "" {
 						return m, errCmd(commandUsage("tasks", "goal") + "\nhint: separate the task reference and objective with a | character")
 					}
-					return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+					return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 						t, err := resolveTask(ctx, c, pid, target)
 						if err != nil {
 							return "", err
@@ -744,7 +747,7 @@ func tasksCommand() command {
 				if target == "" {
 					return taskSelector(m, commandUsage("tasks", "goal "+goalAction), "tasks goal "+goalAction, false)
 				}
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)
 					if err != nil {
 						return "", err
@@ -769,7 +772,7 @@ func tasksCommand() command {
 				if message == "" {
 					return m, errCmd("usage: /tasks reply <task> | <message>\nhint: separate the task reference and message with a | character")
 				}
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTask(ctx, c, pid, target)
 					if err != nil {
 						return "", err
@@ -781,7 +784,7 @@ func tasksCommand() command {
 				})
 
 			case "activate":
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					if err := c.ActivateBacklog(ctx, pid); err != nil {
 						return "", err
 					}
@@ -791,7 +794,7 @@ func tasksCommand() command {
 				})
 
 			case "sweep":
-				return m, run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					if err := c.SweepCompletedTasks(ctx, pid); err != nil {
 						return "", err
 					}
@@ -812,7 +815,7 @@ func tasksCommand() command {
 				if column != "backlog" && column != "completed" {
 					return m, errCmd("clear which column? backlog or completed")
 				}
-				cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+				cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					var err error
 					switch column {
 					case "backlog":
@@ -1053,7 +1056,7 @@ func taskAttachmentsAddCommand(m Model, c *client.Client, projectID string, args
 		return m, errCmd(usage)
 	}
 
-	return m, run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+	return m, m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
 		tasks, err := c.ListTasks(ctx, projectID)
 		if err != nil {
 			return "", err
@@ -1084,7 +1087,7 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 		return m, resolveTaskAttachmentTarget(c, projectID, args)
 	}
 
-	cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+	cmd := m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
 		task, attachment, err := lookupTaskAttachmentTarget(ctx, c, projectID, args)
 		if err != nil {
 			return "", err
@@ -1141,7 +1144,7 @@ func resolveTaskAttachmentTarget(c *client.Client, projectID string, args []stri
 func confirmTaskAttachmentDeletion(m Model, projectID string, task client.Task, attachment client.Attachment) (Model, tea.Cmd) {
 	attachmentLabel := firstNonEmpty(attachment.FileName, attachment.ID)
 	taskLabel := firstNonEmpty(task.Title, task.ID)
-	cmd := run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+	cmd := m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
 		return deleteTaskAttachmentResult(ctx, m.client, projectID, task, attachment)
 	})
 	return confirmOr(m,
@@ -1155,7 +1158,7 @@ func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, arg
 		listUsage := commandUsage("tasks", "attachments list")
 		return taskSelectorWithSuffix(m, listUsage, "tasks attachments list", " ")
 	}
-	return m, run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+	return m, m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
 		task, err := resolveTask(ctx, c, projectID, strings.Join(args, " "))
 		if err != nil {
 			return "", err
@@ -1248,9 +1251,9 @@ func resolveTaskWithOperands(tasks []client.Task, args []string, trailing int) (
 // renders the execution page or, only for an explicit execution reference, the
 // ordered event trace. Interactive pages with several executions use the
 // execution selector; CLI mode always renders the page deterministically.
-func lifecycleCommand(c *client.Client, projectID, action string, args []string) tea.Cmd {
+func lifecycleCommand(m Model, c *client.Client, projectID, action string, args []string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		ctx, cancel := m.commandContext(cmdTimeout)
 		defer cancel()
 
 		tasks, err := c.ListTasks(ctx, projectID)

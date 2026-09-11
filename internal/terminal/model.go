@@ -71,9 +71,9 @@ type pendingCmd struct {
 type Model struct {
 	client *client.Client
 
-	// cliContext is set only for headless runs so project preload can honor the
-	// same cancellation that owns a foreground command. Interactive commands use
-	// their existing per-operation contexts.
+	// cliContext is set only for headless runs so project preload and dispatched
+	// commands honor the same cancellation that owns a foreground command.
+	// Interactive commands use their existing per-operation contexts.
 	cliContext context.Context
 
 	transcript viewport.Model
@@ -409,7 +409,7 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 	sessionGeneration := sessionGenerationOf(m)
 	projectGeneration := projectGenerationOf(m)
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := m.commandContext(15 * time.Second)
 		defer cancel()
 
 		var (
@@ -1163,9 +1163,31 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 }
 
 // run executes fn against the backend and turns its output into a resultMsg.
+// Interactive commands use a fresh per-operation timeout. Headless commands
+// may supply a caller-owned context through Model.cliContext so cancellation
+// continues after project preloading.
 func run(title string, timeout time.Duration, fn func(ctx context.Context) (string, error)) tea.Cmd {
+	return runWithContext(context.Background(), title, timeout, fn)
+}
+
+func (m Model) commandContext(timeout time.Duration) (context.Context, context.CancelFunc) {
+	baseCtx := m.cliContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	return context.WithTimeout(baseCtx, timeout)
+}
+
+func (m Model) run(title string, timeout time.Duration, fn func(ctx context.Context) (string, error)) tea.Cmd {
+	return runWithContext(m.cliContext, title, timeout, fn)
+}
+
+func runWithContext(baseCtx context.Context, title string, timeout time.Duration, fn func(ctx context.Context) (string, error)) tea.Cmd {
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		ctx, cancel := context.WithTimeout(baseCtx, timeout)
 		defer cancel()
 		body, err := fn(ctx)
 		return resultMsg{title: title, body: body, err: err}
