@@ -3191,36 +3191,36 @@ func TestPaginatedCardListsLoadAllPages(t *testing.T) {
 				items, err := c.ListSkills(context.Background(), "project-two")
 				out := make([]string, 0, len(items))
 				for _, item := range items {
-					out = append(out, item.Handle)
+					out = append(out, item.Handle+"="+item.Name)
 				}
 				return out, err
-			}, want: []string{"first", "shared", "later"},
+			}, want: []string{"first=First", "shared=Shared", "later=Later"},
 		},
 		{
-			name: "automations include later structural cards", path: "/automations",
-			firstBody: `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true"><div data-automation-url="/automations/a1"><span class="badge">active</span><button data-automation-card-delete="a1" data-automation-name="First"></button></div></div>`,
-			nextBody:  `<div data-automation-url="/automations/a2"><span class="badge">paused</span><button data-automation-card-delete="a2" data-automation-name="Later"></button></div>`,
+			name: "automations include later structural cards and keep first duplicate", path: "/automations",
+			firstBody: `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true"><div data-automation-url="/automations/a1"><span class="badge">active</span><button data-automation-card-delete="a1" data-automation-name="First"></button></div><div data-automation-url="/automations/shared"><span class="badge">active</span><button data-automation-card-delete="shared" data-automation-name="Shared First"></button></div></div>`,
+			nextBody:  `<div data-automation-url="/automations/shared"><span class="badge">paused</span><button data-automation-card-delete="shared" data-automation-name="Shared Later"></button></div><div data-automation-url="/automations/a2"><span class="badge">paused</span><button data-automation-card-delete="a2" data-automation-name="Later"></button></div>`,
 			list: func(c *Client) ([]string, error) {
 				items, err := c.ListAutomations(context.Background(), "project-two")
 				out := make([]string, 0, len(items))
 				for _, item := range items {
-					out = append(out, item.ID)
+					out = append(out, item.ID+"="+item.Name+"="+item.State)
 				}
 				return out, err
-			}, want: []string{"a1", "a2"},
+			}, want: []string{"a1=First=active", "shared=Shared First=active", "a2=Later=paused"},
 		},
 		{
-			name: "personality offset excludes built-in cards", path: "/personality",
+			name: "personality offset excludes built-in cards and keeps first duplicate", path: "/personality",
 			firstBody: `<div id="personality-section" data-selected-personality="base" data-card-pagination-root data-card-pagination-card-selector="[data-personality-pagination-card='true']" data-card-pagination-key="data-personality-key" data-card-pagination-has-more="true"><div data-personality-key="base" data-personality-name="Base" data-personality-is-preset="true" data-personality-pagination-card="false"></div><div data-personality-key="custom-one" data-personality-name="Custom One" data-personality-is-preset="false" data-personality-pagination-card="true"></div></div>`,
-			nextBody:  `<div data-personality-key="custom-two" data-personality-name="Custom Two" data-personality-is-preset="false" data-personality-pagination-card="true"></div>`,
+			nextBody:  `<div data-personality-key="custom-one" data-personality-name="Later Custom One" data-personality-is-preset="false" data-personality-pagination-card="true"></div><div data-personality-key="custom-two" data-personality-name="Custom Two" data-personality-is-preset="false" data-personality-pagination-card="true"></div>`,
 			list: func(c *Client) ([]string, error) {
 				items, err := c.ListPersonalities(context.Background(), "project-two")
 				out := make([]string, 0, len(items))
 				for _, item := range items {
-					out = append(out, item.Key)
+					out = append(out, item.Key+"="+item.Name)
 				}
 				return out, err
-			}, want: []string{"base", "custom-one", "custom-two"},
+			}, want: []string{"base=Base", "custom-one=Custom One", "custom-two=Custom Two"},
 		},
 	}
 	for _, tt := range tests {
@@ -3277,43 +3277,45 @@ func TestOtherPaginatedCardSurfacesLoadLaterPages(t *testing.T) {
 	}{
 		{
 			name: "alerts", path: "/alerts", marker: "data-alert-id",
-			first: `<div data-alert-id="a1" data-alert-scroll-anchor="a1"><p class="font-semibold">First</p></div>`,
-			later: `<div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Later</p></div>`,
+			first: `<div data-alert-id="a1" data-alert-scroll-anchor="a1"><p class="font-semibold">First</p></div><div data-alert-id="shared" data-alert-scroll-anchor="shared"><p class="font-semibold">Shared first</p></div>`,
+			later: `<div data-alert-id="shared" data-alert-scroll-anchor="shared"><p class="font-semibold">Shared later</p></div><div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Later</p></div>`,
 			list: func(c *Client) ([]string, error) {
 				items, err := c.ListAlerts(context.Background(), "p1")
 				out := make([]string, 0, len(items))
 				for _, item := range items {
-					out = append(out, item.ID)
+					out = append(out, item.ID+"="+item.Title)
 				}
 				return out, err
 			},
-			want: []string{"a1", "a2"},
+			want: []string{"a1=First", "shared=Shared first", "a2=Later"},
 		},
 		{
 			name: "models", path: "/models", marker: "data-model-id",
-			first: `<div data-model-id="m1" data-model-name="First"></div>`, later: `<div data-model-id="m2" data-model-name="Later"></div>`,
+			first: `<div data-model-id="m1" data-model-name="First"></div><div data-model-id="shared" data-model-name="Shared first"></div>`,
+			later: `<div data-model-id="shared" data-model-name="Shared later"></div><div data-model-id="m2" data-model-name="Later"></div>`,
 			list: func(c *Client) ([]string, error) {
 				items, err := c.ListModels(context.Background(), "p1")
 				out := make([]string, 0, len(items))
 				for _, item := range items {
-					out = append(out, item.ID)
+					out = append(out, item.ID+"="+item.Name)
 				}
 				return out, err
 			},
-			want: []string{"m1", "m2"},
+			want: []string{"m1=First", "shared=Shared first", "m2=Later"},
 		},
 		{
 			name: "agents", path: "/agents", marker: "data-agent-id",
-			first: `<div data-agent-id="g1" data-agent-name="First"></div>`, later: `<div data-agent-id="g2" data-agent-name="Later"></div>`,
+			first: `<div data-agent-id="g1" data-agent-name="First"></div><div data-agent-id="shared" data-agent-name="Shared first"></div>`,
+			later: `<div data-agent-id="shared" data-agent-name="Shared later"></div><div data-agent-id="g2" data-agent-name="Later"></div>`,
 			list: func(c *Client) ([]string, error) {
 				items, err := c.ListAgents(context.Background(), "p1")
 				out := make([]string, 0, len(items))
 				for _, item := range items {
-					out = append(out, item.ID)
+					out = append(out, item.ID+"="+item.Name)
 				}
 				return out, err
 			},
-			want: []string{"g1", "g2"},
+			want: []string{"g1=First", "shared=Shared first", "g2=Later"},
 		},
 	}
 	for _, tt := range tests {
@@ -3331,6 +3333,84 @@ func TestOtherPaginatedCardSurfacesLoadLaterPages(t *testing.T) {
 			}))
 			defer srv.Close()
 			c, _ := New(srv.URL)
+			got, err := tt.list(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("items = %#v, want %#v", got, tt.want)
+			}
+			if requests != 2 {
+				t.Fatalf("requests = %d, want 2", requests)
+			}
+		})
+	}
+}
+
+func TestPaginatedModelAndAgentListsFilterNamelessCardsPerPage(t *testing.T) {
+	tests := []struct {
+		name, path, marker, first, later string
+		list                             func(*Client) ([]string, error)
+		want                             []string
+	}{
+		{
+			name:   "models",
+			path:   "/models",
+			marker: "data-model-id",
+			first:  `<div data-model-id="recover"></div><div data-model-id="shared" data-model-name="Shared first"></div>`,
+			later:  `<div data-model-id="recover" data-model-name="Recovered"></div><div data-model-id="shared" data-model-name="Shared later"></div><div data-model-id="last" data-model-name="Last"></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListModels(context.Background(), "p1")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.ID+"="+item.Name)
+				}
+				return out, err
+			},
+			want: []string{"shared=Shared first", "recover=Recovered", "last=Last"},
+		},
+		{
+			name:   "agents",
+			path:   "/agents",
+			marker: "data-agent-id",
+			first:  `<div data-agent-id="recover"></div><div data-agent-id="shared" data-agent-name="Shared first"></div>`,
+			later:  `<div data-agent-id="recover" data-agent-name="Recovered"></div><div data-agent-id="shared" data-agent-name="Shared later"></div><div data-agent-id="last" data-agent-name="Last"></div>`,
+			list: func(c *Client) ([]string, error) {
+				items, err := c.ListAgents(context.Background(), "p1")
+				out := make([]string, 0, len(items))
+				for _, item := range items {
+					out = append(out, item.ID+"="+item.Name)
+				}
+				return out, err
+			},
+			want: []string{"shared=Shared first", "recover=Recovered", "last=Last"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != tt.path || r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request = %s?%s", r.URL.Path, r.URL.RawQuery)
+				}
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Set(cardPageMoreHeader, strconv.FormatBool(requests == 1))
+				if requests == 1 {
+					_, _ = fmt.Fprintf(w, `<div data-card-pagination-root data-card-pagination-card-selector="[%s]" data-card-pagination-key="%s" data-card-pagination-has-more="true">%s</div>`, tt.marker, tt.marker, tt.first)
+					return
+				}
+				if got := r.URL.Query().Get("offset"); got != "2" {
+					t.Errorf("continuation offset = %q, want 2", got)
+				}
+				_, _ = io.WriteString(w, tt.later)
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
 			got, err := tt.list(c)
 			if err != nil {
 				t.Fatal(err)

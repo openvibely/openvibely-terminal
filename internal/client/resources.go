@@ -88,6 +88,26 @@ type AlertListFilter struct {
 	ProcessingState string
 }
 
+// aggregateFirstSeenPages parses each page in order and retains the first item
+// for each resource-specific identity. Callers own per-page traversal,
+// filtering, and field mapping; this helper only centralizes cross-page order
+// and deduplication.
+func aggregateFirstSeenPages[T any](pages []htmlPage, parse func(*html.Node) []T, key func(T) string) []T {
+	out := make([]T, 0)
+	seen := make(map[string]struct{})
+	for _, page := range pages {
+		for _, item := range parse(page.root) {
+			identity := key(item)
+			if _, ok := seen[identity]; ok {
+				continue
+			}
+			seen[identity] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 // ListAlerts scrapes every alert card for a project without workflow predicates.
 func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, error) {
 	return c.ListAlertsWithFilter(ctx, projectID, AlertListFilter{})
@@ -136,18 +156,10 @@ func (c *Client) FindAlertByID(ctx context.Context, id, projectID string) (Alert
 }
 
 func aggregateAlertPages(pages []htmlPage, projectID string) []Alert {
-	seen := make(map[string]bool)
-	alerts := make([]Alert, 0)
-	for _, page := range pages {
-		for _, alert := range parseAlerts(page.root, projectID) {
-			if seen[alert.ID] {
-				continue
-			}
-			seen[alert.ID] = true
-			alerts = append(alerts, alert)
-		}
-	}
-	return alerts
+	return aggregateFirstSeenPages(pages,
+		func(root *html.Node) []Alert { return parseAlerts(root, projectID) },
+		func(alert Alert) string { return alert.ID },
+	)
 }
 
 func parseAlerts(root *html.Node, projectID string) []Alert {
@@ -577,17 +589,14 @@ func (c *Client) ListSkills(ctx context.Context, projectID string) ([]Skill, err
 	if err != nil {
 		return nil, err
 	}
-	cards := make([]Card, 0)
-	for _, page := range pages {
-		cards = append(cards, dedupedCardsWithoutText(page.root, "data-skill-handle")...)
-	}
-	seen := make(map[string]bool)
+	cards := aggregateFirstSeenPages(pages,
+		func(root *html.Node) []Card {
+			return dedupedCardsWithoutText(root, "data-skill-handle")
+		},
+		func(card Card) string { return card.Get("skill-handle") },
+	)
 	out := make([]Skill, 0, len(cards))
 	for _, card := range cards {
-		if seen[card.Get("skill-handle")] {
-			continue
-		}
-		seen[card.Get("skill-handle")] = true
 		out = append(out, Skill{
 			Handle:      card.Get("skill-handle"),
 			Name:        card.Get("skill-name"),
@@ -1296,17 +1305,21 @@ func (c *Client) ListModels(ctx context.Context, projectID string) ([]LLMModel, 
 	if err != nil {
 		return nil, err
 	}
-	cards := make([]Card, 0)
-	for _, page := range pages {
-		cards = append(cards, dedupedCards(page.root, "data-model-id")...)
-	}
-	seen := make(map[string]bool)
+	cards := aggregateFirstSeenPages(pages,
+		func(root *html.Node) []Card {
+			cards := dedupedCards(root, "data-model-id")
+			out := make([]Card, 0, len(cards))
+			for _, card := range cards {
+				if card.Get("model-name") != "" {
+					out = append(out, card)
+				}
+			}
+			return out
+		},
+		func(card Card) string { return card.Get("model-id") },
+	)
 	out := make([]LLMModel, 0, len(cards))
 	for _, card := range cards {
-		if card.Get("model-name") == "" || seen[card.Get("model-id")] {
-			continue
-		}
-		seen[card.Get("model-id")] = true
 		out = append(out, LLMModel{
 			ID:       card.Get("model-id"),
 			Name:     card.Get("model-name"),
@@ -1440,17 +1453,21 @@ func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, 
 	if err != nil {
 		return nil, err
 	}
-	cards := make([]Card, 0)
-	for _, page := range pages {
-		cards = append(cards, dedupedCardsWithoutText(page.root, "data-agent-id")...)
-	}
-	seen := make(map[string]bool)
+	cards := aggregateFirstSeenPages(pages,
+		func(root *html.Node) []Card {
+			cards := dedupedCardsWithoutText(root, "data-agent-id")
+			out := make([]Card, 0, len(cards))
+			for _, card := range cards {
+				if card.Get("agent-name") != "" {
+					out = append(out, card)
+				}
+			}
+			return out
+		},
+		func(card Card) string { return card.Get("agent-id") },
+	)
 	out := make([]AgentDef, 0, len(cards))
 	for _, card := range cards {
-		if card.Get("agent-name") == "" || seen[card.Get("agent-id")] {
-			continue
-		}
-		seen[card.Get("agent-id")] = true
 		out = append(out, AgentDef{
 			ID:          card.Get("agent-id"),
 			Key:         card.Get("agent-key"),
@@ -3059,42 +3076,39 @@ func (c *Client) ListPersonalities(ctx context.Context, projectID string) ([]Per
 		selectedKey = attr(section, "data-selected-personality")
 	}
 
-	cards := make([]*html.Node, 0)
-	for _, page := range pages {
-		cards = append(cards, findAll(page.root, func(n *html.Node) bool {
-			// data-personality-key is intentionally checked for presence because the
-			// Base card carries the empty key as an explicit attribute.
-			return hasHTMLAttr(n, "data-personality-key") &&
-				attr(n, "data-personality-is-preset") != ""
-		})...)
-	}
-	seen := make(map[string]bool)
-	out := make([]Personality, 0, len(cards))
-	for _, card := range cards {
-		identity := attr(card, "data-personality-key")
-		if seen[identity] {
-			continue
-		}
-		seen[identity] = true
-		p := Personality{
-			ID:                  attr(card, "data-personality-id"),
-			Name:                strings.TrimSpace(attr(card, "data-personality-name")),
-			Key:                 attr(card, "data-personality-key"),
-			Description:         strings.TrimSpace(attr(card, "data-personality-description")),
-			SystemPromptPreview: strings.TrimSpace(attr(card, "data-personality-preview")),
-			IsPreset:            attr(card, "data-personality-is-preset") == "true",
-			HasCustom:           attr(card, "data-personality-has-custom") == "true",
-		}
-		if p.Name == "" {
-			if p.Key != "" {
-				p.Name = p.Key
-			} else {
-				p.Name = "Base"
+	out := aggregateFirstSeenPages(pages,
+		func(root *html.Node) []Personality {
+			cards := findAll(root, func(n *html.Node) bool {
+				// data-personality-key is intentionally checked for presence because the
+				// Base card carries the empty key as an explicit attribute.
+				return hasHTMLAttr(n, "data-personality-key") &&
+					attr(n, "data-personality-is-preset") != ""
+			})
+			personalities := make([]Personality, 0, len(cards))
+			for _, card := range cards {
+				p := Personality{
+					ID:                  attr(card, "data-personality-id"),
+					Name:                strings.TrimSpace(attr(card, "data-personality-name")),
+					Key:                 attr(card, "data-personality-key"),
+					Description:         strings.TrimSpace(attr(card, "data-personality-description")),
+					SystemPromptPreview: strings.TrimSpace(attr(card, "data-personality-preview")),
+					IsPreset:            attr(card, "data-personality-is-preset") == "true",
+					HasCustom:           attr(card, "data-personality-has-custom") == "true",
+				}
+				if p.Name == "" {
+					if p.Key != "" {
+						p.Name = p.Key
+					} else {
+						p.Name = "Base"
+					}
+				}
+				p.Active = sectionFound && p.Key == selectedKey
+				personalities = append(personalities, p)
 			}
-		}
-		p.Active = sectionFound && p.Key == selectedKey
-		out = append(out, p)
-	}
+			return personalities
+		},
+		func(personality Personality) string { return personality.Key },
+	)
 	return out, nil
 }
 
@@ -3249,17 +3263,10 @@ func (c *Client) ListAutomations(ctx context.Context, projectID string) ([]Autom
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Automation, 0)
-	seen := make(map[string]bool)
-	for _, page := range pages {
-		for _, automation := range parseAutomations(page.root) {
-			if seen[automation.ID] {
-				continue
-			}
-			seen[automation.ID] = true
-			out = append(out, automation)
-		}
-	}
+	out := aggregateFirstSeenPages(pages,
+		func(root *html.Node) []Automation { return parseAutomations(root) },
+		func(automation Automation) string { return automation.ID },
+	)
 	return out, nil
 }
 
