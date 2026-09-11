@@ -1613,11 +1613,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		alert := msg.alert
 		cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
-			alerts, err := m.client.DeleteAlertAndList(ctx, alert.ID, projectID)
-			if err != nil {
-				return "", err
-			}
-			return alertDeleteOutput("delete: "+alertActionDisplayName(alert), alerts)
+			return resolvedAlertActionOutput(ctx, m.client, projectID, "delete", alert)
 		})
 		display := alertActionDisplayName(alert)
 		return confirmOr(m,
