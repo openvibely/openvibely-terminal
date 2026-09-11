@@ -4634,7 +4634,7 @@ func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				return "", err
 			}
-			return completeChannelMutation(ctx, c, projectID, action, channel)
+			return completeChannelMutation(ctx, c, projectID, action+"ed "+channel.Name)
 		})
 	}
 	var cmd tea.Cmd
@@ -4804,13 +4804,14 @@ func validateChannelsArgs(args []string) error {
 	return errors.New(commandUsage("channels", ""))
 }
 
-func completeChannelMutation(ctx context.Context, c *client.Client, projectID, action string, channel client.Channel) (string, error) {
-	status := action + "ed " + channel.Name
-	channels, err := c.ListChannels(ctx, projectID)
-	if err != nil {
-		return status, nil
-	}
-	return status + "\n\n" + renderChannels(channels), nil
+func completeChannelMutation(ctx context.Context, c *client.Client, projectID, status string) (string, error) {
+	return refreshAndRender(status,
+		func() ([]client.Channel, error) {
+			return c.ListChannels(ctx, projectID)
+		},
+		func(channels []client.Channel, _ string) string {
+			return renderChannels(channels)
+		})
 }
 
 func renderChannels(channels []client.Channel) string {
@@ -5469,7 +5470,7 @@ func channelsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					return completeChannelMutation(ctx, c, pid, action, ch)
+					return completeChannelMutation(ctx, c, pid, action+"ed "+ch.Name)
 				})
 			}
 			ch, _ := matchChannelRef(strings.Join(rest, " "))
@@ -5498,12 +5499,8 @@ func channelsCommand() command {
 				if err := c.ChannelAction(ctx, ch.Type, action, pid); err != nil {
 					return "", err
 				}
-				channels, err := c.ListChannels(ctx, pid)
-				status := action + ": " + ch.Name
-				if err != nil {
-					return status, nil
-				}
-				return status + "\n\n" + renderChannels(channels), nil
+				displayStatus := action + ": " + ch.Name
+				return completeChannelMutation(ctx, c, pid, displayStatus)
 			})
 			if action == "remove" {
 				return confirmOr(m, fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name), fmt.Sprintf("use --force to confirm removal of channel %q", ch.Name), runAction)
