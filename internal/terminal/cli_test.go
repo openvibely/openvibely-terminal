@@ -3330,7 +3330,7 @@ func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
 	}{
 		{name: "unforced", refs: []string{"row-1"}, wantError: "--force to confirm removal", wantDelete: false},
 		{name: "unknown foreign", refs: []string{"foreign-row"}, wantError: "nothing matches", wantDelete: false},
-		{name: "ambiguous", refs: []string{"Shared", "User"}, wantError: "ambiguous", wantDelete: false},
+		{name: "ambiguous", refs: []string{"U"}, wantError: "ambiguous", wantDelete: false},
 		{name: "duplicate", refs: []string{"row-1", "row-1"}, wantError: "more than once", wantDelete: false},
 		{name: "surplus", refs: []string{"row-1", "row-2"}, wantError: "exactly one", wantDelete: false},
 		{name: "forced captured row", refs: []string{"row-1"}, force: true, wantDelete: true},

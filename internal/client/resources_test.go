@@ -1482,7 +1482,7 @@ func TestChannelAuthorizedUsersUseScopedRoutesAndSecretFreeModels(t *testing.T) 
 		identity  string
 	}
 	cases := []providerCase{
-		{provider: "telegram", route: "/channels/telegram/authorized-users", container: "telegram-authorized-users", input: "user_id_or_username", identity: "telegram_user", row: `<span>Telegram User</span><span>@telegram_user</span><span>ID: 987</span>`},
+		{provider: "telegram", route: "/channels/telegram/authorized-users", container: "telegram-authorized-users", input: "user_id_or_username", identity: "telegram_user", row: `<span class="text-sm font-medium">Telegram User</span><span class="text-xs opacity-50">@telegram_user</span><span class="text-xs opacity-50">ID: 987</span>`},
 		{provider: "slack", route: "/channels/slack/authorized-users", container: "slack-authorized-users", input: "slack_user_id", identity: "U12345678", row: `<span>Slack User</span><span>ID: U12345678</span>`},
 		{provider: "discord", route: "/channels/discord/authorized-users", container: "discord-authorized-users", input: "discord_user_id", identity: "123456789012345678", row: `<span>Discord User</span><span>ID: 123456789012345678</span>`},
 		{provider: "email", route: "/channels/email/authorized-senders", container: "email-authorized-senders", input: "authorized_email_address", identity: "person@example.com", row: `<span class="text-sm font-medium truncate">Email User</span><span class="text-xs opacity-50 truncate">person@example.com</span>`},
@@ -1658,6 +1658,29 @@ func TestChannelAuthorizedUsersParseEmailIdentityStructurally(t *testing.T) {
 	}
 	if users[0].MatchesIdentity("support@example.com") || !users[0].MatchesIdentity("REAL.SENDER@EXAMPLE.COM") {
 		t.Fatalf("email aliases = %#v", users[0])
+	}
+}
+
+func TestChannelAuthorizedUsersParseTelegramIdentityStructurally(t *testing.T) {
+	const page = `<div id="telegram-authorized-users">
+		<div data-project-id="p1"><div><span class="text-sm font-medium">ID: 42</span><span class="text-xs opacity-50">@real_user</span></div><button hx-delete="/channels/telegram/authorized-users/username-row?project_id=p1">remove</button></div>
+		<div data-project-id="p1"><div><span class="text-sm font-medium">@misleading</span><span class="text-xs opacity-50">ID: 987</span></div><button hx-delete="/channels/telegram/authorized-users/numeric-row?project_id=p1">remove</button></div>
+	</div>`
+	c := htmlServer(t, page)
+
+	users, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", "p1")
+	if err != nil {
+		t.Fatalf("ListChannelAuthorizedUsers: %v", err)
+	}
+	if len(users) != 2 {
+		t.Fatalf("telegram users = %#v, want two users", users)
+	}
+	username, numeric := users[0], users[1]
+	if username.ID != "username-row" || username.DisplayName != "ID: 42" || username.Identity != "@real_user" || !username.MatchesIdentity("real_user") || username.MatchesIdentity("42") {
+		t.Fatalf("username row = %#v", username)
+	}
+	if numeric.ID != "numeric-row" || numeric.DisplayName != "@misleading" || numeric.Identity != "987" || !numeric.MatchesIdentity("987") || numeric.MatchesIdentity("misleading") {
+		t.Fatalf("numeric row = %#v", numeric)
 	}
 }
 

@@ -4917,9 +4917,10 @@ func channelAccessAmbiguousRef(ref string, matches []client.ChannelAuthorizedUse
 	return fmt.Errorf("%q is ambiguous: %s — use the full name or ID", sanitizeAutomationDetailText(ref), strings.Join(labels, ", "))
 }
 
-// resolveChannelAccessUser preserves the command registry's ID → exact name →
+// resolveChannelAccessUser preserves the command registry's ID → exact identity →
 // prefix → substring ranking while treating a Telegram username and numeric ID
-// as aliases for one captured authorization row.
+// as aliases for one captured authorization row. Display names are rendered only:
+// they are arbitrary metadata and must not select a destructive access mutation.
 func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) (client.ChannelAuthorizedUser, error) {
 	var zero client.ChannelAuthorizedUser
 	ref = strings.TrimSpace(ref)
@@ -4930,13 +4931,13 @@ func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) 
 	for _, tier := range []func(client.ChannelAuthorizedUser) bool{
 		func(user client.ChannelAuthorizedUser) bool { return strings.EqualFold(user.ID, ref) },
 		func(user client.ChannelAuthorizedUser) bool {
-			return strings.EqualFold(user.DisplayName, ref) || strings.EqualFold(user.Identity, ref) || user.MatchesIdentity(ref)
+			return strings.EqualFold(user.Identity, ref) || user.MatchesIdentity(ref)
 		},
 		func(user client.ChannelAuthorizedUser) bool {
-			return strings.HasPrefix(strings.ToLower(user.ID), lower) || strings.HasPrefix(strings.ToLower(user.DisplayName), lower) || strings.HasPrefix(strings.ToLower(user.Identity), lower)
+			return strings.HasPrefix(strings.ToLower(user.ID), lower) || strings.HasPrefix(strings.ToLower(user.Identity), lower)
 		},
 		func(user client.ChannelAuthorizedUser) bool {
-			return strings.Contains(strings.ToLower(user.DisplayName), lower) || strings.Contains(strings.ToLower(user.Identity), lower)
+			return strings.Contains(strings.ToLower(user.ID), lower) || strings.Contains(strings.ToLower(user.Identity), lower)
 		},
 	} {
 		matches := channelAccessUserMatches(users, tier)

@@ -8584,7 +8584,7 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 		fmt.Fprintf(&b, `<div data-project-id="%s"><div>`, projectID)
 		switch provider {
 		case "telegram":
-			fmt.Fprintf(&b, `<span>%s</span><span>@%s</span><span>ID: 987</span>`, row.name, strings.TrimPrefix(row.identity, "@"))
+			fmt.Fprintf(&b, `<span class="text-sm font-medium">%s</span><span class="text-xs opacity-50">@%s</span><span class="text-xs opacity-50">ID: 987</span>`, row.name, strings.TrimPrefix(row.identity, "@"))
 		case "slack", "discord":
 			fmt.Fprintf(&b, `<span>%s</span><span>ID: %s</span>`, row.name, row.identity)
 		case "email":
@@ -8789,6 +8789,34 @@ func TestChannelAccessTUICommandsValidateScopeProvidersAndCapturedRemoval(t *tes
 		m = runLine(t, m, "yes")
 		if !rec.saw(http.MethodDelete, route+"/email-row") {
 			t.Fatalf("canonical email removal used the wrong target: %s", rec.all())
+		}
+	})
+	t.Run("telegram display text cannot replace canonical identity", func(t *testing.T) {
+		route, _ := channelAccessTestRoute("telegram")
+		const page = `<div id="telegram-authorized-users">
+			<div data-project-id="p1"><div><span class="text-sm font-medium">ID: 42</span><span class="text-xs opacity-50">@real_user</span></div><button hx-delete="/channels/telegram/authorized-users/username-row?project_id=p1">remove</button></div>
+			<div data-project-id="p1"><div><span class="text-sm font-medium">@misleading</span><span class="text-xs opacity-50">ID: 987</span></div><button hx-delete="/channels/telegram/authorized-users/numeric-row?project_id=p1">remove</button></div>
+		</div>`
+
+		for _, ref := range []string{"42", "ID: 42", "misleading"} {
+			m, rec := dispatchModel(t, map[string]string{route: page})
+			m = runLine(t, m, "/channels access telegram remove "+ref)
+			if m.pendingConfirmation != nil || rec.saw(http.MethodDelete, route+"/username-row") || rec.saw(http.MethodDelete, route+"/numeric-row") {
+				t.Fatalf("display text %q selected a Telegram row: output=%s calls=%s", ref, transcript(m), rec.all())
+			}
+		}
+
+		m, rec := dispatchModel(t, map[string]string{route: page})
+		m = runLine(t, m, "/channels access telegram remove real_user")
+		if m.pendingConfirmation == nil || rec.saw(http.MethodDelete, route+"/username-row") {
+			t.Fatalf("canonical Telegram identity was not captured before confirmation: output=%s calls=%s", transcript(m), rec.all())
+		}
+		if !strings.Contains(m.pendingConfirmation.message, "ID: 42 (@real_user)") {
+			t.Fatalf("Telegram confirmation did not show the canonical identity: %q", m.pendingConfirmation.message)
+		}
+		m = runLine(t, m, "yes")
+		if !rec.saw(http.MethodDelete, route+"/username-row") {
+			t.Fatalf("canonical Telegram removal used the wrong target: %s", rec.all())
 		}
 	})
 

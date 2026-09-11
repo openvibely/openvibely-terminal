@@ -1852,26 +1852,49 @@ func channelAccessIdentity(provider string, row *html.Node) (displayName, identi
 	switch provider {
 	case "telegram":
 		var username, numericID string
-		for i, field := range fields {
-			if strings.HasPrefix(field, "@") && len(field) > 1 {
-				username = strings.ToLower(field)
+		for _, span := range findAll(row, func(n *html.Node) bool {
+			return n.Data == "span"
+		}) {
+			classes := make(map[string]bool)
+			for _, class := range strings.Fields(attr(span, "class")) {
+				classes[class] = true
 			}
-			if field == "ID:" && i+1 < len(fields) {
-				numericID = fields[i+1]
+			value := strings.TrimSpace(NodeText(span))
+			if classes["text-sm"] && classes["font-medium"] && displayName == "" {
+				displayName = value
+				continue
 			}
-		}
-		if numericID != "" {
-			identity = numericID
-		} else {
-			identity = username
+			if !classes["text-xs"] || !classes["opacity-50"] {
+				continue
+			}
+			switch {
+			case strings.HasPrefix(value, "@"):
+				if username != "" || len(value) == 1 {
+					return "", "", nil
+				}
+				username = "@" + strings.ToLower(strings.TrimPrefix(value, "@"))
+			case strings.HasPrefix(value, "ID:"):
+				if numericID != "" {
+					return "", "", nil
+				}
+				parsedID, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(value, "ID:")), 10, 64)
+				if err != nil || parsedID <= 0 {
+					return "", "", nil
+				}
+				numericID = strconv.FormatInt(parsedID, 10)
+			}
 		}
 		if username != "" {
 			references = append(references, username, strings.TrimPrefix(username, "@"))
-			text = strings.TrimSpace(strings.ReplaceAll(text, username, ""))
 		}
 		if numericID != "" {
+			identity = numericID
 			references = append(references, numericID)
-			text = strings.TrimSpace(strings.ReplaceAll(text, "ID: "+numericID, ""))
+		} else {
+			identity = username
+		}
+		if identity == "" {
+			return "", "", nil
 		}
 	case "slack", "discord":
 		for i := len(fields) - 1; i > 0; i-- {
@@ -1916,7 +1939,7 @@ func channelAccessIdentity(provider string, row *html.Node) (displayName, identi
 	if identity != "" {
 		references = append(references, identity)
 	}
-	if provider != "email" {
+	if provider == "slack" || provider == "discord" {
 		displayName = strings.TrimSpace(text)
 	}
 	return strings.TrimSpace(displayName), identity, references
