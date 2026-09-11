@@ -8679,7 +8679,7 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 			projectID = "p1"
 		}
 		if provider == "x" {
-			fmt.Fprintf(&b, `<div data-x-authorized-user-id="%s" data-x-authorized-project-id="%s" data-x-user-id="%s" data-x-username="%s"><div>`, row.id, projectID, row.identity, strings.TrimPrefix(row.name, "@"))
+			fmt.Fprintf(&b, `<div data-x-authorized-user-id="%s" data-x-authorized-project-id="%s" data-x-user-id="%s" data-x-username="%s">`, row.id, projectID, row.identity, strings.TrimPrefix(row.name, "@"))
 		} else {
 			fmt.Fprintf(&b, `<div data-project-id="%s"><div>`, projectID)
 		}
@@ -8697,7 +8697,10 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 				fmt.Fprintf(&b, `<span><span class="opacity-60">ID %s</span></span>`, row.identity)
 			}
 		}
-		b.WriteString(`<input value="channel-access-backend-secret"></div>`)
+		b.WriteString(`<input value="channel-access-backend-secret">`)
+		if provider != "x" {
+			b.WriteString(`</div>`)
+		}
 		fmt.Fprintf(&b, `<button hx-delete="%s/%s?project_id=p1">remove</button></div>`, route, row.id)
 	}
 	b.WriteString(`</div>`)

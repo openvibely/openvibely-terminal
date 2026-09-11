@@ -2027,15 +2027,15 @@ func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser,
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		row := button.Parent
-		recordID, hasRecordID, markerErr := xAuthorizationMarker(row, container, "data-x-authorized-user-id", "data-x-authorization-id")
+		recordID, hasRecordID, markerErr := xAuthorizationMarker(row, "data-x-authorized-user-id", "data-x-authorization-id")
 		if markerErr != nil || !hasRecordID || recordID != id {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
-		rowProjectID, hasRowProject, markerErr := xAuthorizationMarker(row, container, "data-x-authorized-project-id", "data-project-id")
+		rowProjectID, hasRowProject, markerErr := xAuthorizationMarker(row, "data-x-authorized-project-id", "data-project-id")
 		if markerErr != nil || !hasRowProject || rowProjectID != projectID {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
-		xUserID, username, hasStructuredIdentity, identityErr := xAuthorizationData(row, container)
+		xUserID, username, hasStructuredIdentity, identityErr := xAuthorizationData(row)
 		if identityErr != nil || !hasStructuredIdentity {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
@@ -2085,45 +2085,52 @@ func xAuthorizationDeleteTarget(raw, route, projectID string) (string, error) {
 	return id, nil
 }
 
-func xAuthorizationMarker(row, container *html.Node, names ...string) (string, bool, error) {
-	var value string
-	found := false
-	for node := row; node != nil && node != container; node = node.Parent {
-		for _, name := range names {
-			if !hasHTMLAttr(node, name) {
-				continue
-			}
-			candidate := strings.TrimSpace(attr(node, name))
-			if candidate == "" || found {
-				return "", false, errors.New("duplicate or missing X authorization marker")
-			}
-			value = candidate
-			found = true
+func xAuthorizationMarker(row *html.Node, name string, aliases ...string) (string, bool, error) {
+	if row == nil {
+		return "", false, errors.New("missing X authorization row")
+	}
+	for _, alias := range aliases {
+		if hasHTMLAttr(row, alias) {
+			return "", false, errors.New("unsupported X authorization marker")
 		}
 	}
-	return value, found, nil
+	count := 0
+	value := ""
+	for _, attribute := range row.Attr {
+		if attribute.Key != name {
+			continue
+		}
+		count++
+		value = strings.TrimSpace(attribute.Val)
+	}
+	if count > 1 || (count == 1 && value == "") {
+		return "", false, errors.New("duplicate or missing X authorization marker")
+	}
+	return value, count == 1, nil
 }
 
-func xAuthorizationData(row, container *html.Node) (xUserID, username string, complete bool, err error) {
-	var hasID, hasUsername bool
-	for node := row; node != nil && node != container; node = node.Parent {
-		if hasHTMLAttr(node, "data-x-user-id") {
-			if hasID {
-				return "", "", false, errors.New("duplicate X user ID")
-			}
-			xUserID, hasID = strings.TrimSpace(attr(node, "data-x-user-id")), true
-			if xUserID == "" {
-				return "", "", false, errors.New("missing X user ID")
-			}
-		}
-		if hasHTMLAttr(node, "data-x-username") {
-			if hasUsername {
-				return "", "", false, errors.New("duplicate X username")
-			}
-			username, hasUsername = strings.TrimSpace(attr(node, "data-x-username")), true
+func xAuthorizationData(row *html.Node) (xUserID, username string, complete bool, err error) {
+	if row == nil {
+		return "", "", false, errors.New("missing X authorization row")
+	}
+	var userIDCount, usernameCount int
+	for _, attribute := range row.Attr {
+		switch attribute.Key {
+		case "data-x-user-id":
+			userIDCount++
+			xUserID = strings.TrimSpace(attribute.Val)
+		case "data-x-username":
+			usernameCount++
+			username = strings.TrimSpace(attribute.Val)
 		}
 	}
-	return xUserID, username, hasID, nil
+	if userIDCount > 1 || userIDCount == 1 && xUserID == "" {
+		return "", "", false, errors.New("missing or duplicate X user ID")
+	}
+	if usernameCount > 1 {
+		return "", "", false, errors.New("duplicate X username")
+	}
+	return xUserID, username, userIDCount == 1, nil
 }
 
 func normalizeXAuthorizedUserID(value string) (string, error) {
