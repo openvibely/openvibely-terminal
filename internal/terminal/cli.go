@@ -159,6 +159,9 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 				statusProjectLoadErr = err
 				m.statusProjectsUnavailable = true
 			} else if m.connErr != "" {
+				if client.IsInvalidServerURL(err) || m.connInvalidServerURL {
+					return errors.New(InvalidServerURLMessage(c.BaseURL()))
+				}
 				if m.connReachableError {
 					return errors.New(ReachableBackendErrorMessage(c.BaseURL(), errors.New(m.connErr)))
 				}
@@ -537,6 +540,9 @@ func cliStreamDiagnostic(c *client.Client, err error) error {
 	if client.IsAuthRequired(err) {
 		return errors.New(authRecoveryMessage(c.BaseURL()))
 	}
+	if client.IsInvalidServerURL(err) {
+		return errors.New(InvalidServerURLMessage(c.BaseURL()))
+	}
 	if client.IsTransportError(err) {
 		return errors.New(OfflineRecoveryMessage(c.BaseURL(), err))
 	}
@@ -659,6 +665,9 @@ func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectI
 	}
 	if client.IsAuthRequired(terminalErr) {
 		return errors.New(authRecoveryMessage(c.BaseURL()))
+	}
+	if client.IsInvalidServerURL(terminalErr) {
+		return errors.New(InvalidServerURLMessage(c.BaseURL()))
 	}
 	if client.IsTransportError(terminalErr) {
 		return errors.New(OfflineRecoveryMessage(c.BaseURL(), terminalErr))

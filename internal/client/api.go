@@ -532,7 +532,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body, out any) error
 		rdr = bytes.NewReader(nil)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, rdr)
+	req, err := c.newRequest(ctx, http.MethodPost, path, rdr)
 	if err != nil {
 		return err
 	}

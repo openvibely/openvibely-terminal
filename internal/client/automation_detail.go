@@ -242,7 +242,7 @@ func (c *Client) GetAutomationDetail(ctx context.Context, projectID, automationI
 }
 
 func (c *Client) getAutomationDetailHTML(ctx context.Context, path, projectID, automationID string) (*html.Node, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}

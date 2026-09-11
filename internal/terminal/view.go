@@ -79,6 +79,7 @@ const (
 	connectionPhaseConnecting connectionPhase = iota
 	connectionPhaseOnline
 	connectionPhaseOffline
+	connectionPhaseInvalid
 	connectionPhaseUnhealthy
 )
 
@@ -86,6 +87,8 @@ func (m Model) connectionPhase() connectionPhase {
 	switch {
 	case m.connected && !m.authRequired:
 		return connectionPhaseOnline
+	case m.connInvalidServerURL && (m.connChecked || m.connErr != ""):
+		return connectionPhaseInvalid
 	case m.connReachableError && (m.connChecked || m.connErr != ""):
 		return connectionPhaseUnhealthy
 	case m.connChecked || m.connErr != "":
@@ -113,6 +116,8 @@ func (m Model) renderHeader() string {
 		switch phase {
 		case connectionPhaseOnline:
 			conn = statusOKStyle.Render("● online")
+		case connectionPhaseInvalid:
+			conn = statusErrStyle.Render("● invalid server URL")
 		case connectionPhaseOffline:
 			conn = statusErrStyle.Render("● offline")
 		case connectionPhaseUnhealthy:
@@ -199,6 +204,9 @@ func (m Model) hint() string {
 	}
 	phase := m.connectionPhase()
 	if m.authRequired {
+		if m.connInvalidServerURL {
+			return "invalid configured server URL: correct -server or OPENVIBELY_SERVER_URL · /status · sign-in required: /login"
+		}
 		if m.connErr != "" && !m.connReachableError && isRemoteServerURL(m.client.BaseURL()) {
 			return "offline remote server: check/correct -server or OPENVIBELY_SERVER_URL · /setup · /status · sign-in required: /login"
 		}
@@ -212,6 +220,8 @@ func (m Model) hint() string {
 			}
 			return "offline: /setup · start/check backend · set -server or OPENVIBELY_SERVER_URL · /status"
 		}
+	case connectionPhaseInvalid:
+		return "invalid configured server URL: correct -server or OPENVIBELY_SERVER_URL · /status"
 	case connectionPhaseUnhealthy:
 		return "backend error: backend responded but is unhealthy · check backend logs or /status"
 	case connectionPhaseConnecting:
@@ -234,7 +244,11 @@ func (m Model) renderStatus() string {
 	phase := m.connectionPhase()
 	if m.authRequired {
 		row("server", noticeStyle.Render("sign-in required")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
-		if m.connErr != "" {
+		if m.connInvalidServerURL {
+			row("network", statusErrStyle.Render("invalid configuration"))
+			row("error", safeConnectionDiagnosticText(m.connErr))
+			row("try", "correct -server <url> or OPENVIBELY_SERVER_URL, then run /status")
+		} else if m.connErr != "" {
 			if m.connReachableError {
 				row("network", statusErrStyle.Render("backend error (unhealthy)"))
 				row("error", safeConnectionDiagnosticText(m.connErr))
@@ -261,6 +275,12 @@ func (m Model) renderStatus() string {
 			row("server", statusOKStyle.Render("connected")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 		case connectionPhaseConnecting:
 			row("server", noticeStyle.Render("connecting")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
+		case connectionPhaseInvalid:
+			row("server", statusErrStyle.Render("invalid configured server URL"))
+			if m.connErr != "" {
+				row("error", safeConnectionDiagnosticText(m.connErr))
+			}
+			row("try", "correct -server <url> or OPENVIBELY_SERVER_URL, then run /status")
 		case connectionPhaseOffline:
 			row("server", statusErrStyle.Render("offline")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))
 			if m.connErr != "" {

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/openvibely/openvibely-terminal/internal/client"
 	"github.com/openvibely/openvibely-terminal/internal/terminal"
 )
@@ -315,6 +316,50 @@ func TestRunProjectEditGlobalFlagShapedNameAfterBoundary(t *testing.T) {
 				t.Fatalf("PUTs = %d", puts)
 			}
 		})
+	}
+}
+
+func TestMalformedEnvironmentServerURLUsesInvalidCLIRecovery(t *testing.T) {
+	t.Setenv("OPENVIBELY_SERVER_URL", "https://env-user:env-password-must-not-appear@ops.example/%zz?token=env-token-must-not-appear#env-fragment-must-not-appear\x1b[6m")
+	t.Setenv("OPENVIBELY_AUTH_USERNAME", "")
+	t.Setenv("OPENVIBELY_AUTH_PASSWORD", "")
+
+	oldArgs, oldCommandLine, oldStdout := os.Args, flag.CommandLine, os.Stdout
+	defer func() {
+		os.Args, flag.CommandLine, os.Stdout = oldArgs, oldCommandLine, oldStdout
+	}()
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	flag.CommandLine = flag.NewFlagSet("openvibely-terminal", flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	os.Args = []string{"openvibely-terminal", "status"}
+	os.Stdout = write
+	runErr := run()
+	_ = write.Close()
+	var out bytes.Buffer
+	_, _ = io.Copy(&out, read)
+
+	if runErr == nil || !strings.Contains(strings.ToLower(runErr.Error()), "invalid configured server url") {
+		t.Fatalf("environment server URL error = %v, want invalid configured server URL guidance", runErr)
+	}
+	output := strings.ToLower(ansi.Strip(out.String()))
+	for _, want := range []string{"invalid configured server url", "-server <url>", "openvibely_server_url"} {
+		if !strings.Contains(output, strings.ToLower(want)) {
+			t.Errorf("environment server URL output missing %q:\n%s", want, output)
+		}
+	}
+	for _, unwanted := range []string{"offline", "backend responded", "start/check your local backend", "start or check your local openvibely backend"} {
+		if strings.Contains(output, unwanted) {
+			t.Errorf("environment server URL output contains misleading text %q:\n%s", unwanted, output)
+		}
+	}
+	for _, secret := range []string{"env-user", "env-password-must-not-appear", "env-token-must-not-appear", "env-fragment-must-not-appear"} {
+		if strings.Contains(output, secret) || strings.Contains(runErr.Error(), secret) {
+			t.Errorf("environment server URL leaked %q:\noutput=%s\nerror=%v", secret, output, runErr)
+		}
 	}
 }
 

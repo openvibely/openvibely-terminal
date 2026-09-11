@@ -67,7 +67,7 @@ type htmlPage struct {
 }
 
 func (c *Client) getHTMLPage(ctx context.Context, path string) (*html.Node, bool, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -300,7 +300,7 @@ type contentLengthReader interface {
 }
 
 func (c *Client) doHTMXMutation(ctx context.Context, method, path string, body io.Reader, contentType string, redirectPolicy mutationRedirectPolicy) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	req, err := c.newRequest(ctx, method, path, body)
 	if err != nil {
 		return nil, err
 	}

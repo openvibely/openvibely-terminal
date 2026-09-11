@@ -118,6 +118,7 @@ type Model struct {
 	sessionGeneration         uint64
 	projectGeneration         uint64
 	connErr                   string
+	connInvalidServerURL      bool // connErr came from malformed configured server URL
 	connReachableError        bool // connErr came from a responding but unhealthy backend
 	statusProjectsUnavailable bool // one-shot status could not list projects; global rows remain useful
 	capacity                  *client.GlobalCapacity
@@ -1331,6 +1332,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.authRequired = false
 			}
 			m.connErr = safeConnectionDiagnostic(msg.err)
+			m.connInvalidServerURL = client.IsInvalidServerURL(msg.err)
 			m.connReachableError = client.IsReachableError(msg.err)
 		} else {
 			// Capacity proves that the backend is reachable, but it does not
@@ -1341,12 +1343,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connected = false
 				m.authRequired = true
 				m.connErr = ""
+				m.connInvalidServerURL = false
 				m.connReachableError = false
 				return m, nil
 			}
 			m.connected = true
 			m.authRequired = false
 			m.connErr = ""
+			m.connInvalidServerURL = false
 			m.connReachableError = false
 			if !wasConnected {
 				m.append(entry{role: "system", text: "Connected to " + serverURLDisplay(m.client.BaseURL()) + "."})
@@ -1385,6 +1389,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connected = false
 			m.connChecked = true
 			m.connErr = safeConnectionDiagnostic(msg.err)
+			m.connInvalidServerURL = client.IsInvalidServerURL(msg.err)
 			m.connReachableError = client.IsReachableError(msg.err)
 			m.append(entry{role: "error", text: "loading projects: " + connectionErrorMessage(m.client.BaseURL(), msg.err)})
 			return m, nil
@@ -1963,10 +1968,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.connected = false
 				m.connChecked = true
 				m.connErr = safeConnectionDiagnostic(msg.err)
+				m.connInvalidServerURL = client.IsInvalidServerURL(msg.err)
 				m.connReachableError = false
 				m.auth = nil
 				m.sseConnected = false
-				m.append(entry{role: "error", text: OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
+				if m.connInvalidServerURL {
+					m.append(entry{role: "error", text: InvalidServerURLMessage(m.client.BaseURL())})
+				} else {
+					m.append(entry{role: "error", text: OfflineRecoveryMessage(m.client.BaseURL(), msg.err)})
+				}
 			} else {
 				m.append(entry{role: "error", text: loginFailureText(m.client.BaseURL(), msg.err)})
 			}
@@ -1981,6 +1991,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.connected = false
 		m.connChecked = false
 		m.connErr = ""
+		m.connInvalidServerURL = false
 		m.connReachableError = false
 		m.auth = nil
 		m.sseConnected = false
@@ -3025,6 +3036,7 @@ func (m *Model) markAuthRequired() {
 	m.connected = false
 	m.connChecked = true
 	m.connErr = ""
+	m.connInvalidServerURL = false
 	m.connReachableError = false
 	// A send without an accepted ID cannot be correlated after the session
 	// epoch changes. An accepted turn remains resumable through its polling ID.
@@ -3054,6 +3066,15 @@ func (m *Model) handleCompletedRequestError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if client.IsInvalidServerURL(err) {
+		m.connected = false
+		m.connChecked = true
+		m.connErr = safeConnectionDiagnostic(err)
+		m.connInvalidServerURL = true
+		m.connReachableError = false
+		m.append(entry{role: "error", text: InvalidServerURLMessage(m.client.BaseURL())})
+		return true
+	}
 	if m.handleAuthError(err) {
 		return true
 	}
@@ -3065,6 +3086,18 @@ func (m *Model) handleCompletedRequestError(err error) bool {
 }
 
 func (m *Model) handleTransportError(err error) bool {
+	if client.IsInvalidServerURL(err) {
+		wasInvalid := m.connInvalidServerURL && m.connErr != ""
+		m.connected = false
+		m.connChecked = true
+		m.connErr = safeConnectionDiagnostic(err)
+		m.connInvalidServerURL = true
+		m.connReachableError = false
+		if !wasInvalid {
+			m.append(entry{role: "error", text: InvalidServerURLMessage(m.client.BaseURL())})
+		}
+		return true
+	}
 	if !client.IsTransportError(err) {
 		return false
 	}
@@ -3072,6 +3105,7 @@ func (m *Model) handleTransportError(err error) bool {
 	m.connected = false
 	m.connChecked = true
 	m.connErr = safeConnectionDiagnostic(err)
+	m.connInvalidServerURL = false
 	m.connReachableError = false
 	// Preserve known auth-required precedence while also retaining the network
 	// details needed to explain a temporary offline condition.
@@ -3097,6 +3131,9 @@ func authRecoveryMessage(baseURL string) string {
 // handled. A non-transport client error means the backend answered but returned
 // an unusable response, so it must not receive offline/start-the-server advice.
 func connectionErrorMessage(baseURL string, err error) string {
+	if client.IsInvalidServerURL(err) {
+		return InvalidServerURLMessage(baseURL)
+	}
 	if client.IsReachableError(err) {
 		return ReachableBackendErrorMessage(baseURL, err)
 	}

@@ -1167,6 +1167,36 @@ func TestCLIStatusCancellationStopsFirstWaveBeforeScopedCounts(t *testing.T) {
 	}
 }
 
+func TestCLIStatusUsesInvalidServerURLRecovery(t *testing.T) {
+	server := "https://cli-user:cli-password-must-not-appear@ops.example/%zz?token=cli-token-must-not-appear#cli-fragment-must-not-appear\x1b[7m"
+	c, err := client.New(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"status"}, false, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid configured server url") {
+		t.Fatalf("invalid URL status error = %v, want invalid configured server URL guidance", err)
+	}
+	output := stripANSI(out.String())
+	lower := strings.ToLower(output)
+	for _, want := range []string{"invalid configured server url", "-server <url>", "openvibely_server_url"} {
+		if !strings.Contains(lower, strings.ToLower(want)) {
+			t.Errorf("status output missing %q:\n%s", want, output)
+		}
+	}
+	for _, unwanted := range []string{"offline", "backend responded", "start/check your local backend", "start or check your local openvibely backend"} {
+		if strings.Contains(lower, unwanted) {
+			t.Errorf("status output contains misleading text %q:\n%s", unwanted, output)
+		}
+	}
+	for _, secret := range []string{"cli-user", "cli-password-must-not-appear", "cli-token-must-not-appear", "cli-fragment-must-not-appear"} {
+		if strings.Contains(output, secret) || strings.Contains(err.Error(), secret) {
+			t.Errorf("invalid URL status leaked %q:\noutput=%s\nerror=%v", secret, output, err)
+		}
+	}
+}
+
 func TestCLIStatusPreservesAuthRequiredAndOfflineOutput(t *testing.T) {
 	t.Run("auth required", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

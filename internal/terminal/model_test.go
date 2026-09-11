@@ -238,6 +238,52 @@ func TestProjectLoadFailuresUseReachableBackendPresentation(t *testing.T) {
 	}
 }
 
+func TestMalformedConfiguredServerURLUsesInvalidRecoveryPresentation(t *testing.T) {
+	const (
+		username = "invalid-url-user"
+		password = "invalid-url-password-must-not-appear"
+		token    = "invalid-url-token-must-not-appear"
+		fragment = "invalid-url-fragment-must-not-appear"
+	)
+	server := "https://" + username + ":" + password + "@ops.example/%zz?token=" + token + "#" + fragment + "\x1b[31m"
+	c, err := client.New(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	updated, _ = m.Update(m.checkConnection()())
+	m = updated.(Model)
+
+	if m.connected || m.authRequired || !m.connInvalidServerURL || m.connReachableError {
+		t.Fatalf("invalid URL state = connected=%t authRequired=%t invalid=%t reachable=%t", m.connected, m.authRequired, m.connInvalidServerURL, m.connReachableError)
+	}
+	if got := m.connectionPhase(); got != connectionPhaseInvalid {
+		t.Fatalf("connection phase = %v, want invalid configuration", got)
+	}
+	visible := transcript(m) + "\n" + m.renderHeader() + "\n" + m.renderStatus() + "\n" + m.hint()
+	lower := strings.ToLower(stripANSI(visible))
+	for _, want := range []string{"invalid configured server url", "-server", "openvibely_server_url"} {
+		if !strings.Contains(lower, want) {
+			t.Errorf("invalid URL presentation missing %q:\n%s", want, visible)
+		}
+	}
+	for _, unwanted := range []string{"offline", "backend responded", "start/check your local backend", "connected to"} {
+		if strings.Contains(lower, unwanted) {
+			t.Errorf("invalid URL presentation contains misleading text %q:\n%s", unwanted, visible)
+		}
+	}
+	for _, secret := range []string{username, password, token, fragment} {
+		if strings.Contains(visible, secret) {
+			t.Errorf("invalid URL presentation leaked %q:\n%s", secret, visible)
+		}
+	}
+	if strings.Contains(visible, "\x1b[31m") {
+		t.Fatalf("invalid URL presentation retained terminal controls: %q", visible)
+	}
+}
+
 func TestOfflineProjectLoadShowsRecoveryGuidance(t *testing.T) {
 	c, err := client.New("http://127.0.0.1:1")
 	if err != nil {

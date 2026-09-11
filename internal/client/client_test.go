@@ -60,6 +60,34 @@ func TestNewNormalizesMixedCaseHTTPSSchemeForRequests(t *testing.T) {
 	}
 }
 
+func TestMalformedConfiguredServerURLsAreInvalidNotTransportFailures(t *testing.T) {
+	for _, server := range []string{
+		"https://ops.example/%zz",
+		"https://[::1",
+		"https://ops.example:99999",
+	} {
+		t.Run(server, func(t *testing.T) {
+			c, err := New(server)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			_, err = c.GetGlobalCapacity(context.Background())
+			if err == nil {
+				t.Fatal("expected malformed configured server URL error")
+			}
+			if !IsInvalidServerURL(err) {
+				t.Fatalf("error = %T %v, want invalid server URL classification", err, err)
+			}
+			if IsTransportError(err) || IsReachableError(err) || IsAuthRequired(err) {
+				t.Fatalf("error = %v was assigned another connectivity classification", err)
+			}
+			if got, want := err.Error(), "invalid configured server URL"; got != want {
+				t.Fatalf("error = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestListProjects(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/projects" {

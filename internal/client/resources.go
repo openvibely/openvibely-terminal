@@ -2339,14 +2339,14 @@ func (c *Client) GetChannel(ctx context.Context, projectID, channelType string) 
 }
 
 func safeChannelError(err error) error {
-	if err == nil || IsAuthRequired(err) || IsTransportError(err) {
+	if err == nil || IsAuthRequired(err) || IsTransportError(err) || IsInvalidServerURL(err) {
 		return err
 	}
 	return errors.New("channel request failed")
 }
 
 func (c *Client) doSafeChannelForm(ctx context.Context, path string, form url.Values) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, strings.NewReader(form.Encode()))
+	req, err := c.newRequest(ctx, http.MethodPost, path, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -2643,7 +2643,7 @@ func (c *Client) UpdateWebhook(ctx context.Context, projectID string, webhook We
 }
 
 func (c *Client) doWebhookJSONForm(ctx context.Context, method, path string, form url.Values, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, strings.NewReader(form.Encode()))
+	req, err := c.newRequest(ctx, method, path, strings.NewReader(form.Encode()))
 	if err != nil {
 		return err
 	}
@@ -2695,7 +2695,7 @@ func (c *Client) DeleteWebhook(ctx context.Context, projectID, id string) error 
 }
 
 func (c *Client) doSafeChannelTest(ctx context.Context, path string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, nil)
+	req, err := c.newRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
 		return err
 	}

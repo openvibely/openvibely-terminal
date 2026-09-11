@@ -33,6 +33,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -239,6 +240,9 @@ func loginWithConfiguredCredentials(c *client.Client, username, password string)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := c.Login(ctx, username, password); err != nil {
+		if client.IsInvalidServerURL(err) {
+			return errors.New(terminal.InvalidServerURLMessage(c.BaseURL()))
+		}
 		if client.IsLoginTransportError(err) {
 			return &configuredLoginTransportError{
 				message: terminal.OfflineRecoveryMessage(c.BaseURL(), err),

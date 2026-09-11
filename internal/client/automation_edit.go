@@ -31,7 +31,7 @@ func (c *Client) LoadAutomationDefinition(ctx context.Context, projectID, automa
 		return nil, fmt.Errorf("automation ID is required")
 	}
 	path := "/automations/" + url.PathEscape(automationID) + "/builder" + query("project_id", projectID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}

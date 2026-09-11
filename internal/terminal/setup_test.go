@@ -55,6 +55,37 @@ func TestCLISetupIsReadOnlyAndBackendIndependent(t *testing.T) {
 	}
 }
 
+func TestSetupRemainsAvailableAndSafeForInvalidServerURL(t *testing.T) {
+	server := "https://setup-user:setup-password-must-not-appear@ops.example/%zz?token=setup-token-must-not-appear#setup-fragment-must-not-appear\x1b[8m"
+	c, err := client.New(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup"}, false, false); err != nil {
+		t.Fatalf("setup failed for invalid server URL: %v", err)
+	}
+	guidance := out.String()
+	for _, want := range []string{"Setup is read-only", "Invalid configured server URL", "-server <url>", "OPENVIBELY_SERVER_URL"} {
+		if !strings.Contains(guidance, want) {
+			t.Errorf("setup guidance missing %q:\n%s", want, guidance)
+		}
+	}
+	for _, unwanted := range []string{"Local backend", "./start.sh", "Start or check your local OpenVibely backend"} {
+		if strings.Contains(guidance, unwanted) {
+			t.Errorf("invalid setup guidance contains local startup advice %q:\n%s", unwanted, guidance)
+		}
+	}
+	for _, secret := range []string{"setup-user", "setup-password-must-not-appear", "setup-token-must-not-appear", "setup-fragment-must-not-appear"} {
+		if strings.Contains(guidance, secret) {
+			t.Errorf("setup guidance leaked %q:\n%s", secret, guidance)
+		}
+	}
+	if strings.Contains(guidance, "\x1b[8m") {
+		t.Fatalf("setup guidance retained terminal controls: %q", guidance)
+	}
+}
+
 func TestSetupGuidanceUsesAuthoritativePlatformInstructions(t *testing.T) {
 	for _, tc := range []struct {
 		platform string

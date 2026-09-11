@@ -110,8 +110,7 @@ func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int
 	go func() {
 		defer close(events)
 		defer close(errCh)
-		endpoint := c.baseURL + "/events/chat/" + url.PathEscape(execID) + "?offset=" + fmt.Sprint(offset)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := c.newRequest(ctx, http.MethodGet, "/events/chat/"+url.PathEscape(execID)+"?offset="+fmt.Sprint(offset), nil)
 		if err != nil {
 			errCh <- err
 			return
@@ -245,11 +244,11 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 			}
 		}
 
-		endpoint := c.baseURL + "/events/live"
+		endpoint := "/events/live"
 		if projectID != "" {
 			endpoint += "?project_id=" + url.QueryEscape(projectID)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			sendErr(err)
 			return

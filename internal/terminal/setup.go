@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -21,12 +22,41 @@ var (
 	connectionDiagnosticSecret = regexp.MustCompile(`(?i)\b(?:access[_-]?token|api[_-]?key|authorization|cookie|credential|password|secret|token)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic)\s+)?[^\s,;]+)`)
 )
 
+// InvalidServerURLMessage formats recovery guidance for a malformed configured
+// server URL. It deliberately does not include the raw value because malformed
+// input cannot be safely parsed for userinfo, query, fragment, or control data.
+func InvalidServerURLMessage(string) string {
+	return "Invalid configured server URL.\nCorrect -server or OPENVIBELY_SERVER_URL, then run /status.\nThe URL was not sent to a backend."
+}
+
+func isInvalidServerURL(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || strings.HasSuffix(u.Host, ":") {
+		return true
+	}
+	if port := u.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		return err != nil || value < 0 || value > 65535
+	}
+	return false
+}
+
 // setupGuidance renders only instructions that the user may choose to run. It
 // intentionally performs no backend, project, authentication, process, or file
 // operation so it remains useful on a first launch and when offline.
 func setupGuidance(platform, baseURL string) string {
 	var b strings.Builder
 	b.WriteString("Setup is read-only: it gives you commands to choose and run yourself. It does not install OpenVibely. It does not clone repositories. It does not start processes. It does not create projects. It does not authenticate. It does not modify files.\n\n")
+	if isInvalidServerURL(baseURL) {
+		b.WriteString(InvalidServerURLMessage(baseURL))
+		b.WriteString("\n\n  openvibely-terminal -server <url> status\n")
+		if platform == "windows" {
+			b.WriteString("  $env:OPENVIBELY_SERVER_URL = \"<url>\"; openvibely-terminal status\n")
+		} else {
+			b.WriteString("  OPENVIBELY_SERVER_URL=<url> openvibely-terminal status\n")
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
 	b.WriteString("Local backend\n")
 	switch platform {
 	case "windows":

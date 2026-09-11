@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,6 +30,24 @@ import (
 // ErrAuthRequired identifies a reachable backend that needs a cookie-session
 // login before the requested resource can be used.
 var ErrAuthRequired = errors.New("authentication required")
+
+// ErrInvalidServerURL identifies a configured server URL that cannot be used to
+// construct a request. It is distinct from transport failure because no
+// backend was contacted.
+var ErrInvalidServerURL = errors.New("invalid configured server URL")
+
+// InvalidServerURLError identifies a malformed configured server URL without
+// retaining the raw value, which may contain credentials or other secrets.
+type InvalidServerURLError struct{}
+
+func (e *InvalidServerURLError) Error() string { return ErrInvalidServerURL.Error() }
+func (e *InvalidServerURLError) Unwrap() error { return ErrInvalidServerURL }
+
+// IsInvalidServerURL reports whether err, including a wrapped error, means the
+// configured server URL was invalid before any request could be sent.
+func IsInvalidServerURL(err error) bool {
+	return errors.Is(err, ErrInvalidServerURL)
+}
 
 // ErrEventStreamClosed identifies a server-closed SSE connection without a
 // transport or authentication failure. Callers may treat it as clean EOF when
@@ -86,10 +105,11 @@ func IsLoginTransportError(err error) bool {
 
 // IsTransportError reports whether an error came from request construction,
 // dialing, timeout, or another network transport rather than an HTTP response.
+// Invalid configured URLs are excluded because no backend request was possible.
 // HTTP response errors are deliberately not included so callers can distinguish
 // offline state from server-side failures and authentication responses.
 func IsTransportError(err error) bool {
-	if err == nil {
+	if err == nil || IsInvalidServerURL(err) {
 		return false
 	}
 	var netErr net.Error
@@ -104,7 +124,7 @@ func IsTransportError(err error) bool {
 // and response-decode errors use this category, allowing callers to present a
 // reachable-but-unhealthy backend without replacing it with offline guidance.
 func IsReachableError(err error) bool {
-	return err != nil && !IsAuthRequired(err) && !IsTransportError(err)
+	return err != nil && !IsAuthRequired(err) && !IsTransportError(err) && !IsInvalidServerURL(err)
 }
 
 func newAuthRequiredError(method, path string, resp *http.Response) error {
@@ -186,6 +206,27 @@ func New(baseURL string) (*Client, error) {
 // BaseURL returns the normalized server base URL.
 func (c *Client) BaseURL() string { return c.baseURL }
 
+func validServerURL(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if port := u.Port(); port != "" {
+		value, err := strconv.Atoi(port)
+		if err != nil || value < 0 || value > 65535 {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) newRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Request, error) {
+	if !validServerURL(c.baseURL) {
+		return nil, &InvalidServerURLError{}
+	}
+	return http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, body)
+}
+
 // --- Data models (mirror handler response structs) ---
 
 // Project mirrors handler.ProjectResponse.
@@ -260,7 +301,7 @@ func (c *Client) Login(ctx context.Context, username, password string) error {
 	form.Set("username", username)
 	form.Set("password", password)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/login", strings.NewReader(form.Encode()))
+	req, err := c.newRequest(ctx, http.MethodPost, "/login", strings.NewReader(form.Encode()))
 	if err != nil {
 		return &LoginTransportError{err: err}
 	}
@@ -403,7 +444,7 @@ func (c *Client) SendChatMessage(ctx context.Context, projectID, message string)
 	form.Set("message", message)
 	form.Set("project_id", projectID)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/chat/message", strings.NewReader(form.Encode()))
+	req, err := c.newRequest(ctx, http.MethodPost, "/api/chat/message", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +481,7 @@ func (c *Client) GetChatStatus(ctx context.Context, messageID string) (*ChatStat
 // --- helpers ---
 
 func (c *Client) getJSON(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
