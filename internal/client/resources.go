@@ -1991,9 +1991,10 @@ func (u ChannelAuthorizedUser) MatchesIdentity(value string) bool {
 
 // listXAuthorizedUsers parses the structured X settings representation. The
 // page-level project marker comes from the X authorization form, while each
-// row's canonical ID comes only from its matching delete control. Optional
-// data-* identity markers are preferred when present; the current web contract
-// also exposes the numeric ID and username in dedicated row spans.
+// row's canonical ID comes only from its matching delete control and each row
+// must carry an explicit selected-project ownership marker. Optional data-*
+// identity markers are preferred when present; the current web contract also
+// exposes the numeric ID and username in dedicated row spans.
 func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser, error) {
 	container := findByID(root, "x_config_modal")
 	if container == nil {
@@ -2035,7 +2036,7 @@ func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser,
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		rowProjectID, hasRowProject := xAuthorizationRowProject(row, container)
-		if hasRowProject && rowProjectID != projectID {
+		if !hasRowProject || rowProjectID != projectID {
 			return nil, errors.New("authorized channel access list unavailable")
 		}
 		xUserID, username, hasStructuredIdentity := xAuthorizationData(row, container)

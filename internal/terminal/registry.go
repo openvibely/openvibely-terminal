@@ -5004,6 +5004,17 @@ func channelAccessAmbiguousRef(ref string, matches []client.ChannelAuthorizedUse
 	return fmt.Errorf("%q is ambiguous: %s — use the full name or ID", sanitizeAutomationDetailText(ref), strings.Join(labels, ", "))
 }
 
+func xChannelAccessUserMatchesIdentity(user client.ChannelAuthorizedUser, ref string) bool {
+	if user.MatchesIdentity(ref) {
+		return true
+	}
+	if !numericAccessUserID.MatchString(ref) {
+		return false
+	}
+	normalized, err := normalizeChannelAccessIdentity("x", ref)
+	return err == nil && strings.EqualFold(user.Identity, normalized)
+}
+
 // resolveChannelAccessUser preserves the command registry's ID → exact identity →
 // prefix → substring ranking while treating a Telegram username and numeric ID
 // as aliases for one captured authorization row. Display names are rendered only:
@@ -5018,7 +5029,7 @@ func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) 
 	if len(users) > 0 && users[0].Provider == "x" {
 		for _, tier := range []func(client.ChannelAuthorizedUser) bool{
 			func(user client.ChannelAuthorizedUser) bool { return strings.EqualFold(user.ID, ref) },
-			func(user client.ChannelAuthorizedUser) bool { return user.MatchesIdentity(ref) },
+			func(user client.ChannelAuthorizedUser) bool { return xChannelAccessUserMatchesIdentity(user, ref) },
 		} {
 			matches := channelAccessUserMatches(users, tier)
 			switch len(matches) {

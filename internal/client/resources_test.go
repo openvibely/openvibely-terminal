@@ -4010,7 +4010,7 @@ func skillDurationPercentile(durations []time.Duration, percentile int) time.Dur
 func TestXAuthorizedUsersUseProjectSettingsContract(t *testing.T) {
 	const page = `<dialog id="x_config_modal">
 		<form action="/channels/x/authorized-users"><input type="hidden" name="project_id" value="p1"></form>
-		<div class="flex items-center justify-between"><span><span>@Alice</span> <span class="opacity-60">ID 00123</span></span><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1" hx-swap="none">Delete</button></div>
+		<div data-project-id="p1" class="flex items-center justify-between"><span><span>@Alice</span> <span class="opacity-60">ID 00123</span></span><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1" hx-swap="none">Delete</button></div>
 		<input name="x_consumer_secret" value="backend-secret">
 	</dialog>`
 	var methods []string
@@ -4090,7 +4090,7 @@ func TestXAuthorizedUsersRejectForeignAndMalformedStructuredRows(t *testing.T) {
 		want string
 	}{
 		{name: "foreign row", body: `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form><div data-project-id="p2"><span data-x-user-id="123">@alice</span><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1"></button></div></dialog>`, want: "authorized channel access list unavailable"},
-		{name: "missing project marker", body: `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form><div><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1"></button></div></dialog>`, want: "authorized channel access list unavailable"},
+		{name: "missing project marker", body: `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form><div><span><span>@alice</span><span class="opacity-60">ID 123</span></span><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1"></button></div></dialog>`, want: "authorized channel access list unavailable"},
 		{name: "missing form scope", body: `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p2"></form></dialog>`, want: "authorized channel access ownership unavailable"},
 	}
 	for _, tc := range cases {

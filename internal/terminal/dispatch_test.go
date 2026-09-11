@@ -8976,6 +8976,18 @@ func TestChannelAccessXCommandsNormalizeScopeAndProtectTargets(t *testing.T) {
 		}
 	})
 
+	t.Run("leading-zero numeric identity resolves normalized X ID", func(t *testing.T) {
+		m, rec := dispatchModel(t, bodies)
+		m = runLine(t, m, "/channels access x remove 00123")
+		if m.pendingConfirmation == nil || rec.count(http.MethodDelete, route+"/row-1") != 0 {
+			t.Fatalf("leading-zero X identity was not captured before confirmation: %s", rec.all())
+		}
+		m = runLine(t, m, "yes")
+		if got := rec.count(http.MethodDelete, route+"/row-1"); got != 1 {
+			t.Fatalf("leading-zero X identity deleted %d rows, want 1: %s", got, rec.all())
+		}
+	})
+
 	t.Run("cancellation and canonical removal are safe", func(t *testing.T) {
 		m, rec := dispatchModel(t, bodies)
 		m = runLine(t, m, "/channels access x remove @alice")
