@@ -11050,6 +11050,71 @@ func TestWebhooksCanonicalDetailFailuresDoNotFallbackOrMutate(t *testing.T) {
 	}
 }
 
+func TestWebhooksCanonicalInvalidDetailDoesNotRenderOrUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "different ID",
+			body: canonicalWebhookDetailJSON("fedcba9876543210fedcba9876543210", "p1", "Wrong Hook"),
+		},
+		{
+			name: "missing ID",
+			body: `{"project_id":"p1","name":"Missing ID Hook","enabled":true,"path_token":"missing-id-token","system_instructions":"keep system","title_template":"keep title","prompt_template":"keep prompt","default_priority":2,"agent_ids":["a1","a2"]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var catalogRequests, detailRequests, putRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/channels/webhooks/" + canonicalWebhookID:
+					switch r.Method {
+					case http.MethodGet:
+						detailRequests++
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, tc.body)
+					case http.MethodPut:
+						putRequests++
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				case "/channels":
+					catalogRequests++
+					http.Error(w, "detail failure must not scan catalog", http.StatusInternalServerError)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			showModel := New(c)
+			showModel.selectedID, showModel.selectedName = "p1", "demo"
+			showModel = runLine(t, showModel, "/channels webhooks show "+canonicalWebhookID)
+			showOutput := transcript(showModel)
+			if strings.Contains(showOutput, "Webhook:") || strings.Contains(showOutput, "Wrong Hook") || strings.Contains(showOutput, "Missing ID Hook") {
+				t.Fatalf("show rendered rejected webhook detail:\n%s", showOutput)
+			}
+
+			editModel := New(c)
+			editModel.selectedID, editModel.selectedName = "p1", "demo"
+			editModel = runLine(t, editModel, "/channels webhooks edit "+canonicalWebhookID+" --name Renamed")
+			editOutput := transcript(editModel)
+			if strings.Contains(editOutput, "updated webhook") || strings.Contains(editOutput, "Wrong Hook") || strings.Contains(editOutput, "Missing ID Hook") {
+				t.Fatalf("edit rendered rejected webhook detail:\n%s", editOutput)
+			}
+			if catalogRequests != 0 || detailRequests != 2 || putRequests != 0 {
+				t.Fatalf("catalog/details/PUT = %d/%d/%d, want 0/2/0", catalogRequests, detailRequests, putRequests)
+			}
+		})
+	}
+}
+
 func TestWebhooksCanonicalMismatchedDetailCannotMutate(t *testing.T) {
 	for _, tc := range []struct {
 		action string
