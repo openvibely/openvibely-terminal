@@ -5937,6 +5937,70 @@ func TestFormatCLIEventPreservesOutputAndFiltering(t *testing.T) {
 	}
 }
 
+func TestFormatCLIEventJSONNormalizesWhitespaceEscapesAndOmitsMalformedData(t *testing.T) {
+	validInputs := []json.RawMessage{
+		json.RawMessage(`{"type":"chat_new_message","project_id":"","message":"<>&  ","extra":"<>&  "}`),
+		json.RawMessage(` {
+			"type": "chat_new_message",
+			"project_id": "",
+			"message": "<>&  ",
+			"extra": "<>&  "
+		} `),
+	}
+	want := `{"event":"chat_new_message","type":"chat_new_message","project_id":"p1","task_id":"","task_name":"","status":"","category":"","message":"\u003c\u003e\u0026\u2028\u2029","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false,"data":{"type":"chat_new_message","project_id":"","message":"\u003c\u003e\u0026\u2028\u2029","extra":"\u003c\u003e\u0026\u2028\u2029"}}`
+
+	for _, raw := range validInputs {
+		got, include, err := formatCLIEvent(client.Event{Name: " chat_new_message ", Data: raw}, "p1", true)
+		if err != nil {
+			t.Fatalf("formatCLIEvent() error = %v", err)
+		}
+		if !include {
+			t.Fatal("formatCLIEvent() unexpectedly filtered a compatible taskless chat event")
+		}
+		if got != want {
+			t.Fatalf("formatCLIEvent() = %q, want %q", got, want)
+		}
+	}
+
+	got, include, err := formatCLIEvent(client.Event{Name: "task_status_changed", Data: json.RawMessage(`{"type":"task_status_changed"`)}, "p1", true)
+	if err != nil {
+		t.Fatalf("formatCLIEvent() malformed error = %v", err)
+	}
+	if !include {
+		t.Fatal("formatCLIEvent() unexpectedly filtered malformed metadata")
+	}
+	wantMalformed := `{"event":"task_status_changed","type":"task_status_changed","project_id":"p1","task_id":"","task_name":"","status":"","category":"","message":"","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false}`
+	if got != wantMalformed {
+		t.Fatalf("formatCLIEvent() malformed = %q, want %q", got, wantMalformed)
+	}
+	if strings.Contains(got, `"data"`) {
+		t.Fatalf("malformed event unexpectedly included data: %s", got)
+	}
+}
+
+func BenchmarkFormatCLIEventRecognizedJSON(b *testing.B) {
+	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
+		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
+			prefix := []byte(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"running","padding":"`)
+			suffix := []byte(`"}`)
+			raw := make([]byte, 0, size)
+			raw = append(raw, prefix...)
+			raw = append(raw, bytes.Repeat([]byte{'x'}, size-len(prefix)-len(suffix))...)
+			raw = append(raw, suffix...)
+			event := client.Event{Name: "task_status_changed", Data: raw}
+
+			b.ReportAllocs()
+			b.SetBytes(int64(len(raw)))
+			b.ResetTimer()
+			for b.Loop() {
+				if _, ok, err := formatCLIEvent(event, "p1", true); err != nil || !ok {
+					b.Fatalf("formatCLIEvent() include = %t, error = %v", ok, err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkFormatCLIEventRecognizedPlain(b *testing.B) {
 	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
 		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
