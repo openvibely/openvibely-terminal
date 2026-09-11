@@ -4846,9 +4846,10 @@ var (
 	telegramAccessUsername = regexp.MustCompile(`^@?[A-Za-z][A-Za-z0-9_]{4,31}$`)
 	slackAccessUserID      = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
 	numericAccessUserID    = regexp.MustCompile(`^[0-9]+$`)
+	xAccessUsername        = regexp.MustCompile(`^@?[A-Za-z0-9_]{1,15}$`)
 )
 
-var channelAccessProviders = []string{"telegram", "slack", "discord", "email"}
+var channelAccessProviders = []string{"telegram", "slack", "discord", "x", "email"}
 var channelAccessActions = []string{"list", "add", "remove"}
 
 func channelAccessProvider(provider string) (string, error) {
@@ -4858,7 +4859,7 @@ func channelAccessProvider(provider string) (string, error) {
 			return provider, nil
 		}
 	}
-	return "", errors.New("channel access provider must be telegram, slack, discord, or email")
+	return "", errors.New("channel access provider must be telegram, slack, discord, x, or email")
 }
 
 func normalizeChannelAccessIdentity(provider, value string) (string, error) {
@@ -4887,6 +4888,15 @@ func normalizeChannelAccessIdentity(provider, value string) (string, error) {
 			return "", errors.New("Discord access requires a numeric user ID")
 		}
 		return value, nil
+	case "x":
+		if !numericAccessUserID.MatchString(value) {
+			return "", errors.New("X access requires a numeric user ID")
+		}
+		userID, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || userID == 0 {
+			return "", errors.New("X access requires a numeric user ID")
+		}
+		return strconv.FormatUint(userID, 10), nil
 	case "email":
 		address, err := mail.ParseAddress(value)
 		if err != nil || address == nil || !strings.Contains(address.Address, "@") {
@@ -4896,6 +4906,14 @@ func normalizeChannelAccessIdentity(provider, value string) (string, error) {
 	default:
 		return "", errors.New("unsupported channel access provider")
 	}
+}
+
+func normalizeXChannelAccessUsername(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if !xAccessUsername.MatchString(value) {
+		return "", errors.New("X access username must be a valid username")
+	}
+	return strings.TrimPrefix(value, "@"), nil
 }
 
 func channelAccessUsage() string { return commandUsage("channels", "access") }
@@ -4921,7 +4939,22 @@ func validateChannelAccessArgs(args []string) error {
 		if _, err := normalizeChannelAccessIdentity(provider, args[3]); err != nil {
 			return err
 		}
+		if provider == "x" {
+			if len(args) > 5 {
+				return errors.New(channelAccessUsage())
+			}
+			if len(args) == 5 {
+				if _, err := normalizeXChannelAccessUsername(args[4]); err != nil {
+					return err
+				}
+			}
+		}
 	case "remove":
+		if provider == "x" {
+			if len(args) > 4 || (cliMode && len(args) == 3) {
+				return errors.New(channelAccessUsage())
+			}
+		}
 		if len(args) < 3 {
 			return errors.New(channelAccessUsage())
 		}
@@ -4934,6 +4967,9 @@ func validateChannelAccessArgs(args []string) error {
 func channelAccessUserLabel(user client.ChannelAuthorizedUser) string {
 	identity := strings.TrimSpace(sanitizeAutomationDetailText(user.Identity))
 	displayName := strings.TrimSpace(sanitizeAutomationDetailText(user.DisplayName))
+	if user.Provider == "x" && displayName != "" && !strings.HasPrefix(displayName, "@") {
+		displayName = "@" + displayName
+	}
 	switch {
 	case displayName == "":
 		return identity
@@ -4979,6 +5015,23 @@ func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) 
 		return zero, errors.New("missing authorized access user ID or identity")
 	}
 	lower := strings.ToLower(ref)
+	if len(users) > 0 && users[0].Provider == "x" {
+		for _, tier := range []func(client.ChannelAuthorizedUser) bool{
+			func(user client.ChannelAuthorizedUser) bool { return strings.EqualFold(user.ID, ref) },
+			func(user client.ChannelAuthorizedUser) bool { return user.MatchesIdentity(ref) },
+		} {
+			matches := channelAccessUserMatches(users, tier)
+			switch len(matches) {
+			case 0:
+				continue
+			case 1:
+				return matches[0], nil
+			default:
+				return zero, channelAccessAmbiguousRef(ref, matches)
+			}
+		}
+		return zero, matchRefNotFoundError{ref: sanitizeAutomationDetailText(ref)}
+	}
 	for _, tier := range []func(client.ChannelAuthorizedUser) bool{
 		func(user client.ChannelAuthorizedUser) bool { return strings.EqualFold(user.ID, ref) },
 		func(user client.ChannelAuthorizedUser) bool {
@@ -5053,10 +5106,46 @@ type channelAccessOutputUser struct {
 	Identity    string `json:"identity"`
 }
 
+// xChannelAccessOutputUser is deliberately narrower than the legacy shared
+// access view: X output contains only the canonical row identity, selected
+// project, numeric X user ID, and optional username.
+type xChannelAccessOutputUser struct {
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	XUserID   string `json:"x_user_id"`
+	Username  string `json:"username,omitempty"`
+}
+
+func channelAccessXOutputUser(user client.ChannelAuthorizedUser) xChannelAccessOutputUser {
+	return xChannelAccessOutputUser{
+		ID:        sanitizeAutomationDetailText(user.ID),
+		ProjectID: sanitizeAutomationDetailText(user.ProjectID),
+		XUserID:   sanitizeAutomationDetailText(user.Identity),
+		Username:  strings.TrimPrefix(sanitizeAutomationDetailText(user.DisplayName), "@"),
+	}
+}
+
+func renderChannelAccessJSON(provider string, users []client.ChannelAuthorizedUser) (string, error) {
+	if provider == "x" {
+		out := make([]xChannelAccessOutputUser, 0, len(users))
+		for _, user := range users {
+			out = append(out, channelAccessXOutputUser(user))
+		}
+		return marshalJSON(out)
+	}
+	return marshalJSON(channelAccessOutputUsers(users))
+}
+
 type channelAccessActionJSON struct {
 	Action   string                  `json:"action"`
 	Provider string                  `json:"provider"`
 	User     channelAccessOutputUser `json:"user"`
+}
+
+type xChannelAccessActionJSON struct {
+	Action   string                   `json:"action"`
+	Provider string                   `json:"provider"`
+	User     xChannelAccessOutputUser `json:"user"`
 }
 
 func renderChannelAccessUsers(provider string, users []client.ChannelAuthorizedUser) string {
@@ -5066,6 +5155,15 @@ func renderChannelAccessUsers(provider string, users []client.ChannelAuthorizedU
 	var b strings.Builder
 	fmt.Fprintf(&b, "Authorized %s access\n", titleFor(provider))
 	for _, user := range users {
+		if provider == "x" {
+			username := strings.TrimPrefix(sanitizeAutomationDetailText(user.DisplayName), "@")
+			fmt.Fprintf(&b, "  record ID: %s  project ID: %s  X user ID: %s", sanitizeAutomationDetailText(user.ID), sanitizeAutomationDetailText(user.ProjectID), sanitizeAutomationDetailText(user.Identity))
+			if username != "" {
+				fmt.Fprintf(&b, "  username: @%s", username)
+			}
+			b.WriteByte('\n')
+			continue
+		}
 		label := channelAccessUserLabel(user)
 		id := sanitizeAutomationDetailText(user.ID)
 		fmt.Fprintf(&b, "  %s  %s\n", label, id)
@@ -5088,7 +5186,21 @@ func channelAccessMutationResult(ctx context.Context, c *client.Client, projectI
 	}
 	status := fmt.Sprintf("%s %s access for %q", map[string]string{"add": "authorized", "remove": "removed"}[action], titleFor(provider), channelAccessUserLabel(user))
 	users, reloadErr := c.ListChannelAuthorizedUsers(ctx, provider, projectID)
+	if provider == "x" && action == "add" && reloadErr == nil {
+		matches := channelAccessUserMatches(users, func(existing client.ChannelAuthorizedUser) bool {
+			return existing.ProjectID == projectID && existing.MatchesIdentity(user.Identity)
+		})
+		if len(matches) == 1 {
+			user = matches[0]
+		}
+	}
 	if jsonMode {
+		if provider == "x" {
+			return marshalJSON(xChannelAccessActionJSON{
+				Action: action, Provider: provider,
+				User: channelAccessXOutputUser(user),
+			})
+		}
 		return marshalJSON(channelAccessActionJSON{
 			Action: action, Provider: provider,
 			User: channelAccessOutputUsers([]client.ChannelAuthorizedUser{user})[0],
@@ -5158,13 +5270,16 @@ func runChannelAccess(m Model, args []string) (Model, tea.Cmd) {
 				return "", err
 			}
 			if jsonMode {
-				return marshalJSON(channelAccessOutputUsers(users))
+				return renderChannelAccessJSON(provider, users)
 			}
 			return renderChannelAccessUsers(provider, users), nil
 		})
 	case "add":
 		identity, _ := normalizeChannelAccessIdentity(provider, tail[0])
 		displayName := strings.TrimSpace(strings.Join(tail[1:], " "))
+		if provider == "x" && displayName != "" {
+			displayName, _ = normalizeXChannelAccessUsername(displayName)
+		}
 		user := client.ChannelAuthorizedUser{Provider: provider, ProjectID: projectID, DisplayName: displayName, Identity: identity}
 		return m, run("Channel access", cmdTimeout, func(ctx context.Context) (string, error) {
 			users, err := c.ListChannelAuthorizedUsers(ctx, provider, projectID)
@@ -5207,7 +5322,7 @@ func channelsCommand() command {
 	completions = append(completions, webhookCompletionRules("webhooks")...)
 	return command{
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
-		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"access", "telegram", "remove"}, {"access", "slack", "remove"}, {"access", "discord", "remove"}, {"access", "email", "remove"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}},
+		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"access", "telegram", "remove"}, {"access", "slack", "remove"}, {"access", "discord", "remove"}, {"access", "x", "remove"}, {"access", "email", "remove"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}},
 		completions:   completions,
 		desc:          "manage GitHub, Slack, Telegram, Discord, X, and Email integrations",
 		actionUsages: []commandActionUsage{
@@ -5243,7 +5358,8 @@ func channelsCommand() command {
 			"Slack requires client ID, client secret, and app token; manual mode requires --bot-token.",
 			"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret; X poll interval must be 15 to 300 seconds.",
 			"Webhook options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents.",
-			"Access providers: Telegram accepts a numeric ID or username; Slack requires a Slack user ID; Discord requires a numeric ID; Email is normalized before it is authorized.",
+			"Access providers: Telegram accepts a numeric ID or username; Slack requires a Slack user ID; Discord requires a numeric ID; X requires a numeric ID and accepts an optional username; Email is normalized before it is authorized.",
+			"X access: channels access x list|add|remove [numeric ID] [@username]; username is optional and @ is normalized.",
 			"Access removal resolves and captures one listed identity before confirmation; interactive removal requires yes and headless removal requires --force.",
 			"Secret options are accepted headlessly but are never echoed; prefer an interactive masked terminal when available.",
 		},
@@ -5255,6 +5371,8 @@ func channelsCommand() command {
 			"channels remove discord",
 			"channels access telegram list",
 			"channels access slack add U12345678 \"Slack User\"",
+			"channels access x add 123456789 @release_user",
+			"channels access x remove @release_user",
 			"channels access email remove person@example.com",
 			`channels webhooks create "PagerDuty alerts" --priority 3`,
 			"channels webhooks test pager",

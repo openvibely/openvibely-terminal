@@ -528,16 +528,21 @@ GitHub App setup accepts pasted multiline PEM keys and reconstructs line breaks
 flattened by terminal input.
 
 Authorized inbound access is managed independently from channel credentials and
-outbound message targets. The selected project's access rows are secret-free in
-both plain and `--json` output. Telegram accepts a numeric user ID or username,
-Slack accepts a Slack user ID, Discord accepts only a numeric user ID, and Email
-addresses are normalized before they are added:
+outbound message targets. Use `channels access x list|add|remove` for the
+project-scoped X mention-author workflow. The selected project's access rows are
+secret-free in both plain and `--json` output. Telegram accepts a numeric user ID or username,
+Slack accepts a Slack user ID, Discord accepts only a numeric user ID, X accepts a
+numeric X user ID and an optional username, and Email addresses are normalized
+before they are added:
 
 ```
 /channels access telegram list
 /channels access telegram add @release_user "Release User"
 /channels access slack add U12345678 "Slack User"
 /channels access discord add 123456789012345678
+/channels access x list
+/channels access x add 123456789 @release_user
+/channels access x remove @release_user
 /channels access email add Person@Example.COM "Person"
 /channels access email remove person@example.com
 openvibely-terminal -project demo --json channels access slack list
@@ -547,8 +552,9 @@ openvibely-terminal -project demo --force channels access email remove person@ex
 `remove` resolves one listed identity before it prompts, captures that row ID,
 and then requires `yes` in the TUI or `--force`/`-f` in one-shot CLI mode.
 Unknown, ambiguous, duplicate, foreign, malformed, and surplus references are
-rejected before a deletion request is sent. GitHub and X authorization remain
-outside this initial access workflow.
+rejected before a deletion request is sent. X authorization records expose only
+their canonical record ID, selected project ID, numeric X user ID, and optional
+username. GitHub authorization remains outside this access workflow.
 
 Inbound webhooks use the nested `/channels webhooks` registry:
 
@@ -784,8 +790,13 @@ $ openvibely-terminal help channels
   channels test <channel>                    test Slack, Telegram, Discord, X, or Email
   channels remove <channel>                  remove configuration; Slack disconnects safely (confirmation required)
   channels disconnect <github|slack>         clear connection credentials but keep other settings (confirmation required)
-  channels access <telegram|slack|discord|email> <list|add|remove> [identity] [display name]
+  channels access <telegram|slack|discord|x|email> <list|add|remove> [identity] [display name]
                                             manage authorized inbound access identities
+  channels access x list                    list project-scoped X mention authors
+  channels access x add <numeric ID> [@username]
+                                            authorize one X user ID with optional username
+  channels access x remove <ID|numeric ID|@username>
+                                            remove one listed X mention author
   channels webhooks list                     list inbound webhooks
   channels webhooks show <webhook>           show secret-free webhook detail
   channels webhooks create <name> [options]  create an inbound webhook

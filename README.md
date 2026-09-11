@@ -80,13 +80,22 @@ Common commands include:
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
 | `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |
-| `/channels` | Manage integrations, inbound webhooks, and project-scoped Telegram, Slack, Discord, and Email authorized access with `channels access <provider> list\|add\|remove` |
+| `/channels` | Manage integrations, inbound webhooks, and project-scoped Telegram, Slack, Discord, X, and Email authorized access with `channels access <provider> list\|add\|remove` |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/help <command>` | Show complete command syntax |
 
-Task goal lifecycle forms include:
+Use `help channels` for integration-specific options. X mention access is project-scoped and uses `channels access x list|add|remove`; add accepts a numeric X user ID plus an optional username. The username is normalized by removing a leading `@`:
+
+```text
+channels access x list
+channels access x add 123456789 @release_user
+channels access x remove @release_user
+openvibely-terminal -project demo --json channels access x list
+openvibely-terminal -project demo --force channels access x remove 123456789
+```
+
 
 ```text
 tasks goal <task> | <objective>

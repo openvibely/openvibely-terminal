@@ -4006,3 +4006,132 @@ func skillDurationPercentile(durations []time.Duration, percentile int) time.Dur
 	}
 	return durations[index-1]
 }
+
+func TestXAuthorizedUsersUseProjectSettingsContract(t *testing.T) {
+	const page = `<dialog id="x_config_modal">
+		<form action="/channels/x/authorized-users"><input type="hidden" name="project_id" value="p1"></form>
+		<div class="flex items-center justify-between"><span><span>@Alice</span> <span class="opacity-60">ID 00123</span></span><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1" hx-swap="none">Delete</button></div>
+		<input name="x_consumer_secret" value="backend-secret">
+	</dialog>`
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method+" "+r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("X list project_id = %q", r.URL.Query().Get("project_id"))
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/x/authorized-users":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.PostForm.Get("project_id"); got != "p1" {
+				t.Errorf("X add project_id = %q", got)
+			}
+			if got := r.PostForm.Get("x_user_id"); got != "123" {
+				t.Errorf("X add x_user_id = %q, want 123", got)
+			}
+			if got := r.PostForm.Get("x_username"); got != "release_user" {
+				t.Errorf("X add x_username = %q, want release_user", got)
+			}
+		case r.Method == http.MethodDelete && r.URL.Path == "/channels/x/authorized-users/row-1":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("X delete project_id = %q", r.URL.Query().Get("project_id"))
+			}
+		default:
+			t.Errorf("unexpected X request %s %s", r.Method, r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, page)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	users, err := c.ListXAuthorizedUsers(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("ListXAuthorizedUsers: %v", err)
+	}
+	if len(users) != 1 || users[0].ID != "row-1" || users[0].ProjectID != "p1" || users[0].XUserID != "123" || users[0].Username != "Alice" || !users[0].MatchesIdentity("@alice") {
+		t.Fatalf("X users = %#v", users)
+	}
+	encoded, err := json.Marshal(users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"backend-secret", "x_consumer_secret", "hx-delete", "Delete"} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("X authorization JSON leaked %q: %s", forbidden, encoded)
+		}
+	}
+	if err := c.AddXAuthorizedUser(context.Background(), "p1", "123", "@release_user"); err != nil {
+		t.Fatalf("AddXAuthorizedUser: %v", err)
+	}
+	if err := c.RemoveXAuthorizedUser(context.Background(), "p1", "row-1"); err != nil {
+		t.Fatalf("RemoveXAuthorizedUser: %v", err)
+	}
+	wantMethods := []string{
+		"GET /channels?project_id=p1",
+		"POST /channels/x/authorized-users",
+		"GET /channels?project_id=p1",
+		"DELETE /channels/x/authorized-users/row-1?project_id=p1",
+	}
+	if !reflect.DeepEqual(methods, wantMethods) {
+		t.Fatalf("X methods = %#v, want %#v", methods, wantMethods)
+	}
+}
+
+func TestXAuthorizedUsersRejectForeignAndMalformedStructuredRows(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "foreign row", body: `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form><div data-project-id="p2"><span data-x-user-id="123">@alice</span><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1"></button></div></dialog>`, want: "authorized channel access list unavailable"},
+		{name: "missing project marker", body: `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form><div><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1"></button></div></dialog>`, want: "authorized channel access list unavailable"},
+		{name: "missing form scope", body: `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p2"></form></dialog>`, want: "authorized channel access ownership unavailable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := htmlServer(t, tc.body)
+			if _, err := c.ListXAuthorizedUsers(context.Background(), "p1"); err == nil || err.Error() != tc.want {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestXAuthorizedUsersPreserveAuthTransportAndMalformedDiagnostics(t *testing.T) {
+	secret := "x-authorization-backend-secret"
+	transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, secret, http.StatusBadGateway)
+	}))
+	defer transport.Close()
+	c, err := New(transport.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListXAuthorizedUsers(context.Background(), "p1"); err == nil || err.Error() != "channel request failed" || strings.Contains(err.Error(), secret) {
+		t.Fatalf("unsafe X transport error = %v", err)
+	}
+
+	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer auth.Close()
+	c, err = New(auth.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ListXAuthorizedUsers(context.Background(), "p1"); err == nil || !IsAuthRequired(err) {
+		t.Fatalf("X auth error = %v, want authentication required", err)
+	}
+
+	malformed := htmlServer(t, `<dialog id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form><div data-project-id="p1"><span><span>@bad!</span><span class="opacity-60">ID nope</span></span><button hx-delete="/channels/x/authorized-users/row-1?project_id=p1"></button></div></dialog>`)
+	if _, err := malformed.ListXAuthorizedUsers(context.Background(), "p1"); err == nil || err.Error() != "authorized channel access list unavailable" {
+		t.Fatalf("malformed X list error = %v", err)
+	}
+}

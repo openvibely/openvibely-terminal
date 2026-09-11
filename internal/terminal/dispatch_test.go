@@ -8659,6 +8659,8 @@ func channelAccessTestRoute(provider string) (route, container string) {
 		return "/channels/discord/authorized-users", "discord-authorized-users"
 	case "email":
 		return "/channels/email/authorized-senders", "email-authorized-senders"
+	case "x":
+		return "/channels/x/authorized-users", "x_config_modal"
 	default:
 		panic("unsupported test channel access provider")
 	}
@@ -8668,6 +8670,9 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 	route, container := channelAccessTestRoute(provider)
 	var b strings.Builder
 	fmt.Fprintf(&b, `<div id="%s">`, container)
+	if provider == "x" {
+		b.WriteString(`<form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form>`)
+	}
 	for _, row := range rows {
 		projectID := row.projectID
 		if projectID == "" {
@@ -8681,6 +8686,12 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 			fmt.Fprintf(&b, `<span>%s</span><span>ID: %s</span>`, row.name, row.identity)
 		case "email":
 			fmt.Fprintf(&b, `<span class="text-sm font-medium truncate">%s</span><span class="text-xs opacity-50 truncate">%s</span>`, row.name, row.identity)
+		case "x":
+			if row.name != "" {
+				fmt.Fprintf(&b, `<span><span>@%s</span> <span class="opacity-60">ID %s</span></span>`, strings.TrimPrefix(row.name, "@"), row.identity)
+			} else {
+				fmt.Fprintf(&b, `<span><span class="opacity-60">ID %s</span></span>`, row.identity)
+			}
 		}
 		b.WriteString(`<input value="channel-access-backend-secret"></div>`)
 		fmt.Fprintf(&b, `<button hx-delete="%s/%s?project_id=p1">remove</button></div>`, route, row.id)
@@ -8944,7 +8955,66 @@ func TestChannelAccessTUICommandsValidateScopeProvidersAndCapturedRemoval(t *tes
 	}
 }
 
-// TestChannelsCommandListsPage verifies the no-arg /channels command fetches
+func TestChannelAccessXCommandsNormalizeScopeAndProtectTargets(t *testing.T) {
+	route, _ := channelAccessTestRoute("x")
+	page := channelAccessTestPage("x", channelAccessTestRow{id: "row-1", name: "Alice", identity: "00123"})
+	bodies := map[string]string{route: page, "/channels": page}
+
+	t.Run("list and add are safe and scoped", func(t *testing.T) {
+		m, rec := dispatchModel(t, bodies)
+		m = runLine(t, m, "/channels access x list")
+		out := transcript(m)
+		if !strings.Contains(out, "@Alice") || !strings.Contains(out, "123") || strings.Contains(out, "channel-access-backend-secret") {
+			t.Fatalf("unsafe X list output: %s", out)
+		}
+		m = runLine(t, m, "/channels access x add 456 @Release_User")
+		if !rec.saw(http.MethodPost, route) || !rec.sawQuery("project_id=p1") || !rec.sawForm("x_user_id=456") || !rec.sawForm("x_username=Release_User") || rec.sawForm("display_name=") {
+			t.Fatalf("X add was not normalized/scoped: %s forms=%v", rec.all(), rec.forms)
+		}
+		if strings.Contains(transcript(m), "channel-access-backend-secret") {
+			t.Fatalf("X add leaked backend content: %s", transcript(m))
+		}
+	})
+
+	t.Run("cancellation and canonical removal are safe", func(t *testing.T) {
+		m, rec := dispatchModel(t, bodies)
+		m = runLine(t, m, "/channels access x remove @alice")
+		if m.pendingConfirmation == nil || rec.saw(http.MethodDelete, route+"/row-1") {
+			t.Fatalf("X username removal was not captured before confirmation: %s", rec.all())
+		}
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if rec.saw(http.MethodDelete, route+"/row-1") {
+			t.Fatalf("canceled X removal mutated backend: %s", rec.all())
+		}
+
+		m = runLine(t, m, "/channels access x remove row-1")
+		if m.pendingConfirmation == nil {
+			t.Fatalf("canonical X row ID did not resolve: %s", transcript(m))
+		}
+		m = runLine(t, m, "yes")
+		if !rec.saw(http.MethodDelete, route+"/row-1") || !rec.sawQuery("project_id=p1") {
+			t.Fatalf("confirmed X removal was not scoped/canonical: %s", rec.all())
+		}
+	})
+
+	t.Run("foreign and invalid targets do not confirm or mutate", func(t *testing.T) {
+		foreign := `<div id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p1"></form><div data-project-id="other-project"><span><span>@alice</span><span class="opacity-60">ID 123</span></span><button hx-delete="/channels/x/authorized-users/foreign-row?project_id=p1"></button></div></div>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": foreign, route: foreign})
+		m = runLine(t, m, "/channels access x remove 123")
+		if m.pendingConfirmation != nil || rec.saw(http.MethodDelete, route+"/foreign-row") || !strings.Contains(transcript(m), "authorized channel access list unavailable") {
+			t.Fatalf("foreign X target was not rejected: output=%s calls=%s", transcript(m), rec.all())
+		}
+		for _, line := range []string{"/channels access x add", "/channels access x add not-numeric", "/channels access x add 123 @bad-name", "/channels access x list extra", "/channels access x remove 123 extra"} {
+			m, rec = dispatchModel(t, nil)
+			m = runLine(t, m, line)
+			if rec.all() != "" || m.pendingConfirmation != nil {
+				t.Fatalf("invalid X command made a request or opened confirmation: %s calls=%s", transcript(m), rec.all())
+			}
+		}
+	})
+}
+
 // and renders the integrations page unchanged from the read-only behavior.
 func TestChannelsInteractiveSetupEnforcesConditionalRequirements(t *testing.T) {
 	pressEnter := func(m Model) Model {

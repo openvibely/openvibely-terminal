@@ -3574,6 +3574,177 @@ func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
 	}
 }
 
+func TestCLIXChannelAccessJSONSafetyResolutionAndForce(t *testing.T) {
+	route, _ := channelAccessTestRoute("x")
+	page := channelAccessTestPage("x", channelAccessTestRow{id: "row-1", name: "Alice", identity: "00123"})
+
+	t.Run("list JSON exposes only safe X fields", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": page})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"channels", "access", "x", "list"}, false, true); err != nil {
+			t.Fatalf("X list: %v", err)
+		}
+		var users []xChannelAccessOutputUser
+		if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &users); err != nil {
+			t.Fatalf("X JSON = %q: %v", out.String(), err)
+		}
+		if len(users) != 1 || users[0].ID != "row-1" || users[0].ProjectID != "p1" || users[0].XUserID != "123" || users[0].Username != "Alice" {
+			t.Fatalf("X JSON users = %#v", users)
+		}
+		for _, forbidden := range []string{"provider", "display_name", "identity", "channel-access-backend-secret", "x_consumer_secret"} {
+			if strings.Contains(out.String(), forbidden) {
+				t.Fatalf("X JSON leaked %q: %s", forbidden, out.String())
+			}
+		}
+		if !rec.saw(http.MethodGet, "/channels") || !rec.sawQuery("project_id=p1") {
+			t.Fatalf("X list was not project scoped: %s", rec.all())
+		}
+	})
+
+	t.Run("add normalizes username and forced remove captures canonical row", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": page, route: page})
+		var addOut bytes.Buffer
+		if err := RunCLI(c, &addOut, "demo", []string{"channels", "access", "x", "add", "456", "@Release_User"}, false, true); err != nil {
+			t.Fatalf("X add: %v", err)
+		}
+		if !rec.saw(http.MethodPost, route) || !rec.sawForm("x_user_id=456") || !rec.sawForm("x_username=Release_User") || rec.sawForm("display_name=") {
+			t.Fatalf("X add request = %s forms=%v", rec.all(), rec.forms)
+		}
+		var addAction xChannelAccessActionJSON
+		if err := json.Unmarshal(bytes.TrimSpace(addOut.Bytes()), &addAction); err != nil || addAction.User.XUserID != "456" || addAction.User.Username != "Release_User" || strings.Contains(addOut.String(), "channel-access-backend-secret") {
+			t.Fatalf("unsafe X add JSON = %q, err=%v", addOut.String(), err)
+		}
+
+		var removeOut bytes.Buffer
+		if err := RunCLI(c, &removeOut, "demo", []string{"channels", "access", "x", "remove", "@alice"}, true, true); err != nil {
+			t.Fatalf("forced X remove: %v", err)
+		}
+		if !rec.saw(http.MethodDelete, route+"/row-1") || rec.saw(http.MethodDelete, route+"/456") || !rec.sawQuery("project_id=p1") {
+			t.Fatalf("X remove did not use the captured row ID: %s", rec.all())
+		}
+		var removeAction xChannelAccessActionJSON
+		if err := json.Unmarshal(bytes.TrimSpace(removeOut.Bytes()), &removeAction); err != nil || removeAction.Action != "remove" || removeAction.User.ID != "row-1" || removeAction.User.XUserID != "123" {
+			t.Fatalf("X remove JSON = %q, err=%v", removeOut.String(), err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		force     bool
+		wantError string
+	}{
+		{name: "missing", args: []string{"channels", "access", "x", "remove"}, wantError: "usage"},
+		{name: "nonnumeric", args: []string{"channels", "access", "x", "add", "alice"}, wantError: "numeric"},
+		{name: "surplus add", args: []string{"channels", "access", "x", "add", "123", "alice", "extra"}, wantError: "usage"},
+		{name: "surplus remove", args: []string{"channels", "access", "x", "remove", "123", "456"}, wantError: "usage"},
+		{name: "unforced", args: []string{"channels", "access", "x", "remove", "row-1"}, wantError: "--force"},
+	} {
+		t.Run("validation "+tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": page})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, tc.force, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.wantError)) {
+				t.Fatalf("error = %v, want %q", err, tc.wantError)
+			}
+			if rec.all() != "" && tc.wantError != "--force" {
+				t.Fatalf("local X validation made requests: %s", rec.all())
+			}
+			if rec.saw(http.MethodDelete, route+"/row-1") {
+				t.Fatalf("unsafe X validation deleted a row: %s", rec.all())
+			}
+		})
+	}
+
+	t.Run("ambiguous username and foreign row are fail closed", func(t *testing.T) {
+		ambiguous := channelAccessTestPage("x", channelAccessTestRow{id: "row-1", name: "same", identity: "123"}, channelAccessTestRow{id: "row-2", name: "same", identity: "456"})
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": ambiguous})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "access", "x", "remove", "@same"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "ambiguous") || rec.saw(http.MethodDelete, route+"/row-1") || rec.saw(http.MethodDelete, route+"/row-2") {
+			t.Fatalf("ambiguous X username was not rejected: err=%v calls=%s", err, rec.all())
+		}
+
+		foreign := `<div id="x_config_modal"><form action="/channels/x/authorized-users"><input name="project_id" value="p2"></form><div data-project-id="p2"><span><span>@foreign</span><span class="opacity-60">ID 123</span></span><button hx-delete="/channels/x/authorized-users/foreign-row?project_id=p2"></button></div></div>`
+		c, rec = cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": foreign})
+		err = RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "access", "x", "remove", "123"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "ownership") && !strings.Contains(err.Error(), "unavailable") || rec.saw(http.MethodDelete, route+"/foreign-row") {
+			t.Fatalf("foreign X row was not rejected: err=%v calls=%s", err, rec.all())
+		}
+	})
+
+	t.Run("add reports refreshed canonical row ID", func(t *testing.T) {
+		initial := channelAccessTestPage("x", channelAccessTestRow{id: "row-1", name: "Alice", identity: "123"})
+		refreshed := channelAccessTestPage("x", channelAccessTestRow{id: "row-2", name: "Release_User", identity: "456"})
+		gets := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/channels":
+				gets++
+				w.Header().Set("Content-Type", "text/html")
+				if gets == 1 {
+					_, _ = io.WriteString(w, initial)
+				} else {
+					_, _ = io.WriteString(w, refreshed)
+				}
+			case route:
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"channels", "access", "x", "add", "456", "@Release_User"}, false, true); err != nil {
+			t.Fatalf("X add canonical output: %v", err)
+		}
+		var action xChannelAccessActionJSON
+		if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &action); err != nil || action.User.ID != "row-2" || action.User.ProjectID != "p1" {
+			t.Fatalf("X add did not report refreshed canonical row: %q, err=%v", out.String(), err)
+		}
+	})
+
+	t.Run("refresh failure does not erase mutation success", func(t *testing.T) {
+		gets := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/channels":
+				gets++
+				if gets > 1 {
+					http.Error(w, "x-refresh-secret", http.StatusBadGateway)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, page)
+			case route:
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"channels", "access", "x", "add", "456"}, false, false); err != nil {
+			t.Fatalf("X mutation with refresh failure: %v", err)
+		}
+		if !strings.Contains(out.String(), "authorized X access") || strings.Contains(out.String(), "x-refresh-secret") {
+			t.Fatalf("X refresh failure was not swallowed safely: %q", out.String())
+		}
+	})
+}
+
 func TestCLIChannelAccessMutationFailureAndRefreshFailureRemainSafe(t *testing.T) {
 	const secret = "channel-access-backend-secret"
 	route, _ := channelAccessTestRoute("email")
