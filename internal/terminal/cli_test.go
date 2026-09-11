@@ -2217,12 +2217,16 @@ func TestCLIBriefingCommandsRequireProjectWhenProjectListIsEmpty(t *testing.T) {
 		triggerPath string
 	}{
 		{name: "pulse", args: []string{"pulse"}, fetchPath: "/upcoming"},
+		{name: "pulse show", args: []string{"pulse", "show"}, fetchPath: "/upcoming"},
 		{name: "pulse summary", args: []string{"pulse", "summary"}, fetchPath: "/upcoming", triggerPath: "/upcoming/summary"},
 		{name: "reflection", args: []string{"reflection"}, fetchPath: "/history"},
+		{name: "reflection show", args: []string{"reflection", "show"}, fetchPath: "/history"},
 		{name: "reflection summary", args: []string{"reflection", "summary"}, fetchPath: "/history", triggerPath: "/history/summary"},
 		{name: "grades", args: []string{"grades"}, fetchPath: "/history"},
+		{name: "grades show", args: []string{"grades", "show"}, fetchPath: "/history"},
 		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/history", triggerPath: "/history/grade-ideas"},
 		{name: "insights", args: []string{"insights"}, fetchPath: "/insights"},
+		{name: "insights show", args: []string{"insights", "show"}, fetchPath: "/insights"},
 		{name: "insights analyze", args: []string{"insights", "analyze"}, fetchPath: "/insights", triggerPath: "/insights/analyze"},
 	}
 

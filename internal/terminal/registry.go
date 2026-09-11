@@ -76,18 +76,28 @@ func page(name, desc string, fetch func(c *client.Client, ctx context.Context, p
 	}
 }
 
-// generateThenFetch consolidates the "optionally run a generate action, then
-// always fetch and return the page text" sequence shared by pulseCommand,
-// reflectionCommand, and insightsCommand. If currentAction == triggerAction
-// the generate func is called first; a generate error short-circuits before
-// the fetch.
-func generateThenFetch(ctx context.Context, triggerAction, currentAction string, generate func(context.Context) error, fetch func(context.Context) (string, error)) (string, error) {
-	if currentAction == triggerAction {
-		if err := generate(ctx); err != nil {
-			return "", err
-		}
+// runBriefingCommand owns the shared project guard, strict argument parsing,
+// and trigger-then-fetch lifecycle for the project-scoped briefing commands.
+// Each command keeps its own metadata, title, trigger callback, and fetch
+// callback at the call site.
+func runBriefingCommand(m Model, args []string, command string, actions []string, triggerAction, title string, trigger func(context.Context, *client.Client, string) error, fetch func(context.Context, *client.Client, string) (string, error)) (Model, tea.Cmd) {
+	mm, cmd, ok := m.needProject()
+	if !ok {
+		return mm, cmd
 	}
-	return fetch(ctx)
+	if err := validateBriefingArgs(command, actions, args); err != nil {
+		return m, errCmd(err.Error())
+	}
+	action, _ := splitAction(actions, args)
+	c, pid := m.client, m.selectedID
+	return m, run(title, cmdTimeout, func(ctx context.Context) (string, error) {
+		if action == triggerAction {
+			if err := trigger(ctx, c, pid); err != nil {
+				return "", err
+			}
+		}
+		return fetch(ctx, c, pid)
+	})
 }
 
 // refreshAndRender consolidates the "act, then reload the list, then format a
@@ -6107,20 +6117,13 @@ func pulseCommand() command {
 			`pulse summary`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			mm, cmd, ok := m.needProject()
-			if !ok {
-				return mm, cmd
-			}
-			if err := validateBriefingArgs("pulse", actions, args); err != nil {
-				return m, errCmd(err.Error())
-			}
-			action, _ := splitAction(actions, args)
-			c, pid := m.client, m.selectedID
-			return m, run("Pulse", cmdTimeout, func(ctx context.Context) (string, error) {
-				return generateThenFetch(ctx, "summary", action,
-					func(ctx context.Context) error { return c.GeneratePulseSummary(ctx, pid) },
-					func(ctx context.Context) (string, error) { return c.GetPulse(ctx, pid) })
-			})
+			return runBriefingCommand(m, args, "pulse", actions, "summary", "Pulse",
+				func(ctx context.Context, c *client.Client, pid string) error {
+					return c.GeneratePulseSummary(ctx, pid)
+				},
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
+					return c.GetPulse(ctx, pid)
+				})
 		},
 	}
 }
@@ -6142,20 +6145,13 @@ func reflectionCommand() command {
 			`reflection summary`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			mm, cmd, ok := m.needProject()
-			if !ok {
-				return mm, cmd
-			}
-			if err := validateBriefingArgs("reflection", actions, args); err != nil {
-				return m, errCmd(err.Error())
-			}
-			action, _ := splitAction(actions, args)
-			c, pid := m.client, m.selectedID
-			return m, run("Reflection", cmdTimeout, func(ctx context.Context) (string, error) {
-				return generateThenFetch(ctx, "summary", action,
-					func(ctx context.Context) error { return c.GenerateReflectionSummary(ctx, pid) },
-					func(ctx context.Context) (string, error) { return c.GetReflection(ctx, pid) })
-			})
+			return runBriefingCommand(m, args, "reflection", actions, "summary", "Reflection",
+				func(ctx context.Context, c *client.Client, pid string) error {
+					return c.GenerateReflectionSummary(ctx, pid)
+				},
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
+					return c.GetReflection(ctx, pid)
+				})
 		},
 	}
 }
@@ -6173,20 +6169,13 @@ func gradesCommand() command {
 		},
 		examples: []string{`grades`, `grades run`},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			mm, cmd, ok := m.needProject()
-			if !ok {
-				return mm, cmd
-			}
-			if err := validateBriefingArgs("grades", actions, args); err != nil {
-				return m, errCmd(err.Error())
-			}
-			action, _ := splitAction(actions, args)
-			c, pid := m.client, m.selectedID
-			return m, run("Grades", cmdTimeout, func(ctx context.Context) (string, error) {
-				return generateThenFetch(ctx, "run", action,
-					func(ctx context.Context) error { return c.GradeIdeas(ctx, pid) },
-					func(ctx context.Context) (string, error) { return c.GetGrades(ctx, pid) })
-			})
+			return runBriefingCommand(m, args, "grades", actions, "run", "Grades",
+				func(ctx context.Context, c *client.Client, pid string) error {
+					return c.GradeIdeas(ctx, pid)
+				},
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
+					return c.GetGrades(ctx, pid)
+				})
 		},
 	}
 }
@@ -6208,20 +6197,13 @@ func insightsCommand() command {
 			`insights analyze`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			mm, cmd, ok := m.needProject()
-			if !ok {
-				return mm, cmd
-			}
-			if err := validateBriefingArgs("insights", actions, args); err != nil {
-				return m, errCmd(err.Error())
-			}
-			action, _ := splitAction(actions, args)
-			c, pid := m.client, m.selectedID
-			return m, run("Insights", cmdTimeout, func(ctx context.Context) (string, error) {
-				return generateThenFetch(ctx, "analyze", action,
-					func(ctx context.Context) error { return c.RunInsightsAnalysis(ctx, pid) },
-					func(ctx context.Context) (string, error) { return c.GetInsights(ctx, pid) })
-			})
+			return runBriefingCommand(m, args, "insights", actions, "analyze", "Insights",
+				func(ctx context.Context, c *client.Client, pid string) error {
+					return c.RunInsightsAnalysis(ctx, pid)
+				},
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
+					return c.GetInsights(ctx, pid)
+				})
 		},
 	}
 }
