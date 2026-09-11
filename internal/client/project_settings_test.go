@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -111,6 +112,72 @@ func TestGetProjectSettingsPreservesParenthesesInAgentNames(t *testing.T) {
 	}
 }
 
+func TestProjectSettingsMaxWorkersRoundTripDistinguishesZeroAndEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    string
+		want     *int
+		wantForm string
+	}{
+		{name: "explicit zero", value: "0", want: intPointer(0), wantForm: "0"},
+		{name: "empty inherits", value: "", want: nil, wantForm: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			html := strings.Replace(projectSettingsHTML, `value="4"`, `value="`+tc.value+`"`, 1)
+			var submitted url.Values
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodGet:
+					_, _ = w.Write([]byte(html))
+				case http.MethodPut:
+					if err := r.ParseForm(); err != nil {
+						t.Fatalf("parse form: %v", err)
+					}
+					submitted = r.PostForm
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+
+			got, err := c.GetProjectSettings(context.Background(), "p1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == nil {
+				if got.MaxWorkers != nil {
+					t.Fatalf("max workers = %v, want nil", *got.MaxWorkers)
+				}
+			} else if got.MaxWorkers == nil || *got.MaxWorkers != *tc.want {
+				t.Fatalf("max workers = %v, want %d", got.MaxWorkers, *tc.want)
+			}
+			if err := c.UpdateProjectSettings(context.Background(), *got); err != nil {
+				t.Fatal(err)
+			}
+			if submitted.Get("max_workers") != tc.wantForm {
+				t.Fatalf("submitted max_workers = %q, want %q", submitted.Get("max_workers"), tc.wantForm)
+			}
+		})
+	}
+}
+
+func TestProjectSettingsJSONPreservesExplicitZeroAndNull(t *testing.T) {
+	zero, err := json.Marshal(ProjectSettings{MaxWorkers: intPointer(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(zero), `"max_workers":0`) {
+		t.Fatalf("explicit zero JSON = %s", zero)
+	}
+
+	nilValue, err := json.Marshal(ProjectSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(nilValue), `"max_workers":null`) {
+		t.Fatalf("nil max workers JSON = %s", nilValue)
+	}
+}
 func TestUpdateProjectSettingsSendsFullAuthoritativeFormAndSurfacesToast(t *testing.T) {
 	settings := ProjectSettings{ID: "p /1", Name: "Renamed", Description: "", RepositorySource: "local", RepositoryPath: `\\server\share\repo with spaces`, GitHubURL: "", DefaultAgentID: "", MaxWorkers: intPointer(0)}
 	var got url.Values

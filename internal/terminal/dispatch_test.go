@@ -9498,12 +9498,14 @@ func TestChannelsTestAndRemove(t *testing.T) {
 		{"remove", "x", "/channels/x/remove"},
 		{"test", "email", "/channels/email/test"},
 		{"remove", "email", "/channels/email/remove"},
+		{"disconnect", "github", "/channels/github/disconnect"},
+		{"disconnect", "slack", "/channels/slack/disconnect"},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.action+" "+tc.channelName, func(t *testing.T) {
 			m, rec := dispatchModel(t, map[string]string{"/channels": refreshedChannelsPage})
-			if tc.action == "remove" {
+			if tc.action == "remove" || tc.action == "disconnect" {
 				m = confirmDestructive(t, m, "/channels "+tc.action+" "+tc.channelName)
 			} else {
 				m = runLine(t, m, "/channels "+tc.action+" "+tc.channelName)
@@ -9528,6 +9530,98 @@ func TestChannelsTestAndRemove(t *testing.T) {
 				t.Errorf("expected refreshed structured channel list after action:\n%s", out)
 			}
 		})
+	}
+}
+
+func TestChannelActionCompletionPolicy(t *testing.T) {
+	const channelsPage = structuredChannelsPage
+	cases := []struct {
+		action      string
+		channelName string
+		wantPath    string
+		confirm     bool
+	}{
+		{action: "test", channelName: "telegram", wantPath: "/channels/telegram/test"},
+		{action: "remove", channelName: "telegram", wantPath: "/channels/telegram/remove", confirm: true},
+		{action: "disconnect", channelName: "github", wantPath: "/channels/github/disconnect", confirm: true},
+		{action: "disconnect", channelName: "slack", wantPath: "/channels/slack/disconnect", confirm: true},
+	}
+	for _, tc := range cases {
+		for _, outcome := range []string{"success", "mutation failure", "refresh failure"} {
+			tc, outcome := tc, outcome
+			t.Run(tc.action+" "+tc.channelName+"/"+outcome, func(t *testing.T) {
+				var actionCalls, listCalls int
+				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/channels":
+						listCalls++
+						if outcome == "refresh failure" {
+							http.Error(w, "refresh failed", http.StatusInternalServerError)
+							return
+						}
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = io.WriteString(w, channelsPage)
+					case r.Method == http.MethodPost && r.URL.Path == tc.wantPath:
+						actionCalls++
+						if outcome == "mutation failure" {
+							http.Error(w, "mutation failed", http.StatusInternalServerError)
+							return
+						}
+						if tc.action == "test" {
+							w.Header().Set("Content-Type", "text/html")
+							_, _ = io.WriteString(w, `<div class="text-success">Connection successful!</div>`)
+							return
+						}
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				})
+
+				line := "/channels " + tc.action + " " + tc.channelName
+				if tc.confirm {
+					m = runLine(t, m, line)
+					if actionCalls != 0 || m.pendingConfirmation == nil {
+						t.Fatalf("%s requested mutation before confirmation: actions=%d pending=%v", line, actionCalls, m.pendingConfirmation != nil)
+					}
+					if !strings.Contains(stripANSI(m.View()), "Type 'yes' to confirm") {
+						t.Fatalf("%s did not show the confirmation prompt:\n%s", line, transcript(m))
+					}
+					m = runLine(t, m, "yes")
+				} else {
+					m = runLine(t, m, line)
+				}
+
+				wantLists := 1
+				if outcome == "mutation failure" {
+					wantLists = 0
+				}
+				if actionCalls != 1 || listCalls != wantLists {
+					t.Fatalf("POST %s=%d, GET /channels=%d; want 1 and %d", tc.wantPath, actionCalls, listCalls, wantLists)
+				}
+
+				channel, err := matchChannelRef(tc.channelName)
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := tc.action + ": " + channel.Name
+				out := stripANSI(transcript(m))
+				switch outcome {
+				case "success":
+					if !strings.Contains(out, status) || !strings.Contains(out, "CONNECTION") || strings.Contains(out, "error:") {
+						t.Fatalf("successful %s output = %q", line, out)
+					}
+				case "mutation failure":
+					if strings.Contains(out, status) || strings.Contains(out, "CONNECTION") || !strings.Contains(out, "error:") {
+						t.Fatalf("mutation failure %s output = %q", line, out)
+					}
+				case "refresh failure":
+					if !strings.Contains(out, status) || strings.Contains(out, "CONNECTION") || strings.Contains(out, "refresh failed") || strings.Contains(out, "error:") {
+						t.Fatalf("refresh failure %s output = %q", line, out)
+					}
+				}
+			})
+		}
 	}
 }
 
