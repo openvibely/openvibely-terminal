@@ -540,9 +540,24 @@ func TestCLITaskAttachmentsDeleteRequiresForceAndRefreshes(t *testing.T) {
 			"/tasks":        attachmentTaskBoardHTML,
 		})
 		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor the API", "monthly report.pdf"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), `use --force to confirm deletion of attachment "monthly report.pdf"`) {
+			t.Fatalf("delete without force error = %v, want raw attachment label and --force guidance", err)
+		}
+		if rec.saw("DELETE", "/attachments/att-1") {
+			t.Fatal("CLI delete ran without --force")
+		}
+	})
+
+	t.Run("without force keeps raw ID guidance", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/tasks":        attachmentTaskBoardHTML,
+		})
+		var out bytes.Buffer
 		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor", "att-1"}, false, false)
-		if err == nil || !strings.Contains(err.Error(), "--force") {
-			t.Fatalf("delete without force error = %v, want --force guidance", err)
+		if err == nil || !strings.Contains(err.Error(), `use --force to confirm deletion of attachment "att-1"`) {
+			t.Fatalf("delete without force error = %v, want raw attachment ID and --force guidance", err)
 		}
 		if rec.saw("DELETE", "/attachments/att-1") {
 			t.Fatal("CLI delete ran without --force")
