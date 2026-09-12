@@ -2790,7 +2790,7 @@ func confirmAgentDeletion(m Model, projectID string, agent client.AgentDef) (Mod
 	name := sanitizeAutomationDetailText(firstNonEmpty(agent.Name, agent.Key, agent.ID))
 	c := m.client
 	cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
-		if err := c.DeleteAgent(ctx, agent.ID); err != nil {
+		if err := c.DeleteAgent(ctx, projectID, agent.ID); err != nil {
 			return "", err
 		}
 		return refreshAndRender("deleted "+name,

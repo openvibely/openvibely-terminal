@@ -1572,9 +1572,12 @@ func firstNonEmptyString(values ...string) string {
 	return "agent"
 }
 
-// DeleteAgent removes an agent definition.
-func (c *Client) DeleteAgent(ctx context.Context, agentID string) error {
-	return c.doForm(ctx, http.MethodDelete, "/agents/"+url.PathEscape(agentID), nil)
+// DeleteAgent removes an agent definition from the selected project.
+func (c *Client) DeleteAgent(ctx context.Context, projectID, agentID string) error {
+	if strings.TrimSpace(projectID) == "" {
+		return errors.New("project ID is required for agent mutations")
+	}
+	return c.doForm(ctx, http.MethodDelete, "/agents/"+url.PathEscape(agentID)+query("project_id", projectID), nil)
 }
 
 // GenerateAgent asks the backend to draft an agent from a description.
