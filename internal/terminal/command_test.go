@@ -253,8 +253,8 @@ func TestParseProjectCreateSpecGitHubForm(t *testing.T) {
 		args     []string
 		wantName string
 	}{
-		{name: "quoted-name-shape", args: []string{"Quoted, Project", "--github-url", repoURL}, wantName: "Quoted, Project"},
-		{name: "pipe-separated-name", args: []string{"Quoted", "Project", "|", "--github-url", repoURL}, wantName: "Quoted Project"},
+		{name: "quoted-name-shape", args: []string{"Quoted, Project", "--github-url=" + repoURL}, wantName: "Quoted, Project"},
+		{name: "pipe-separated-name", args: []string{"Quoted", "Project", "|", "--github-url=" + repoURL}, wantName: "Quoted Project"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec, ok := parseProjectCreateSpec(tc.args)
@@ -275,9 +275,11 @@ func TestParseProjectCreateSpecGitHubForm(t *testing.T) {
 	}{
 		{name: "missing-option-value", args: []string{"Project", "--github-url"}, wantName: "Project", wantPath: "--github-url"},
 		{name: "path-like-option-value", args: []string{"Legacy", "--github-url", "/tmp/legacy repo"}, wantName: "Legacy --github-url", wantPath: "/tmp/legacy repo"},
+		{name: "literal-option-followed-by-url", args: []string{"Legacy", "--github-url", repoURL}, wantName: "Legacy", wantPath: "--github-url " + repoURL},
 		{name: "malformed-url-value", args: []string{"Project", "--github-url", "not-a-url"}, wantName: "Project", wantPath: "--github-url not-a-url"},
 		{name: "surplus-after-url", args: []string{"Project", "--github-url", repoURL, "extra"}, wantName: "Project", wantPath: "--github-url " + repoURL + " extra"},
 		{name: "duplicate-option", args: []string{"Project", "--github-url", "", "--github-url", repoURL}, wantName: "Project", wantPath: "--github-url  --github-url " + repoURL},
+		{name: "duplicate-equals-option", args: []string{"Project", "--github-url=" + repoURL, "--github-url=" + repoURL}, wantName: "Project", wantPath: "--github-url=" + repoURL + " --github-url=" + repoURL},
 		{name: "pipe-local-literal", args: []string{"Project", "|", "--github-url"}, wantName: "Project", wantPath: "--github-url"},
 	} {
 		t.Run("legacy-"+tc.name, func(t *testing.T) {
@@ -463,7 +465,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		"/projects cr":                                                             "/projects create ",
 		"/projects sh":                                                             "/projects show ",
 		"/projects de":                                                             "/projects delete ",
-		"/projects create My Project --g":                                          "/projects create My Project --github-url ",
+		"/projects create My Project --g":                                          "/projects create My Project --github-url= ",
 		"/projects edit demo --repository-s":                                       "/projects edit demo --repository-source ",
 		"/projects edit demo --repository-source g":                                "/projects edit demo --repository-source github ",
 		"/projects edit demo --name renamed --repository-s":                        "/projects edit demo --name renamed --repository-source ",
@@ -480,7 +482,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	for _, want := range []string{
 		"projects show <project>",
 		"projects create <name> <path>",
-		"projects create <name> --github-url <url>",
+		"projects create <name> --github-url=<url>",
 		"projects edit <project> [options]",
 		"projects delete <project>",
 		"projects edit <project> | [options]",
@@ -511,7 +513,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		for _, want := range []string{
 			"projects delete demo",
 			"openvibely-terminal --force projects delete demo",
-			"projects create \"My GitHub Project\" --github-url https://github.com/acme/demo",
+			"projects create \"My GitHub Project\" --github-url=https://github.com/acme/demo",
 			"backend-owned project data",
 		} {
 			if !strings.Contains(string(body), want) {

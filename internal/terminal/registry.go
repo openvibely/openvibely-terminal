@@ -6976,15 +6976,15 @@ func projectsCommand() command {
 			{action: "delete", args: "<project>", description: "delete a project and its backend-owned data"},
 		},
 		selectorPaths: [][]string{{"show"}, {"edit"}, {"delete"}},
-		completions:   append(projectEditCompletions(), commandCompletion{after: []string{"create", "**"}, values: []string{"--github-url"}}),
+		completions:   append(projectEditCompletions(), commandCompletion{after: []string{"create", "**"}, values: []string{"--github-url="}}),
 		desc:          "list, show, create, edit, or delete backend-owned projects",
 		usage: []string{
 			"projects [list]                              list projects with running/queued counts",
 			"projects show <project>                     show authoritative project settings",
 			"projects create <name> <path>                create and select a local-path project",
 			"projects create <name> | <path>              use | when the name or path contains spaces",
-			"projects create <name> --github-url <url>    create and select a GitHub-backed project",
-			"  quote a multi-word name or use | before --github-url",
+			"projects create <name> --github-url=<url>    create and select a GitHub-backed project",
+			"  use --github-url=<url> so literal --github-url paths remain local",
 			"projects edit <project> [options]            update only explicitly supplied settings",
 			"projects edit <project> | [options]          separate a project name containing option-like words",
 			"projects delete <project>                    delete project and all backend-owned project data",
@@ -6998,7 +6998,7 @@ func projectsCommand() command {
 		examples: []string{
 			`projects show demo`,
 			`projects create demo /Users/me/src/demo`,
-			`projects create "My Project" --github-url https://github.com/acme/demo`,
+			`projects create "My Project" --github-url=https://github.com/acme/demo`,
 			`projects create My Project | C:\Users\me\src\my-project`,
 			`projects edit demo --description "Local checkout" --max-workers 4`,
 			`projects edit demo --repository-source github --github-url https://github.com/acme/demo`,
@@ -7672,7 +7672,7 @@ func renderProjectSettings(settings client.ProjectSettings) string {
 }
 
 func projectCreateUsage() string {
-	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> --github-url <url> for a GitHub-backed project; use | when an operand contains spaces)", cmdPrefix)
+	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> --github-url=<url> for a GitHub-backed project; use | when an operand contains spaces)", cmdPrefix)
 }
 
 type projectCreateSpec struct {
@@ -7686,25 +7686,31 @@ func parseProjectCreateSpec(args []string) (projectCreateSpec, bool) {
 		return projectCreateSpec{}, false
 	}
 	for i, arg := range args {
-		if arg != "--github-url" {
+		// The separated --github-url <url> spelling is intentionally not
+		// recognized here: the legacy positional grammar accepts that exact
+		// sequence as a local path. The equals form is the unambiguous opt-in.
+		if !strings.HasPrefix(arg, "--github-url=") || i == 0 || i+1 != len(args) {
 			continue
-		}
-		if i == 0 || i+1 >= len(args) || i+2 != len(args) {
-			break
 		}
 		nameArgs := append([]string(nil), args[:i]...)
 		if len(nameArgs) > 0 && nameArgs[len(nameArgs)-1] == "|" {
 			nameArgs = nameArgs[:len(nameArgs)-1]
 		}
+		duplicateOption := false
+		for _, nameArg := range nameArgs {
+			if nameArg == "--github-url" || strings.HasPrefix(nameArg, "--github-url=") {
+				duplicateOption = true
+				break
+			}
+		}
+		if duplicateOption {
+			continue
+		}
 		name := strings.TrimSpace(strings.Join(nameArgs, " "))
-		repoURL := strings.TrimSpace(args[i+1])
+		repoURL := strings.TrimSpace(strings.TrimPrefix(arg, "--github-url="))
 		if name != "" && isAbsoluteProjectRepositoryURL(repoURL) {
 			return projectCreateSpec{name: name, source: "github", location: repoURL}, true
 		}
-		// A complete but non-URL-looking value remains eligible for the legacy
-		// local grammar. This preserves local names and paths that literally
-		// contain --github-url instead of reinterpreting them as GitHub input.
-		break
 	}
 
 	name, path, ok := parseLocalProjectCreateArgs(args)

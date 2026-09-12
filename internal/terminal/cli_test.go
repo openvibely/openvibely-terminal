@@ -5322,7 +5322,7 @@ func TestCLICreatesGitHubProjectWithQuotedNameAndOutputModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "", []string{"projects", "create", "Quoted, Project", "--github-url", repoURL}, false, false); err != nil {
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "Quoted, Project", "--github-url=" + repoURL}, false, false); err != nil {
 		t.Fatalf("GitHub project creation failed: %v", err)
 	}
 	plain := out.String()
@@ -5336,7 +5336,7 @@ func TestCLICreatesGitHubProjectWithQuotedNameAndOutputModes(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := RunCLI(c, &out, "", []string{"projects", "create", "JSON, GitHub Project", "--github-url", repoURL}, false, true); err != nil {
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "JSON, GitHub Project", "--github-url=" + repoURL}, false, true); err != nil {
 		t.Fatalf("GitHub project JSON creation failed: %v", err)
 	}
 	var project client.Project
@@ -5381,7 +5381,7 @@ func TestCLIGitHubCreationErrorsAreActionableAndCredentialSafe(t *testing.T) {
 	if localErr == nil || !strings.Contains(localErr.Error(), "Local repository paths are disabled") {
 		t.Fatalf("local-path-disabled error = %v", localErr)
 	}
-	githubErr := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create", "GitHub", "Project", "--github-url", "https://github.com/acme/repo"}, false, false)
+	githubErr := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create", "GitHub", "Project", "--github-url=https://github.com/acme/repo"}, false, false)
 	if githubErr == nil {
 		t.Fatal("GitHub clone failure returned nil error")
 	}

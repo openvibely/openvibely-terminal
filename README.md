@@ -81,10 +81,10 @@ Create projects from either a local checkout or a GitHub repository:
 
 ```text
 /projects create demo /Users/me/src/demo
-/projects create "My GitHub Project" --github-url https://github.com/acme/demo
+/projects create "My GitHub Project" --github-url=https://github.com/acme/demo
 ```
 
-The local form remains `projects create <name> <path>`; use `|` when an unquoted local name or path contains spaces, for example `/projects create My Project | C:\Users\me\src\my-project`. The GitHub form accepts a project name followed by `--github-url <url>` and supports the same quoting rules. The backend clones the GitHub repository and handles authentication, so GitHub-backed creation also works when local repository paths are disabled in the environment. After either form succeeds, the backend-assigned project ID is selected in the TUI and included in plain output or the `--json` project record.
+The local form remains `projects create <name> <path>`; use `|` when an unquoted local name or path contains spaces, for example `/projects create My Project | C:\Users\me\src\my-project`. The GitHub form is `projects create <name> --github-url=<url>`; use the equals form so a legacy local path containing the literal `--github-url` remains local, and quote the full option when your shell requires it. The backend clones the GitHub repository and handles authentication, so GitHub-backed creation also works when local repository paths are disabled in the environment. After either form succeeds, the backend-assigned project ID is selected in the TUI and included in plain output or the `--json` project record.
 
 Common commands include:
 

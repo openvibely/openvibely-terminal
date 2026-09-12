@@ -565,7 +565,7 @@ func TestProjectsCreateGitHubSelectsCreatedProject(t *testing.T) {
 	m.selectedName = "Old Project"
 	m.projects = []client.Project{{ID: "old-project", Name: "Old Project"}}
 
-	m = runLine(t, m, `/projects create "GitHub, Project" --github-url `+repoURL)
+	m = runLine(t, m, `/projects create "GitHub, Project" --github-url=`+repoURL)
 	defer m.Cleanup()
 	if m.selectedID != "github-created" || m.selectedName != "GitHub, Project" {
 		t.Fatalf("GitHub project was not selected: id=%q name=%q", m.selectedID, m.selectedName)

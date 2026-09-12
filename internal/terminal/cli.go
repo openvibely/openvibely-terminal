@@ -1413,7 +1413,7 @@ func cliProjectPreflight(c command, args []string, projectRef string, m Model) e
 	}
 	if m.selectedID == "" {
 		if c.name == "models" {
-			return errors.New("no project selected — models capacity, edit, default, and delete require -project <name|id>; create one first with projects create <name> <path> or projects create <name> --github-url <url>")
+			return errors.New("no project selected — models capacity, edit, default, and delete require -project <name|id>; create one first with projects create <name> <path> or projects create <name> --github-url=<url>")
 		}
 		return errors.New("no project selected — use /project <name>")
 	}
