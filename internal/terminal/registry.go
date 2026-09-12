@@ -1174,10 +1174,7 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 	})
 	attachmentDisplay := strings.TrimSpace(args[len(args)-1])
 	taskDisplay := strings.TrimSpace(strings.Join(args[:len(args)-1], " "))
-	return confirmOr(m,
-		fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachmentDisplay, taskDisplay),
-		fmt.Sprintf("use --force to confirm deletion of attachment %q", attachmentDisplay),
-		cmd)
+	return confirmTaskAttachmentDeletionWithLabels(m, attachmentDisplay, taskDisplay, cmd)
 }
 
 func lookupTaskAttachmentTarget(ctx context.Context, c *client.Client, projectID string, args []string) (client.Task, client.Attachment, error) {
@@ -1225,6 +1222,10 @@ func confirmTaskAttachmentDeletion(m Model, projectID string, task client.Task, 
 	cmd := m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
 		return deleteTaskAttachmentResult(ctx, m.client, projectID, task, attachment)
 	})
+	return confirmTaskAttachmentDeletionWithLabels(m, attachmentLabel, taskLabel, cmd)
+}
+
+func confirmTaskAttachmentDeletionWithLabels(m Model, attachmentLabel, taskLabel string, cmd tea.Cmd) (Model, tea.Cmd) {
 	return confirmOr(m,
 		fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachmentLabel, taskLabel),
 		fmt.Sprintf("use --force to confirm deletion of attachment %q", attachmentLabel),
@@ -2868,7 +2869,7 @@ func confirmAgentDeletion(m Model, projectID string, agent client.AgentDef) (Mod
 	name := sanitizeAutomationDetailText(firstNonEmpty(agent.Name, agent.Key, agent.ID))
 	c := m.client
 	cmd := run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
-		if err := c.DeleteAgent(ctx, agent.ID); err != nil {
+		if err := c.DeleteAgent(ctx, projectID, agent.ID); err != nil {
 			return "", err
 		}
 		return refreshAndRender("deleted "+name,

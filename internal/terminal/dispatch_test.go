@@ -8461,6 +8461,66 @@ func TestAgentsDeleteResolutionRejectsStaleResults(t *testing.T) {
 	}
 }
 
+func TestAgentsDeleteUsesSelectedProjectScope(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
+		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`
+
+	newModel := func(t *testing.T) (Model, *recorder) {
+		t.Helper()
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m.projects = []client.Project{
+			{ID: "p1", Name: "demo"},
+			{ID: "p2", Name: "other"},
+		}
+		m.setActiveProject(client.Project{ID: "p2", Name: "other"})
+		return m, rec
+	}
+	assertProjectScoped := func(t *testing.T, rec *recorder) {
+		t.Helper()
+		for _, uri := range rec.urlsSnapshot() {
+			if strings.HasPrefix(uri, "GET /agents") && !strings.Contains(uri, "project_id=p2") {
+				t.Errorf("agent request is not scoped to selected project: %s", uri)
+			}
+		}
+	}
+
+	t.Run("cancellation makes no delete request", func(t *testing.T) {
+		m, rec := newModel(t)
+		m = runLine(t, m, "/agents delete Reviewer")
+		if m.pendingConfirmation == nil {
+			t.Fatal("delete did not open confirmation")
+		}
+		if rec.saw("DELETE", "/agents/ag-1") {
+			t.Fatalf("delete occurred before confirmation:\n%s", rec.all())
+		}
+		m = runLine(t, m, "no")
+		if rec.saw("DELETE", "/agents/ag-1") {
+			t.Fatalf("cancellation made a DELETE request:\n%s", rec.all())
+		}
+		assertProjectScoped(t, rec)
+	})
+
+	t.Run("yes deletes and refreshes selected project", func(t *testing.T) {
+		m, rec := newModel(t)
+		m = confirmDestructive(t, m, "/agents delete Reviewer")
+		if !rec.saw("DELETE", "/agents/ag-1") {
+			t.Fatalf("confirmed deletion did not reach backend:\n%s", rec.all())
+		}
+		wantDelete := "DELETE /agents/ag-1?project_id=p2"
+		foundDelete := false
+		for _, uri := range rec.urlsSnapshot() {
+			if uri == wantDelete {
+				foundDelete = true
+				break
+			}
+		}
+		if !foundDelete {
+			t.Fatalf("confirmed deletion was not scoped to p2; requests:\n%s", rec.all())
+		}
+		assertProjectScoped(t, rec)
+	})
+}
+
 func TestAgentsGenerateDelete(t *testing.T) {
 	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Reviewer"
 		data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>`

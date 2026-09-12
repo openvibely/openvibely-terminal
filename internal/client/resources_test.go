@@ -1034,6 +1034,40 @@ func TestListModelsAndAgents(t *testing.T) {
 	})
 }
 
+func TestDeleteAgentUsesProjectScope(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		if r.Method != http.MethodDelete || r.URL.Path != "/agents/ag-1" {
+			t.Fatalf("request = %s %s, want DELETE /agents/ag-1", r.Method, r.URL.RequestURI())
+		}
+		if r.URL.Query().Get("project_id") != "p2" {
+			http.Error(w, "agent belongs to another project", http.StatusForbidden)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteAgent(context.Background(), "p2", "ag-1"); err != nil {
+		t.Fatalf("DeleteAgent scoped to p2: %v", err)
+	}
+	if got, want := requests[0], "DELETE /agents/ag-1?project_id=p2"; got != want {
+		t.Fatalf("request = %q, want %q", got, want)
+	}
+
+	if err := c.DeleteAgent(context.Background(), "p1", "ag-1"); err == nil {
+		t.Fatal("foreign project deletion unexpectedly succeeded")
+	}
+	if got, want := requests[1], "DELETE /agents/ag-1?project_id=p1"; got != want {
+		t.Fatalf("foreign request = %q, want %q", got, want)
+	}
+}
+
 func TestListAutomationsReadsCardMarkup(t *testing.T) {
 	// Mirrors the delete-menu button markup on a real automation card, which
 	// carries the id/name the TUI resolves references against.
@@ -1718,7 +1752,7 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "DELETE", path: "/skills/deploy"},
 		{name: "model default", fn: func() error { return c.SetDefaultModel(ctx, "p1", "m1") },
 			method: "POST", path: "/models/m1/set-default"},
-		{name: "agent delete", fn: func() error { return c.DeleteAgent(ctx, "ag1") },
+		{name: "agent delete", fn: func() error { return c.DeleteAgent(ctx, "p1", "ag1") },
 			method: "DELETE", path: "/agents/ag1"},
 		{name: "schedule delete", fn: func() error { return c.DeleteSchedule(ctx, "p1", "s1") },
 			method: "DELETE", path: "/schedules/s1"},

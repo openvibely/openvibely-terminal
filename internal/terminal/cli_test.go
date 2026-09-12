@@ -4945,6 +4945,80 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 	})
 }
 
+func TestCLIAgentsDeleteUsesSelectedProjectScope(t *testing.T) {
+	const agentsHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer"
+		data-agent-name="Reviewer" data-agent-description="reviews code"
+		data-agent-model="claude" data-agent-scope="project"></div>`
+
+	newServer := func(t *testing.T) (*client.Client, *recorder) {
+		t.Helper()
+		rec := &recorder{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/agents":
+				w.Header().Set("Content-Type", "text/html")
+				if r.URL.Query().Get("project_id") == "p2" {
+					_, _ = io.WriteString(w, agentsHTML)
+					return
+				}
+				_, _ = io.WriteString(w, `<div>No agents</div>`)
+			case "/agents/ag-1":
+				if r.Method != http.MethodDelete {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if r.URL.Query().Get("project_id") != "p2" {
+					http.Error(w, "agent belongs to another project", http.StatusForbidden)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, rec
+	}
+
+	t.Run("forced deletion uses selected p2 scope", func(t *testing.T) {
+		c, rec := newServer(t)
+		if err := RunCLI(c, &bytes.Buffer{}, "other", []string{"agents", "delete", "Reviewer"}, true, false); err != nil {
+			t.Fatalf("forced p2 deletion failed: %v", err)
+		}
+		wantDelete := "DELETE /agents/ag-1?project_id=p2"
+		if !slices.Contains(rec.urlsSnapshot(), wantDelete) {
+			t.Fatalf("requests = %v, want %q", rec.urlsSnapshot(), wantDelete)
+		}
+		for _, uri := range rec.urlsSnapshot() {
+			if strings.HasPrefix(uri, "GET /agents") && !strings.Contains(uri, "project_id=p2") {
+				t.Errorf("agent list/refresh lost selected project scope: %s", uri)
+			}
+		}
+	})
+
+	t.Run("foreign p1 agent is not deletable", func(t *testing.T) {
+		c, rec := newServer(t)
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"agents", "delete", "Reviewer"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "nothing matches") {
+			t.Fatalf("error = %v, want unresolved foreign agent", err)
+		}
+		if rec.saw("DELETE", "/agents/ag-1") {
+			t.Fatalf("foreign p1 selection attempted deletion:\n%s", rec.all())
+		}
+		if !rec.sawQuery("GET /agents?project_id=p1") {
+			t.Fatalf("foreign project lookup was not scoped to p1: %v", rec.urlsSnapshot())
+		}
+	})
+}
+
 func TestCLIAgentsDeleteValidatesBeforeForceGate(t *testing.T) {
 	const agentsHTML = `<div data-agent-id="ag-reviewer" data-agent-key="reviewer"
 		data-agent-name="Code Reviewer" data-agent-description="reviews code"

@@ -1015,13 +1015,24 @@ func (m Model) waitForCurrentChatStream(generation int) tea.Cmd {
 	return m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, m.chatStreamExecID, m.chatStreamEvents, m.chatStreamErrs)
 }
 
+func (m Model) chatStreamReconnectMessage(generation int) chatStreamReconnectMsg {
+	return chatStreamReconnectMsg{
+		generation:   generation,
+		submissionID: m.chatSubmissionID,
+		projectID:    m.pendingMsgProjectID,
+		execID:       m.chatStreamExecID,
+		offset:       m.chatStreamOffset,
+	}
+}
+
 func (m Model) scheduleChatStreamReconnect(generation int) tea.Cmd {
-	submissionID := m.chatSubmissionID
-	projectID := m.pendingMsgProjectID
-	execID := m.chatStreamExecID
-	offset := m.chatStreamOffset
-	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
-		return chatStreamReconnectMsg{generation: generation, submissionID: submissionID, projectID: projectID, execID: execID, offset: offset}
+	return m.scheduleChatStreamReconnectWith(generation, tea.Tick)
+}
+
+func (m Model) scheduleChatStreamReconnectWith(generation int, schedule func(time.Duration, func(time.Time) tea.Msg) tea.Cmd) tea.Cmd {
+	reconnect := m.chatStreamReconnectMessage(generation)
+	return schedule(500*time.Millisecond, func(time.Time) tea.Msg {
+		return reconnect
 	})
 }
 

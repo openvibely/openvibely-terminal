@@ -3910,10 +3910,9 @@ func TestChatOutputStreamIncrementalTerminalStaleAndRecovery(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("disconnected pending stream did not schedule recovery")
 	}
-	msg := cmd()
-	reconnect, ok := msg.(chatStreamReconnectMsg)
-	if !ok || reconnect.offset != len([]byte("Hello world")) {
-		t.Fatalf("recovery = %#v, want byte offset 11", msg)
+	reconnect := m.chatStreamReconnectMessage(m.chatStreamGeneration)
+	if reconnect.generation != m.chatStreamGeneration || reconnect.submissionID != 9 || reconnect.projectID != "project-A" || reconnect.execID != "exec-1" || reconnect.offset != len([]byte("Hello world")) {
+		t.Fatalf("recovery = %#v, want generation=%d submission=9 project=project-A exec=exec-1 byte offset %d", reconnect, m.chatStreamGeneration, len([]byte("Hello world")))
 	}
 
 	next, _ = m.Update(chatStatusMsg{projectGeneration: m.projectGeneration, messageID: "exec-1", submissionID: 9, projectID: "project-A", status: &client.ChatStatus{MessageID: "exec-1", Status: "completed", Response: "Hello world!"}})
@@ -4012,9 +4011,30 @@ func TestChatStreamDisconnectFlushesBeforeReconnect(t *testing.T) {
 	if cmd == nil || m.chatStreamRenderQueued || !strings.Contains(transcript(m), "agent::buffered λ") {
 		t.Fatalf("disconnect did not flush before reconnect: cmd=%v queued=%t transcript=%q", cmd != nil, m.chatStreamRenderQueued, transcript(m))
 	}
-	reconnect, ok := cmd().(chatStreamReconnectMsg)
-	if !ok || reconnect.offset != len([]byte("buffered λ")) {
-		t.Fatalf("reconnect = %#v, want UTF-8 byte offset %d", reconnect, len([]byte("buffered λ")))
+	reconnect := m.chatStreamReconnectMessage(m.chatStreamGeneration)
+	if reconnect.generation != m.chatStreamGeneration || reconnect.submissionID != 9 || reconnect.projectID != "project-A" || reconnect.execID != "exec-1" || reconnect.offset != len([]byte("buffered λ")) {
+		t.Fatalf("reconnect = %#v, want generation=%d submission=9 project=project-A exec=exec-1 UTF-8 byte offset %d", reconnect, m.chatStreamGeneration, len([]byte("buffered λ")))
+	}
+}
+
+func TestChatStreamReconnectSchedulesProductionDelay(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	var gotDelay time.Duration
+	cmd := m.scheduleChatStreamReconnectWith(m.chatStreamGeneration, func(delay time.Duration, callback func(time.Time) tea.Msg) tea.Cmd {
+		gotDelay = delay
+		return func() tea.Msg { return callback(time.Time{}) }
+	})
+
+	msg, ok := cmd().(chatStreamReconnectMsg)
+	if !ok {
+		t.Fatalf("scheduled reconnect message = %#v, want chatStreamReconnectMsg", msg)
+	}
+	if gotDelay != 500*time.Millisecond {
+		t.Fatalf("reconnect delay = %s, want 500ms", gotDelay)
+	}
+	want := m.chatStreamReconnectMessage(m.chatStreamGeneration)
+	if msg != want {
+		t.Fatalf("scheduled reconnect = %#v, want %#v", msg, want)
 	}
 }
 
