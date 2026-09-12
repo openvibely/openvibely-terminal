@@ -402,8 +402,7 @@ disabled in the environment. Both forms select the backend-assigned project in
 the TUI, and one-shot CLI output supports plain text and `--json` project
 records.
 
-The same syntax works in one-shot mode (`openvibely-terminal projects create
-...`); add `--json` for a machine-readable created-project record.
+The same GitHub syntax works in one-shot mode (`openvibely-terminal projects github-create ...`); add `--json` for a machine-readable created-project record.
 
 Inspect or update an existing project's backend-owned settings without opening a
 browser:
