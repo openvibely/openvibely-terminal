@@ -1772,6 +1772,150 @@ func TestCLIModelsAddUsesStdinAndRefreshesWithoutLeakingAPIKey(t *testing.T) {
 	}
 }
 
+func TestCLIModelsAddNonOAuthRefreshFailurePreservesSuccess(t *testing.T) {
+	const secret = "non-oauth-refresh-secret"
+	var postCount, listCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			postCount++
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			if got := r.PostForm.Get("api_key"); got != secret {
+				t.Fatalf("API key form value = %q, want supplied stdin secret", got)
+			}
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			listCount++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"models temporarily unavailable"}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, jsonOutput := range []bool{false, true} {
+		var out bytes.Buffer
+		err := RunCLIWithInput(c, &out, strings.NewReader(secret+"\n"), "", []string{
+			"models", "add", "openai", "OpenAI", "gpt-4o", "--api-key-stdin",
+		}, false, jsonOutput)
+		if err != nil {
+			t.Fatalf("non-OAuth add with refresh failure failed: %v", err)
+		}
+		if jsonOutput {
+			var result modelAddOutput
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+				t.Fatalf("invalid non-OAuth refresh-failure JSON: %v\n%s", err, out.String())
+			}
+			if result.Status != "added OpenAI" || result.Models != nil || result.OAuthStatus != "" || result.AuthorizationURL != "" {
+				t.Fatalf("non-OAuth refresh-failure result = %+v", result)
+			}
+		} else if plain := stripANSI(out.String()); !strings.Contains(plain, "added OpenAI") || strings.Contains(plain, "temporarily unavailable") {
+			t.Fatalf("non-OAuth refresh-failure output = %q", plain)
+		}
+		if strings.Contains(out.String(), secret) {
+			t.Fatalf("API key leaked after non-OAuth refresh failure: %s", out.String())
+		}
+	}
+	if postCount != 2 || listCount != 2 {
+		t.Fatalf("POST/list counts = %d/%d, want 2/2", postCount, listCount)
+	}
+}
+
+func TestCLIModelsAddOAuthResolvesConfiguredNameAmongCompetingModels(t *testing.T) {
+	var statusPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			_, _ = io.WriteString(w, `<div data-model-id="m-backup" data-model-name="Claude OAuth Backup" data-model-provider="anthropic" data-model-model="claude-sonnet-4-6"></div><div data-model-id="m-other" data-model-name="Unrelated" data-model-provider="openai" data-model-model="gpt-4o"></div><div data-model-id="m-target" data-model-name="Claude OAuth" data-model-provider="anthropic" data-model-model="claude-sonnet-4-6"></div>`)
+		case "GET /models/m-target/oauth/status":
+			statusPath = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"connected"}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLIWithInput(c, &out, nil, "", []string{
+		"models", "add", "anthropic", "Claude OAuth", "claude-sonnet-4-6", "--oauth",
+	}, false, true); err != nil {
+		t.Fatalf("OAuth add with competing models failed: %v", err)
+	}
+	var result modelAddOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+		t.Fatalf("invalid competing-model OAuth JSON: %v\n%s", err, out.String())
+	}
+	if statusPath != "/models/m-target/oauth/status" || result.OAuthStatus != "connected" {
+		t.Fatalf("OAuth name resolution = status path %q, result %+v", statusPath, result)
+	}
+}
+
+func TestCLIModelsAddOAuthUnknownStatusDoesNotClaimConnection(t *testing.T) {
+	var postCount, listCount, statusCount int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			postCount++
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			listCount++
+			_, _ = io.WriteString(w, `<div data-model-id="m-unknown" data-model-name="Unknown OAuth" data-model-provider="anthropic" data-model-model="claude-sonnet-4-6"></div>`)
+		case "GET /models/m-unknown/oauth/status":
+			statusCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, jsonOutput := range []bool{false, true} {
+		var out bytes.Buffer
+		if err := RunCLIWithInput(c, &out, nil, "", []string{
+			"models", "add", "anthropic", "Unknown OAuth", "claude-sonnet-4-6", "--oauth",
+		}, false, jsonOutput); err != nil {
+			t.Fatalf("OAuth add with unknown status failed: %v", err)
+		}
+		if jsonOutput {
+			var result modelAddOutput
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+				t.Fatalf("invalid unknown-status OAuth JSON: %v\n%s", err, out.String())
+			}
+			if result.OAuthStatus != "unknown" || result.AuthorizationURL == "" || strings.Contains(result.Status, "connected") {
+				t.Fatalf("unknown-status OAuth result = %+v", result)
+			}
+		} else {
+			plain := stripANSI(out.String())
+			if !strings.Contains(plain, "OAuth authorization is required (status: unknown)") || strings.Contains(plain, "OAuth connected") {
+				t.Fatalf("unknown-status OAuth output = %q", plain)
+			}
+		}
+	}
+	if postCount != 2 || listCount != 2 || statusCount != 2 {
+		t.Fatalf("POST/list/status counts = %d/%d/%d, want 2/2/2", postCount, listCount, statusCount)
+	}
+}
+
 func TestCLIModelsAddOllamaAndOAuthHandoff(t *testing.T) {
 	t.Run("ollama", func(t *testing.T) {
 		var postForm url.Values
