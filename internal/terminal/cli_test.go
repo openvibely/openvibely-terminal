@@ -2653,10 +2653,11 @@ func TestCLISingleProjectModelsActionsRemainScoped(t *testing.T) {
 		force      bool
 		wantMethod string
 		wantPath   string
+		wantQuery  string
 	}{
-		{name: "capacity", args: []string{"models", "capacity"}, wantMethod: "GET", wantPath: "/api/analytics/usage?project_id=p1"},
-		{name: "default", args: []string{"models", "default", "Sonnet"}, wantMethod: "POST", wantPath: "/models/m-1/set-default"},
-		{name: "delete", args: []string{"models", "delete", "Sonnet"}, force: true, wantMethod: "DELETE", wantPath: "/models/m-1"},
+		{name: "capacity", args: []string{"models", "capacity"}, wantMethod: "GET", wantPath: "/api/analytics/usage", wantQuery: "project_id=p1"},
+		{name: "default", args: []string{"models", "default", "Sonnet"}, wantMethod: "POST", wantPath: "/models/m-1/set-default", wantQuery: "project_id=p1"},
+		{name: "delete", args: []string{"models", "delete", "Sonnet"}, force: true, wantMethod: "DELETE", wantPath: "/models/m-1", wantQuery: "project_id=p1"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -2676,12 +2677,8 @@ func TestCLISingleProjectModelsActionsRemainScoped(t *testing.T) {
 				if err := RunCLI(c, &out, "", tc.args, tc.force, jsonOutput); err != nil {
 					t.Fatalf("scoped models action failed: %v\n%s", err, rec.all())
 				}
-				if tc.wantPath == "/api/analytics/usage?project_id=p1" {
-					if !rec.sawQuery("GET " + tc.wantPath) {
-						t.Fatalf("capacity usage request lost implicit scope; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
-					}
-				} else if !rec.saw(tc.wantMethod, tc.wantPath) {
-					t.Fatalf("missing %s %s:\n%s", tc.wantMethod, tc.wantPath, rec.all())
+				if !rec.saw(tc.wantMethod, tc.wantPath) || !rec.sawQuery(tc.wantMethod+" "+tc.wantPath+"?"+tc.wantQuery) {
+					t.Fatalf("missing scoped %s %s?%s:\n%s", tc.wantMethod, tc.wantPath, tc.wantQuery, strings.Join(rec.urlsSnapshot(), "\n"))
 				}
 				if tc.name != "capacity" && !rec.sawQuery("GET /models?project_id=p1") {
 					t.Fatalf("model mutation lookup was not scoped to the implicit project; request URLs:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))

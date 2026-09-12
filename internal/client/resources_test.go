@@ -1716,7 +1716,7 @@ func TestResourceMutationRoutes(t *testing.T) {
 			method: "POST", path: "/alerts/read-all"},
 		{name: "skill delete", fn: func() error { return c.DeleteSkill(ctx, "p1", "deploy", "project") },
 			method: "DELETE", path: "/skills/deploy"},
-		{name: "model default", fn: func() error { return c.SetDefaultModel(ctx, "m1") },
+		{name: "model default", fn: func() error { return c.SetDefaultModel(ctx, "p1", "m1") },
 			method: "POST", path: "/models/m1/set-default"},
 		{name: "agent delete", fn: func() error { return c.DeleteAgent(ctx, "ag1") },
 			method: "DELETE", path: "/agents/ag1"},
@@ -1768,6 +1768,67 @@ func TestResourceMutationRoutes(t *testing.T) {
 				t.Errorf("%s = %q, want %q", tc.formKey, gotForm.Get(tc.formKey), tc.formValue)
 			}
 		})
+	}
+}
+
+func TestModelMutationRoutesCarryProjectScope(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := c.SetDefaultModel(ctx, "project/one", "m/1"); err != nil {
+		t.Fatalf("SetDefaultModel: %v", err)
+	}
+	if err := c.DeleteModel(ctx, "project/one", "m/1"); err != nil {
+		t.Fatalf("DeleteModel: %v", err)
+	}
+
+	want := []string{
+		"POST /models/m%2F1/set-default?project_id=project%2Fone",
+		"DELETE /models/m%2F1?project_id=project%2Fone",
+	}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+}
+
+func TestModelMutationsRejectMissingProjectBeforeRequest(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "default", call: func() error { return c.SetDefaultModel(ctx, " \t", "m1") }},
+		{name: "delete", call: func() error { return c.DeleteModel(ctx, "", "m1") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if err == nil || !strings.Contains(err.Error(), "project ID is required") {
+				t.Fatalf("error = %v, want local project-scope error", err)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d, want 0", requests)
 	}
 }
 

@@ -5836,8 +5836,8 @@ func TestModelsDefault(t *testing.T) {
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
 	m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
 	runLine(t, m, "/models default Sonnet")
-	if !rec.saw("POST", "/models/m-1/set-default") {
-		t.Errorf("calls:\n%s", rec.all())
+	if !rec.saw("POST", "/models/m-1/set-default") || !rec.sawQuery("POST /models/m-1/set-default?project_id=p1") {
+		t.Errorf("calls:\n%s\nrequests:\n%s", rec.all(), strings.Join(rec.urlsSnapshot(), "\n"))
 	}
 }
 
@@ -5846,8 +5846,8 @@ func TestModelsDelete(t *testing.T) {
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
 	m, rec := dispatchModel(t, map[string]string{"/models": modelsHTML})
 	confirmDestructive(t, m, "/models delete Sonnet")
-	if !rec.saw("DELETE", "/models/m-1") {
-		t.Errorf("calls:\n%s", rec.all())
+	if !rec.saw("DELETE", "/models/m-1") || !rec.sawQuery("DELETE /models/m-1?project_id=p1") {
+		t.Errorf("calls:\n%s\nrequests:\n%s", rec.all(), strings.Join(rec.urlsSnapshot(), "\n"))
 	}
 }
 
@@ -5870,8 +5870,10 @@ func TestModelsResolvedActionsMatchAcrossEntryRoutes(t *testing.T) {
 				}
 
 				method, path := http.MethodPost, "/models/mo-1/set-default"
+				mutationQuery := "POST /models/mo-1/set-default?project_id=project-selected"
 				if action == "delete" {
 					method, path = http.MethodDelete, "/models/mo-1"
+					mutationQuery = "DELETE /models/mo-1?project_id=project-selected"
 					if m.pendingConfirmation == nil {
 						t.Fatalf("delete did not wait for confirmation:\n%s", transcript(m))
 					}
@@ -5890,6 +5892,9 @@ func TestModelsResolvedActionsMatchAcrossEntryRoutes(t *testing.T) {
 
 				if got := rec.count(method, path); got != 1 {
 					t.Fatalf("%s requests = %d, want 1; calls:\n%s", path, got, rec.all())
+				}
+				if !rec.sawQuery(mutationQuery) {
+					t.Fatalf("mutation lost selected project; requests:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
 				}
 				if got := rec.count(http.MethodGet, "/models"); got != 2 {
 					t.Fatalf("model list requests = %d, want resolution/selection and refresh; calls:\n%s", got, rec.all())

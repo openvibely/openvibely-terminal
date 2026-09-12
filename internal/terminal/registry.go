@@ -3869,9 +3869,9 @@ func modelsCommand() command {
 			executeResolvedAction := func(ctx context.Context, mo client.LLMModel, action string) (string, error) {
 				var err error
 				if action == "default" {
-					err = c.SetDefaultModel(ctx, mo.ID)
+					err = c.SetDefaultModel(ctx, pid, mo.ID)
 				} else {
-					err = c.DeleteModel(ctx, mo.ID)
+					err = c.DeleteModel(ctx, pid, mo.ID)
 				}
 				if err != nil {
 					return "", err

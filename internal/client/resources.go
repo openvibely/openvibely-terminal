@@ -1331,14 +1331,20 @@ func (c *Client) ListModels(ctx context.Context, projectID string) ([]LLMModel, 
 	return out, nil
 }
 
-// SetDefaultModel marks a model as the default.
-func (c *Client) SetDefaultModel(ctx context.Context, modelID string) error {
-	return c.doForm(ctx, http.MethodPost, "/models/"+url.PathEscape(modelID)+"/set-default", nil)
+// SetDefaultModel marks a model as the default within a project.
+func (c *Client) SetDefaultModel(ctx context.Context, projectID, modelID string) error {
+	if strings.TrimSpace(projectID) == "" {
+		return errors.New("project ID is required for model mutations")
+	}
+	return c.doForm(ctx, http.MethodPost, "/models/"+url.PathEscape(modelID)+"/set-default"+query("project_id", projectID), nil)
 }
 
-// DeleteModel removes a model config.
-func (c *Client) DeleteModel(ctx context.Context, modelID string) error {
-	return c.doForm(ctx, http.MethodDelete, "/models/"+url.PathEscape(modelID), nil)
+// DeleteModel removes a model config from a project.
+func (c *Client) DeleteModel(ctx context.Context, projectID, modelID string) error {
+	if strings.TrimSpace(projectID) == "" {
+		return errors.New("project ID is required for model mutations")
+	}
+	return c.doForm(ctx, http.MethodDelete, "/models/"+url.PathEscape(modelID)+query("project_id", projectID), nil)
 }
 
 // --- agents ---
