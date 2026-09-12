@@ -6985,6 +6985,7 @@ func projectsCommand() command {
 			"projects create <name> | <path>              use | when the name or path contains spaces",
 			"projects create <name> --github-url=<url>    create and select a GitHub-backed project",
 			"  use --github-url=<url> so literal --github-url paths remain local",
+			"  GitHub creation remains available when local repository paths are disabled",
 			"projects edit <project> [options]            update only explicitly supplied settings",
 			"projects edit <project> | [options]          separate a project name containing option-like words",
 			"projects delete <project>                    delete project and all backend-owned project data",
@@ -7684,6 +7685,18 @@ type projectCreateSpec struct {
 func parseProjectCreateSpec(args []string) (projectCreateSpec, bool) {
 	if len(args) == 0 {
 		return projectCreateSpec{}, false
+	}
+	// The established pipe separator belongs to the legacy local grammar. If it
+	// is present, preserve that interpretation even when the path happens to
+	// look like a GitHub URL option value.
+	for _, arg := range args {
+		if arg == "|" {
+			name, path, ok := parseLocalProjectCreateArgs(args)
+			if !ok {
+				return projectCreateSpec{}, false
+			}
+			return projectCreateSpec{name: name, source: "local", location: path}, true
+		}
 	}
 	for i, arg := range args {
 		// The separated --github-url <url> spelling is intentionally not

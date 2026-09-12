@@ -254,7 +254,7 @@ func TestParseProjectCreateSpecGitHubForm(t *testing.T) {
 		wantName string
 	}{
 		{name: "quoted-name-shape", args: []string{"Quoted, Project", "--github-url=" + repoURL}, wantName: "Quoted, Project"},
-		{name: "pipe-separated-name", args: []string{"Quoted", "Project", "|", "--github-url=" + repoURL}, wantName: "Quoted Project"},
+		{name: "multiword-name-operand", args: []string{"Quoted Project", "--github-url=" + repoURL}, wantName: "Quoted Project"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec, ok := parseProjectCreateSpec(tc.args)
@@ -281,6 +281,7 @@ func TestParseProjectCreateSpecGitHubForm(t *testing.T) {
 		{name: "duplicate-option", args: []string{"Project", "--github-url", "", "--github-url", repoURL}, wantName: "Project", wantPath: "--github-url  --github-url " + repoURL},
 		{name: "duplicate-equals-option", args: []string{"Project", "--github-url=" + repoURL, "--github-url=" + repoURL}, wantName: "Project", wantPath: "--github-url=" + repoURL + " --github-url=" + repoURL},
 		{name: "pipe-local-literal", args: []string{"Project", "|", "--github-url"}, wantName: "Project", wantPath: "--github-url"},
+		{name: "pipe-local-url-looking-path", args: []string{"Legacy", "|", "--github-url=" + repoURL}, wantName: "Legacy", wantPath: "--github-url=" + repoURL},
 	} {
 		t.Run("legacy-"+tc.name, func(t *testing.T) {
 			spec, ok := parseProjectCreateSpec(tc.args)
@@ -483,6 +484,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		"projects show <project>",
 		"projects create <name> <path>",
 		"projects create <name> --github-url=<url>",
+		"GitHub creation remains available when local repository paths are disabled",
 		"projects edit <project> [options]",
 		"projects delete <project>",
 		"projects edit <project> | [options]",
