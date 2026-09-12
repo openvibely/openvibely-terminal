@@ -2681,6 +2681,42 @@ func TestTaskSteerNoActiveResponseDoesNotPostOrFallback(t *testing.T) {
 	}
 }
 
+func TestTaskSteerMissingActiveTurnIDDoesNotPostOrFallback(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
+	const mixedThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div><div data-execution-pair="true" data-exec-status="running"></div>`
+	steerPosts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+			_, _ = fmt.Fprint(w, board)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
+			_, _ = fmt.Fprint(w, mixedThread)
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread/steer":
+			steerPosts++
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread":
+			t.Fatalf("normal reply fallback was sent")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m = runLine(t, m, "/tasks steer Refactor | Stop now")
+	if steerPosts != 0 {
+		t.Fatalf("steer posts = %d, want zero", steerPosts)
+	}
+	if !strings.Contains(transcript(m), "without a turn ID") {
+		t.Fatalf("missing fail-closed error:\n%s", transcript(m))
+	}
+}
+
 func TestTaskEditAndOrder(t *testing.T) {
 	t.Run("edit", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})

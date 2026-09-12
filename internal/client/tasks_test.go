@@ -1111,6 +1111,7 @@ func TestGetTaskThreadStateRequiresOneExplicitActiveTurn(t *testing.T) {
 	}{
 		{name: "active", body: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`, want: "turn-1"},
 		{name: "none", body: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="completed"></div>`, err: "no error"},
+		{name: "missing active turn ID", body: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div><div data-execution-pair="true" data-exec-status="running"></div>`, err: "active response without a turn ID"},
 		{name: "multiple", body: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div><div data-execution-pair="true" data-exec-id="turn-2" data-exec-status="running"></div>`, err: "multiple active responses"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

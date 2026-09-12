@@ -288,6 +288,28 @@ func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, pr
 	return result, nil
 }
 
+func (m Model) runTaskSteer(c *client.Client, projectID, target, message string) tea.Cmd {
+	baseCtx := m.cliContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
+		defer cancel()
+		task, err := resolveTask(ctx, c, projectID, target)
+		if err != nil {
+			return resultMsg{title: "Tasks", err: err}
+		}
+		body, err := steerTaskThread(ctx, c, task, projectID, message)
+		result := resultMsg{title: "Tasks", body: body, err: err}
+		if err == nil {
+			result.refreshTaskID = task.ID
+			result.refreshProjectID = projectID
+		}
+		return result
+	}
+}
+
 // --- tasks ---
 
 // taskSelectorItems converts tasks into selector rows.
@@ -837,13 +859,7 @@ func tasksCommand() command {
 				if target == "" || message == "" {
 					return m, errCmd(commandUsage("tasks", "steer") + "\nhint: separate the task reference and message with a | character")
 				}
-				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, target)
-					if err != nil {
-						return "", err
-					}
-					return steerTaskThread(ctx, c, t, pid, message)
-				})
+				return m, m.runTaskSteer(c, pid, target, message)
 
 			case "activate":
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {

@@ -948,15 +948,17 @@ func (c *Client) GetTaskThreadStateForProject(ctx context.Context, taskID, proje
 	if err != nil {
 		return nil, err
 	}
-	activeIDs := findAll(root, func(n *html.Node) bool {
+	activeNodes := findAll(root, func(n *html.Node) bool {
 		return attr(n, "data-execution-pair") == "true" &&
-			strings.EqualFold(strings.TrimSpace(attr(n, "data-exec-status")), "running") &&
-			strings.TrimSpace(attr(n, "data-exec-id")) != ""
+			strings.EqualFold(strings.TrimSpace(attr(n, "data-exec-status")), "running")
 	})
-	turnIDs := make([]string, 0, len(activeIDs))
-	seen := make(map[string]struct{}, len(activeIDs))
-	for _, node := range activeIDs {
+	turnIDs := make([]string, 0, len(activeNodes))
+	seen := make(map[string]struct{}, len(activeNodes))
+	for _, node := range activeNodes {
 		id := strings.TrimSpace(attr(node, "data-exec-id"))
+		if id == "" {
+			return nil, fmt.Errorf("task thread has an active response without a turn ID; refusing to guess which turn to steer")
+		}
 		if _, ok := seen[id]; ok {
 			continue
 		}

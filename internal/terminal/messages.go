@@ -133,6 +133,8 @@ type resultMsg struct {
 	title             string // optional heading
 	body              string
 	err               error
+	refreshTaskID     string
+	refreshProjectID  string
 }
 
 type agentDeleteTargetMsg struct {

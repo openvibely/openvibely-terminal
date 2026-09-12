@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -76,18 +77,35 @@ func TestTasksOpenLoadsOnlyConversationAndSuppressesModelControls(t *testing.T) 
 	}
 }
 
-func TestRunningOpenTaskRefreshesAfterSteeringEvent(t *testing.T) {
+func TestRunningOpenTaskRefreshesAfterSteeringMutation(t *testing.T) {
 	threadGets := 0
+	var steerForm url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/tasks":
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 			_, _ = w.Write([]byte(strings.Replace(taskBoardHTML, `data-task-status="pending"`, `data-task-status="running"`, 1)))
-		case "/tasks/t-1/thread":
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
 			threadGets++
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Fatalf("thread project_id = %q", r.URL.Query().Get("project_id"))
+			}
 			if threadGets == 1 {
 				_, _ = w.Write([]byte(`<div>agent: working on it</div>`))
 				return
 			}
+			if threadGets == 2 {
+				_, _ = w.Write([]byte(`<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`))
+				return
+			}
+			_, _ = w.Write([]byte(`<div data-thread-input-id="input-1" data-task-id="t-1" data-input-mode="steering">Steering pending Stop now</div>`))
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread/steer":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Fatalf("steer project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			steerForm = r.PostForm
 			_, _ = w.Write([]byte(`<div data-thread-input-id="input-1" data-task-id="t-1" data-input-mode="steering">Steering pending Stop now</div>`))
 		default:
 			http.NotFound(w, r)
@@ -103,20 +121,12 @@ func TestRunningOpenTaskRefreshesAfterSteeringEvent(t *testing.T) {
 	m = updated.(Model)
 	m.selectedID = "p1"
 	m = runLine(t, m, "/tasks open Refactor")
-	m.sseGeneration = 7
-	m.sseEvents = make(chan client.Event)
-	m.sseErrs = make(chan error)
-	updated, cmd := m.Update(sseEventMsg{generation: 7, event: client.Event{
-		Name: "task_thread_input_steered",
-		Data: json.RawMessage(`{"type":"task_thread_input_steered","project_id":"p1","task_id":"t-1","exec_id":"turn-1","pending_input_id":"input-1"}`),
-	}})
-	m = updated.(Model)
-	if cmd == nil {
-		t.Fatal("steering event did not schedule a thread refresh")
+	m = runLineWithFollowUp(t, m, "/tasks steer Refactor | Stop now")
+	if steerForm.Get("message") != "Stop now" || steerForm.Get("expected_turn_id") != "turn-1" {
+		t.Fatalf("steer form = %v, thread GETs = %d, transcript:\n%s", steerForm, threadGets, transcript(m))
 	}
-	executeThreadRefreshFromBatch(t, &m, cmd)
-	if threadGets != 2 {
-		t.Fatalf("thread requests = %d, want open plus steering refresh", threadGets)
+	if threadGets != 3 {
+		t.Fatalf("thread requests = %d, want open, active-turn discovery, and post-mutation refresh", threadGets)
 	}
 	if !strings.Contains(stripANSI(transcript(m)), "Steering pending Stop now") {
 		t.Fatalf("steering row was not visible in thread transcript:\n%s", transcript(m))
