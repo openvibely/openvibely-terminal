@@ -1191,7 +1191,9 @@ func TestChannelsCompletionDocumentsManagementOptions(t *testing.T) {
 		{[]string{"edit", "email", "--provider"}, "icloud"},
 		{[]string{"add", "email"}, "--skip-attachments"},
 		{[]string{"access"}, "telegram"},
+		{[]string{"access"}, "github"},
 		{[]string{"access", "telegram"}, "remove"},
+		{[]string{"access", "github"}, "list"},
 	} {
 		values := registryCompletionValues("channels", tc.after...)
 		if !slices.Contains(values, tc.want) {
@@ -1220,9 +1222,8 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		"/channels test <channel>",
 		"/channels remove <channel>",
 		"/channels disconnect <github|slack>",
-		"/channels access <telegram|slack|discord|x|email> <list|add|remove> [identity] [display name]",
-		"Telegram accepts a numeric ID or username",
-		"Discord requires a numeric ID",
+		"/channels access <telegram|slack|discord|x|email|github> <list|add|remove> [identity] [display name]",
+		"Telegram accepts a numeric ID or username", "Discord requires a numeric ID",
 		"Email is normalized before it is authorized",
 		"headless removal requires --force",
 		"--skip-attachments",

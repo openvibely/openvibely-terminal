@@ -9380,6 +9380,8 @@ func channelAccessTestRoute(provider string) (route, container string) {
 		return "/channels/discord/authorized-users", "discord-authorized-users"
 	case "email":
 		return "/channels/email/authorized-senders", "email-authorized-senders"
+	case "github":
+		return "/channels/github/authorized-actors", "github-runtime-settings"
 	case "x":
 		return "/channels/x/authorized-users", "x_config_modal"
 	default:
@@ -9401,6 +9403,8 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 		}
 		if provider == "x" {
 			fmt.Fprintf(&b, `<div data-x-authorized-user-id="%s" data-x-authorized-project-id="%s" data-x-user-id="%s" data-x-username="%s">`, row.id, projectID, row.identity, strings.TrimPrefix(row.name, "@"))
+		} else if provider == "github" {
+			b.WriteString(`<div><div>`)
 		} else {
 			fmt.Fprintf(&b, `<div data-project-id="%s"><div>`, projectID)
 		}
@@ -9411,6 +9415,8 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 			fmt.Fprintf(&b, `<span>%s</span><span>ID: %s</span>`, row.name, row.identity)
 		case "email":
 			fmt.Fprintf(&b, `<span class="text-sm font-medium truncate">%s</span><span class="text-xs opacity-50 truncate">%s</span>`, row.name, row.identity)
+		case "github":
+			fmt.Fprintf(&b, `<span class="text-sm font-medium truncate">%s</span><span class="text-xs opacity-50 truncate">@%s</span>`, row.name, strings.TrimPrefix(row.identity, "@"))
 		case "x":
 			if row.name != "" {
 				fmt.Fprintf(&b, `<span><span>@%s</span> <span class="opacity-60">ID %s</span></span>`, strings.TrimPrefix(row.name, "@"), row.identity)
@@ -9422,7 +9428,11 @@ func channelAccessTestPage(provider string, rows ...channelAccessTestRow) string
 		if provider != "x" {
 			b.WriteString(`</div>`)
 		}
-		fmt.Fprintf(&b, `<button hx-delete="%s/%s?project_id=p1">remove</button></div>`, route, row.id)
+		buttonProjectID := "p1"
+		if provider == "github" {
+			buttonProjectID = projectID
+		}
+		fmt.Fprintf(&b, `<button hx-delete="%s/%s?project_id=%s">remove</button></div>`, route, row.id, buttonProjectID)
 	}
 	b.WriteString(`</div>`)
 	return b.String()
@@ -9664,10 +9674,9 @@ func TestChannelAccessTUICommandsValidateScopeProvidersAndCapturedRemoval(t *tes
 		line string
 		want string
 	}{
-		{"/channels access github list", "provider"},
+		{"/channels access bogus list", "provider"},
 		{"/channels access telegram add not-valid!", "numeric user ID or username"},
-		{"/channels access telegram add 0", "numeric user ID or username"},
-		{"/channels access telegram add 9223372036854775808", "numeric user ID or username"},
+		{"/channels access telegram add 0", "numeric user ID or username"}, {"/channels access telegram add 9223372036854775808", "numeric user ID or username"},
 		{"/channels access slack add alice", "Slack user ID"},
 		{"/channels access discord add username", "numeric user ID"},
 		{"/channels access email add not-an-email", "valid email"},

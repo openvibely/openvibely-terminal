@@ -4055,13 +4055,18 @@ func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
 		{"slack", "U12345678"},
 		{"discord", "123456789012345678"},
 		{"email", "person@example.com"},
+		{"github", "alice"},
 	}
 	for _, tc := range providers {
 		t.Run("json list "+tc.provider, func(t *testing.T) {
 			route, _ := channelAccessTestRoute(tc.provider)
+			listRoute := route
+			if tc.provider == "github" {
+				listRoute = "/channels/github/runtime-settings"
+			}
 			c, rec := cliServer(t, map[string]string{
 				"/api/projects": cliProjects,
-				route:           channelAccessTestPage(tc.provider, channelAccessTestRow{id: "row-1", name: "Visible User", identity: tc.identity}),
+				listRoute:       channelAccessTestPage(tc.provider, channelAccessTestRow{id: "row-1", name: "Visible User", identity: tc.identity}),
 			})
 			var out bytes.Buffer
 			if err := RunCLI(c, &out, "demo", []string{"channels", "access", tc.provider, "list"}, false, true); err != nil {
@@ -4074,7 +4079,7 @@ func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
 			if len(users) != 1 || users[0].Provider != tc.provider || users[0].ProjectID != "p1" || strings.Contains(out.String(), "channel-access-backend-secret") {
 				t.Fatalf("unsafe access JSON = %q", out.String())
 			}
-			if !rec.saw(http.MethodGet, route) || !rec.sawQuery("project_id=p1") {
+			if !rec.saw(http.MethodGet, listRoute) || !rec.sawQuery("project_id=p1") {
 				t.Fatalf("unscoped access list calls:\n%s", rec.all())
 			}
 		})
@@ -4159,7 +4164,7 @@ func TestCLIChannelAccessAllProvidersJSONSafetyAndRemovalGuards(t *testing.T) {
 		{"channels", "access", "slack", "add", "alice"},
 		{"channels", "access", "discord", "add", "alice"},
 		{"channels", "access", "email", "add", "not-an-email"},
-		{"channels", "access", "github", "list"},
+		{"channels", "access", "bogus", "list"},
 	} {
 		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
 		if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err == nil || rec.all() != "" {
@@ -4400,6 +4405,47 @@ func TestCLIChannelAccessMutationFailureAndRefreshFailureRemainSafe(t *testing.T
 		}
 		if !strings.Contains(out.String(), "authorized Email access") || strings.Contains(out.String(), secret) {
 			t.Fatalf("refresh failure did not preserve safe success: %q", out.String())
+		}
+	})
+	t.Run("GitHub refresh failure retains success", func(t *testing.T) {
+		const githubListPath = "/channels/github/runtime-settings"
+		const githubMutationPath = "/channels/github/authorized-actors"
+		githubPage := channelAccessTestPage("github", channelAccessTestRow{id: "actor-1", name: "Alice", identity: "alice"})
+		lists := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case githubListPath:
+				lists++
+				if lists > 1 {
+					http.Error(w, secret, http.StatusBadGateway)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, githubPage)
+			case githubMutationPath:
+				if r.Method != http.MethodPost {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"channels", "access", "github", "add", "@Bob"}, false, false); err != nil {
+			t.Fatalf("successful GitHub mutation with failed refresh: %v", err)
+		}
+		if !strings.Contains(out.String(), "authorized GitHub access") || strings.Contains(out.String(), secret) {
+			t.Fatalf("GitHub refresh failure did not preserve safe success: %q", out.String())
 		}
 	})
 }

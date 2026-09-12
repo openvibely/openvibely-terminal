@@ -1589,7 +1589,7 @@ func TestChannelAuthorizedUsersRejectMalformedScopesAndPreserveSafeDiagnostics(t
 	if _, err := c.ListChannelAuthorizedUsers(context.Background(), "telegram", ""); err == nil {
 		t.Fatal("empty project scope listed channel access")
 	}
-	if err := c.AddChannelAuthorizedUser(context.Background(), "github", "p1", "actor", ""); err == nil || strings.Contains(err.Error(), "actor") {
+	if err := c.AddChannelAuthorizedUser(context.Background(), "unknown", "p1", "actor", ""); err == nil || strings.Contains(err.Error(), "actor") {
 		t.Fatalf("unsupported provider error = %v", err)
 	}
 

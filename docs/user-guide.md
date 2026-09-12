@@ -247,7 +247,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete` |
+| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
@@ -265,6 +265,29 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/help` | `?`, `commands` | `/help <command>` details one |
 | `/chat` | `back`, `leave` | return to project chat; `/chat <message>` also sends it |
 | `/quit` | `q`, `exit` | |
+
+### Channel access
+
+Channel access commands require a selected project. Use `channels access github list|add|remove` to manage the GitHub authorized-actor allowlist. The backend stores this allowlist at system level, while every terminal request still carries the selected `project_id` as request context. GitHub logins are normalized by stripping a leading `@` and lowercasing the login. The display name is optional; quote it as one operand when it contains spaces.
+
+```text
+/channels access github list
+/channels access github add @Alice
+/channels access github add @Alice "Release Reviewer"
+/channels access github remove @Alice
+```
+
+The same grammar is available in one-shot mode. `--json` returns only safe actor identity fields, and no credentials, OAuth state, tokens, permissions, or unrelated backend form values. Add rejects malformed, duplicate, and surplus operands before the POST. Removal resolves one canonical listed actor before confirmation, captures its backend row ID, revalidates that ID in the selected project, then requires `yes` interactively or `--force` headlessly. Cancellation and missing force perform no DELETE. A successful mutation remains successful if the optional refreshed list cannot be loaded.
+
+```bash
+openvibely-terminal -project demo channels access github list
+openvibely-terminal -project demo --json channels access github list
+openvibely-terminal -project demo channels access github add @Alice "Release Reviewer"
+openvibely-terminal -project demo --force channels access github remove @alice
+```
+
+The same `list|add|remove` access grammar remains available for Telegram, Slack,
+Discord, X, and Email; use `help channels` for provider-specific identity forms.
 
 ### Model providers
 

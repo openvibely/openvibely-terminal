@@ -87,13 +87,24 @@ Common commands include:
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
 | `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |
-| `/channels` | Manage integrations, inbound webhooks, and project-scoped Telegram, Slack, Discord, X, and Email authorized access with `channels access <provider> list\|add\|remove` |
+| `/channels` | Manage integrations, inbound webhooks, and project-scoped Telegram, Slack, Discord, X, Email, and GitHub authorized access with `channels access <provider> list\|add\|remove` |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/help <command>` | Show complete command syntax |
 
-Use `help channels` for integration-specific options. X mention access is project-scoped and uses `channels access x list|add|remove`; add accepts a numeric X user ID plus an optional username. The username is normalized by removing a leading `@`:
+Use `help channels` for integration-specific options. Channel access management is scoped to the selected project in every request. Telegram, Slack, Discord, X, Email, and GitHub expose `channels access <provider> list|add|remove`; GitHub actors are a system-level allowlist viewed with the selected project as request context. GitHub logins are normalized by removing a leading `@` and lowercasing them. A display name is optional and must be one quoted operand when it contains spaces:
+
+```text
+channels access github list
+channels access github add @Alice
+channels access github add @Alice "Release Reviewer"
+channels access github remove @Alice
+openvibely-terminal -project demo --json channels access github list
+openvibely-terminal -project demo --force channels access github remove @alice
+```
+
+X mention access remains project-scoped and uses a numeric X user ID plus an optional username:
 
 ```text
 channels access x list

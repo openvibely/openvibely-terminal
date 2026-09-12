@@ -1882,6 +1882,11 @@ func authorizedChannelAccessRoute(provider string) (channelAccessRoute, error) {
 		return channelAccessRoute{path: "/channels/discord/authorized-users", listPath: "/channels/discord/authorized-users", container: "discord-authorized-users", inputName: "discord_user_id"}, nil
 	case "email":
 		return channelAccessRoute{path: "/channels/email/authorized-senders", listPath: "/channels/email/authorized-senders", container: "email-authorized-senders", inputName: "authorized_email_address"}, nil
+	case "github":
+		// GitHub authorization is rendered by the runtime-settings fragment. The
+		// actor list is system-level, but the fragment still requires the selected
+		// project as request context and scopes every delete control.
+		return channelAccessRoute{path: "/channels/github/authorized-actors", listPath: "/channels/github/runtime-settings", container: "github-runtime-settings", inputName: "github_login"}, nil
 	case "x":
 		// X authorization is rendered inside the project-scoped channels/settings
 		// representation; the mutation route itself has no GET list endpoint.
@@ -1897,6 +1902,127 @@ func requireChannelAccessProject(projectID string) (string, error) {
 		return "", errors.New("project ID is required")
 	}
 	return projectID, nil
+}
+
+// normalizeGitHubChannelAccessLogin mirrors the backend's safe login
+// normalization while rejecting values that cannot be a GitHub login. The
+// backend may preserve this system-level actor list across projects, so the
+// client must not accept arbitrary page text as an actor identity.
+func normalizeGitHubChannelAccessLogin(value string) (string, error) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
+	if value == "" || len(value) > 39 {
+		return "", errors.New("GitHub login is invalid")
+	}
+	for _, r := range value {
+		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+			return "", errors.New("GitHub login is invalid")
+		}
+	}
+	return strings.ToLower(value), nil
+}
+
+// githubChannelAccessIdentity reads only the semantic display/login spans
+// emitted by GitHubRuntimeSettings. It deliberately ignores flattened row
+// text, hidden inputs, permissions, added-by metadata, and other backend form
+// values.
+func githubChannelAccessIdentity(row *html.Node) (displayName, login string, references []string, err error) {
+	if row == nil {
+		return "", "", nil, errors.New("missing GitHub authorization row")
+	}
+	var displayNames, logins []string
+	for _, span := range findAll(row, func(n *html.Node) bool { return n.Data == "span" }) {
+		classes := make(map[string]bool)
+		for _, class := range strings.Fields(attr(span, "class")) {
+			classes[class] = true
+		}
+		value := strings.TrimSpace(NodeText(span))
+		switch {
+		case classes["text-sm"] && classes["font-medium"]:
+			if value == "" {
+				return "", "", nil, errors.New("missing GitHub display name")
+			}
+			displayNames = append(displayNames, value)
+		case classes["text-xs"] && classes["opacity-50"]:
+			normalized, normalizeErr := normalizeGitHubChannelAccessLogin(value)
+			if normalizeErr != nil {
+				return "", "", nil, errors.New("invalid GitHub login")
+			}
+			logins = append(logins, normalized)
+		}
+	}
+	if len(displayNames) > 1 || len(logins) != 1 {
+		return "", "", nil, errors.New("GitHub authorization identity unavailable")
+	}
+	login = logins[0]
+	references = []string{login, "@" + login}
+	if len(displayNames) == 1 {
+		displayName = displayNames[0]
+	}
+	return displayName, login, references, nil
+}
+
+func githubChannelAccessDeleteTarget(raw, projectID string) (string, error) {
+	location, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || location == nil || location.Scheme != "" || location.Host != "" || location.Fragment != "" {
+		return "", errors.New("invalid GitHub authorization delete target")
+	}
+	const route = "/channels/github/authorized-actors"
+	prefix := route + "/"
+	if !strings.HasPrefix(location.Path, prefix) {
+		return "", errors.New("invalid GitHub authorization delete target")
+	}
+	query, err := url.ParseQuery(location.RawQuery)
+	if err != nil {
+		return "", errors.New("invalid GitHub authorization delete scope")
+	}
+	projectValues, ok := query["project_id"]
+	if !ok || len(projectValues) != 1 || projectValues[0] != projectID || len(query) != 1 {
+		return "", errors.New("invalid GitHub authorization delete scope")
+	}
+	id := strings.TrimPrefix(location.Path, prefix)
+	if id == "" || id == "." || id == ".." || strings.Contains(id, "/") {
+		return "", errors.New("invalid GitHub authorization delete target")
+	}
+	return id, nil
+}
+
+// listGitHubChannelAccessUsers parses the stable GitHub runtime-settings
+// fragment. GitHub actors are system-level records; projectID is retained as
+// selected request context rather than treated as row ownership evidence.
+func listGitHubChannelAccessUsers(root *html.Node, projectID string) ([]ChannelAuthorizedUser, error) {
+	container := findByID(root, "github-runtime-settings")
+	if container == nil {
+		return nil, errors.New("authorized channel access list unavailable")
+	}
+	users := make([]ChannelAuthorizedUser, 0)
+	seenIDs := make(map[string]struct{})
+	seenLogins := make(map[string]struct{})
+	for _, button := range findAll(container, func(n *html.Node) bool {
+		return n.Data == "button" && hasHTMLAttr(n, "hx-delete")
+	}) {
+		id, err := githubChannelAccessDeleteTarget(attr(button, "hx-delete"), projectID)
+		if err != nil {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		if _, duplicate := seenIDs[id]; duplicate {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		row := button.Parent
+		displayName, login, references, err := githubChannelAccessIdentity(row)
+		if err != nil {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		if _, duplicate := seenLogins[login]; duplicate {
+			return nil, errors.New("authorized channel access list unavailable")
+		}
+		seenIDs[id] = struct{}{}
+		seenLogins[login] = struct{}{}
+		users = append(users, ChannelAuthorizedUser{
+			ID: id, Provider: "github", ProjectID: projectID,
+			DisplayName: displayName, Identity: login, references: references,
+		})
+	}
+	return users, nil
 }
 
 func channelAccessIdentity(provider string, row *html.Node) (displayName, identity string, references []string) {
@@ -2232,10 +2358,11 @@ func (c *Client) RemoveXAuthorizedUser(ctx context.Context, projectID, id string
 }
 
 // ListChannelAuthorizedUsers returns the current project's visible authorized
-// inbound identities for Telegram, Slack, Discord, Email, or X. The backend
-// serves HTMX fragments for the first four providers and the project-scoped
-// channels/settings page for X; row IDs are taken only from canonical delete
-// controls and project scope is verified before returning any record.
+// inbound identities for Telegram, Slack, Discord, Email, GitHub, or X. The backend
+// serves HTMX fragments for the first four providers, the GitHub runtime-settings
+// fragment for its system-level actor list, and the project-scoped channels/settings
+// page for X; row IDs are taken only from canonical delete controls and project
+// scope is verified before returning any record.
 func (c *Client) ListChannelAuthorizedUsers(ctx context.Context, provider, projectID string) ([]ChannelAuthorizedUser, error) {
 	projectID, err := requireChannelAccessProject(projectID)
 	if err != nil {
@@ -2260,6 +2387,9 @@ func (c *Client) ListChannelAuthorizedUsers(ctx context.Context, provider, proje
 	root, err := c.getHTML(ctx, route.listPath+query("project_id", projectID))
 	if err != nil {
 		return nil, safeChannelError(err)
+	}
+	if provider == "github" {
+		return listGitHubChannelAccessUsers(root, projectID)
 	}
 	container := findByID(root, route.container)
 	if container == nil {
@@ -2305,6 +2435,29 @@ func (c *Client) ListChannelAuthorizedUsers(ctx context.Context, provider, proje
 	return users, nil
 }
 
+// ListGitHubAuthorizedActors is the stable GitHub-specific alias for the safe
+// structured channel-access contract. GitHub actors remain system-level records;
+// projectID is required only as backend request and rendered-fragment context.
+func (c *Client) ListGitHubAuthorizedActors(ctx context.Context, projectID string) ([]ChannelAuthorizedUser, error) {
+	return c.ListChannelAuthorizedUsers(ctx, "github", projectID)
+}
+
+// AddGitHubAuthorizedActor adds one normalized GitHub login to the system-level
+// allowlist while carrying the selected project in the form context.
+func (c *Client) AddGitHubAuthorizedActor(ctx context.Context, projectID, login, displayName string) error {
+	login, err := normalizeGitHubChannelAccessLogin(login)
+	if err != nil {
+		return err
+	}
+	return c.AddChannelAuthorizedUser(ctx, "github", projectID, login, displayName)
+}
+
+// RemoveGitHubAuthorizedActor removes a captured actor ID after the shared
+// selected-project revalidation performed by RemoveChannelAuthorizedUser.
+func (c *Client) RemoveGitHubAuthorizedActor(ctx context.Context, projectID, id string) error {
+	return c.RemoveChannelAuthorizedUser(ctx, "github", projectID, id)
+}
+
 // AddChannelAuthorizedUser grants an inbound identity access in one selected
 // project. Identity validation and normalization belong to the command layer;
 // this client method owns the provider route, field name, HTMX transport, and
@@ -2317,6 +2470,12 @@ func (c *Client) AddChannelAuthorizedUser(ctx context.Context, provider, project
 	route, err := authorizedChannelAccessRoute(provider)
 	if err != nil {
 		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "github") {
+		identity, err = normalizeGitHubChannelAccessLogin(identity)
+		if err != nil {
+			return err
+		}
 	}
 	form := url.Values{}
 	form.Set("project_id", projectID)
