@@ -184,7 +184,7 @@ var commands []command
 var cmdPrefix = "/"
 
 const projectCreateCommand = "projects create <name> <path>"
-const projectCreateGitHubCommand = "projects create <name> --github-url=<url>"
+const projectCreateGitHubCommand = "projects github-create <name> <url>"
 
 func projectCreationCommand() string {
 	return cmdPrefix + projectCreateCommand

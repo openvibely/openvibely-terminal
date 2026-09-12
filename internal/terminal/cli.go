@@ -1413,7 +1413,7 @@ func cliProjectPreflight(c command, args []string, projectRef string, m Model) e
 	}
 	if m.selectedID == "" {
 		if c.name == "models" {
-			return errors.New("no project selected — models capacity, edit, default, and delete require -project <name|id>; create one first with projects create <name> <path> or projects create <name> --github-url=<url>")
+			return errors.New("no project selected — models capacity, edit, default, and delete require -project <name|id>; create one first with projects create <name> <path> or projects github-create <name> <url>")
 		}
 		return errors.New("no project selected — use /project <name>")
 	}
@@ -1448,7 +1448,7 @@ func (c command) needsBackend() bool {
 // independent of the existing project list, so first-run creation works even
 // when the backend has no projects yet.
 func (c command) needsProjectLoad(args []string) bool {
-	if c.name == "projects" && len(args) > 1 && strings.EqualFold(args[1], "create") {
+	if c.name == "projects" && len(args) > 1 && (strings.EqualFold(args[1], "create") || strings.EqualFold(args[1], "github-create")) {
 		return false
 	}
 	if c.name == "models" && len(args) > 0 && !c.cliProjectScoped(args[1:]) {

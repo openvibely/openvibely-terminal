@@ -6966,7 +6966,7 @@ func projectCommand() command {
 }
 
 func projectsCommand() command {
-	actions := []string{"list", "show", "create", "edit", "delete"}
+	actions := []string{"list", "show", "create", "github-create", "edit", "delete"}
 	return command{
 		name:    "projects",
 		actions: actions,
@@ -6976,15 +6976,15 @@ func projectsCommand() command {
 			{action: "delete", args: "<project>", description: "delete a project and its backend-owned data"},
 		},
 		selectorPaths: [][]string{{"show"}, {"edit"}, {"delete"}},
-		completions:   append(projectEditCompletions(), commandCompletion{after: []string{"create", "**"}, values: []string{"--github-url="}}),
+		completions:   projectEditCompletions(),
 		desc:          "list, show, create, edit, or delete backend-owned projects",
 		usage: []string{
 			"projects [list]                              list projects with running/queued counts",
 			"projects show <project>                     show authoritative project settings",
 			"projects create <name> <path>                create and select a local-path project",
 			"projects create <name> | <path>              use | when the name or path contains spaces",
-			"projects create <name> --github-url=<url>    create and select a GitHub-backed project",
-			"  use --github-url=<url> so literal --github-url paths remain local",
+			"projects github-create <name> <url>           create and select a GitHub-backed project",
+			"  use | when the project name contains spaces",
 			"  GitHub creation remains available when local repository paths are disabled",
 			"projects edit <project> [options]            update only explicitly supplied settings",
 			"projects edit <project> | [options]          separate a project name containing option-like words",
@@ -6999,8 +6999,9 @@ func projectsCommand() command {
 		examples: []string{
 			`projects show demo`,
 			`projects create demo /Users/me/src/demo`,
-			`projects create "My Project" --github-url=https://github.com/acme/demo`,
 			`projects create My Project | C:\Users\me\src\my-project`,
+			`projects github-create "My Project" https://github.com/acme/demo`,
+			`projects github-create My Project | https://github.com/acme/demo`,
 			`projects edit demo --description "Local checkout" --max-workers 4`,
 			`projects edit demo --repository-source github --github-url https://github.com/acme/demo`,
 			`projects delete demo`,
@@ -7010,10 +7011,20 @@ func projectsCommand() command {
 			m.busy = false
 			action, rest := splitAction(actions, args)
 			switch action {
-			case "create":
-				spec, ok := parseProjectCreateSpec(rest)
+			case "create", "github-create":
+				var spec projectCreateSpec
+				var ok bool
+				if action == "github-create" {
+					var name, repoURL string
+					name, repoURL, ok = parseProjectCreateGitHubArgs(rest)
+					spec = projectCreateSpec{name: name, source: "github", location: repoURL}
+				} else {
+					var name, path string
+					name, path, ok = parseProjectCreateArgs(rest)
+					spec = projectCreateSpec{name: name, source: "local", location: path}
+				}
 				if !ok {
-					return m, errCmd(projectCreateUsage())
+					return m, errCmd(projectCreateUsage(action))
 				}
 				m.busy = true
 				requestID := nextProjectRequestID()
@@ -7672,8 +7683,11 @@ func renderProjectSettings(settings client.ProjectSettings) string {
 	return strings.Join(rows, "\n")
 }
 
-func projectCreateUsage() string {
-	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> --github-url=<url> for a GitHub-backed project; use | when an operand contains spaces)", cmdPrefix)
+func projectCreateUsage(action string) string {
+	if action == "github-create" {
+		return fmt.Sprintf("usage: %sprojects github-create <name> <url> (or <name> | <url> when the name contains spaces)", cmdPrefix)
+	}
+	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> | <path> when either contains spaces)", cmdPrefix)
 }
 
 type projectCreateSpec struct {
@@ -7682,55 +7696,27 @@ type projectCreateSpec struct {
 	location string
 }
 
-func parseProjectCreateSpec(args []string) (projectCreateSpec, bool) {
+func parseProjectCreateGitHubArgs(args []string) (string, string, bool) {
 	if len(args) == 0 {
-		return projectCreateSpec{}, false
+		return "", "", false
 	}
-	// The established pipe separator belongs to the legacy local grammar. If it
-	// is present, preserve that interpretation even when the path happens to
-	// look like a GitHub URL option value.
-	for _, arg := range args {
-		if arg == "|" {
-			name, path, ok := parseLocalProjectCreateArgs(args)
-			if !ok {
-				return projectCreateSpec{}, false
-			}
-			return projectCreateSpec{name: name, source: "local", location: path}, true
+	joined := strings.TrimSpace(strings.Join(args, " "))
+	if strings.Contains(joined, "|") {
+		name, repoURL := splitPipe(joined)
+		if name == "" || !isAbsoluteProjectRepositoryURL(repoURL) {
+			return "", "", false
 		}
+		return name, repoURL, true
 	}
-	for i, arg := range args {
-		// The separated --github-url <url> spelling is intentionally not
-		// recognized here: the legacy positional grammar accepts that exact
-		// sequence as a local path. The equals form is the unambiguous opt-in.
-		if !strings.HasPrefix(arg, "--github-url=") || i == 0 || i+1 != len(args) {
-			continue
-		}
-		nameArgs := append([]string(nil), args[:i]...)
-		if len(nameArgs) > 0 && nameArgs[len(nameArgs)-1] == "|" {
-			nameArgs = nameArgs[:len(nameArgs)-1]
-		}
-		duplicateOption := false
-		for _, nameArg := range nameArgs {
-			if nameArg == "--github-url" || strings.HasPrefix(nameArg, "--github-url=") {
-				duplicateOption = true
-				break
-			}
-		}
-		if duplicateOption {
-			continue
-		}
-		name := strings.TrimSpace(strings.Join(nameArgs, " "))
-		repoURL := strings.TrimSpace(strings.TrimPrefix(arg, "--github-url="))
-		if name != "" && isAbsoluteProjectRepositoryURL(repoURL) {
-			return projectCreateSpec{name: name, source: "github", location: repoURL}, true
-		}
+	if len(args) < 2 {
+		return "", "", false
 	}
-
-	name, path, ok := parseLocalProjectCreateArgs(args)
-	if !ok {
-		return projectCreateSpec{}, false
+	name := strings.TrimSpace(strings.Join(args[:len(args)-1], " "))
+	repoURL := strings.TrimSpace(args[len(args)-1])
+	if name == "" || !isAbsoluteProjectRepositoryURL(repoURL) {
+		return "", "", false
 	}
-	return projectCreateSpec{name: name, source: "local", location: path}, true
+	return name, repoURL, true
 }
 
 func isAbsoluteProjectRepositoryURL(value string) bool {
@@ -7739,8 +7725,8 @@ func isAbsoluteProjectRepositoryURL(value string) bool {
 }
 
 // parseProjectCreateArgs remains the local-path parser used by regression
-// tests and compatibility callers. New dispatch uses parseProjectCreateSpec
-// so the GitHub form can share the same command without changing local syntax.
+// tests and compatibility callers. GitHub creation uses the separate
+// parseProjectCreateGitHubArgs grammar so local syntax is never reinterpreted.
 func parseProjectCreateArgs(args []string) (string, string, bool) {
 	return parseLocalProjectCreateArgs(args)
 }

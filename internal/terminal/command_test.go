@@ -246,50 +246,58 @@ func TestParseProjectCreateArgs(t *testing.T) {
 	}
 }
 
-func TestParseProjectCreateSpecGitHubForm(t *testing.T) {
+func TestParseProjectCreateGitHubArgs(t *testing.T) {
 	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
 	for _, tc := range []struct {
 		name     string
 		args     []string
 		wantName string
 	}{
-		{name: "quoted-name-shape", args: []string{"Quoted, Project", "--github-url=" + repoURL}, wantName: "Quoted, Project"},
-		{name: "multiword-name-operand", args: []string{"Quoted Project", "--github-url=" + repoURL}, wantName: "Quoted Project"},
+		{name: "quoted-name-shape", args: []string{"Quoted, Project", repoURL}, wantName: "Quoted, Project"},
+		{name: "multiword-name", args: []string{"Quoted", "Project", repoURL}, wantName: "Quoted Project"},
+		{name: "pipe-delimited-name", args: []string{"Quoted", "Project", "|", repoURL}, wantName: "Quoted Project"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			spec, ok := parseProjectCreateSpec(tc.args)
+			name, gotURL, ok := parseProjectCreateGitHubArgs(tc.args)
 			if !ok {
-				t.Fatalf("parseProjectCreateSpec(%v) rejected valid GitHub form", tc.args)
+				t.Fatalf("parseProjectCreateGitHubArgs(%v) rejected valid GitHub form", tc.args)
 			}
-			if spec.name != tc.wantName || spec.source != "github" || spec.location != repoURL {
-				t.Fatalf("parseProjectCreateSpec(%v) = %+v, want quoted name, github, %q", tc.args, spec, repoURL)
+			if name != tc.wantName || gotURL != repoURL {
+				t.Fatalf("parseProjectCreateGitHubArgs(%v) = %q, %q; want %q, %q", tc.args, name, gotURL, tc.wantName, repoURL)
 			}
 		})
 	}
+	for _, args := range [][]string{
+		{},
+		{"Project"},
+		{"Project", "not-a-url"},
+		{"Project", repoURL, "extra"},
+		{"Project", "|", "not-a-url"},
+	} {
+		if _, _, ok := parseProjectCreateGitHubArgs(args); ok {
+			t.Errorf("parseProjectCreateGitHubArgs(%v) accepted malformed GitHub form", args)
+		}
+	}
+}
 
+func TestProjectCreatePreservesLiteralGitHubOptionLocalPaths(t *testing.T) {
+	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
 	for _, tc := range []struct {
 		name     string
 		args     []string
 		wantName string
 		wantPath string
 	}{
-		{name: "missing-option-value", args: []string{"Project", "--github-url"}, wantName: "Project", wantPath: "--github-url"},
-		{name: "path-like-option-value", args: []string{"Legacy", "--github-url", "/tmp/legacy repo"}, wantName: "Legacy --github-url", wantPath: "/tmp/legacy repo"},
 		{name: "literal-option-followed-by-url", args: []string{"Legacy", "--github-url", repoURL}, wantName: "Legacy", wantPath: "--github-url " + repoURL},
-		{name: "malformed-url-value", args: []string{"Project", "--github-url", "not-a-url"}, wantName: "Project", wantPath: "--github-url not-a-url"},
-		{name: "surplus-after-url", args: []string{"Project", "--github-url", repoURL, "extra"}, wantName: "Project", wantPath: "--github-url " + repoURL + " extra"},
-		{name: "duplicate-option", args: []string{"Project", "--github-url", "", "--github-url", repoURL}, wantName: "Project", wantPath: "--github-url  --github-url " + repoURL},
-		{name: "duplicate-equals-option", args: []string{"Project", "--github-url=" + repoURL, "--github-url=" + repoURL}, wantName: "Project", wantPath: "--github-url=" + repoURL + " --github-url=" + repoURL},
-		{name: "pipe-local-literal", args: []string{"Project", "|", "--github-url"}, wantName: "Project", wantPath: "--github-url"},
-		{name: "pipe-local-url-looking-path", args: []string{"Legacy", "|", "--github-url=" + repoURL}, wantName: "Legacy", wantPath: "--github-url=" + repoURL},
+		{name: "literal-equals-option-followed-by-url", args: []string{"Legacy", "--github-url=" + repoURL}, wantName: "Legacy", wantPath: "--github-url=" + repoURL},
+		{name: "pipe-delimited-literal-equals-path", args: []string{"Legacy", "|", "--github-url=" + repoURL}, wantName: "Legacy", wantPath: "--github-url=" + repoURL},
+		{name: "duplicate-equals-options", args: []string{"Legacy", "--github-url=" + repoURL, "--github-url=" + repoURL}, wantName: "Legacy", wantPath: "--github-url=" + repoURL + " --github-url=" + repoURL},
+		{name: "malformed-and-surplus", args: []string{"Legacy", "--github-url=not-a-url", "extra"}, wantName: "Legacy", wantPath: "--github-url=not-a-url extra"},
 	} {
-		t.Run("legacy-"+tc.name, func(t *testing.T) {
-			spec, ok := parseProjectCreateSpec(tc.args)
-			if !ok {
-				t.Fatalf("parseProjectCreateSpec(%v) rejected legacy local form", tc.args)
-			}
-			if spec.name != tc.wantName || spec.source != "local" || spec.location != tc.wantPath {
-				t.Fatalf("parseProjectCreateSpec(%v) = %+v, want local %q at %q", tc.args, spec, tc.wantName, tc.wantPath)
+		t.Run(tc.name, func(t *testing.T) {
+			name, path, ok := parseProjectCreateArgs(tc.args)
+			if !ok || name != tc.wantName || path != tc.wantPath {
+				t.Fatalf("parseProjectCreateArgs(%v) = %q, %q, %v; want %q, %q, true", tc.args, name, path, ok, tc.wantName, tc.wantPath)
 			}
 		})
 	}
@@ -463,11 +471,11 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		t.Fatal("projects command missing")
 	}
 	for input, want := range map[string]string{
-		"/projects cr":                                                             "/projects create ",
-		"/projects sh":                                                             "/projects show ",
-		"/projects de":                                                             "/projects delete ",
-		"/projects create My Project --g":                                          "/projects create My Project --github-url= ",
-		"/projects edit demo --repository-s":                                       "/projects edit demo --repository-source ",
+		"/projects cr":                       "/projects create ",
+		"/projects sh":                       "/projects show ",
+		"/projects de":                       "/projects delete ",
+		"/projects g":                        "/projects github-create ",
+		"/projects edit demo --repository-s": "/projects edit demo --repository-source ",
 		"/projects edit demo --repository-source g":                                "/projects edit demo --repository-source github ",
 		"/projects edit demo --name renamed --repository-s":                        "/projects edit demo --name renamed --repository-source ",
 		`/projects edit "--name" | --repository-s`:                                 `/projects edit "--name" | --repository-source `,
@@ -483,10 +491,9 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	for _, want := range []string{
 		"projects show <project>",
 		"projects create <name> <path>",
-		"projects create <name> --github-url=<url>",
+		"projects github-create <name> <url>",
 		"GitHub creation remains available when local repository paths are disabled",
-		"projects edit <project> [options]",
-		"projects delete <project>",
+		"projects edit <project> [options]", "projects delete <project>",
 		"projects edit <project> | [options]",
 		"[global flags] -- projects edit <project> | [options]",
 		"--repository-source <local|github>",
@@ -515,7 +522,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		for _, want := range []string{
 			"projects delete demo",
 			"openvibely-terminal --force projects delete demo",
-			"projects create \"My GitHub Project\" --github-url=https://github.com/acme/demo",
+			"projects github-create \"My GitHub Project\" https://github.com/acme/demo",
 			"backend-owned project data",
 		} {
 			if !strings.Contains(string(body), want) {
