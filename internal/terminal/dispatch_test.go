@@ -2784,6 +2784,95 @@ func TestTaskSteerConflictSanitizesBackendError(t *testing.T) {
 		}
 	})
 }
+func TestTaskSteerNonConflictSanitizesBackendError(t *testing.T) {
+	hostile := "\x1b[31mbackend\nfailure\r\t\x00"
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
+	const activeThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
+
+	assertSafeError := func(t *testing.T, value string, status int) {
+		t.Helper()
+		for _, unsafe := range []string{"\x1b", "\r", "\t", "\x00"} {
+			if strings.Contains(value, unsafe) {
+				t.Fatalf("steering error contains unsafe byte %q: %q", unsafe, value)
+			}
+		}
+		if strings.Contains(value, "\n") {
+			t.Fatalf("steering error contains an injected line break: %q", value)
+		}
+		for _, want := range []string{fmt.Sprintf("server error (%d)", status), "backend failure"} {
+			if !strings.Contains(value, want) {
+				t.Fatalf("steering error missing %q: %q", want, value)
+			}
+		}
+	}
+
+	newServer := func(t *testing.T, status int) (*client.Client, *recorder) {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"error": hostile})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := &recorder{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+				_, _ = fmt.Fprint(w, board)
+			case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
+				_, _ = fmt.Fprint(w, activeThread)
+			case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread/steer":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				_, _ = w.Write(body)
+			case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread":
+				t.Fatalf("ordinary reply fallback was sent")
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, rec
+	}
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusInternalServerError} {
+		t.Run(fmt.Sprintf("status_%d_TUI", status), func(t *testing.T) {
+			c, rec := newServer(t, status)
+			m := New(c)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+			m = updated.(Model)
+			m.selectedID = "p1"
+			m = runLine(t, m, "/tasks steer Refactor | Stop now")
+			if len(m.log) == 0 || m.log[len(m.log)-1].role != "error" {
+				t.Fatalf("steering error did not produce an error entry: %+v", m.log)
+			}
+			assertSafeError(t, m.log[len(m.log)-1].text, status)
+			if rec.count("POST", "/tasks/t-1/thread") != 0 {
+				t.Fatalf("ordinary reply fallback was sent: %s", rec.all())
+			}
+		})
+
+		t.Run(fmt.Sprintf("status_%d_CLI", status), func(t *testing.T) {
+			c, rec := newServer(t, status)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", []string{"tasks", "steer", "Refactor", "|", "Stop now"}, false, false)
+			if err == nil {
+				t.Fatal("non-conflict steering error unexpectedly succeeded")
+			}
+			assertSafeError(t, err.Error(), status)
+			if rec.count("POST", "/tasks/t-1/thread") != 0 {
+				t.Fatalf("ordinary reply fallback was sent: %s", rec.all())
+			}
+		})
+	}
+}
+
 func TestTaskSteerNoActiveResponseDoesNotPostOrFallback(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
 	const completedThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="completed"></div>`

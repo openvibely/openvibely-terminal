@@ -257,7 +257,7 @@ type taskSteerAcknowledgement struct {
 func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, projectID, message string) (string, error) {
 	state, err := c.GetTaskThreadStateForProject(ctx, task.ID, projectID)
 	if err != nil {
-		return "", err
+		return "", safeTaskSteerError(err)
 	}
 	if strings.TrimSpace(state.ActiveTurnID) == "" {
 		return "", fmt.Errorf("no active response to steer; send a normal follow-up with tasks reply (no steering request was sent)")
@@ -268,7 +268,7 @@ func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, pr
 		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
 			return "", fmt.Errorf("task steering conflict: %s; no fallback message was sent, retry after reopening the task thread or use tasks reply", sanitizeAutomationDetailText(err.Error()))
 		}
-		return "", err
+		return "", safeTaskSteerError(err)
 	}
 	ack := taskSteerAcknowledgement{
 		Status:         "steered",
@@ -288,6 +288,21 @@ func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, pr
 	return result, nil
 }
 
+type taskSteerError struct {
+	cause   error
+	message string
+}
+
+func (e taskSteerError) Error() string { return e.message }
+func (e taskSteerError) Unwrap() error { return e.cause }
+
+func safeTaskSteerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return taskSteerError{cause: err, message: sanitizeAutomationDetailText(err.Error())}
+}
+
 func (m Model) runTaskSteer(c *client.Client, projectID, target, message string) tea.Cmd {
 	baseCtx := m.cliContext
 	if baseCtx == nil {
@@ -305,7 +320,7 @@ func (m Model) runTaskSteer(c *client.Client, projectID, target, message string)
 		defer cancel()
 		task, err := resolveTask(ctx, c, projectID, target)
 		if err != nil {
-			result.err = err
+			result.err = safeTaskSteerError(err)
 			return result
 		}
 		result.body, result.err = steerTaskThread(ctx, c, task, projectID, message)
