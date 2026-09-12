@@ -305,6 +305,81 @@ func TestModelsEditOAuthReportsBackendStatusWithoutPrematureSuccess(t *testing.T
 	}
 }
 
+func TestModelsEditOAuthCompletionPreservesStatusAndFailurePolicy(t *testing.T) {
+	cases := []struct {
+		name              string
+		refreshStatusCode int
+		oauthStatusCode   int
+		oauthBody         string
+		want              string
+		authFailure       bool
+		wantStatusReads   int
+	}{
+		{name: "connected", oauthBody: `{"status":"connected"}`, want: "OAuth connected", wantStatusReads: 1},
+		{name: "authorization required", oauthBody: `{"status":"authorization_required"}`, want: "OAuth authorization is required", wantStatusReads: 1},
+		{name: "unknown status", oauthBody: `{}`, want: "status: unknown", wantStatusReads: 1},
+		{name: "refresh unavailable", refreshStatusCode: http.StatusServiceUnavailable, want: "status: unknown", wantStatusReads: 0},
+		{name: "refresh authentication failure", refreshStatusCode: http.StatusUnauthorized, authFailure: true},
+		{name: "status authentication failure", oauthStatusCode: http.StatusUnauthorized, authFailure: true, wantStatusReads: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var lists, details, updates, statusReads int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /models":
+					lists++
+					if lists == 2 && tc.refreshStatusCode != 0 {
+						w.WriteHeader(tc.refreshStatusCode)
+						_, _ = io.WriteString(w, `{"error":"models unavailable"}`)
+						return
+					}
+					_, _ = io.WriteString(w, `<div data-model-id="oauth-model" data-model-name="OAuth" data-model-provider="anthropic" data-model-model="claude-sonnet-4-6"></div>`)
+				case "GET /models/oauth-model/edit-details":
+					details++
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"oauth-model","name":"OAuth","provider":"anthropic","model":"claude-sonnet-4-6","auth_method":"oauth"}`)
+				case "PUT /models/oauth-model":
+					updates++
+					w.WriteHeader(http.StatusNoContent)
+				case "GET /models/oauth-model/oauth/status":
+					statusReads++
+					if tc.oauthStatusCode != 0 {
+						w.WriteHeader(tc.oauthStatusCode)
+						_, _ = io.WriteString(w, `{"error":"session expired"}`)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, tc.oauthBody)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, "/models edit OAuth --max-workers 2")
+			out := stripANSI(transcript(m))
+			if lists != 2 || details != 1 || updates != 1 || statusReads != tc.wantStatusReads {
+				t.Fatalf("requests = lists=%d details=%d updates=%d status=%d, want 2/1/1/%d:\n%s", lists, details, updates, statusReads, tc.wantStatusReads, out)
+			}
+			if tc.authFailure {
+				if strings.Contains(out, "updated OAuth") || !strings.Contains(strings.ToLower(out), "sign-in") {
+					t.Fatalf("OAuth authentication failure claimed success or omitted sign-in guidance:\n%s", out)
+				}
+				return
+			}
+			if !strings.Contains(out, "updated OAuth") || !strings.Contains(out, tc.want) {
+				t.Fatalf("OAuth completion output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 func TestModelsEditUpdatesCompatibleEndpoint(t *testing.T) {
 	var form url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

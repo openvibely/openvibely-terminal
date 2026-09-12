@@ -3164,17 +3164,19 @@ func modelAddResult(ctx context.Context, c *client.Client, projectID string, spe
 	}
 
 	status := "added " + spec.Name
-	models, err := c.ListModels(ctx, projectID)
-	if err != nil {
-		if client.IsAuthRequired(err) {
-			return "", err
+	if !spec.OAuth {
+		return modelMutationResult(ctx, c, projectID, status, nil, nil)
+	}
+	resolveOAuthModelID := func(models []client.LLMModel) string {
+		model, err := matchRef(models, spec.Name,
+			func(item client.LLMModel) string { return item.ID },
+			func(item client.LLMModel) string { return item.Name })
+		if err != nil {
+			return ""
 		}
-		if !spec.OAuth {
-			if jsonMode {
-				return marshalJSON(modelAddOutput{Status: status})
-			}
-			return status, nil
-		}
+		return model.ID
+	}
+	refreshUnavailable := func() (string, error) {
 		output := modelAddOutput{
 			Status:           status,
 			OAuthStatus:      "unknown",
@@ -3191,40 +3193,48 @@ func modelAddResult(ctx context.Context, c *client.Client, projectID string, spe
 		}
 		return message, nil
 	}
-	if !spec.OAuth {
+	return modelMutationResult(ctx, c, projectID, status, resolveOAuthModelID, refreshUnavailable)
+}
+
+// modelMutationResult owns the shared post-save refresh and presentation policy.
+// Callers retain their distinct mutation and OAuth model-ID resolution steps.
+func modelMutationResult(ctx context.Context, c *client.Client, projectID, status string, resolveOAuthModelID func([]client.LLMModel) string, refreshUnavailable func() (string, error)) (string, error) {
+	models, err := c.ListModels(ctx, projectID)
+	if err != nil {
+		if client.IsAuthRequired(err) {
+			return "", err
+		}
+		if resolveOAuthModelID == nil {
+			if jsonMode {
+				return marshalJSON(modelAddOutput{Status: status})
+			}
+			return status, nil
+		}
+		if refreshUnavailable != nil {
+			return refreshUnavailable()
+		}
+		return modelOAuthMutationOutput(status, nil, "unknown", modelModelsPageURL(c, projectID))
+	}
+	if resolveOAuthModelID == nil {
 		if jsonMode {
 			return marshalJSON(modelAddOutput{Status: status, Models: models})
 		}
 		return status + "\n\n" + renderModels(models, ""), nil
 	}
 
-	output := modelAddOutput{Status: status, Models: models, OAuthStatus: "unknown"}
-	model, findErr := matchRef(models, spec.Name,
-		func(item client.LLMModel) string { return item.ID },
-		func(item client.LLMModel) string { return item.Name })
-	if findErr == nil {
-		output.AuthorizationURL = modelOAuthHandoffURL(c, model.ID, projectID)
-		oauth, statusErr := c.GetModelOAuthStatus(ctx, model.ID)
+	oauthStatus := "unknown"
+	authorizationURL := ""
+	if modelID := resolveOAuthModelID(models); modelID != "" {
+		authorizationURL = modelOAuthHandoffURL(c, modelID, projectID)
+		oauth, statusErr := c.GetModelOAuthStatus(ctx, modelID)
 		if client.IsAuthRequired(statusErr) {
 			return "", statusErr
 		}
 		if statusErr == nil && oauth != nil && strings.TrimSpace(oauth.Status) != "" {
-			output.OAuthStatus = strings.TrimSpace(oauth.Status)
+			oauthStatus = strings.TrimSpace(oauth.Status)
 		}
 	}
-	if jsonMode {
-		return marshalJSON(output)
-	}
-	if output.OAuthStatus == "connected" {
-		return status + "; OAuth connected (backend confirmed)\n\n" + renderModels(models, ""), nil
-	}
-	message := status + "; OAuth authorization is required (status: " + output.OAuthStatus + ")"
-	if output.AuthorizationURL != "" {
-		message += ". Open " + output.AuthorizationURL + " in a browser and complete authorization; the backend Models page confirms the resulting status."
-	} else {
-		message += ". Open the backend Models page, complete authorization, and confirm the resulting status there."
-	}
-	return message + "\n\n" + renderModels(models, ""), nil
+	return modelOAuthMutationOutput(status, models, oauthStatus, authorizationURL)
 }
 
 type modelEditSpec struct {
@@ -3412,36 +3422,11 @@ func modelEditResult(ctx context.Context, c *client.Client, projectID string, sp
 		statusName = model.ID
 	}
 	status := "updated " + statusName
-	refreshed, err := c.ListModels(ctx, projectID)
-	if err != nil {
-		if client.IsAuthRequired(err) {
-			return "", err
-		}
-		if !strings.EqualFold(details.AuthMethod, "oauth") {
-			if jsonMode {
-				return marshalJSON(modelAddOutput{Status: status})
-			}
-			return status, nil
-		}
-		return modelOAuthMutationOutput(status, nil, "unknown", modelModelsPageURL(c, projectID))
+	var resolveOAuthModelID func([]client.LLMModel) string
+	if strings.EqualFold(details.AuthMethod, "oauth") {
+		resolveOAuthModelID = func([]client.LLMModel) string { return model.ID }
 	}
-	if !strings.EqualFold(details.AuthMethod, "oauth") {
-		if jsonMode {
-			return marshalJSON(modelAddOutput{Status: status, Models: refreshed})
-		}
-		return status + "\n\n" + renderModels(refreshed, ""), nil
-	}
-
-	oauthStatus := "unknown"
-	authorizationURL := modelOAuthHandoffURL(c, model.ID, projectID)
-	oauth, oauthErr := c.GetModelOAuthStatus(ctx, model.ID)
-	if client.IsAuthRequired(oauthErr) {
-		return "", oauthErr
-	}
-	if oauthErr == nil && oauth != nil && strings.TrimSpace(oauth.Status) != "" {
-		oauthStatus = strings.TrimSpace(oauth.Status)
-	}
-	return modelOAuthMutationOutput(status, refreshed, oauthStatus, authorizationURL)
+	return modelMutationResult(ctx, c, projectID, status, resolveOAuthModelID, nil)
 }
 
 func modelOAuthMutationOutput(status string, models []client.LLMModel, oauthStatus, authorizationURL string) (string, error) {

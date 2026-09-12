@@ -1850,6 +1850,40 @@ func TestCLIModelsAddOllamaAndOAuthHandoff(t *testing.T) {
 	})
 }
 
+func TestCLIModelsAddOAuthConnectedStatusIsBackendConfirmed(t *testing.T) {
+	var statusPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			_, _ = io.WriteString(w, `<div data-model-id="m-oauth" data-model-name="Claude OAuth" data-model-provider="anthropic" data-model-model="claude-sonnet-4-6"></div>`)
+		case "GET /models/m-oauth/oauth/status":
+			statusPath = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"connected"}`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLIWithInput(c, &out, nil, "", []string{"models", "add", "anthropic", "Claude OAuth", "claude-sonnet-4-6", "--oauth"}, false, true); err != nil {
+		t.Fatalf("connected OAuth add failed: %v", err)
+	}
+	var result modelAddOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+		t.Fatalf("invalid connected OAuth JSON: %v\n%s", err, out.String())
+	}
+	if result.OAuthStatus != "connected" || !strings.Contains(result.AuthorizationURL, "/models/m-oauth/oauth/initiate") || statusPath != "/models/m-oauth/oauth/status" {
+		t.Fatalf("connected OAuth result/status path = %+v/%q", result, statusPath)
+	}
+}
+
 func TestCLIModelsAddOAuthRefreshFailureStillProvidesHandoff(t *testing.T) {
 	var postCount, listCount, oauthStatusCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
