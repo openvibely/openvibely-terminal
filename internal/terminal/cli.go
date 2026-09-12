@@ -796,14 +796,14 @@ func isCLIJSONCanonicalString(raw []byte) bool {
 	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
 		return false
 	}
+	if !utf8.Valid(raw) {
+		return false
+	}
 	// A string without escapes is already in the spelling emitted by
 	// encoding/json; RawMessage embedding will handle HTML and line-separator
 	// escaping while it writes the value.
 	if bytes.IndexByte(raw, 0x5c) < 0 {
 		return true
-	}
-	if !utf8.Valid(raw) {
-		return false
 	}
 	for i := 1; i < len(raw)-1; i++ {
 		switch raw[i] {
@@ -817,9 +817,14 @@ func isCLIJSONCanonicalString(raw []byte) bool {
 			switch raw[i] {
 			case '"', 0x5c, 'b', 'f', 'n', 'r', 't':
 			case 'u':
-				if i+4 >= len(raw) || !isCLIJSONHex(raw[i+1]) || !isCLIJSONHex(raw[i+2]) ||
+				if i+4 >= len(raw)-1 || !isCLIJSONHex(raw[i+1]) || !isCLIJSONHex(raw[i+2]) ||
 					!isCLIJSONHex(raw[i+3]) || !isCLIJSONHex(raw[i+4]) {
 					return false
+				}
+				for j := i + 1; j <= i+4; j++ {
+					if raw[j] >= 'A' && raw[j] <= 'F' {
+						return false
+					}
 				}
 				code := uint16(cliJSONHexValue(raw[i+1])<<12 | cliJSONHexValue(raw[i+2])<<8 |
 					cliJSONHexValue(raw[i+3])<<4 | cliJSONHexValue(raw[i+4]))

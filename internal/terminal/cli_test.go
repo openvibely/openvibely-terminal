@@ -7048,22 +7048,57 @@ func TestFormatCLIEventJSONFastPayloadDecodeMatchesEncodingJSON(t *testing.T) {
 	}{
 		{
 			name: "case insensitive fields and nested unknown data",
-			raw:  json.RawMessage(` { "TYPE": "chat_new_message", "PROJECT_ID": "p1", "TASK_ID": "t1", "MESSAGE": "hello", "unknown": { "project_id": "foreign", "items": [1, true, null] } } `),
+			raw: func() json.RawMessage {
+				raw := []byte(` { "TYPE": "chat_new_message", "PROJECT_ID": "p1", "TASK_ID": "t1", "MESSAGE": "hello", "unknown": { "project_id": "foreign", "items": [1, true, null] }, "padding":"`)
+				raw = append(raw, bytes.Repeat([]byte{'x'}, 5000)...)
+				return append(raw, []byte(`" } `)...)
+			}(),
 		},
 		{
 			name: "duplicate values retain standard scalar behavior",
-			raw:  json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","message":"first","message":42,"message":"last","queued":"wrong","queued":true}`),
+			raw: func() json.RawMessage {
+				raw := []byte(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","message":"first","message":42,"message":"last","queued":"wrong","queued":true,"padding":"`)
+				raw = append(raw, bytes.Repeat([]byte{'x'}, 5000)...)
+				return append(raw, []byte(`"}`)...)
+			}(),
 		},
 		{
-			name: "valid primitive retains raw data",
-			raw: json.RawMessage(`
- [ { "project_id": "foreign" }, "text" ]
-`),
+			name: "valid raw array",
+			raw: func() json.RawMessage {
+				raw := []byte{'['}
+				raw = append(raw, bytes.Repeat([]byte("0,"), 2048)...)
+				return append(raw, []byte("0]")...)
+			}(),
+		},
+		{
+			name: "valid raw string",
+			raw: func() json.RawMessage {
+				raw := []byte{'"'}
+				raw = append(raw, bytes.Repeat([]byte{'x'}, 5000)...)
+				return append(raw, '"')
+			}(),
+		},
+		{
+			name: "valid raw number with padding",
+			raw: func() json.RawMessage {
+				raw := bytes.Repeat([]byte{' '}, 5000)
+				return append(raw, []byte("42")...)
+			}(),
+		},
+		{
+			name: "valid raw null with padding",
+			raw: func() json.RawMessage {
+				raw := bytes.Repeat([]byte{'\n'}, 5000)
+				return append(raw, []byte("null")...)
+			}(),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.raw) <= 4096 {
+				t.Fatalf("fixture length = %d, want > 4096 to exercise fast path", len(tc.raw))
+			}
 			var payload cliEventPayload
 			if !json.Valid(tc.raw) {
 				t.Fatal("fixture is not valid JSON")
@@ -7141,29 +7176,68 @@ func TestFormatCLIEventJSONMalformedPayloadFallsBackToDecodedMetadata(t *testing
 }
 
 func TestFormatCLIEventJSONLargeNoncanonicalStringUsesStandardFallback(t *testing.T) {
-	raw := append([]byte(`{"type":"chat_new_message","project_id":"p1","message":"`), bytes.Repeat([]byte(`\u0061`), 1024)...)
-	raw = append(raw, []byte(`"}`)...)
-	var payload cliEventPayload
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		t.Fatal(err)
+	makeRaw := func(field string, value []byte) json.RawMessage {
+		raw := append([]byte(`{"type":"chat_new_message","project_id":"p1","`+field+`":"`), value...)
+		raw = append(raw, []byte(`"}`)...)
+		if len(raw) <= 4096 {
+			t.Fatalf("%s fixture length = %d, want > 4096", field, len(raw))
+		}
+		return raw
 	}
-	wantRecord := cliEventRecord{
-		Event:     "chat_new_message",
-		Type:      "chat_new_message",
-		ProjectID: "p1",
-		Message:   payload.Message,
-		Data:      raw,
+	tests := []struct {
+		name  string
+		field string
+		value []byte
+	}{
+		{
+			name:  "uppercase Unicode escape in message",
+			field: "message",
+			value: bytes.Repeat([]byte(`\u003C`), 1024),
+		},
+		{
+			name:  "uppercase Unicode escape in completed output",
+			field: "completed_output",
+			value: bytes.Repeat([]byte(`\u003C`), 1024),
+		},
+		{
+			name:  "invalid UTF-8 in message",
+			field: "message",
+			value: bytes.Repeat([]byte{0x80}, 5000),
+		},
+		{
+			name:  "invalid UTF-8 in completed output",
+			field: "completed_output",
+			value: bytes.Repeat([]byte{0x80}, 5000),
+		},
 	}
-	want, err := json.Marshal(wantRecord)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, include, err := formatCLIEvent(client.Event{Name: "chat_new_message", Data: raw}, "p1", true)
-	if err != nil || !include {
-		t.Fatalf("formatCLIEvent() include=%t error=%v", include, err)
-	}
-	if got != string(want) {
-		t.Fatalf("noncanonical string fallback = %s, want %s", got, want)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := makeRaw(tc.field, tc.value)
+			var payload cliEventPayload
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			wantRecord := cliEventRecord{
+				Event:           "chat_new_message",
+				Type:            "chat_new_message",
+				ProjectID:       "p1",
+				Message:         payload.Message,
+				CompletedOutput: payload.CompletedOutput,
+				Data:            raw,
+			}
+			want, err := json.Marshal(wantRecord)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, include, err := formatCLIEvent(client.Event{Name: "chat_new_message", Data: raw}, "p1", true)
+			if err != nil || !include {
+				t.Fatalf("formatCLIEvent() include=%t error=%v", include, err)
+			}
+			if got != string(want) {
+				t.Fatalf("noncanonical string fallback = %s, want %s", got, want)
+			}
+		})
 	}
 }
 
