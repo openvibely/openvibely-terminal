@@ -6910,17 +6910,18 @@ func projectCommand() command {
 }
 
 func projectsCommand() command {
-	actions := []string{"list", "show", "create", "edit"}
+	actions := []string{"list", "show", "create", "edit", "delete"}
 	return command{
 		name:    "projects",
 		actions: actions,
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<project>", description: "show authoritative project settings"},
 			{action: "edit", args: "<project> [options]", description: "update project settings"},
+			{action: "delete", args: "<project>", description: "delete a project and its backend-owned data"},
 		},
-		selectorPaths: [][]string{{"show"}, {"edit"}},
+		selectorPaths: [][]string{{"show"}, {"edit"}, {"delete"}},
 		completions:   projectEditCompletions(),
-		desc:          "list, show, create, or edit backend-owned projects",
+		desc:          "list, show, create, edit, or delete backend-owned projects",
 		usage: []string{
 			"projects [list]                              list projects with running/queued counts",
 			"projects show <project>                     show authoritative project settings",
@@ -6928,11 +6929,13 @@ func projectsCommand() command {
 			"projects create <name> | <path>              use | when the name or path contains spaces",
 			"projects edit <project> [options]            update only explicitly supplied settings",
 			"projects edit <project> | [options]          separate a project name containing option-like words",
+			"projects delete <project>                    delete project and all backend-owned project data",
 			"  one-shot flag-like name: [global flags] -- projects edit <project> | [options]",
 			"  --name <name> --description <text>",
 			"  --repository-source <local|github> --repository-path <path> --github-url <url>",
 			"  --default-agent <name|id|inherit> --max-workers <n|inherit>",
 			"  repository replacement requires confirmation (CLI: --force)",
+			"  deletion requires confirmation (CLI: --force) and removes backend-owned project data",
 		},
 		examples: []string{
 			`projects show demo`,
@@ -6940,6 +6943,8 @@ func projectsCommand() command {
 			`projects create My Project | C:\Users\me\src\my-project`,
 			`projects edit demo --description "Local checkout" --max-workers 4`,
 			`projects edit demo --repository-source github --github-url https://github.com/acme/demo`,
+			`projects delete demo`,
+			`openvibely-terminal --force projects delete demo`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
@@ -7023,6 +7028,51 @@ func projectsCommand() command {
 					}
 					return updateCmd()
 				}
+			case "delete":
+				ref := strings.TrimSpace(strings.Join(rest, " "))
+				if ref == "" {
+					return selectorOr(m, commandUsage("projects", "delete"), projectSelector(m.projects, "projects delete", ""))
+				}
+				project, err := matchProject(m.projects, ref)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				projectID := project.ID
+				projectName := sanitizeAutomationDetailText(firstNonEmpty(project.Name, project.ID))
+				requestID := nextProjectRequestID()
+				sessionGeneration := sessionGenerationOf(m)
+				projectGeneration := projectGenerationOf(m)
+				m.projectRequestID = requestID
+				deleteCmd := func() tea.Msg {
+					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+					defer cancel()
+					backendSelectedID, err := m.client.DeleteProjectWithSelection(ctx, projectID)
+					if err != nil {
+						return projectDeletedMsg{
+							sessionGeneration: sessionGeneration,
+							projectGeneration: projectGeneration,
+							requestID:         requestID,
+							projectID:         projectID,
+							projectName:       projectName,
+							err:               err,
+						}
+					}
+					projects, refreshErr := m.client.ListProjects(ctx)
+					return projectDeletedMsg{
+						sessionGeneration: sessionGeneration,
+						projectGeneration: projectGeneration,
+						requestID:         requestID,
+						projectID:         projectID,
+						projectName:       projectName,
+						backendSelectedID: backendSelectedID,
+						projects:          projects,
+						refreshErr:        refreshErr,
+					}
+				}
+				return confirmOr(m,
+					fmt.Sprintf("Delete project %q and its backend-owned data? Type 'yes' to confirm or Esc to cancel.", projectName),
+					fmt.Sprintf("use --force to confirm deletion of project %q and its backend-owned data", projectName),
+					deleteCmd)
 			}
 			if jsonMode {
 				c := m.client
@@ -7051,12 +7101,71 @@ type projectEditPartialResult struct {
 	RefreshError string `json:"refresh_error"`
 }
 
+type projectDeleteResult struct {
+	Deleted           bool   `json:"deleted"`
+	ProjectID         string `json:"project_id"`
+	SelectedProjectID string `json:"selected_project_id,omitempty"`
+	RefreshError      string `json:"refresh_error,omitempty"`
+}
+
 type projectUpdateConfirmationMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
 	display           string
 	cli               string
 	cmd               tea.Cmd
+}
+
+func projectAfterDeletion(projects []client.Project, deletedID, backendSelectedID string) (client.Project, bool) {
+	if backendSelectedID != "" {
+		for _, project := range projects {
+			if project.ID == backendSelectedID && project.ID != deletedID {
+				return project, true
+			}
+		}
+	}
+	for _, project := range projects {
+		if project.ID != "" && project.ID != deletedID {
+			return project, true
+		}
+	}
+	return client.Project{}, false
+}
+
+func projectDeletionRefreshStatus(err error) string {
+	kind := "backend"
+	switch {
+	case client.IsInvalidServerURL(err):
+		kind = "invalid server URL"
+	case client.IsTransportError(err):
+		kind = "transport"
+	case client.IsAuthRequired(err):
+		kind = "authentication"
+	}
+	return fmt.Sprintf("project catalog refresh unavailable (%s): %s", kind, safeConnectionDiagnosticText(err.Error()))
+}
+
+func projectDeleteActionOutput(msg projectDeletedMsg, selected client.Project) (string, error) {
+	result := projectDeleteResult{
+		Deleted:           true,
+		ProjectID:         msg.projectID,
+		SelectedProjectID: selected.ID,
+	}
+	if msg.refreshErr != nil {
+		result.RefreshError = projectDeletionRefreshStatus(msg.refreshErr)
+	}
+	if jsonMode {
+		return marshalJSON(result)
+	}
+
+	status := fmt.Sprintf("deleted project %q", msg.projectName)
+	if selected.ID != "" {
+		status += fmt.Sprintf("\nactive project: %q", sanitizeAutomationDetailText(firstNonEmpty(selected.Name, selected.ID)))
+	}
+	if msg.refreshErr != nil {
+		return status + "\n" + result.RefreshError, nil
+	}
+	return status + "\n\n" + renderProjects(msg.projects, nil, selected.ID), nil
 }
 
 func projectEditOptionNames() []string {

@@ -1076,6 +1076,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case projectDeletedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case projectUpdatedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1485,6 +1489,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		if !m.authRequired && m.selectedID != "" && shouldReconnect {
+			m.sseRetryAfterProject = false
+			return m, m.connectSSE()
+		}
+		return m, nil
+
+	case projectDeletedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if !m.acceptsProjectResponse(msg.requestID) {
+			return m, nil
+		}
+		m.busy = false
+		if msg.err != nil {
+			m.handleCompletedRequestError(msg.err)
+			return m, nil
+		}
+
+		// A successful deletion must invalidate the old selection even if the
+		// catalog refresh is unavailable. Never retain the deleted ID locally.
+		remaining := make([]client.Project, 0, len(msg.projects))
+		for _, project := range msg.projects {
+			if project.ID != "" && project.ID != msg.projectID {
+				remaining = append(remaining, project)
+			}
+		}
+		shouldReconnect := m.sseCancel != nil || m.sseRetryAfterProject
+		m.projects = remaining
+		m.projectsLoaded = msg.refreshErr == nil
+		msg.projects = remaining
+		selected := client.Project{}
+		if msg.refreshErr == nil {
+			selected, _ = projectAfterDeletion(remaining, msg.projectID, msg.backendSelectedID)
+		}
+		m.setActiveProject(selected)
+
+		body, err := projectDeleteActionOutput(msg, selected)
+		if err != nil {
+			m.append(entry{role: "error", text: err.Error()})
+			return m, nil
+		}
+		m.append(entry{role: "result", head: "Project", text: body})
+		if !m.authRequired && selected.ID != "" && shouldReconnect {
 			m.sseRetryAfterProject = false
 			return m, m.connectSSE()
 		}

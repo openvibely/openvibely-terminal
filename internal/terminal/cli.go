@@ -1377,7 +1377,7 @@ func CommandSummary() string {
 // CLIProjectSelectionHint is the static help text for headless project scope.
 func CLIProjectSelectionHint() string { return cliProjectSelectionHint }
 
-const cliProjectSelectionHint = "Project-scoped CLI commands use the only backend project automatically; when multiple projects exist, pass -project <name|id>. Global commands such as projects list/create/show/edit and help do not require a separate -project reference."
+const cliProjectSelectionHint = "Project-scoped CLI commands use the only backend project automatically; when multiple projects exist, pass -project <name|id>. Global commands such as projects list/create/show/edit/delete and help do not require a separate -project reference. Project deletion requires --force and removes backend-owned project data."
 
 // cliProjectScoped reports whether this invocation can read or mutate a
 // project-scoped endpoint. Global actions remain usable without selecting a

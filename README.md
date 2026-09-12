@@ -52,6 +52,7 @@ summarize the current project
 /tasks goal resume refactor
 /tasks steer refactor | stop and use the new interface
 /automations show "Nightly sweep"
+/projects delete demo
 /status
 /help tasks
 ```
@@ -67,11 +68,14 @@ openvibely-terminal -project demo tasks show refactor
 openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
 openvibely-terminal -project demo chat "summarize the current project"
+openvibely-terminal --force projects delete demo
 openvibely-terminal --json -project demo automations list
 ```
 
 Project-scoped commands automatically use the backend's only project. When the
 backend has multiple projects, select one with `-project <name|id>`.
+
+`projects delete <project>` requires the standard interactive confirmation (`Type 'yes' to confirm or Esc to cancel`). One-shot CLI deletion requires `--force` (or `-f`), and the backend remains authoritative for refusing deletion of the default project. Deletion removes the project and its backend-owned project data; after success, the terminal refreshes the catalog and selects the backend-selected remaining/default project when available.
 
 Common commands include:
 

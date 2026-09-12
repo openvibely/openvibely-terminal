@@ -46,6 +46,21 @@ type projectCreatedMsg struct {
 	err      error
 }
 
+// projectDeletedMsg carries the result of a project deletion and its
+// best-effort catalog refresh. A successful deletion remains successful when
+// the follow-up catalog request is unavailable.
+type projectDeletedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	requestID         uint64
+	projectID         string
+	projectName       string
+	backendSelectedID string
+	projects          []client.Project
+	refreshErr        error
+	err               error
+}
+
 // projectUpdatedMsg carries an authoritative post-save settings refresh.
 type projectUpdatedMsg struct {
 	sessionGeneration uint64

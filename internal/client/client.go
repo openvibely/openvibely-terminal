@@ -364,6 +364,51 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 	return out.Projects, nil
 }
 
+// DeleteProject removes one backend-owned project. The backend remains
+// authoritative for protected projects such as the default project.
+func (c *Client) DeleteProject(ctx context.Context, projectID string) error {
+	_, err := c.DeleteProjectWithSelection(ctx, projectID)
+	return err
+}
+
+// DeleteProjectWithSelection removes one backend-owned project and returns the
+// remaining/default project ID from the backend redirect when it provides one.
+// The redirect is only a selection hint: callers must still refresh the project
+// catalog before installing that project as active.
+func (c *Client) DeleteProjectWithSelection(ctx context.Context, projectID string) (string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", fmt.Errorf("project ID is required")
+	}
+
+	resp, err := c.doFormResponseWithPolicy(ctx, http.MethodDelete,
+		"/projects/"+url.PathEscape(projectID), nil, mutationRedirectReturn)
+	if err != nil {
+		return "", err
+	}
+	defer drainAndClose(resp.Body)
+
+	redirect := strings.TrimSpace(resp.Header.Get("HX-Redirect"))
+	if redirect == "" {
+		redirect = strings.TrimSpace(resp.Header.Get("Location"))
+	}
+	return projectIDFromDeletionRedirect(redirect)
+}
+
+func projectIDFromDeletionRedirect(redirect string) (string, error) {
+	if redirect == "" {
+		return "", nil
+	}
+	u, err := url.Parse(redirect)
+	if err != nil {
+		return "", fmt.Errorf("delete project: invalid backend redirect: %w", err)
+	}
+	if u.Path != "/tasks" {
+		return "", fmt.Errorf("delete project: unexpected backend redirect path %q", u.Path)
+	}
+	return strings.TrimSpace(u.Query().Get("project_id")), nil
+}
+
 // GetPendingAlertCount fetches the number of pending decision alerts for one
 // project. The backend response is intentionally compact and contains no alert
 // cards or detail fields.

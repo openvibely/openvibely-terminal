@@ -205,11 +205,16 @@ func TestNoArgOpensSelectorPerArea(t *testing.T) {
 		{"personality_edit", "/personality edit", "personality edit"},
 		{"personality_set", "/personality set", "personality set"},
 		{"personality_delete", "/personality delete", "personality delete"},
+		// projects
+		{"projects_delete", "/projects delete", "projects delete"},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := dispatchModel(t, selFixtures())
+			if tc.want == "projects delete" {
+				m.projects = []client.Project{{ID: "p1", Name: "Project one"}, {ID: "p2", Name: "Project two"}}
+			}
 			m = runLine(t, m, tc.cmd)
 			if !m.selectorActive {
 				t.Fatalf("expected selector mode for %s, transcript:\n%s", tc.cmd, transcript(m))

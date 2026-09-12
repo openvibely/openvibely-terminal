@@ -108,6 +108,107 @@ func TestListProjects(t *testing.T) {
 	}
 }
 
+func TestDeleteProjectUsesExactIDAndReturnsBackendSelection(t *testing.T) {
+	var requests int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodDelete || r.URL.Path != "/projects/project-delete" {
+			t.Fatalf("request = %s %s, want DELETE /projects/project-delete", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("HX-Request") != "true" {
+			t.Fatal("DELETE request missing HX-Request header")
+		}
+		if got := r.Header.Get("Accept"); got != "text/html, application/json" {
+			t.Fatalf("Accept = %q, want HTMX mutation accept header", got)
+		}
+		w.Header().Set("HX-Redirect", "/tasks?project_id=remaining-project")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	selected, err := c.DeleteProjectWithSelection(context.Background(), "project-delete")
+	if err != nil {
+		t.Fatalf("DeleteProjectWithSelection: %v", err)
+	}
+	if selected != "remaining-project" {
+		t.Fatalf("backend-selected project = %q, want remaining-project", selected)
+	}
+	if requests != 1 {
+		t.Fatalf("DELETE requests = %d, want one", requests)
+	}
+}
+
+func TestDeleteProjectAcceptsMissingSelectionHintAndLocation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		location string
+		want     string
+	}{
+		{name: "missing hint", location: "", want: ""},
+		{name: "ordinary redirect", location: "/tasks?project_id=location-project", want: "location-project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/projects/p1" {
+					t.Fatalf("request = %s %s, want DELETE /projects/p1", r.Method, r.URL.Path)
+				}
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(http.StatusSeeOther)
+			}))
+
+			selected, err := c.DeleteProjectWithSelection(context.Background(), "p1")
+			if err != nil {
+				t.Fatalf("DeleteProjectWithSelection: %v", err)
+			}
+			if selected != tc.want {
+				t.Fatalf("backend-selected project = %q, want %q", selected, tc.want)
+			}
+		})
+	}
+}
+
+func TestDeleteProjectValidationAndBackendDefaultProtection(t *testing.T) {
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/projects/default" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"cannot delete the default project"}`)
+	}))
+
+	if err := c.DeleteProject(context.Background(), " "); err == nil || err.Error() != "project ID is required" {
+		t.Fatalf("blank project ID error = %v, want local validation", err)
+	}
+	if requests != 0 {
+		t.Fatalf("blank project ID made %d requests", requests)
+	}
+	if err := c.DeleteProject(context.Background(), "default"); err == nil || !strings.Contains(err.Error(), "cannot delete the default project") {
+		t.Fatalf("default deletion error = %v", err)
+	} else if !IsReachableError(err) || IsTransportError(err) || IsAuthRequired(err) {
+		t.Fatalf("default deletion error classification = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("default deletion requests = %d, want one", requests)
+	}
+}
+
+func TestDeleteProjectPreservesTransportClassification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	baseURL := srv.URL
+	srv.Close()
+
+	c, err := New(baseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.DeleteProject(context.Background(), "p1"); err == nil || !IsTransportError(err) {
+		t.Fatalf("closed-server delete error = %v, want transport error", err)
+	}
+}
+
 func TestCreateProject(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/projects" {

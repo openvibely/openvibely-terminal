@@ -5055,7 +5055,135 @@ func TestCLIAgentsDeleteValidatesBeforeForceGate(t *testing.T) {
 	}
 }
 
-// --- JSON output mode tests ---
+func TestCLIProjectsDeleteRequiresForceAndResolvesReference(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "", []string{"projects", "delete", "demo"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), `use --force to confirm deletion of project "demo"`) {
+		t.Fatalf("unforced project delete error = %v, want force guidance", err)
+	}
+	if rec.saw(http.MethodDelete, "/projects/p1") {
+		t.Fatalf("unforced project delete mutated backend:\n%s", rec.all())
+	}
+}
+
+func TestCLIProjectsDeleteUsesCanonicalIDRefreshAndBackendSelection(t *testing.T) {
+	var projectLists, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			projectLists++
+			w.Header().Set("Content-Type", "application/json")
+			if projectLists == 1 {
+				_, _ = io.WriteString(w, cliProjects)
+			} else {
+				_, _ = io.WriteString(w, `{"projects":[{"id":"p3","name":"Catalog first"},{"id":"p2","name":"other"}]}`)
+			}
+		case r.Method == http.MethodDelete && r.URL.Path == "/projects/p1":
+			deletes++
+			if r.Header.Get("HX-Request") != "true" {
+				t.Error("project delete missing HX-Request header")
+			}
+			w.Header().Set("HX-Redirect", "/tasks?project_id=p2")
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected project delete request: %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"projects", "delete", "dem"}, true, true); err != nil {
+		t.Fatalf("forced project delete failed: %v\n%s", err, out.String())
+	}
+	if deletes != 1 || projectLists != 2 {
+		t.Fatalf("delete/catalog requests = %d/%d, want one DELETE and two catalog GETs", deletes, projectLists)
+	}
+	var result projectDeleteResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+		t.Fatalf("project deletion JSON is invalid: %v\n%s", err, out.String())
+	}
+	if !result.Deleted || result.ProjectID != "p1" || result.SelectedProjectID != "p2" || result.RefreshError != "" {
+		t.Fatalf("project deletion result = %+v, want deleted p1 with selected p2", result)
+	}
+}
+
+func TestCLIProjectsDeleteBackendProtectionAndRefreshFailure(t *testing.T) {
+	t.Run("default protection is fatal", func(t *testing.T) {
+		var deletes, refreshes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				refreshes++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"projects":[{"id":"default","name":"Default"}]}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/projects/default":
+				deletes++
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"cannot delete the default project"}`)
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "", []string{"projects", "delete", "default"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "cannot delete the default project") {
+			t.Fatalf("default deletion error = %v", err)
+		}
+		if deletes != 1 || refreshes != 1 {
+			t.Fatalf("default deletion requests = delete:%d catalog:%d, want 1/1", deletes, refreshes)
+		}
+	})
+
+	t.Run("refresh failure remains successful", func(t *testing.T) {
+		var deletes, refreshes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				refreshes++
+				w.Header().Set("Content-Type", "application/json")
+				if refreshes == 1 {
+					_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`)
+					return
+				}
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":"project catalog unavailable"}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/projects/p1":
+				deletes++
+				w.Header().Set("HX-Redirect", "/tasks?project_id=p2")
+				w.WriteHeader(http.StatusOK)
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "", []string{"projects", "delete", "demo"}, true, false)
+		if err != nil {
+			t.Fatalf("deletion failed because refresh was unavailable: %v\n%s", err, out.String())
+		}
+		if deletes != 1 || refreshes != 2 {
+			t.Fatalf("refresh-failure requests = delete:%d catalog:%d, want 1/2", deletes, refreshes)
+		}
+		plain := stripANSI(out.String())
+		if !strings.Contains(plain, "deleted project") || !strings.Contains(plain, "project catalog refresh unavailable (backend)") {
+			t.Fatalf("refresh failure output did not distinguish phases:\n%s", plain)
+		}
+	})
+}
 
 func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
 	rec := &recorder{}

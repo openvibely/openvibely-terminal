@@ -540,6 +540,165 @@ func TestProjectsCreateSameIDPreservesThreadState(t *testing.T) {
 	}
 }
 
+func TestProjectsDeleteCapturesIDUsesBackendSelectionAndRefreshesCatalog(t *testing.T) {
+	var deleteID string
+	var refreshes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/projects/p1":
+			deleteID = r.URL.Path
+			if r.Header.Get("HX-Request") != "true" {
+				t.Error("project delete missing HX-Request header")
+			}
+			w.Header().Set("HX-Redirect", "/tasks?project_id=p2")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			refreshes++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p3","name":"First by catalog"},{"id":"p2","name":"Backend selected"}]}`)
+		default:
+			t.Errorf("unexpected project deletion request: %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "Demo"
+	m.projects = []client.Project{
+		{ID: "p1", Name: "Demo"},
+		{ID: "p2", Name: "Backend selected"},
+		{ID: "p3", Name: "First by catalog"},
+	}
+
+	m, cmd := typeLine(t, m, "/projects delete De")
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("delete did not open confirmation: cmd:%v pending:%v", cmd != nil, m.pendingConfirmation != nil)
+	}
+	if got, want := m.pendingConfirmation.message, `Delete project "Demo" and its backend-owned data? Type 'yes' to confirm or Esc to cancel.`; got != want {
+		t.Fatalf("confirmation = %q, want %q", got, want)
+	}
+	m = runLine(t, m, "yes")
+	if deleteID != "/projects/p1" || refreshes != 1 {
+		t.Fatalf("delete/refresh = %q/%d, want /projects/p1 and one catalog refresh", deleteID, refreshes)
+	}
+	if m.selectedID != "p2" || m.selectedName != "Backend selected" {
+		t.Fatalf("active project = %q/%q, want backend-selected p2", m.selectedID, m.selectedName)
+	}
+	for _, project := range m.projects {
+		if project.ID == "p1" {
+			t.Fatalf("deleted project remained in catalog: %+v", m.projects)
+		}
+	}
+	if !strings.Contains(transcript(m), "deleted project") {
+		t.Fatalf("successful deletion missing output:\n%s", transcript(m))
+	}
+}
+
+func TestProjectsDeleteEscCancelsBeforeMutation(t *testing.T) {
+	deletes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes++
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"Demo"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "Demo"
+	m.projects = []client.Project{{ID: "p1", Name: "Demo"}}
+	m = runLine(t, m, "/projects delete p1")
+	if m.pendingConfirmation == nil {
+		t.Fatal("delete did not open confirmation")
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation != nil || deletes != 0 {
+		t.Fatalf("Esc cancellation state = cmd:%v pending:%v deletes:%d", cmd != nil, m.pendingConfirmation != nil, deletes)
+	}
+	if !strings.Contains(transcript(m), "cancelled") {
+		t.Fatalf("Esc cancellation missing transcript output:\n%s", transcript(m))
+	}
+}
+
+func TestProjectsDeletePreservesBackendDefaultProtection(t *testing.T) {
+	deletes := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deletes++
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":"cannot delete the default project"}`)
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "default", "Default"
+	m.projects = []client.Project{{ID: "default", Name: "Default"}}
+	m = confirmDestructive(t, m, "/projects delete default")
+	if deletes != 1 || m.selectedID != "default" {
+		t.Fatalf("default delete state = requests:%d selected:%q", deletes, m.selectedID)
+	}
+	if !strings.Contains(transcript(m), "cannot delete the default project") {
+		t.Fatalf("backend default-protection error missing:\n%s", transcript(m))
+	}
+	if strings.Contains(transcript(m), "deleted project") {
+		t.Fatalf("default project deletion reported success:\n%s", transcript(m))
+	}
+}
+
+func TestProjectsDeleteRefreshFailureDoesNotReportDeletionFailureOrRetainID(t *testing.T) {
+	var refreshes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && r.URL.Path == "/projects/p1" {
+			w.Header().Set("HX-Redirect", "/tasks?project_id=p2")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/projects" {
+			refreshes++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"catalog unavailable"}`)
+			return
+		}
+		t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "Demo"
+	m.projects = []client.Project{{ID: "p1", Name: "Demo"}}
+	m = confirmDestructive(t, m, "/projects delete p1")
+	if refreshes != 1 || m.selectedID != "" {
+		t.Fatalf("refresh failure state = refreshes:%d selected:%q", refreshes, m.selectedID)
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "deleted project") || !strings.Contains(out, "project catalog refresh unavailable (backend)") {
+		t.Fatalf("refresh failure output did not distinguish successful deletion from refresh failure:\n%s", out)
+	}
+	for _, e := range m.log {
+		if e.role == "error" {
+			t.Fatalf("refresh-only failure created a fatal error entry: %+v", e)
+		}
+	}
+}
+
 func TestEmptyProjectCommandsOfferCreationGuidance(t *testing.T) {
 	for _, line := range []string{"/projects", "/project"} {
 		t.Run(line, func(t *testing.T) {

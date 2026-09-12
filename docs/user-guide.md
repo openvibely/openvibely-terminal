@@ -48,6 +48,7 @@ openvibely-terminal -project demo chat "why is that task taking so long?"
 # Project-independent commands do not need a project reference.
 openvibely-terminal projects list
 openvibely-terminal projects create demo /Users/me/src/demo
+openvibely-terminal --force projects delete demo
 ```
 
 ## Install and run
@@ -172,6 +173,7 @@ Commands take a resource, an optional action, and arguments:
 /alerts delete a1b2           delete one
 /alerts read-bulk a1b2 "Release approval"     mark selected alerts read
 /alerts delete-bulk a1b2 "Release approval"   delete selected alerts (confirm)
+/projects delete demo                  # type yes to confirm, or press Esc
 /skills add notes | writes release notes
 /skills load notes
 /tasks move Refactor active   move a task between columns
@@ -203,6 +205,14 @@ openvibely-terminal -project demo skills load retry-logic
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
 prefix or by a substring of their name/title** — `/tasks run refactor` works.
 Ambiguous references report the candidates instead of guessing.
+
+Project deletion is deliberately destructive: `/projects delete <project>` resolves
+an exact ID/name or unique prefix/substring, then asks `Type 'yes' to confirm or
+Esc to cancel`. One-shot CLI deletion requires `--force` or `-f`. The backend
+protects its default project and remains authoritative for that refusal. Deletion
+removes the project and all backend-owned project data; after a successful
+deletion, the terminal refreshes the catalog and selects the backend-selected
+remaining/default project when available.
 
 `/alerts list [filter] --decision-state <state> [--processing-state <state>]`
 uses exact backend workflow predicates on the selected project. Valid decision
@@ -245,7 +255,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/insights` | `suggestions` | `show`, `analyze` |
 | `/automations` | `automation` | `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, `delete` |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
-| `/projects` | | `list`, `show <project>`, `create <name> <path>`, `edit <project> [options]` |
+| `/projects` | | `list`, `show <project>`, `create <name> <path>`, `edit <project> [options]`, `delete <project>` |
 | `/project <name>` | | select the active project |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
 | `/setup` | | read-only backend installation, startup, health, and remote-connection guidance |

@@ -416,6 +416,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	for input, want := range map[string]string{
 		"/projects cr":                                                             "/projects create ",
 		"/projects sh":                                                             "/projects show ",
+		"/projects de":                                                             "/projects delete ",
 		"/projects edit demo --repository-s":                                       "/projects edit demo --repository-source ",
 		"/projects edit demo --repository-source g":                                "/projects edit demo --repository-source github ",
 		"/projects edit demo --name renamed --repository-s":                        "/projects edit demo --name renamed --repository-source ",
@@ -433,16 +434,40 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		"projects show <project>",
 		"projects create <name> <path>",
 		"projects edit <project> [options]",
+		"projects delete <project>",
 		"projects edit <project> | [options]",
 		"[global flags] -- projects edit <project> | [options]",
 		"--repository-source <local|github>",
 		"--default-agent <name|id|inherit>",
 		"repository replacement requires confirmation",
+		"deletion requires confirmation",
+		"backend-owned project data",
 		"projects create My Project",
 		`C:\Users\me\src\my-project`,
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("projects help missing %q:\n%s", want, help)
+		}
+	}
+
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed while locating project documentation")
+	}
+	root := filepath.Join(filepath.Dir(source), "..", "..")
+	for _, path := range []string{"README.md", filepath.Join("docs", "user-guide.md")} {
+		body, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, want := range []string{
+			"projects delete demo",
+			"openvibely-terminal --force projects delete demo",
+			"backend-owned project data",
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("%s missing %q", path, want)
+			}
 		}
 	}
 }
