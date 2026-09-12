@@ -3592,6 +3592,95 @@ func TestCLITaskReplyQueuedPromotionUsesAuthoritativeStatus(t *testing.T) {
 	}
 }
 
+func TestCLITaskSteerJSONAcknowledgementAndConflict(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
+	const activeThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
+	const steeringRow = `<div data-thread-input-id="input-1" data-task-id="t-1" data-input-mode="steering"></div>`
+	for _, tc := range []struct {
+		name        string
+		steerStatus int
+		steerBody   string
+		wantErr     string
+	}{
+		{name: "success", steerStatus: http.StatusOK, steerBody: steeringRow},
+		{name: "conflict", steerStatus: http.StatusConflict, steerBody: `{"error":"active turn changed; queue the message instead"}`, wantErr: "no fallback message was sent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.recordURL(r.Method, r.URL.RequestURI())
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case "/tasks":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, board)
+				case "/tasks/t-1/thread":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, activeThread)
+				case "/tasks/t-1/thread/steer":
+					if r.URL.Query().Get("project_id") != "p1" || r.PostForm.Get("expected_turn_id") != "turn-1" {
+						t.Fatalf("steer request scope/form: %s %v", r.URL.String(), r.PostForm)
+					}
+					w.Header().Set("Content-Type", "text/html")
+					w.WriteHeader(tc.steerStatus)
+					_, _ = io.WriteString(w, tc.steerBody)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", []string{"tasks", "steer", "Refactor", "|", "Stop now"}, false, tc.name == "success")
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("steer failed: %v", err)
+				}
+				var ack map[string]string
+				if decodeErr := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &ack); decodeErr != nil {
+					t.Fatalf("JSON acknowledgement = %q: %v", out.String(), decodeErr)
+				}
+				if ack["status"] != "steered" || ack["task_id"] != "t-1" || ack["expected_turn_id"] != "turn-1" || ack["pending_input_id"] != "input-1" {
+					t.Fatalf("acknowledgement = %#v", ack)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if rec.count("POST", "/tasks/t-1/thread") != 0 {
+				t.Fatalf("ordinary reply fallback was sent: %s", rec.all())
+			}
+		})
+	}
+}
+
+func TestCLITaskSteerNoActiveResponseDoesNotPost(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":           cliProjects,
+		"/tasks":                  board,
+		"/tasks/t-1/thread":       `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="completed"></div>`,
+		"/tasks/t-1/thread/steer": `<div data-thread-input-id="unexpected" data-input-mode="steering"></div>`,
+	})
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"tasks", "steer", "Refactor", "|", "Stop now"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "no active response") {
+		t.Fatalf("error = %v, want actionable no-active error", err)
+	}
+	if rec.count("POST", "/tasks/t-1/thread/steer") != 0 {
+		t.Fatalf("steering was posted despite no active response: %s", rec.all())
+	}
+}
+
 // Mutating commands work headlessly too.
 func TestCLIRunsTaskMutation(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog">

@@ -76,6 +76,53 @@ func TestTasksOpenLoadsOnlyConversationAndSuppressesModelControls(t *testing.T) 
 	}
 }
 
+func TestRunningOpenTaskRefreshesAfterSteeringEvent(t *testing.T) {
+	threadGets := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks":
+			_, _ = w.Write([]byte(strings.Replace(taskBoardHTML, `data-task-status="pending"`, `data-task-status="running"`, 1)))
+		case "/tasks/t-1/thread":
+			threadGets++
+			if threadGets == 1 {
+				_, _ = w.Write([]byte(`<div>agent: working on it</div>`))
+				return
+			}
+			_, _ = w.Write([]byte(`<div data-thread-input-id="input-1" data-task-id="t-1" data-input-mode="steering">Steering pending Stop now</div>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m = runLine(t, m, "/tasks open Refactor")
+	m.sseGeneration = 7
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+	updated, cmd := m.Update(sseEventMsg{generation: 7, event: client.Event{
+		Name: "task_thread_input_steered",
+		Data: json.RawMessage(`{"type":"task_thread_input_steered","project_id":"p1","task_id":"t-1","exec_id":"turn-1","pending_input_id":"input-1"}`),
+	}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("steering event did not schedule a thread refresh")
+	}
+	executeThreadRefreshFromBatch(t, &m, cmd)
+	if threadGets != 2 {
+		t.Fatalf("thread requests = %d, want open plus steering refresh", threadGets)
+	}
+	if !strings.Contains(stripANSI(transcript(m)), "Steering pending Stop now") {
+		t.Fatalf("steering row was not visible in thread transcript:\n%s", transcript(m))
+	}
+}
+
 func TestRunningOpenTaskRefreshesFromMatchingSSEAndCompletes(t *testing.T) {
 	m, rec := threadModel(t)
 	m = runLine(t, m, "/tasks open Refactor")

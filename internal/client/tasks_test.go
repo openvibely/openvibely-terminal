@@ -1102,6 +1102,90 @@ func TestAddTaskReviewCommentPostsFormAndParsesHTMLFragment(t *testing.T) {
 	}
 }
 
+func TestGetTaskThreadStateRequiresOneExplicitActiveTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+		err  string
+	}{
+		{name: "active", body: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`, want: "turn-1"},
+		{name: "none", body: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="completed"></div>`, err: "no error"},
+		{name: "multiple", body: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div><div data-execution-pair="true" data-exec-id="turn-2" data-exec-status="running"></div>`, err: "multiple active responses"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("project_id") != "project/one" {
+					t.Fatalf("project_id = %q", r.URL.Query().Get("project_id"))
+				}
+				_, _ = fmt.Fprint(w, tc.body)
+			}))
+			state, err := c.GetTaskThreadStateForProject(context.Background(), "task/one", "project/one")
+			if tc.err == "no error" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if state.ActiveTurnID != "" {
+					t.Fatalf("active turn = %q, want empty", state.ActiveTurnID)
+				}
+				return
+			}
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("error = %v, want %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.ActiveTurnID != tc.want {
+				t.Fatalf("active turn = %q, want %q", state.ActiveTurnID, tc.want)
+			}
+		})
+	}
+}
+
+func TestSteerTaskThreadForProjectUsesGuardAndEscapedPath(t *testing.T) {
+	var requestURI string
+	var form url.Values
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestURI = r.URL.RequestURI()
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s", r.Method)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		form = r.PostForm
+		_, _ = fmt.Fprint(w, `<div data-thread-input-id="input-1" data-task-id="task/one" data-input-mode="steering"></div>`)
+	}))
+	accepted, err := c.SteerTaskThreadForProject(context.Background(), "task/one", "project one", "stop now", "turn-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestURI != "/tasks/task%2Fone/thread/steer?project_id=project+one" && requestURI != "/tasks/task%2Fone/thread/steer?project_id=project%20one" {
+		t.Fatalf("request URI = %q", requestURI)
+	}
+	if form.Get("message") != "stop now" || form.Get("expected_turn_id") != "turn-1" {
+		t.Fatalf("form = %v", form)
+	}
+	if accepted.PendingInputID != "input-1" {
+		t.Fatalf("accepted = %#v", accepted)
+	}
+}
+
+func TestSteerTaskThreadForProjectRejectsMissingGuardBeforeHTTP(t *testing.T) {
+	calls := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++ }))
+	if _, err := c.SteerTaskThreadForProject(context.Background(), "task", "project", "message", ""); err == nil {
+		t.Fatal("expected missing expected turn error")
+	}
+	if calls != 0 {
+		t.Fatalf("request count = %d, want zero", calls)
+	}
+}
+
 func TestGetTaskThreadIsProjectScopedAndOmitsControls(t *testing.T) {
 	var requestURI string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

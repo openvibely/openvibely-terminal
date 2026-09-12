@@ -178,6 +178,7 @@ Commands take a resource, an optional action, and arguments:
 /tasks goal Refactor | all checks pass
 /tasks goal pause Refactor
 /tasks goal resume Refactor
+/tasks steer Refactor | stop and use the new interface
 /tasks attachments add Refactor ./request.txt ./trace.json
 /tasks attachments delete Refactor att-123
 /agents edit reviewer description "Reviews Go and SQL" enabled true
@@ -228,7 +229,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 
 | Command | Aliases | Actions |
 |---|---|---|
-| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `activate`, `sweep`, `clear` |
+| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `steer`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `show`, `read`, `read-bulk`, `approve`, `reject`, `dismiss`, `delete`, `delete-bulk`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always`, `load` |
@@ -464,6 +465,30 @@ A pipe always denotes a set-goal request, so `tasks goal <task> | pause` sets
 `pause` as the objective rather than pausing the goal. Unknown, ambiguous, or
 out-of-project task references fail before any goal mutation. All four actions
 use the selected project scope.
+
+### Active task-response steering
+
+Use `steer` to send a correction into the currently running model turn without
+starting a second execution:
+
+```
+/tasks steer <task> | <message>
+openvibely-terminal -project demo tasks steer "Fix login bug" '|' "Stop and use the new interface"
+```
+
+The terminal resolves the task from the selected project, reads the thread's
+single explicit running execution, and sends its exact execution ID as
+`expected_turn_id`. It never guesses a turn. A task with no active response
+fails before the steering POST; a stale-turn conflict is a non-zero error and
+does not fall back to `tasks reply`. Use `tasks reply` explicitly when you want
+the backend to queue a normal follow-up. On success, the TUI shows the pending
+steering row in the open task thread when the live stream is connected, and the
+CLI acknowledgement includes `status`, `task_id`, `expected_turn_id`, and the
+backend's `pending_input_id` when returned with `--json`.
+
+This release intentionally exposes active steering only. Pending-input listing,
+cancellation, and redirection of already queued inputs remain available in the
+web task thread but do not yet have terminal commands.
 
 ### Task attachments
 
@@ -708,6 +733,7 @@ openvibely-terminal -project demo tasks run refactor   # run it
 openvibely-terminal -project demo tasks goal refactor '|' "all checks pass"
 openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo tasks goal resume refactor
+openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
 openvibely-terminal -project demo agents votes step-exec-123 # inspect parallel votes
 openvibely-terminal -project demo tasks attachments add refactor ./request.txt ./trace.json
 openvibely-terminal -project demo --force tasks attachments delete refactor att-123
@@ -788,6 +814,7 @@ $ openvibely-terminal help tasks
   tasks goal pause <task>                    pause a goal without changing its objective
   tasks goal resume <task>                   resume a paused goal
   tasks reply <task> | <message>             post to the task thread
+  tasks steer <task> | <message>             steer the active response
   tasks activate                             activate the whole backlog
   tasks sweep                                sweep finished tasks
   tasks clear <backlog|completed>            clear a column

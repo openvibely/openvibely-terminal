@@ -918,14 +918,96 @@ func (c *Client) ReorderTask(ctx context.Context, taskID string, position int) e
 	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/reorder", v)
 }
 
+// TaskThreadState is the project-scoped task-thread snapshot needed for guarded
+// active-response controls. ActiveTurnID is populated only when the thread
+// contains exactly one running execution; callers must not infer a turn from a
+// task status or from an arbitrary execution in the thread.
+type TaskThreadState struct {
+	Body         string
+	ActiveTurnID string
+}
+
+// TaskThreadSteerAccepted identifies the pending steering input returned by the
+// backend. The ID is empty only when the backend accepted the mutation without
+// rendering an input row.
+type TaskThreadSteerAccepted struct {
+	PendingInputID string `json:"pending_input_id,omitempty"`
+}
+
+func (c *Client) getTaskThreadDocument(ctx context.Context, taskID, projectID string) (*html.Node, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task thread")
+	}
+	return c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/thread"+query("project_id", projectID))
+}
+
+// GetTaskThreadStateForProject fetches the task conversation and the exact
+// active execution identity used to guard steering mutations.
+func (c *Client) GetTaskThreadStateForProject(ctx context.Context, taskID, projectID string) (*TaskThreadState, error) {
+	root, err := c.getTaskThreadDocument(ctx, taskID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	activeIDs := findAll(root, func(n *html.Node) bool {
+		return attr(n, "data-execution-pair") == "true" &&
+			strings.EqualFold(strings.TrimSpace(attr(n, "data-exec-status")), "running") &&
+			strings.TrimSpace(attr(n, "data-exec-id")) != ""
+	})
+	turnIDs := make([]string, 0, len(activeIDs))
+	seen := make(map[string]struct{}, len(activeIDs))
+	for _, node := range activeIDs {
+		id := strings.TrimSpace(attr(node, "data-exec-id"))
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		turnIDs = append(turnIDs, id)
+	}
+	if len(turnIDs) > 1 {
+		return nil, fmt.Errorf("task thread has multiple active responses; refusing to guess which turn to steer")
+	}
+	state := &TaskThreadState{Body: strings.TrimSpace(nodeConversationText(root))}
+	if len(turnIDs) == 1 {
+		state.ActiveTurnID = turnIDs[0]
+	}
+	return state, nil
+}
+
+// SteerTaskThreadForProject queues a steering instruction for the active task
+// execution. expectedTurnID must come from GetTaskThreadStateForProject; this
+// method never discovers or substitutes a turn on behalf of the caller.
+func (c *Client) SteerTaskThreadForProject(ctx context.Context, taskID, projectID, message, expectedTurnID string) (*TaskThreadSteerAccepted, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task thread steering")
+	}
+	if strings.TrimSpace(expectedTurnID) == "" {
+		return nil, fmt.Errorf("expected turn ID is required for task thread steering")
+	}
+	form := url.Values{}
+	form.Set("message", message)
+	form.Set("expected_turn_id", expectedTurnID)
+	doc, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/thread/steer"+query("project_id", projectID), form)
+	if err != nil {
+		return nil, err
+	}
+	accepted := &TaskThreadSteerAccepted{}
+	for _, node := range findAll(doc, func(n *html.Node) bool {
+		return attr(n, "data-input-mode") == "steering" && attr(n, "data-thread-input-id") != ""
+	}) {
+		if task := strings.TrimSpace(attr(node, "data-task-id")); task != "" && task != taskID {
+			continue
+		}
+		accepted.PendingInputID = strings.TrimSpace(attr(node, "data-thread-input-id"))
+		break
+	}
+	return accepted, nil
+}
+
 // GetTaskThread fetches only the task conversation fragment used by the web
 // task view. Interactive controls in that fragment are intentionally excluded
 // from terminal output.
 func (c *Client) GetTaskThread(ctx context.Context, taskID, projectID string) (string, error) {
-	if strings.TrimSpace(projectID) == "" {
-		return "", fmt.Errorf("project ID is required for task thread")
-	}
-	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/thread"+query("project_id", projectID))
+	root, err := c.getTaskThreadDocument(ctx, taskID, projectID)
 	if err != nil {
 		return "", err
 	}

@@ -2556,6 +2556,9 @@ func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
 	if json.Unmarshal(ev.Data, &taskEvent) != nil || taskEvent.TaskID != m.threadID || taskEvent.ProjectID != m.selectedID {
 		return true
 	}
+	if taskEvent.Type == "task_thread_input_steered" || ev.Name == "task_thread_input_steered" {
+		return true
+	}
 	if m.pendingMsgID == "" {
 		// The send is in flight but no backend identity has been acknowledged yet;
 		// no task event can safely claim this turn. Polling/streaming after the
@@ -2585,6 +2588,16 @@ func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
 func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	if m.threadID == "" || m.threadStatus != "running" {
 		return nil
+	}
+
+	// Steering acknowledgements are rendered by the backend as pending-input
+	// rows. Refresh the open thread so the successful command is visible there,
+	// while preserving task/project identity checks before any request.
+	var steeringEvent client.TaskEvent
+	if json.Unmarshal(ev.Data, &steeringEvent) == nil && steeringEvent.TaskID == m.threadID &&
+		steeringEvent.ProjectID != "" && steeringEvent.ProjectID == m.selectedID &&
+		(steeringEvent.Type == "task_thread_input_steered" || ev.Name == "task_thread_input_steered") {
+		return m.refreshTaskThread(m.threadID, m.selectedID, "")
 	}
 
 	var taskEvent client.TaskEvent

@@ -2595,6 +2595,92 @@ func TestUsageErrorsSurfaceInTranscript(t *testing.T) {
 	}
 }
 
+func TestTaskSteerUsesScopedActiveTurnAndReportsPendingInput(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
+	const activeThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
+	const steeringRow = `<div data-thread-input-id="input-1" data-task-id="t-1" data-input-mode="steering"></div>`
+	var requests []string
+	var steerForm url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+			_, _ = fmt.Fprint(w, board)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Fatalf("thread project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			_, _ = fmt.Fprint(w, activeThread)
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread/steer":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Fatalf("steer project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			steerForm = r.PostForm
+			_, _ = fmt.Fprint(w, steeringRow)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m = runLine(t, m, "/tasks steer Refactor | Stop and use the new interface")
+	if steerForm.Get("message") != "Stop and use the new interface" || steerForm.Get("expected_turn_id") != "turn-1" {
+		t.Fatalf("steer form = %v", steerForm)
+	}
+	if !strings.Contains(transcript(m), "pending input input-1") || !strings.Contains(transcript(m), "turn-1") {
+		t.Fatalf("steering acknowledgement missing:\n%s", transcript(m))
+	}
+	if strings.Contains(strings.Join(requests, "\n"), "POST /tasks/t-1/thread?") {
+		t.Fatalf("ordinary reply route was used:\n%s", strings.Join(requests, "\n"))
+	}
+}
+
+func TestTaskSteerNoActiveResponseDoesNotPostOrFallback(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
+	const completedThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="completed"></div>`
+	steerPosts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+			_, _ = fmt.Fprint(w, board)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
+			_, _ = fmt.Fprint(w, completedThread)
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread/steer":
+			steerPosts++
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread":
+			t.Fatalf("normal reply fallback was sent")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m = runLine(t, m, "/tasks steer Refactor | Stop now")
+	if steerPosts != 0 {
+		t.Fatalf("steer posts = %d, want zero", steerPosts)
+	}
+	if !strings.Contains(transcript(m), "no active response") {
+		t.Fatalf("missing actionable no-active error:\n%s", transcript(m))
+	}
+}
+
 func TestTaskEditAndOrder(t *testing.T) {
 	t.Run("edit", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})

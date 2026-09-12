@@ -244,6 +244,50 @@ func selectorOr(m Model, usage string, sel tea.Cmd) (Model, tea.Cmd) {
 	return m, sel
 }
 
+// taskSteerAcknowledgement is the stable machine-facing acknowledgement for
+// active steering. It deliberately reports the guarded turn and pending-input
+// identity rather than pretending steering started a new execution.
+type taskSteerAcknowledgement struct {
+	Status         string `json:"status"`
+	TaskID         string `json:"task_id"`
+	ExpectedTurnID string `json:"expected_turn_id"`
+	PendingInputID string `json:"pending_input_id,omitempty"`
+}
+
+func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, projectID, message string) (string, error) {
+	state, err := c.GetTaskThreadStateForProject(ctx, task.ID, projectID)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(state.ActiveTurnID) == "" {
+		return "", fmt.Errorf("no active response to steer; send a normal follow-up with tasks reply (no steering request was sent)")
+	}
+	accepted, err := c.SteerTaskThreadForProject(ctx, task.ID, projectID, message, state.ActiveTurnID)
+	if err != nil {
+		var statusErr *client.HTTPStatusError
+		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
+			return "", fmt.Errorf("task steering conflict: %v; no fallback message was sent, retry after reopening the task thread or use tasks reply", err)
+		}
+		return "", err
+	}
+	ack := taskSteerAcknowledgement{
+		Status:         "steered",
+		TaskID:         task.ID,
+		ExpectedTurnID: state.ActiveTurnID,
+	}
+	if accepted != nil {
+		ack.PendingInputID = strings.TrimSpace(accepted.PendingInputID)
+	}
+	if jsonMode {
+		return marshalJSON(ack)
+	}
+	result := fmt.Sprintf("steering pending in task thread of %s (turn %s)", task.Title, ack.ExpectedTurnID)
+	if ack.PendingInputID != "" {
+		result += "; pending input " + ack.PendingInputID
+	}
+	return result, nil
+}
+
 // --- tasks ---
 
 // taskSelectorItems converts tasks into selector rows.
@@ -303,7 +347,7 @@ func taskDetailCompletionValues() []string {
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "activate", "sweep", "clear"}
+	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear"}
 	return command{
 		name:    "tasks",
 		aliases: []string{"task", "t", "board"},
@@ -322,7 +366,7 @@ func tasksCommand() command {
 		selectorPaths: [][]string{
 			{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
 			{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
-			{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"},
+			{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
 			{"attachments"}, {"attachments", "add"}, {"attachments", "upload"},
 			{"attachments", "list"}, {"attachments", "show"}, {"attachments", "delete"},
 			{"attachments", "remove"},
@@ -354,6 +398,7 @@ func tasksCommand() command {
 		},
 		actionUsages: []commandActionUsage{
 			{action: "goal", args: "<task> | <objective>", description: "set a goal (\"clear\" removes it)"},
+			{action: "steer", args: "<task> | <message>", description: "steer the active response"},
 			{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
 			{action: "goal resume", args: "<task>", description: "resume a paused goal"},
 			{action: "reviews add", args: "<task> <file>:<line> <comment>"},
@@ -376,6 +421,7 @@ func tasksCommand() command {
 			`tasks lifecycle "Fix login bug"`,
 			`tasks logs "Fix login bug" execution-id`,
 			`tasks reply "Fix login bug" | PR is up — please review`,
+			`tasks steer "Fix login bug" | Stop and use the new interface`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
@@ -781,6 +827,22 @@ func tasksCommand() command {
 						return "", err
 					}
 					return "sent to thread of " + t.Title, nil
+				})
+
+			case "steer":
+				if len(rest) < 1 {
+					return taskSelector(m, commandUsage("tasks", "steer"), "tasks steer", true)
+				}
+				target, message := splitPipe(strings.Join(rest, " "))
+				if target == "" || message == "" {
+					return m, errCmd(commandUsage("tasks", "steer") + "\nhint: separate the task reference and message with a | character")
+				}
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+					t, err := resolveTask(ctx, c, pid, target)
+					if err != nil {
+						return "", err
+					}
+					return steerTaskThread(ctx, c, t, pid, message)
 				})
 
 			case "activate":

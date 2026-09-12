@@ -50,6 +50,7 @@ summarize the current project
 /tasks goal refactor | all tests pass
 /tasks goal pause refactor
 /tasks goal resume refactor
+/tasks steer refactor | stop and use the new interface
 /automations show "Nightly sweep"
 /status
 /help tasks
@@ -64,6 +65,7 @@ For one-shot CLI use, omit the leading slash:
 openvibely-terminal tasks
 openvibely-terminal -project demo tasks show refactor
 openvibely-terminal -project demo tasks goal pause refactor
+openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
 openvibely-terminal -project demo chat "summarize the current project"
 openvibely-terminal --json -project demo automations list
 ```
@@ -103,6 +105,19 @@ tasks goal <task> | <objective>
 tasks goal <task> | clear
 tasks goal pause <task>
 tasks goal resume <task>
+```
+
+Steer only an actively running task response with the guarded form below. The
+terminal first reads the selected project's thread to obtain its exact active
+turn ID, then sends that ID with the steering request. If the response is no
+longer active or the turn changed, the command fails without sending a normal
+follow-up; use `tasks reply` explicitly when a queued follow-up is intended.
+Pending-input inspection, cancellation, and queued-input steering are not yet
+part of the terminal command surface.
+
+```text
+/tasks steer <task> | <message>
+openvibely-terminal -project demo tasks steer <task> '|' <message>
 ```
 
 Mark or remove selected alerts by supplying one or more IDs or quoted titles. To
