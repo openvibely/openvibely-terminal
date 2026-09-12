@@ -281,9 +281,9 @@ func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, pr
 	if jsonMode {
 		return marshalJSON(ack)
 	}
-	result := fmt.Sprintf("steering pending in task thread of %s (turn %s)", task.Title, ack.ExpectedTurnID)
+	result := fmt.Sprintf("steering pending in task thread of %s (turn %s)", sanitizeAutomationDetailText(task.Title), sanitizeAutomationDetailText(ack.ExpectedTurnID))
 	if ack.PendingInputID != "" {
-		result += "; pending input " + ack.PendingInputID
+		result += "; pending input " + sanitizeAutomationDetailText(ack.PendingInputID)
 	}
 	return result, nil
 }

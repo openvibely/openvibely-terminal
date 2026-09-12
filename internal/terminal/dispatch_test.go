@@ -2645,6 +2645,59 @@ func TestTaskSteerUsesScopedActiveTurnAndReportsPendingInput(t *testing.T) {
 	}
 }
 
+func TestTaskSteerAcknowledgementSanitizesHostileTaskTitle(t *testing.T) {
+	hostileTitle := "\x1b[31mDeploy\nproduction\r\t\x00"
+	board := `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="` + hostileTitle + `">Refactor</a></div>`
+	activeThread := `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
+	steeringRow := `<div data-thread-input-id="input-1" data-task-id="t-1" data-input-mode="steering"></div>`
+
+	assertSafeAcknowledgement := func(t *testing.T, value string) {
+		t.Helper()
+		for _, unsafe := range []string{"\x1b", "\r", "\t", "\x00"} {
+			if strings.Contains(value, unsafe) {
+				t.Fatalf("steering acknowledgement contains unsafe byte %q: %q", unsafe, value)
+			}
+		}
+		if strings.Contains(strings.TrimSuffix(value, "\n"), "\n") {
+			t.Fatalf("steering acknowledgement contains an injected line break: %q", value)
+		}
+		if !strings.Contains(value, "Deploy production") {
+			t.Fatalf("steering acknowledgement omitted readable task title: %q", value)
+		}
+	}
+
+	t.Run("TUI", func(t *testing.T) {
+		m, _ := dispatchModel(t, map[string]string{
+			"/tasks":                  board,
+			"/tasks/t-1/thread":       activeThread,
+			"/tasks/t-1/thread/steer": steeringRow,
+		})
+		m = runLine(t, m, "/tasks steer t-1 | Stop now")
+		if len(m.log) == 0 || m.log[len(m.log)-1].role != "result" {
+			t.Fatalf("steering did not produce a result entry: %+v", m.log)
+		}
+		assertSafeAcknowledgement(t, m.log[len(m.log)-1].text)
+	})
+
+	t.Run("CLI", func(t *testing.T) {
+		c, _ := cliServer(t, map[string]string{
+			"/api/projects":           cliProjects,
+			"/tasks":                  board,
+			"/tasks/t-1/thread":       activeThread,
+			"/tasks/t-1/thread/steer": steeringRow,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"tasks", "steer", "t-1", "|", "Stop now"}, false, false); err != nil {
+			t.Fatalf("steering failed: %v", err)
+		}
+		ack := out.String()
+		if marker := strings.LastIndex(ack, "steering pending"); marker >= 0 {
+			ack = ack[marker:]
+		}
+		assertSafeAcknowledgement(t, ack)
+	})
+}
+
 func TestTaskSteerNoActiveResponseDoesNotPostOrFallback(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
 	const completedThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="completed"></div>`
