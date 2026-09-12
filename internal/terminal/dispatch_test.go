@@ -2699,7 +2699,7 @@ func TestTaskSteerAcknowledgementSanitizesHostileTaskTitle(t *testing.T) {
 }
 
 func TestTaskSteerConflictSanitizesBackendError(t *testing.T) {
-	hostile := "\x1b[31mstale\nturn\r\t\x00"
+	hostile := "\x1b[31mstale\nturn\r\t\x00 https://alice:password@backend.example/steer?api_key=query-secret&token=query-token#fragment token=assignment-secret Authorization: Bearer bearer-secret"
 	conflictBody, err := json.Marshal(map[string]string{"error": hostile})
 	if err != nil {
 		t.Fatal(err)
@@ -2717,9 +2717,14 @@ func TestTaskSteerConflictSanitizesBackendError(t *testing.T) {
 		if strings.Contains(value, "\n") {
 			t.Fatalf("conflict error contains an injected line break: %q", value)
 		}
-		for _, want := range []string{"task steering conflict", "stale turn", "no fallback message was sent"} {
+		for _, want := range []string{"task steering conflict", "stale turn", "no fallback message was sent", "https://backend.example/steer"} {
 			if !strings.Contains(value, want) {
 				t.Fatalf("conflict error missing %q: %q", want, value)
+			}
+		}
+		for _, secret := range []string{"alice", "password", "query-secret", "query-token", "fragment", "assignment-secret", "bearer-secret"} {
+			if strings.Contains(value, secret) {
+				t.Fatalf("conflict error leaked secret %q: %q", secret, value)
 			}
 		}
 	}
@@ -2785,7 +2790,7 @@ func TestTaskSteerConflictSanitizesBackendError(t *testing.T) {
 	})
 }
 func TestTaskSteerNonConflictSanitizesBackendError(t *testing.T) {
-	hostile := "\x1b[31mbackend\nfailure\r\t\x00"
+	hostile := "\x1b[31mbackend\nfailure\r\t\x00 https://alice:password@backend.example/failure?secret=query-secret&api_key=query-key#fragment token=assignment-secret Authorization: Bearer bearer-secret"
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1?from=tasks" title="Refactor">Refactor</a></div>`
 	const activeThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
 
@@ -2799,9 +2804,14 @@ func TestTaskSteerNonConflictSanitizesBackendError(t *testing.T) {
 		if strings.Contains(value, "\n") {
 			t.Fatalf("steering error contains an injected line break: %q", value)
 		}
-		for _, want := range []string{fmt.Sprintf("server error (%d)", status), "backend failure"} {
+		for _, want := range []string{fmt.Sprintf("server error (%d)", status), "backend failure", "https://backend.example/failure"} {
 			if !strings.Contains(value, want) {
 				t.Fatalf("steering error missing %q: %q", want, value)
+			}
+		}
+		for _, secret := range []string{"alice", "password", "query-secret", "query-key", "fragment", "assignment-secret", "bearer-secret"} {
+			if strings.Contains(value, secret) {
+				t.Fatalf("steering error leaked secret %q: %q", secret, value)
 			}
 		}
 	}
@@ -2870,6 +2880,23 @@ func TestTaskSteerNonConflictSanitizesBackendError(t *testing.T) {
 				t.Fatalf("ordinary reply fallback was sent: %s", rec.all())
 			}
 		})
+	}
+}
+
+func TestTaskSteerErrorPreservesStatusClassification(t *testing.T) {
+	cause := &client.HTTPStatusError{
+		StatusCode: http.StatusConflict,
+		Message:    "https://alice:secret@example.test/path?token=hidden#fragment",
+	}
+	err := safeTaskSteerError(cause)
+	var statusErr *client.HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr != cause {
+		t.Fatalf("error = %T %v, want wrapped original HTTP status error", err, err)
+	}
+	for _, leaked := range []string{"alice", "secret", "token=hidden", "fragment"} {
+		if strings.Contains(err.Error(), leaked) {
+			t.Fatalf("sanitized error leaked %q: %q", leaked, err.Error())
+		}
 	}
 }
 

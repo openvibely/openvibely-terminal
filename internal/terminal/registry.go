@@ -266,7 +266,10 @@ func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, pr
 	if err != nil {
 		var statusErr *client.HTTPStatusError
 		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
-			return "", fmt.Errorf("task steering conflict: %s; no fallback message was sent, retry after reopening the task thread or use tasks reply", sanitizeAutomationDetailText(err.Error()))
+			return "", taskSteerError{
+				cause:   err,
+				message: fmt.Sprintf("task steering conflict: %s; no fallback message was sent, retry after reopening the task thread or use tasks reply", safeConnectionDiagnosticText(err.Error())),
+			}
 		}
 		return "", safeTaskSteerError(err)
 	}
@@ -300,7 +303,7 @@ func safeTaskSteerError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return taskSteerError{cause: err, message: sanitizeAutomationDetailText(err.Error())}
+	return taskSteerError{cause: err, message: safeConnectionDiagnosticText(err.Error())}
 }
 
 func (m Model) runTaskSteer(c *client.Client, projectID, target, message string) tea.Cmd {
