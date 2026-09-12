@@ -2922,13 +2922,23 @@ func renderAlerts(alerts []client.Alert, filter string) string {
 	return renderAlertsWithWorkflowFilter(alerts, filter, client.AlertListFilter{})
 }
 
+func filterAlertsByText(alerts []client.Alert, textFilter string) []client.Alert {
+	if textFilter == "" {
+		return alerts
+	}
+	filtered := make([]client.Alert, 0, len(alerts))
+	for _, alert := range alerts {
+		if filterMatch(textFilter, alert.Title, alert.Text, alert.Message, alert.ID) {
+			filtered = append(filtered, alert)
+		}
+	}
+	return filtered
+}
+
 func renderAlertsWithWorkflowFilter(alerts []client.Alert, textFilter string, workflowFilter client.AlertListFilter) string {
 	rows := [][]string{{"ID", "", "ALERT", "STATE"}}
 	unread := 0
-	for _, a := range alerts {
-		if !filterMatch(textFilter, a.Title, a.Text, a.Message, a.ID) {
-			continue
-		}
+	for _, a := range filterAlertsByText(alerts, textFilter) {
 		mark := noticeStyle.Render("●") // unread
 		if a.Read {
 			mark = dimStyle.Render("·")

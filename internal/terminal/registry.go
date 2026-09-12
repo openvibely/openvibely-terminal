@@ -2180,7 +2180,7 @@ func alertsCommand() command {
 						return "", err
 					}
 					if jsonMode {
-						return marshalJSON(alerts)
+						return marshalJSON(filterAlertsByText(alerts, textFilter))
 					}
 					return renderAlertsWithWorkflowFilter(alerts, textFilter, workflowFilter), nil
 				})

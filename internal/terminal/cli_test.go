@@ -5951,6 +5951,129 @@ func TestCLIJSONAlertsList(t *testing.T) {
 	}
 }
 
+func TestCLIAlertsListJSONMatchesPlainTextFilter(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-title" data-alert-scroll-anchor="a-title">
+		<p class="font-semibold">Title match</p>
+	</div>
+	<div data-alert-id="a-text" data-alert-scroll-anchor="a-text" data-search-text="match in searchable text">
+		<p class="font-semibold">Text alert</p>
+	</div>
+	<div data-alert-id="a-msg" data-alert-scroll-anchor="a-msg">
+		<p class="font-semibold">Message alert</p>
+		<p class="text-sm opacity-60">match in message</p>
+	</div>
+	<div data-alert-id="id-match" data-alert-scroll-anchor="id-match">
+		<p class="font-semibold">ID alert</p>
+	</div>
+	<div data-alert-id="a-nope" data-alert-scroll-anchor="a-nope">
+		<p class="font-semibold">Unrelated alert</p>
+	</div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/alerts":       alertsHTML,
+	})
+
+	var plainOut bytes.Buffer
+	if err := RunCLI(c, &plainOut, "demo", []string{"alerts", "list", "match"}, false, false); err != nil {
+		t.Fatalf("plain alerts list failed: %v", err)
+	}
+	plain := stripANSI(plainOut.String())
+	for _, want := range []string{"a-title", "a-text", "a-msg", "id-match"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("plain output omitted matching alert %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "a-nope") {
+		t.Fatalf("plain output included unrelated alert:\n%s", plain)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := RunCLI(c, &jsonOut, "demo", []string{"alerts", "list", "match"}, false, true); err != nil {
+		t.Fatalf("JSON alerts list failed: %v", err)
+	}
+	var alerts []client.Alert
+	if err := json.Unmarshal([]byte(strings.TrimSpace(jsonOut.String())), &alerts); err != nil {
+		t.Fatalf("JSON output is not valid: %v\noutput: %s", err, jsonOut.String())
+	}
+	gotIDs := make([]string, 0, len(alerts))
+	for _, alert := range alerts {
+		gotIDs = append(gotIDs, alert.ID)
+	}
+	wantIDs := []string{"a-title", "a-text", "a-msg", "id-match"}
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("JSON selected IDs = %v, want %v", gotIDs, wantIDs)
+	}
+	for _, id := range gotIDs {
+		if !strings.Contains(plain, id) {
+			t.Errorf("plain output omitted JSON-selected ID %q", id)
+		}
+	}
+
+	var noMatchOut bytes.Buffer
+	if err := RunCLI(c, &noMatchOut, "demo", []string{"alerts", "list", "does-not-match"}, false, true); err != nil {
+		t.Fatalf("no-match JSON alerts list failed: %v", err)
+	}
+	var noMatch []client.Alert
+	if err := json.Unmarshal([]byte(strings.TrimSpace(noMatchOut.String())), &noMatch); err != nil {
+		t.Fatalf("no-match JSON output is not valid: %v\noutput: %s", err, noMatchOut.String())
+	}
+	if noMatch == nil || len(noMatch) != 0 {
+		t.Fatalf("no-match JSON = %#v, want non-nil empty array", noMatch)
+	}
+}
+
+func TestCLIAlertsListTextAndWorkflowFiltersCombine(t *testing.T) {
+	const filteredAlertsHTML = `<div data-alert-id="state-ok" data-alert-scroll-anchor="state-ok" data-search-text="match in selected state">
+		<p class="font-semibold">Selected state alert</p>
+	</div>
+	<div data-alert-id="state-no" data-alert-scroll-anchor="state-no" data-search-text="different text">
+		<p class="font-semibold">Other selected-state alert</p>
+	</div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/alerts":
+			q := r.URL.Query()
+			if q.Get("project_id") != "p1" || q.Get("decision_state") != "pending" || q.Get("processing_state") != "unclaimed" {
+				t.Errorf("combined alert request = %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, filteredAlertsHTML)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"alerts", "list", "match", "--decision-state", "pending", "--processing-state=unclaimed"}
+
+	var plainOut bytes.Buffer
+	if err := RunCLI(c, &plainOut, "demo", args, false, false); err != nil {
+		t.Fatalf("combined plain alerts list failed: %v", err)
+	}
+	plain := stripANSI(plainOut.String())
+	if !strings.Contains(plain, "state-ok") || strings.Contains(plain, "state-no") {
+		t.Fatalf("combined plain output = %q", plain)
+	}
+
+	var jsonOut bytes.Buffer
+	if err := RunCLI(c, &jsonOut, "demo", args, false, true); err != nil {
+		t.Fatalf("combined JSON alerts list failed: %v", err)
+	}
+	var alerts []client.Alert
+	if err := json.Unmarshal([]byte(strings.TrimSpace(jsonOut.String())), &alerts); err != nil {
+		t.Fatalf("combined JSON output is not valid: %v\noutput: %s", err, jsonOut.String())
+	}
+	if len(alerts) != 1 || alerts[0].ID != "state-ok" {
+		t.Fatalf("combined JSON alerts = %#v, want only state-ok", alerts)
+	}
+}
+
 func TestCLIAlertsShowCanonicalIDStopsEarlyWithEquivalentOutput(t *testing.T) {
 	const id = "0123456789abcdef0123456789abcdef"
 	runShow := func(t *testing.T, ref string, jsonOutput bool) (string, int, int) {
