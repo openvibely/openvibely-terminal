@@ -266,14 +266,29 @@ func TestParseProjectCreateSpecGitHubForm(t *testing.T) {
 			}
 		})
 	}
-	for _, args := range [][]string{
-		{"Project", "--github-url"},
-		{"Project", "--github-url", repoURL, "extra"},
-		{"Project", "--github-url", "", "--github-url", repoURL},
+
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantName string
+		wantPath string
+	}{
+		{name: "missing-option-value", args: []string{"Project", "--github-url"}, wantName: "Project", wantPath: "--github-url"},
+		{name: "path-like-option-value", args: []string{"Legacy", "--github-url", "/tmp/legacy repo"}, wantName: "Legacy --github-url", wantPath: "/tmp/legacy repo"},
+		{name: "malformed-url-value", args: []string{"Project", "--github-url", "not-a-url"}, wantName: "Project", wantPath: "--github-url not-a-url"},
+		{name: "surplus-after-url", args: []string{"Project", "--github-url", repoURL, "extra"}, wantName: "Project", wantPath: "--github-url " + repoURL + " extra"},
+		{name: "duplicate-option", args: []string{"Project", "--github-url", "", "--github-url", repoURL}, wantName: "Project", wantPath: "--github-url  --github-url " + repoURL},
+		{name: "pipe-local-literal", args: []string{"Project", "|", "--github-url"}, wantName: "Project", wantPath: "--github-url"},
 	} {
-		if _, ok := parseProjectCreateSpec(args); ok {
-			t.Errorf("parseProjectCreateSpec(%v) accepted malformed GitHub form", args)
-		}
+		t.Run("legacy-"+tc.name, func(t *testing.T) {
+			spec, ok := parseProjectCreateSpec(tc.args)
+			if !ok {
+				t.Fatalf("parseProjectCreateSpec(%v) rejected legacy local form", tc.args)
+			}
+			if spec.name != tc.wantName || spec.source != "local" || spec.location != tc.wantPath {
+				t.Fatalf("parseProjectCreateSpec(%v) = %+v, want local %q at %q", tc.args, spec, tc.wantName, tc.wantPath)
+			}
+		})
 	}
 }
 

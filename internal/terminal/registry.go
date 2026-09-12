@@ -7690,18 +7690,21 @@ func parseProjectCreateSpec(args []string) (projectCreateSpec, bool) {
 			continue
 		}
 		if i == 0 || i+1 >= len(args) || i+2 != len(args) {
-			return projectCreateSpec{}, false
+			break
 		}
 		nameArgs := append([]string(nil), args[:i]...)
 		if len(nameArgs) > 0 && nameArgs[len(nameArgs)-1] == "|" {
 			nameArgs = nameArgs[:len(nameArgs)-1]
 		}
 		name := strings.TrimSpace(strings.Join(nameArgs, " "))
-		url := strings.TrimSpace(args[i+1])
-		if name == "" || url == "" {
-			return projectCreateSpec{}, false
+		repoURL := strings.TrimSpace(args[i+1])
+		if name != "" && isAbsoluteProjectRepositoryURL(repoURL) {
+			return projectCreateSpec{name: name, source: "github", location: repoURL}, true
 		}
-		return projectCreateSpec{name: name, source: "github", location: url}, true
+		// A complete but non-URL-looking value remains eligible for the legacy
+		// local grammar. This preserves local names and paths that literally
+		// contain --github-url instead of reinterpreting them as GitHub input.
+		break
 	}
 
 	name, path, ok := parseLocalProjectCreateArgs(args)
@@ -7709,6 +7712,11 @@ func parseProjectCreateSpec(args []string) (projectCreateSpec, bool) {
 		return projectCreateSpec{}, false
 	}
 	return projectCreateSpec{name: name, source: "local", location: path}, true
+}
+
+func isAbsoluteProjectRepositoryURL(value string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Hostname() != ""
 }
 
 // parseProjectCreateArgs remains the local-path parser used by regression
