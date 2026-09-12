@@ -1938,10 +1938,11 @@ func githubChannelAccessIdentity(row *html.Node) (displayName, login string, ref
 		value := strings.TrimSpace(NodeText(span))
 		switch {
 		case classes["text-sm"] && classes["font-medium"]:
-			if value == "" {
-				return "", "", nil, errors.New("missing GitHub display name")
+			// Display names are optional in the backend model. An empty semantic
+			// span is therefore equivalent to an omitted display name.
+			if value != "" {
+				displayNames = append(displayNames, value)
 			}
-			displayNames = append(displayNames, value)
 		case classes["text-xs"] && classes["opacity-50"]:
 			normalized, normalizeErr := normalizeGitHubChannelAccessLogin(value)
 			if normalizeErr != nil {

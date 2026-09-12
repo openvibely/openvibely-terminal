@@ -129,8 +129,14 @@ func TestGitHubAuthorizedActorClientRejectsMissingScopeAndMalformedFragments(t *
 		})
 	}
 
+	emptyDisplay := htmlServer(t, `<div id="github-runtime-settings"><div><span class="text-sm font-medium truncate"></span><span class="text-xs opacity-50 truncate">@alice</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div></div>`)
+	actors, err := emptyDisplay.ListGitHubAuthorizedActors(context.Background(), "p1")
+	if err != nil || actors == nil || len(actors) != 1 || actors[0].Identity != "alice" || actors[0].DisplayName != "" {
+		t.Fatalf("empty display actor = %#v, error = %v; want valid actor without display name", actors, err)
+	}
+
 	empty := htmlServer(t, `<div id="github-runtime-settings"><p>No authorized users configured.</p></div>`)
-	actors, err := empty.ListGitHubAuthorizedActors(context.Background(), "p1")
+	actors, err = empty.ListGitHubAuthorizedActors(context.Background(), "p1")
 	if err != nil || actors == nil || len(actors) != 0 {
 		t.Fatalf("empty actors = %#v, error = %v; want non-nil empty list", actors, err)
 	}

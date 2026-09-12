@@ -622,7 +622,9 @@ and then requires `yes` in the TUI or `--force`/`-f` in one-shot CLI mode.
 Unknown, ambiguous, duplicate, foreign, malformed, and surplus references are
 rejected before a deletion request is sent. X authorization records expose only
 their canonical record ID, selected project ID, numeric X user ID, and optional
-username. GitHub authorization remains outside this access workflow.
+username. GitHub actors use a system-level allowlist with the selected project
+ID carried as request context; their output exposes only the canonical record ID,
+login, and optional display name.
 
 Inbound webhooks use the nested `/channels webhooks` registry:
 
@@ -860,7 +862,7 @@ $ openvibely-terminal help channels
   channels test <channel>                    test Slack, Telegram, Discord, X, or Email
   channels remove <channel>                  remove configuration; Slack disconnects safely (confirmation required)
   channels disconnect <github|slack>         clear connection credentials but keep other settings (confirmation required)
-  channels access <telegram|slack|discord|x|email> <list|add|remove> [identity] [display name]
+  channels access <telegram|slack|discord|x|email|github> <list|add|remove> [identity] [display name]
                                             manage authorized inbound access identities
   channels access x list                    list project-scoped X mention authors
   channels access x add <numeric ID> [@username]
