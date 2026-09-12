@@ -613,6 +613,38 @@ func TestApplyProjectEditsCoversAllSettingsAndPathForms(t *testing.T) {
 	}
 }
 
+func TestProjectEditReferenceTiersShareCanonicalMatching(t *testing.T) {
+	projects := []client.Project{
+		{ID: "id-123", Name: "Alpha Project"},
+		{ID: "name-456", Name: "Beta Project"},
+		{ID: "prefix-789", Name: "Gamma Project"},
+		{ID: "other-999", Name: "Delta Project"},
+	}
+	for _, tc := range []struct {
+		name        string
+		project     client.Project
+		ref         string
+		successTier int
+		errorTier   int
+	}{
+		{name: "exact ID", project: projects[0], ref: "id-123", successTier: 0, errorTier: 0},
+		{name: "exact name", project: projects[1], ref: "Beta Project", successTier: 1, errorTier: 1},
+		{name: "ID prefix", project: projects[2], ref: "prefix-", successTier: 2, errorTier: 2},
+		{name: "name prefix", project: projects[2], ref: "Gamma", successTier: 2, errorTier: 2},
+		{name: "substring only", project: projects[3], ref: "elta", successTier: 3, errorTier: 3},
+		{name: "no match", project: projects[0], ref: "missing", successTier: 3, errorTier: projectReferenceNoMatchTier},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := projectReferenceTier(tc.project, tc.ref); got != tc.successTier {
+				t.Fatalf("successful tier = %d, want %d", got, tc.successTier)
+			}
+			if got := projectReferenceErrorTier(projects, tc.ref); got != tc.errorTier {
+				t.Fatalf("error tier = %d, want %d", got, tc.errorTier)
+			}
+		})
+	}
+}
+
 func TestApplyProjectEditsRejectsSourceIncompatibleRepositoryOptions(t *testing.T) {
 	local := client.ProjectSettings{RepositorySource: "local", LocalRepositoryPathsEnabled: true}
 	github := client.ProjectSettings{RepositorySource: "github", LocalRepositoryPathsEnabled: true}

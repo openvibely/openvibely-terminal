@@ -7354,33 +7354,36 @@ func parseProjectEditOptions(args []string) (projectEditValues, error) {
 	return edits, nil
 }
 
-func projectReferenceTier(project client.Project, ref string) int {
-	ref = strings.ToLower(strings.TrimSpace(ref))
+const projectReferenceNoMatchTier = 100
+
+func projectReferenceMatchTier(project client.Project, ref string) int {
+	ref = strings.TrimSpace(ref)
+	lower := strings.ToLower(ref)
 	switch {
 	case strings.EqualFold(project.ID, ref):
 		return 0
 	case strings.EqualFold(project.Name, ref):
 		return 1
-	case strings.HasPrefix(strings.ToLower(project.ID), ref) || strings.HasPrefix(strings.ToLower(project.Name), ref):
+	case strings.HasPrefix(strings.ToLower(project.ID), lower) || strings.HasPrefix(strings.ToLower(project.Name), lower):
 		return 2
 	default:
-		return 3
+		return projectReferenceNoMatchTier
 	}
+}
+
+func projectReferenceTier(project client.Project, ref string) int {
+	if tier := projectReferenceMatchTier(project, ref); tier != projectReferenceNoMatchTier {
+		return tier
+	}
+	return 3
 }
 
 func projectReferenceErrorTier(projects []client.Project, ref string) int {
 	lower := strings.ToLower(strings.TrimSpace(ref))
-	best := 100
+	best := projectReferenceNoMatchTier
 	for _, project := range projects {
-		tier := 100
-		switch {
-		case strings.EqualFold(project.ID, ref):
-			tier = 0
-		case strings.EqualFold(project.Name, ref):
-			tier = 1
-		case strings.HasPrefix(strings.ToLower(project.ID), lower) || strings.HasPrefix(strings.ToLower(project.Name), lower):
-			tier = 2
-		case strings.Contains(strings.ToLower(project.Name), lower):
+		tier := projectReferenceMatchTier(project, ref)
+		if tier == projectReferenceNoMatchTier && strings.Contains(strings.ToLower(project.Name), lower) {
 			tier = 3
 		}
 		if tier < best {
