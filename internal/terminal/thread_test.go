@@ -1184,9 +1184,9 @@ func TestInteractiveTaskReplyReconnectKeepsUTF8OffsetAndRejectsStaleTask(t *test
 	if cmd == nil || m.chatStreamOffset != len([]byte("λ🙂")) || !strings.Contains(transcript(m), "λ🙂") {
 		t.Fatalf("task reconnect lost buffered UTF-8 output: offset=%d transcript=%q", m.chatStreamOffset, transcript(m))
 	}
-	reconnect := cmd().(chatStreamReconnectMsg)
-	if reconnect.offset != len([]byte("λ🙂")) {
-		t.Fatalf("resume offset = %d", reconnect.offset)
+	reconnect := m.chatStreamReconnectMessage(m.chatStreamGeneration)
+	if reconnect.generation != m.chatStreamGeneration || reconnect.submissionID != 9 || reconnect.projectID != "project-A" || reconnect.execID != "exec-1" || reconnect.offset != len([]byte("λ🙂")) {
+		t.Fatalf("task reconnect = %#v, want generation=%d submission=9 project=project-A exec=exec-1 UTF-8 byte offset %d", reconnect, m.chatStreamGeneration, len([]byte("λ🙂")))
 	}
 
 	m.threadID = "t-2"
