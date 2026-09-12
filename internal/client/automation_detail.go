@@ -1446,20 +1446,25 @@ func automationEdgeARIAHasCountWords(aria string) bool {
 	return strings.Contains(lower, "transition") || strings.Contains(lower, " recent") || strings.HasSuffix(lower, "recent")
 }
 
-func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (AutomationLiveEdge, bool) {
-	parsed := AutomationLiveEdge{edgeSource: automationEdgeSourceGraph}
-	parsed.ID = strings.TrimSpace(firstAutomationAttr(edge, "data-automation-live-edge-id", "data-automation-edge-id", "data-edge-id"))
-	parsed.EdgeKey = strings.TrimSpace(firstAutomationAttr(edge, "data-automation-live-edge", "data-automation-edge", "data-edge", "data-edge-key"))
-	parsed.SourceNodeID = strings.TrimSpace(firstAutomationAttr(edge, "data-source-node-id", "data-automation-source-node-id", "data-edge-from", "data-source-node", "data-source"))
-	parsed.TargetNodeID = strings.TrimSpace(firstAutomationAttr(edge, "data-target-node-id", "data-automation-target-node-id", "data-edge-to", "data-target-node", "data-target"))
-	parsed.SourceName = strings.TrimSpace(firstAutomationAttr(edge, "data-source-node-name", "data-edge-from-name"))
-	parsed.TargetName = strings.TrimSpace(firstAutomationAttr(edge, "data-target-node-name", "data-edge-to-name"))
-	parsed.Label = strings.TrimSpace(firstAutomationAttr(edge, "data-automation-edge-label", "data-edge-label", "data-label"))
-	parsed.ConditionJSON = strings.TrimSpace(firstAutomationAttr(edge, "data-automation-edge-condition", "data-edge-condition"))
-	parsed.Highlighted = parseAutomationBool(firstAutomationAttr(edge, "data-automation-edge-highlighted", "data-highlighted"))
+type automationEdgeFieldAliases struct {
+	edgeKey          []string
+	transitionCount  []string
+	recentTransition []string
+}
 
-	transition, transitionFound, transitionInvalid := parseAutomationEdgeCount(detail, edge, "edge transition", "data-automation-transition-count", "data-transition-count", "data-transitions")
-	recent, recentFound, recentInvalid := parseAutomationEdgeCount(detail, edge, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
+func parseAutomationSharedEdgeFields(detail *AutomationDetail, node *html.Node, aliases automationEdgeFieldAliases) (AutomationLiveEdge, bool) {
+	parsed := AutomationLiveEdge{}
+	parsed.ID = strings.TrimSpace(firstAutomationAttr(node, "data-automation-live-edge-id", "data-automation-edge-id", "data-edge-id"))
+	parsed.EdgeKey = strings.TrimSpace(firstAutomationAttr(node, aliases.edgeKey...))
+	parsed.SourceNodeID = strings.TrimSpace(firstAutomationAttr(node, "data-source-node-id", "data-automation-source-node-id", "data-edge-from", "data-source-node", "data-source"))
+	parsed.TargetNodeID = strings.TrimSpace(firstAutomationAttr(node, "data-target-node-id", "data-automation-target-node-id", "data-edge-to", "data-target-node", "data-target"))
+	parsed.SourceName = strings.TrimSpace(firstAutomationAttr(node, "data-source-node-name", "data-edge-from-name"))
+	parsed.TargetName = strings.TrimSpace(firstAutomationAttr(node, "data-target-node-name", "data-edge-to-name"))
+	parsed.Label = strings.TrimSpace(firstAutomationAttr(node, "data-automation-edge-label", "data-edge-label", "data-label"))
+	parsed.ConditionJSON = strings.TrimSpace(firstAutomationAttr(node, "data-automation-edge-condition", "data-edge-condition"))
+
+	transition, transitionFound, transitionInvalid := parseAutomationEdgeCount(detail, node, "edge transition", aliases.transitionCount...)
+	recent, recentFound, recentInvalid := parseAutomationEdgeCount(detail, node, "edge recent transition", aliases.recentTransition...)
 	if transitionFound {
 		parsed.TransitionCount = transition
 		parsed.transitionCountQuality = 2
@@ -1472,6 +1477,24 @@ func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (Automat
 	} else if recentInvalid {
 		parsed.recentTransitionCountQuality = -1
 	}
+	parsed.TransitionCountAvailable = transitionFound
+	parsed.RecentTransitionCountAvailable = recentFound
+	return parsed, transitionFound || recentFound
+}
+
+func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (AutomationLiveEdge, bool) {
+	parsed, _ := parseAutomationSharedEdgeFields(detail, edge, automationEdgeFieldAliases{
+		edgeKey:          []string{"data-automation-live-edge", "data-automation-edge", "data-edge", "data-edge-key"},
+		transitionCount:  []string{"data-automation-transition-count", "data-transition-count", "data-transitions"},
+		recentTransition: []string{"data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent"},
+	})
+	parsed.edgeSource = automationEdgeSourceGraph
+	parsed.Highlighted = parseAutomationBool(firstAutomationAttr(edge, "data-automation-edge-highlighted", "data-highlighted"))
+
+	transitionFound := parsed.TransitionCountAvailable
+	transitionInvalid := parsed.transitionCountQuality < 0
+	recentFound := parsed.RecentTransitionCountAvailable
+	recentInvalid := parsed.recentTransitionCountQuality < 0
 	if aria := strings.TrimSpace(attr(edge, "aria-label")); aria != "" {
 		if match := automationEdgeCountsMatch(aria); match != nil {
 			if parsed.Label == "" {
@@ -1528,15 +1551,12 @@ func parseAutomationLiveEdge(detail *AutomationDetail, edge *html.Node) (Automat
 }
 
 func parseAutomationEdgeDetail(detail *AutomationDetail, section *html.Node) (AutomationLiveEdge, bool) {
-	parsed := AutomationLiveEdge{edgeSource: automationEdgeSourceDetails}
-	parsed.ID = strings.TrimSpace(firstAutomationAttr(section, "data-automation-live-edge-id", "data-automation-edge-id", "data-edge-id"))
-	parsed.EdgeKey = strings.TrimSpace(firstAutomationAttr(section, "data-automation-live-edge-detail", "data-automation-edge-detail", "data-edge-key", "data-edge"))
-	parsed.SourceNodeID = strings.TrimSpace(firstAutomationAttr(section, "data-source-node-id", "data-automation-source-node-id", "data-edge-from", "data-source-node", "data-source"))
-	parsed.TargetNodeID = strings.TrimSpace(firstAutomationAttr(section, "data-target-node-id", "data-automation-target-node-id", "data-edge-to", "data-target-node", "data-target"))
-	parsed.SourceName = strings.TrimSpace(firstAutomationAttr(section, "data-source-node-name", "data-edge-from-name"))
-	parsed.TargetName = strings.TrimSpace(firstAutomationAttr(section, "data-target-node-name", "data-edge-to-name"))
-	parsed.Label = strings.TrimSpace(firstAutomationAttr(section, "data-automation-edge-label", "data-edge-label", "data-label"))
-	parsed.ConditionJSON = strings.TrimSpace(firstAutomationAttr(section, "data-automation-edge-condition", "data-edge-condition"))
+	parsed, hasCounts := parseAutomationSharedEdgeFields(detail, section, automationEdgeFieldAliases{
+		edgeKey:          []string{"data-automation-live-edge-detail", "data-automation-edge-detail", "data-edge-key", "data-edge"},
+		transitionCount:  []string{"data-automation-transition-count", "data-transition-count", "data-transitions"},
+		recentTransition: []string{"data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions"},
+	})
+	parsed.edgeSource = automationEdgeSourceDetails
 	if parsed.SourceName == "" || parsed.TargetName == "" {
 		if heading := findNode(section, func(n *html.Node) bool { return n.Data == "div" || n.Data == "span" }); heading != nil {
 			from, to := splitAutomationEdgeEndpoints(firstLine(NodeText(heading)))
@@ -1555,23 +1575,7 @@ func parseAutomationEdgeDetail(detail *AutomationDetail, section *html.Node) (Au
 	if parsed.ConditionJSON == "" && len(paragraphs) > 1 {
 		parsed.ConditionJSON = strings.TrimSpace(NodeText(paragraphs[1]))
 	}
-	transition, transitionFound, transitionInvalid := parseAutomationEdgeCount(detail, section, "edge transition", "data-automation-transition-count", "data-transition-count", "data-transitions")
-	recent, recentFound, recentInvalid := parseAutomationEdgeCount(detail, section, "edge recent transition", "data-automation-recent-transition-count", "data-recent-transition-count", "data-recent-transitions", "data-recent")
-	if transitionFound {
-		parsed.TransitionCount = transition
-		parsed.transitionCountQuality = 2
-	} else if transitionInvalid {
-		parsed.transitionCountQuality = -1
-	}
-	if recentFound {
-		parsed.RecentTransitionCount = recent
-		parsed.recentTransitionCountQuality = 2
-	} else if recentInvalid {
-		parsed.recentTransitionCountQuality = -1
-	}
-	parsed.TransitionCountAvailable = transitionFound
-	parsed.RecentTransitionCountAvailable = recentFound
-	return parsed, transitionFound || recentFound
+	return parsed, hasCounts
 }
 
 func parseAutomationEdgeCount(detail *AutomationDetail, node *html.Node, label string, attrs ...string) (int, bool, bool) {
