@@ -299,8 +299,9 @@ func TestStructurallyBoundedPartialOperandsOpenFilteredOptionPickers(t *testing.
 			if m.selectorFilter != tc.wantFilter {
 				t.Fatalf("selector filter = %q, want %q", m.selectorFilter, tc.wantFilter)
 			}
-			if len(m.selectorFiltered) != 1 || m.selectorFiltered[0].ref != tc.wantOption {
-				t.Fatalf("filtered options = %+v, want %q", m.selectorFiltered, tc.wantOption)
+			items := m.filteredSelectorItems()
+			if len(items) != 1 || items[0].ref != tc.wantOption {
+				t.Fatalf("filtered options = %+v, want %q", items, tc.wantOption)
 			}
 		})
 	}
@@ -716,6 +717,176 @@ func typeSelectorRunes(t *testing.T, m Model, s string) Model {
 	return m
 }
 
+func TestSelectorFilterPreservesOrderAndMatchCounts(t *testing.T) {
+	items := []selectorItem{
+		{ref: "task-1", label: "Alpha task", detail: "ordinary"},
+		{ref: "task-2", label: "Beta task", detail: "Needle in detail"},
+		{ref: "NEEDLE-ref", label: "Gamma task", detail: "ordinary"},
+		{ref: "task-4", label: "Delta", detail: "ordinary"},
+	}
+	cases := []struct {
+		filter string
+		refs   []string
+	}{
+		{filter: "absent", refs: []string{}},
+		{filter: "alpha", refs: []string{"task-1"}},
+		{filter: "needle", refs: []string{"task-2", "NEEDLE-ref"}},
+		{filter: "TASK", refs: []string{"task-1", "task-2", "NEEDLE-ref", "task-4"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.filter, func(t *testing.T) {
+			m, _ := dispatchModel(t, nil)
+			updated, _ := m.handleSelector(selectorActiveMsg{
+				title:       "Tasks",
+				command:     "tasks open",
+				forcePicker: true,
+				items:       items,
+			})
+			m = updated.(Model).setSelectorFilter(tc.filter)
+			gotItems := m.filteredSelectorItems()
+			got := make([]string, 0, len(gotItems))
+			for _, item := range gotItems {
+				got = append(got, item.ref)
+			}
+			if !reflect.DeepEqual(got, tc.refs) {
+				t.Fatalf("filter %q refs = %v, want %v", tc.filter, got, tc.refs)
+			}
+			if gotCount := m.selectorFilteredCount(); gotCount != len(tc.refs) {
+				t.Fatalf("filter %q count = %d, want %d", tc.filter, gotCount, len(tc.refs))
+			}
+		})
+	}
+}
+
+func TestSelectorLaterMatchCursorAndEnterSelection(t *testing.T) {
+	selected := ""
+	items := make([]selectorItem, 12)
+	for i := range items {
+		ref := fmt.Sprintf("task-%02d", i)
+		items[i] = selectorItem{
+			ref:   ref,
+			label: fmt.Sprintf("Matching task %02d", i),
+			dispatch: func(m Model) (Model, tea.Cmd) {
+				selected = ref
+				return m, nil
+			},
+		}
+	}
+	m, _ := dispatchModel(t, nil)
+	updated, _ := m.handleSelector(selectorActiveMsg{
+		title:       "Tasks",
+		command:     "tasks open",
+		forcePicker: true,
+		items:       items,
+	})
+	m = updated.(Model)
+	for i := 0; i < 9; i++ {
+		m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.selectorCursor != 9 || m.selectorFilteredCount() != len(items) {
+		t.Fatalf("cursor/count = %d/%d, want 9/%d", m.selectorCursor, m.selectorFilteredCount(), len(items))
+	}
+	if view := stripANSI(m.renderSelector()); !strings.Contains(view, "showing 8 of 12") || !strings.Contains(view, "Matching task 09") {
+		t.Fatalf("later cursor was not rendered correctly:\n%s", view)
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if selected != "task-09" {
+		t.Fatalf("Enter selected %q, want task-09", selected)
+	}
+}
+
+func TestSelectorResolvedTaskIdentitySurvivesFilteredSelection(t *testing.T) {
+	tasks := make([]*client.Task, 12)
+	items := make([]selectorItem, 12)
+	for i := range items {
+		ref := fmt.Sprintf("task-%02d", i)
+		tasks[i] = &client.Task{ID: ref, Title: fmt.Sprintf("Matching task %02d", i)}
+		items[i] = selectorItem{
+			ref:          ref,
+			label:        tasks[i].Title,
+			resolvedTask: tasks[i],
+		}
+	}
+	m, _ := dispatchModel(t, nil)
+	updated, _ := m.handleSelector(selectorActiveMsg{
+		title:         "Tasks",
+		command:       "tasks reviews add",
+		prefill:       true,
+		prefillSuffix: " | ",
+		forcePicker:   true,
+		items:         items,
+	})
+	m = updated.(Model)
+	for i := 0; i < 9; i++ {
+		m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive {
+		t.Fatal("selector remained active after selecting a task")
+	}
+	if m.reviewPrefillTask != tasks[9] {
+		t.Fatalf("resolved task pointer = %p, want %p", m.reviewPrefillTask, tasks[9])
+	}
+	if got, want := m.input.Value(), "/tasks reviews add task-09 | "; got != want {
+		t.Fatalf("review prefill = %q, want %q", got, want)
+	}
+}
+
+func TestSelectorItemReplacementInvalidatesFilterCache(t *testing.T) {
+	oldItems := []selectorItem{
+		{ref: "old-1", label: "Old one"},
+		{ref: "old-2", label: "Old two"},
+	}
+	newItems := []selectorItem{
+		{ref: "new-1", label: "New one"},
+		{ref: "new-2", label: "New two"},
+	}
+	m, _ := dispatchModel(t, nil)
+	updated, _ := m.handleSelector(selectorActiveMsg{title: "Items", command: "items open", forcePicker: true, items: oldItems})
+	m = updated.(Model).setSelectorFilter("old")
+	if got := m.filteredSelectorItems(); len(got) != 2 {
+		t.Fatalf("old filter count = %d, want 2", len(got))
+	}
+
+	updated, _ = m.handleSelector(selectorActiveMsg{title: "Items", command: "items open", forcePicker: true, items: newItems})
+	m = updated.(Model)
+	if m.selectorFilter != "" || m.selectorFilteredFor != "" || m.selectorMatchIndexes != nil {
+		t.Fatalf("replacement retained filter cache: filter=%q cached=%q indexes=%v", m.selectorFilter, m.selectorFilteredFor, m.selectorMatchIndexes)
+	}
+	got := m.filteredSelectorItems()
+	if len(got) != 2 || got[0].ref != "new-1" || got[1].ref != "new-2" {
+		t.Fatalf("replacement returned stale items: %+v", got)
+	}
+	m = m.setSelectorFilter("new")
+	if got := m.filteredSelectorItems(); len(got) != 2 || got[0].ref != "new-1" || got[1].ref != "new-2" {
+		t.Fatalf("replacement filter returned stale items: %+v", got)
+	}
+}
+
+func TestSelectorRepeatedFilterChangesKeepBoundedMatchCache(t *testing.T) {
+	m := benchmarkSelectorFilterModel(10000)
+	filters := []string{"s", "sy", "synthetic", "synthetic task", "group-099", "not-present", ""}
+	for cycle := 0; cycle < 25; cycle++ {
+		for _, filter := range filters {
+			m = m.setSelectorFilter(filter)
+			if cap(m.selectorMatchIndexes) > len(m.selectorItems) {
+				t.Fatalf("filter %q grew match cache beyond item count: len=%d cap=%d", filter, len(m.selectorMatchIndexes), cap(m.selectorMatchIndexes))
+			}
+			for _, index := range m.selectorMatchIndexes {
+				if index < 0 || index >= len(m.selectorItems) {
+					t.Fatalf("filter %q retained invalid match index %d", filter, index)
+				}
+			}
+		}
+	}
+	m = m.clearSelector()
+	if m.selectorItems != nil || m.selectorSearch != nil || m.selectorMatchIndexes != nil || m.selectorFilteredFor != "" {
+		t.Fatalf("clear retained selector state: items=%d search=%d indexes=%d cached=%q",
+			len(m.selectorItems), len(m.selectorSearch), len(m.selectorMatchIndexes), m.selectorFilteredFor)
+	}
+}
+
 // TestSelectorFilterNarrowsItems verifies incremental text filtering.
 func TestSelectorFilterNarrowsItems(t *testing.T) {
 	m, _ := dispatchModel(t, selFixtures())
@@ -794,7 +965,8 @@ func TestSelectorEmptyInitialFilterPreservesOriginalSlice(t *testing.T) {
 	})
 	m = updated.(Model)
 
-	if len(m.selectorFiltered) != len(items) || &m.selectorFiltered[0] != &items[0] {
+	filtered := m.filteredSelectorItems()
+	if len(filtered) != len(items) || &filtered[0] != &items[0] {
 		t.Fatalf("empty initial filter did not preserve the original item slice")
 	}
 	if m.selectorFilter != "" || m.selectorFilteredFor != "" {
@@ -1634,9 +1806,9 @@ func TestSelectorCacheClearsBetweenSelectors(t *testing.T) {
 	}
 
 	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
-	if m.selectorSearch != nil || m.selectorFiltered != nil || m.selectorFilteredFor != "" {
-		t.Fatalf("selector cache should clear on close: search=%d filtered=%d for=%q",
-			len(m.selectorSearch), len(m.selectorFiltered), m.selectorFilteredFor)
+	if m.selectorSearch != nil || m.selectorMatchIndexes != nil || m.selectorFilteredFor != "" {
+		t.Fatalf("selector cache should clear on close: search=%d indexes=%d for=%q",
+			len(m.selectorSearch), len(m.selectorMatchIndexes), m.selectorFilteredFor)
 	}
 
 	m = runLine(t, m, "/skills show")
@@ -1657,7 +1829,7 @@ func TestSelectorCacheClearsBetweenSelectors(t *testing.T) {
 
 var selectorBenchmarkSink string
 
-func benchmarkSelectorModel(n int) Model {
+func benchmarkSelectorFilterModel(n int) Model {
 	items := make([]selectorItem, n)
 	for i := range items {
 		items[i] = selectorItem{
@@ -1675,13 +1847,53 @@ func benchmarkSelectorModel(n int) Model {
 		command: "tasks open",
 		items:   items,
 	})
-	m = updated.(Model)
-	m = m.setSelectorFilter("common")
-	return m
+	return updated.(Model)
+}
+
+func benchmarkSelectorModel(n int) Model {
+	return benchmarkSelectorFilterModel(n).setSelectorFilter("common")
+}
+
+func BenchmarkSelectorFilterChanges(b *testing.B) {
+	cases := []struct {
+		name   string
+		filter string
+		prefix bool
+	}{
+		{name: "high_match", filter: "task"},
+		{name: "low_match", filter: "group-099"},
+		{name: "no_match", filter: "not-present"},
+		{name: "character_by_character_high_match", filter: "Synthetic Task", prefix: true},
+	}
+
+	for _, n := range []int{1000, 10000} {
+		for _, tc := range cases {
+			tc := tc
+			b.Run(fmt.Sprintf("items_%d/%s", n, tc.name), func(b *testing.B) {
+				initial := benchmarkSelectorFilterModel(n)
+				filters := []string{tc.filter}
+				if tc.prefix {
+					filters = make([]string, 0, len([]rune(tc.filter)))
+					for i := range []rune(tc.filter) {
+						filters = append(filters, tc.filter[:i+1])
+					}
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					m := initial
+					for _, filter := range filters {
+						m = m.setSelectorFilter(filter)
+						selectorBenchmarkSink = m.selectorFilter
+					}
+				}
+			})
+		}
+	}
 }
 
 func BenchmarkSelectorFilteredRender(b *testing.B) {
-	for _, n := range []int{1000, 10000} {
+	for _, n := range []int{100, 1000, 10000} {
 		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
 			m := benchmarkSelectorModel(n)
 			b.ReportAllocs()

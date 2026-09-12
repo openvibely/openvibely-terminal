@@ -218,18 +218,21 @@ type Model struct {
 
 	// inline ref selector (opened when a command needing a <ref> is run
 	// without one): key input is routed to the picker while active.
-	selectorActive        bool
-	selectorTitle         string
-	selectorItems         []selectorItem
-	selectorSearch        []string
-	selectorFilter        string
-	selectorFiltered      []selectorItem
-	selectorFilteredFor   string
-	selectorWarnings      []string
-	selectorCursor        int
-	pendingCommand        string // e.g. "tasks open"; re-dispatched with the chosen ref
-	selectorPrefill       bool   // prime the input instead of dispatching
-	selectorPrefillSuffix string // appended after the chosen ref when priming input
+	selectorActive           bool
+	selectorTitle            string
+	selectorItems            []selectorItem
+	selectorSearch           []string
+	selectorFilter           string
+	selectorFilterLower      string
+	selectorMatchIndexes     []int
+	selectorMatchesAll       bool
+	selectorFilteredFor      string
+	selectorFilteredForLower string
+	selectorWarnings         []string
+	selectorCursor           int
+	pendingCommand           string // e.g. "tasks open"; re-dispatched with the chosen ref
+	selectorPrefill          bool   // prime the input instead of dispatching
+	selectorPrefillSuffix    string // appended after the chosen ref when priming input
 
 	// reviewPrefillTask carries the task record loaded by the review-add
 	// selector until the user submits its completed command. It avoids a

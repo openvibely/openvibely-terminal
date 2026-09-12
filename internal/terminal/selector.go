@@ -132,17 +132,26 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 		m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: text})
 		return m, nil
 	}
-	matchingItems := msg.items
+	matchingIndexes := []int(nil)
+	matchingCount := len(msg.items)
+	matchingAll := false
 	var search []string
+	filterLower := ""
 	if msg.initialFilter != "" {
 		search = selectorSearchTexts(msg.items)
-		matchingItems = matchSelectorItems(msg.items, search, msg.initialFilter)
+		filterLower = strings.ToLower(msg.initialFilter)
+		matchingIndexes, matchingAll = matchSelectorIndexesLower(msg.items, search, filterLower, nil, true)
+		matchingCount = len(matchingIndexes)
 	}
-	if len(matchingItems) == 1 && !msg.forcePicker {
+	if matchingCount == 1 && !msg.forcePicker {
 		if len(warnings) > 0 {
 			m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: renderMemoryWarnings(warnings)})
 		}
-		it := matchingItems[0]
+		index := 0
+		if msg.initialFilter != "" {
+			index = matchingIndexes[0]
+		}
+		it := msg.items[index]
 		m.append(entry{role: "system", text: "only one match — selected " + selectorDisplay(it.label, selectorLabelDisplayWidth)})
 		return m.selectorDispatch(msg.command, msg.prefill, msg.prefillSuffix, it)
 	}
@@ -155,8 +164,11 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	}
 	m.selectorSearch = search
 	m.selectorFilter = msg.initialFilter
-	m.selectorFiltered = matchingItems
+	m.selectorFilterLower = filterLower
+	m.selectorMatchIndexes = matchingIndexes
+	m.selectorMatchesAll = matchingAll
 	m.selectorFilteredFor = msg.initialFilter
+	m.selectorFilteredForLower = filterLower
 	m.selectorCursor = 0
 	m.pendingCommand = msg.command
 	m.selectorPrefill = msg.prefill
@@ -174,8 +186,11 @@ func (m Model) clearSelector() Model {
 	m.selectorItems = nil
 	m.selectorSearch = nil
 	m.selectorFilter = ""
-	m.selectorFiltered = nil
+	m.selectorFilterLower = ""
+	m.selectorMatchIndexes = nil
+	m.selectorMatchesAll = false
 	m.selectorFilteredFor = ""
+	m.selectorFilteredForLower = ""
 	m.selectorWarnings = nil
 	m.selectorCursor = 0
 	m.pendingCommand = ""
@@ -212,14 +227,46 @@ func selectorSearchTexts(items []selectorItem) []string {
 }
 
 func matchSelectorItems(items []selectorItem, search []string, filter string) []selectorItem {
-	needle := strings.ToLower(filter)
-	matches := make([]selectorItem, 0, len(items))
-	for i, item := range items {
-		if strings.Contains(search[i], needle) {
-			matches = append(matches, item)
-		}
+	indexes, _ := matchSelectorIndexesLower(items, search, strings.ToLower(filter), nil, true)
+	matches := make([]selectorItem, 0, len(indexes))
+	for _, index := range indexes {
+		matches = append(matches, items[index])
 	}
 	return matches
+}
+
+// matchSelectorIndexes returns matching item positions in their original order.
+func matchSelectorIndexes(items []selectorItem, search []string, filter string, candidates []int, candidatesAll bool) ([]int, bool) {
+	return matchSelectorIndexesLower(items, search, strings.ToLower(filter), candidates, candidatesAll)
+}
+
+// matchSelectorIndexesLower is the allocation-free filtering core once the
+// lowercase filter has been computed. When candidatesAll is true, candidates
+// may be nil to scan every item. A non-nil candidate slice is reused in place
+// so character-by-character filters do not allocate another result list while
+// narrowing the previous match set.
+func matchSelectorIndexesLower(items []selectorItem, search []string, needle string, candidates []int, candidatesAll bool) ([]int, bool) {
+	if !candidatesAll && len(candidates) == 0 {
+		return nil, false
+	}
+
+	if candidates == nil {
+		matches := make([]int, 0, len(items))
+		for i := range items {
+			if strings.Contains(search[i], needle) {
+				matches = append(matches, i)
+			}
+		}
+		return matches, len(matches) == len(items)
+	}
+
+	matches := candidates[:0]
+	for _, index := range candidates {
+		if strings.Contains(search[index], needle) {
+			matches = append(matches, index)
+		}
+	}
+	return matches, candidatesAll && len(matches) == len(items)
 }
 
 func (m Model) setSelectorFilter(filter string) Model {
@@ -227,35 +274,97 @@ func (m Model) setSelectorFilter(filter string) Model {
 		return m
 	}
 	m.selectorFilter = filter
+	m.selectorFilterLower = strings.ToLower(filter)
 	m.selectorCursor = 0
 	return m.rebuildSelectorFilterCache()
 }
 
 func (m Model) rebuildSelectorFilterCache() Model {
+	previousFilter := m.selectorFilteredFor
+	previousFilterLower := m.selectorFilteredForLower
+	previousIndexes := m.selectorMatchIndexes
+	previousAll := m.selectorMatchesAll
 	m.selectorFilteredFor = m.selectorFilter
+	m.selectorFilteredForLower = m.selectorFilterLower
 	if m.selectorFilter == "" {
-		m.selectorFiltered = m.selectorItems
+		m.selectorMatchIndexes = nil
+		m.selectorMatchesAll = false
 		return m
 	}
 	if len(m.selectorSearch) != len(m.selectorItems) {
 		m.selectorSearch = selectorSearchTexts(m.selectorItems)
+		previousFilter = ""
+		previousFilterLower = ""
+		previousIndexes = nil
+		previousAll = false
 	}
-	m.selectorFiltered = matchSelectorItems(m.selectorItems, m.selectorSearch, m.selectorFilter)
+
+	var candidates []int
+	candidatesAll := true
+	if previousFilter != "" && strings.HasPrefix(m.selectorFilterLower, previousFilterLower) {
+		candidates = previousIndexes
+		candidatesAll = previousAll
+	}
+	m.selectorMatchIndexes, m.selectorMatchesAll = matchSelectorIndexesLower(m.selectorItems, m.selectorSearch, m.selectorFilterLower, candidates, candidatesAll)
 	return m
 }
 
+func (m Model) selectorFilteredCount() int {
+	if m.selectorFilter == "" {
+		return len(m.selectorItems)
+	}
+	if m.selectorFilteredFor == m.selectorFilter {
+		if m.selectorMatchesAll {
+			return len(m.selectorItems)
+		}
+		return len(m.selectorMatchIndexes)
+	}
+	return len(m.filteredSelectorItems())
+}
+
+func (m Model) selectorFilteredItemAt(index int) selectorItem {
+	if m.selectorFilter == "" {
+		return m.selectorItems[index]
+	}
+	if m.selectorFilteredFor == m.selectorFilter {
+		if m.selectorMatchesAll {
+			return m.selectorItems[index]
+		}
+		return m.selectorItems[m.selectorMatchIndexes[index]]
+	}
+	return m.filteredSelectorItems()[index]
+}
+
 // filteredSelectorItems returns the cached items matching the typed filter.
+// The filtered result is materialized only for callers that need a slice; the
+// selector's hot rendering and input paths use selectorFilteredCount and
+// selectorFilteredItemAt to avoid copying every matching item.
 func (m Model) filteredSelectorItems() []selectorItem {
 	if m.selectorFilter == "" {
 		return m.selectorItems
 	}
-	if m.selectorFilteredFor == m.selectorFilter && m.selectorFiltered != nil {
-		return m.selectorFiltered
+	if m.selectorFilteredFor == m.selectorFilter {
+		if m.selectorMatchesAll {
+			return m.selectorItems
+		}
+		matches := make([]selectorItem, 0, len(m.selectorMatchIndexes))
+		for _, index := range m.selectorMatchIndexes {
+			matches = append(matches, m.selectorItems[index])
+		}
+		return matches
 	}
 	if len(m.selectorSearch) != len(m.selectorItems) {
 		m.selectorSearch = selectorSearchTexts(m.selectorItems)
 	}
-	return matchSelectorItems(m.selectorItems, m.selectorSearch, m.selectorFilter)
+	indexes, all := matchSelectorIndexesLower(m.selectorItems, m.selectorSearch, strings.ToLower(m.selectorFilter), nil, true)
+	if all {
+		return m.selectorItems
+	}
+	matches := make([]selectorItem, 0, len(indexes))
+	for _, index := range indexes {
+		matches = append(matches, m.selectorItems[index])
+	}
+	return matches
 }
 
 // handleSelectorKey routes key input while the selector is open.
@@ -278,7 +387,7 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down", "ctrl+n":
-		if n := len(m.filteredSelectorItems()); m.selectorCursor < n-1 {
+		if n := m.selectorFilteredCount(); m.selectorCursor < n-1 {
 			m.selectorCursor++
 		}
 		return m, nil
@@ -291,15 +400,15 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		items := m.filteredSelectorItems()
-		if len(items) == 0 {
+		count := m.selectorFilteredCount()
+		if count == 0 {
 			return m, nil
 		}
 		cur := m.selectorCursor
-		if cur >= len(items) {
-			cur = len(items) - 1
+		if cur >= count {
+			cur = count - 1
 		}
-		it := items[cur]
+		it := m.selectorFilteredItemAt(cur)
 		command, prefill, prefillSuffix := m.pendingCommand, m.selectorPrefill, m.selectorPrefillSuffix
 		m = m.clearSelector()
 		return m.selectorDispatch(command, prefill, prefillSuffix, it)
@@ -352,8 +461,8 @@ func (m Model) renderSelector() string {
 	rows = append(rows, sectionStyle.Render("▸ "+selectorDisplay(m.selectorTitle, selectorTitleDisplayWidth)))
 	rows = append(rows, "> "+selectorDisplay(m.selectorFilter, selectorDetailDisplayWidth)+"█")
 
-	items := m.filteredSelectorItems()
-	if len(items) == 0 {
+	itemsCount := m.selectorFilteredCount()
+	if itemsCount == 0 {
 		rows = append(rows, dimStyle.Render("  no matches — backspace to widen"))
 		if len(m.selectorWarnings) > 0 {
 			rows = append(rows, renderMemoryWarnings(m.selectorWarnings))
@@ -362,20 +471,25 @@ func (m Model) renderSelector() string {
 	}
 
 	cur := m.selectorCursor
-	if cur >= len(items) {
-		cur = len(items) - 1
+	if cur >= itemsCount {
+		cur = itemsCount - 1
 	}
 	const maxRows = 8
 	start := 0
-	if len(items) > maxRows && cur >= maxRows {
+	if itemsCount > maxRows && cur >= maxRows {
 		start = cur - maxRows + 1
 	}
 	end := start + maxRows
-	if end > len(items) {
-		end = len(items)
+	if end > itemsCount {
+		end = itemsCount
 	}
+	matchesAll := m.selectorFilter == "" || (m.selectorFilteredFor == m.selectorFilter && m.selectorMatchesAll)
 	for i := start; i < end; i++ {
-		it := items[i]
+		index := i
+		if !matchesAll {
+			index = m.selectorMatchIndexes[i]
+		}
+		it := m.selectorItems[index]
 		line := selectorDisplay(it.label, selectorLabelDisplayWidth)
 		if detail := selectorDisplay(it.detail, selectorDetailDisplayWidth); detail != "" {
 			line += dimStyle.Render("  " + detail)
@@ -387,8 +501,8 @@ func (m Model) renderSelector() string {
 			rows = append(rows, dimStyle.Render("  ")+line)
 		}
 	}
-	if end < len(items) || start > 0 {
-		rows = append(rows, dimStyle.Render(fmt.Sprintf("  … showing %d of %d", end-start, len(items))))
+	if end < itemsCount || start > 0 {
+		rows = append(rows, dimStyle.Render(fmt.Sprintf("  … showing %d of %d", end-start, itemsCount)))
 	}
 	if len(m.selectorWarnings) > 0 {
 		rows = append(rows, renderMemoryWarnings(m.selectorWarnings))
