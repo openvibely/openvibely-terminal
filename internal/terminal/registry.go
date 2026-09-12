@@ -266,7 +266,7 @@ func steerTaskThread(ctx context.Context, c *client.Client, task client.Task, pr
 	if err != nil {
 		var statusErr *client.HTTPStatusError
 		if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusConflict {
-			return "", fmt.Errorf("task steering conflict: %v; no fallback message was sent, retry after reopening the task thread or use tasks reply", err)
+			return "", fmt.Errorf("task steering conflict: %s; no fallback message was sent, retry after reopening the task thread or use tasks reply", sanitizeAutomationDetailText(err.Error()))
 		}
 		return "", err
 	}
