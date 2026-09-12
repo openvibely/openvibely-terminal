@@ -128,6 +128,7 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 
 	var statusProjectLoadErr error
 	var statusCheckResult <-chan tea.Msg
+	var statusCountsResult <-chan tea.Msg
 	// Only commands that talk to the backend need a project or connection
 	// state; /help and friends should stay instant and work offline.
 	if cmdDef.needsProjectLoad(args) {
@@ -175,6 +176,16 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 	if err := cliProjectPreflight(*cmdDef, fields[1:], projectRef, m); err != nil {
 		return err
 	}
+	if cmdDef.needsStatus() && statusProjectLoadErr == nil && m.selectedID != "" {
+		// The scoped counts depend only on the selected project, not on the
+		// global capacity/auth result. Start them as soon as project
+		// discovery succeeds, while preserving the deterministic connection-
+		// then-counts application order below.
+		countResult := make(chan tea.Msg, 1)
+		countFetch := m.fetchStatusCounts()
+		go func() { countResult <- countFetch() }()
+		statusCountsResult = countResult
+	}
 	implicitProject, hasImplicitProject := cliImplicitProject(*cmdDef, fields[1:], projectRef, m)
 
 	// A one-shot events command owns its stream directly. The interactive model
@@ -197,7 +208,24 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 		} else {
 			m = drain(m, m.checkConnection())
 		}
-		m = drain(m, m.fetchStatusCounts())
+		if statusCountsResult != nil {
+			m = drain(m, func() tea.Msg {
+				msg := <-statusCountsResult
+				// A concurrent auth failure may advance the session generation
+				// while these counts are in flight. They belong to this same
+				// one-shot status operation, so apply them to the current model
+				// generation instead of discarding a successful partial result as
+				// stale.
+				if counts, ok := msg.(statusCountsMsg); ok {
+					counts.sessionGeneration = sessionGenerationOf(m)
+					counts.projectGeneration = projectGenerationOf(m)
+					return counts
+				}
+				return msg
+			})
+		} else {
+			m = drain(m, m.fetchStatusCounts())
+		}
 	}
 
 	if ctx.Err() != nil {

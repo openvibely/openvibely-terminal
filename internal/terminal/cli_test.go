@@ -1417,6 +1417,57 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	}
 }
 
+func TestCLIStatusAuthFailurePreservesSuccessfulOverlappedCounts(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects":
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/api/capacity/global":
+			_, _ = io.WriteString(w, `{"total_running":1,"max_workers":4,"available_slots":3}`)
+		case "/auth/me":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"session expired"}`)
+		case "/api/alerts/pending-count":
+			if got := r.URL.RawQuery; got != "project_id=p1" {
+				t.Fatalf("alert count query = %q, want project_id=p1", got)
+			}
+			_, _ = io.WriteString(w, `{"count":4}`)
+		case "/api/tasks/status-counts":
+			if got := r.URL.RawQuery; got != "project_id=p1" {
+				t.Fatalf("task count query = %q, want project_id=p1", got)
+			}
+			_, _ = io.WriteString(w, `{"active_tasks":3,"queued_tasks":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"status"}, false, false)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "requires sign-in") {
+		t.Fatalf("status auth error = %v, want sign-in guidance", err)
+	}
+	got := strings.ToLower(stripANSI(out.String()))
+	for _, want := range []string{"sign-in required", "4 pending approvals", "3 active, 2 queued", "project"} {
+		if !strings.Contains(got, strings.ToLower(want)) {
+			t.Errorf("status output missing %q:\n%s", want, got)
+		}
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+}
+
 func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *testing.T) {
 	firstWaveStarted := make(chan string, 3)
 	releaseFirstWave := make(chan struct{})
@@ -1502,6 +1553,289 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
+	}
+}
+
+func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T) {
+	globalStarted := make(chan string, 2)
+	countsStarted := make(chan string, 2)
+	releaseGlobal := make(chan struct{})
+	projectReady := make(chan struct{})
+	var releaseOnce sync.Once
+	rec := &recorder{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+			close(projectReady)
+		case "/api/capacity/global", "/auth/me":
+			globalStarted <- r.URL.Path
+			<-releaseGlobal
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/auth/me" {
+				_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
+			} else {
+				_, _ = io.WriteString(w, `{"total_running":1,"max_workers":4,"available_slots":3}`)
+			}
+		case "/api/alerts/pending-count", "/api/tasks/status-counts":
+			if got := r.URL.RawQuery; got != "project_id=p1" {
+				t.Errorf("%s query = %q, want exact selected project_id", r.URL.Path, got)
+			}
+			countsStarted <- r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Path == "/api/alerts/pending-count" {
+				_, _ = io.WriteString(w, `{"count":2}`)
+			} else {
+				_, _ = io.WriteString(w, `{"active_tasks":3,"queued_tasks":1}`)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	defer releaseOnce.Do(func() { close(releaseGlobal) })
+
+	// projectReady is deliberately separate from the request-start channels:
+	// project discovery must complete before the count wave can begin.
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLI(c, &bytes.Buffer{}, "", []string{"status"}, false, false)
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-globalStarted:
+		case <-time.After(time.Second):
+			t.Fatal("global status checks did not start")
+		}
+	}
+	select {
+	case <-projectReady:
+	case <-time.After(time.Second):
+		t.Fatal("project discovery did not complete")
+	}
+	select {
+	case <-countsStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first scoped count did not start while global checks were blocked")
+	}
+	select {
+	case <-countsStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second scoped count did not start while global checks were blocked")
+	}
+	releaseOnce.Do(func() { close(releaseGlobal) })
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("status failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("status did not complete after releasing global checks")
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+}
+
+func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t *testing.T) {
+	started := make(chan string, 4)
+	canceled := make(chan string, 4)
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts":
+			if strings.HasPrefix(r.URL.Path, "/api/alerts/") || strings.HasPrefix(r.URL.Path, "/api/tasks/") {
+				if got := r.URL.RawQuery; got != "project_id=p1" {
+					t.Errorf("%s query = %q, want exact selected project_id", r.URL.Path, got)
+				}
+			}
+			started <- r.URL.Path
+			<-r.Context().Done()
+			canceled <- r.URL.Path
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, &bytes.Buffer{}, "", []string{"status"}, false, false)
+	}()
+	seen := make(map[string]bool, 4)
+	for len(seen) < 4 {
+		select {
+		case path := <-started:
+			seen[path] = true
+		case <-time.After(time.Second):
+			t.Fatalf("not every global/scoped request started: %v", seen)
+		}
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("canceled status returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled status did not return promptly")
+	}
+	canceledSeen := make(map[string]bool, 4)
+	for len(canceledSeen) < 4 {
+		select {
+		case path := <-canceled:
+			canceledSeen[path] = true
+		case <-time.After(time.Second):
+			t.Fatalf("not every started request observed cancellation: %v", canceledSeen)
+		}
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("canceled status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+}
+
+func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *testing.T) {
+	started := make(chan string, 4)
+	canceled := make(chan string, 4)
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts":
+			started <- r.URL.Path
+			<-r.Context().Done()
+			canceled <- r.URL.Path
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, &bytes.Buffer{}, "", []string{"status"}, false, false)
+	}()
+	seen := make(map[string]bool, 4)
+	for len(seen) < 4 {
+		select {
+		case path := <-started:
+			seen[path] = true
+		case <-time.After(2 * time.Second):
+			t.Fatalf("not every global/scoped request started: %v", seen)
+		}
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("deadline status error = %v, want context deadline exceeded", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("deadline status did not return promptly")
+	}
+	canceledSeen := make(map[string]bool, 4)
+	for len(canceledSeen) < 4 {
+		select {
+		case path := <-canceled:
+			canceledSeen[path] = true
+		case <-time.After(time.Second):
+			t.Fatalf("not every started request observed deadline cancellation: %v", canceledSeen)
+		}
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("deadline status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+}
+
+func TestCLIStatusLatencyOverlapsBalancedAndSlowDiscovery(t *testing.T) {
+	cases := []struct {
+		name      string
+		project   time.Duration
+		global    time.Duration
+		counts    time.Duration
+		maxMedian time.Duration
+	}{
+		{name: "balanced critical path", project: 20 * time.Millisecond, global: 200 * time.Millisecond, counts: 80 * time.Millisecond, maxMedian: 250 * time.Millisecond},
+		{name: "slow project discovery", project: 240 * time.Millisecond, global: 20 * time.Millisecond, counts: 80 * time.Millisecond, maxMedian: 360 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				delay := tc.global
+				switch r.URL.Path {
+				case "/api/projects":
+					delay = tc.project
+				case "/api/alerts/pending-count", "/api/tasks/status-counts":
+					delay = tc.counts
+				}
+				time.Sleep(delay)
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/projects":
+					_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+				case "/api/capacity/global":
+					_, _ = io.WriteString(w, `{"total_running":1,"max_workers":4,"available_slots":3}`)
+				case "/auth/me":
+					_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
+				case "/api/alerts/pending-count":
+					_, _ = io.WriteString(w, `{"count":1}`)
+				case "/api/tasks/status-counts":
+					_, _ = io.WriteString(w, `{"active_tasks":2,"queued_tasks":1}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const runs = 5
+			durations := make([]time.Duration, 0, runs)
+			for i := 0; i < runs; i++ {
+				start := time.Now()
+				if err := RunCLI(c, &bytes.Buffer{}, "", []string{"status"}, false, false); err != nil {
+					t.Fatalf("status run %d failed: %v", i+1, err)
+				}
+				durations = append(durations, time.Since(start))
+			}
+			slices.Sort(durations)
+			median := durations[len(durations)/2]
+			if median > tc.maxMedian {
+				t.Fatalf("median status latency = %s, want <= %s (durations: %v)", median, tc.maxMedian, durations)
+			}
+		})
 	}
 }
 
