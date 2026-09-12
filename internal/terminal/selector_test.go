@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -818,6 +819,10 @@ func TestSelectorResolvedTaskIdentitySurvivesFilteredSelection(t *testing.T) {
 		items:         items,
 	})
 	m = updated.(Model)
+	m = m.setSelectorFilter("matching task 0")
+	if got := m.selectorFilteredCount(); got != 10 {
+		t.Fatalf("filtered match count = %d, want 10", got)
+	}
 	for i := 0; i < 9; i++ {
 		m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	}
@@ -849,8 +854,17 @@ func TestSelectorItemReplacementInvalidatesFilterCache(t *testing.T) {
 		t.Fatalf("old filter count = %d, want 2", len(got))
 	}
 
+	oldSearch := m.selectorSearch
+	oldItemsBacking := m.selectorItems
+
 	updated, _ = m.handleSelector(selectorActiveMsg{title: "Items", command: "items open", forcePicker: true, items: newItems})
 	m = updated.(Model)
+	if m.selectorSearch == nil || &m.selectorSearch[0] == &oldSearch[0] {
+		t.Fatal("replacement retained the old selector search backing array")
+	}
+	if len(m.selectorItems) == 0 || &m.selectorItems[0] == &oldItemsBacking[0] {
+		t.Fatal("replacement retained the old selector item backing array")
+	}
 	if m.selectorFilter != "" || m.selectorFilteredFor != "" || m.selectorMatchIndexes != nil {
 		t.Fatalf("replacement retained filter cache: filter=%q cached=%q indexes=%v", m.selectorFilter, m.selectorFilteredFor, m.selectorMatchIndexes)
 	}
@@ -884,6 +898,34 @@ func TestSelectorRepeatedFilterChangesKeepBoundedMatchCache(t *testing.T) {
 	if m.selectorItems != nil || m.selectorSearch != nil || m.selectorMatchIndexes != nil || m.selectorFilteredFor != "" {
 		t.Fatalf("clear retained selector state: items=%d search=%d indexes=%d cached=%q",
 			len(m.selectorItems), len(m.selectorSearch), len(m.selectorMatchIndexes), m.selectorFilteredFor)
+	}
+}
+
+func TestSelectorRepeatedFilterChangesDoNotGrowHeap(t *testing.T) {
+	m := benchmarkSelectorFilterModel(10000)
+	filters := []string{"s", "sy", "synthetic", "synthetic task", "group-099", "not-present", ""}
+	for _, filter := range filters {
+		m = m.setSelectorFilter(filter)
+	}
+
+	runtime.GC()
+	runtime.KeepAlive(m)
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	for cycle := 0; cycle < 100; cycle++ {
+		for _, filter := range filters {
+			m = m.setSelectorFilter(filter)
+		}
+	}
+
+	runtime.GC()
+	runtime.KeepAlive(m)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	const maxRetainedHeapGrowth = 4 << 20
+	if growth := int64(after.HeapAlloc) - int64(before.HeapAlloc); growth > maxRetainedHeapGrowth {
+		t.Fatalf("repeated filter changes retained %d bytes, want no more than %d", growth, maxRetainedHeapGrowth)
 	}
 }
 
