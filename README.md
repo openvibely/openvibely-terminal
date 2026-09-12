@@ -77,6 +77,7 @@ Common commands include:
 |---|---|
 | `/tasks` | Inspect and manage tasks, threads, and completion goals. See the task-goal lifecycle examples below. |
 | `/alerts` | Review alerts, including selected bulk read/delete actions |
+| `/skills` | Manage reusable skills; `skills always <skill>` and `skills load <skill>` are equivalent names for automatic loading |
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
 | `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |

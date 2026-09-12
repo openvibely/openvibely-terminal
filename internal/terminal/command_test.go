@@ -1114,6 +1114,18 @@ func TestHelpListsEveryRegisteredCommand(t *testing.T) {
 	}
 }
 
+func TestSkillsHelpDocumentsEquivalentAutomaticLoadingAliases(t *testing.T) {
+	detail := renderCommandHelp(skillsCommand())
+	for _, want := range []string{
+		"skills always|load <skill>",
+		"skills load retry-logic",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("skills help missing %q:\n%s", want, detail)
+		}
+	}
+}
+
 // Listing action names isn't enough to use a command, so every command with
 // actions must also spell out their concrete syntax. VISION.md "Friendly By
 // Default" further requires examples, not only syntax — so every command with

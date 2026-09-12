@@ -173,6 +173,7 @@ Commands take a resource, an optional action, and arguments:
 /alerts read-bulk a1b2 "Release approval"     mark selected alerts read
 /alerts delete-bulk a1b2 "Release approval"   delete selected alerts (confirm)
 /skills add notes | writes release notes
+/skills load notes
 /tasks move Refactor active   move a task between columns
 /tasks goal Refactor | all checks pass
 /tasks goal pause Refactor
@@ -187,6 +188,15 @@ Commands take a resource, an optional action, and arguments:
 /schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false
 /schedule edit "Daily repeat report" repeat daily interval 5
 /schedule edit a1b2c3 repeat hourly
+```
+
+`/skills always <skill>` and `/skills load <skill>` are equivalent project-scoped
+names for marking a skill for automatic loading. The same syntax is available in
+one-shot mode by omitting the leading slash and selecting the project explicitly:
+
+```bash
+/skills load retry-logic
+openvibely-terminal -project demo skills load retry-logic
 ```
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
@@ -221,7 +231,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `show`, `read`, `read-bulk`, `approve`, `reject`, `dismiss`, `delete`, `delete-bulk`, `read-all`, `clear` |
-| `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always` |
+| `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always`, `load` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
