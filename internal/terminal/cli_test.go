@@ -1596,7 +1596,7 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 		}
 	}))
 	defer srv.Close()
-	defer releaseOnce.Do(func() { close(releaseGlobal) })
+	defer func() { releaseOnce.Do(func() { close(releaseGlobal) }) }()
 
 	// projectReady is deliberately separate from the request-start channels:
 	// project discovery must complete before the count wave can begin.
