@@ -691,7 +691,14 @@ func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool)
 			return payload, rawPayload, false
 		}
 		valueStart := skipCLIJSONSpace(raw, pos+1)
-		valueEnd, ok := scanCLIJSONValue(raw, valueStart, 0)
+		var valueEnd int
+		knownRawString := (strings.EqualFold(key, "message") || strings.EqualFold(key, "completed_output")) &&
+			valueStart < len(raw) && raw[valueStart] == '"'
+		if knownRawString {
+			valueEnd, ok = scanCLIJSONCanonicalString(raw, valueStart)
+		} else {
+			valueEnd, ok = scanCLIJSONValue(raw, valueStart, 0)
+		}
 		if !ok {
 			return payload, rawPayload, false
 		}
@@ -710,11 +717,10 @@ func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool)
 		case strings.EqualFold(key, "category"):
 			_ = json.Unmarshal(value, &payload.Category)
 		case strings.EqualFold(key, "message"):
-			if len(value) > 0 && value[0] == '"' {
-				if !isCLIJSONCanonicalString(value) {
-					return payload, rawPayload, false
-				}
+			if knownRawString {
 				rawPayload.Message = value
+			} else {
+				_ = json.Unmarshal(value, &payload.Message)
 			}
 		case strings.EqualFold(key, "exec_id"):
 			_ = json.Unmarshal(value, &payload.ExecID)
@@ -723,11 +729,10 @@ func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool)
 		case strings.EqualFold(key, "agent_name"):
 			_ = json.Unmarshal(value, &payload.AgentName)
 		case strings.EqualFold(key, "completed_output"):
-			if len(value) > 0 && value[0] == '"' {
-				if !isCLIJSONCanonicalString(value) {
-					return payload, rawPayload, false
-				}
+			if knownRawString {
 				rawPayload.CompletedOutput = value
+			} else {
+				_ = json.Unmarshal(value, &payload.CompletedOutput)
 			}
 		case strings.EqualFold(key, "queued"):
 			_ = json.Unmarshal(value, &payload.Queued)
@@ -792,52 +797,54 @@ func scanCLIJSONString(raw []byte, pos int) (int, bool) {
 	return pos, false
 }
 
-func isCLIJSONCanonicalString(raw []byte) bool {
-	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return false
+func scanCLIJSONCanonicalString(raw []byte, pos int) (int, bool) {
+	if pos >= len(raw) || raw[pos] != '"' {
+		return pos, false
 	}
-	if !utf8.Valid(raw) {
-		return false
-	}
-	// A string without escapes is already in the spelling emitted by
-	// encoding/json; RawMessage embedding will handle HTML and line-separator
-	// escaping while it writes the value.
-	if bytes.IndexByte(raw, 0x5c) < 0 {
-		return true
-	}
-	for i := 1; i < len(raw)-1; i++ {
-		switch raw[i] {
+	for pos++; pos < len(raw); pos++ {
+		switch raw[pos] {
 		case '"':
-			return false
+			return pos + 1, true
 		case 0x5c:
-			i++
-			if i >= len(raw)-1 {
-				return false
+			pos++
+			if pos >= len(raw) {
+				return pos, false
 			}
-			switch raw[i] {
+			switch raw[pos] {
 			case '"', 0x5c, 'b', 'f', 'n', 'r', 't':
 			case 'u':
-				if i+4 >= len(raw)-1 || !isCLIJSONHex(raw[i+1]) || !isCLIJSONHex(raw[i+2]) ||
-					!isCLIJSONHex(raw[i+3]) || !isCLIJSONHex(raw[i+4]) {
-					return false
+				if pos+4 >= len(raw) || !isCLIJSONHex(raw[pos+1]) || !isCLIJSONHex(raw[pos+2]) ||
+					!isCLIJSONHex(raw[pos+3]) || !isCLIJSONHex(raw[pos+4]) {
+					return pos, false
 				}
-				for j := i + 1; j <= i+4; j++ {
-					if raw[j] >= 'A' && raw[j] <= 'F' {
-						return false
+				for i := pos + 1; i <= pos+4; i++ {
+					if raw[i] >= 'A' && raw[i] <= 'F' {
+						return pos, false
 					}
 				}
-				code := uint16(cliJSONHexValue(raw[i+1])<<12 | cliJSONHexValue(raw[i+2])<<8 |
-					cliJSONHexValue(raw[i+3])<<4 | cliJSONHexValue(raw[i+4]))
+				code := uint16(cliJSONHexValue(raw[pos+1])<<12 | cliJSONHexValue(raw[pos+2])<<8 |
+					cliJSONHexValue(raw[pos+3])<<4 | cliJSONHexValue(raw[pos+4]))
 				if !isCLIJSONCanonicalUnicodeEscape(code) {
-					return false
+					return pos, false
 				}
-				i += 4
+				pos += 4
 			default:
-				return false
+				return pos, false
+			}
+		default:
+			if raw[pos] < 0x20 {
+				return pos, false
+			}
+			if raw[pos] >= 0x80 {
+				_, size := utf8.DecodeRune(raw[pos:])
+				if size == 1 {
+					return pos, false
+				}
+				pos += size - 1
 			}
 		}
 	}
-	return true
+	return pos, false
 }
 
 func cliJSONHexValue(c byte) uint16 {
