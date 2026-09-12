@@ -699,6 +699,125 @@ func TestProjectsDeleteRefreshFailureDoesNotReportDeletionFailureOrRetainID(t *t
 	}
 }
 
+func TestProjectsDeleteSanitizesBackendErrorPreservingClassification(t *testing.T) {
+	const hostileMessage = "delete rejected \x1b[31mproject\x1b[0m token=super-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/projects/p1" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": hostileMessage})
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "Demo"
+	m.projects = []client.Project{{ID: "p1", Name: "Demo"}}
+	m = confirmDestructive(t, m, "/projects delete p1")
+
+	out := transcript(m)
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "super-secret") {
+		t.Fatalf("backend deletion error was not terminal-safe:\n%q", out)
+	}
+	if !strings.Contains(out, "server error (500): delete rejected") {
+		t.Fatalf("sanitized backend deletion error missing:\n%s", out)
+	}
+	if m.authRequired || m.connReachableError || m.connInvalidServerURL {
+		t.Fatalf("backend deletion error changed connection classification: auth=%t reachable=%t invalid=%t", m.authRequired, m.connReachableError, m.connInvalidServerURL)
+	}
+	cause := &client.HTTPStatusError{StatusCode: http.StatusInternalServerError, Message: hostileMessage}
+	wrapped := terminalSafeProjectDeletionError(cause)
+	if !client.IsReachableError(wrapped) || client.IsAuthRequired(wrapped) || client.IsTransportError(wrapped) {
+		t.Fatalf("safe deletion error lost reachable classification: %v", wrapped)
+	}
+}
+
+func TestProjectsDeleteAuthRefreshEntersRecoveryWithoutFailingDeletion(t *testing.T) {
+	var refreshes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/projects/p1":
+			w.Header().Set("HX-Redirect", "/tasks?project_id=p2")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			refreshes++
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"do not expose this body"}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "Demo"
+	m.projects = []client.Project{{ID: "p1", Name: "Demo"}, {ID: "p2", Name: "Remaining"}}
+	m = confirmDestructive(t, m, "/projects delete p1")
+
+	if refreshes != 1 {
+		t.Fatalf("catalog refreshes = %d, want one", refreshes)
+	}
+	if !m.authRequired || m.connected {
+		t.Fatalf("auth refresh state = authRequired:%t connected:%t, want recovery", m.authRequired, m.connected)
+	}
+	if m.selectedID == "p1" {
+		t.Fatal("deleted project remained selected after auth refresh failure")
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "deleted project") || !strings.Contains(out, "project catalog refresh unavailable (authentication)") {
+		t.Fatalf("auth refresh output did not distinguish committed deletion:\n%s", out)
+	}
+	for _, entry := range m.log {
+		if entry.role == "error" {
+			t.Fatalf("auth-only refresh failure became a fatal deletion error: %+v", entry)
+		}
+	}
+}
+
+func TestProjectsDeleteIgnoresUnexpectedRedirectAndRefreshesCatalog(t *testing.T) {
+	var refreshes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete && r.URL.Path == "/projects/p1":
+			w.Header().Set("HX-Redirect", "/not-a-project-page/%zz?project_id=p2")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			refreshes++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p2","name":"Remaining"}]}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "Demo"
+	m.projects = []client.Project{{ID: "p1", Name: "Demo"}}
+	m = confirmDestructive(t, m, "/projects delete p1")
+
+	if refreshes != 1 {
+		t.Fatalf("catalog refreshes = %d, want one after successful delete", refreshes)
+	}
+	if m.selectedID != "p2" || m.selectedName != "Remaining" {
+		t.Fatalf("active project = %q/%q, want refreshed catalog fallback p2", m.selectedID, m.selectedName)
+	}
+	if strings.Contains(transcript(m), "delete project: ") {
+		t.Fatalf("unexpected redirect was reported as deletion failure:\n%s", transcript(m))
+	}
+}
+
 func TestEmptyProjectCommandsOfferCreationGuidance(t *testing.T) {
 	for _, line := range []string{"/projects", "/project"} {
 		t.Run(line, func(t *testing.T) {

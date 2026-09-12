@@ -1503,7 +1503,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = false
 		if msg.err != nil {
-			m.handleCompletedRequestError(msg.err)
+			m.handleCompletedRequestError(terminalSafeProjectDeletionError(msg.err))
 			return m, nil
 		}
 
@@ -1524,6 +1524,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			selected, _ = projectAfterDeletion(remaining, msg.projectID, msg.backendSelectedID)
 		}
 		m.setActiveProject(selected)
+		if client.IsAuthRequired(msg.refreshErr) {
+			m.markAuthRequiredQuiet()
+		}
 
 		body, err := projectDeleteActionOutput(msg, selected)
 		if err != nil {
@@ -3102,6 +3105,18 @@ func truncatePrefix(s string, n int) string {
 }
 
 func (m *Model) markAuthRequired() {
+	m.markAuthRequiredWithMessage(true)
+}
+
+// markAuthRequiredQuiet enters the same auth/session recovery state as a normal
+// auth failure without adding a fatal transcript entry. It is used after a
+// mutation has already succeeded when only a best-effort follow-up refresh
+// reports that the session expired.
+func (m *Model) markAuthRequiredQuiet() {
+	m.markAuthRequiredWithMessage(false)
+}
+
+func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
 	// Preserve any accepted stream bytes before auth invalidation advances the
 	// stream generation and makes its queued cadence render stale.
 	m.flushChatStreamOutput()
@@ -3112,8 +3127,8 @@ func (m *Model) markAuthRequired() {
 	m.connErr = ""
 	m.connInvalidServerURL = false
 	m.connReachableError = false
-	// A send without an accepted ID cannot be correlated after the session
-	// epoch changes. An accepted turn remains resumable through its polling ID.
+	// A send without an accepted ID cannot be correlated after the session epoch
+	// changes. An accepted turn remains resumable through its polling ID.
 	if m.chatSubmissionPending && m.pendingMsgID == "" {
 		m.clearPendingChat()
 	} else if m.pendingMsgID != "" {
@@ -3131,7 +3146,7 @@ func (m *Model) markAuthRequired() {
 	// still running. Invalidate every in-flight check before it can clear the
 	// sign-in-required state.
 	m.invalidateConnectionChecks()
-	if !wasRequired {
+	if appendMessage && !wasRequired {
 		m.append(entry{role: "error", text: authRecoveryMessage(m.client.BaseURL())})
 	}
 }

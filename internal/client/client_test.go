@@ -142,9 +142,12 @@ func TestDeleteProjectAcceptsMissingSelectionHintAndLocation(t *testing.T) {
 		name     string
 		location string
 		want     string
+		htmx     bool
 	}{
 		{name: "missing hint", location: "", want: ""},
 		{name: "ordinary redirect", location: "/tasks?project_id=location-project", want: "location-project"},
+		{name: "unexpected redirect path is advisory", location: "/projects?project_id=ignored-project", want: ""},
+		{name: "malformed redirect is advisory", location: "/tasks/%zz", want: "", htmx: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -152,9 +155,17 @@ func TestDeleteProjectAcceptsMissingSelectionHintAndLocation(t *testing.T) {
 					t.Fatalf("request = %s %s, want DELETE /projects/p1", r.Method, r.URL.Path)
 				}
 				if tc.location != "" {
-					w.Header().Set("Location", tc.location)
+					if tc.htmx {
+						w.Header().Set("HX-Redirect", tc.location)
+					} else {
+						w.Header().Set("Location", tc.location)
+					}
 				}
-				w.WriteHeader(http.StatusSeeOther)
+				if tc.htmx {
+					w.WriteHeader(http.StatusOK)
+				} else {
+					w.WriteHeader(http.StatusSeeOther)
+				}
 			}))
 
 			selected, err := c.DeleteProjectWithSelection(context.Background(), "p1")

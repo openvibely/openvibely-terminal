@@ -7390,6 +7390,21 @@ func projectReferenceErrorTier(projects []client.Project, ref string) int {
 	return best
 }
 
+type projectDeletionSafeError struct {
+	cause   error
+	message string
+}
+
+func (e projectDeletionSafeError) Error() string { return e.message }
+func (e projectDeletionSafeError) Unwrap() error { return e.cause }
+
+func terminalSafeProjectDeletionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return projectDeletionSafeError{cause: err, message: safeConnectionDiagnostic(err)}
+}
+
 func terminalSafeProjectSettingsError(err error) error {
 	if err == nil || client.IsAuthRequired(err) || client.IsTransportError(err) {
 		return err

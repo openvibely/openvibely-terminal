@@ -400,11 +400,11 @@ func projectIDFromDeletionRedirect(redirect string) (string, error) {
 		return "", nil
 	}
 	u, err := url.Parse(redirect)
-	if err != nil {
-		return "", fmt.Errorf("delete project: invalid backend redirect: %w", err)
-	}
-	if u.Path != "/tasks" {
-		return "", fmt.Errorf("delete project: unexpected backend redirect path %q", u.Path)
+	if err != nil || u.Path != "/tasks" {
+		// Deletion has already succeeded. Redirects only provide an optional
+		// selection hint, so malformed or unrelated hints must not turn the
+		// mutation into a reported failure or prevent a catalog refresh.
+		return "", nil
 	}
 	return strings.TrimSpace(u.Query().Get("project_id")), nil
 }
