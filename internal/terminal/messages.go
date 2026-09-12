@@ -128,13 +128,17 @@ type chatStreamReconnectMsg struct {
 // resultMsg is the generic outcome of a slash command: a rendered block to
 // append to the transcript, or an error.
 type resultMsg struct {
-	sessionGeneration uint64
-	projectGeneration uint64
-	title             string // optional heading
-	body              string
-	err               error
-	refreshTaskID     string
-	refreshProjectID  string
+	sessionGeneration  uint64
+	projectGeneration  uint64
+	title              string // optional heading
+	body               string
+	err                error
+	refreshTaskID      string
+	refreshProjectID   string
+	taskSteerResult    bool
+	steerProjectID     string
+	steerThreadID      string
+	steerOpenRequestID uint64
 }
 
 type agentDeleteTargetMsg struct {

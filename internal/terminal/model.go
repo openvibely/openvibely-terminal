@@ -675,6 +675,12 @@ func (m *Model) acceptsSSEGeneration(generation int) bool {
 	return m.sseGeneration == generation
 }
 
+func (m Model) acceptsTaskSteerResult(msg resultMsg) bool {
+	return msg.steerProjectID != "" && msg.steerProjectID == m.selectedID &&
+		msg.steerThreadID == m.threadID &&
+		msg.steerOpenRequestID == m.threadOpenRequestID
+}
+
 func (m Model) acceptsSSEEvent(ev client.Event) bool {
 	var scope struct {
 		ProjectID string `json:"project_id"`
@@ -1545,6 +1551,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resultMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale command response from an older session or project
+		}
+		if msg.taskSteerResult && !m.acceptsTaskSteerResult(msg) {
+			return m, nil // steering result belongs to a view that is no longer current
 		}
 		m.busy = false
 		if msg.err != nil {

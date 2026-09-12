@@ -293,16 +293,23 @@ func (m Model) runTaskSteer(c *client.Client, projectID, target, message string)
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
+	result := resultMsg{
+		title:              "Tasks",
+		taskSteerResult:    true,
+		steerProjectID:     m.selectedID,
+		steerThreadID:      m.threadID,
+		steerOpenRequestID: m.threadOpenRequestID,
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
 		defer cancel()
 		task, err := resolveTask(ctx, c, projectID, target)
 		if err != nil {
-			return resultMsg{title: "Tasks", err: err}
+			result.err = err
+			return result
 		}
-		body, err := steerTaskThread(ctx, c, task, projectID, message)
-		result := resultMsg{title: "Tasks", body: body, err: err}
-		if err == nil {
+		result.body, result.err = steerTaskThread(ctx, c, task, projectID, message)
+		if result.err == nil {
 			result.refreshTaskID = task.ID
 			result.refreshProjectID = projectID
 		}

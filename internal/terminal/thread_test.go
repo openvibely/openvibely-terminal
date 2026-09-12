@@ -133,6 +133,66 @@ func TestRunningOpenTaskRefreshesAfterSteeringMutation(t *testing.T) {
 	}
 }
 
+func TestDelayedTaskSteerResultIgnoredAfterNavigation(t *testing.T) {
+	const activeThread = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
+	const steeringRow = `<div data-thread-input-id="input-1" data-task-id="t-1" data-input-mode="steering">Steering pending Stop now</div>`
+	const oneTaskBoard = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Alpha">Alpha</a></div>`
+	const twoTaskBoard = `<div>
+		<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Alpha">Alpha</a></div>
+		<div data-task-id="t-2" data-task-status="running" data-task-category="active"><a href="/tasks/t-2" title="Beta">Beta</a></div>
+	</div>`
+
+	t.Run("leave to project chat", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/tasks":                  oneTaskBoard,
+			"/tasks/t-1/thread":       activeThread,
+			"/tasks/t-1/thread/steer": steeringRow,
+		})
+		m = runLine(t, m, "/tasks open Alpha")
+		started, steerCmd := m.runCommand("/tasks steer Alpha | Stop now")
+		m = started.(Model)
+		left, _ := m.runCommand("/chat")
+		m = left.(Model)
+		updated, _ := m.Update(steerCmd())
+		m = updated.(Model)
+
+		if rec.count("POST", "/tasks/t-1/thread/steer") != 1 {
+			t.Fatalf("steering request count = %d, calls:\n%s", rec.count("POST", "/tasks/t-1/thread/steer"), rec.all())
+		}
+		if strings.Contains(stripANSI(transcript(m)), "steering pending") {
+			t.Fatalf("delayed steering acknowledgement polluted project chat:\n%s", transcript(m))
+		}
+		if m.busy {
+			t.Fatal("stale steering result changed project-chat busy state")
+		}
+	})
+
+	t.Run("open another task", func(t *testing.T) {
+		m, _ := dispatchModel(t, map[string]string{
+			"/tasks":                  twoTaskBoard,
+			"/tasks/t-1/thread":       activeThread,
+			"/tasks/t-1/thread/steer": steeringRow,
+			"/tasks/t-2/thread":       `<div>beta thread</div>`,
+		})
+		m = runLine(t, m, "/tasks open Alpha")
+		started, steerCmd := m.runCommand("/tasks steer Alpha | Stop now")
+		m = started.(Model)
+		m = runLine(t, m, "/tasks open Beta")
+		updated, _ := m.Update(steerCmd())
+		m = updated.(Model)
+
+		if m.threadID != "t-2" {
+			t.Fatalf("current thread = %q, want t-2", m.threadID)
+		}
+		if strings.Contains(stripANSI(transcript(m)), "steering pending") {
+			t.Fatalf("delayed steering acknowledgement polluted another task thread:\n%s", transcript(m))
+		}
+		if !strings.Contains(stripANSI(transcript(m)), "beta thread") {
+			t.Fatalf("current task thread was not preserved:\n%s", transcript(m))
+		}
+	})
+}
+
 func TestRunningOpenTaskRefreshesFromMatchingSSEAndCompletes(t *testing.T) {
 	m, rec := threadModel(t)
 	m = runLine(t, m, "/tasks open Refactor")
