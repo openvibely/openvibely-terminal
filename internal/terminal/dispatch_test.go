@@ -4481,6 +4481,116 @@ func TestScheduleEditResolvesNonFirstCardAndPreservesOmittedSettings(t *testing.
 	}
 }
 
+func TestScheduleEditUsesFirstUnmarkedRepeatOptionAndExactProjectScope(t *testing.T) {
+	cases := []struct {
+		name       string
+		repeatHTML string
+		wantRepeat string
+	}{
+		{
+			name:       "one unmarked option",
+			repeatHTML: `<option value="daily">Daily</option>`,
+			wantRepeat: "daily",
+		},
+		{
+			name:       "multiple unmarked options",
+			repeatHTML: `<option value="weekly">Weekly</option><option value="monthly">Monthly</option>`,
+			wantRepeat: "weekly",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotForm url.Values
+			var puts int
+			detail := `<div id="task-detail-content"><div data-project-id="p1"></div>` +
+				`<div data-schedule-id="s-1"><form hx-put="/schedules/s-1?project_id=p1">` +
+				`<input name="run_at" value="2026-01-02T09:00"><select name="repeat_type">` + tc.repeatHTML +
+				`</select><input name="repeat_interval" value="2"><input type="checkbox" name="clear_context_on_start" checked>` +
+				`</form></div></div>`
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "p1" {
+					t.Errorf("project_id = %q, want p1 for %s %s", got, r.Method, r.URL.Path)
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					_, _ = io.WriteString(w, `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Nightly</div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+					if r.URL.Query().Get("tab") != "schedules" {
+						t.Errorf("task detail tab = %q, want schedules", r.URL.Query().Get("tab"))
+					}
+					_, _ = io.WriteString(w, detail)
+				case r.Method == http.MethodPut && r.URL.Path == "/schedules/s-1":
+					puts++
+					_ = r.ParseForm()
+					gotForm = r.PostForm
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, "/schedule edit s-1 interval 4")
+			want := url.Values{"run_at": {"2026-01-02T09:00"}, "repeat_type": {tc.wantRepeat}, "repeat_interval": {"4"}, "clear_context_on_start": {"true"}}
+			if puts != 1 || !reflect.DeepEqual(gotForm, want) {
+				t.Fatalf("puts = %d, form = %#v, want one PUT with %#v; transcript:\n%s", puts, gotForm, want, stripANSI(transcript(m)))
+			}
+		})
+	}
+}
+
+func TestScheduleEditRejectsIncompleteFormWithoutMutation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "missing run_at",
+			body: `<select name="repeat_type"><option value="daily" selected>Daily</option></select><input name="repeat_interval" value="1">`,
+			want: "schedule run_at is required",
+		},
+		{
+			name: "missing repeat_interval",
+			body: `<input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select>`,
+			want: "schedule repeat_interval is required",
+		},
+		{
+			name: "empty repeat select",
+			body: `<input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"></select><input name="repeat_interval" value="1">`,
+			want: "schedule repeat_type select has no options",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var puts int
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "p1" {
+					t.Errorf("project_id = %q, want p1", got)
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+					_, _ = io.WriteString(w, `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1">Nightly</div></div>`)
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+					_, _ = io.WriteString(w, `<div id="task-detail-content"><div data-schedule-id="s-1"><form hx-put="/schedules/s-1?project_id=p1">`+tc.body+`</form></div></div>`)
+				case r.Method == http.MethodPut:
+					puts++
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			})
+			m = runLine(t, m, "/schedule edit s-1 interval 4")
+			out := stripANSI(transcript(m))
+			if puts != 0 {
+				t.Fatalf("incomplete form sent %d PUT requests; transcript:\n%s", puts, out)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 func TestScheduleEditRejectsMalformedEarlierOptionsBeforeRequests(t *testing.T) {
 	cases := []struct {
 		name string

@@ -123,6 +123,9 @@ func findNode(n *html.Node, match func(*html.Node) bool) *html.Node {
 
 // attr returns the value of the named attribute, or "".
 func attr(n *html.Node, name string) string {
+	if n == nil {
+		return ""
+	}
 	for _, a := range n.Attr {
 		if a.Key == name {
 			return a.Val

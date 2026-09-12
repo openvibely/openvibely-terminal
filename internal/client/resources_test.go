@@ -2395,6 +2395,85 @@ func TestCreateScheduleRejectsInvalidRepeatIntervalsBeforeRequest(t *testing.T) 
 	}
 }
 
+func TestGetTaskScheduleUsesFirstRepeatOptionWhenUnmarked(t *testing.T) {
+	cases := []struct {
+		name       string
+		repeatHTML string
+		wantRepeat string
+	}{
+		{
+			name:       "one unmarked option",
+			repeatHTML: `<option value="daily">Daily</option>`,
+			wantRepeat: "daily",
+		},
+		{
+			name:       "multiple unmarked options",
+			repeatHTML: `<option value="weekly">Weekly</option><option value="monthly">Monthly</option>`,
+			wantRepeat: "weekly",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `<div data-schedule-id="s1"><form action="/schedules/s1?project_id=p1">` +
+				`<input name="run_at" value="2026-01-02T09:00"><select name="repeat_type">` + tc.repeatHTML +
+				`</select><input name="repeat_interval" value="2"><input type="checkbox" name="clear_context_on_start" checked></form></div>`
+			c := htmlServer(t, body)
+			config, err := c.GetTaskSchedule(context.Background(), "p1", "t1", "s1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if config.RepeatType != tc.wantRepeat || config.RepeatInterval != 2 || !config.ClearContextOnStart {
+				t.Fatalf("config = %#v, want repeat %q, interval 2, and clear context", config, tc.wantRepeat)
+			}
+		})
+	}
+}
+
+func TestGetTaskScheduleRejectsIncompleteRequiredFields(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "missing run_at",
+			body: `<input name="run_at"><select name="repeat_type"><option value="daily" selected>Daily</option></select><input name="repeat_interval" value="1">`,
+			want: "schedule run_at is required",
+		},
+		{
+			name: "missing repeat_interval",
+			body: `<input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"><option value="daily" selected>Daily</option></select>`,
+			want: "schedule repeat_interval is required",
+		},
+		{
+			name: "empty repeat select",
+			body: `<input name="run_at" value="2026-01-02T09:00"><select name="repeat_type"></select><input name="repeat_interval" value="1">`,
+			want: "schedule repeat_type select has no options",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := htmlServer(t, `<div data-schedule-id="s1"><form action="/schedules/s1?project_id=p1">`+tc.body+`</form></div>`)
+			var config ScheduleConfig
+			var err error
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						t.Fatalf("GetTaskSchedule panicked: %v", recovered)
+					}
+				}()
+				config, err = c.GetTaskSchedule(context.Background(), "p1", "t1", "s1")
+			}()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+			if config != (ScheduleConfig{}) {
+				t.Fatalf("config = %#v on parse failure, want zero config", config)
+			}
+		})
+	}
+}
+
 func TestScheduleEditLoadsSelectedConfigAndPreservesOmittedValues(t *testing.T) {
 	const detail = `<div id="task-detail-content" data-project-id="p2">
 		<div data-schedule-id="s1"><form action="/schedules/s1?project_id=p2">

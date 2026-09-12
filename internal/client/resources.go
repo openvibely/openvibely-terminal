@@ -1716,26 +1716,50 @@ func (c *Client) GetTaskSchedule(ctx context.Context, projectID, taskID, schedul
 	if updateURL.Path != "/schedules/"+scheduleID {
 		return ScheduleConfig{}, fmt.Errorf("schedule update form identity does not match %q", scheduleID)
 	}
-	inputValue := func(name string) string {
+	inputValue := func(name string) (string, bool) {
 		n := findNode(form, func(n *html.Node) bool { return attr(n, "name") == name && attr(n, "type") != "hidden" })
-		return attr(n, "value")
+		if n == nil {
+			return "", false
+		}
+		return attr(n, "value"), true
 	}
-	selectValue := func(name string) string {
+	selectValue := func(name string) (string, error) {
 		selectNode := findNode(form, func(n *html.Node) bool { return n.Data == "select" && attr(n, "name") == name })
 		if selectNode == nil {
-			return ""
+			return "", fmt.Errorf("schedule %s select is required", name)
+		}
+		options := findAll(selectNode, func(n *html.Node) bool { return n.Data == "option" })
+		if len(options) == 0 {
+			return "", fmt.Errorf("schedule %s select has no options", name)
 		}
 		selected := findNode(selectNode, func(n *html.Node) bool { return n.Data == "option" && hasHTMLAttr(n, "selected") })
-		return attr(selected, "value")
+		if selected == nil {
+			// HTML form controls use the first option when no option has an
+			// explicit selected marker. Keep that browser behavior deterministic.
+			selected = options[0]
+		}
+		return attr(selected, "value"), nil
 	}
-	interval, err := strconv.Atoi(inputValue("repeat_interval"))
+	runAt, ok := inputValue("run_at")
+	if !ok || strings.TrimSpace(runAt) == "" {
+		return ScheduleConfig{}, fmt.Errorf("schedule run_at is required")
+	}
+	intervalValue, ok := inputValue("repeat_interval")
+	if !ok || strings.TrimSpace(intervalValue) == "" {
+		return ScheduleConfig{}, fmt.Errorf("schedule repeat_interval is required")
+	}
+	interval, err := strconv.Atoi(intervalValue)
 	if err != nil {
 		return ScheduleConfig{}, fmt.Errorf("invalid schedule repeat interval")
+	}
+	repeat, err := selectValue("repeat_type")
+	if err != nil {
+		return ScheduleConfig{}, err
 	}
 	checkedClear := findNode(form, func(n *html.Node) bool {
 		return attr(n, "name") == "clear_context_on_start" && attr(n, "type") == "checkbox" && hasHTMLAttr(n, "checked")
 	}) != nil
-	config := ScheduleConfig{ID: scheduleID, TaskID: taskID, ProjectID: projectID, RunAt: inputValue("run_at"), RepeatType: selectValue("repeat_type"), RepeatInterval: interval, ClearContextOnStart: checkedClear}
+	config := ScheduleConfig{ID: scheduleID, TaskID: taskID, ProjectID: projectID, RunAt: runAt, RepeatType: repeat, RepeatInterval: interval, ClearContextOnStart: checkedClear}
 	if err := validateScheduleValues(config.RunAt, config.RepeatType, config.RepeatInterval); err != nil {
 		return ScheduleConfig{}, fmt.Errorf("invalid existing schedule: %w", err)
 	}
