@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -614,6 +615,30 @@ type cliEventRecord struct {
 	Data            json.RawMessage `json:"data,omitempty"`
 }
 
+type cliEventRawPayload struct {
+	Message         json.RawMessage
+	CompletedOutput json.RawMessage
+}
+
+// cliEventJSONRecord keeps potentially large string values in their validated
+// raw form so JSON mode does not decode and re-encode them unnecessarily.
+type cliEventJSONRecord struct {
+	Event           string          `json:"event"`
+	Type            string          `json:"type"`
+	ProjectID       string          `json:"project_id"`
+	TaskID          string          `json:"task_id"`
+	TaskName        string          `json:"task_name"`
+	Status          string          `json:"status"`
+	Category        string          `json:"category"`
+	Message         json.RawMessage `json:"message"`
+	ExecID          string          `json:"exec_id"`
+	Source          string          `json:"source"`
+	AgentName       string          `json:"agent_name"`
+	CompletedOutput json.RawMessage `json:"completed_output"`
+	Queued          bool            `json:"queued"`
+	Data            json.RawMessage `json:"data,omitempty"`
+}
+
 // cliEventPayload covers the fields used by the backend's task and chat SSE
 // payloads. Unknown fields are preserved in cliEventRecord.Data.
 type cliEventPayload struct {
@@ -629,6 +654,338 @@ type cliEventPayload struct {
 	AgentName       string `json:"agent_name"`
 	CompletedOutput string `json:"completed_output"`
 	Queued          bool   `json:"queued"`
+}
+
+// scanCLIEventPayload validates one JSON value and extracts only the fields
+// needed by the CLI envelope. Unknown values are skipped without decoding them;
+// malformed input is handled by the compatibility fallback in formatCLIEventBytes.
+func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool) {
+	var payload cliEventPayload
+	var rawPayload cliEventRawPayload
+	pos := skipCLIJSONSpace(raw, 0)
+	if pos >= len(raw) {
+		return payload, rawPayload, false
+	}
+	if raw[pos] != '{' {
+		end, ok := scanCLIJSONValue(raw, pos, 0)
+		return payload, rawPayload, ok && skipCLIJSONSpace(raw, end) == len(raw)
+	}
+
+	pos++
+	pos = skipCLIJSONSpace(raw, pos)
+	if pos < len(raw) && raw[pos] == '}' {
+		return payload, rawPayload, skipCLIJSONSpace(raw, pos+1) == len(raw)
+	}
+	for {
+		keyStart := pos
+		keyEnd, ok := scanCLIJSONString(raw, pos)
+		if !ok {
+			return payload, rawPayload, false
+		}
+		var key string
+		if err := json.Unmarshal(raw[keyStart:keyEnd], &key); err != nil {
+			return payload, rawPayload, false
+		}
+		pos = skipCLIJSONSpace(raw, keyEnd)
+		if pos >= len(raw) || raw[pos] != ':' {
+			return payload, rawPayload, false
+		}
+		valueStart := skipCLIJSONSpace(raw, pos+1)
+		valueEnd, ok := scanCLIJSONValue(raw, valueStart, 0)
+		if !ok {
+			return payload, rawPayload, false
+		}
+		value := raw[valueStart:valueEnd]
+		switch {
+		case strings.EqualFold(key, "type"):
+			_ = json.Unmarshal(value, &payload.Type)
+		case strings.EqualFold(key, "project_id"):
+			_ = json.Unmarshal(value, &payload.ProjectID)
+		case strings.EqualFold(key, "task_id"):
+			_ = json.Unmarshal(value, &payload.TaskID)
+		case strings.EqualFold(key, "task_name"):
+			_ = json.Unmarshal(value, &payload.TaskName)
+		case strings.EqualFold(key, "status"):
+			_ = json.Unmarshal(value, &payload.Status)
+		case strings.EqualFold(key, "category"):
+			_ = json.Unmarshal(value, &payload.Category)
+		case strings.EqualFold(key, "message"):
+			if len(value) > 0 && value[0] == '"' {
+				if !isCLIJSONCanonicalString(value) {
+					return payload, rawPayload, false
+				}
+				rawPayload.Message = value
+			}
+		case strings.EqualFold(key, "exec_id"):
+			_ = json.Unmarshal(value, &payload.ExecID)
+		case strings.EqualFold(key, "source"):
+			_ = json.Unmarshal(value, &payload.Source)
+		case strings.EqualFold(key, "agent_name"):
+			_ = json.Unmarshal(value, &payload.AgentName)
+		case strings.EqualFold(key, "completed_output"):
+			if len(value) > 0 && value[0] == '"' {
+				if !isCLIJSONCanonicalString(value) {
+					return payload, rawPayload, false
+				}
+				rawPayload.CompletedOutput = value
+			}
+		case strings.EqualFold(key, "queued"):
+			_ = json.Unmarshal(value, &payload.Queued)
+		}
+		pos = skipCLIJSONSpace(raw, valueEnd)
+		if pos >= len(raw) {
+			return payload, rawPayload, false
+		}
+		switch raw[pos] {
+		case ',':
+			pos = skipCLIJSONSpace(raw, pos+1)
+		case '}':
+			return payload, rawPayload, skipCLIJSONSpace(raw, pos+1) == len(raw)
+		default:
+			return payload, rawPayload, false
+		}
+	}
+}
+
+func skipCLIJSONSpace(raw []byte, pos int) int {
+	for pos < len(raw) {
+		switch raw[pos] {
+		case 0x20, 0x09, 0x0a, 0x0d:
+			pos++
+		default:
+			return pos
+		}
+	}
+	return pos
+}
+
+func scanCLIJSONString(raw []byte, pos int) (int, bool) {
+	if pos >= len(raw) || raw[pos] != '"' {
+		return pos, false
+	}
+	for pos++; pos < len(raw); pos++ {
+		switch raw[pos] {
+		case '"':
+			return pos + 1, true
+		case '\\':
+			pos++
+			if pos >= len(raw) {
+				return pos, false
+			}
+			switch raw[pos] {
+			case '"', '\\', '/', 'b', 'f', 'n', 'r', 't':
+			case 'u':
+				if pos+4 >= len(raw) || !isCLIJSONHex(raw[pos+1]) || !isCLIJSONHex(raw[pos+2]) ||
+					!isCLIJSONHex(raw[pos+3]) || !isCLIJSONHex(raw[pos+4]) {
+					return pos, false
+				}
+				pos += 4
+			default:
+				return pos, false
+			}
+		default:
+			if raw[pos] < 0x20 {
+				return pos, false
+			}
+		}
+	}
+	return pos, false
+}
+
+func isCLIJSONCanonicalString(raw []byte) bool {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return false
+	}
+	// A string without escapes is already in the spelling emitted by
+	// encoding/json; RawMessage embedding will handle HTML and line-separator
+	// escaping while it writes the value.
+	if bytes.IndexByte(raw, 0x5c) < 0 {
+		return true
+	}
+	if !utf8.Valid(raw) {
+		return false
+	}
+	for i := 1; i < len(raw)-1; i++ {
+		switch raw[i] {
+		case '"':
+			return false
+		case 0x5c:
+			i++
+			if i >= len(raw)-1 {
+				return false
+			}
+			switch raw[i] {
+			case '"', 0x5c, 'b', 'f', 'n', 'r', 't':
+			case 'u':
+				if i+4 >= len(raw) || !isCLIJSONHex(raw[i+1]) || !isCLIJSONHex(raw[i+2]) ||
+					!isCLIJSONHex(raw[i+3]) || !isCLIJSONHex(raw[i+4]) {
+					return false
+				}
+				code := uint16(cliJSONHexValue(raw[i+1])<<12 | cliJSONHexValue(raw[i+2])<<8 |
+					cliJSONHexValue(raw[i+3])<<4 | cliJSONHexValue(raw[i+4]))
+				if !isCLIJSONCanonicalUnicodeEscape(code) {
+					return false
+				}
+				i += 4
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func cliJSONHexValue(c byte) uint16 {
+	switch {
+	case c >= '0' && c <= '9':
+		return uint16(c - '0')
+	case c >= 'a' && c <= 'f':
+		return uint16(c-'a') + 10
+	default:
+		return uint16(c-'A') + 10
+	}
+}
+
+func isCLIJSONCanonicalUnicodeEscape(code uint16) bool {
+	if code <= 0x1f {
+		switch code {
+		case 0x08, 0x09, 0x0a, 0x0c, 0x0d:
+			return false
+		default:
+			return true
+		}
+	}
+	return code == 0x26 || code == 0x3c || code == 0x3e || code == 0x2028 || code == 0x2029
+}
+
+func isCLIJSONHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func scanCLIJSONValue(raw []byte, pos, depth int) (int, bool) {
+	if depth > 1000 || pos >= len(raw) {
+		return pos, false
+	}
+	switch raw[pos] {
+	case '"':
+		return scanCLIJSONString(raw, pos)
+	case '{':
+		return scanCLIJSONObject(raw, pos, depth+1)
+	case '[':
+		return scanCLIJSONArray(raw, pos, depth+1)
+	case 't':
+		return pos + 4, pos+4 <= len(raw) && raw[pos+1] == 'r' && raw[pos+2] == 'u' && raw[pos+3] == 'e'
+	case 'f':
+		return pos + 5, pos+5 <= len(raw) && raw[pos+1] == 'a' && raw[pos+2] == 'l' && raw[pos+3] == 's' && raw[pos+4] == 'e'
+	case 'n':
+		return pos + 4, pos+4 <= len(raw) && raw[pos+1] == 'u' && raw[pos+2] == 'l' && raw[pos+3] == 'l'
+	default:
+		if raw[pos] == '-' || raw[pos] >= '0' && raw[pos] <= '9' {
+			return scanCLIJSONNumber(raw, pos)
+		}
+	}
+	return pos, false
+}
+
+func scanCLIJSONObject(raw []byte, pos, depth int) (int, bool) {
+	pos = skipCLIJSONSpace(raw, pos+1)
+	if pos < len(raw) && raw[pos] == '}' {
+		return pos + 1, true
+	}
+	for {
+		var ok bool
+		pos, ok = scanCLIJSONString(raw, pos)
+		if !ok {
+			return pos, false
+		}
+		pos = skipCLIJSONSpace(raw, pos)
+		if pos >= len(raw) || raw[pos] != ':' {
+			return pos, false
+		}
+		var end int
+		end, ok = scanCLIJSONValue(raw, skipCLIJSONSpace(raw, pos+1), depth)
+		if !ok {
+			return end, false
+		}
+		pos = skipCLIJSONSpace(raw, end)
+		if pos >= len(raw) {
+			return pos, false
+		}
+		if raw[pos] == '}' {
+			return pos + 1, true
+		}
+		if raw[pos] != ',' {
+			return pos, false
+		}
+		pos = skipCLIJSONSpace(raw, pos+1)
+	}
+}
+
+func scanCLIJSONArray(raw []byte, pos, depth int) (int, bool) {
+	pos = skipCLIJSONSpace(raw, pos+1)
+	if pos < len(raw) && raw[pos] == ']' {
+		return pos + 1, true
+	}
+	for {
+		end, ok := scanCLIJSONValue(raw, pos, depth)
+		if !ok {
+			return end, false
+		}
+		pos = skipCLIJSONSpace(raw, end)
+		if pos >= len(raw) {
+			return pos, false
+		}
+		if raw[pos] == ']' {
+			return pos + 1, true
+		}
+		if raw[pos] != ',' {
+			return pos, false
+		}
+		pos = skipCLIJSONSpace(raw, pos+1)
+	}
+}
+
+func scanCLIJSONNumber(raw []byte, pos int) (int, bool) {
+	start := pos
+	if raw[pos] == '-' {
+		pos++
+		if pos >= len(raw) {
+			return pos, false
+		}
+	}
+	if raw[pos] == '0' {
+		pos++
+	} else if raw[pos] >= '1' && raw[pos] <= '9' {
+		for pos < len(raw) && raw[pos] >= '0' && raw[pos] <= '9' {
+			pos++
+		}
+	} else {
+		return pos, false
+	}
+	if pos < len(raw) && raw[pos] == '.' {
+		pos++
+		fractionStart := pos
+		for pos < len(raw) && raw[pos] >= '0' && raw[pos] <= '9' {
+			pos++
+		}
+		if fractionStart == pos {
+			return pos, false
+		}
+	}
+	if pos < len(raw) && (raw[pos] == 'e' || raw[pos] == 'E') {
+		pos++
+		if pos < len(raw) && (raw[pos] == '+' || raw[pos] == '-') {
+			pos++
+		}
+		exponentStart := pos
+		for pos < len(raw) && raw[pos] >= '0' && raw[pos] <= '9' {
+			pos++
+		}
+		if exponentStart == pos {
+			return pos, false
+		}
+	}
+	return pos, pos > start
 }
 
 // runCLIEvents consumes exactly one project-scoped stream. eventsOn is the
@@ -667,7 +1024,7 @@ func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectI
 				events = nil
 				continue
 			}
-			line, include, formatErr := formatCLIEvent(ev, projectID, jsonOutput)
+			line, include, formatErr := formatCLIEventBytes(ev, projectID, jsonOutput)
 			if formatErr != nil {
 				cancel()
 				drainCLIEventChannels(events, errs)
@@ -676,7 +1033,12 @@ func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectI
 			if !include {
 				continue
 			}
-			if _, writeErr := fmt.Fprintln(out, line); writeErr != nil {
+			if _, writeErr := out.Write(line); writeErr != nil {
+				cancel()
+				drainCLIEventChannels(events, errs)
+				return fmt.Errorf("writing live event output: %w", writeErr)
+			}
+			if _, writeErr := io.WriteString(out, "\n"); writeErr != nil {
 				cancel()
 				drainCLIEventChannels(events, errs)
 				return fmt.Errorf("writing live event output: %w", writeErr)
@@ -744,14 +1106,36 @@ func drainCLIEventChannels(events <-chan client.Event, errs <-chan error) {
 }
 
 func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string, bool, error) {
+	encoded, include, err := formatCLIEventBytes(ev, projectID, jsonOutput)
+	if err != nil {
+		return "", false, err
+	}
+	return string(encoded), include, nil
+}
+
+func formatCLIEventBytes(ev client.Event, projectID string, jsonOutput bool) ([]byte, bool, error) {
 	var payload cliEventPayload
-	payloadErr := json.Unmarshal(ev.Data, &payload)
+	var rawPayload cliEventRawPayload
+	var payloadErr error
+	fastPayload := false
+	if jsonOutput && len(ev.Data) > 4096 {
+		var parsed bool
+		payload, rawPayload, parsed = scanCLIEventPayload(ev.Data)
+		fastPayload = parsed
+		if !parsed {
+			payload = cliEventPayload{}
+			rawPayload = cliEventRawPayload{}
+			payloadErr = json.Unmarshal(ev.Data, &payload)
+		}
+	} else {
+		payloadErr = json.Unmarshal(ev.Data, &payload)
+	}
 	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
 	if strings.TrimSpace(payload.TaskID) != "" && payload.ProjectID == "" {
-		return "", false, nil
+		return nil, false, nil
 	}
 	if payload.ProjectID != "" && payload.ProjectID != projectID {
-		return "", false, nil
+		return nil, false, nil
 	}
 	if payload.ProjectID == "" {
 		payload.ProjectID = projectID
@@ -779,14 +1163,53 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 		record.Type = record.Event
 	}
 	if jsonOutput {
+		if fastPayload && payloadErr == nil {
+			emptyString := json.RawMessage{'"', '"'}
+			message := rawPayload.Message
+			if len(message) == 0 {
+				message = emptyString
+			}
+			completedOutput := rawPayload.CompletedOutput
+			if len(completedOutput) == 0 {
+				completedOutput = emptyString
+			}
+			jsonRecord := cliEventJSONRecord{
+				Event:           record.Event,
+				Type:            record.Type,
+				ProjectID:       record.ProjectID,
+				TaskID:          record.TaskID,
+				TaskName:        record.TaskName,
+				Status:          record.Status,
+				Category:        record.Category,
+				Message:         message,
+				ExecID:          record.ExecID,
+				Source:          record.Source,
+				AgentName:       record.AgentName,
+				CompletedOutput: completedOutput,
+				Queued:          record.Queued,
+			}
+			if len(message) <= 4096 && len(completedOutput) <= 4096 {
+				encoded, err := formatCLIEventJSONRecord(jsonRecord, ev.Data)
+				if err != nil {
+					return nil, false, fmt.Errorf("encoding live event: %w", err)
+				}
+				return encoded, true, nil
+			}
+			jsonRecord.Data = ev.Data
+			encoded, err := json.Marshal(jsonRecord)
+			if err != nil {
+				return nil, false, fmt.Errorf("encoding live event: %w", err)
+			}
+			return encoded, true, nil
+		}
 		if payloadErr == nil || json.Valid(ev.Data) {
 			record.Data = ev.Data
 		}
 		encoded, err := json.Marshal(record)
 		if err != nil {
-			return "", false, fmt.Errorf("encoding live event: %w", err)
+			return nil, false, fmt.Errorf("encoding live event: %w", err)
 		}
-		return string(encoded), true, nil
+		return encoded, true, nil
 	}
 
 	parts := []string{"event=" + strconv.Quote(record.Event)}
@@ -816,7 +1239,83 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 			parts = append(parts, "data="+strconv.Quote(string(ev.Data)))
 		}
 	}
-	return strings.Join(parts, " "), true, nil
+	return []byte(strings.Join(parts, " ")), true, nil
+}
+
+func formatCLIEventJSONRecord(record cliEventJSONRecord, raw []byte) ([]byte, error) {
+	record.Data = nil
+	metadata, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	encoded := make([]byte, 0, len(metadata)+len(raw)+len(`,"data":`))
+	encoded = append(encoded, metadata[:len(metadata)-1]...)
+	encoded = append(encoded, `,"data":`...)
+	if cliJSONNeedsNormalization(raw) {
+		encoded = appendCompactCLIJSON(encoded, raw)
+	} else {
+		encoded = append(encoded, raw...)
+	}
+	return append(encoded, '}'), nil
+}
+
+func cliJSONNeedsNormalization(raw []byte) bool {
+	return bytes.IndexByte(raw, 0x20) >= 0 ||
+		bytes.IndexByte(raw, 0x09) >= 0 ||
+		bytes.IndexByte(raw, 0x0a) >= 0 ||
+		bytes.IndexByte(raw, 0x0d) >= 0 ||
+		bytes.IndexByte(raw, '<') >= 0 ||
+		bytes.IndexByte(raw, '>') >= 0 ||
+		bytes.IndexByte(raw, '&') >= 0 ||
+		bytes.IndexByte(raw, 0xe2) >= 0
+}
+
+// appendCompactCLIJSON matches encoding/json's RawMessage embedding behavior
+// for the valid JSON values passed by formatCLIEventBytes.
+func appendCompactCLIJSON(dst, raw []byte) []byte {
+	inString := false
+	escaped := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if inString {
+			switch {
+			case escaped:
+				dst = append(dst, c)
+				escaped = false
+			case c == 0x5c:
+				dst = append(dst, c)
+				escaped = true
+			case c == '"':
+				dst = append(dst, c)
+				inString = false
+			case c == '<':
+				dst = append(dst, '\\', 'u', '0', '0', '3', 'c')
+			case c == '>':
+				dst = append(dst, '\\', 'u', '0', '0', '3', 'e')
+			case c == '&':
+				dst = append(dst, '\\', 'u', '0', '0', '2', '6')
+			case c == 0xe2 && i+2 < len(raw) && raw[i+1] == 0x80 && raw[i+2]&^1 == 0xa8:
+				if raw[i+2] == 0xa8 {
+					dst = append(dst, '\\', 'u', '2', '0', '2', '8')
+				} else {
+					dst = append(dst, '\\', 'u', '2', '0', '2', '9')
+				}
+				i += 2
+			default:
+				dst = append(dst, c)
+			}
+			continue
+		}
+
+		switch c {
+		case 0x20, 0x09, 0x0a, 0x0d:
+			continue
+		case '"':
+			inString = true
+		}
+		dst = append(dst, c)
+	}
+	return dst
 }
 
 func compactJSON(raw []byte) json.RawMessage {

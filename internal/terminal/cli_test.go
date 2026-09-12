@@ -6859,12 +6859,20 @@ func TestCLITaskReviewsAddWithoutReferenceReturnsUsageWithoutMutation(t *testing
 // cliEventWriter makes it possible to assert that event lines are written while
 // a foreground stream is still running, rather than only after it terminates.
 type cliEventWriter struct {
-	lines chan string
+	lines   chan string
+	pending string
 }
 
 func (w *cliEventWriter) Write(p []byte) (int, error) {
-	line := string(p)
-	w.lines <- line
+	w.pending += string(p)
+	for {
+		idx := strings.IndexByte(w.pending, '\n')
+		if idx < 0 {
+			break
+		}
+		w.lines <- w.pending[:idx+1]
+		w.pending = w.pending[idx+1:]
+	}
 	return len(p), nil
 }
 
@@ -7033,26 +7041,366 @@ func TestFormatCLIEventJSONRetainsValidDataAfterPayloadDecodeError(t *testing.T)
 	}
 }
 
-func BenchmarkFormatCLIEventRecognizedJSON(b *testing.B) {
-	for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
-		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
-			prefix := []byte(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"running","padding":"`)
-			suffix := []byte(`"}`)
-			raw := make([]byte, 0, size)
-			raw = append(raw, prefix...)
-			raw = append(raw, bytes.Repeat([]byte{'x'}, size-len(prefix)-len(suffix))...)
-			raw = append(raw, suffix...)
-			event := client.Event{Name: "task_status_changed", Data: raw}
+func TestFormatCLIEventJSONFastPayloadDecodeMatchesEncodingJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{
+			name: "case insensitive fields and nested unknown data",
+			raw:  json.RawMessage(` { "TYPE": "chat_new_message", "PROJECT_ID": "p1", "TASK_ID": "t1", "MESSAGE": "hello", "unknown": { "project_id": "foreign", "items": [1, true, null] } } `),
+		},
+		{
+			name: "duplicate values retain standard scalar behavior",
+			raw:  json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","message":"first","message":42,"message":"last","queued":"wrong","queued":true}`),
+		},
+		{
+			name: "valid primitive retains raw data",
+			raw: json.RawMessage(`
+ [ { "project_id": "foreign" }, "text" ]
+`),
+		},
+	}
 
-			b.ReportAllocs()
-			b.SetBytes(int64(len(raw)))
-			b.ResetTimer()
-			for b.Loop() {
-				if _, ok, err := formatCLIEvent(event, "p1", true); err != nil || !ok {
-					b.Fatalf("formatCLIEvent() include = %t, error = %v", ok, err)
-				}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload cliEventPayload
+			if !json.Valid(tc.raw) {
+				t.Fatal("fixture is not valid JSON")
+			}
+			_ = json.Unmarshal(tc.raw, &payload)
+			payload.ProjectID = strings.TrimSpace(payload.ProjectID)
+			if strings.TrimSpace(payload.TaskID) != "" && payload.ProjectID == "" {
+				t.Fatal("fixture unexpectedly describes an unscoped task")
+			}
+			if payload.ProjectID == "" {
+				payload.ProjectID = "p1"
+			}
+			eventName := strings.TrimSpace(payload.Type)
+			if eventName == "" {
+				eventName = "future_event"
+			}
+			wantRecord := cliEventRecord{
+				Event:           eventName,
+				Type:            strings.TrimSpace(payload.Type),
+				ProjectID:       payload.ProjectID,
+				TaskID:          payload.TaskID,
+				TaskName:        payload.TaskName,
+				Status:          payload.Status,
+				Category:        payload.Category,
+				Message:         payload.Message,
+				ExecID:          payload.ExecID,
+				Source:          payload.Source,
+				AgentName:       payload.AgentName,
+				CompletedOutput: payload.CompletedOutput,
+				Queued:          payload.Queued,
+				Data:            tc.raw,
+			}
+			if wantRecord.Type == "" {
+				wantRecord.Type = wantRecord.Event
+			}
+			want, err := json.Marshal(wantRecord)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, include, err := formatCLIEvent(client.Event{Name: eventName, Data: tc.raw}, "p1", true)
+			if err != nil || !include {
+				t.Fatalf("formatCLIEvent() include=%t error=%v", include, err)
+			}
+			if got != string(want) {
+				t.Fatalf("fast payload output differs from encoding/json: got %s, want %s", got, want)
 			}
 		})
+	}
+}
+
+func TestFormatCLIEventJSONMalformedPayloadFallsBackToDecodedMetadata(t *testing.T) {
+	raw := json.RawMessage(`{"type":"chat_new_message","project_id":"p1","message":"partial",`)
+	var payload cliEventPayload
+	decodeErr := json.Unmarshal(raw, &payload)
+	if decodeErr == nil {
+		t.Fatal("fixture unexpectedly decoded successfully")
+	}
+	wantRecord := cliEventRecord{
+		Event:     "chat_new_message",
+		Type:      "chat_new_message",
+		ProjectID: "p1",
+		Message:   payload.Message,
+	}
+	want, err := json.Marshal(wantRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, include, err := formatCLIEvent(client.Event{Name: "chat_new_message", Data: raw}, "p1", true)
+	if err != nil || !include {
+		t.Fatalf("formatCLIEvent() include=%t error=%v", include, err)
+	}
+	if got != string(want) {
+		t.Fatalf("malformed fallback = %s, want %s", got, want)
+	}
+}
+
+func TestFormatCLIEventJSONLargeNoncanonicalStringUsesStandardFallback(t *testing.T) {
+	raw := append([]byte(`{"type":"chat_new_message","project_id":"p1","message":"`), bytes.Repeat([]byte(`\u0061`), 1024)...)
+	raw = append(raw, []byte(`"}`)...)
+	var payload cliEventPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	wantRecord := cliEventRecord{
+		Event:     "chat_new_message",
+		Type:      "chat_new_message",
+		ProjectID: "p1",
+		Message:   payload.Message,
+		Data:      raw,
+	}
+	want, err := json.Marshal(wantRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, include, err := formatCLIEvent(client.Event{Name: "chat_new_message", Data: raw}, "p1", true)
+	if err != nil || !include {
+		t.Fatalf("formatCLIEvent() include=%t error=%v", include, err)
+	}
+	if got != string(want) {
+		t.Fatalf("noncanonical string fallback = %s, want %s", got, want)
+	}
+}
+
+func TestFormatCLIEventJSONLargeUTF8AndEscapedPayloads(t *testing.T) {
+	largeText := strings.Repeat("café <&> \u2028\u2029 \\\"quoted\\\"\\n", 4096)
+	encodedText, err := json.Marshal(largeText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep actual UTF-8 and HTML-sensitive bytes in the input so the formatter,
+	// rather than the fixture encoder, is responsible for output escaping.
+	encodedText = bytes.ReplaceAll(encodedText, []byte(`\u003c`), []byte("<"))
+	encodedText = bytes.ReplaceAll(encodedText, []byte(`\u003e`), []byte(">"))
+	encodedText = bytes.ReplaceAll(encodedText, []byte(`\u0026`), []byte("&"))
+	encodedText = bytes.ReplaceAll(encodedText, []byte(`\u2028`), []byte("\u2028"))
+	encodedText = bytes.ReplaceAll(encodedText, []byte(`\u2029`), []byte("\u2029"))
+
+	cases := []struct {
+		name   string
+		nameOn string
+		raw    []byte
+	}{
+		{
+			name:   "chat",
+			nameOn: "chat_new_message",
+			raw: append(append([]byte(`{"type":"chat_new_message","message":`), encodedText...),
+				[]byte(`,"completed_output":"streamed","extra":{"kind":"chat"}}`)...),
+		},
+		{
+			name:   "task",
+			nameOn: "task_status_changed",
+			raw: append(append([]byte(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","task_name":`), encodedText...),
+				[]byte(`,"status":"running","details":[true,null,42]}`)...),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, include, err := formatCLIEvent(client.Event{Name: tc.nameOn, Data: tc.raw}, "p1", true)
+			if err != nil || !include {
+				t.Fatalf("formatCLIEvent() include=%t error=%v", include, err)
+			}
+
+			var payload cliEventPayload
+			if err := json.Unmarshal(tc.raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			wantRecord := cliEventRecord{
+				Event:           tc.nameOn,
+				Type:            payload.Type,
+				ProjectID:       payload.ProjectID,
+				TaskID:          payload.TaskID,
+				TaskName:        payload.TaskName,
+				Status:          payload.Status,
+				Category:        payload.Category,
+				Message:         payload.Message,
+				ExecID:          payload.ExecID,
+				Source:          payload.Source,
+				AgentName:       payload.AgentName,
+				CompletedOutput: payload.CompletedOutput,
+				Queued:          payload.Queued,
+				Data:            tc.raw,
+			}
+			if wantRecord.ProjectID == "" {
+				wantRecord.ProjectID = "p1"
+			}
+			want, err := json.Marshal(wantRecord)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != string(want) {
+				t.Fatalf("large JSON output differs from encoding/json oracle: got %d bytes, want %d", len(got), len(want))
+			}
+		})
+	}
+}
+
+func TestRunCLIEventsJSONPreservesScopeAndBurstOrder(t *testing.T) {
+	const stream = "event: chat_new_message\ndata: {\"type\":\"chat_new_message\",\"message\":\"first <&>\"}\n\n" +
+		"event: task_status_changed\ndata: {\"type\":\"task_status_changed\",\"project_id\":\"foreign\",\"task_id\":\"foreign-task\"}\n\n" +
+		"event: task_status_changed\ndata: {\"type\":\"task_status_changed\",\"project_id\":\"p1\",\"task_id\":\"selected-task\",\"status\":\"running\"}\n\n" +
+		"event: task_status_changed\ndata: {\"type\":\"task_status_changed\",\"task_id\":\"missing-project\"}\n\n" +
+		"event: future_event\ndata: {\"type\":\"future_event\",\"project_id\":\"p1\",\"message\":\"last\"}\n\n"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("stream project_id = %q, want p1", r.URL.Query().Get("project_id"))
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, stream)
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runCLIEvents(context.Background(), c, &out, "p1", true, true); err != nil {
+		t.Fatalf("runCLIEvents() error = %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("JSON lines = %d, want 3: %q", len(lines), out.String())
+	}
+	var records []struct {
+		Event     string          `json:"event"`
+		ProjectID string          `json:"project_id"`
+		TaskID    string          `json:"task_id"`
+		Message   string          `json:"message"`
+		Data      json.RawMessage `json:"data"`
+	}
+	for _, line := range lines {
+		var record struct {
+			Event     string          `json:"event"`
+			ProjectID string          `json:"project_id"`
+			TaskID    string          `json:"task_id"`
+			Message   string          `json:"message"`
+			Data      json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("invalid NDJSON line %q: %v", line, err)
+		}
+		records = append(records, record)
+	}
+	if records[0].Event != "chat_new_message" || records[0].ProjectID != "p1" || records[0].Message != "first <&>" {
+		t.Fatalf("first record = %#v", records[0])
+	}
+	if string(records[0].Data) != `{"type":"chat_new_message","message":"first \u003c\u0026\u003e"}` {
+		t.Fatalf("first raw data = %s", records[0].Data)
+	}
+	if records[1].TaskID != "selected-task" || records[1].ProjectID != "p1" || records[1].Event != "task_status_changed" {
+		t.Fatalf("selected task record = %#v", records[1])
+	}
+	if records[2].Event != "future_event" || records[2].ProjectID != "p1" {
+		t.Fatalf("last record = %#v", records[2])
+	}
+	if strings.Contains(out.String(), "foreign-task") || strings.Contains(out.String(), "missing-project") {
+		t.Fatalf("out-of-scope task was emitted: %s", out.String())
+	}
+	if strings.Index(out.String(), "chat_new_message") > strings.Index(out.String(), "selected-task") ||
+		strings.Index(out.String(), "selected-task") > strings.Index(out.String(), "future_event") {
+		t.Fatalf("burst order changed: %s", out.String())
+	}
+}
+
+func TestRunCLIEventsCancellationClosesStreamQuietly(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: chat_new_message\ndata: {\"type\":\"chat_new_message\",\"message\":\"before cancel\"}\n\n")
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cliEventWriter{lines: make(chan string, 1)}
+	done := make(chan error, 1)
+	go func() { done <- runCLIEvents(ctx, c, writer, "p1", true, true) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("event stream did not start")
+	}
+	select {
+	case line := <-writer.lines:
+		if !strings.Contains(line, "before cancel") {
+			t.Fatalf("output lost event before cancellation: %q", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("event was not emitted before cancellation")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runCLIEvents() cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runCLIEvents() did not stop after cancellation")
+	}
+}
+
+func cliEventBenchmarkPayload(size int, shape string) []byte {
+	var prefix, suffix []byte
+	switch shape {
+	case "recognized":
+		prefix = []byte(`{"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"running","padding":"`)
+		suffix = []byte(`"}`)
+	case "unknown":
+		prefix = []byte(`{"type":"future_event","project_id":"p1","message":"unknown","padding":"`)
+		suffix = []byte(`"}`)
+	case "chat":
+		prefix = []byte(`{"type":"chat_new_message","project_id":"","exec_id":"exec-1","source":"agent","agent_name":"Planner","message":"`)
+		suffix = []byte(`","completed_output":"reply","metadata":{"trace_id":"trace-1"}}`)
+	case "task":
+		prefix = []byte(`{"type":"task_status_changed","project_id":"p1","task_id":"task-1","task_name":"Deploy API","status":"running","category":"active","message":"`)
+		suffix = []byte(`","details":{"attempt":2,"labels":["deploy","api"]}}`)
+	default:
+		panic("unknown benchmark shape: " + shape)
+	}
+	if size < len(prefix)+len(suffix) {
+		panic("benchmark size is smaller than fixture")
+	}
+	return append(append(prefix, bytes.Repeat([]byte{'x'}, size-len(prefix)-len(suffix))...), suffix...)
+}
+
+func BenchmarkFormatCLIEventJSON(b *testing.B) {
+	for _, shape := range []string{"recognized", "unknown", "chat", "task"} {
+		for _, size := range []int{1 << 10, 64 << 10, 1 << 20} {
+			b.Run(fmt.Sprintf("%s/%dKiB", shape, size>>10), func(b *testing.B) {
+				raw := cliEventBenchmarkPayload(size, shape)
+				eventName := "task_status_changed"
+				if shape == "unknown" {
+					eventName = "future_event"
+				} else if shape == "chat" {
+					eventName = "chat_new_message"
+				}
+				event := client.Event{Name: eventName, Data: raw}
+
+				b.ReportAllocs()
+				b.SetBytes(int64(len(raw)))
+				b.ResetTimer()
+				for b.Loop() {
+					if _, ok, err := formatCLIEventBytes(event, "p1", true); err != nil || !ok {
+						b.Fatalf("formatCLIEventBytes() include = %t, error = %v", ok, err)
+					}
+				}
+			})
+		}
 	}
 }
 
