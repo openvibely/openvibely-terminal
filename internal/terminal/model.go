@@ -2643,7 +2643,11 @@ func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
 		// Once a task follow-up has been acknowledged, identity-less lifecycle and
 		// mirrored chat events cannot be attributed to that turn. Reject them before
 		// either the open-thread handler or generic /events display can mutate output.
-		return ev.Name != "task_status_changed" && ev.Name != "chat_new_message"
+		eventType := strings.TrimSpace(taskEvent.Type)
+		if eventType == "" {
+			eventType = strings.TrimSpace(ev.Name)
+		}
+		return eventType != "task_status_changed" && eventType != "chat_new_message"
 	}
 	if taskEvent.PendingInputID != "" && taskEvent.PendingInputID != m.pendingMsgID {
 		return false
