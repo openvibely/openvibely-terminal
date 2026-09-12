@@ -253,6 +253,97 @@ func TestCreateProject(t *testing.T) {
 	}
 }
 
+func TestCreateGitHubProjectSendsOnlyGitHubRepositoryFields(t *testing.T) {
+	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("HX-Request") != "true" {
+			t.Errorf("missing HX-Request header")
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if got, want := r.FormValue("name"), "Quoted, GitHub Project"; got != want {
+			t.Errorf("name = %q, want %q", got, want)
+		}
+		if got, want := r.FormValue("repo_source"), "github"; got != want {
+			t.Errorf("repo_source = %q, want %q", got, want)
+		}
+		if got, want := r.FormValue("repo_url"), repoURL; got != want {
+			t.Errorf("repo_url = %q, want %q", got, want)
+		}
+		if _, present := r.PostForm["repo_path"]; present {
+			t.Errorf("GitHub request unexpectedly included repo_path: %v", r.PostForm["repo_path"])
+		}
+		w.Header().Set("Location", "/tasks?project_id=github-project")
+		w.WriteHeader(http.StatusFound)
+	}))
+
+	project, err := c.CreateGitHubProject(context.Background(), "  Quoted, GitHub Project  ", "  "+repoURL+"  ")
+	if err != nil {
+		t.Fatalf("CreateGitHubProject: %v", err)
+	}
+	if project.ID != "github-project" || project.Name != "Quoted, GitHub Project" || project.Path != "" {
+		t.Fatalf("unexpected GitHub project: %+v", project)
+	}
+}
+
+func TestCreateGitHubProjectValidatesURLBeforeHTTP(t *testing.T) {
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	for _, tc := range []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "", url: "https://github.com/acme/repo", want: "project name is required"},
+		{name: "Project", url: "", want: "GitHub repository URL is required"},
+		{name: "Project", url: "   ", want: "GitHub repository URL is required"},
+	} {
+		if _, err := c.CreateGitHubProject(context.Background(), tc.name, tc.url); err == nil || err.Error() != tc.want {
+			t.Errorf("CreateGitHubProject(%q, %q) error = %v, want %q", tc.name, tc.url, err, tc.want)
+		}
+	}
+	if requests != 0 {
+		t.Errorf("GitHub validation made %d HTTP requests", requests)
+	}
+}
+
+func TestCreateGitHubProjectWorksWhenLocalPathsAreDisabled(t *testing.T) {
+	var sources []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		sources = append(sources, r.FormValue("repo_source"))
+		if r.FormValue("repo_source") == "local" {
+			w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"Local repository paths are disabled in this environment","status":"failed"}}`)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Location", "/tasks?project_id=github-project")
+		w.WriteHeader(http.StatusFound)
+	}))
+
+	if _, err := c.CreateProject(context.Background(), "Local Project", "/tmp/repo"); err == nil || !strings.Contains(err.Error(), "Local repository paths are disabled") {
+		t.Fatalf("local creation error = %v, want disabled-path failure", err)
+	}
+	project, err := c.CreateGitHubProject(context.Background(), "GitHub Project", "https://github.com/acme/repo")
+	if err != nil {
+		t.Fatalf("GitHub creation with disabled local paths: %v", err)
+	}
+	if project.ID != "github-project" {
+		t.Fatalf("GitHub project ID = %q, want github-project", project.ID)
+	}
+	if got, want := strings.Join(sources, ","), "local,github"; got != want {
+		t.Fatalf("repository sources = %q, want %q", got, want)
+	}
+}
+
 func TestCreateProjectAcceptsLocationRedirect(t *testing.T) {
 	var projectRequests, redirectedRequests int
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

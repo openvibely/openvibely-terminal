@@ -5288,6 +5288,116 @@ func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
 	}
 }
 
+func TestCLICreatesGitHubProjectWithQuotedNameAndOutputModes(t *testing.T) {
+	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		requests++
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if got, want := r.FormValue("repo_source"), "github"; got != want {
+			t.Errorf("repo_source = %q, want %q", got, want)
+		}
+		if got, want := r.FormValue("repo_url"), repoURL; got != want {
+			t.Errorf("repo_url = %q, want %q", got, want)
+		}
+		if _, present := r.PostForm["repo_path"]; present {
+			t.Errorf("GitHub creation included repo_path: %v", r.PostForm["repo_path"])
+		}
+		id := "github-project"
+		if r.FormValue("name") == "JSON, GitHub Project" {
+			id = "json-github-project"
+		}
+		w.Header().Set("Location", "/tasks?project_id="+id)
+		w.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "Quoted, Project", "--github-url", repoURL}, false, false); err != nil {
+		t.Fatalf("GitHub project creation failed: %v", err)
+	}
+	plain := out.String()
+	for _, want := range []string{"created project \"Quoted, Project\" from a GitHub repository", "project ID: github-project", "-project github-project"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("plain GitHub creation output missing %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "local-path") || strings.Contains(plain, "at \"") {
+		t.Fatalf("GitHub creation was rendered as a local-path project:\n%s", plain)
+	}
+
+	out.Reset()
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "JSON, GitHub Project", "--github-url", repoURL}, false, true); err != nil {
+		t.Fatalf("GitHub project JSON creation failed: %v", err)
+	}
+	var project client.Project
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &project); err != nil {
+		t.Fatalf("GitHub JSON output is invalid: %v\noutput: %s", err, out.String())
+	}
+	if project.ID != "json-github-project" || project.Name != "JSON, GitHub Project" || project.Path != "" {
+		t.Fatalf("unexpected GitHub JSON project: %+v", project)
+	}
+	if requests != 2 {
+		t.Fatalf("GitHub creation requests = %d, want 2", requests)
+	}
+}
+
+func TestCLIGitHubCreationErrorsAreActionableAndCredentialSafe(t *testing.T) {
+	const pat = "github_pat_super_secret_value"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		switch r.FormValue("repo_source") {
+		case "local":
+			w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"Local repository paths are disabled in this environment","status":"failed"}}`)
+			w.WriteHeader(http.StatusNoContent)
+		case "github":
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = io.WriteString(w, `{"error":"clone failed: GitHub authentication rejected `+pat+`"}`)
+		default:
+			t.Errorf("unexpected repo_source %q", r.FormValue("repo_source"))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localErr := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create", "Local", "Project", "/tmp/repo"}, false, false)
+	if localErr == nil || !strings.Contains(localErr.Error(), "Local repository paths are disabled") {
+		t.Fatalf("local-path-disabled error = %v", localErr)
+	}
+	githubErr := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create", "GitHub", "Project", "--github-url", "https://github.com/acme/repo"}, false, false)
+	if githubErr == nil {
+		t.Fatal("GitHub clone failure returned nil error")
+	}
+	message := githubErr.Error()
+	for _, want := range []string{"GitHub project creation failed", "Check the repository URL", "credentials are not shown"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("GitHub error missing %q: %v", want, githubErr)
+		}
+	}
+	for _, forbidden := range []string{pat, "Local repository paths are disabled", "\x1b", "\n", "\r"} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("GitHub error exposed %q: %q", forbidden, message)
+		}
+	}
+}
+
 func TestCLICreateProjectValidationAndBackendFailure(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

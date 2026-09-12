@@ -378,15 +378,31 @@ and tells you to press `Ctrl-C` in that monitoring process. Use interactive
 
 Create a project from the terminal without opening the browser. The backend owns
 and persists the project; after a successful creation it becomes the active
-project immediately:
+project immediately. Use the local-path form when local repository paths are
+enabled:
 
 ```
 /projects create demo /Users/me/src/demo
 /projects create My Project | C:\Users\me\src\my-project
 ```
 
-The pipe form separates the name from the repository path when either contains
-spaces. The same syntax works in one-shot mode (`openvibely-terminal projects create
+For a backend-managed clone, pass a GitHub URL instead:
+
+```
+/projects create "My GitHub Project" --github-url https://github.com/acme/demo
+openvibely-terminal projects create "My GitHub Project" --github-url https://github.com/acme/demo
+```
+
+The local form is `projects create <name> <path>`; the pipe form separates the
+name from the repository path when either contains spaces. The GitHub form is
+`projects create <name> --github-url <url>`; quote a multi-word name or URL when
+your shell requires it. The backend performs the clone and GitHub
+authentication, so this form remains available when local repository paths are
+disabled in the environment. Both forms select the backend-assigned project in
+the TUI, and one-shot CLI output supports plain text and `--json` project
+records.
+
+The same syntax works in one-shot mode (`openvibely-terminal projects create
 ...`); add `--json` for a machine-readable created-project record.
 
 Inspect or update an existing project's backend-owned settings without opening a
@@ -779,8 +795,10 @@ openvibely-terminal -project demo alerts read-bulk a1b2 "Release approval"
 openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release approval"
 openvibely-terminal -project demo analytics usage      # one analytics section
 openvibely-terminal -project demo chat "ship the docs" # ask the agent, print the reply
-openvibely-terminal projects create demo /Users/me/src/demo # create; output includes its backend ID
+openvibely-terminal projects create demo /Users/me/src/demo # local checkout; output includes backend ID
+openvibely-terminal projects create "GitHub Project" --github-url https://github.com/acme/demo # backend-managed GitHub clone
 openvibely-terminal --json projects create demo /Users/me/src/demo # JSON project record
+openvibely-terminal --json projects create "GitHub Project" --github-url https://github.com/acme/demo # JSON GitHub project record
 openvibely-terminal projects show demo                  # authoritative project settings
 openvibely-terminal projects edit demo --description "Local checkout" --max-workers 4
 openvibely-terminal --force projects edit demo --repository-source github --github-url https://github.com/acme/demo
@@ -827,6 +845,8 @@ $ openvibely-terminal help projects
   projects show <project>                     show authoritative project settings
   projects create <name> <path>                create and select a local-path project
   projects create <name> | <path>              use | when the name or path contains spaces
+  projects create <name> --github-url <url>    create and select a GitHub-backed project
+    quote a multi-word name or use | before --github-url
   projects edit <project> [options]            update only explicitly supplied settings
     --name <name> --description <text>
     --repository-source <local|github> --repository-path <path> --github-url <url>

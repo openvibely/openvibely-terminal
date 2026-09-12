@@ -1461,7 +1461,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // stale creation after a newer selection or list request
 		}
 		m.busy = false
-		if m.handleCompletedRequestError(msg.err) {
+		if msg.err != nil {
+			m.handleCompletedRequestError(terminalSafeProjectCreationError(msg.err, msg.repositorySource))
 			return m, nil
 		}
 		shouldReconnect := msg.startSSE || m.sseCancel != nil || m.sseRetryAfterProject
@@ -1482,13 +1483,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{
 				role: "result",
 				head: "Project",
-				text: fmt.Sprintf("created project %q at %q\nproject ID: %s\nnext: select it on the next CLI command with -project %s, for example: openvibely-terminal -project %s tasks", msg.project.Name, msg.project.Path, msg.project.ID, msg.project.ID, msg.project.ID),
+				text: projectCreationOutput(msg),
 			})
 		} else {
 			m.append(entry{
 				role: "result",
 				head: "Project",
-				text: fmt.Sprintf("created project %q at %q — active project selected\nnext: send a message or run %sprojects to inspect it", msg.project.Name, msg.project.Path, cmdPrefix),
+				text: projectCreationInteractiveOutput(msg),
 			})
 		}
 		if !m.authRequired && m.selectedID != "" && shouldReconnect {

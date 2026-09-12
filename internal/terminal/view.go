@@ -231,7 +231,7 @@ func (m Model) hint() string {
 		return "in task thread · messages reply to this task · /chat to exit · / for commands"
 	}
 	if m.selectedID == "" && m.projectsLoaded && len(m.projects) == 0 {
-		return "no projects yet · " + projectCreationCommand()
+		return "no projects yet · " + projectCreationGuidance()
 	}
 	return "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"
 }

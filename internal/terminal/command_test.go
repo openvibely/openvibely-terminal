@@ -246,6 +246,37 @@ func TestParseProjectCreateArgs(t *testing.T) {
 	}
 }
 
+func TestParseProjectCreateSpecGitHubForm(t *testing.T) {
+	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantName string
+	}{
+		{name: "quoted-name-shape", args: []string{"Quoted, Project", "--github-url", repoURL}, wantName: "Quoted, Project"},
+		{name: "pipe-separated-name", args: []string{"Quoted", "Project", "|", "--github-url", repoURL}, wantName: "Quoted Project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, ok := parseProjectCreateSpec(tc.args)
+			if !ok {
+				t.Fatalf("parseProjectCreateSpec(%v) rejected valid GitHub form", tc.args)
+			}
+			if spec.name != tc.wantName || spec.source != "github" || spec.location != repoURL {
+				t.Fatalf("parseProjectCreateSpec(%v) = %+v, want quoted name, github, %q", tc.args, spec, repoURL)
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"Project", "--github-url"},
+		{"Project", "--github-url", repoURL, "extra"},
+		{"Project", "--github-url", "", "--github-url", repoURL},
+	} {
+		if _, ok := parseProjectCreateSpec(args); ok {
+			t.Errorf("parseProjectCreateSpec(%v) accepted malformed GitHub form", args)
+		}
+	}
+}
+
 func TestRegistryCompletionAtEveryDepth(t *testing.T) {
 	cases := []struct {
 		input string
@@ -417,6 +448,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		"/projects cr":                                                             "/projects create ",
 		"/projects sh":                                                             "/projects show ",
 		"/projects de":                                                             "/projects delete ",
+		"/projects create My Project --g":                                          "/projects create My Project --github-url ",
 		"/projects edit demo --repository-s":                                       "/projects edit demo --repository-source ",
 		"/projects edit demo --repository-source g":                                "/projects edit demo --repository-source github ",
 		"/projects edit demo --name renamed --repository-s":                        "/projects edit demo --name renamed --repository-source ",
@@ -433,6 +465,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	for _, want := range []string{
 		"projects show <project>",
 		"projects create <name> <path>",
+		"projects create <name> --github-url <url>",
 		"projects edit <project> [options]",
 		"projects delete <project>",
 		"projects edit <project> | [options]",
@@ -463,6 +496,7 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		for _, want := range []string{
 			"projects delete demo",
 			"openvibely-terminal --force projects delete demo",
+			"projects create \"My GitHub Project\" --github-url https://github.com/acme/demo",
 			"backend-owned project data",
 		} {
 			if !strings.Contains(string(body), want) {

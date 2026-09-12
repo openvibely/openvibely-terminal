@@ -184,13 +184,22 @@ var commands []command
 var cmdPrefix = "/"
 
 const projectCreateCommand = "projects create <name> <path>"
+const projectCreateGitHubCommand = "projects create <name> --github-url <url>"
 
 func projectCreationCommand() string {
 	return cmdPrefix + projectCreateCommand
 }
 
+func projectCreationGitHubCommand() string {
+	return cmdPrefix + projectCreateGitHubCommand
+}
+
+func projectCreationGuidance() string {
+	return projectCreationCommand() + " or " + projectCreationGitHubCommand()
+}
+
 func noProjectsGuidance() string {
-	return "no projects yet — use " + projectCreationCommand()
+	return "no projects yet — use " + projectCreationGuidance()
 }
 
 func lookupCommand(name string) *command {

@@ -77,6 +77,15 @@ backend has multiple projects, select one with `-project <name|id>`.
 
 `projects delete <project>` requires the standard interactive confirmation (`Type 'yes' to confirm or Esc to cancel`). One-shot CLI deletion requires `--force` (or `-f`), and the backend remains authoritative for refusing deletion of the default project. Deletion removes the project and its backend-owned project data; after success, the terminal refreshes the catalog and selects the backend-selected remaining/default project when available.
 
+Create projects from either a local checkout or a GitHub repository:
+
+```text
+/projects create demo /Users/me/src/demo
+/projects create "My GitHub Project" --github-url https://github.com/acme/demo
+```
+
+The local form remains `projects create <name> <path>`; use `|` when an unquoted local name or path contains spaces, for example `/projects create My Project | C:\Users\me\src\my-project`. The GitHub form accepts a project name followed by `--github-url <url>` and supports the same quoting rules. The backend clones the GitHub repository and handles authentication, so GitHub-backed creation also works when local repository paths are disabled in the environment. After either form succeeds, the backend-assigned project ID is selected in the TUI and included in plain output or the `--json` project record.
+
 Common commands include:
 
 | Command | Purpose |

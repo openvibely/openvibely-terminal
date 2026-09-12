@@ -40,6 +40,9 @@ type projectCreatedMsg struct {
 	projectGeneration uint64
 	requestID         uint64
 	project           client.Project
+	// repositorySource retains the create input for source-specific success and
+	// terminal-safe failure output.
+	repositorySource string
 	// startSSE requests that the selected project receive a scoped stream even
 	// when project creation was the first successful backend operation.
 	startSSE bool

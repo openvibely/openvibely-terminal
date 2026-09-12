@@ -441,19 +441,38 @@ func (c *Client) GetTaskStatusCounts(ctx context.Context, projectID string) (*Ta
 // project form route. The HTMX redirect contains the backend-assigned project
 // ID, so project state remains owned by the backend rather than this client.
 func (c *Client) CreateProject(ctx context.Context, name, path string) (*Project, error) {
+	return c.createProject(ctx, name, "local", path)
+}
+
+// CreateGitHubProject creates a GitHub-backed project through the backend's
+// public project form route. The backend owns repository cloning and GitHub
+// authentication; the client only submits the repository URL and reads the
+// backend-assigned project ID from the redirect.
+func (c *Client) CreateGitHubProject(ctx context.Context, name, repoURL string) (*Project, error) {
+	return c.createProject(ctx, name, "github", repoURL)
+}
+
+func (c *Client) createProject(ctx context.Context, name, source, location string) (*Project, error) {
 	name = strings.TrimSpace(name)
-	path = strings.TrimSpace(path)
+	location = strings.TrimSpace(location)
 	if name == "" {
 		return nil, fmt.Errorf("project name is required")
 	}
-	if path == "" {
+	if location == "" {
+		if source == "github" {
+			return nil, fmt.Errorf("GitHub repository URL is required")
+		}
 		return nil, fmt.Errorf("project path is required")
 	}
 
 	form := url.Values{}
 	form.Set("name", name)
-	form.Set("repo_source", "local")
-	form.Set("repo_path", path)
+	form.Set("repo_source", source)
+	if source == "github" {
+		form.Set("repo_url", location)
+	} else {
+		form.Set("repo_path", location)
+	}
 
 	resp, err := c.doProjectFormResponse(ctx, http.MethodPost, "/projects", form)
 	if err != nil {
@@ -474,7 +493,11 @@ func (c *Client) CreateProject(ctx context.Context, name, path string) (*Project
 	if err != nil {
 		return nil, err
 	}
-	return &Project{ID: projectID, Name: name, Path: path}, nil
+	project := &Project{ID: projectID, Name: name}
+	if source == "local" {
+		project.Path = location
+	}
+	return project, nil
 }
 
 func projectIDFromRedirect(redirect string) (string, error) {

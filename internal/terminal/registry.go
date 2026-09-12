@@ -6976,13 +6976,15 @@ func projectsCommand() command {
 			{action: "delete", args: "<project>", description: "delete a project and its backend-owned data"},
 		},
 		selectorPaths: [][]string{{"show"}, {"edit"}, {"delete"}},
-		completions:   projectEditCompletions(),
+		completions:   append(projectEditCompletions(), commandCompletion{after: []string{"create", "**"}, values: []string{"--github-url"}}),
 		desc:          "list, show, create, edit, or delete backend-owned projects",
 		usage: []string{
 			"projects [list]                              list projects with running/queued counts",
 			"projects show <project>                     show authoritative project settings",
 			"projects create <name> <path>                create and select a local-path project",
 			"projects create <name> | <path>              use | when the name or path contains spaces",
+			"projects create <name> --github-url <url>    create and select a GitHub-backed project",
+			"  quote a multi-word name or use | before --github-url",
 			"projects edit <project> [options]            update only explicitly supplied settings",
 			"projects edit <project> | [options]          separate a project name containing option-like words",
 			"projects delete <project>                    delete project and all backend-owned project data",
@@ -6996,6 +6998,7 @@ func projectsCommand() command {
 		examples: []string{
 			`projects show demo`,
 			`projects create demo /Users/me/src/demo`,
+			`projects create "My Project" --github-url https://github.com/acme/demo`,
 			`projects create My Project | C:\Users\me\src\my-project`,
 			`projects edit demo --description "Local checkout" --max-workers 4`,
 			`projects edit demo --repository-source github --github-url https://github.com/acme/demo`,
@@ -7007,7 +7010,7 @@ func projectsCommand() command {
 			action, rest := splitAction(actions, args)
 			switch action {
 			case "create":
-				name, path, ok := parseProjectCreateArgs(rest)
+				spec, ok := parseProjectCreateSpec(rest)
 				if !ok {
 					return m, errCmd(projectCreateUsage())
 				}
@@ -7019,11 +7022,29 @@ func projectsCommand() command {
 				return m, func() tea.Msg {
 					ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 					defer cancel()
-					project, err := c.CreateProject(ctx, name, path)
-					if err != nil {
-						return projectCreatedMsg{requestID: requestID, startSSE: startSSE, err: err}
+					var (
+						project *client.Project
+						err     error
+					)
+					if spec.source == "github" {
+						project, err = c.CreateGitHubProject(ctx, spec.name, spec.location)
+					} else {
+						project, err = c.CreateProject(ctx, spec.name, spec.location)
 					}
-					return projectCreatedMsg{requestID: requestID, startSSE: startSSE, project: *project}
+					if err != nil {
+						return projectCreatedMsg{
+							requestID:        requestID,
+							startSSE:         startSSE,
+							repositorySource: spec.source,
+							err:              err,
+						}
+					}
+					return projectCreatedMsg{
+						requestID:        requestID,
+						startSSE:         startSSE,
+						repositorySource: spec.source,
+						project:          *project,
+					}
 				}
 			case "show":
 				ref := strings.TrimSpace(strings.Join(rest, " "))
@@ -7457,6 +7478,52 @@ type projectDeletionSafeError struct {
 func (e projectDeletionSafeError) Error() string { return e.message }
 func (e projectDeletionSafeError) Unwrap() error { return e.cause }
 
+type projectCreationSafeError struct {
+	cause   error
+	message string
+}
+
+func (e projectCreationSafeError) Error() string { return e.message }
+func (e projectCreationSafeError) Unwrap() error { return e.cause }
+
+var githubCredentialPattern = regexp.MustCompile(`(?i)\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]+)\b`)
+
+func terminalSafeProjectCreationError(err error, source string) error {
+	if err == nil {
+		return nil
+	}
+	if source != "github" {
+		if client.IsAuthRequired(err) || client.IsTransportError(err) || client.IsInvalidServerURL(err) {
+			return err
+		}
+		return projectCreationSafeError{cause: err, message: sanitizeAutomationDetailText(err.Error())}
+	}
+	if client.IsAuthRequired(err) || client.IsTransportError(err) || client.IsInvalidServerURL(err) {
+		return err
+	}
+	diagnostic := githubCredentialPattern.ReplaceAllString(safeConnectionDiagnostic(err), "[redacted GitHub credential]")
+	message := "GitHub project creation failed"
+	if diagnostic != "" {
+		message += ": " + diagnostic
+	}
+	message += ". Check the repository URL and the backend's GitHub authentication/access; credentials are not shown."
+	return projectCreationSafeError{cause: err, message: message}
+}
+
+func projectCreationOutput(msg projectCreatedMsg) string {
+	if msg.repositorySource == "github" {
+		return fmt.Sprintf("created project %q from a GitHub repository\nproject ID: %s\nnext: select it on the next CLI command with -project %s, for example: openvibely-terminal -project %s tasks", msg.project.Name, msg.project.ID, msg.project.ID, msg.project.ID)
+	}
+	return fmt.Sprintf("created project %q at %q\nproject ID: %s\nnext: select it on the next CLI command with -project %s, for example: openvibely-terminal -project %s tasks", msg.project.Name, msg.project.Path, msg.project.ID, msg.project.ID, msg.project.ID)
+}
+
+func projectCreationInteractiveOutput(msg projectCreatedMsg) string {
+	if msg.repositorySource == "github" {
+		return fmt.Sprintf("created project %q from a GitHub repository — active project selected\nnext: send a message or run %sprojects to inspect it", msg.project.Name, cmdPrefix)
+	}
+	return fmt.Sprintf("created project %q at %q — active project selected\nnext: send a message or run %sprojects to inspect it", msg.project.Name, msg.project.Path, cmdPrefix)
+}
+
 func terminalSafeProjectDeletionError(err error) error {
 	if err == nil {
 		return nil
@@ -7605,9 +7672,53 @@ func renderProjectSettings(settings client.ProjectSettings) string {
 }
 
 func projectCreateUsage() string {
-	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> | <path> when either contains spaces)", cmdPrefix)
+	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> --github-url <url> for a GitHub-backed project; use | when an operand contains spaces)", cmdPrefix)
 }
+
+type projectCreateSpec struct {
+	name     string
+	source   string
+	location string
+}
+
+func parseProjectCreateSpec(args []string) (projectCreateSpec, bool) {
+	if len(args) == 0 {
+		return projectCreateSpec{}, false
+	}
+	for i, arg := range args {
+		if arg != "--github-url" {
+			continue
+		}
+		if i == 0 || i+1 >= len(args) || i+2 != len(args) {
+			return projectCreateSpec{}, false
+		}
+		nameArgs := append([]string(nil), args[:i]...)
+		if len(nameArgs) > 0 && nameArgs[len(nameArgs)-1] == "|" {
+			nameArgs = nameArgs[:len(nameArgs)-1]
+		}
+		name := strings.TrimSpace(strings.Join(nameArgs, " "))
+		url := strings.TrimSpace(args[i+1])
+		if name == "" || url == "" {
+			return projectCreateSpec{}, false
+		}
+		return projectCreateSpec{name: name, source: "github", location: url}, true
+	}
+
+	name, path, ok := parseLocalProjectCreateArgs(args)
+	if !ok {
+		return projectCreateSpec{}, false
+	}
+	return projectCreateSpec{name: name, source: "local", location: path}, true
+}
+
+// parseProjectCreateArgs remains the local-path parser used by regression
+// tests and compatibility callers. New dispatch uses parseProjectCreateSpec
+// so the GitHub form can share the same command without changing local syntax.
 func parseProjectCreateArgs(args []string) (string, string, bool) {
+	return parseLocalProjectCreateArgs(args)
+}
+
+func parseLocalProjectCreateArgs(args []string) (string, string, bool) {
 	if len(args) == 0 {
 		return "", "", false
 	}

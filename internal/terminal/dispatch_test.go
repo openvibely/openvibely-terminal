@@ -515,6 +515,74 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	}
 }
 
+func TestProjectsCreateGitHubSelectsCreatedProject(t *testing.T) {
+	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
+	requestURI := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/projects":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got, want := r.FormValue("name"), "GitHub, Project"; got != want {
+				t.Errorf("name = %q, want %q", got, want)
+			}
+			if got, want := r.FormValue("repo_source"), "github"; got != want {
+				t.Errorf("repo_source = %q, want %q", got, want)
+			}
+			if got, want := r.FormValue("repo_url"), repoURL; got != want {
+				t.Errorf("repo_url = %q, want %q", got, want)
+			}
+			if _, present := r.PostForm["repo_path"]; present {
+				t.Errorf("GitHub creation included repo_path: %v", r.PostForm["repo_path"])
+			}
+			w.Header().Set("Location", "/tasks?project_id=github-created")
+			w.WriteHeader(http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/events/live":
+			select {
+			case requestURI <- r.URL.RequestURI():
+			default:
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "old-project"
+	m.selectedName = "Old Project"
+	m.projects = []client.Project{{ID: "old-project", Name: "Old Project"}}
+
+	m = runLine(t, m, `/projects create "GitHub, Project" --github-url `+repoURL)
+	defer m.Cleanup()
+	if m.selectedID != "github-created" || m.selectedName != "GitHub, Project" {
+		t.Fatalf("GitHub project was not selected: id=%q name=%q", m.selectedID, m.selectedName)
+	}
+	if !strings.Contains(transcript(m), "from a GitHub repository") || strings.Contains(transcript(m), "local-path") {
+		t.Fatalf("GitHub creation output had the wrong source wording:\n%s", transcript(m))
+	}
+	select {
+	case got := <-requestURI:
+		if got != "/events/live?project_id=github-created" {
+			t.Fatalf("GitHub creation SSE request URI = %q, want scoped created project", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scoped SSE request after GitHub project creation")
+	}
+}
+
 func TestProjectsCreateSameIDPreservesThreadState(t *testing.T) {
 	m, _ := dispatchModel(t, nil)
 	m.threadID = "old-task"
