@@ -633,6 +633,34 @@ func TestParseAutomationDetailUsesPerMetricEdgeCountProvenance(t *testing.T) {
 	}
 }
 
+func TestParseAutomationDetailKeepsGraphAndDetailEdgeAliasesDistinct(t *testing.T) {
+	graphDocument, err := html.Parse(strings.NewReader(`<line class="automation-graph-edge" data-automation-edge="graph-edge" data-automation-live-edge-detail="wrong-detail-edge" data-recent="5"></line>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	graphNode := findNode(graphDocument, func(n *html.Node) bool { return n.Data == "line" })
+	if graphNode == nil {
+		t.Fatal("graph edge node was not found")
+	}
+	graphEdge, _ := parseAutomationLiveEdge(&AutomationDetail{}, graphNode)
+	if graphEdge.EdgeKey != "graph-edge" || !graphEdge.RecentTransitionCountAvailable || graphEdge.RecentTransitionCount != 5 {
+		t.Fatalf("graph edge aliases = %+v", graphEdge)
+	}
+
+	detailDocument, err := html.Parse(strings.NewReader(`<div data-automation-live-edge-detail="detail-edge" data-automation-edge="wrong-graph-edge" data-recent="7"><div>Start → Review</div><p>approved</p></div>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailNode := findNode(detailDocument, func(n *html.Node) bool { return n.Data == "div" && hasHTMLAttr(n, "data-automation-live-edge-detail") })
+	if detailNode == nil {
+		t.Fatal("detail edge node was not found")
+	}
+	detailEdge, _ := parseAutomationEdgeDetail(&AutomationDetail{}, detailNode)
+	if detailEdge.EdgeKey != "detail-edge" || detailEdge.RecentTransitionCountAvailable {
+		t.Fatalf("detail edge aliases = %+v", detailEdge)
+	}
+}
+
 func TestParseAutomationDetailRejectsMalformedAutomationCounts(t *testing.T) {
 	tests := []struct {
 		name string

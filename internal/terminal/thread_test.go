@@ -670,68 +670,120 @@ func TestTaskEventsRejectForeignActiveExecutionIdentity(t *testing.T) {
 }
 
 func TestPostAckTaskEventsRequireExecutionIdentity(t *testing.T) {
-	t.Run("terminal lifecycle event", func(t *testing.T) {
-		m := pendingChatStreamTestModel(t)
-		m.threadID = "t-1"
-		m.threadStatus = "running"
-		m.pendingMsgTaskID = "t-1"
-		m.pendingMsgThreadRequestID = m.threadOpenRequestID
-		m.showEvents = true
-		m.sseGeneration = 19
-		m.sseEvents = make(chan client.Event)
-		m.sseErrs = make(chan error)
-		before := transcript(m)
+	cases := []struct {
+		name      string
+		eventName string
+		payload   string
+	}{
+		{
+			name:      "canonical lifecycle",
+			eventName: "task_status_changed",
+			payload:   `{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","status":"failed","message":"uncorrelated failure"}`,
+		},
+		{
+			name:      "aliased lifecycle",
+			eventName: "task_update",
+			payload:   `{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","status":"failed","message":"uncorrelated failure"}`,
+		},
+		{
+			name:    "unnamed lifecycle",
+			payload: `{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","status":"failed","message":"uncorrelated failure"}`,
+		},
+		{
+			name:      "canonical lifecycle without payload type",
+			eventName: "task_status_changed",
+			payload:   `{"project_id":"project-A","task_id":"t-1","status":"failed","message":"uncorrelated failure"}`,
+		},
+		{
+			name:      "canonical mirrored chat",
+			eventName: "chat_new_message",
+			payload:   `{"type":"chat_new_message","project_id":"project-A","task_id":"t-1","message":"uncorrelated duplicate"}`,
+		},
+		{
+			name:      "aliased mirrored chat",
+			eventName: "chat_update",
+			payload:   `{"type":"chat_new_message","project_id":"project-A","task_id":"t-1","message":"uncorrelated duplicate"}`,
+		},
+		{
+			name:    "unnamed mirrored chat",
+			payload: `{"type":"chat_new_message","project_id":"project-A","task_id":"t-1","message":"uncorrelated duplicate"}`,
+		},
+		{
+			name:      "canonical mirrored chat without payload type",
+			eventName: "chat_new_message",
+			payload:   `{"project_id":"project-A","task_id":"t-1","message":"uncorrelated duplicate"}`,
+		},
+	}
 
-		updated, _ := m.Update(sseEventMsg{generation: 19, event: client.Event{
-			Name: "task_status_changed",
-			Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","status":"failed","message":"uncorrelated failure"}`),
-		}})
-		m = updated.(Model)
-		if m.threadStatus != "running" || transcript(m) != before || !m.pendingChatScopeCurrent() {
-			t.Fatalf("identity-less post-ack terminal event mutated current turn: status=%q current=%t transcript=%q", m.threadStatus, m.pendingChatScopeCurrent(), transcript(m))
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/api/chat/message/exec-1": `{"message_id":"exec-1","status":"completed"}`,
+			})
+			m.selectedID = "project-A"
+			m.threadID = "t-1"
+			m.threadStatus = "running"
+			installPendingTaskReply(&m, "exec-1")
+			m.showEvents = true
+			m.sseGeneration = 19
+			sseEvents := make(chan client.Event, 1)
+			m.sseEvents = sseEvents
+			m.sseErrs = make(chan error)
+			sseEvents <- client.Event{Name: "sentinel"}
+			before := transcript(m)
 
-		updated, cmd := m.Update(sseEventMsg{generation: 19, event: client.Event{
-			Name: "task_status_changed",
-			Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","exec_id":"exec-1","status":"completed"}`),
-		}})
-		m = updated.(Model)
-		if cmd == nil || m.threadStatus != "completed" {
-			t.Fatalf("correlated lifecycle event was suppressed after identity-less event: cmd=%t status=%q", cmd != nil, m.threadStatus)
-		}
-	})
+			updated, cmd := m.Update(sseEventMsg{generation: 19, event: client.Event{
+				Name: tc.eventName,
+				Data: json.RawMessage(tc.payload),
+			}})
+			m = updated.(Model)
+			if cmd == nil {
+				t.Fatal("identity-less event did not re-arm the current SSE stream")
+			}
+			if _, ok := cmd().(tea.BatchMsg); ok {
+				t.Fatal("identity-less event scheduled a current-reply status request")
+			}
+			if got := rec.count("GET", "/api/chat/message/exec-1"); got != 0 {
+				t.Fatalf("identity-less event triggered %d current-reply status requests", got)
+			}
+			if m.threadStatus != "running" || transcript(m) != before || m.chatStreamExecID != "exec-1" || !m.hasPendingChat() {
+				t.Fatalf("identity-less event mutated current turn: status=%q transcript=%q stream=%q pending=%t", m.threadStatus, transcript(m), m.chatStreamExecID, m.hasPendingChat())
+			}
 
-	t.Run("mirrored chat message", func(t *testing.T) {
-		m := pendingChatStreamTestModel(t)
-		m.threadID = "t-1"
-		m.threadStatus = "running"
-		m.pendingMsgTaskID = "t-1"
-		m.pendingMsgThreadRequestID = m.threadOpenRequestID
-		m.showEvents = true
-		m.sseGeneration = 20
-		m.sseEvents = make(chan client.Event)
-		m.sseErrs = make(chan error)
-		before := transcript(m)
+			updated, _ = m.Update(chatStreamEventMsg{
+				generation: m.chatStreamGeneration, submissionID: m.chatSubmissionID, projectID: "project-A", execID: "exec-1",
+				event: client.ChatOutputEvent{Data: "owned output"},
+			})
+			m = updated.(Model)
+			m.flushChatStreamOutput()
+			if !strings.Contains(transcript(m), "owned output") || strings.Contains(transcript(m), "uncorrelated duplicate") {
+				t.Fatalf("identity-less event suppressed or duplicated owned stream: %q", transcript(m))
+			}
 
-		updated, _ := m.Update(sseEventMsg{generation: 20, event: client.Event{
-			Name: "chat_new_message",
-			Data: json.RawMessage(`{"type":"chat_new_message","project_id":"project-A","task_id":"t-1","message":"uncorrelated duplicate"}`),
-		}})
-		m = updated.(Model)
-		if transcript(m) != before {
-			t.Fatalf("identity-less mirrored message reached transcript or /events display: %q", transcript(m))
-		}
-
-		updated, _ = m.Update(chatStreamEventMsg{
-			generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1",
-			event: client.ChatOutputEvent{Data: "owned output"},
+			sseEvents <- client.Event{Name: "sentinel"}
+			updated, cmd = m.Update(sseEventMsg{generation: 19, event: client.Event{
+				Name: "task_status_changed",
+				Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","exec_id":"exec-1","status":"completed"}`),
+			}})
+			m = updated.(Model)
+			if cmd == nil || m.threadStatus != "completed" {
+				t.Fatalf("correlated lifecycle event was suppressed after identity-less event: cmd=%t status=%q", cmd != nil, m.threadStatus)
+			}
+			batch, ok := cmd().(tea.BatchMsg)
+			if !ok {
+				t.Fatal("correlated lifecycle event did not schedule the authoritative status request")
+			}
+			for _, sub := range batch {
+				if msg, ok := sub().(chatStatusMsg); ok {
+					updated, _ = m.Update(msg)
+					m = updated.(Model)
+				}
+			}
+			if m.hasPendingChat() || m.busy {
+				t.Fatalf("correlated lifecycle completion did not settle current reply: pending=%t busy=%t", m.hasPendingChat(), m.busy)
+			}
 		})
-		m = updated.(Model)
-		m.flushChatStreamOutput()
-		if !strings.Contains(transcript(m), "owned output") || strings.Contains(transcript(m), "uncorrelated duplicate") {
-			t.Fatalf("identity-less mirror suppressed or duplicated owned stream: %q", transcript(m))
-		}
-	})
+	}
 }
 
 func TestTaskEventPromotesExecutionOnlyFromMatchingPendingInput(t *testing.T) {
