@@ -45,7 +45,7 @@ jobs:
             BENCH_RUN="$run" \
             python3 .github/bench/ci-vet-run.py
           done
-          python3 .github/bench/ci-vet-summary.py "$BENCH_OUT"
+          python3 .github/bench/ci-vet-summary.py "$BENCH_OUT" | tee "$GITHUB_STEP_SUMMARY"
 
       - name: Upload raw benchmark evidence
         if: always()

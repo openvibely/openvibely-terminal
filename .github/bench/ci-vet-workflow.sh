@@ -9,6 +9,7 @@ profile=${BENCH_PROFILE:?}
 mode=${BENCH_MODE:?}
 cap=${BENCH_CAP:?}
 mkdir -p "$metrics" "$cache" "$modcache"
+export GOCACHE="$cache"
 cd "$repo"
 
 now_ns() { date +%s%N; }
