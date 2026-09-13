@@ -37,10 +37,12 @@ fi
 vet_pid=$!
 printf '%s\n' "$(now_ns)" >"$metrics/test_start_ns"
 if [[ "$mode" == uncached ]]; then
-  /usr/bin/time -p -o "$metrics/test.time" go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile="$profile" >"$metrics/test.log" 2>&1 || test_status=$?
+  /usr/bin/time -p -o "$metrics/test.time" go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile="$profile" >"$metrics/test.log" 2>&1 &
 else
-  /usr/bin/time -p -o "$metrics/test.time" go test ./... -timeout 120s -coverpkg=./... -coverprofile="$profile" >"$metrics/test.log" 2>&1 || test_status=$?
+  /usr/bin/time -p -o "$metrics/test.time" go test ./... -timeout 120s -coverpkg=./... -coverprofile="$profile" >"$metrics/test.log" 2>&1 &
 fi
+test_pid=$!
+wait "$test_pid" || test_status=$?
 printf '%s\n' "$(now_ns)" >"$metrics/test_done_ns"
 wait "$vet_pid" || vet_status=$?
 printf '%s\n' "$(now_ns)" >"$metrics/end_ns"

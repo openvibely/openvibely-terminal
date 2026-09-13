@@ -25,7 +25,13 @@ wall = stats(rows, "wrapper_wall_s")
 vet = stats(rows, "vet_done_s")
 test = stats(rows, "test_done_s")
 rss = stats(rows, "peak_rss_kb_process_group")
-cpu = [row["cpu"].get("user", 0) + row["cpu"].get("sys", 0) for row in rows]
+cpu = [
+    row["cpu"].get("user", 0)
+    + row["cpu"].get("sys", 0)
+    + row["vet_cpu"].get("user", 0)
+    + row["vet_cpu"].get("sys", 0)
+    for row in rows
+]
 print(
     f"CAP {cap} n={len(rows)} statuses={sorted(set((r['vet_status'], r['test_status']) for r in rows))} "
     f"wall={wall[0]:.3f}/{wall[1]:.3f}s "
