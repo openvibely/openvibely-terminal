@@ -2355,6 +2355,34 @@ func TestAnalyticsInteractiveRequiresProjectBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestAnalyticsInteractiveRejectsUnknownAndSurplusOperands(t *testing.T) {
+	for _, line := range []string{
+		"/analytics usgae",
+		"/analytics usage now",
+		"/stats usgae",
+		"/stats usage now",
+	} {
+		t.Run(strings.TrimPrefix(line, "/"), func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, line)
+
+			if got := rec.urlsSnapshot(); len(got) != 0 {
+				t.Fatalf("invalid analytics command made requests: %v", got)
+			}
+			if m.busy {
+				t.Fatal("invalid analytics command left the model busy")
+			}
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "usage: /analytics [usage|rates|agents|frequent|failures|skills|trends]") {
+				t.Fatalf("invalid analytics command did not report canonical usage:\n%s", out)
+			}
+			if strings.Contains(out, "Usage & cost") {
+				t.Fatalf("invalid analytics command reported a successful section:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 	const projectID = "selected-project"
 	bodies := map[string]string{
@@ -2387,6 +2415,7 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 		{line: "/analytics failures", paths: []string{"/api/analytics/failed-task-patterns"}},
 		{line: "/analytics skills", paths: []string{"/api/analytics/skills"}},
 		{line: "/analytics trends", paths: []string{"/api/analytics/avg-execution-time-by-task"}},
+		{line: "/stats usage", paths: []string{"/api/analytics/usage"}},
 	}
 
 	for _, tc := range cases {
@@ -3787,6 +3816,72 @@ func TestScheduleDirectDispatchResolvesSecondScheduleID(t *testing.T) {
 	}
 }
 
+func TestScheduleToggleDirectAndPickerHaveEndpointStatusParity(t *testing.T) {
+	const (
+		projectID    = "project B&mode=terminal"
+		encodedScope = "project_id=project+B%26mode%3Dterminal"
+		schedulePath = "/api/schedules/s-1/toggle"
+	)
+
+	run := func(t *testing.T, picker bool) string {
+		t.Helper()
+		var scheduleGETs, toggleRequests int
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+				scheduleGETs++
+				if got := r.URL.Query().Get("project_id"); got != projectID {
+					t.Errorf("schedule GET project_id = %q, want %q", got, projectID)
+				}
+				if r.URL.RawQuery != encodedScope {
+					t.Errorf("schedule GET RawQuery = %q, want %q", r.URL.RawQuery, encodedScope)
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, selScheduleHTML)
+			case r.Method == http.MethodPost && r.URL.Path == schedulePath:
+				toggleRequests++
+				if r.URL.RawQuery != encodedScope {
+					t.Errorf("toggle RawQuery = %q, want %q", r.URL.RawQuery, encodedScope)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{}`)
+			default:
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+				w.WriteHeader(http.StatusNotFound)
+			}
+		})
+		m.selectedID = projectID
+		if picker {
+			m = runLine(t, m, "/schedule toggle")
+			if !m.selectorActive {
+				t.Fatalf("expected schedule toggle picker:\n%s", transcript(m))
+			}
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+		} else {
+			m = runLine(t, m, "/schedule toggle s-1")
+		}
+		if toggleRequests != 1 {
+			t.Fatalf("toggle requests = %d, want 1", toggleRequests)
+		}
+		if scheduleGETs != 2 {
+			t.Fatalf("schedule GETs = %d, want resolution/refresh pair", scheduleGETs)
+		}
+		if len(m.log) == 0 {
+			t.Fatal("schedule toggle produced no result")
+		}
+		return m.log[len(m.log)-1].text
+	}
+
+	direct := run(t, false)
+	picker := run(t, true)
+	if direct != picker {
+		t.Fatalf("direct and picker toggle output differ:\ndirect:\n%s\npicker:\n%s", direct, picker)
+	}
+	if !strings.Contains(stripANSI(direct), "toggled schedule") {
+		t.Fatalf("toggle success status missing:\n%s", direct)
+	}
+}
+
 func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 	actions := []struct {
 		name           string
@@ -3796,6 +3891,7 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 		status         string
 		initialGETs    int
 		needsTaskBoard bool
+		picker         bool
 	}{
 		{
 			name:           "add",
@@ -3820,6 +3916,15 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 			path:        "/api/schedules/s-1/toggle",
 			status:      "toggled schedule",
 			initialGETs: 1,
+		},
+		{
+			name:        "toggle picker",
+			line:        "/schedule toggle",
+			method:      http.MethodPost,
+			path:        "/api/schedules/s-1/toggle",
+			status:      "toggled schedule",
+			initialGETs: 1,
+			picker:      true,
 		},
 	}
 	failures := []struct {
@@ -3869,7 +3974,7 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 						}
 						http.Error(w, "refresh failed", http.StatusInternalServerError)
 					case r.Method == tc.method && r.URL.Path == tc.path:
-						if tc.name == "toggle" {
+						if strings.HasPrefix(tc.name, "toggle") {
 							w.Header().Set("Content-Type", "application/json")
 							_, _ = w.Write([]byte(`{}`))
 							return
@@ -3881,7 +3986,13 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 					}
 				})
 
-				if tc.name == "delete" {
+				if tc.picker {
+					m = runLine(t, m, tc.line)
+					if !m.selectorActive {
+						t.Fatalf("expected picker for %s:\n%s", tc.name, transcript(m))
+					}
+					m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				} else if tc.name == "delete" {
 					m = confirmDestructive(t, m, tc.line)
 				} else {
 					m = runLine(t, m, tc.line)
@@ -3916,6 +4027,7 @@ func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
 		path        string
 		status      string
 		initialGETs int
+		picker      bool
 	}{
 		{
 			name:   "add",
@@ -3939,6 +4051,15 @@ func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
 			path:        "/api/schedules/s-1/toggle",
 			status:      "toggled schedule",
 			initialGETs: 1,
+		},
+		{
+			name:        "toggle picker",
+			line:        "/schedule toggle",
+			method:      http.MethodPost,
+			path:        "/api/schedules/s-1/toggle",
+			status:      "toggled schedule",
+			initialGETs: 1,
+			picker:      true,
 		},
 	}
 
@@ -3970,7 +4091,13 @@ func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
 				}
 			})
 
-			if tc.name == "delete" {
+			if tc.picker {
+				m = runLine(t, m, tc.line)
+				if !m.selectorActive {
+					t.Fatalf("expected picker for %s:\n%s", tc.name, transcript(m))
+				}
+				m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			} else if tc.name == "delete" {
 				m = confirmDestructive(t, m, tc.line)
 			} else {
 				m = runLine(t, m, tc.line)

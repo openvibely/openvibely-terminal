@@ -1,0 +1,11 @@
+# Adjacent Sensitive Model Options
+
+Use with `terminal-model-provider-setup.md` when changing or auditing interactive `/models add` command redaction.
+
+- In tokenized redaction, never consume a recognized sensitive option marker as the operand of a preceding sensitive option. Classify the next token by splitting an optional `=` and checking its option-name portion with the same `modelSensitiveOption` allowlist.
+- Treat direct adjacency as malformed and fail closed by returning the generic redacted models-add representation. This prevents a following credential value from being rendered after the wrongly consumed marker, even though local parser validation later rejects the command.
+- Apply the rule to bare flags and empty assignments, including `--api-key-stdin --api-key secret`, `--endpoint --api-key secret`, `--api-key-stdin= --api-key secret`, and `--endpoint= --api-key secret`. The following sensitive marker can itself carry an assignment, so classify its name rather than exact token text.
+- A separated sensitive option has at most one operand. If any token remains after a non-empty separated operand, fail closed rather than masking that operand and rendering the malformed tail. This covers `--api-key placeholder pasted-secret`, `--api-key-stdin placeholder pasted-secret`, and `--endpoint http://localhost:11434 pasted-secret`; local parsing may reject the tail, but transcript/history redaction happens first.
+- A non-empty sensitive inline assignment is also an unsafe boundary. Masking only `--option=value` and then resuming token rendering can expose a later pasted value in a malformed command, even when the parser rejects the unsupported assignment locally. For every recognized sensitive `--option=value` form, fail closed for the remaining command rather than rendering trailing tokens.
+- Regress direct adjacency, separated-operand tails, and inline-assignment tails for API key, API-key stdin, and endpoint forms. Assert local rejection, zero HTTP requests, and absence of the credential from raw `View`, transcript, and every history entry.
+- Keep these checks alongside the existing empty-quoted-operand fail-closed branch; each means the redactor cannot safely determine how much of the malformed tail is secret-bearing.

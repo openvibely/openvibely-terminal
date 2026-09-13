@@ -1,0 +1,10 @@
+# Empty Or Adjacent Sensitive Operands
+
+Use this reference when changing or auditing `redactModelCommandSecrets`, `tokenizeCommandTokens`, or interactive `/models add` error handling.
+
+- `tokenizeCommandTokens` preserves balanced empty single- and double-quoted arguments as tokens with `value == ""`. A display redactor that consumes exactly one token after a sensitive option can therefore redact the empty token and then append a following pasted credential unchanged.
+- Treat an empty apparent value for every model-sensitive option as ambiguous and fail closed. Prefer returning the generic `/models add <redacted sensitive options>` display label rather than trying to reconstruct a partial command. This applies to `--api-key`, `--api-key-stdin`, `--api-key-file`, `--secret`, `--oauth-client-secret`, `--signing-secret`, and `--endpoint`.
+- Treat a directly adjacent model-sensitive option marker as equally ambiguous. Do not consume the later marker as the preceding option's value and then resume rendering its operand. Fail closed for patterns such as `--api-key-stdin --api-key pasted-secret`, including endpoint and empty-assignment variants followed by another sensitive option.
+- Cover both `""` and `''` after each relevant API-key/API-key-stdin form. At minimum test `/models add openai OpenAI gpt-4o --api-key "" pasted-secret` and the `--api-key-stdin` equivalent, the malformed endpoint form `--endpoint "" http://user:password@host`, plus no-empty adjacent-option cases for both quote styles where applicable.
+- Each regression must preserve the parser/usage error, issue zero backend requests, and assert that the raw sensitive suffix is absent from `View`, transcript, and every history entry. Test raw output before ANSI stripping.
+- Apply the same conservative rule in any future redaction path that operates over parser tokens. An empty token or a sensitive option marker is not proof that a preceding sensitive value was safely consumed; do not resume echoing later tokens after either boundary.

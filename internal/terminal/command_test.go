@@ -1182,6 +1182,73 @@ func TestRenderStatusReportsConnection(t *testing.T) {
 	}
 }
 
+func TestRenderStatusGlobalWorkerCapacity(t *testing.T) {
+	cases := []struct {
+		name     string
+		capacity client.GlobalCapacity
+		want     string
+		unwanted []string
+	}{
+		{
+			name:     "empty unlimited",
+			capacity: client.GlobalCapacity{},
+			want:     "0 running / Unlimited, 0 queued",
+			unwanted: []string{"0 max", "0 free"},
+		},
+		{
+			name: "unlimited with running and queued work",
+			capacity: client.GlobalCapacity{
+				MaxWorkers: 0, TotalRunning: 3, QueueSize: 4, AvailableSlots: 0,
+			},
+			want:     "3 running / Unlimited, 4 queued",
+			unwanted: []string{"0 max", "0 free"},
+		},
+		{
+			name: "finite",
+			capacity: client.GlobalCapacity{
+				MaxWorkers: 5, TotalRunning: 2, QueueSize: 1, AvailableSlots: 3,
+			},
+			want: "2 running / 5 max, 1 queued, 3 free",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(t)
+			m.connected = true
+			m.capacity = &tc.capacity
+
+			out := stripANSI(m.renderStatus())
+			if !strings.Contains(out, tc.want) {
+				t.Fatalf("status missing %q:\n%s", tc.want, out)
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(out, unwanted) {
+					t.Errorf("status contains misleading capacity text %q:\n%s", unwanted, out)
+				}
+			}
+		})
+	}
+}
+
+// The global worker limit uses the same Unlimited wording in /workers and
+// /status, while status deliberately omits the unavailable free-slot count.
+func TestUnlimitedGlobalWorkerCapacityUsesConsistentTerminology(t *testing.T) {
+	capacity := &client.GlobalCapacity{TotalRunning: 3, QueueSize: 4}
+	statusModel := newTestModel(t)
+	statusModel.connected = true
+	statusModel.capacity = capacity
+
+	status := stripANSI(statusModel.renderStatus())
+	workers := stripANSI(renderWorkers(newWorkersOverview(capacity, nil, nil, nil, true)))
+	if !strings.Contains(status, "3 running / Unlimited, 4 queued") {
+		t.Fatalf("status did not use unlimited global wording:\n%s", status)
+	}
+	if !strings.Contains(workers, "Unlimited") {
+		t.Fatalf("workers did not use unlimited global wording:\n%s", workers)
+	}
+}
+
 // Help must document every command, otherwise features are unreachable in
 // practice: a command that isn't listed is a command nobody finds.
 func TestHelpListsEveryRegisteredCommand(t *testing.T) {

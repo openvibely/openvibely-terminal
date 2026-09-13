@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -624,6 +625,16 @@ func (c *Client) GetSkillDetail(ctx context.Context, projectID, handle, scope st
 	return skill, nil
 }
 
+// skillDetailWorkerLimit bounds concurrent full-content requests. The catalog is
+// still resolved once, while a fixed worker pool overlaps independent detail
+// reads without creating one goroutine per skill.
+const skillDetailWorkerLimit = 8
+
+// skillDetailConcurrentMinSkills avoids goroutine and transport setup overhead
+// for small exports. The threshold is based on the full-content benchmark's
+// zero-delay allocation budget; larger catalogs use the bounded worker pool.
+const skillDetailConcurrentMinSkills = 11
+
 // ListSkillsWithContent retains the full-content JSON list contract by loading
 // the instruction body for each summary after the paginated catalog resolves.
 // Ordinary terminal lists and selectors must use ListSkills instead.
@@ -632,14 +643,86 @@ func (c *Client) ListSkillsWithContent(ctx context.Context, projectID string) ([
 	if err != nil {
 		return nil, err
 	}
-	for i, skill := range skills {
-		detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
-		if err != nil {
-			return nil, err
-		}
-		skills[i] = detail
+	if len(skills) == 0 {
+		return skills, nil
 	}
-	return skills, nil
+	if len(skills) < skillDetailConcurrentMinSkills {
+		for i, skill := range skills {
+			detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
+			if err != nil {
+				return nil, err
+			}
+			skills[i] = detail
+		}
+		return skills, nil
+	}
+
+	// Keep the caller's context as the source of cancellation, but cancel the
+	// internal context when a detail fails so in-flight work is joined promptly.
+	// Results remain indexed by catalog position, and errors are selected in that
+	// same order after all workers have stopped.
+	detailCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	loaded := make([]Skill, len(skills))
+	errs := make([]error, len(skills))
+	jobs := make(chan int)
+	workerCount := min(skillDetailWorkerLimit, len(skills))
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-detailCtx.Done():
+					return
+				case i, ok := <-jobs:
+					if !ok {
+						return
+					}
+					detail, detailErr := c.GetSkillDetail(detailCtx, projectID, skills[i].Handle, skills[i].Scope)
+					loaded[i] = detail
+					errs[i] = detailErr
+					if detailErr != nil {
+						cancel()
+					}
+				}
+			}
+		}()
+	}
+
+sendJobs:
+	for i := range skills {
+		select {
+		case <-detailCtx.Done():
+			break sendJobs
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	workers.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var canceledErr error
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, context.Canceled) {
+			if canceledErr == nil {
+				canceledErr = err
+			}
+			continue
+		}
+		return nil, err
+	}
+	if canceledErr != nil {
+		return nil, canceledErr
+	}
+	return loaded, nil
 }
 
 // CreateSkill adds a skill. body is the skill markdown/front-matter document.

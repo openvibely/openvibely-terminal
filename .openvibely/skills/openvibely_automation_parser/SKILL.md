@@ -1,6 +1,6 @@
 ---
 kind: openvibely.agent_skill
-version: 10
+version: 11
 skill:
     key: openvibely_automation_parser
     name: OpenVibely Automation Parser Refactoring
@@ -16,6 +16,8 @@ Use this skill when changing automation graph-node or detail-node HTML parsing i
 
 - Establish behavior with focused regressions before changing extraction or correlation code.
 - A private common helper may extract configurable ID, key, and state attributes plus shared name, type, role, and count fields.
+- When graph and detail representations use different aliases, pass separate caller-owned alias sets into the common helper. Never make the helper consume the other representation's aliases; keep alias separation explicit in the wrappers.
+- Preserve existing attribute lookup depth and metric initialization behavior when extracting structured counts. In particular, do not collapse shallow attribute lookup and deep structured-count lookup, or change count-quality, availability, or warning values while moving assignments.
 - Keep representation-specific fallbacks in their wrappers and in their existing order. Graph-only behavior includes `strong`/CSS-state/state-text/first-line-name fallbacks and parent task-link counts; detail-only behavior includes heading, metadata-paragraph, and badge fallbacks.
 - Preserve count precedence and merging, record correlation, duplicate handling, unmatched-record provenance, availability, warnings, rendering, and JSON shape.
 - Do not infer expected canonical state strings directly from visible text. In the established parser, visible `Waiting` normalizes to `waiting_human`; lock existing normalization into tests rather than changing it during an extraction-only refactor.
@@ -49,6 +51,7 @@ Use this skill when changing automation graph-node or detail-node HTML parsing i
 
 - Cover structured graph and detail records.
 - Cover graph-specific and detail-specific fallback records.
+- Cover graph-only and detail-only aliases explicitly, including a regression proving each wrapper ignores the other representation's aliases. If the collector treats cross-marker attributes as separate records, test alias separation with isolated representation parser nodes rather than relying on a mixed top-level fixture.
 - Cover safely correlated records and intentionally conflicting or uncorrelated detail records.
 - Assert structured-versus-text count precedence, parent-count merging, provenance, availability, warnings, rendered state, and JSON separation where applicable.
 - For config summaries, compare fixtures against labels and ordering emitted by the current backend template; assert required role-specific operational values survive the configured field cap and that secret/prompt bodies do not.
@@ -60,14 +63,16 @@ Use this skill when changing automation graph-node or detail-node HTML parsing i
 
 ## Validation
 
-Run focused automation parser tests and benchmarks first, then finish with:
+Run the narrow parser selector first, then broader automation parser tests and benchmarks, and finish with:
 
 ```bash
+go test ./internal/client -run '^TestParseAutomationDetail' -count=1
 go test ./... -run 'Automation|Graph|Detail' -count=1
 go test ./... -bench 'Automation|Graph|Detail' -benchmem -count=10
 go build ./...
 go vet ./...
 go test ./... -count=1
+gofmt -l .
 git diff --check
 ```
 

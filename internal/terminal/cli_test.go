@@ -63,6 +63,92 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 	return c, rec
 }
 
+// cliSkillsServer stubs the skills catalog and detail endpoints for headless runs.
+func cliSkillsServer(t *testing.T) (*client.Client, *recorder) {
+	t.Helper()
+	const page = `<div>
+		<div data-skill-handle="deploy" data-skill-name="Deploy" data-skill-description="ship safely" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false" data-skill-content="secret body from catalog"></div>
+	</div>`
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, page)
+		case "/skills/deploy/details":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"handle":"deploy","name":"Deploy","description":"ship safely","scope":"project","source":"project","content":"secret detail body","enabled":true,"always_use":false}`)
+		default:
+			t.Errorf("unexpected skills request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, rec
+}
+
+func TestCLISkillsSummaryJSONAndShowRequestContracts(t *testing.T) {
+	t.Run("plain summary does not fetch bodies", func(t *testing.T) {
+		c, rec := cliSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills"}, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "secret") {
+			t.Fatalf("plain summary retained body content: %q", out.String())
+		}
+		if got := rec.count("GET", "/skills"); got != 1 {
+			t.Fatalf("summary catalog requests = %d, want one", got)
+		}
+		if got := rec.count("GET", "/skills/deploy/details"); got != 0 {
+			t.Fatalf("summary detail requests = %d, want zero", got)
+		}
+	})
+
+	t.Run("JSON list is complete and ordered", func(t *testing.T) {
+		c, rec := cliSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills"}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		var skills []client.Skill
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &skills); err != nil {
+			t.Fatalf("JSON output = %q: %v", out.String(), err)
+		}
+		if len(skills) != 1 || skills[0].Handle != "deploy" || skills[0].Content != "secret detail body" || skills[0].Scope != "project" || !skills[0].Enabled {
+			t.Fatalf("skills = %+v", skills)
+		}
+		if got := rec.count("GET", "/skills/deploy/details"); got != 1 {
+			t.Fatalf("JSON detail requests = %d, want one", got)
+		}
+	})
+
+	t.Run("show remains one detail request", func(t *testing.T) {
+		c, rec := cliSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills", "show", "deploy"}, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "secret detail body") {
+			t.Fatalf("show output missing body: %q", out.String())
+		}
+		if got := rec.count("GET", "/skills"); got != 0 {
+			t.Fatalf("show catalog requests = %d, want zero", got)
+		}
+		if got := rec.count("GET", "/skills/deploy/details"); got != 1 {
+			t.Fatalf("show detail requests = %d, want one", got)
+		}
+	})
+}
+
 // cliVoteServer stubs project loading and one vote-record response for CLI
 // success and error cases.
 func cliVoteServer(t *testing.T, status int, body string) (*client.Client, *recorder) {
@@ -810,6 +896,101 @@ func TestCLIAnalyticsUsageMatchesInteractiveQuotaOutput(t *testing.T) {
 	}
 }
 
+func TestCLIAnalyticsRejectsUnknownAndSurplusOperandsBeforeRequests(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown action", args: []string{"analytics", "usgae"}},
+		{name: "surplus operand", args: []string{"analytics", "usage", "now"}},
+		{name: "stats unknown action", args: []string{"stats", "usgae"}},
+		{name: "stats surplus operand", args: []string{"stats", "usage", "now"}},
+	}
+	for _, tc := range cases {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", tc.name, jsonOutput), func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+				var out bytes.Buffer
+				err := RunCLI(c, &out, "demo", tc.args, false, jsonOutput)
+				if err == nil || !strings.Contains(err.Error(), "usage: analytics [usage|rates|agents|frequent|failures|skills|trends]") {
+					t.Fatalf("invalid analytics invocation error = %v", err)
+				}
+				if out.Len() != 0 {
+					t.Fatalf("invalid analytics invocation emitted output: %q", out.String())
+				}
+				if got := rec.urlsSnapshot(); len(got) != 0 {
+					t.Fatalf("invalid analytics invocation made requests: %v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
+	bodies := map[string]string{
+		"/api/projects":                              cliProjects,
+		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
+		"/api/analytics/success-failure-rates":       `[]`,
+		"/api/analytics/avg-execution-time-by-agent": `[]`,
+		"/api/analytics/avg-execution-time-by-task":  `[]`,
+		"/api/analytics/most-frequent-tasks":         `[]`,
+		"/api/analytics/failed-task-patterns":        `[]`,
+		"/api/analytics/skills":                      `{}`,
+	}
+	allPaths := []string{
+		"/api/analytics/usage",
+		"/api/analytics/success-failure-rates",
+		"/api/analytics/avg-execution-time-by-agent",
+		"/api/analytics/avg-execution-time-by-task",
+		"/api/analytics/most-frequent-tasks",
+		"/api/analytics/failed-task-patterns",
+		"/api/analytics/skills",
+	}
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "bare", args: []string{"analytics"}, want: allPaths},
+		{name: "usage", args: []string{"analytics", "usage"}, want: []string{"/api/analytics/usage"}},
+		{name: "rates", args: []string{"analytics", "rates"}, want: []string{"/api/analytics/success-failure-rates"}},
+		{name: "agents", args: []string{"analytics", "agents"}, want: []string{"/api/analytics/avg-execution-time-by-agent"}},
+		{name: "frequent", args: []string{"analytics", "frequent"}, want: []string{"/api/analytics/most-frequent-tasks"}},
+		{name: "failures", args: []string{"analytics", "failures"}, want: []string{"/api/analytics/failed-task-patterns"}},
+		{name: "skills", args: []string{"analytics", "skills"}, want: []string{"/api/analytics/skills"}},
+		{name: "trends", args: []string{"analytics", "trends"}, want: []string{"/api/analytics/avg-execution-time-by-task"}},
+		{name: "stats alias", args: []string{"stats", "usage"}, want: []string{"/api/analytics/usage"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, bodies)
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, false); err != nil {
+				t.Fatalf("valid analytics invocation failed: %v", err)
+			}
+
+			want := make(map[string]int, len(tc.want))
+			for _, path := range tc.want {
+				want[path]++
+			}
+			got := make(map[string]int, len(tc.want))
+			for _, uri := range rec.urlsSnapshot() {
+				request := strings.SplitN(uri, " ", 2)
+				if len(request) != 2 || !strings.HasPrefix(request[1], "/api/analytics/") {
+					continue
+				}
+				if !strings.Contains(request[1], "project_id=p1") {
+					t.Errorf("analytics request lost selected project scope: %q", uri)
+				}
+				got[strings.SplitN(request[1], "?", 2)[0]]++
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("analytics endpoints = %v, want %v; requests:\n%s", got, want, rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIHelpWorksOffline(t *testing.T) {
 	c, err := client.New("http://127.0.0.1:1") // nothing listening
 	if err != nil {
@@ -1110,6 +1291,45 @@ func TestCLIStatusZeroProjectsSkipsScopedCounts(t *testing.T) {
 	}
 	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
 		t.Fatalf("zero-project status made scoped requests:\n%s", rec.all())
+	}
+}
+
+func TestCLIAndInteractiveStatusShareUnlimitedWorkerCapacityOutput(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":        `{"projects":[]}`,
+		"/api/capacity/global": `{"total_running":3,"max_workers":0,"queue_size":4,"available_slots":0,"has_capacity":true}`,
+		"/auth/me":             `{"authenticated":false}`,
+	})
+
+	interactive := New(c)
+	updated, _ := interactive.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	interactive = updated.(Model)
+	interactive.connected = true
+	interactive.connChecked = true
+	interactive.projectsLoaded = true
+	interactive.projects = []client.Project{}
+	interactive.capacity = &client.GlobalCapacity{TotalRunning: 3, QueueSize: 4, HasCapacity: true}
+	interactive.auth = &client.AuthStatus{Authenticated: false}
+	interactive = runLine(t, interactive, "/status")
+	interactiveStatus := stripANSI(interactive.renderStatus())
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"status"}, false, false); err != nil {
+		t.Fatalf("one-shot status failed: %v", err)
+	}
+	cliOutput := stripANSI(out.String())
+	if !strings.Contains(cliOutput, interactiveStatus) {
+		t.Fatalf("one-shot status differed from interactive status:\ninteractive:\n%s\ncli:\n%s", interactiveStatus, cliOutput)
+	}
+	for _, output := range []string{interactiveStatus, cliOutput} {
+		if !strings.Contains(output, "3 running / Unlimited, 4 queued") {
+			t.Errorf("unlimited status wording missing:\n%s", output)
+		}
+		for _, unwanted := range []string{"0 max", "0 free"} {
+			if strings.Contains(output, unwanted) {
+				t.Errorf("status output contains misleading unlimited capacity text %q:\n%s", unwanted, output)
+			}
+		}
 	}
 }
 

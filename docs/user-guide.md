@@ -266,6 +266,11 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/chat` | `back`, `leave` | return to project chat; `/chat <message>` also sends it |
 | `/quit` | `q`, `exit` | |
 
+`/status` and one-shot `status` use `Unlimited` for an unlimited global worker
+pool, matching the global row in `/workers`. In that mode the status summary
+shows running and queued work but omits the backend's sentinel free-slot value;
+finite pools continue to show maximum and free counts.
+
 ### Channel access
 
 Channel access commands require a selected project. Use `channels access github list|add|remove` to manage the GitHub authorized-actor allowlist. The backend stores this allowlist at system level, while every terminal request still carries the selected `project_id` as request context. GitHub logins are normalized by stripping a leading `@` and lowercasing the login. The display name is optional; quote it as one operand when it contains spaces.

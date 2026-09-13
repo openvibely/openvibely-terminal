@@ -24,7 +24,8 @@ Use this skill for scheduled inbox runs that turn approved, actionable backend a
 
 - For each processable alert, claim it, then call `create_alert_implementation_task` with a focused Backlog title and a prompt containing the notification ID, reviewed context, acceptance criteria, and direct instructions to implement in the repository, add or update tests, and run required validation.
 - The created task is already the linked implementation task. State that it must begin implementation directly, must not run notification intake or call `get_alert`, and must not create or search for another implementation task.
-- Pass the exact approved lifecycle goal required by the inbox policy. Human approval permits implementation-task creation and execution only; do not authorize merge, release, deployment, destructive remediation, or credential changes. Do not imply that the task lacks authorization to implement.
+- Pass the exact approved lifecycle goal required by the inbox policy. Treat that goal as a byte-for-byte contract: do not add an explanatory prefix, suffix, or extra sentence. If the creation response or task inspection exposes the stored goal, compare it with the required text before continuing and correct any drift when the API permits.
+- Human approval permits implementation-task creation and execution only; do not authorize merge, release, deployment, destructive remediation, or credential changes. Do not imply that the task lacks authorization to implement.
 - Immediately call `execute_tasks` with the exact `implementation_task_id` returned by creation/linkage. Do not leave the linked task waiting in Backlog.
 
 ## Finalize Safely

@@ -1,0 +1,3 @@
+# Project-Scoped Agent Mutations
+
+When adding or repairing a client mutation for an agent or other project-owned resource, treat `project_id` as part of the mutation contract, not optional display context. Thread the selected project ID through the public client method and send it on the exact backend route; do not rely on the backend session's default project. Add an `httptest` regression that calls the scoped method with a non-default project and asserts the complete method/URI, including the exact `project_id` query. Use a fixture that rejects or exposes foreign-project scope so a request lacking scope cannot pass accidentally. Keep list, mutation, and post-mutation refresh requests consistently scoped.
