@@ -1,0 +1,12 @@
+MODE routine
+CAP 1 n=10 statuses=[(0, 0)] wall=0.290/0.295s vet_done=0.235/0.239s test_done=0.202/0.213s user_cpu=0.335/0.350s sys_cpu=0.230/0.251s cpu=0.565/0.591s rss_mib=92.8/98.8 profiles=[(2909911, True, 87.8)]
+MODE routine
+CAP 2 n=10 statuses=[(0, 0)] wall=0.236/0.318s vet_done=0.185/0.242s test_done=0.218/0.271s user_cpu=0.360/0.457s sys_cpu=0.235/0.300s cpu=0.590/0.758s rss_mib=95.6/101.0 profiles=[(2909911, True, 87.8)]
+MODE routine
+CAP default n=10 statuses=[(0, 0)] wall=0.237/0.299s vet_done=0.179/0.190s test_done=0.226/0.242s user_cpu=0.355/0.376s sys_cpu=0.240/0.266s cpu=0.600/0.627s rss_mib=92.2/102.2 profiles=[(2909911, True, 87.8)]
+MODE uncached
+CAP 1 n=10 statuses=[(0, 0)] wall=12.632/14.163s vet_done=0.280/0.288s test_done=12.590/14.144s user_cpu=7.175/7.275s sys_cpu=2.935/4.646s cpu=10.080/11.886s rss_mib=581.5/640.7 profiles=[(2909911, True, 87.8)]
+MODE uncached
+CAP 2 n=10 statuses=[(0, 0)] wall=12.627/16.009s vet_done=0.202/0.210s test_done=12.602/15.986s user_cpu=7.000/7.140s sys_cpu=2.775/4.411s cpu=9.695/11.542s rss_mib=584.7/615.6 profiles=[(2909911, True, 87.8)]
+MODE uncached
+CAP default n=10 statuses=[(0, 0)] wall=12.607/14.151s vet_done=0.176/0.183s test_done=12.571/14.096s user_cpu=6.950/7.075s sys_cpu=2.875/4.437s cpu=9.800/11.425s rss_mib=576.5/650.5 profiles=[(2909911, True, 87.8)]

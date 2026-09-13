@@ -1,0 +1,8 @@
+benchmark_commit=9a5e48b42cc85b32158045c80b26ad13677a6ba2
+runner_os=Linux
+runner_arch=X64
+runner_name=GitHub Actions 1000008075
+go_version=go version go1.27.1 linux/amd64
+kernel=Linux 6.17.0-1022-azure x86_64 GNU/Linux
+cpus=4
+memory_kib=16373452
