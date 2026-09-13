@@ -1023,11 +1023,11 @@ go tool cover -func=coverage.txt
 
 The vet/test overlap cap was benchmarked before considering a change. The hosted
 measurement ran on `ubuntu-latest` in GitHub Actions at checkout
-`a1413d03f529f0127c1722b0fb99b96013cb50ee`, using Go `1.27.1` on Linux amd64.
+`be384f46a460bc141b04940a54e52cca2997cecd`, using Go `1.27.1` on Linux amd64.
 The runner reported a 4-CPU quota, 15.6 GiB memory, and kernel
 `6.17.0-1022-azure`; all six cells ran sequentially on that same hosted runner.
-The successful run was `34738479818`, with raw records published on the
-`ci-vet-result-34738479818` result ref. The module download cache was prewarmed
+The successful run was `34739177320`, with raw records published on the
+`ci-vet-result-34739177320` result ref. The module download cache was prewarmed
 once, each cap/mode pair used its own warmed Go build cache, and one warm-up was
 discarded before ten valid measured samples. Failed or non-equivalent rows were
 not counted. The exact overlapping workflow commands were measured for
@@ -1038,31 +1038,31 @@ Routine mode (`-count=1` omitted):
 
 | Vet cap | End-to-end wall median / p95 (s) | Vet completion median / p95 (s) | Test completion median / p95 (s) | User CPU median / p95 (s) | System CPU median / p95 (s) | Peak RSS median / p95 (MiB) |
 |---|---:|---:|---:|---:|---:|---:|
-| `1` | 0.433 / 0.437 | 0.404 / 0.415 | 0.338 / 0.351 | 0.645 / 0.666 | 0.350 / 0.366 | 93.0 / 96.9 |
-| `2` | 0.382 / 0.591 | 0.320 / 0.332 | 0.362 / 0.540 | 0.675 / 0.865 | 0.360 / 0.408 | 96.2 / 158.0 |
-| default | 0.435 / 0.442 | 0.314 / 0.326 | 0.380 / 0.388 | 0.700 / 0.726 | 0.360 / 0.381 | 96.8 / 101.1 |
+| `1` | 0.221 / 0.276 | 0.214 / 0.220 | 0.174 / 0.182 | 0.380 / 0.386 | 0.140 / 0.160 | 91.4 / 94.8 |
+| `2` | 0.224 / 0.228 | 0.179 / 0.194 | 0.195 / 0.205 | 0.400 / 0.425 | 0.150 / 0.160 | 97.9 / 110.6 |
+| default | 0.224 / 0.233 | 0.178 / 0.185 | 0.202 / 0.210 | 0.420 / 0.430 | 0.160 / 0.170 | 97.8 / 105.5 |
 
 Explicit uncached mode (`-count=1` retained):
 
 | Vet cap | End-to-end wall median / p95 (s) | Vet completion median / p95 (s) | Test completion median / p95 (s) | User CPU median / p95 (s) | System CPU median / p95 (s) | Peak RSS median / p95 (MiB) |
 |---|---:|---:|---:|---:|---:|---:|
-| `1` | 16.677 / 17.065 | 0.470 / 0.489 | 16.620 / 17.006 | 13.265 / 13.665 | 4.265 / 4.680 | 596.4 / 622.8 |
-| `2` | 16.601 / 17.026 | 0.338 / 0.401 | 16.555 / 16.985 | 13.075 / 13.180 | 4.220 / 4.399 | 590.6 / 616.9 |
-| default | 16.475 / 18.896 | 0.314 / 0.338 | 16.440 / 18.853 | 12.915 / 13.001 | 4.115 / 4.245 | 606.5 / 623.2 |
+| `1` | 13.714 / 16.009 | 0.243 / 0.271 | 13.685 / 15.992 | 8.950 / 9.149 | 2.765 / 3.344 | 602.0 / 616.5 |
+| `2` | 13.605 / 14.359 | 0.194 / 0.236 | 13.588 / 14.342 | 8.970 / 9.145 | 2.770 / 3.631 | 593.4 / 621.8 |
+| default | 13.906 / 15.079 | 0.190 / 0.209 | 13.876 / 15.057 | 9.070 / 9.171 | 2.925 / 3.409 | 607.3 / 647.8 |
 
 All 60 measured runs were valid, returned `vet=0` and `test=0`, and produced
 non-empty readable profiles of exactly 2,909,911 bytes with aggregate coverage
 of `87.8%`. Routine runs used the cacheable command and uncached runs used
 `-count=1`; no cache or coverage semantics were changed. The largest measured
-CPU-seconds-to-wall-seconds ratio was 2.79, within the 4-CPU runner budget.
-Compared with the current cap, `GOMAXPROCS=2` reduced routine median wall time
-by 11.7% but made routine p95 wall time 35.2% worse and routine p95 RSS 63.1%
-higher; its uncached median improved only 0.5%. The runner-default cap was 0.5%
-slower routine and only 1.2% faster uncached, with uncached p95 wall time 10.7%
-worse. Neither candidate met both required median improvements and p95/RSS
-safeguards, so the workflow retains the bounded `GOMAXPROCS=1` vet cap. The
-workflow retains independent status reporting, non-empty profile validation,
-and the success-gated summary. Explicit child cleanup terminates and reaps vet
+CPU-seconds-to-wall-seconds ratio was 2.64, within the 4-CPU runner budget.
+Compared with the current cap, `GOMAXPROCS=2` was 1.4% slower routine at the
+median and only 0.8% faster uncached; its routine p95 RSS was 16.7% higher.
+The runner-default cap was 1.4% slower routine and 1.4% slower uncached at the
+median, although its uncached p95 wall time was 5.8% better. Neither candidate
+met both required median improvements and p95/RSS safeguards, so the workflow
+retains the bounded `GOMAXPROCS=1` vet cap. The workflow retains independent
+status reporting, non-empty profile validation, and the success-gated summary.
+Explicit child cleanup terminates and reaps vet
 and tests on normal exit, job cancellation, and timeout termination; the
 harness exercises each interruption path.
 
