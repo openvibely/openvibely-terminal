@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
@@ -443,12 +446,89 @@ func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
 					b.ReportAllocs()
 					b.SetBytes(int64(size.bytes * count))
 					b.ResetTimer()
+					b.ReportMetric(float64(count), "events/op")
+					b.ReportMetric(float64(size.bytes*count), "payload-bytes/op")
 					for i := 0; i < b.N; i++ {
 						lifecycleBenchmarkSink = renderLifecycleEvents(task, execution, events)
 					}
 				})
 			}
 		}
+	}
+}
+
+type lifecycleRenderMeasurement struct {
+	wall             time.Duration
+	allocations      uint64
+	peakLiveHeapByte uint64
+}
+
+func measureLifecycleRender(events []client.LifecycleEvent) lifecycleRenderMeasurement {
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	var peak atomic.Uint64
+	peak.Store(before.HeapAlloc)
+	updatePeak := func(current uint64) {
+		for {
+			previous := peak.Load()
+			if current <= previous || peak.CompareAndSwap(previous, current) {
+				return
+			}
+		}
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(100 * time.Microsecond)
+		defer ticker.Stop()
+		defer close(done)
+		for {
+			select {
+			case <-ticker.C:
+				var current runtime.MemStats
+				runtime.ReadMemStats(&current)
+				updatePeak(current.HeapAlloc)
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	started := time.Now()
+	lifecycleBenchmarkSink = renderLifecycleEvents(client.Task{ID: "task-1"}, client.LifecycleExecution{ID: "execution-1"}, events)
+	wall := time.Since(started)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	updatePeak(after.HeapAlloc)
+	close(stop)
+	<-done
+	return lifecycleRenderMeasurement{
+		wall:             wall,
+		allocations:      after.Mallocs - before.Mallocs,
+		peakLiveHeapByte: peak.Load() - before.HeapAlloc,
+	}
+}
+
+func TestRenderLifecycleEventsBackendShapedMeasurements(t *testing.T) {
+	const payloadBytes = 64 << 10
+	for _, eventCount := range []int{1, 100} {
+		payload := lifecycleBenchmarkPayload(payloadBytes, "wide_struct_map")
+		events := make([]client.LifecycleEvent, eventCount)
+		for i := range events {
+			events[i] = client.LifecycleEvent{
+				ID:        fmt.Sprintf("event-%03d", i),
+				Seq:       i + 1,
+				EventType: "completed",
+				Payload:   payload,
+			}
+		}
+		measurement := measureLifecycleRender(events)
+		if lifecycleBenchmarkSink == "" {
+			t.Fatal("backend-shaped lifecycle render returned an empty result")
+		}
+		t.Logf("fixture=wide_struct_map events=%d payload_bytes=%d wall=%s allocations=%d peak_live_heap_bytes=%d", eventCount, payloadBytes*eventCount, measurement.wall, measurement.allocations, measurement.peakLiveHeapByte)
 	}
 }
 
@@ -542,6 +622,51 @@ func TestRenderLifecycleRenderersShareTaskHeading(t *testing.T) {
 				t.Fatalf("lifecycle heading = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+func TestRenderLifecycleEventsCachesOnlyDataOnlyRepeatedPayloads(t *testing.T) {
+	safe := map[string]any{
+		"value": lifecyclePreviewStructContainers{Values: map[string]string{"message": "ordinary"}},
+	}
+	if _, cacheable := lifecyclePayloadSummaryWithCacheability(safe); !cacheable {
+		t.Fatal("data-only payload was not marked cacheable")
+	}
+
+	calls := 0
+	custom := map[string]any{
+		"value": lifecyclePreviewCountingMarshaler{Calls: &calls, Value: "ordinary"},
+	}
+	if _, cacheable := lifecyclePayloadSummaryWithCacheability(custom); cacheable {
+		t.Fatal("custom-marshaler payload was marked cacheable")
+	}
+	calls = 0
+
+	events := []client.LifecycleEvent{
+		{ID: "event-1", Seq: 1, EventType: "started", Payload: custom},
+		{ID: "event-2", Seq: 2, EventType: "completed", Payload: custom},
+	}
+	if got := renderLifecycleEvents(client.Task{ID: "task-1"}, client.LifecycleExecution{ID: "execution-1"}, events); got == "" {
+		t.Fatal("renderLifecycleEvents returned an empty result")
+	}
+	if calls != 2 {
+		t.Fatalf("custom marshaler calls for repeated payload = %d, want 2", calls)
+	}
+
+	zeroCalls := 0
+	zeroOrder := []string{}
+	zeroPayload := map[string]any{
+		"value": lifecyclePreviewStatefulZeroFields{Value: lifecyclePreviewStatefulZero{
+			Name: "stateful", Calls: &zeroCalls, Order: &zeroOrder,
+		}},
+	}
+	zeroEvents := []client.LifecycleEvent{
+		{ID: "event-1", Seq: 1, EventType: "started", Payload: zeroPayload},
+		{ID: "event-2", Seq: 2, EventType: "completed", Payload: zeroPayload},
+	}
+	_ = renderLifecycleEvents(client.Task{ID: "task-1"}, client.LifecycleExecution{ID: "execution-1"}, zeroEvents)
+	if zeroCalls != 2 {
+		t.Fatalf("stateful IsZero calls for repeated payload = %d, want 2", zeroCalls)
 	}
 }
 
@@ -1268,6 +1393,28 @@ func TestLifecyclePayloadSummaryInvokesIsZeroOnceInCanonicalMapOrder(t *testing.
 		t.Fatalf("stateful omitzero preview = %q, want %q", got, want)
 	}
 	assertCalls(t, calls, order)
+}
+
+func TestLifecyclePayloadSummaryBoundsStatefulIsZeroValues(t *testing.T) {
+	const count = lifecyclePreviewMaxValidationMapKeys + 1
+	calls := 0
+	order := []string{}
+	payload := make(map[string]any, count)
+	for i := range count {
+		name := fmt.Sprintf("key-%04d", i)
+		payload[name] = lifecyclePreviewStatefulZeroFields{Value: lifecyclePreviewStatefulZero{
+			Name: name, Calls: &calls, Order: &order,
+		}}
+	}
+	if !lifecycleTypeMayMarshalError(reflect.TypeFor[lifecyclePreviewStatefulZeroFields]()) {
+		t.Fatal("stateful IsZero field type was classified as safe")
+	}
+	if got := lifecyclePayloadSummary(payload); got != "<unavailable>" {
+		t.Fatalf("over-cap stateful IsZero preview = %q, want unavailable", got)
+	}
+	if calls != 0 || len(order) != 0 {
+		t.Fatalf("over-cap stateful IsZero invoked user code: calls=%d order=%v", calls, order)
+	}
 }
 
 func TestLifecyclePayloadSummaryOmitsNilIsZeroFieldsBeyondValidationCap(t *testing.T) {

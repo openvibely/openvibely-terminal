@@ -785,12 +785,33 @@ func renderLifecycleEvents(task client.Task, execution client.LifecycleExecution
 	})
 
 	rows := [][]string{{"SEQ", "TIMESTAMP", "EVENT TYPE", "PAYLOAD"}}
+	var payloadPreviews map[uintptr]string
+	if len(ordered) > 1 {
+		payloadPreviews = make(map[uintptr]string)
+	}
 	for _, event := range ordered {
+		payloadPreview := "—"
+		if len(event.Payload) != 0 {
+			if payloadPreviews == nil {
+				payloadPreview = lifecyclePayloadSummary(event.Payload)
+			} else {
+				payloadID := reflect.ValueOf(event.Payload).Pointer()
+				var ok bool
+				payloadPreview, ok = payloadPreviews[payloadID]
+				if !ok {
+					var cacheable bool
+					payloadPreview, cacheable = lifecyclePayloadSummaryWithCacheability(event.Payload)
+					if cacheable {
+						payloadPreviews[payloadID] = payloadPreview
+					}
+				}
+			}
+		}
 		rows = append(rows, []string{
 			fmt.Sprintf("%d", event.Seq),
 			truncate(sanitizeAutomationDetailText(firstNonEmpty(event.CreatedAt, "—")), 32),
 			truncate(sanitizeAutomationDetailText(firstNonEmpty(event.EventType, "—")), 32),
-			lifecyclePayloadSummary(event.Payload),
+			payloadPreview,
 		})
 	}
 	b.WriteString(table(rows))
@@ -798,14 +819,19 @@ func renderLifecycleEvents(task client.Task, execution client.LifecycleExecution
 }
 
 func lifecyclePayloadSummary(payload map[string]any) string {
+	preview, _ := lifecyclePayloadSummaryWithCacheability(payload)
+	return preview
+}
+
+func lifecyclePayloadSummaryWithCacheability(payload map[string]any) (string, bool) {
 	if len(payload) == 0 {
-		return "—"
+		return "—", true
 	}
-	preview := lifecycleJSONPreview{limit: 96}
+	preview := lifecycleJSONPreview{limit: 96, cacheable: true}
 	if err := preview.appendValue(payload, 0); err != nil {
-		return "<unavailable>"
+		return "<unavailable>", false
 	}
-	return preview.result()
+	return preview.result(), preview.cacheable
 }
 
 const (
@@ -826,6 +852,7 @@ type lifecycleJSONPreview struct {
 	byteCapped   bool
 	indirections int
 	active       map[lifecyclePreviewVisit]bool
+	cacheable    bool
 }
 
 type lifecyclePreviewVisit struct {
@@ -889,8 +916,10 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
 	var validationKeys []lifecyclePreviewMapKey
 	sourceOrder := 0
+	retainedKeyBytes := 0
 	for key, item := range value {
-		candidate := lifecyclePreviewNativeStringKey(key)
+		candidate := lifecyclePreviewNativeStringKeyWithBudget(key, max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes))
+		retainedKeyBytes += len(candidate.text)
 		candidate.sourceOrder = sourceOrder
 		sourceOrder++
 		candidate.nativeValue = item
@@ -1164,9 +1193,16 @@ func (p *lifecycleJSONPreview) appendStruct(value reflect.Value, depth int) erro
 	written := 0
 	for _, field := range lifecycleStructFields(value.Type()) {
 		fieldValue, ok := lifecycleFieldByIndex(value, field.index)
-		if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) ||
-			(field.omitZero && lifecycleJSONZeroValue(fieldValue)) {
+		if !ok || (field.omitEmpty && lifecycleJSONEmptyValue(fieldValue)) {
 			continue
+		}
+		if field.omitZero {
+			if lifecycleJSONZeroValueUsesMethod(fieldValue) {
+				p.cacheable = false
+			}
+			if lifecycleJSONZeroValue(fieldValue) {
+				continue
+			}
 		}
 		if !p.stopped {
 			if written > 0 {
@@ -1400,6 +1436,18 @@ func lifecycleJSONZeroValueUsesMethod(value reflect.Value) bool {
 	}
 }
 
+func lifecycleTypeUsesJSONZeroMethod(typeOf reflect.Type) bool {
+	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
+	switch {
+	case typeOf.Kind() == reflect.Interface && typeOf.Implements(isZeroerType):
+		return true
+	case typeOf.Kind() == reflect.Pointer && typeOf.Implements(isZeroerType):
+		return true
+	default:
+		return typeOf.Implements(isZeroerType) || reflect.PointerTo(typeOf).Implements(isZeroerType)
+	}
+}
+
 func lifecycleJSONZeroValue(value reflect.Value) bool {
 	isZeroerType := reflect.TypeFor[lifecycleJSONIsZeroer]()
 	typeOf := value.Type()
@@ -1425,6 +1473,7 @@ func lifecycleJSONZeroValue(value reflect.Value) bool {
 }
 
 func (p *lifecycleJSONPreview) appendQuotedReflectValue(value reflect.Value) error {
+	p.cacheable = false
 	for value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			p.append("null")
@@ -1456,6 +1505,51 @@ func (p *lifecycleJSONPreview) appendQuotedReflectValue(value reflect.Value) err
 	return nil
 }
 
+func (p *lifecycleJSONPreview) appendStringStringMap(value map[string]string, depth int) error {
+	if value == nil {
+		p.append("null")
+		return nil
+	}
+	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
+	orderingUnavailable := false
+	retainedKeyBytes := 0
+	sourceOrder := 0
+	for text := range value {
+		key := lifecyclePreviewNativeStringKeyWithBudget(text, max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes))
+		key.sourceOrder = sourceOrder
+		key.sourceString = text
+		sourceOrder++
+		for _, retained := range keys {
+			if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+				orderingUnavailable = true
+				break
+			}
+		}
+		if orderingUnavailable {
+			continue
+		}
+		retainedKeyBytes += len(key.text)
+		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
+	}
+	if orderingUnavailable {
+		return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+	}
+
+	p.append("{")
+	for i, key := range keys {
+		if !p.stopped {
+			if i > 0 {
+				p.append(",")
+			}
+			key.appendTo(p)
+			p.append(":")
+		}
+		p.appendJSONString(value[key.sourceString])
+	}
+	p.append("}")
+	return nil
+}
+
 func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) error {
 	if value.IsNil() {
 		p.append("null")
@@ -1470,6 +1564,10 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 		if !keyType.Implements(reflect.TypeFor[encoding.TextMarshaler]()) {
 			return fmt.Errorf("unsupported lifecycle payload map key %s", keyType)
 		}
+		p.cacheable = false
+	}
+	if value.Type() == reflect.TypeFor[map[string]string]() && value.CanInterface() {
+		return p.appendStringStringMap(value.Interface().(map[string]string), depth)
 	}
 	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
 	var validationKeys []lifecyclePreviewMapKey
@@ -1477,6 +1575,7 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	iterator := value.MapRange()
 	sourceOrder := 0
 	retainedKeyBytes := 0
+	elementMayError := lifecycleTypeMayMarshalErrorAddressable(value.Type().Elem(), false)
 	for iterator.Next() {
 		if orderingUnavailable {
 			// Continue the single key-method pass so key call cardinality and errors
@@ -1494,7 +1593,7 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 		key.sourceOrder = sourceOrder
 		sourceOrder++
 		key.mapValue = iterator.Value()
-		mayError := lifecycleReflectValueMayMarshalError(key.mapValue)
+		mayError := elementMayError && lifecycleReflectValueMayMarshalError(key.mapValue)
 		for _, retained := range keys {
 			if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
 				// These keys may differ only beyond a discarded suffix, so their
@@ -1583,15 +1682,25 @@ type lifecyclePreviewMapKey struct {
 	retainedText  bool
 	textTruncated bool
 	textString    string
+	sourceString  string
 }
 
 func lifecyclePreviewNativeStringKey(text string) lifecyclePreviewMapKey {
+	return lifecyclePreviewNativeStringKeyWithBudget(text, lifecyclePreviewMaxRetainedKeyBytes)
+}
+
+func lifecyclePreviewNativeStringKeyWithBudget(text string, retainedBudget int) lifecyclePreviewMapKey {
 	if len(text) <= lifecyclePreviewMaxKeyBytes+1 {
-		return lifecyclePreviewMapKey{textString: text}
+		return lifecyclePreviewMapKey{textString: text, sourceString: text}
 	}
-	retained := append([]byte(nil), text[:lifecyclePreviewMaxKeyBytes+1]...)
+	retainedLength := min(len(text), lifecyclePreviewMaxKeyBytes+1)
+	if retainedBudget < retainedLength {
+		retainedLength = max(0, retainedBudget)
+	}
+	retained := append([]byte(nil), text[:retainedLength]...)
 	return lifecyclePreviewMapKey{
 		text: retained, textLength: len(retained), retainedText: true, textTruncated: true,
+		sourceString: text,
 	}
 }
 
@@ -1600,7 +1709,7 @@ func lifecyclePreviewKey(value reflect.Value, retainedBudget int) (lifecyclePrev
 		if retainedBudget < 0 {
 			return lifecyclePreviewMapKey{}, nil
 		}
-		key := lifecyclePreviewNativeStringKey(value.String())
+		key := lifecyclePreviewNativeStringKeyWithBudget(value.String(), retainedBudget)
 		key.sourceKey = value
 		return key, nil
 	}
@@ -1652,6 +1761,9 @@ func (key lifecyclePreviewMapKey) appendTo(preview *lifecycleJSONPreview) {
 }
 
 func lifecyclePreviewMapKeyOrderAmbiguous(left, right lifecyclePreviewMapKey) bool {
+	if !left.textTruncated && !right.textTruncated {
+		return false
+	}
 	leftLength, rightLength := left.length(), right.length()
 	for i := 0; i < min(leftLength, rightLength); i++ {
 		if left.byteAt(i) != right.byteAt(i) {
@@ -1713,6 +1825,10 @@ func lifecyclePreviewSourceKeyLess(left, right reflect.Value) bool {
 
 func lifecycleAnyMayMarshalError(value any) bool {
 	if value == nil {
+		return false
+	}
+	typeOf := reflect.TypeOf(value)
+	if !lifecycleTypeMayMarshalError(typeOf) {
 		return false
 	}
 	return lifecycleReflectValueMayMarshalError(reflect.ValueOf(value))
@@ -1932,6 +2048,9 @@ func lifecycleTypeMayMarshalErrorSeen(typeOf reflect.Type, addressable bool, see
 				}
 				fieldType = fieldType.Field(fieldIndex).Type
 			}
+			if field.omitZero && lifecycleTypeUsesJSONZeroMethod(fieldType) {
+				return true
+			}
 			if lifecycleTypeMayMarshalErrorSeen(fieldType, fieldAddressable, seen) {
 				return true
 			}
@@ -1956,6 +2075,7 @@ func (p *lifecycleJSONPreview) appendBytes(value []byte) error {
 }
 
 func (p *lifecycleJSONPreview) appendJSONMarshaler(marshaler json.Marshaler) error {
+	p.cacheable = false
 	encoded, err := marshaler.MarshalJSON()
 	if err != nil {
 		return err
@@ -1968,6 +2088,7 @@ func (p *lifecycleJSONPreview) appendJSONMarshaler(marshaler json.Marshaler) err
 }
 
 func (p *lifecycleJSONPreview) appendTextMarshaler(marshaler encoding.TextMarshaler) error {
+	p.cacheable = false
 	text, err := marshaler.MarshalText()
 	if err != nil {
 		return err
