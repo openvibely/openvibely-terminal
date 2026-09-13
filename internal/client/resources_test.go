@@ -4663,6 +4663,9 @@ func benchmarkSkillContentVariant(b *testing.B, skillCount int, delay time.Durat
 	b.ReportMetric(float64(maxInFlight), "max-inflight")
 	b.ReportMetric(float64(catalogBytes)/float64(max(1, b.N)), "catalog-observed-B/op")
 	b.ReportMetric(float64(detailBytes)/float64(max(1, b.N)), "detail-observed-B/op")
+	if len(durations) <= 20 {
+		b.Logf("wall-samples-ns=%v", durations)
+	}
 }
 
 func BenchmarkListSkillsSummary(b *testing.B) {
