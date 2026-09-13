@@ -114,8 +114,13 @@ case "${1-}" in
         -coverprofile=*) profile=${arg#-coverprofile=} ;;
       esac
     done
-    if (( count != 1 || timeout != 1 || coverpkg != 1 )) || [[ -z "${profile}" ]]; then
-      echo "fresh coverage test flags changed" >&2
+    if (( timeout != 1 || coverpkg != 1 )) || [[ -z "${profile}" ]]; then
+      echo "coverage test flags changed" >&2
+      exit 99
+    fi
+    if [[ "${FAKE_UNCACHED:-true}" == true && "$count" -ne 1 ]] ||
+      [[ "${FAKE_UNCACHED:-true}" == false && "$count" -ne 0 ]]; then
+      echo "cache-mode test flag changed" >&2
       exit 99
     fi
     printf 'test-start-%s\n' "$run_id" >>"$log"
@@ -143,9 +148,13 @@ run_workflow() {
   local run_id=$2
   local vet_status=$3
   local test_status=$4
+  local uncached=${5:-true}
   local status=0
   local log="$case_dir/events.log"
   local workflow_log="$case_dir/workflow-$run_id.log"
+  local rendered_run
+
+  rendered_run=${verification_run//\$\{\{ inputs.uncached \}\}/$uncached}
 
   if (
     cd "$case_dir"
@@ -154,10 +163,11 @@ run_workflow() {
     FAKE_SOURCE="$case_dir/fixture.go" \
     FAKE_VET_STATUS="$vet_status" \
     FAKE_TEST_STATUS="$test_status" \
+    FAKE_UNCACHED="$uncached" \
     FAKE_VET_DELAY=0.25 \
     FAKE_TEST_DELAY=0.01 \
     PATH="$fake_bin:$original_path" \
-      bash -euo pipefail -c "$verification_run" >"$workflow_log" 2>&1
+      bash -euo pipefail -c "$rendered_run" >"$workflow_log" 2>&1
   ); then
     status=0
   else
@@ -205,9 +215,10 @@ run_case() {
   local vet_status=$2
   local test_status=$3
   local expected=$4
+  local uncached=${5:-true}
   local case_dir="$test_root/$name"
   make_fixture "$case_dir"
-  run_workflow "$case_dir" "$name" "$vet_status" "$test_status"
+  run_workflow "$case_dir" "$name" "$vet_status" "$test_status" "$uncached"
   if [[ "$RUN_STATUS" -ne "$expected" ]]; then
     fail "$name returned $RUN_STATUS, expected $expected"
   fi
@@ -217,6 +228,7 @@ run_case clean-success 0 0 0
 run_case vet-only-failure 7 0 1
 run_case test-only-failure 0 9 1
 run_case dual-failure 7 9 1
+run_case routine-cacheable-flags 0 0 0 false
 
 repeated_dir="$test_root/repeated-coverage"
 make_fixture "$repeated_dir"
