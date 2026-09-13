@@ -1083,52 +1083,50 @@ go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt
 go tool cover -func=coverage.txt
 ```
 
-The vet/test overlap cap was benchmarked before considering a change. The
-measurement checkout was `30ff6a484f2db616e36810f7d61e3297c846deff`, using Go
-`1.27.1` in a fixed Ubuntu 24.04 arm64 container with a 4-CPU quota and 7 GiB
-memory limit. This is a close local approximation, not a claim about an
-unobserved GitHub-hosted runner. Because it was not an actual `ubuntu-latest`
-runner, these measurements are sensitivity and rejection evidence only; they
-do not qualify a cap increase. The module download cache was prewarmed once;
-each cap/mode pair used its own warmed Go build cache, and one warm-up run was
-discarded before ten measured samples. The exact overlapping workflow commands
-were measured for `GOMAXPROCS=1`, `GOMAXPROCS=2`, and an unset (runner-default)
-vet cap. The reported p95 uses the inclusive 95th percentile.
+The vet/test overlap cap was benchmarked before considering a change. The hosted
+measurement ran on `ubuntu-latest` in GitHub Actions at checkout
+`a1413d03f529f0127c1722b0fb99b96013cb50ee`, using Go `1.27.1` on Linux amd64.
+The runner reported a 4-CPU quota, 15.6 GiB memory, and kernel
+`6.17.0-1022-azure`; all six cells ran sequentially on that same hosted runner.
+The successful run was `34738479818`, with raw records published on the
+`ci-vet-result-34738479818` result ref. The module download cache was prewarmed
+once, each cap/mode pair used its own warmed Go build cache, and one warm-up was
+discarded before ten valid measured samples. Failed or non-equivalent rows were
+not counted. The exact overlapping workflow commands were measured for
+`GOMAXPROCS=1`, `GOMAXPROCS=2`, and an unset (runner-default) vet cap. The
+reported p95 uses the inclusive 95th percentile.
 
 Routine mode (`-count=1` omitted):
 
 | Vet cap | End-to-end wall median / p95 (s) | Vet completion median / p95 (s) | Test completion median / p95 (s) | User CPU median / p95 (s) | System CPU median / p95 (s) | Peak RSS median / p95 (MiB) |
 |---|---:|---:|---:|---:|---:|---:|
-| `1` | 0.522 / 0.652 | 0.484 / 0.628 | 0.514 / 0.642 | 0.555 / 0.627 | 0.285 / 0.361 | 224.016 / 245.797 |
-| `2` | 0.570 / 0.603 | 0.449 / 0.482 | 0.561 / 0.593 | 0.590 / 0.651 | 0.330 / 0.350 | 190.777 / 205.003 |
-| default | 0.495 / 0.623 | 0.339 / 0.439 | 0.488 / 0.614 | 0.565 / 0.661 | 0.320 / 0.376 | 198.525 / 290.333 |
+| `1` | 0.433 / 0.437 | 0.404 / 0.415 | 0.338 / 0.351 | 0.645 / 0.666 | 0.350 / 0.366 | 93.0 / 96.9 |
+| `2` | 0.382 / 0.591 | 0.320 / 0.332 | 0.362 / 0.540 | 0.675 / 0.865 | 0.360 / 0.408 | 96.2 / 158.0 |
+| default | 0.435 / 0.442 | 0.314 / 0.326 | 0.380 / 0.388 | 0.700 / 0.726 | 0.360 / 0.381 | 96.8 / 101.1 |
 
 Explicit uncached mode (`-count=1` retained):
 
 | Vet cap | End-to-end wall median / p95 (s) | Vet completion median / p95 (s) | Test completion median / p95 (s) | User CPU median / p95 (s) | System CPU median / p95 (s) | Peak RSS median / p95 (MiB) |
 |---|---:|---:|---:|---:|---:|---:|
-| `1` | 13.259 / 13.815 | 0.428 / 0.583 | 13.253 / 13.794 | 7.420 / 7.857 | 2.105 / 2.774 | 542.881 / 560.328 |
-| `2` | 14.058 / 15.324 | 0.423 / 0.474 | 14.049 / 15.315 | 8.200 / 8.889 | 2.335 / 3.842 | 491.268 / 565.505 |
-| default | 13.242 / 14.521 | 0.308 / 0.350 | 13.235 / 14.513 | 7.270 / 8.355 | 2.325 / 3.083 | 480.793 / 555.339 |
+| `1` | 16.677 / 17.065 | 0.470 / 0.489 | 16.620 / 17.006 | 13.265 / 13.665 | 4.265 / 4.680 | 596.4 / 622.8 |
+| `2` | 16.601 / 17.026 | 0.338 / 0.401 | 16.555 / 16.985 | 13.075 / 13.180 | 4.220 / 4.399 | 590.6 / 616.9 |
+| default | 16.475 / 18.896 | 0.314 / 0.338 | 16.440 / 18.853 | 12.915 / 13.001 | 4.115 / 4.245 | 606.5 / 623.2 |
 
-All 60 measured runs returned `vet=0` and `test=0`. Every profile was
-non-empty and readable, exactly 2,899,087 bytes, and reported the same
-aggregate coverage of `87.8%`. Routine runs used the cacheable command and
-uncached runs used `-count=1`; no cache or coverage semantics were changed.
-The summed vet/test user and system CPU stayed within the 4-CPU quota: the
-largest sample used 13.02 CPU seconds over 15.73 wall seconds, and the highest
-sampled CPU-seconds-to-wall-seconds ratio was 1.98. Compared with the current
-cap, `GOMAXPROCS=2` was 9.2% slower routine and 6.0% slower
-uncached at the median, and the runner-default cap was only 5.2% faster
-routine and 0.1% faster uncached. The default uncached p95 was 5.1% worse,
-and its routine p95 RSS was 18.1% above the current cap. Neither candidate
-reached the required 10% routine and 15% uncached median
-improvements, so the workflow retains the bounded `GOMAXPROCS=1` vet cap.
-The workflow retains the bounded `GOMAXPROCS=1` vet cap, independent status
-reporting, non-empty profile validation, and success-gated summary. Explicit
-child cleanup now terminates and reaps vet and tests on normal exit, job
-cancellation, and timeout termination; the harness exercises both interruption
-paths.
+All 60 measured runs were valid, returned `vet=0` and `test=0`, and produced
+non-empty readable profiles of exactly 2,909,911 bytes with aggregate coverage
+of `87.8%`. Routine runs used the cacheable command and uncached runs used
+`-count=1`; no cache or coverage semantics were changed. The largest measured
+CPU-seconds-to-wall-seconds ratio was 2.79, within the 4-CPU runner budget.
+Compared with the current cap, `GOMAXPROCS=2` reduced routine median wall time
+by 11.7% but made routine p95 wall time 35.2% worse and routine p95 RSS 63.1%
+higher; its uncached median improved only 0.5%. The runner-default cap was 0.5%
+slower routine and only 1.2% faster uncached, with uncached p95 wall time 10.7%
+worse. Neither candidate met both required median improvements and p95/RSS
+safeguards, so the workflow retains the bounded `GOMAXPROCS=1` vet cap. The
+workflow retains independent status reporting, non-empty profile validation,
+and the success-gated summary. Explicit child cleanup terminates and reaps vet
+and tests on normal exit, job cancellation, and timeout termination; the
+harness exercises each interruption path.
 
 Tests cover the HTML scrapers and JSON client against `httptest` servers, the
 chat update loop (history, menus, chat polling, SSE backoff), the renderers,
