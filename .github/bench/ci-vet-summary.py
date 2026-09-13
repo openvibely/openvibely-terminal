@@ -25,18 +25,22 @@ wall = stats(rows, "wrapper_wall_s")
 vet = stats(rows, "vet_done_s")
 test = stats(rows, "test_done_s")
 rss = stats(rows, "peak_rss_kb_process_group")
-cpu = [
-    row["cpu"].get("user", 0)
-    + row["cpu"].get("sys", 0)
-    + row["vet_cpu"].get("user", 0)
-    + row["vet_cpu"].get("sys", 0)
+user_cpu = [
+    row["cpu"].get("user", 0) + row["vet_cpu"].get("user", 0)
     for row in rows
 ]
+sys_cpu = [
+    row["cpu"].get("sys", 0) + row["vet_cpu"].get("sys", 0)
+    for row in rows
+]
+cpu = [user + system for user, system in zip(user_cpu, sys_cpu)]
 print(
     f"CAP {cap} n={len(rows)} statuses={sorted(set((r['vet_status'], r['test_status']) for r in rows))} "
     f"wall={wall[0]:.3f}/{wall[1]:.3f}s "
     f"vet_done={vet[0]:.3f}/{vet[1]:.3f}s "
     f"test_done={test[0]:.3f}/{test[1]:.3f}s "
+    f"user_cpu={statistics.median(user_cpu):.3f}/{p95(user_cpu):.3f}s "
+    f"sys_cpu={statistics.median(sys_cpu):.3f}/{p95(sys_cpu):.3f}s "
     f"cpu={statistics.median(cpu):.3f}/{p95(cpu):.3f}s "
     f"rss_mib={rss[0]/1024:.1f}/{rss[1]/1024:.1f} "
     f"profiles={sorted(set((r['profile_bytes'], r['coverage_readable'], r['coverage_pct']) for r in rows))}"
