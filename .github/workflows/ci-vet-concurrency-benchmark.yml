@@ -51,9 +51,9 @@ jobs:
         if: always()
         env:
           RESULT_BRANCH: ci-vet-result-${{ matrix.cap }}-${{ matrix.mode }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          result_repo=$(mktemp -d)
           git -C "$GITHUB_WORKSPACE" switch --orphan benchmark-result
           git -C "$GITHUB_WORKSPACE" rm -rf . >/dev/null 2>&1 || true
           cp -R "$BENCH_OUT" "$GITHUB_WORKSPACE/ci-vet-benchmark-result"
@@ -61,6 +61,5 @@ jobs:
           git -C "$GITHUB_WORKSPACE" config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git -C "$GITHUB_WORKSPACE" add ci-vet-benchmark-result
           git -C "$GITHUB_WORKSPACE" commit -m "Temporary benchmark result $RESULT_BRANCH"
-          git -C "$GITHUB_WORKSPACE" push origin "HEAD:refs/heads/$RESULT_BRANCH"
-          rm -rf "$result_repo"
+          git -C "$GITHUB_WORKSPACE" push "https://x-access-token:${GH_TOKEN}@github.com/openvibely/openvibely-terminal.git" "HEAD:refs/heads/$RESULT_BRANCH"
 
