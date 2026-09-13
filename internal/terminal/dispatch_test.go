@@ -9646,8 +9646,8 @@ func TestChannelsRejectMalformedArgumentsBeforeSideEffects(t *testing.T) {
 		line      string
 		wantUsage string
 	}{
-		{line: "/channels nonsense", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
-		{line: "/channels list extra", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
+		{line: "/channels nonsense", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|access|targets|webhooks]"},
+		{line: "/channels list extra", wantUsage: "usage: /channels [list|show|add|connect|edit|test|remove|disconnect|access|targets|webhooks]"},
 		{line: "/channels test telegram extra", wantUsage: "nothing matches"},
 		{line: "/channels remove slack extra", wantUsage: "nothing matches"},
 	}

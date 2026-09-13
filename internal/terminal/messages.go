@@ -193,6 +193,14 @@ type channelAccessRemovalTargetMsg struct {
 	err               error
 }
 
+type outboundTargetRemovalTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	target            client.OutboundTarget
+	err               error
+}
+
 type channelWizardStartMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64

@@ -646,6 +646,67 @@ username. GitHub actors use a system-level allowlist with the selected project
 ID carried as request context; their output exposes only the canonical record ID,
 login, and optional display name.
 
+#### Saved outbound targets
+
+`channels targets` manages the selected project's saved destinations for
+`send_message`. `outbound-targets` is an equivalent command name. The TUI and
+one-shot CLI share the same registry, parser, project scope, and backend form:
+
+```text
+/channels targets list
+/channels targets show ops
+/channels targets add slack C123 --kind channel --name ops --thread-id 42 --home
+/channels targets add slack U123 --kind user --name "Release reviewer"
+/channels targets add telegram -1001234567890 --kind chat --name alerts --topic-id 7
+/channels targets add email person@example.com --name client --default-subject Deploy
+/channels targets add discord 123456789012345678 --kind user --name reviewer
+/channels targets add x me --kind account --name release
+/channels targets edit ops --default-subject Deployments
+/channels targets test ops
+/channels targets test draft email person@example.com --name draft
+/channels targets policy on
+/channels targets remove ops
+```
+
+The equivalent CLI forms are:
+
+```bash
+openvibely-terminal -project demo channels targets list
+openvibely-terminal -project demo --json channels targets list
+openvibely-terminal -project demo channels targets add slack C123 --kind channel --name ops --thread-id 42 --home
+openvibely-terminal -project demo channels targets add discord 123456789012345678 --kind user --name reviewer
+openvibely-terminal -project demo channels targets edit ops --thread-id 99
+openvibely-terminal -project demo channels targets test ops
+openvibely-terminal -project demo channels targets test draft email person@example.com --name draft
+openvibely-terminal -project demo channels targets policy off
+openvibely-terminal -project demo --force channels targets remove ops
+```
+
+Add and edit accept `--platform`, `--kind`/`--target-kind`, `--name`,
+`--destination`/`--target-id`, `--thread-id`/`--topic-id`, `--home`, and
+`--default-subject`. The positional add form is
+`targets add <platform> <destination>`. Slack and Discord support user-DM
+forms with `--kind user`; Slack channels, Telegram chats/topics, Email
+addresses, Discord channels, and X accounts use their corresponding backend
+forms. The backend performs final normalization and duplicate validation, so
+values are sent through unchanged rather than rewritten by the terminal.
+
+List and show output contains only platform, target kind, name, destination,
+thread/topic, Home state, and default subject. Backend record IDs, project IDs,
+credentials, and raw HTML are omitted; `--json` is stable and emits `[]` for an
+empty target list. Saved `test <id-or-name>` and unsaved `test draft ...` print
+only a clear `sent` or `failed` result, including provider failures without
+requiring terminal credentials.
+
+`targets policy` reads the selected project's explicit-unsaved-target setting;
+`targets policy on|off` changes it while preserving saved rows. Removal accepts
+an ID or name and resolves it only from the selected project's current results.
+The TUI requires typing `yes` or permits `Esc` cancellation; CLI removal
+requires `--force`/`-f`. Missing, foreign, ambiguous, and stale references are
+rejected before the replacement form is submitted, including when a row changes
+between resolution and confirmation. A failed refresh after a successful save
+is reported without printing backend markup.
+
 Inbound webhooks use the nested `/channels webhooks` registry:
 
 ```

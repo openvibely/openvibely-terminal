@@ -1335,7 +1335,7 @@ func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
 		t.Fatal("channels command missing")
 	}
 
-	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "webhooks"}; !reflect.DeepEqual(cmd.actions, want) {
+	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}; !reflect.DeepEqual(cmd.actions, want) {
 		t.Fatalf("channels actions = %#v, want %#v", cmd.actions, want)
 	}
 

@@ -96,7 +96,7 @@ Common commands include:
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
 | `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |
-| `/channels` | Manage integrations, inbound webhooks, and project-scoped Telegram, Slack, Discord, X, Email, and GitHub authorized access with `channels access <provider> list\|add\|remove` |
+| `/channels` | Manage integrations, inbound webhooks, saved outbound targets, and project-scoped Telegram, Slack, Discord, X, Email, and GitHub authorized access with `channels access <provider> list\|add\|remove` and `channels targets list\|show\|add\|edit\|test\|remove\|policy` |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
@@ -123,6 +123,50 @@ openvibely-terminal -project demo --json channels access x list
 openvibely-terminal -project demo --force channels access x remove 123456789
 ```
 
+```text
+channels targets list
+channels targets add slack C123 --kind channel --name ops --thread-id 42 --home
+channels targets add slack U123 --kind user --name "Release reviewer"
+channels targets add telegram -1001234567890 --kind chat --name alerts --topic-id 7
+channels targets add email person@example.com --name client --default-subject Deploy
+channels targets add discord 123456789012345678 --kind user --name reviewer
+channels targets add x me --kind account --name release
+channels targets edit ops --default-subject Deployments
+channels targets test ops
+channels targets test draft email person@example.com --name draft --default-subject Preview
+channels targets policy on
+channels targets remove ops
+```
+
+The same registry is available to one-shot CLI callers:
+
+```bash
+openvibely-terminal -project demo channels targets list
+openvibely-terminal -project demo --json channels targets list
+openvibely-terminal -project demo channels targets add slack C123 --kind channel --name ops --thread-id 42 --home
+openvibely-terminal -project demo channels targets add discord 123456789012345678 --kind user --name reviewer
+openvibely-terminal -project demo channels targets edit ops --thread-id 99
+openvibely-terminal -project demo channels targets test ops
+openvibely-terminal -project demo channels targets test draft email person@example.com --name draft
+openvibely-terminal -project demo channels targets policy off
+openvibely-terminal -project demo --force channels targets remove ops
+```
+
+`targets` also accepts `outbound-targets`. Saved target list/show output is
+project-scoped and contains only platform, target kind, name, destination,
+thread/topic, Home state, and default subject; `--json` omits backend IDs and
+secrets and prints `[]` when no targets are saved. Slack and Discord support
+user-DM targets with `--kind user`; Slack channels, Telegram chats/topics,
+Email addresses, Discord channels, and X accounts use the corresponding backend
+forms and normalization. The backend remains authoritative for normalization
+and duplicate validation. Saved and draft tests report only `sent` or `failed`,
+without requiring credentials in the terminal or printing backend HTML.
+
+`targets policy on|off` reads or changes the selected project's
+explicit-unsaved-target setting. Removing by ID or name resolves only within
+the selected project's results, then requires `yes` in the TUI or `--force` in
+CLI mode. Missing, foreign, ambiguous, or stale references are rejected without
+submitting a replacement form.
 
 ```text
 tasks goal <task> | <objective>

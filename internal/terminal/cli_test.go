@@ -4850,8 +4850,8 @@ func TestCLIChannelsRejectMalformedArgumentsBeforeRequests(t *testing.T) {
 		args      []string
 		wantUsage string
 	}{
-		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
-		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
+		{args: []string{"channels", "nonsense"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|access|targets|webhooks]"},
+		{args: []string{"channels", "list", "extra"}, wantUsage: "usage: channels [list|show|add|connect|edit|test|remove|disconnect|access|targets|webhooks]"},
 		{args: []string{"channels", "test", "telegram", "extra"}, wantUsage: "nothing matches"},
 		{args: []string{"channels", "remove", "slack", "extra"}, wantUsage: "nothing matches"},
 	}

@@ -4855,6 +4855,9 @@ func validateChannelsArgs(args []string) error {
 	if action == "webhooks" {
 		return validateWebhooksArgs(args[1:])
 	}
+	if isOutboundTargetsAction(action) {
+		return validateOutboundTargetsArgs(args[1:])
+	}
 	switch action {
 	case "list":
 		if len(args) == 1 {
@@ -5461,7 +5464,7 @@ func runChannelAccess(m Model, args []string) (Model, tea.Cmd) {
 }
 
 func channelsCommand() command {
-	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "webhooks"}
+	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}
 	webhookActions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
 	completions := []commandCompletion{
 		{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
@@ -5474,16 +5477,22 @@ func channelsCommand() command {
 		{after: []string{"edit", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
 		{after: []string{"access"}, values: channelAccessProviders},
 		{after: []string{"access", "*"}, values: channelAccessActions},
+		{after: []string{"targets"}, values: outboundTargetActions},
+		{after: []string{"targets", "add", "**"}, values: outboundTargetOptionCompletionValues()},
+		{after: []string{"targets", "edit", "*", "**"}, values: outboundTargetOptionCompletionValues()},
+		{after: []string{"targets", "test"}, values: []string{"draft"}},
+		{after: []string{"targets", "test", "draft", "**"}, values: outboundTargetOptionCompletionValues()},
+		{after: []string{"targets", "policy"}, values: []string{"show", "on", "off"}},
 		{after: []string{"webhooks"}, values: webhookActions},
 	}
 	completions = append(completions, webhookCompletionRules("webhooks")...)
 	return command{
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
-		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"access", "telegram", "remove"}, {"access", "slack", "remove"}, {"access", "discord", "remove"}, {"access", "x", "remove"}, {"access", "email", "remove"}, {"access", "github", "remove"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}},
+		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"targets", "show"}, {"targets", "edit"}, {"targets", "test"}, {"targets", "remove"}, {"access", "telegram", "remove"}, {"access", "slack", "remove"}, {"access", "discord", "remove"}, {"access", "x", "remove"}, {"access", "email", "remove"}, {"access", "github", "remove"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}},
 		completions:   completions,
 		desc:          "manage GitHub, Slack, Telegram, Discord, X, and Email integrations",
 		actionUsages: []commandActionUsage{
-			{action: "", args: "[list|show|add|connect|edit|test|remove|disconnect|access|webhooks]"},
+			{action: "", args: "[list|show|add|connect|edit|test|remove|disconnect|access|targets|webhooks]"},
 			{action: "list", description: "list safe channel identity and connection state"},
 			{action: "show", args: "<channel>", description: "show safe channel details"},
 			{action: "add", args: "<type> <options>", description: "configure a new channel"},
@@ -5493,6 +5502,15 @@ func channelsCommand() command {
 			{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
 			{action: "disconnect", args: "<github|slack>", description: "disconnect credentials without removing other configuration (confirmation required)"},
 			{action: "access", args: "<telegram|slack|discord|x|email|github> <list|add|remove> [identity] [display name]", description: "manage authorized inbound access identities"},
+			{action: "targets", description: "manage saved outbound message destinations"},
+			{action: "targets list", description: "list safe saved destinations"},
+			{action: "targets show", args: "<target>", description: "show one safe saved destination"},
+			{action: "targets add", args: "<platform> <destination> [options]", description: "save a Slack, Telegram, Email, Discord, or X destination"},
+			{action: "targets edit", args: "<target> [options]", description: "edit one saved destination"},
+			{action: "targets test", args: "<target>", description: "test a saved destination"},
+			{action: "targets test draft", args: "<platform> <destination> [options]", description: "test an unsaved destination"},
+			{action: "targets remove", args: "<target>", description: "remove one saved destination (confirmation required)"},
+			{action: "targets policy", args: "[show|on|off]", description: "read or set explicit unsaved-target policy"},
 			{action: "webhooks", args: "[action]", description: "manage inbound webhook endpoints"},
 			{action: "webhooks list", description: "list inbound webhooks"},
 			{action: "webhooks show", args: "<webhook>", description: "show secret-free webhook detail"},
@@ -5516,6 +5534,9 @@ func channelsCommand() command {
 			"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret; X poll interval must be 15 to 300 seconds.",
 			"Webhook options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents.",
 			"Access providers: Telegram accepts a numeric ID or username; Slack requires a Slack user ID; Discord requires a numeric ID; X requires a numeric ID and accepts an optional username; Email is normalized before it is authorized; GitHub accepts a normalized login and optional display name.",
+			"Outbound targets: targets add <platform> <destination> [--kind channel|user] [--name name] [--thread-id id] [--home] [--default-subject subject].",
+			"Outbound target references resolve only within the selected project; removal captures the canonical ID, then requires yes or --force.",
+			"Explicit unsaved target policy: channels targets policy show|on|off.",
 			"X access: channels access x list|add|remove [numeric ID] [@username]; username is optional and @ is normalized.",
 			"GitHub access: channels access github list|add|remove [@login] [display name]; @login is normalized and the display name is optional.",
 			"Access removal resolves and captures one listed identity before confirmation; interactive removal requires yes and headless removal requires --force.",
@@ -5523,6 +5544,13 @@ func channelsCommand() command {
 		},
 		examples: []string{
 			"channels show slack",
+			"channels targets list",
+			"channels targets add slack C123456 --name ops --home",
+			"channels targets edit ops --thread-id 42 --default-subject Deploy",
+			"channels targets test ops",
+			"channels targets test draft email person@example.com --name client --default-subject Hello",
+			"channels targets policy on",
+			"channels targets remove ops",
 			"channels add x --consumer-key <key> --consumer-secret <secret> --access-token <token> --access-token-secret <secret>",
 			"channels connect slack",
 			"channels test x",
@@ -5550,6 +5578,9 @@ func channelsCommand() command {
 			}
 			if err := validateChannelsArgs(args); err != nil {
 				return m, errCmd(err.Error())
+			}
+			if len(args) > 0 && isOutboundTargetsAction(args[0]) {
+				return runOutboundTargets(m, args[1:])
 			}
 			if len(args) > 0 && strings.EqualFold(args[0], "access") {
 				return runChannelAccess(m, args)
