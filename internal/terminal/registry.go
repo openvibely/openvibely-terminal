@@ -140,6 +140,16 @@ func scheduleMutationOutput(status string, reload func() ([]client.ScheduleEntry
 	return status + "\n\n" + renderSchedule(entries, summary), nil
 }
 
+// scheduleToggleOutput performs a resolved schedule toggle and returns the
+// mutation status with the best-effort refreshed schedule page.
+func scheduleToggleOutput(ctx context.Context, c *client.Client, projectID, scheduleID string) (string, error) {
+	if _, err := c.ToggleSchedule(ctx, projectID, scheduleID); err != nil {
+		return "", err
+	}
+	return scheduleMutationOutput("toggled schedule",
+		func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, projectID) })
+}
+
 // resolveScheduleDeletion captures the unique schedule selected by a typed
 // reference before either interactive confirmation or the headless force gate.
 func resolveScheduleDeletion(c *client.Client, projectID, ref string) tea.Cmd {
@@ -1829,11 +1839,7 @@ func scheduleCommand() command {
 										}
 										m.busy = true
 										return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
-											if _, err := c.ToggleSchedule(ctx, pid, e.ScheduleID); err != nil {
-												return "", err
-											}
-											return scheduleMutationOutput("toggled schedule",
-												func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
+											return scheduleToggleOutput(ctx, c, pid, e.ScheduleID)
 										})
 									}
 									items = append(items, item)
@@ -1858,11 +1864,7 @@ func scheduleCommand() command {
 					if e.ScheduleID == "" {
 						return "", fmt.Errorf("that task has no schedule")
 					}
-					if _, err := c.ToggleSchedule(ctx, pid, e.ScheduleID); err != nil {
-						return "", err
-					}
-					return scheduleMutationOutput("toggled schedule",
-						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
+					return scheduleToggleOutput(ctx, c, pid, e.ScheduleID)
 				})
 			}
 			return m, nil
