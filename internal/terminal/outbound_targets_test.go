@@ -2,11 +2,15 @@ package terminal
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
@@ -341,5 +345,70 @@ func TestOutboundTargetsCLIEmptyJSON(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out.String()); got != "[]" {
 		t.Fatalf("empty CLI JSON = %q, want []", got)
+	}
+}
+
+func TestOutboundTargetsCLICancellationPropagatesToBlockedRemovalLookup(t *testing.T) {
+	lookupStarted := make(chan struct{})
+	lookupCanceled := make(chan struct{})
+	var postMu sync.Mutex
+	var postCalls int
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			close(lookupStarted)
+			<-r.Context().Done()
+			close(lookupCanceled)
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			postMu.Lock()
+			postCalls++
+			postMu.Unlock()
+			http.Error(w, "unexpected mutation", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, io.Discard, "demo", []string{"channels", "targets", "remove", "target-a"}, true, false)
+	}()
+
+	select {
+	case <-lookupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("outbound target removal lookup did not start")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("canceled outbound target removal returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled outbound target removal did not return promptly")
+	}
+	select {
+	case <-lookupCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("outbound target removal lookup did not observe caller cancellation")
+	}
+	postMu.Lock()
+	gotPosts := postCalls
+	postMu.Unlock()
+	if gotPosts != 0 {
+		t.Fatalf("canceled outbound target removal sent %d replacement mutations", gotPosts)
 	}
 }

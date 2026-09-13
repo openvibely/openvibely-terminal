@@ -390,9 +390,12 @@ func outboundTargetSelector(m Model, action string) (Model, tea.Cmd) {
 		}))
 }
 
-func outboundTargetRemovalTarget(c *client.Client, projectID, ref string) tea.Cmd {
+func outboundTargetRemovalTarget(baseCtx context.Context, c *client.Client, projectID, ref string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
 		defer cancel()
 		targets, err := c.ListOutboundTargets(ctx, projectID)
 		var target client.OutboundTarget
@@ -618,7 +621,7 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 	}
 	if action == "remove" {
 		ref := strings.Join(args[1:], " ")
-		return m, outboundTargetRemovalTarget(c, projectID, ref)
+		return m, outboundTargetRemovalTarget(m.cliContext, c, projectID, ref)
 	}
 	return m, errCmd(outboundTargetsUsage(""))
 }
