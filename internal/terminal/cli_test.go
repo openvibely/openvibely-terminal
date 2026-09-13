@@ -1294,6 +1294,45 @@ func TestCLIStatusZeroProjectsSkipsScopedCounts(t *testing.T) {
 	}
 }
 
+func TestCLIAndInteractiveStatusShareUnlimitedWorkerCapacityOutput(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":        `{"projects":[]}`,
+		"/api/capacity/global": `{"total_running":3,"max_workers":0,"queue_size":4,"available_slots":0,"has_capacity":true}`,
+		"/auth/me":             `{"authenticated":false}`,
+	})
+
+	interactive := New(c)
+	updated, _ := interactive.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	interactive = updated.(Model)
+	interactive.connected = true
+	interactive.connChecked = true
+	interactive.projectsLoaded = true
+	interactive.projects = []client.Project{}
+	interactive.capacity = &client.GlobalCapacity{TotalRunning: 3, QueueSize: 4, HasCapacity: true}
+	interactive.auth = &client.AuthStatus{Authenticated: false}
+	interactive = runLine(t, interactive, "/status")
+	interactiveStatus := stripANSI(interactive.renderStatus())
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"status"}, false, false); err != nil {
+		t.Fatalf("one-shot status failed: %v", err)
+	}
+	cliOutput := stripANSI(out.String())
+	if !strings.Contains(cliOutput, interactiveStatus) {
+		t.Fatalf("one-shot status differed from interactive status:\ninteractive:\n%s\ncli:\n%s", interactiveStatus, cliOutput)
+	}
+	for _, output := range []string{interactiveStatus, cliOutput} {
+		if !strings.Contains(output, "3 running / Unlimited, 4 queued") {
+			t.Errorf("unlimited status wording missing:\n%s", output)
+		}
+		for _, unwanted := range []string{"0 max", "0 free"} {
+			if strings.Contains(output, unwanted) {
+				t.Errorf("status output contains misleading unlimited capacity text %q:\n%s", unwanted, output)
+			}
+		}
+	}
+}
+
 func TestCLIStatusCancellationStopsFirstWaveBeforeScopedCounts(t *testing.T) {
 	started := make(chan string, 3)
 	rec := &recorder{}

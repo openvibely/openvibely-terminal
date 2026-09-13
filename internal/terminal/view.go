@@ -236,6 +236,18 @@ func (m Model) hint() string {
 	return "type to chat · / for commands · ↑↓ history · pgup/pgdn scroll · ctrl+l clear · ctrl+c quit"
 }
 
+// globalWorkerCapacityText keeps the status summary aligned with the global
+// row in /workers. The backend reports zero available slots for an unlimited
+// pool, so status must not present that sentinel as a finite free count.
+func globalWorkerCapacityText(c *client.GlobalCapacity) string {
+	limit := workerLimitLabel("global", &c.MaxWorkers)
+	if c.MaxWorkers == 0 {
+		return fmt.Sprintf("%d running / %s, %d queued", c.TotalRunning, limit, c.QueueSize)
+	}
+	return fmt.Sprintf("%d running / %d max, %d queued, %d free",
+		c.TotalRunning, c.MaxWorkers, c.QueueSize, c.AvailableSlots)
+}
+
 // renderStatus is the /status block.
 func (m Model) renderStatus() string {
 	var b strings.Builder
@@ -324,8 +336,7 @@ func (m Model) renderStatus() string {
 		row("project", m.selectedName)
 	}
 	if c := m.capacity; c != nil {
-		row("workers", fmt.Sprintf("%d running / %d max, %d queued, %d free",
-			c.TotalRunning, c.MaxWorkers, c.QueueSize, c.AvailableSlots))
+		row("workers", globalWorkerCapacityText(c))
 	}
 	if m.selectedID != "" {
 		if m.pendingAlertCount > 0 {
