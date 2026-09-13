@@ -457,6 +457,66 @@ func BenchmarkRenderLifecycleEventsLargePayload(b *testing.B) {
 	}
 }
 
+func BenchmarkRenderLifecycleEventsDecodedPayloads(b *testing.B) {
+	for _, size := range []struct {
+		name  string
+		bytes int
+	}{
+		{name: "64KiB", bytes: 64 << 10},
+		{name: "1MiB", bytes: 1 << 20},
+	} {
+		for _, eventCount := range []int{1, 100} {
+			events, payloadBytes, err := lifecycleDecodedBackendEvents(size.bytes, eventCount)
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Run(fmt.Sprintf("wide_struct_map/%s/%d_events", size.name, eventCount), func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(payloadBytes))
+				b.ResetTimer()
+				b.ReportMetric(float64(eventCount), "events/op")
+				b.ReportMetric(float64(payloadBytes), "payload-bytes/op")
+				for i := 0; i < b.N; i++ {
+					lifecycleBenchmarkSink = renderLifecycleEvents(client.Task{ID: "task-1"}, client.LifecycleExecution{ID: "execution-1"}, events)
+				}
+			})
+		}
+	}
+}
+
+type lifecycleBackendWireEvent struct {
+	ID        string          `json:"id"`
+	Seq       int             `json:"seq"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+	CreatedAt string          `json:"created_at"`
+}
+
+func lifecycleDecodedBackendEvents(payloadSize, eventCount int) ([]client.LifecycleEvent, int, error) {
+	payload, err := json.Marshal(lifecycleBenchmarkPayload(payloadSize, "wide_struct_map"))
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal lifecycle backend payload: %w", err)
+	}
+	wire := make([]lifecycleBackendWireEvent, eventCount)
+	for i := range wire {
+		wire[i] = lifecycleBackendWireEvent{
+			ID:        fmt.Sprintf("event-%03d", i),
+			Seq:       i + 1,
+			EventType: "completed",
+			Payload:   payload,
+		}
+	}
+	encoded, err := json.Marshal(wire)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal lifecycle backend events: %w", err)
+	}
+	var events []client.LifecycleEvent
+	if err := json.Unmarshal(encoded, &events); err != nil {
+		return nil, 0, fmt.Errorf("decode lifecycle backend events: %w", err)
+	}
+	return events, len(payload) * eventCount, nil
+}
+
 type lifecycleRenderMeasurement struct {
 	wall             time.Duration
 	allocations      uint64
@@ -512,23 +572,20 @@ func measureLifecycleRender(events []client.LifecycleEvent) lifecycleRenderMeasu
 }
 
 func TestRenderLifecycleEventsBackendShapedMeasurements(t *testing.T) {
-	const payloadBytes = 64 << 10
+	const payloadSize = 64 << 10
 	for _, eventCount := range []int{1, 100} {
-		payload := lifecycleBenchmarkPayload(payloadBytes, "wide_struct_map")
-		events := make([]client.LifecycleEvent, eventCount)
-		for i := range events {
-			events[i] = client.LifecycleEvent{
-				ID:        fmt.Sprintf("event-%03d", i),
-				Seq:       i + 1,
-				EventType: "completed",
-				Payload:   payload,
-			}
+		events, payloadBytes, err := lifecycleDecodedBackendEvents(payloadSize, eventCount)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if eventCount > 1 && reflect.ValueOf(events[0].Payload).Pointer() == reflect.ValueOf(events[1].Payload).Pointer() {
+			t.Fatal("decoded backend payload maps unexpectedly share identity")
 		}
 		measurement := measureLifecycleRender(events)
 		if lifecycleBenchmarkSink == "" {
 			t.Fatal("backend-shaped lifecycle render returned an empty result")
 		}
-		t.Logf("fixture=wide_struct_map events=%d payload_bytes=%d wall=%s allocations=%d peak_live_heap_bytes=%d", eventCount, payloadBytes*eventCount, measurement.wall, measurement.allocations, measurement.peakLiveHeapByte)
+		t.Logf("fixture=wide_struct_map events=%d payload_bytes=%d payload_bytes_per_event=%d wall=%s allocations=%d peak_live_heap_bytes=%d", eventCount, payloadBytes, payloadBytes/eventCount, measurement.wall, measurement.allocations, measurement.peakLiveHeapByte)
 	}
 }
 
@@ -1503,6 +1560,57 @@ func TestLifecyclePayloadSummaryHonorsOmitZeroDuringBoundedMapValidation(t *test
 	}
 }
 
+func TestLifecyclePayloadSummaryBoundsManyLongTextMarshalerKeys(t *testing.T) {
+	const (
+		keyCount = lifecyclePreviewMaxRetainedKeyBytes/lifecyclePreviewMaxKeyBytes + 64
+		keySize  = 4 << 10
+	)
+	values := make(map[lifecyclePreviewOversizedCollidingTextKey]int, keyCount)
+	texts := make([][]byte, keyCount)
+	calls := 0
+	for i := range keyCount {
+		texts[i] = []byte(strings.Repeat("x", keySize) + fmt.Sprintf("-%04d", i))
+		key := lifecyclePreviewOversizedCollidingTextKey{ID: i, Text: &texts[i], Calls: &calls}
+		values[key] = i
+	}
+
+	retainedBytes := 0
+	for key := range values {
+		candidate, err := lifecyclePreviewKey(reflect.ValueOf(key), max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedBytes))
+		if err != nil {
+			t.Fatalf("marshal TextMarshaler key: %v", err)
+		}
+		retainedBytes += len(candidate.text)
+		if retainedBytes > lifecyclePreviewMaxRetainedKeyBytes {
+			t.Fatalf("retained TextMarshaler key bytes = %d, exceeds bound %d", retainedBytes, lifecyclePreviewMaxRetainedKeyBytes)
+		}
+	}
+	if got := lifecyclePayloadSummary(map[string]any{"values": values}); got != "<unavailable>" {
+		t.Fatalf("over-budget TextMarshaler key preview = %q, want unavailable", got)
+	}
+
+	const (
+		unambiguousKeyCount = 120
+		unambiguousKeySize  = 1 << 10
+	)
+	unambiguous := make(map[lifecyclePreviewOversizedCollidingTextKey]string, unambiguousKeyCount)
+	unambiguousTexts := make([][]byte, unambiguousKeyCount)
+	calls = 0
+	for i := range unambiguousKeyCount {
+		unambiguousTexts[i] = []byte(fmt.Sprintf("%04d-%s", i, strings.Repeat("y", unambiguousKeySize)))
+		key := lifecyclePreviewOversizedCollidingTextKey{ID: i, Text: &unambiguousTexts[i], Calls: &calls}
+		unambiguous[key] = "value"
+	}
+	payload := map[string]any{"values": unambiguous}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal unambiguous TextMarshaler keys: %v", err)
+	}
+	if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
+		t.Fatalf("unambiguous TextMarshaler key preview = %q, want %q", got, want)
+	}
+}
+
 func TestLifecyclePayloadSummaryPreservesDistinguishableOversizedNativeMapKeys(t *testing.T) {
 	concrete := map[string]any{
 		"a-" + strings.Repeat("k", 1<<20): 1,
@@ -1858,12 +1966,24 @@ func TestLifecyclePreviewKeyCapsOversizedTextRetention(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("oversized TextMarshaler key calls = %d, want 1", calls)
 	}
+	if !key.textTruncated || len(key.text) != 0 {
+		t.Fatalf("retained oversized key = %d bytes, truncated %t; want zero retained bytes and truncated", len(key.text), key.textTruncated)
+	}
+
+	calls = 0
+	key, err = lifecyclePreviewKey(reflect.ValueOf(value), lifecyclePreviewMaxKeyBytes+1)
+	if err != nil {
+		t.Fatalf("preview bounded oversized text key: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("bounded oversized TextMarshaler key calls = %d, want 1", calls)
+	}
 	if !key.textTruncated || len(key.text) != lifecyclePreviewMaxKeyBytes+1 {
-		t.Fatalf("retained oversized key = %d bytes, truncated %t; want %d bytes and truncated", len(key.text), key.textTruncated, lifecyclePreviewMaxKeyBytes+1)
+		t.Fatalf("bounded retained oversized key = %d bytes, truncated %t; want %d bytes and truncated", len(key.text), key.textTruncated, lifecyclePreviewMaxKeyBytes+1)
 	}
 	text[0] = 'z'
 	if key.text[0] != 'k' {
-		t.Fatal("retained oversized key aliases caller-owned storage")
+		t.Fatal("bounded retained oversized key aliases caller-owned storage")
 	}
 }
 

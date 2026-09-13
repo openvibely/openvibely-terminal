@@ -1575,6 +1575,7 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	iterator := value.MapRange()
 	sourceOrder := 0
 	retainedKeyBytes := 0
+	keyRetentionBudget := lifecyclePreviewMaxRetainedKeyBytes / max(1, value.Len())
 	elementMayError := lifecycleTypeMayMarshalErrorAddressable(value.Type().Elem(), false)
 	for iterator.Next() {
 		if orderingUnavailable {
@@ -1585,7 +1586,7 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 			}
 			continue
 		}
-		key, err := lifecyclePreviewKey(iterator.Key(), max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes))
+		key, err := lifecyclePreviewKey(iterator.Key(), min(keyRetentionBudget, max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes)))
 		if err != nil {
 			return err
 		}
@@ -1734,7 +1735,7 @@ func lifecyclePreviewKey(value reflect.Value, retainedBudget int) (lifecyclePrev
 			}
 			textLength := len(text)
 			if textLength > retainedBudget {
-				textLength = min(textLength, lifecyclePreviewMaxKeyBytes+1)
+				textLength = min(retainedBudget, lifecyclePreviewMaxKeyBytes+1)
 			}
 			retained := append([]byte(nil), text[:textLength]...)
 			return lifecyclePreviewMapKey{
