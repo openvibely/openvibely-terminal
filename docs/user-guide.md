@@ -1020,7 +1020,9 @@ The vet/test overlap cap was benchmarked before considering a change. The
 measurement checkout was `30ff6a484f2db616e36810f7d61e3297c846deff`, using Go
 `1.27.1` in a fixed Ubuntu 24.04 arm64 container with a 4-CPU quota and 7 GiB
 memory limit. This is a close local approximation, not a claim about an
-unobserved GitHub-hosted runner. The module download cache was prewarmed once;
+unobserved GitHub-hosted runner. Because it was not an actual `ubuntu-latest`
+runner, these measurements are sensitivity and rejection evidence only; they
+do not qualify a cap increase. The module download cache was prewarmed once;
 each cap/mode pair used its own warmed Go build cache, and one warm-up run was
 discarded before ten measured samples. The exact overlapping workflow commands
 were measured for `GOMAXPROCS=1`, `GOMAXPROCS=2`, and an unset (runner-default)
@@ -1050,13 +1052,16 @@ The summed vet/test user and system CPU stayed within the 4-CPU quota: the
 largest sample used 13.02 CPU seconds over 15.73 wall seconds, and the highest
 sampled CPU-seconds-to-wall-seconds ratio was 1.98. Compared with the current
 cap, `GOMAXPROCS=2` was 9.2% slower routine and 6.0% slower
-slower uncached at the median, and the runner-default cap was only 5.2% faster
+uncached at the median, and the runner-default cap was only 5.2% faster
 routine and 0.1% faster uncached. The default uncached p95 was 5.1% worse,
 and its routine p95 RSS was 18.1% above the current cap. Neither candidate
 reached the required 10% routine and 15% uncached median
 improvements, so the workflow retains the bounded `GOMAXPROCS=1` vet cap.
-The existing overlap, independent status reporting, vet reaping, non-empty
-profile check, and success-gated summary remain unchanged.
+The workflow retains the bounded `GOMAXPROCS=1` vet cap, independent status
+reporting, non-empty profile validation, and success-gated summary. Explicit
+child cleanup now terminates and reaps vet and tests on normal exit, job
+cancellation, and timeout termination; the harness exercises both interruption
+paths.
 
 Tests cover the HTML scrapers and JSON client against `httptest` servers, the
 chat update loop (history, menus, chat polling, SSE backoff), the renderers,

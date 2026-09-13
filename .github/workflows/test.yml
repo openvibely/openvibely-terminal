@@ -44,19 +44,63 @@ jobs:
           set -euo pipefail
           vet_status=0
           test_status=0
+          vet_pid=
+          test_pid=
+
+          stop_child() {
+            local pid=$1
+            if kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+            fi
+            wait "$pid" 2>/dev/null || true
+          }
+
+          cleanup_children() {
+            if [[ -n "${test_pid:-}" ]]; then
+              stop_child "$test_pid"
+              test_pid=
+            fi
+            if [[ -n "${vet_pid:-}" ]]; then
+              stop_child "$vet_pid"
+              vet_pid=
+            fi
+          }
+
+          on_exit() {
+            local status=$?
+            trap - EXIT INT TERM
+            cleanup_children
+            exit "$status"
+          }
+
+          on_signal() {
+            local status=$1
+            trap - EXIT INT TERM
+            cleanup_children
+            exit "$status"
+          }
+
+          trap on_exit EXIT
+          trap 'on_signal 130' INT
+          trap 'on_signal 143' TERM
 
           # Keep vet's build fan-out bounded while it overlaps with the full test build.
           GOMAXPROCS=1 go vet ./... &
           vet_pid=$!
 
           if [[ "${{ inputs.uncached }}" == "true" ]]; then
-            go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt || test_status=$?
+            go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &
           else
-            go test ./... -timeout 120s -coverpkg=./... -coverprofile=coverage.txt || test_status=$?
+            go test ./... -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &
           fi
+          test_pid=$!
 
-          # Always reap vet so a test failure cannot hide a vet failure or leave it running.
+          # Always reap both children so a failure, cancellation, or timeout cannot
+          # hide a status or leave vet/test running.
+          wait "$test_pid" || test_status=$?
+          test_pid=
           wait "$vet_pid" || vet_status=$?
+          vet_pid=
 
           if (( vet_status != 0 )); then
             echo "::error::go vet ./... failed with exit code ${vet_status}"

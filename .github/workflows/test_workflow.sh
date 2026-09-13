@@ -56,8 +56,13 @@ fi
 for required in \
   'GOMAXPROCS=1 go vet ./... &' \
   'vet_pid=$!' \
-  'go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt' \
+  'go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &' \
+  'test_pid=$!' \
+  'wait "$test_pid" || test_status=$?' \
   'wait "$vet_pid" || vet_status=$?' \
+  'trap on_exit EXIT' \
+  'trap '\''on_signal 130'\'' INT' \
+  'trap '\''on_signal 143'\'' TERM' \
   'if (( vet_status != 0 || test_status != 0 )); then' \
   'exit 1'; do
   if ! grep -Fq -- "$required" <<<"$verification_run"; then
@@ -93,6 +98,7 @@ case "${1-}" in
       exit 98
     fi
     printf 'vet-start-%s\n' "$run_id" >>"$log"
+    printf '%s\n' "$$" >"$log.vet-pid"
     sleep "${FAKE_VET_DELAY:-0.25}"
     printf 'vet-done-%s\n' "$run_id" >>"$log"
     exit "${FAKE_VET_STATUS:-0}"
@@ -124,6 +130,7 @@ case "${1-}" in
       exit 99
     fi
     printf 'test-start-%s\n' "$run_id" >>"$log"
+    printf '%s\n' "$$" >"$log.test-pid"
     sleep "${FAKE_TEST_DELAY:-0.01}"
     printf 'mode: set\n%s:3.1,3.17 1 1\n' "${FAKE_SOURCE:?}" >"$profile"
     printf 'test-done-%s\n' "$run_id" >>"$log"
@@ -224,11 +231,70 @@ run_case() {
   fi
 }
 
+run_interrupted_workflow() {
+  local name=$1
+  local signal=$2
+  local expected=$3
+  local case_dir="$test_root/$name"
+  local log="$case_dir/events.log"
+  local workflow_log="$case_dir/workflow.log"
+  local rendered_run
+  local workflow_pid
+  local status=0
+  local vet_pid test_pid
+
+  make_fixture "$case_dir"
+  rendered_run=${verification_run//\$\{\{ inputs.uncached \}\}/true}
+  (
+    cd "$case_dir"
+    FAKE_LOG="$log" \
+    FAKE_RUN_ID="$name" \
+    FAKE_SOURCE="$case_dir/fixture.go" \
+    FAKE_VET_STATUS=0 \
+    FAKE_TEST_STATUS=0 \
+    FAKE_UNCACHED=true \
+    FAKE_VET_DELAY=5 \
+    FAKE_TEST_DELAY=5 \
+    PATH="$fake_bin:$original_path" \
+      exec bash -euo pipefail -c "$rendered_run" >"$workflow_log" 2>&1
+  ) &
+  workflow_pid=$!
+
+  for _ in {1..100}; do
+    if [[ -s "$log.vet-pid" && -s "$log.test-pid" ]]; then
+      break
+    fi
+    sleep 0.01
+  done
+  [[ -s "$log.vet-pid" && -s "$log.test-pid" ]] ||
+    fail "$name did not start both children before interruption"
+
+  kill -"$signal" "$workflow_pid" 2>/dev/null || fail "$name signal failed"
+  if wait "$workflow_pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq "$expected" ]] ||
+    fail "$name returned $status, expected $expected"
+
+  vet_pid=$(<"$log.vet-pid")
+  test_pid=$(<"$log.test-pid")
+  if kill -0 "$vet_pid" 2>/dev/null; then
+    fail "$name left vet running after $signal"
+  fi
+  if kill -0 "$test_pid" 2>/dev/null; then
+    fail "$name left tests running after $signal"
+  fi
+}
+
 run_case clean-success 0 0 0
 run_case vet-only-failure 7 0 1
 run_case test-only-failure 0 9 1
 run_case dual-failure 7 9 1
 run_case routine-cacheable-flags 0 0 0 false
+run_interrupted_workflow cancellation TERM 143
+run_interrupted_workflow timeout TERM 143
 
 repeated_dir="$test_root/repeated-coverage"
 make_fixture "$repeated_dir"

@@ -1,0 +1,57 @@
+name: Temporary CI vet concurrency benchmark
+
+on:
+  push:
+    branches:
+      - 'ci-vet-benchmark-*'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: '${{ matrix.cap }} / ${{ matrix.mode }}'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        cap: ["1", "2", default]
+        mode: [routine, uncached]
+    steps:
+      - name: Check out exact benchmark commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Collect ten matched samples
+        env:
+          BENCH_CAP: ${{ matrix.cap }}
+          BENCH_MODE: ${{ matrix.mode }}
+          BENCH_OUT: ${{ runner.temp }}/ci-vet-benchmark
+          BENCH_GOCACHE: ${{ runner.temp }}/go-build-cache
+          GOMODCACHE: ${{ runner.temp }}/go-mod-cache
+        run: |
+          set -euo pipefail
+          mkdir -p "$BENCH_OUT" "$BENCH_GOCACHE" "$GOMODCACHE"
+          go mod download
+          for run in 0 1 2 3 4 5 6 7 8 9 10; do
+            BENCH_REPO="$GITHUB_WORKSPACE" \
+            BENCH_RUN="$run" \
+            python3 .github/bench/ci-vet-run.py
+          done
+          python3 .github/bench/ci-vet-summary.py "$BENCH_OUT"
+
+      - name: Upload raw benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-vet-benchmark-${{ matrix.cap }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/ci-vet-benchmark
+          if-no-files-found: error
+          retention-days: 7
