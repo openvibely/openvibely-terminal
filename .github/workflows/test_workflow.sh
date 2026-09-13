@@ -54,9 +54,9 @@ if (( run_line >= summary_line )); then
 fi
 
 for required in \
-  'GOMAXPROCS=1 go vet ./... &' \
+  'GOMAXPROCS=1 setsid go vet ./... &' \
   'vet_pid=$!' \
-  'go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &' \
+  'setsid go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &' \
   'test_pid=$!' \
   'wait "$test_pid" || test_status=$?' \
   'wait "$vet_pid" || vet_status=$?' \
@@ -87,6 +87,19 @@ set -u
 log=${FAKE_LOG:?}
 run_id=${FAKE_RUN_ID:?}
 
+child_pid=
+stop_child() {
+  local status=$1
+  if [[ -n "${child_pid:-}" ]]; then
+    kill -TERM "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+    child_pid=
+  fi
+  exit "$status"
+}
+trap 'stop_child 130' INT
+trap 'stop_child 143' TERM
+
 case "${1-}" in
   vet)
     if [[ "$#" -ne 2 || "$2" != "./..." ]]; then
@@ -99,7 +112,11 @@ case "${1-}" in
     fi
     printf 'vet-start-%s\n' "$run_id" >>"$log"
     printf '%s\n' "$$" >"$log.vet-pid"
-    sleep "${FAKE_VET_DELAY:-0.25}"
+    sleep "${FAKE_VET_DELAY:-0.25}" &
+    child_pid=$!
+    printf '%s\n' "$child_pid" >"$log.vet-child-pid"
+    wait "$child_pid"
+    child_pid=
     printf 'vet-done-%s\n' "$run_id" >>"$log"
     exit "${FAKE_VET_STATUS:-0}"
     ;;
@@ -131,7 +148,11 @@ case "${1-}" in
     fi
     printf 'test-start-%s\n' "$run_id" >>"$log"
     printf '%s\n' "$$" >"$log.test-pid"
-    sleep "${FAKE_TEST_DELAY:-0.01}"
+    sleep "${FAKE_TEST_DELAY:-0.01}" &
+    child_pid=$!
+    printf '%s\n' "$child_pid" >"$log.test-child-pid"
+    wait "$child_pid"
+    child_pid=
     printf 'mode: set\n%s:3.1,3.17 1 1\n' "${FAKE_SOURCE:?}" >"$profile"
     printf 'test-done-%s\n' "$run_id" >>"$log"
     exit "${FAKE_TEST_STATUS:-0}"
@@ -143,6 +164,27 @@ case "${1-}" in
 esac
 FAKE_GO
 chmod +x "$fake_bin/go"
+
+cat >"$fake_bin/setsid" <<'FAKE_SETSID'
+#!/usr/bin/env python3
+import os
+import signal
+import sys
+
+for signum in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, signal.SIG_DFL)
+
+try:
+    os.setsid()
+except PermissionError:
+    child = os.fork()
+    if child:
+        _, status = os.waitpid(child, 0)
+        sys.exit(os.waitstatus_to_exitcode(status))
+    os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+FAKE_SETSID
+chmod +x "$fake_bin/setsid"
 
 line_for() {
   local event=$1
@@ -241,7 +283,7 @@ run_interrupted_workflow() {
   local rendered_run
   local workflow_pid
   local status=0
-  local vet_pid test_pid
+  local vet_pid test_pid vet_child_pid test_child_pid
 
   make_fixture "$case_dir"
   rendered_run=${verification_run//\$\{\{ inputs.uncached \}\}/true}
@@ -256,7 +298,7 @@ run_interrupted_workflow() {
     FAKE_VET_DELAY=5 \
     FAKE_TEST_DELAY=5 \
     PATH="$fake_bin:$original_path" \
-      exec bash -euo pipefail -c "$rendered_run" >"$workflow_log" 2>&1
+      exec setsid bash -euo pipefail -c "$rendered_run" >"$workflow_log" 2>&1
   ) &
   workflow_pid=$!
 
@@ -280,12 +322,22 @@ run_interrupted_workflow() {
 
   vet_pid=$(<"$log.vet-pid")
   test_pid=$(<"$log.test-pid")
-  if kill -0 "$vet_pid" 2>/dev/null; then
-    fail "$name left vet running after $signal"
-  fi
-  if kill -0 "$test_pid" 2>/dev/null; then
-    fail "$name left tests running after $signal"
-  fi
+  vet_child_pid=$(<"$log.vet-child-pid")
+  test_child_pid=$(<"$log.test-child-pid")
+  assert_stopped() {
+    local pid=$1
+    for _ in {1..100}; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        return
+      fi
+      sleep 0.01
+    done
+    fail "$name left process $pid running after $signal"
+  }
+  assert_stopped "$vet_pid"
+  assert_stopped "$test_pid"
+  assert_stopped "$vet_child_pid"
+  assert_stopped "$test_child_pid"
 }
 
 run_case clean-success 0 0 0
@@ -294,6 +346,7 @@ run_case test-only-failure 0 9 1
 run_case dual-failure 7 9 1
 run_case routine-cacheable-flags 0 0 0 false
 run_interrupted_workflow cancellation TERM 143
+run_interrupted_workflow interrupt INT 130
 run_interrupted_workflow timeout TERM 143
 
 repeated_dir="$test_root/repeated-coverage"

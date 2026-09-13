@@ -7,8 +7,10 @@ import sys
 root = Path(sys.argv[1])
 if len(sys.argv) == 4:
     cells = [(sys.argv[2], sys.argv[3])]
-else:
+elif len(sys.argv) == 2:
     cells = [(cap, mode) for mode in ("routine", "uncached") for cap in ("1", "2", "default")]
+else:
+    raise SystemExit(f"usage: {sys.argv[0]} RESULT_DIR [CAP MODE]")
 
 def p95(values):
     return statistics.quantiles(values, n=20, method="inclusive")[18]
@@ -18,11 +20,16 @@ def stats(rows, key):
     return statistics.median(values), p95(values)
 
 for cap, mode in cells:
-    rows = [
-        json.loads(path.read_text())
-        for path in sorted((root / f"{cap}-{mode}").glob("run-[0-9][0-9]/record.json"))
-        if json.loads(path.read_text())["run"] > 0
-    ]
+    paths = sorted((root / f"{cap}-{mode}").glob("run-[0-9][0-9]/record.json"))
+    rows = []
+    for path in paths:
+        row = json.loads(path.read_text())
+        if row["run"] > 0 and row.get("valid", False):
+            rows.append(row)
+    if len(rows) < 10:
+        raise SystemExit(
+            f"{cap}/{mode} has only {len(rows)} valid measured samples; need at least 10"
+        )
     wall = stats(rows, "wrapper_wall_s")
     vet = stats(rows, "vet_done_s")
     test = stats(rows, "test_done_s")

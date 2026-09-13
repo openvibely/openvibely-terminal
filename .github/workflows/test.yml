@@ -49,9 +49,17 @@ jobs:
 
           stop_child() {
             local pid=$1
-            if kill -0 "$pid" 2>/dev/null; then
-              kill "$pid" 2>/dev/null || true
+            if [[ -z "$pid" ]]; then
+              return
             fi
+            kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+            for _ in {1..50}; do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                break
+              fi
+              sleep 0.1
+            done
+            kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
           }
 
@@ -85,13 +93,13 @@ jobs:
           trap 'on_signal 143' TERM
 
           # Keep vet's build fan-out bounded while it overlaps with the full test build.
-          GOMAXPROCS=1 go vet ./... &
+          GOMAXPROCS=1 setsid go vet ./... &
           vet_pid=$!
 
           if [[ "${{ inputs.uncached }}" == "true" ]]; then
-            go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &
+            setsid go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &
           else
-            go test ./... -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &
+            setsid go test ./... -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &
           fi
           test_pid=$!
 

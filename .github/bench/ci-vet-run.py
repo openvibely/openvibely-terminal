@@ -26,6 +26,8 @@ env.update({
     "BENCH_MODE": mode,
     "BENCH_CAP": cap,
 })
+if cap == "default":
+    env.pop("GOMAXPROCS", None)
 start = time.monotonic_ns()
 proc = subprocess.Popen(
     [str(repo / ".github/bench/ci-vet-workflow.sh")],
@@ -90,26 +92,51 @@ for line in reversed(cover_output.splitlines()):
     if match:
         coverage = float(match.group(1))
         break
+vet_status = int(read(metrics / "vet_status")) if (metrics / "vet_status").exists() else None
+test_status = int(read(metrics / "test_status")) if (metrics / "test_status").exists() else None
+vet_done = (
+    (int(read(metrics / "vet_done_ns")) - int(read(metrics / "start_ns"))) / 1e9
+    if (metrics / "vet_done_ns").exists()
+    else None
+)
+test_done = (
+    (int(read(metrics / "test_done_ns")) - int(read(metrics / "start_ns"))) / 1e9
+    if (metrics / "test_done_ns").exists()
+    else None
+)
+vet_cpu = timed(metrics / "vet.time") if (metrics / "vet.time").exists() else {}
+test_cpu = timed(metrics / "test.time") if (metrics / "test.time").exists() else {}
+valid = (
+    proc.returncode == 0
+    and vet_status == 0
+    and test_status == 0
+    and profile_bytes > 0
+    and cover_status == 0
+    and coverage is not None
+    and vet_done is not None
+    and test_done is not None
+)
 record = {
     "cap": cap,
     "mode": mode,
     "run": run,
     "status": proc.returncode,
-    "vet_status": int(read(metrics / "vet_status")) if (metrics / "vet_status").exists() else None,
-    "test_status": int(read(metrics / "test_status")) if (metrics / "test_status").exists() else None,
+    "vet_status": vet_status,
+    "test_status": test_status,
     "wrapper_wall_s": (end - start) / 1e9,
-    "vet_done_s": (int(read(metrics / "vet_done_ns")) - int(read(metrics / "start_ns"))) / 1e9 if (metrics / "vet_done_ns").exists() else None,
-    "test_done_s": (int(read(metrics / "test_done_ns")) - int(read(metrics / "start_ns"))) / 1e9 if (metrics / "test_done_ns").exists() else None,
+    "vet_done_s": vet_done,
+    "test_done_s": test_done,
     "peak_rss_kb_process_group": peak_kb,
     "peak_rss_sample_ns": peak_sample_ns,
     "profile_bytes": profile_bytes,
     "coverage_readable": cover_status == 0,
     "coverage_pct": coverage,
-    "cpu": timed(metrics / "test.time") if (metrics / "test.time").exists() else {},
-    "vet_cpu": timed(metrics / "vet.time") if (metrics / "vet.time").exists() else {},
+    "valid": valid,
+    "cpu": test_cpu,
+    "vet_cpu": vet_cpu,
 }
 (run_dir / "record.json").write_text(json.dumps(record, sort_keys=True) + "\n")
 print(json.dumps(record, sort_keys=True))
-if proc.returncode != 0:
+if not valid:
     sys.stderr.write(stderr)
-    sys.exit(proc.returncode)
+    sys.exit(proc.returncode or 1)
