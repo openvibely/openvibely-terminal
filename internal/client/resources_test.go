@@ -4213,15 +4213,15 @@ func TestListSkillsWithContentPreservesDetailErrors(t *testing.T) {
 		wantText   string
 	}{
 		{name: "first detail error", index: 0, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
-		{name: "middle detail error", index: 1, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
-		{name: "final detail error", index: 2, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
+		{name: "middle detail error", index: skillDetailConcurrentMinSkills / 2, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
+		{name: "final detail error", index: skillDetailConcurrentMinSkills - 1, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
 		{name: "authentication", index: 1, status: http.StatusFound, wantAuth: true},
 		{name: "malformed JSON", index: 1, response: "not-json", status: http.StatusOK, wantText: "decoding /skills/skill-0001/details?project_id=p1&scope=project response"},
 		{name: "trailing JSON", index: 1, response: `{"handle":"skill-0001","scope":"project"} trailing`, status: http.StatusOK, wantText: "trailing JSON data"},
 		{name: "identity", index: 1, response: `{"handle":"other","scope":"project","content":"wrong"}`, status: http.StatusOK, wantText: "mismatched skill detail"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := skillListBenchmarkFixture(3)
+			fixture := skillListBenchmarkFixture(skillDetailConcurrentMinSkills)
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/skills" {
 					w.Header().Set("Content-Type", "text/html")
@@ -4466,10 +4466,23 @@ func TestSkillDetailReadsFreshContentAfterMutation(t *testing.T) {
 }
 
 func TestListSkillsWithContentMatchesSerialJSONOutput(t *testing.T) {
-	const page = `<div>
-		<div data-skill-handle="project-skill" data-skill-name="Project" data-skill-description="project description" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false"></div>
-		<div data-skill-handle="global-skill" data-skill-name="Global" data-skill-description="global description" data-skill-scope="global" data-skill-source="global" data-skill-enabled="false" data-skill-always-use="true"></div>
-	</div>`
+	const skillCount = skillDetailConcurrentMinSkills
+	var pageBuilder strings.Builder
+	pageBuilder.WriteString(`<div>`)
+	for i := 0; i < skillCount; i++ {
+		handle := fmt.Sprintf("skill-%04d", i)
+		name := fmt.Sprintf("Skill %04d", i)
+		description := fmt.Sprintf("description %04d", i)
+		scope := "project"
+		if i%2 == 1 {
+			scope = "global"
+		}
+		enabled := i%3 != 0
+		alwaysUse := i%4 == 0
+		fmt.Fprintf(&pageBuilder, `<div data-skill-handle=%q data-skill-name=%q data-skill-description=%q data-skill-scope=%q data-skill-source=%q data-skill-enabled=%t data-skill-always-use=%t></div>`, handle, name, description, scope, scope, enabled, alwaysUse)
+	}
+	pageBuilder.WriteString(`</div>`)
+	page := pageBuilder.String()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/skills" {
 			w.Header().Set("Content-Type", "text/html")
@@ -4477,14 +4490,21 @@ func TestListSkillsWithContentMatchesSerialJSONOutput(t *testing.T) {
 			return
 		}
 		handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
-		scope := "project"
-		name := "Project Skill"
-		if handle == "global-skill" {
-			scope = "global"
-			name = "Global Skill"
+		var index int
+		if _, err := fmt.Sscanf(handle, "skill-%d", &index); err != nil {
+			t.Errorf("unexpected detail handle %q", handle)
+			return
 		}
+		scope := "project"
+		if index%2 == 1 {
+			scope = "global"
+		}
+		name := fmt.Sprintf("Skill %04d", index)
+		description := fmt.Sprintf("description %04d", index)
+		enabled := index%3 != 0
+		alwaysUse := index%4 == 0
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"handle":%q,"name":%q,"description":%q,"scope":%q,"source":%q,"content":%q,"enabled":%t,"always_use":%t}`, handle, name, scope, scope, scope, "body-"+handle, scope == "project", scope == "global")
+		_, _ = fmt.Fprintf(w, `{"handle":%q,"name":%q,"description":%q,"scope":%q,"source":%q,"content":%q,"enabled":%t,"always_use":%t}`, handle, name, description, scope, scope, "body-"+handle, enabled, alwaysUse)
 	}))
 	defer srv.Close()
 	c, err := New(srv.URL)
@@ -4531,10 +4551,12 @@ func listSkillsWithContentSerial(ctx context.Context, c *Client, projectID strin
 }
 
 type skillContentBenchmarkStats struct {
-	mu          sync.Mutex
-	requests    int
-	inFlight    int
-	maxInFlight int
+	mu           sync.Mutex
+	requests     int
+	catalogBytes int64
+	detailBytes  int64
+	inFlight     int
+	maxInFlight  int
 }
 
 func BenchmarkListSkillsWithContentSerialVsBounded(b *testing.B) {
@@ -4554,23 +4576,27 @@ func BenchmarkListSkillsWithContentSerialVsBounded(b *testing.B) {
 	}
 }
 
+func benchmarkSkillDetailResponse(handle string) string {
+	return fmt.Sprintf(`{"handle":%q,"name":%q,"scope":"project","source":"project","content":%q,"enabled":true,"always_use":false}`, handle, handle, "body-"+handle)
+}
+
 func benchmarkSkillContentVariant(b *testing.B, skillCount int, delay time.Duration, serial bool) {
 	b.Helper()
 	fixture := skillListBenchmarkFixture(skillCount)
-	detailBody := fmt.Sprintf(`{"handle":"skill-%04d","name":"Skill %04d","scope":"project","source":"project","content":"body-%04d","enabled":true,"always_use":false}`, 0, 0, 0)
+	detailResponse := benchmarkSkillDetailResponse("skill-0000")
 	stats := &skillContentBenchmarkStats{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		stats.mu.Lock()
-		stats.requests++
 		isDetail := r.URL.Path != "/skills"
 		if isDetail {
+			detailResponse := benchmarkSkillDetailResponse(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details"))
+			stats.mu.Lock()
+			stats.requests++
+			stats.detailBytes += int64(len(detailResponse))
 			stats.inFlight++
 			if stats.inFlight > stats.maxInFlight {
 				stats.maxInFlight = stats.inFlight
 			}
-		}
-		stats.mu.Unlock()
-		if isDetail {
+			stats.mu.Unlock()
 			if delay > 0 {
 				time.Sleep(delay)
 			}
@@ -4578,13 +4604,16 @@ func benchmarkSkillContentVariant(b *testing.B, skillCount int, delay time.Durat
 			stats.inFlight--
 			stats.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
-			handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
-			_, _ = fmt.Fprintf(w, `{"handle":%q,"name":%q,"scope":"project","source":"project","content":%q,"enabled":true,"always_use":false}`, handle, handle, "body-"+handle)
+			_, _ = io.WriteString(w, detailResponse)
 			return
 		}
+		stats.mu.Lock()
+		stats.requests++
+		stats.catalogBytes += int64(len(fixture))
+		stats.mu.Unlock()
 		if delay > 0 {
 			// Keep the catalog response latency identical for the baseline and
-			// candidate; only detail requests are delayed below.
+			// candidate; only detail requests are delayed above.
 			time.Sleep(time.Millisecond)
 		}
 		w.Header().Set("Content-Type", "text/html")
@@ -4597,9 +4626,11 @@ func benchmarkSkillContentVariant(b *testing.B, skillCount int, delay time.Durat
 	}
 
 	b.ReportAllocs()
-	b.SetBytes(int64(len(fixture) + len(detailBody)*skillCount))
+	responseBytesPerOp := int64(len(fixture)) + int64(len(detailResponse))*int64(skillCount)
+	b.SetBytes(responseBytesPerOp)
 	b.ReportMetric(float64(len(fixture)), "catalog-response-B")
-	b.ReportMetric(float64(len(detailBody)), "detail-response-B")
+	b.ReportMetric(float64(len(detailResponse)), "detail-response-B")
+	b.ReportMetric(float64(responseBytesPerOp), "response-B/op")
 	b.ResetTimer()
 	durations := make([]time.Duration, 0, b.N)
 	for i := 0; i < b.N; i++ {
@@ -4621,7 +4652,7 @@ func benchmarkSkillContentVariant(b *testing.B, skillCount int, delay time.Durat
 	b.StopTimer()
 	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 	stats.mu.Lock()
-	requests, maxInFlight := stats.requests, stats.maxInFlight
+	requests, catalogBytes, detailBytes, maxInFlight := stats.requests, stats.catalogBytes, stats.detailBytes, stats.maxInFlight
 	stats.mu.Unlock()
 	if len(durations) > 0 {
 		b.ReportMetric(float64(skillDurationPercentile(durations, 50)), "median-wall-ns/op")
@@ -4630,6 +4661,8 @@ func benchmarkSkillContentVariant(b *testing.B, skillCount int, delay time.Durat
 	b.ReportMetric(float64(len(durations)), "samples")
 	b.ReportMetric(float64(requests)/float64(max(1, b.N)), "requests/op")
 	b.ReportMetric(float64(maxInFlight), "max-inflight")
+	b.ReportMetric(float64(catalogBytes)/float64(max(1, b.N)), "catalog-observed-B/op")
+	b.ReportMetric(float64(detailBytes)/float64(max(1, b.N)), "detail-observed-B/op")
 }
 
 func BenchmarkListSkillsSummary(b *testing.B) {
