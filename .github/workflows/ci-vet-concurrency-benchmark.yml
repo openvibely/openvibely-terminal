@@ -6,7 +6,7 @@ on:
       - 'ci-vet-benchmark-*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   benchmark:
@@ -45,21 +45,8 @@ jobs:
             BENCH_RUN="$run" \
             python3 .github/bench/ci-vet-run.py
           done
-          python3 .github/bench/ci-vet-summary.py "$BENCH_OUT" "$BENCH_CAP" "$BENCH_MODE" | tee "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish temporary raw result
-        if: always()
-        env:
-          RESULT_BRANCH: ci-vet-result-${{ matrix.cap }}-${{ matrix.mode }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          git -C "$GITHUB_WORKSPACE" switch --orphan benchmark-result
-          git -C "$GITHUB_WORKSPACE" rm -rf . >/dev/null 2>&1 || true
-          cp -R "$BENCH_OUT" "$GITHUB_WORKSPACE/ci-vet-benchmark-result"
-          git -C "$GITHUB_WORKSPACE" config user.name github-actions[bot]
-          git -C "$GITHUB_WORKSPACE" config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git -C "$GITHUB_WORKSPACE" add ci-vet-benchmark-result
-          git -C "$GITHUB_WORKSPACE" commit -m "Temporary benchmark result $RESULT_BRANCH"
-          git -C "$GITHUB_WORKSPACE" push "https://x-access-token:${GH_TOKEN}@github.com/openvibely/openvibely-terminal.git" "HEAD:refs/heads/$RESULT_BRANCH"
-
+          summary=$(python3 .github/bench/ci-vet-summary.py "$BENCH_OUT" "$BENCH_CAP" "$BENCH_MODE")
+          printf '%s\n' "$summary" | tee "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r line; do
+            echo "::warning file=ci-vet-benchmark::$line"
+          done <<<"$summary"
