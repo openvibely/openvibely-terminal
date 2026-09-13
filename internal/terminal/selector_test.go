@@ -689,6 +689,168 @@ func TestProjectNoArgOpensSelector(t *testing.T) {
 	}
 }
 
+func TestProjectPickerRowsMatchAcrossEntryPoints(t *testing.T) {
+	projects := []client.Project{
+		{ID: "project-first", Name: "First Project", Path: "/workspace/projects/first/with/a/very/long/path"},
+		{ID: "project-later", Name: "Later Project", Path: "/workspace/projects/later"},
+		{ID: "project-third", Name: "Third Project", Path: "/workspace/projects/third"},
+	}
+	wantItems := []selectorItem{
+		{ref: projects[0].ID, label: projects[0].Name, detail: truncate(projects[0].Path, 40)},
+		{ref: projects[1].ID, label: projects[1].Name, detail: truncate(projects[1].Path, 40)},
+		{ref: projects[2].ID, label: projects[2].Name, detail: truncate(projects[2].Path, 40)},
+	}
+	cases := []struct {
+		name           string
+		line           string
+		wantCommand    string
+		wantPrefill    bool
+		wantPrefillSfx string
+	}{
+		{name: "project", line: "/project", wantCommand: "project"},
+		{name: "show", line: "/projects show", wantCommand: "projects show"},
+		{name: "edit", line: "/projects edit", wantCommand: "projects edit", wantPrefill: true, wantPrefillSfx: " "},
+		{name: "delete", line: "/projects delete", wantCommand: "projects delete"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, nil)
+			m.projects = projects
+			m.projectsLoaded = true
+
+			m, cmd := typeLine(t, m, tc.line)
+			if cmd == nil {
+				t.Fatal("picker command is nil")
+			}
+			pickerMsg := cmd()
+			msg, ok := pickerMsg.(selectorActiveMsg)
+			if !ok {
+				t.Fatalf("picker command returned %T, want selectorActiveMsg", pickerMsg)
+			}
+			if msg.command != tc.wantCommand {
+				t.Errorf("command = %q, want %q", msg.command, tc.wantCommand)
+			}
+			if msg.emptyHint != "no projects" {
+				t.Errorf("empty hint = %q, want %q", msg.emptyHint, "no projects")
+			}
+			if msg.prefill != tc.wantPrefill || msg.prefillSuffix != tc.wantPrefillSfx {
+				t.Errorf("prefill = %t/%q, want %t/%q", msg.prefill, msg.prefillSuffix, tc.wantPrefill, tc.wantPrefillSfx)
+			}
+			if !reflect.DeepEqual(msg.items, wantItems) {
+				t.Fatalf("picker rows = %+v, want %+v", msg.items, wantItems)
+			}
+
+			next, followUp := m.Update(msg)
+			m = next.(Model)
+			if followUp != nil || !m.selectorActive {
+				t.Fatalf("selector state = active:%t follow-up:%v", m.selectorActive, followUp != nil)
+			}
+			if m.pendingCommand != tc.wantCommand {
+				t.Errorf("pending command = %q, want %q", m.pendingCommand, tc.wantCommand)
+			}
+			if !reflect.DeepEqual(m.selectorItems, wantItems) {
+				t.Errorf("active picker rows = %+v, want %+v", m.selectorItems, wantItems)
+			}
+		})
+	}
+}
+
+func TestProjectPickerFilterDispatchesOriginalLaterProjectID(t *testing.T) {
+	m, _ := dispatchModel(t, nil)
+	defer m.Cleanup()
+	m.projects = []client.Project{
+		{ID: "project-first", Name: "First Project", Path: "/workspace/first"},
+		{ID: "project-middle", Name: "Middle Project", Path: "/workspace/middle"},
+		{ID: "project-later", Name: "Later Project", Path: "/workspace/later"},
+	}
+	m.projectsLoaded = true
+	m = runLine(t, m, "/project")
+	if !m.selectorActive {
+		t.Fatalf("expected project selector:\n%s", transcript(m))
+	}
+
+	m = typeSelectorRunes(t, m, "later")
+	if got := m.selectorFilteredCount(); got != 1 {
+		t.Fatalf("filtered project count = %d, want 1", got)
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectedID != "project-later" || m.selectedName != "Later Project" {
+		t.Fatalf("selected project = %q/%q, want project-later/Later Project", m.selectedID, m.selectedName)
+	}
+}
+
+func TestProjectPickerDeleteConfirmsBeforeMutation(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/projects": `{"projects":[]}`,
+	})
+	defer m.Cleanup()
+	m.projects = []client.Project{
+		{ID: "project-first", Name: "First Project"},
+		{ID: "project-later", Name: "Later Project"},
+	}
+	m.projectsLoaded = true
+	m = runLine(t, m, "/projects delete")
+	if !m.selectorActive {
+		t.Fatalf("expected project delete selector:\n%s", transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.pendingConfirmation == nil {
+		t.Fatal("project picker delete did not open confirmation")
+	}
+	if got := rec.count(http.MethodDelete, "/projects/project-later"); got != 0 {
+		t.Fatalf("project delete ran before confirmation: %d requests", got)
+	}
+
+	m = runLine(t, m, "yes")
+	if got := rec.count(http.MethodDelete, "/projects/project-later"); got != 1 {
+		t.Fatalf("confirmed project delete requests = %d, want 1\n%s", got, rec.all())
+	}
+}
+
+func TestProjectPickersRemainNonInteractiveInCLI(t *testing.T) {
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode = true
+	forceMode = false
+	defer func() {
+		cliMode, forceMode = oldCLI, oldForce
+	}()
+
+	cases := []struct {
+		name       string
+		line       string
+		wantOutput string
+	}{
+		{name: "project", line: "/project", wantOutput: "Projects"},
+		{name: "show", line: "/projects show", wantOutput: "usage"},
+		{name: "edit", line: "/projects edit", wantOutput: "usage"},
+		{name: "delete", line: "/projects delete", wantOutput: "usage"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.projects = []client.Project{
+				{ID: "project-first", Name: "First Project"},
+				{ID: "project-later", Name: "Later Project"},
+			}
+			m.projectsLoaded = true
+			m = runLine(t, m, tc.line)
+			if m.selectorActive || m.pendingCommand != "" || m.pendingConfirmation != nil {
+				t.Fatalf("CLI picker state = active:%t pending:%q confirmation:%v", m.selectorActive, m.pendingCommand, m.pendingConfirmation != nil)
+			}
+			if out := strings.ToLower(transcript(m)); !strings.Contains(out, strings.ToLower(tc.wantOutput)) {
+				t.Fatalf("CLI output missing %q:\n%s", tc.wantOutput, transcript(m))
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("CLI picker made backend requests:\n%s", calls)
+			}
+		})
+	}
+}
+
 // key helpers for driving the selector.
 func selKey(t *testing.T, m Model, key tea.KeyMsg) Model {
 	t.Helper()

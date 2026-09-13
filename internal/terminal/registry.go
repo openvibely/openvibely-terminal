@@ -6988,15 +6988,7 @@ func projectCommand() command {
 					projects := m.projects
 					return m, selectorFor("Projects", "project", "no projects", false,
 						func(context.Context) ([]selectorItem, error) {
-							items := make([]selectorItem, 0, len(projects))
-							for _, p := range projects {
-								items = append(items, selectorItem{
-									ref:    p.ID,
-									label:  p.Name,
-									detail: truncate(p.Path, 40),
-								})
-							}
-							return items, nil
+							return projectSelectorItems(projects), nil
 						})
 				}
 				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, nil, m.selectedID)})
@@ -7694,13 +7686,17 @@ func canonicalProjectGitHubRepository(raw string) string {
 	return "github.com/" + strings.ToLower(strings.TrimSuffix(strings.Trim(value, "/"), ".git"))
 }
 
+func projectSelectorItems(projects []client.Project) []selectorItem {
+	items := make([]selectorItem, 0, len(projects))
+	for _, project := range projects {
+		items = append(items, selectorItem{ref: project.ID, label: project.Name, detail: truncate(project.Path, 40)})
+	}
+	return items
+}
+
 func projectSelector(projects []client.Project, command, suffix string) tea.Cmd {
 	return selectorForWithSuffix("Projects", command, "no projects", suffix, func(context.Context) ([]selectorItem, error) {
-		items := make([]selectorItem, 0, len(projects))
-		for _, project := range projects {
-			items = append(items, selectorItem{ref: project.ID, label: project.Name, detail: truncate(project.Path, 40)})
-		}
-		return items, nil
+		return projectSelectorItems(projects), nil
 	})
 }
 
