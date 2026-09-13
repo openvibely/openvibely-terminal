@@ -21,21 +21,24 @@ The backend update route is `PUT /schedules/:id?project_id=...`. Verify its curr
 
 When a task page contains multiple schedule forms, match the selected schedule ID and parse only that form; do not default to the first form. Validate the parsed form's project ownership against the terminal-selected project before issuing the PUT. Carry the original schedule ID through the update.
 
-Represent user changes separately from the final full configuration, for example with pointer/optional update fields. Merge supplied `run-at`, recurrence type/interval, and clear-context values onto the parsed existing configuration. Omit `clear_context_on_start` from the request unless the user explicitly sets `clear-context true|false` when the backend uses omission to preserve it.
+Represent user changes separately from the final full configuration, for example with pointer/optional update fields. Merge supplied `run-at`, recurrence type/interval, and clear-context values onto the parsed existing configuration. Submit the final `clear_context_on_start` value explicitly, even when the user changed another setting and the existing value is `true`: the backend does not preserve an omitted enabled value and can reset it to its default. Only send a value different from the parsed setting when the user explicitly selected `clear-context true|false`.
 
 Validate before HTTP: reject malformed timestamps, unsupported recurrence types, repeat intervals outside `1..365`, unknown edit actions, and surplus operands. Normalize supported aliases such as hourly only through the established helper. Preserve exact/unique-prefix/unique-substring reference matching and reject missing or ambiguous one-shot references before mutation.
+
+For HTML schedule forms, make extraction defensive and deterministic. Attribute helpers must tolerate a missing node rather than dereferencing nil. A `repeat_type` select with options but no `selected` marker is valid browser-style markup: use its first option and document that fallback; do not treat the absence of an explicit marker as an empty value. Conversely, return a descriptive user-visible parse error for missing `run_at`, missing `repeat_interval`, or an empty repeat select. Complete parsing and validation before calling `UpdateSchedule`, so every required-field or malformed-form failure produces zero PUT requests. Preserve selected-option values, clear-context state, form identity, and selected project scope on valid forms.
 
 After a successful PUT, emit stable plain or typed JSON mutation output before attempting refresh. If refresh fails, retain the successful mutation report and surface the refresh error through the established partial-success path rather than reporting the mutation as failed.
 
 ## Regression Contract
 
 - Use two distinct projects: set the backend/web preference to Project A and the terminal selection to Project B.
-- Use a query-sensitive selected ID such as `project B&mode=terminal`; assert the handler receives the exact decoded value and the raw request query is correctly encoded.
+- Use a query-sensitive selected ID such as `project B\u0026mode=terminal`; assert the handler receives the exact decoded value and the raw request query is correctly encoded.
 - Cover add, direct edit/toggle/delete, and picker edit/toggle/delete independently at request and dispatch levels.
 - Assert list/resolution, existing-form fetch for edit, mutation, and refresh requests all carry the selected Project B ID.
 - Prove Project B succeeds despite the stale Project A web preference.
 - Select Project A against a Project B schedule and verify the backend ownership rejection remains visible with no false success output.
-- For edit, cover all supported recurrence forms, a non-first schedule form, identity preservation, each independently changed field, omission preservation, explicit clear-context true and false, ambiguous/missing references, stable JSON keys, and successful mutation followed by refresh failure.
+- For edit, cover all supported recurrence forms, a non-first schedule form, identity preservation, each independently changed field, an existing enabled `clear_context_on_start` preserved when only another setting changes, explicit clear-context true and false, ambiguous/missing references, stable JSON keys, and successful mutation followed by refresh failure.
+- For HTML parsing, cover one and multiple unmarked repeat options and assert deterministic first-option selection; cover selected-option retention, missing `run_at`, missing `repeat_interval`, and an empty repeat select. Guard malformed forms against panics and assert every parse/validation failure is user-visible and issues zero PUT requests.
 - Preserve the mutation transport's established error abstraction. For example, if a `403` body is intentionally reduced to `server error (403)`, assert non-nil failure and status classification rather than requiring backend response text.
 - Assert invalid input still fails at the existing boundary and does not issue a mutation request.
 - Keep generated help, completion metadata, and README examples synchronized with the edit action.

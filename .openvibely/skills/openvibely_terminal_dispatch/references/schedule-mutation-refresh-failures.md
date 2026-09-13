@@ -10,6 +10,14 @@ This failure path is user-visible: a write can commit even when the subsequent G
 
 Normal successful reloads must retain the existing schedule table and output. Preserve project scoping on every follow-up GET, including the refresh after a mutation.
 
+## Shared Toggle Dispatch Tail
+
+When direct-reference and picker-based toggle branches both resolve a schedule and then perform the same mutation plus refresh/status output, extract only that post-resolution tail into one smallest command-local helper. Pass the canonical resolved schedule ID and the selected project ID explicitly so both paths issue the same scoped request and use the same output contract.
+
+Keep reference lookup, picker row construction, selector cancellation, and delete confirmation outside the helper. Do not merge distinct resolution or interaction behavior merely because the mutation tail is shared. If `ToggleSchedule` already accepts and encodes the project ID, keep the client transport unchanged and consolidate at the command boundary.
+
+Regression coverage should compare direct and true picker paths for identical status/output and exact request scope, with one toggle request per action. Retain cases for successful mutation plus failed refresh preserving mutation success, failed mutation issuing no refresh or success output, and a direct reference resolving a later schedule ID so the helper receives the canonical match rather than a positional record.
+
 ## Audit Steps
 
 Trace each `add`, `delete`, and `toggle` branch through the write request, scoped page/list reload, error handling, and final rendering. Confirm that write and reload errors are handled independently and that a failed reload cannot be represented by nil data as a valid empty result. Compare `actAndReloadText` or other nearby status-preserving helpers, but verify the schedule-specific output contract rather than assuming a generic reload policy is safe for every resource.

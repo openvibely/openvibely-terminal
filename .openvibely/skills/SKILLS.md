@@ -42,4 +42,20 @@
 
 ## rebase_task_branch
 
-[Rebase Task Branch For Fast-Forward Integration](rebase_task_branch/SKILL.md) — Rebase a clean task branch onto main, resolve conflicts semantically, validate the rewritten branch, and leave main unchanged for fast-forward-only integration.
+[Prepare Delivery Branch For Fast-Forward Integration](rebase_task_branch/SKILL.md) — Safely prepare, validate, and explicitly authorize a task or delivery branch for fast-forward integration without disturbing shared worktrees.
+
+## go_bounded_memory_search
+
+[Bounded Go Memory Search](go_bounded_memory_search/SKILL.md) — Optimize indexed Markdown memory search in the Go TUI without changing search semantics or materializing document-sized temporary copies.
+
+## exact_head_validation_evidence
+
+[Exact-HEAD Validation Evidence](exact_head_validation_evidence/SKILL.md) — Establish and inspect durable exact-commit Go validation evidence before a separate read-only audit.
+
+## native_sdlc_bug_audit
+
+[Native SDLC Bug Audit](native_sdlc_bug_audit/SKILL.md) — Perform a focused read-only correctness audit and file one deduplicated bug suggestion.
+
+## terminal_model_save_completion
+
+[Terminal Model Save Completion](terminal_model_save_completion/SKILL.md) — Preserve add/edit model mutation completion behavior while extracting narrow shared post-save refresh, status, and output logic.

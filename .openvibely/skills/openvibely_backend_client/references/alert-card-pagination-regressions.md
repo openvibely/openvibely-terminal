@@ -10,6 +10,14 @@ Use this reference when changing alert list parsing, continuation traversal, ale
 - Keep the existing traversal ceiling observable. A fixture that continually advertises a valid next page should fail with the established safety-limit error after exactly 200 total requests, not silently truncate or issue request 201.
 - Validate continuation-at-limit immediately after accepting every page and before invoking any early-stop predicate. If an accepted page reaches the 200-page or 10,000-card ceiling while still advertising `has-more=true`, return the established safety-limit error even when that boundary page contains the requested record; never let a match bypass the limit check.
 
+## Workflow-State Filters
+
+- Keep workflow-state filtering distinct from free-text alert matching. Apply backend predicates only when the user supplies explicit `--decision-state` and optional `--processing-state` options; unflagged terms, including words such as `approved`, remain local searchable text.
+- Accept only the backend decision-state values `pending`, `approved`, `rejected`, and `dismissed`. Validate supplied values before making a list request, and retain existing all-alert behavior when neither predicate is supplied.
+- Build the first alert-card URL with `project_id` plus every selected predicate, then preserve the same `project_id`, `decision_state`, and `processing_state` values on every continuation request. Do not let pagination replace the original filtered query with an unscoped continuation URL.
+- Keep an empty filtered collection non-nil so JSON output remains `[]`; plain output should clearly identify that no alerts matched the selected predicates without changing detail, review, bulk-action, or all-alert output contracts.
+- Cover combined `pending` plus `unclaimed` filtering, every decision state, false-positive free-text state words, project scope on first and later pages, empty results, and equivalent stable plain/JSON list output.
+
 ## Canonical Alert Detail Fast Path
 
 - Restrict incremental early-stop lookup to the proven canonical alert identifier shape: exactly 32 lowercase hexadecimal characters. Keep titles, prefixes, substrings, uppercase IDs, malformed ID-like values, selectors, list filters, and mutation actions on the existing complete-list plus reference-matching path.

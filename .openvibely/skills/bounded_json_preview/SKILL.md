@@ -1,6 +1,6 @@
 ---
 kind: openvibely.agent_skill
-version: 20
+version: 22
 skill:
     key: bounded_json_preview
     name: Bounded JSON Preview Engineering
@@ -28,6 +28,8 @@ Use for lifecycle/event rendering or other paths that must show a deterministic 
 12. Bound aggregate retained key bytes, key-comparison work, and late-validation candidate count. If discarded suffixes, collisions, or overflow make exact ordering unknowable, return unavailable rather than guessing or retaining payload-sized data. As soon as a key comparison establishes ambiguity, do not insert or sort the triggering key: a comparator must not fall through from equal retained prefixes to comparing unrestricted source strings. Once fallback is certain, still finish the single key-marshaling pass to preserve key call cardinality and surface key errors, but retain no additional key output.
 13. Do not reject every oversized key automatically. One oversized key, or multiple keys whose retained prefixes establish exact relative order, can remain previewable even with successful error-capable values. Ambiguity must come from actual key comparisons.
 14. Do not let ignored, omitted, or shadowed fields consume output or validation budget. Confirm any claimed compatibility defect with a minimal differential regression before changing traversal.
+15. For large JSON formatter fast paths that splice validated raw values into an envelope, treat byte-for-byte `encoding/json` output as the oracle. Reuse a known string's raw bytes only after validating UTF-8 and canonical escape spelling; valid JSON can still differ from decode-and-marshal semantics through invalid UTF-8 replacement, redundant escapes, or uppercase/noncanonical `\\uXXXX` hex. Preserve duplicate-field, case-insensitive-field, type-mismatch, and last-value behavior of `encoding/json`, and retain valid raw payloads for every JSON shape, including objects, arrays, strings, numbers, and `null`.
+16. For a large known JSON string whose fast-path contract permits raw reuse, optimize only the common no-escape case: locate the next quote with an indexed byte search, reject candidates containing backslashes or control bytes or invalid UTF-8, and fall back to the full canonical scanner for every other case. Never trade away canonical escape, UTF-8, or delimiter validation for the indexed shortcut.
 
 ## Regression Coverage
 
@@ -41,8 +43,10 @@ For custom `IsZero`, use a stateful type with no marshaler method of its own. Co
 
 For recursive type analysis, include acyclic sibling fields of the same safe type in arrays, slices, and over-cap reflected maps. They must not be classified as cycles merely because a type repeats.
 
+For raw JSON fast paths, make every fixture larger than the activation threshold so tests cannot silently exercise fallback. Differential-test duplicate and type-mismatched known fields, case-insensitive names, invalid UTF-8, uppercase and redundant Unicode escapes, whitespace and HTML-sensitive characters, and valid object/array/string/number/`null` payloads. Assert both metadata and raw `data` match the standard decoded-and-marshaled implementation. Include long escape-free UTF-8 strings to exercise the indexed fast path and malformed/backslash/control-byte cases to prove fallback remains active.
+
 ## Benchmark And Validation
 
-Benchmark 1 KiB, 64 KiB, and 1 MiB fixtures with one and many events. Separate payload-byte, map-cardinality, key-length growth, and common-prefix comparison work. Include decoded wide maps, wide error-capable maps, wide value-sensitive nested maps, reflected native-string maps with ambiguous long common-prefix keys, and fixed-high-cardinality oversized TextMarshaler keys. Use `-benchmem`; ensure bounded retention and comparison latency do not scale as key count multiplied by key size, and investigate unexpectedly payload-linear allocation or runtime before claiming bounded performance.
+Benchmark 1 KiB, 64 KiB, and 1 MiB fixtures with one and many events. Separate payload-byte, map-cardinality, key-length growth, and common-prefix comparison work. Include decoded wide maps, wide error-capable maps, wide value-sensitive nested maps, reflected native-string maps with ambiguous long common-prefix keys, and fixed-high-cardinality oversized TextMarshaler keys. Use `-benchmem`; ensure bounded retention and comparison latency do not scale as key count multiplied by key size, and investigate unexpectedly payload-linear allocation or runtime before claiming bounded performance. Compare optimization medians with a named historical baseline using the same committed workload, and retain the small-input regression guard alongside large-input gains.
 
 Run `gofmt` on changed Go files, targeted regressions repeatedly, focused benchmarks with `-benchmem`, `go build ./...`, `go vet ./...`, `go test ./... -count=1`, `git diff --check`, and final worktree/status checks. Deliberate duplicate JSON-tag fixtures can trigger `go vet`; model conflicts through embedded types instead.
