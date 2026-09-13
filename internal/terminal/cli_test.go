@@ -896,6 +896,101 @@ func TestCLIAnalyticsUsageMatchesInteractiveQuotaOutput(t *testing.T) {
 	}
 }
 
+func TestCLIAnalyticsRejectsUnknownAndSurplusOperandsBeforeRequests(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{name: "unknown action", args: []string{"analytics", "usgae"}},
+		{name: "surplus operand", args: []string{"analytics", "usage", "now"}},
+		{name: "stats unknown action", args: []string{"stats", "usgae"}},
+		{name: "stats surplus operand", args: []string{"stats", "usage", "now"}},
+	}
+	for _, tc := range cases {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", tc.name, jsonOutput), func(t *testing.T) {
+				c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+				var out bytes.Buffer
+				err := RunCLI(c, &out, "demo", tc.args, false, jsonOutput)
+				if err == nil || !strings.Contains(err.Error(), "usage: analytics [usage|rates|agents|frequent|failures|skills|trends]") {
+					t.Fatalf("invalid analytics invocation error = %v", err)
+				}
+				if out.Len() != 0 {
+					t.Fatalf("invalid analytics invocation emitted output: %q", out.String())
+				}
+				if got := rec.urlsSnapshot(); len(got) != 0 {
+					t.Fatalf("invalid analytics invocation made requests: %v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
+	bodies := map[string]string{
+		"/api/projects":                              cliProjects,
+		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
+		"/api/analytics/success-failure-rates":       `[]`,
+		"/api/analytics/avg-execution-time-by-agent": `[]`,
+		"/api/analytics/avg-execution-time-by-task":  `[]`,
+		"/api/analytics/most-frequent-tasks":         `[]`,
+		"/api/analytics/failed-task-patterns":        `[]`,
+		"/api/analytics/skills":                      `{}`,
+	}
+	allPaths := []string{
+		"/api/analytics/usage",
+		"/api/analytics/success-failure-rates",
+		"/api/analytics/avg-execution-time-by-agent",
+		"/api/analytics/avg-execution-time-by-task",
+		"/api/analytics/most-frequent-tasks",
+		"/api/analytics/failed-task-patterns",
+		"/api/analytics/skills",
+	}
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "bare", args: []string{"analytics"}, want: allPaths},
+		{name: "usage", args: []string{"analytics", "usage"}, want: []string{"/api/analytics/usage"}},
+		{name: "rates", args: []string{"analytics", "rates"}, want: []string{"/api/analytics/success-failure-rates"}},
+		{name: "agents", args: []string{"analytics", "agents"}, want: []string{"/api/analytics/avg-execution-time-by-agent"}},
+		{name: "frequent", args: []string{"analytics", "frequent"}, want: []string{"/api/analytics/most-frequent-tasks"}},
+		{name: "failures", args: []string{"analytics", "failures"}, want: []string{"/api/analytics/failed-task-patterns"}},
+		{name: "skills", args: []string{"analytics", "skills"}, want: []string{"/api/analytics/skills"}},
+		{name: "trends", args: []string{"analytics", "trends"}, want: []string{"/api/analytics/avg-execution-time-by-task"}},
+		{name: "stats alias", args: []string{"stats", "usage"}, want: []string{"/api/analytics/usage"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, bodies)
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, false); err != nil {
+				t.Fatalf("valid analytics invocation failed: %v", err)
+			}
+
+			want := make(map[string]int, len(tc.want))
+			for _, path := range tc.want {
+				want[path]++
+			}
+			got := make(map[string]int, len(tc.want))
+			for _, uri := range rec.urlsSnapshot() {
+				request := strings.SplitN(uri, " ", 2)
+				if len(request) != 2 || !strings.HasPrefix(request[1], "/api/analytics/") {
+					continue
+				}
+				if !strings.Contains(request[1], "project_id=p1") {
+					t.Errorf("analytics request lost selected project scope: %q", uri)
+				}
+				got[strings.SplitN(request[1], "?", 2)[0]]++
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("analytics endpoints = %v, want %v; requests:\n%s", got, want, rec.all())
+			}
+		})
+	}
+}
+
 func TestCLIHelpWorksOffline(t *testing.T) {
 	c, err := client.New("http://127.0.0.1:1") // nothing listening
 	if err != nil {

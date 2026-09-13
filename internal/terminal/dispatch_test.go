@@ -2355,6 +2355,34 @@ func TestAnalyticsInteractiveRequiresProjectBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestAnalyticsInteractiveRejectsUnknownAndSurplusOperands(t *testing.T) {
+	for _, line := range []string{
+		"/analytics usgae",
+		"/analytics usage now",
+		"/stats usgae",
+		"/stats usage now",
+	} {
+		t.Run(strings.TrimPrefix(line, "/"), func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, line)
+
+			if got := rec.urlsSnapshot(); len(got) != 0 {
+				t.Fatalf("invalid analytics command made requests: %v", got)
+			}
+			if m.busy {
+				t.Fatal("invalid analytics command left the model busy")
+			}
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "usage: /analytics [usage|rates|agents|frequent|failures|skills|trends]") {
+				t.Fatalf("invalid analytics command did not report canonical usage:\n%s", out)
+			}
+			if strings.Contains(out, "Usage & cost") {
+				t.Fatalf("invalid analytics command reported a successful section:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 	const projectID = "selected-project"
 	bodies := map[string]string{
@@ -2387,6 +2415,7 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 		{line: "/analytics failures", paths: []string{"/api/analytics/failed-task-patterns"}},
 		{line: "/analytics skills", paths: []string{"/api/analytics/skills"}},
 		{line: "/analytics trends", paths: []string{"/api/analytics/avg-execution-time-by-task"}},
+		{line: "/stats usage", paths: []string{"/api/analytics/usage"}},
 	}
 
 	for _, tc := range cases {

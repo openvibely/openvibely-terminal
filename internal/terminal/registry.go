@@ -6885,13 +6885,25 @@ func readAutomationDefinitionFile(path string) (string, error) {
 
 // --- analytics ---
 
+func validateAnalyticsArgs(actions, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	action, rest := splitAction(actions, args)
+	if action != "" && len(rest) == 0 {
+		return nil
+	}
+	return fmt.Errorf("usage: %sanalytics [%s]", cmdPrefix, strings.Join(actions, "|"))
+}
+
 func analyticsCommand() command {
 	actions := []string{"usage", "rates", "agents", "frequent", "failures", "skills", "trends"}
 	return command{
-		name:    "analytics",
-		aliases: []string{"stats"},
-		actions: actions,
-		desc:    "usage, cost, success rates and trends",
+		name:         "analytics",
+		aliases:      []string{"stats"},
+		actions:      actions,
+		validateArgs: func(args []string) error { return validateAnalyticsArgs(actions, args) },
+		desc:         "usage, cost, success rates and trends",
 		usage: []string{
 			"analytics                                  every section",
 			"analytics usage                            token usage and cost by model",
@@ -6912,6 +6924,9 @@ func analyticsCommand() command {
 			m, cmd, ok := m.needProject()
 			if !ok {
 				return m, cmd
+			}
+			if err := validateAnalyticsArgs(actions, args); err != nil {
+				return m, errCmd(err.Error())
 			}
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
