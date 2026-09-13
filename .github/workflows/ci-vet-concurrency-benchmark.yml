@@ -45,7 +45,7 @@ jobs:
             BENCH_RUN="$run" \
             python3 .github/bench/ci-vet-run.py
           done
-          python3 .github/bench/ci-vet-summary.py "$BENCH_OUT" | tee "$GITHUB_STEP_SUMMARY"
+          python3 .github/bench/ci-vet-summary.py "$BENCH_OUT" "$BENCH_CAP" "$BENCH_MODE" | tee "$GITHUB_STEP_SUMMARY"
 
       - name: Publish temporary raw result
         if: always()
