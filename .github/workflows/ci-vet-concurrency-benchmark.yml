@@ -13,9 +13,6 @@ jobs:
     name: Sequential ubuntu-latest CI vet benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      BENCH_OUT: ${{ runner.temp }}/ci-vet-benchmark
-      GOMODCACHE: ${{ runner.temp }}/go-mod-cache
     steps:
       - name: Check out exact benchmark commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -27,6 +24,9 @@ jobs:
           cache: true
 
       - name: Collect ten matched samples per cell
+        env:
+          BENCH_OUT: ${{ runner.temp }}/ci-vet-benchmark
+          GOMODCACHE: ${{ runner.temp }}/go-mod-cache
         run: |
           set -euo pipefail
           mkdir -p "$BENCH_OUT" "$GOMODCACHE"
@@ -70,6 +70,7 @@ jobs:
       - name: Publish hosted benchmark evidence
         if: always()
         env:
+          BENCH_OUT: ${{ runner.temp }}/ci-vet-benchmark
           GH_TOKEN: ${{ github.token }}
           RESULT_BRANCH: ci-vet-result-${{ github.run_id }}
         run: |
