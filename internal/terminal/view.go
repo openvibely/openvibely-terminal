@@ -461,6 +461,19 @@ func filterMatch(filter string, fields ...string) bool {
 	return false
 }
 
+func filterTasks(tasks []client.Task, filter string) []client.Task {
+	if filter == "" {
+		return tasks
+	}
+	filtered := make([]client.Task, 0, len(tasks))
+	for _, t := range tasks {
+		if filterMatch(filter, t.Title, t.ID, t.Prompt) {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
 // shortID trims an ID for display.
 func shortID(id string) string {
 	if len(id) > 8 {
@@ -488,6 +501,7 @@ func statusMark(status string) string {
 // --- tasks ---
 
 func renderBoard(tasks []client.Task, filter string) string {
+	tasks = filterTasks(tasks, filter)
 	columns := []struct {
 		key   string
 		label string
@@ -503,9 +517,6 @@ func renderBoard(tasks []client.Task, filter string) string {
 		var rows [][]string
 		for _, t := range tasks {
 			if !strings.EqualFold(t.Category, col.key) {
-				continue
-			}
-			if !filterMatch(filter, t.Title, t.ID, t.Prompt) {
 				continue
 			}
 			title := t.Title

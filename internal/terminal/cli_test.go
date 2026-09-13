@@ -1172,6 +1172,113 @@ func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	}
 }
 
+func TestCLITaskListFilterJSONParityAndUnfilteredSchema(t *testing.T) {
+	const board = `<div data-task-id="title-task" data-task-status="pending" data-task-category="backlog" data-display-order="3">
+		<a href="/tasks/title-task?from=tasks" title="Needle Title">Needle Title</a>
+		<p class="line-clamp-2">ordinary prompt</p>
+		<span class="badge">priority 1</span>
+	</div>
+	<div data-task-id="id-needle" data-task-status="running" data-task-category="active" data-display-order="1">
+		<a href="/tasks/id-needle?from=tasks" title="Another title">Another title</a>
+		<p class="line-clamp-2">ordinary prompt</p>
+	</div>
+	<div data-task-id="prompt-task" data-task-status="completed" data-task-category="completed" data-display-order="2">
+		<a href="/tasks/prompt-task?from=tasks" title="Third title">Third title</a>
+		<p class="line-clamp-2">Prompt Needle</p>
+	</div>
+	<div data-task-id="unrelated-task" data-task-status="failed" data-task-category="active" data-display-order="4">
+		<a href="/tasks/unrelated-task?from=tasks" title="Unrelated title">Unrelated title</a>
+		<p class="line-clamp-2">Unrelated prompt</p>
+	</div>`
+	wantAll := []client.Task{
+		{ID: "title-task", ProjectID: "p1", Title: "Needle Title", Prompt: "ordinary prompt", Category: "backlog", Status: "pending", DisplayOrder: 3, Badges: []string{"priority 1"}},
+		{ID: "id-needle", ProjectID: "p1", Title: "Another title", Prompt: "ordinary prompt", Category: "active", Status: "running", DisplayOrder: 1},
+		{ID: "prompt-task", ProjectID: "p1", Title: "Third title", Prompt: "Prompt Needle", Category: "completed", Status: "completed", DisplayOrder: 2},
+		{ID: "unrelated-task", ProjectID: "p1", Title: "Unrelated title", Prompt: "Unrelated prompt", Category: "active", Status: "failed", DisplayOrder: 4},
+	}
+
+	cases := []struct {
+		name          string
+		filter        string
+		includeFilter bool
+		want          []string
+	}{
+		{name: "title", filter: "nEeDlE tItLe", includeFilter: true, want: []string{"title-task"}},
+		{name: "ID", filter: "ID-NEEDLE", includeFilter: true, want: []string{"id-needle"}},
+		{name: "prompt", filter: "pRoMpT nEeDlE", includeFilter: true, want: []string{"prompt-task"}},
+		{name: "no match", filter: "missing", includeFilter: true, want: []string{}},
+		{name: "empty filter", includeFilter: true, want: []string{"title-task", "id-needle", "prompt-task", "unrelated-task"}},
+		{name: "unfiltered", want: []string{"title-task", "id-needle", "prompt-task", "unrelated-task"}},
+	}
+
+	run := func(t *testing.T, filter string, includeFilter, jsonOutput bool) (string, []client.Task, *recorder) {
+		t.Helper()
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/tasks":        board,
+		})
+		args := []string{"tasks"}
+		if includeFilter || filter != "" {
+			args = append(args, filter)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", args, false, jsonOutput); err != nil {
+			t.Fatalf("tasks %v failed: %v\n%s", args, err, rec.all())
+		}
+		var tasks []client.Task
+		if jsonOutput {
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &tasks); err != nil {
+				t.Fatalf("tasks JSON is not valid: %v\n%s", err, out.String())
+			}
+		}
+		return out.String(), tasks, rec
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			plain, _, plainRec := run(t, tc.filter, tc.includeFilter, false)
+			plainText := stripANSI(plain)
+			for _, id := range tc.want {
+				if !strings.Contains(plainText, shortID(id)) {
+					t.Errorf("plain output missing matching task %q:\n%s", id, plainText)
+				}
+			}
+			for _, task := range wantAll {
+				if !slices.Contains(tc.want, task.ID) && strings.Contains(plainText, shortID(task.ID)) {
+					t.Errorf("plain output included unrelated task %q:\n%s", task.ID, plainText)
+				}
+			}
+
+			_, got, jsonRec := run(t, tc.filter, tc.includeFilter, true)
+			gotIDs := make([]string, 0, len(got))
+			for _, task := range got {
+				gotIDs = append(gotIDs, task.ID)
+			}
+			if !slices.Equal(gotIDs, tc.want) {
+				t.Errorf("JSON task IDs = %v, want %v", gotIDs, tc.want)
+			}
+			if tc.filter != "" && tc.name == "no match" && got == nil {
+				t.Fatal("filtered no-match JSON decoded to nil instead of []")
+			}
+			for _, rec := range []*recorder{plainRec, jsonRec} {
+				if !slices.Contains(rec.urlsSnapshot(), "GET /tasks?project_id=p1") {
+					t.Errorf("task request lost project scope: %v", rec.urlsSnapshot())
+				}
+				for _, uri := range rec.urlsSnapshot() {
+					if strings.HasPrefix(uri, "GET /tasks?") && uri != "GET /tasks?project_id=p1" {
+						t.Errorf("task request changed unexpectedly: %s", uri)
+					}
+				}
+			}
+
+			if (tc.name == "empty filter" || tc.name == "unfiltered") && !reflect.DeepEqual(got, wantAll) {
+				t.Errorf("unfiltered JSON tasks = %#v, want %#v", got, wantAll)
+			}
+		})
+	}
+}
+
 func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

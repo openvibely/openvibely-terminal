@@ -497,7 +497,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					if jsonMode {
-						return marshalJSON(tasks)
+						return marshalJSON(filterTasks(tasks, ref))
 					}
 					return renderBoard(tasks, ref), nil
 				})

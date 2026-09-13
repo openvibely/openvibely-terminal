@@ -975,6 +975,7 @@ Notes:
   one backend projects; project-scoped commands require `-project <name|id>`
   when multiple projects exist. Project-reference `projects` commands and
   other global commands do not require it.
+- `tasks [filter]` applies the same case-insensitive substring filter to task titles, IDs, and prompts in plain and `--json` output. Omit the filter to retain the complete backend-ordered task list and its existing JSON shape.
 - Chat and long-running commands block until the backend finishes, then print
   the result.
 - Errors go to stderr with a non-zero exit status; results go to stdout. `status`
