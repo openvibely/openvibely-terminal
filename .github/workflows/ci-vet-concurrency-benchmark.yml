@@ -6,7 +6,7 @@ on:
       - 'ci-vet-benchmark-*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   benchmark:
@@ -37,15 +37,69 @@ jobs:
               export BENCH_CAP="$cap"
               export BENCH_GOCACHE="$RUNNER_TEMP/go-build-cache-$cap-$mode"
               mkdir -p "$BENCH_GOCACHE"
-              for run in 0 1 2 3 4 5 6 7 8 9 10; do
-                BENCH_REPO="$GITHUB_WORKSPACE" \
-                BENCH_RUN="$run" \
-                python3 .github/bench/ci-vet-run.py
+
+              warmup=0
+              while (( warmup == 0 )); do
+                if BENCH_REPO="$GITHUB_WORKSPACE" BENCH_RUN=0 \
+                  python3 .github/bench/ci-vet-run.py; then
+                  warmup=1
+                else
+                  echo "discarding failed $cap/$mode warm-up"
+                fi
+              done
+
+              valid=0
+              run=1
+              while (( valid < 10 )); do
+                if BENCH_REPO="$GITHUB_WORKSPACE" BENCH_RUN="$run" \
+                  python3 .github/bench/ci-vet-run.py; then
+                  valid=$((valid + 1))
+                else
+                  echo "discarding failed $cap/$mode sample $run"
+                fi
+                run=$((run + 1))
               done
             done
           done
           summary=$(python3 .github/bench/ci-vet-summary.py "$BENCH_OUT")
-          printf '%s\n' "$summary" | tee "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$summary" | tee "$GITHUB_STEP_SUMMARY" "$BENCH_OUT/summary.txt"
           while IFS= read -r line; do
             echo "::warning file=ci-vet-benchmark::$line"
           done <<<"$summary"
+
+      - name: Publish hosted benchmark evidence
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT_BRANCH: ci-vet-result-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          result_repo=$(mktemp -d)
+          result_root="$result_repo/ci-vet-benchmark-result"
+          mkdir -p "$result_root"
+          if [[ -d "$BENCH_OUT" ]]; then
+            find "$BENCH_OUT" -name record.json -print0 | while IFS= read -r -d '' record; do
+              relative=${record#"$BENCH_OUT/"}
+              mkdir -p "$result_root/$(dirname "$relative")"
+              cp "$record" "$result_root/$relative"
+            done
+            cp "$BENCH_OUT/summary.txt" "$result_root/summary.txt" 2>/dev/null || true
+          fi
+          {
+            printf 'benchmark_commit=%s\n' "$GITHUB_SHA"
+            printf 'runner_os=%s\n' "$RUNNER_OS"
+            printf 'runner_arch=%s\n' "$RUNNER_ARCH"
+            printf 'runner_name=%s\n' "$RUNNER_NAME"
+            printf 'go_version='; go version
+            printf 'kernel='; uname -srmo
+            printf 'cpus='; nproc
+            printf 'memory_kib='; awk '/MemTotal:/ { print $2; exit }' /proc/meminfo
+          } >"$result_root/environment.txt"
+          git -C "$result_repo" init -q
+          git -C "$result_repo" config user.name github-actions[bot]
+          git -C "$result_repo" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$result_repo" add ci-vet-benchmark-result
+          git -C "$result_repo" commit -qm "Temporary benchmark result $RESULT_BRANCH"
+          git -C "$result_repo" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git -C "$result_repo" push -q origin "HEAD:refs/heads/$RESULT_BRANCH"
+          rm -rf "$result_repo"
