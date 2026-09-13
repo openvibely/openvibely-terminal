@@ -6,7 +6,7 @@ on:
       - 'ci-vet-benchmark-*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   benchmark:
@@ -47,11 +47,20 @@ jobs:
           done
           python3 .github/bench/ci-vet-summary.py "$BENCH_OUT" | tee "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload raw benchmark evidence
+      - name: Publish temporary raw result
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-vet-benchmark-${{ matrix.cap }}-${{ matrix.mode }}
-          path: ${{ runner.temp }}/ci-vet-benchmark
-          if-no-files-found: error
-          retention-days: 7
+        env:
+          RESULT_BRANCH: ci-vet-result-${{ matrix.cap }}-${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          result_repo=$(mktemp -d)
+          git -C "$GITHUB_WORKSPACE" switch --orphan benchmark-result
+          git -C "$GITHUB_WORKSPACE" rm -rf . >/dev/null 2>&1 || true
+          cp -R "$BENCH_OUT" "$GITHUB_WORKSPACE/ci-vet-benchmark-result"
+          git -C "$GITHUB_WORKSPACE" config user.name github-actions[bot]
+          git -C "$GITHUB_WORKSPACE" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$GITHUB_WORKSPACE" add ci-vet-benchmark-result
+          git -C "$GITHUB_WORKSPACE" commit -m "Temporary benchmark result $RESULT_BRANCH"
+          git -C "$GITHUB_WORKSPACE" push origin "HEAD:refs/heads/$RESULT_BRANCH"
+          rm -rf "$result_repo"
+
