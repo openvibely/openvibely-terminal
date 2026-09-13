@@ -63,6 +63,92 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 	return c, rec
 }
 
+// cliSkillsServer stubs the skills catalog and detail endpoints for headless runs.
+func cliSkillsServer(t *testing.T) (*client.Client, *recorder) {
+	t.Helper()
+	const page = `<div>
+		<div data-skill-handle="deploy" data-skill-name="Deploy" data-skill-description="ship safely" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false" data-skill-content="secret body from catalog"></div>
+	</div>`
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, page)
+		case "/skills/deploy/details":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"handle":"deploy","name":"Deploy","description":"ship safely","scope":"project","source":"project","content":"secret detail body","enabled":true,"always_use":false}`)
+		default:
+			t.Errorf("unexpected skills request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, rec
+}
+
+func TestCLISkillsSummaryJSONAndShowRequestContracts(t *testing.T) {
+	t.Run("plain summary does not fetch bodies", func(t *testing.T) {
+		c, rec := cliSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills"}, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out.String(), "secret") {
+			t.Fatalf("plain summary retained body content: %q", out.String())
+		}
+		if got := rec.count("GET", "/skills"); got != 1 {
+			t.Fatalf("summary catalog requests = %d, want one", got)
+		}
+		if got := rec.count("GET", "/skills/deploy/details"); got != 0 {
+			t.Fatalf("summary detail requests = %d, want zero", got)
+		}
+	})
+
+	t.Run("JSON list is complete and ordered", func(t *testing.T) {
+		c, rec := cliSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills"}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		var skills []client.Skill
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &skills); err != nil {
+			t.Fatalf("JSON output = %q: %v", out.String(), err)
+		}
+		if len(skills) != 1 || skills[0].Handle != "deploy" || skills[0].Content != "secret detail body" || skills[0].Scope != "project" || !skills[0].Enabled {
+			t.Fatalf("skills = %+v", skills)
+		}
+		if got := rec.count("GET", "/skills/deploy/details"); got != 1 {
+			t.Fatalf("JSON detail requests = %d, want one", got)
+		}
+	})
+
+	t.Run("show remains one detail request", func(t *testing.T) {
+		c, rec := cliSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills", "show", "deploy"}, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "secret detail body") {
+			t.Fatalf("show output missing body: %q", out.String())
+		}
+		if got := rec.count("GET", "/skills"); got != 0 {
+			t.Fatalf("show catalog requests = %d, want zero", got)
+		}
+		if got := rec.count("GET", "/skills/deploy/details"); got != 1 {
+			t.Fatalf("show detail requests = %d, want one", got)
+		}
+	})
+}
+
 // cliVoteServer stubs project loading and one vote-record response for CLI
 // success and error cases.
 func cliVoteServer(t *testing.T, status int, body string) (*client.Client, *recorder) {

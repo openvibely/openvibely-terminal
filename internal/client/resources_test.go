@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -4053,9 +4055,12 @@ func TestGetSkillDetailUsesScopedRequestAndValidatesIdentity(t *testing.T) {
 }
 
 func TestListSkillsWithContentFetchesOnlyResolvedBodiesInOrder(t *testing.T) {
+	var mu sync.Mutex
 	var requests []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		requests = append(requests, r.URL.RequestURI())
+		mu.Unlock()
 		switch r.URL.Path {
 		case "/skills":
 			w.Header().Set("Content-Type", "text/html")
@@ -4064,8 +4069,14 @@ func TestListSkillsWithContentFetchesOnlyResolvedBodiesInOrder(t *testing.T) {
 				<div data-skill-handle="global-skill" data-skill-name="Global" data-skill-scope="global" data-skill-source="global" data-skill-enabled="false" data-skill-always-use="true"></div>
 			</div>`)
 		case "/skills/project-skill/details":
+			if r.URL.Query().Get("project_id") != "p1" || r.URL.Query().Get("scope") != "project" {
+				t.Errorf("project detail query = %s", r.URL.RawQuery)
+			}
 			_, _ = io.WriteString(w, `{"handle":"project-skill","name":"Project","scope":"project","source":"project","content":"project body","enabled":true}`)
 		case "/skills/global-skill/details":
+			if r.URL.Query().Get("project_id") != "p1" || r.URL.Query().Get("scope") != "global" {
+				t.Errorf("global detail query = %s", r.URL.RawQuery)
+			}
 			_, _ = io.WriteString(w, `{"handle":"global-skill","name":"Global","scope":"global","source":"global","content":"global body","enabled":false,"always_use":true}`)
 		default:
 			http.NotFound(w, r)
@@ -4081,13 +4092,334 @@ func TestListSkillsWithContentFetchesOnlyResolvedBodiesInOrder(t *testing.T) {
 	if len(skills) != 2 || skills[0].Content != "project body" || skills[1].Content != "global body" {
 		t.Fatalf("skills = %+v", skills)
 	}
+	mu.Lock()
+	gotRequests := append([]string(nil), requests...)
+	mu.Unlock()
+	sort.Strings(gotRequests)
 	wantRequests := []string{
 		"/skills?project_id=p1",
-		"/skills/project-skill/details?project_id=p1&scope=project",
 		"/skills/global-skill/details?project_id=p1&scope=global",
+		"/skills/project-skill/details?project_id=p1&scope=project",
 	}
-	if !reflect.DeepEqual(requests, wantRequests) {
-		t.Fatalf("requests = %v, want %v", requests, wantRequests)
+	sort.Strings(wantRequests)
+	if !reflect.DeepEqual(gotRequests, wantRequests) {
+		t.Fatalf("requests = %v, want same scoped request set %v", gotRequests, wantRequests)
+	}
+}
+
+func TestListSkillsWithContentUsesBoundedWorkersAndPreservesCatalogOrder(t *testing.T) {
+	const skillCount = skillDetailWorkerLimit*2 + 1
+	fixture := skillListBenchmarkFixture(skillCount)
+	var mu sync.Mutex
+	inFlight, maxInFlight, detailRequests := 0, 0, 0
+	var readyOnce sync.Once
+	waveReady := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/skills" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, fixture)
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/skills/") || !strings.HasSuffix(r.URL.Path, "/details") {
+			http.NotFound(w, r)
+			return
+		}
+		handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
+		mu.Lock()
+		inFlight++
+		detailRequests++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		if inFlight == skillDetailWorkerLimit {
+			readyOnce.Do(func() { close(waveReady) })
+		}
+		mu.Unlock()
+		<-release
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"handle":%q,"name":%q,"scope":"project","source":"project","content":%q,"enabled":true,"always_use":false}`, handle, handle, "body-"+handle)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		skills []Skill
+		err    error
+	}
+	finished := make(chan result, 1)
+	go func() {
+		skills, err := c.ListSkillsWithContent(context.Background(), "p1")
+		finished <- result{skills: skills, err: err}
+	}()
+	select {
+	case <-waveReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the first detail wave")
+	}
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	gotInFlight, gotDetails := inFlight, detailRequests
+	mu.Unlock()
+	if gotInFlight > skillDetailWorkerLimit || gotDetails != skillDetailWorkerLimit {
+		t.Fatalf("before release: in-flight=%d details=%d, want at most %d in-flight and exactly one first wave", gotInFlight, gotDetails, skillDetailWorkerLimit)
+	}
+	close(release)
+
+	select {
+	case result := <-finished:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if len(result.skills) != skillCount {
+			t.Fatalf("skills = %d, want %d", len(result.skills), skillCount)
+		}
+		for i, skill := range result.skills {
+			wantHandle := fmt.Sprintf("skill-%04d", i)
+			if skill.Handle != wantHandle || skill.Content != "body-"+wantHandle {
+				t.Fatalf("skill[%d] = %+v, want ordered complete detail for %q", i, skill, wantHandle)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for full-content export")
+	}
+	mu.Lock()
+	gotInFlight, gotDetails, gotMax := inFlight, detailRequests, maxInFlight
+	mu.Unlock()
+	if gotInFlight != 0 {
+		t.Fatalf("in-flight after completion = %d, want zero", gotInFlight)
+	}
+	if gotDetails != skillCount {
+		t.Fatalf("detail requests = %d, want %d", gotDetails, skillCount)
+	}
+	if gotMax != skillDetailWorkerLimit {
+		t.Fatalf("maximum in-flight details = %d, want %d", gotMax, skillDetailWorkerLimit)
+	}
+}
+
+func TestListSkillsWithContentPreservesDetailErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		index      int
+		response   string
+		status     int
+		wantAuth   bool
+		wantStatus int
+		wantText   string
+	}{
+		{name: "first detail error", index: 0, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
+		{name: "middle detail error", index: 1, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
+		{name: "final detail error", index: 2, response: "server failure", status: http.StatusBadGateway, wantStatus: http.StatusBadGateway},
+		{name: "authentication", index: 1, status: http.StatusFound, wantAuth: true},
+		{name: "malformed JSON", index: 1, response: "not-json", status: http.StatusOK, wantText: "decoding /skills/skill-0001/details?project_id=p1&scope=project response"},
+		{name: "trailing JSON", index: 1, response: `{"handle":"skill-0001","scope":"project"} trailing`, status: http.StatusOK, wantText: "trailing JSON data"},
+		{name: "identity", index: 1, response: `{"handle":"other","scope":"project","content":"wrong"}`, status: http.StatusOK, wantText: "mismatched skill detail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := skillListBenchmarkFixture(3)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/skills" {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, fixture)
+					return
+				}
+				handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
+				var index int
+				if _, err := fmt.Sscanf(handle, "skill-%d", &index); err != nil {
+					http.Error(w, "unexpected handle", http.StatusNotFound)
+					return
+				}
+				if index == tc.index {
+					if tc.wantAuth {
+						http.Redirect(w, r, "/login?next=%2Fskills", http.StatusFound)
+						return
+					}
+					w.WriteHeader(tc.status)
+					_, _ = io.WriteString(w, tc.response)
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"handle":%q,"scope":"project","content":"body"}`, handle)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.ListSkillsWithContent(context.Background(), "p1")
+			if err == nil {
+				t.Fatal("full-content export succeeded, want detail error")
+			}
+			if tc.wantAuth && !IsAuthRequired(err) {
+				t.Fatalf("error = %v, want authentication required", err)
+			}
+			if tc.wantStatus != 0 {
+				var statusErr *HTTPStatusError
+				if !errors.As(err, &statusErr) || statusErr.StatusCode != tc.wantStatus {
+					t.Fatalf("error = %v, want HTTP status %d", err, tc.wantStatus)
+				}
+			}
+			if tc.wantText != "" && !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("error = %v, want text %q", err, tc.wantText)
+			}
+		})
+	}
+}
+
+func TestListSkillsWithContentPreservesTransportClassification(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/skills" {
+			t.Errorf("unexpected server request %s", r.URL.Path)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, skillListBenchmarkFixture(skillDetailConcurrentMinSkills))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.http.Transport = htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/skills" {
+			return http.DefaultTransport.RoundTrip(r)
+		}
+		return nil, &net.DNSError{Name: "skill-detail.test", Err: "dial failed"}
+	})
+	_, err = c.ListSkillsWithContent(context.Background(), "p1")
+	if !IsTransportError(err) {
+		t.Fatalf("error = %v, want transport classification", err)
+	}
+}
+
+func TestListSkillsWithContentEscapesHandlesAndPreservesScope(t *testing.T) {
+	const handle = "release/v1?audit#one"
+	const projectID = "project/one"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprintf(w, `<div data-skill-handle=%q data-skill-name="Release" data-skill-scope="global" data-skill-source="global" data-skill-enabled="false" data-skill-always-use="true"></div>`, handle)
+		default:
+			wantPath := "/skills/" + url.PathEscape(handle) + "/details"
+			if r.URL.EscapedPath() != wantPath {
+				t.Errorf("escaped path = %q, want %q", r.URL.EscapedPath(), wantPath)
+			}
+			if r.URL.Query().Get("project_id") != projectID || r.URL.Query().Get("scope") != "global" {
+				t.Errorf("detail query = %s, want project and global scope", r.URL.RawQuery)
+			}
+			_, _ = fmt.Fprintf(w, `{"handle":%q,"name":"Release","scope":"global","source":"global","content":"complete body","enabled":false,"always_use":true}`, handle)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skills, err := c.ListSkillsWithContent(context.Background(), projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skills) != 1 || skills[0].Handle != handle || skills[0].Scope != "global" || skills[0].Enabled || !skills[0].AlwaysUse || skills[0].Content != "complete body" {
+		t.Fatalf("skills = %+v", skills)
+	}
+}
+
+func TestListSkillsWithContentCancellationAndDeadlineJoinWorkers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cancel func(context.Context) (context.Context, func())
+		want   error
+	}{
+		{name: "cancellation", cancel: func(parent context.Context) (context.Context, func()) {
+			return context.WithCancel(parent)
+		}, want: context.Canceled},
+		{name: "deadline", cancel: func(parent context.Context) (context.Context, func()) {
+			return context.WithTimeout(parent, 30*time.Millisecond)
+		}, want: context.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			started := make(chan struct{}, skillDetailWorkerLimit)
+			var mu sync.Mutex
+			active, maxActive := 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/skills" {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, skillListBenchmarkFixture(100))
+					return
+				}
+				mu.Lock()
+				active++
+				if active > maxActive {
+					maxActive = active
+				}
+				mu.Unlock()
+				select {
+				case started <- struct{}{}:
+				case <-r.Context().Done():
+				}
+				<-r.Context().Done()
+				mu.Lock()
+				active--
+				mu.Unlock()
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, finish := tc.cancel(context.Background())
+			startedAt := time.Now()
+			var loadErr error
+			if tc.name == "cancellation" {
+				finished := make(chan error, 1)
+				go func() {
+					_, callErr := c.ListSkillsWithContent(ctx, "p1")
+					finished <- callErr
+				}()
+				select {
+				case <-started:
+					finish()
+				case <-time.After(2 * time.Second):
+					finish()
+					t.Fatal("timed out waiting for detail request")
+				}
+				select {
+				case loadErr = <-finished:
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for canceled export")
+				}
+			} else {
+				_, loadErr = c.ListSkillsWithContent(ctx, "p1")
+			}
+			if !errors.Is(loadErr, tc.want) {
+				t.Fatalf("error = %v, want %v", loadErr, tc.want)
+			}
+			if elapsed := time.Since(startedAt); elapsed > time.Second {
+				t.Fatalf("cancellation cleanup took %s", elapsed)
+			}
+			finish()
+			deadline := time.Now().Add(time.Second)
+			for {
+				mu.Lock()
+				gotActive, gotMax := active, maxActive
+				mu.Unlock()
+				if gotActive == 0 {
+					if gotMax > skillDetailWorkerLimit {
+						t.Fatalf("maximum active details = %d, want at most %d", gotMax, skillDetailWorkerLimit)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("active detail handlers did not drain; active=%d", gotActive)
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
 	}
 }
 
@@ -4131,6 +4463,173 @@ func TestSkillDetailReadsFreshContentAfterMutation(t *testing.T) {
 	if before.Content != "before edit" || after.Content != "after edit" {
 		t.Fatalf("before = %q, after = %q", before.Content, after.Content)
 	}
+}
+
+func TestListSkillsWithContentMatchesSerialJSONOutput(t *testing.T) {
+	const page = `<div>
+		<div data-skill-handle="project-skill" data-skill-name="Project" data-skill-description="project description" data-skill-scope="project" data-skill-source="project" data-skill-enabled="true" data-skill-always-use="false"></div>
+		<div data-skill-handle="global-skill" data-skill-name="Global" data-skill-description="global description" data-skill-scope="global" data-skill-source="global" data-skill-enabled="false" data-skill-always-use="true"></div>
+	</div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/skills" {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, page)
+			return
+		}
+		handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
+		scope := "project"
+		name := "Project Skill"
+		if handle == "global-skill" {
+			scope = "global"
+			name = "Global Skill"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"handle":%q,"name":%q,"description":%q,"scope":%q,"source":%q,"content":%q,"enabled":%t,"always_use":%t}`, handle, name, scope, scope, scope, "body-"+handle, scope == "project", scope == "global")
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := listSkillsWithContentSerial(context.Background(), c, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := c.ListSkillsWithContent(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialJSON, err := json.Marshal(serial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateJSON, err := json.Marshal(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(candidate, serial) || string(candidateJSON) != string(serialJSON) {
+		t.Fatalf("candidate JSON = %s, serial JSON = %s", candidateJSON, serialJSON)
+	}
+}
+
+// listSkillsWithContentSerial is the pre-concurrency implementation retained as
+// the controlled benchmark baseline. It intentionally mirrors the old request
+// and replacement order rather than calling the candidate implementation.
+func listSkillsWithContentSerial(ctx context.Context, c *Client, projectID string) ([]Skill, error) {
+	skills, err := c.ListSkills(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for i, skill := range skills {
+		detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
+		if err != nil {
+			return nil, err
+		}
+		skills[i] = detail
+	}
+	return skills, nil
+}
+
+type skillContentBenchmarkStats struct {
+	mu          sync.Mutex
+	requests    int
+	inFlight    int
+	maxInFlight int
+}
+
+func BenchmarkListSkillsWithContentSerialVsBounded(b *testing.B) {
+	// Run with -benchtime=10x when repeated samples are practical. The delayed
+	// 1,000-skill serial cases intentionally become long enough that fewer
+	// samples are the useful controlled comparison.
+	for _, skillCount := range []int{10, 100, 1000} {
+		for _, delay := range []time.Duration{0, 25 * time.Millisecond, 100 * time.Millisecond} {
+			name := fmt.Sprintf("skills=%d/delay=%dms", skillCount, delay/time.Millisecond)
+			b.Run(name+"/serial", func(b *testing.B) {
+				benchmarkSkillContentVariant(b, skillCount, delay, true)
+			})
+			b.Run(name+"/bounded", func(b *testing.B) {
+				benchmarkSkillContentVariant(b, skillCount, delay, false)
+			})
+		}
+	}
+}
+
+func benchmarkSkillContentVariant(b *testing.B, skillCount int, delay time.Duration, serial bool) {
+	b.Helper()
+	fixture := skillListBenchmarkFixture(skillCount)
+	detailBody := fmt.Sprintf(`{"handle":"skill-%04d","name":"Skill %04d","scope":"project","source":"project","content":"body-%04d","enabled":true,"always_use":false}`, 0, 0, 0)
+	stats := &skillContentBenchmarkStats{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stats.mu.Lock()
+		stats.requests++
+		isDetail := r.URL.Path != "/skills"
+		if isDetail {
+			stats.inFlight++
+			if stats.inFlight > stats.maxInFlight {
+				stats.maxInFlight = stats.inFlight
+			}
+		}
+		stats.mu.Unlock()
+		if isDetail {
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			stats.mu.Lock()
+			stats.inFlight--
+			stats.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
+			_, _ = fmt.Fprintf(w, `{"handle":%q,"name":%q,"scope":"project","source":"project","content":%q,"enabled":true,"always_use":false}`, handle, handle, "body-"+handle)
+			return
+		}
+		if delay > 0 {
+			// Keep the catalog response latency identical for the baseline and
+			// candidate; only detail requests are delayed below.
+			time.Sleep(time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, fixture)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(fixture) + len(detailBody)*skillCount))
+	b.ReportMetric(float64(len(fixture)), "catalog-response-B")
+	b.ReportMetric(float64(len(detailBody)), "detail-response-B")
+	b.ResetTimer()
+	durations := make([]time.Duration, 0, b.N)
+	for i := 0; i < b.N; i++ {
+		started := time.Now()
+		var skills []Skill
+		if serial {
+			skills, err = listSkillsWithContentSerial(context.Background(), c, "benchmark-project")
+		} else {
+			skills, err = c.ListSkillsWithContent(context.Background(), "benchmark-project")
+		}
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(skills) != skillCount || skills[0].Content == "" || skills[len(skills)-1].Content == "" {
+			b.Fatalf("skills = %d, want %d complete skills", len(skills), skillCount)
+		}
+		durations = append(durations, time.Since(started))
+	}
+	b.StopTimer()
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	stats.mu.Lock()
+	requests, maxInFlight := stats.requests, stats.maxInFlight
+	stats.mu.Unlock()
+	if len(durations) > 0 {
+		b.ReportMetric(float64(skillDurationPercentile(durations, 50)), "median-wall-ns/op")
+		b.ReportMetric(float64(skillDurationPercentile(durations, 95)), "p95-wall-ns/op")
+	}
+	b.ReportMetric(float64(len(durations)), "samples")
+	b.ReportMetric(float64(requests)/float64(max(1, b.N)), "requests/op")
+	b.ReportMetric(float64(maxInFlight), "max-inflight")
 }
 
 func BenchmarkListSkillsSummary(b *testing.B) {
