@@ -10,15 +10,12 @@ permissions:
 
 jobs:
   benchmark:
-    name: '${{ matrix.cap }} / ${{ matrix.mode }}'
+    name: Sequential ubuntu-latest CI vet benchmark
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      max-parallel: 6
-      matrix:
-        cap: ["1", "2", default]
-        mode: [routine, uncached]
+    env:
+      BENCH_OUT: ${{ runner.temp }}/ci-vet-benchmark
+      GOMODCACHE: ${{ runner.temp }}/go-mod-cache
     steps:
       - name: Check out exact benchmark commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -29,23 +26,25 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Collect ten matched samples
-        env:
-          BENCH_CAP: ${{ matrix.cap }}
-          BENCH_MODE: ${{ matrix.mode }}
-          BENCH_OUT: ${{ runner.temp }}/ci-vet-benchmark
-          BENCH_GOCACHE: ${{ runner.temp }}/go-build-cache
-          GOMODCACHE: ${{ runner.temp }}/go-mod-cache
+      - name: Collect ten matched samples per cell
         run: |
           set -euo pipefail
-          mkdir -p "$BENCH_OUT" "$BENCH_GOCACHE" "$GOMODCACHE"
+          mkdir -p "$BENCH_OUT" "$GOMODCACHE"
           go mod download
-          for run in 0 1 2 3 4 5 6 7 8 9 10; do
-            BENCH_REPO="$GITHUB_WORKSPACE" \
-            BENCH_RUN="$run" \
-            python3 .github/bench/ci-vet-run.py
+          for mode in routine uncached; do
+            for cap in 1 2 default; do
+              export BENCH_MODE="$mode"
+              export BENCH_CAP="$cap"
+              export BENCH_GOCACHE="$RUNNER_TEMP/go-build-cache-$cap-$mode"
+              mkdir -p "$BENCH_GOCACHE"
+              for run in 0 1 2 3 4 5 6 7 8 9 10; do
+                BENCH_REPO="$GITHUB_WORKSPACE" \
+                BENCH_RUN="$run" \
+                python3 .github/bench/ci-vet-run.py
+              done
+            done
           done
-          summary=$(python3 .github/bench/ci-vet-summary.py "$BENCH_OUT" "$BENCH_CAP" "$BENCH_MODE")
+          summary=$(python3 .github/bench/ci-vet-summary.py "$BENCH_OUT")
           printf '%s\n' "$summary" | tee "$GITHUB_STEP_SUMMARY"
           while IFS= read -r line; do
             echo "::warning file=ci-vet-benchmark::$line"
