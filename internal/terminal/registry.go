@@ -7366,8 +7366,12 @@ func projectsCommand() command {
 					deleteCmd)
 			}
 			if jsonMode {
+				if cliMode && m.projectsLoaded {
+					return m, m.run("Projects", cmdTimeout, func(context.Context) (string, error) {
+						return marshalJSON(m.projects)
+					})
+				}
 				c := m.client
-				selectName := strings.TrimSpace(m.wantProject)
 				return m, m.run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
 					projects, err := c.ListProjects(ctx)
 					if err != nil {
@@ -7376,17 +7380,12 @@ func projectsCommand() command {
 						}
 						return "", err
 					}
-					if cliMode && selectName != "" {
-						if _, err := matchProject(projects, selectName); err != nil {
-							return "", err
-						}
-					}
 					return marshalJSON(projects)
 				})
 			}
 			var cmd tea.Cmd
-			if cliMode {
-				m, cmd = m.beginProjectLoadWithCapacityAfterCatalog(true, m.wantProject)
+			if cliMode && m.projectsLoaded {
+				m, cmd = m.beginProjectCapacityLoad(true)
 				return m, cmd
 			}
 			m, cmd = m.beginProjectLoadWithSSE(true, "", true)

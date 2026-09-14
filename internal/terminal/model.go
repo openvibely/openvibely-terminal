@@ -478,15 +478,15 @@ func (m Model) beginProjectLoadWithSSE(echo bool, selectName string, startSSE bo
 	return m, m.loadProjectsWithIDAndSSE(requestID, echo, selectName, startSSE)
 }
 
-func (m Model) beginProjectLoadWithCapacityAfterCatalog(echo bool, selectName string) (Model, tea.Cmd) {
+func (m Model) beginProjectCapacityLoad(echo bool) (Model, tea.Cmd) {
 	requestID := nextProjectRequestID()
 	m.projectRequestID = requestID
-	m.projectsLoaded = false
-	return m, m.loadProjectsWithCapacityAfterCatalogWithID(requestID, echo, selectName)
+	return m, m.loadProjectCapacitiesWithID(requestID, echo)
 }
 
-func (m Model) loadProjectsWithCapacityAfterCatalogWithID(requestID uint64, echo bool, selectName string) tea.Cmd {
+func (m Model) loadProjectCapacitiesWithID(requestID uint64, echo bool) tea.Cmd {
 	c := m.client
+	projects := m.projects
 	sessionGeneration := sessionGenerationOf(m)
 	projectGeneration := projectGenerationOf(m)
 	return func() tea.Msg {
@@ -497,18 +497,14 @@ func (m Model) loadProjectsWithCapacityAfterCatalogWithID(requestID uint64, echo
 		ctx, cancel := context.WithTimeout(baseCtx, 15*time.Second)
 		defer cancel()
 
-		projects, err := c.ListProjects(ctx)
-		if err != nil {
-			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: err, echo: echo}
-		}
-		caps, capsErr := c.GetProjectCapacities(ctx)
+		capacities, err := c.GetProjectCapacities(ctx)
 		// Keep capacity enrichment best-effort just like the existing project
 		// loader. Authentication failures still enter the shared auth recovery
 		// path; ordinary capacity failures render the catalog without counts.
-		if client.IsAuthRequired(capsErr) {
-			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: capsErr, echo: echo}
+		if client.IsAuthRequired(err) {
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: err, echo: echo}
 		}
-		return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName}
+		return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projects: projects, capacities: capacities, echo: echo}
 	}
 }
 

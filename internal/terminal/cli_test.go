@@ -7521,7 +7521,7 @@ func TestCLIProjectListCapacityAuthFailureRetainsAuthDiagnostic(t *testing.T) {
 	}
 }
 
-func TestCLIProjectListTransportFailureRetainsLoadingDiagnostic(t *testing.T) {
+func TestCLIProjectListTransportFailureRetainsOfflineDiagnostic(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/projects" {
 			w.WriteHeader(http.StatusNotFound)
@@ -7544,8 +7544,8 @@ func TestCLIProjectListTransportFailureRetainsLoadingDiagnostic(t *testing.T) {
 	}
 
 	err = RunCLI(c, io.Discard, "", []string{"projects", "list"}, false, true)
-	if err == nil || !strings.Contains(err.Error(), "loading projects") || !strings.Contains(err.Error(), "Unable to reach") {
-		t.Fatalf("transport error = %v, want loading/offline diagnostic", err)
+	if err == nil || !strings.Contains(err.Error(), "Unable to reach") || !strings.Contains(err.Error(), "/api/projects") {
+		t.Fatalf("transport error = %v, want offline recovery with catalog detail", err)
 	}
 }
 
