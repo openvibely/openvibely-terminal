@@ -14091,6 +14091,80 @@ func TestWebhookDeleteBulkLookupIsCanceledByLoginTransition(t *testing.T) {
 	}
 }
 
+func TestWebhookDeleteBulkLookupIsInvalidatedByTabCommand(t *testing.T) {
+	const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div></div>`
+	requestStarted := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	var releaseOnce sync.Once
+	releaseRequest := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/channels" {
+			started.Do(func() { close(requestStarted) })
+			<-release
+			_, _ = io.WriteString(w, selected)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	defer releaseRequest()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m, cmd := typeLine(t, m, "/channels webhooks delete-bulk")
+	if cmd == nil || !m.busy {
+		t.Fatalf("bulk selector lookup state = cmd:%v busy:%v", cmd != nil, m.busy)
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- cmd() }()
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk lookup did not reach backend")
+	}
+
+	m.input.SetValue("/tasks show ")
+	m.input.CursorEnd()
+	m.menu = []command{*lookupCommand("tasks")}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(Model)
+	if m.webhookBulkLookupCancel != nil || m.webhookBulkLookupID != 0 {
+		t.Fatalf("Tab command left bulk lookup active: cancel:%v id:%d", m.webhookBulkLookupCancel != nil, m.webhookBulkLookupID)
+	}
+	releaseRequest()
+	next, _ = m.Update(<-result)
+	m = next.(Model)
+	if m.selectorActive || m.pendingConfirmation != nil {
+		t.Fatalf("late Tab-superseded lookup reopened destructive flow: selector:%v pending:%v", m.selectorActive, m.pendingConfirmation != nil)
+	}
+}
+
+func TestWebhookDeleteBulkSelectorSanitizesNewlineBearingNames(t *testing.T) {
+	item := webhookBulkSelectorItem(client.Webhook{
+		ID: "w-one", Name: "Line One\nLine Two", Path: "/webhooks/inbound/token-one",
+	})
+	m := Model{
+		selectorActive:   true,
+		selectorTitle:    "Webhooks to delete",
+		selectorItems:    []selectorItem{item},
+		selectorSearch:   []string{item.label},
+		selectorSelected: make(map[string]struct{}),
+		selectorMulti:    true,
+	}
+	view := stripANSI(m.renderSelector())
+	if strings.Contains(view, "Line One\nLine Two") || !strings.Contains(view, "Line One Line Two") {
+		t.Fatalf("newline-bearing name corrupted picker row:\n%s", view)
+	}
+	if item.resolvedWebhook == nil || item.resolvedWebhook.ID != "w-one" {
+		t.Fatalf("resolved webhook target changed: %#v", item.resolvedWebhook)
+	}
+}
+
 func webhookCatalogPageHTML(total, offset int) string {
 	end := min(offset+50, total)
 	var b strings.Builder

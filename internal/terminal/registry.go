@@ -6240,6 +6240,16 @@ func webhookSelector(m Model, action string, prefill bool) (Model, tea.Cmd) {
 	}))
 }
 
+func webhookBulkSelectorItem(webhook client.Webhook) selectorItem {
+	label := strings.ReplaceAll(sanitizeAutomationDetailText(webhook.Name), "\n", " ")
+	return selectorItem{
+		ref:             webhook.ID,
+		label:           label,
+		detail:          strings.ReplaceAll(sanitizeAutomationDetailText(webhook.Path), "\n", " "),
+		resolvedWebhook: &webhook,
+	}
+}
+
 func webhookBulkSelector(m Model) (Model, tea.Cmd) {
 	c, projectID := m.client, m.selectedID
 	dispatch := func(m Model, selected []selectorItem) (Model, tea.Cmd) {
@@ -6276,13 +6286,7 @@ func webhookBulkSelector(m Model) (Model, tea.Cmd) {
 			}
 			items := make([]selectorItem, 0, len(webhooks))
 			for _, webhook := range webhooks {
-				webhook := webhook
-				items = append(items, selectorItem{
-					ref:             webhook.ID,
-					label:           webhook.Name,
-					detail:          webhook.Path,
-					resolvedWebhook: &webhook,
-				})
+				items = append(items, webhookBulkSelectorItem(webhook))
 			}
 			return items, nil
 		})
