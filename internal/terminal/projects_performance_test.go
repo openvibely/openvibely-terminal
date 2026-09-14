@@ -38,6 +38,8 @@ func TestProjectsListPerformanceEvidence(t *testing.T) {
 		t.Fatalf("OPENVIBELY_PROJECTS_PERF_RUNS = %d, want at least 3", runs)
 	}
 	delay := time.Duration(projectsPerformanceEnvInt(t, "OPENVIBELY_PROJECTS_PERF_DELAY_MS", 2)) * time.Millisecond
+	catalogDelay := time.Duration(projectsPerformanceEnvInt(t, "OPENVIBELY_PROJECTS_PERF_CATALOG_DELAY_MS", int(delay/time.Millisecond))) * time.Millisecond
+	capacityDelay := time.Duration(projectsPerformanceEnvInt(t, "OPENVIBELY_PROJECTS_PERF_CAPACITY_DELAY_MS", int(delay/time.Millisecond))) * time.Millisecond
 
 	for _, records := range []int{10, 100, 1000} {
 		catalog, capacities := projectsPerformanceFixtures(records)
@@ -47,16 +49,19 @@ func TestProjectsListPerformanceEvidence(t *testing.T) {
 				var catalogRequests, capacityRequests atomic.Int32
 				var catalogBytes, capacityBytes atomic.Int64
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if delay > 0 {
-						time.Sleep(delay)
-					}
 					switch r.URL.Path {
 					case "/api/projects":
+						if catalogDelay > 0 {
+							time.Sleep(catalogDelay)
+						}
 						catalogRequests.Add(1)
 						catalogBytes.Add(int64(len(catalog)))
 						w.Header().Set("Content-Type", "application/json")
 						_, _ = io.WriteString(w, catalog)
 					case "/api/capacity/projects":
+						if capacityDelay > 0 {
+							time.Sleep(capacityDelay)
+						}
 						capacityRequests.Add(1)
 						capacityBytes.Add(int64(len(capacities)))
 						w.Header().Set("Content-Type", "application/json")
@@ -121,7 +126,7 @@ func TestProjectsListPerformanceEvidence(t *testing.T) {
 				if allocErr != nil {
 					t.Fatalf("allocation run failed: %v", allocErr)
 				}
-				t.Logf("projects_perf mode=%s records=%d output=%s fixed_delay=%s runs=%d catalog_bytes=%d capacity_bytes=%d catalog_requests=%d capacity_requests=%d median=%s allocs=%.0f durations=%v", mode, records, projectsPerformanceOutputName(jsonMode), delay, runs, catalogBytesPerRun, capacityBytesPerRun, catalogRequestsPerRun, capacityRequestsPerRun, median, allocs, durations)
+				t.Logf("projects_perf mode=%s records=%d output=%s catalog_delay=%s capacity_delay=%s runs=%d catalog_bytes=%d capacity_bytes=%d catalog_requests=%d capacity_requests=%d median=%s allocs=%.0f durations=%v", mode, records, projectsPerformanceOutputName(jsonMode), catalogDelay, capacityDelay, runs, catalogBytesPerRun, capacityBytesPerRun, catalogRequestsPerRun, capacityRequestsPerRun, median, allocs, durations)
 			})
 		}
 	}
