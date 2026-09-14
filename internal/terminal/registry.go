@@ -7371,10 +7371,10 @@ func projectsCommand() command {
 				return m, m.run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
 					projects, err := c.ListProjects(ctx)
 					if err != nil {
-						if client.IsAuthRequired(err) {
-							return "", err
+						if client.IsTransportError(err) {
+							return "", fmt.Errorf("loading projects: %s", OfflineRecoveryMessage(c.BaseURL(), err))
 						}
-						return "", fmt.Errorf("loading projects: %s", connectionErrorMessage(c.BaseURL(), err))
+						return "", err
 					}
 					if cliMode && selectName != "" {
 						if _, err := matchProject(projects, selectName); err != nil {
@@ -7385,11 +7385,11 @@ func projectsCommand() command {
 				})
 			}
 			var cmd tea.Cmd
-			selectName := ""
 			if cliMode {
-				selectName = m.wantProject
+				m, cmd = m.beginProjectLoadWithCapacityAfterCatalog(true, m.wantProject)
+				return m, cmd
 			}
-			m, cmd = m.beginProjectLoadWithSSE(true, selectName, !cliMode)
+			m, cmd = m.beginProjectLoadWithSSE(true, "", true)
 			return m, cmd
 		},
 	}

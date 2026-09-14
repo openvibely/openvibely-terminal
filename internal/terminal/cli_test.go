@@ -7365,6 +7365,45 @@ func TestCLIProjectListCapacityFailurePreservesCatalogOutput(t *testing.T) {
 	}
 }
 
+func TestCLIProjectListCatalogFailurePrecedesCapacityAndSkipsIt(t *testing.T) {
+	var catalogRequests, capacityRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			catalogRequests++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":"project catalog unavailable"}`)
+		case "/api/capacity/projects":
+			capacityRequests++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"capacity login required"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = RunCLI(c, io.Discard, "", []string{"projects", "list"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "project catalog unavailable") {
+		t.Fatalf("catalog error = %v, want the catalog diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "capacity login required") || strings.Contains(err.Error(), "requires sign-in") {
+		t.Fatalf("catalog error was replaced by capacity error: %v", err)
+	}
+	if catalogRequests != 1 {
+		t.Fatalf("catalog requests = %d, want one", catalogRequests)
+	}
+	if capacityRequests != 0 {
+		t.Fatalf("capacity requests = %d, want zero after catalog failure", capacityRequests)
+	}
+}
+
 func TestCLIProjectListPreservesExplicitReferenceWithoutStartupPreload(t *testing.T) {
 	for _, jsonOutput := range []bool{false, true} {
 		mode := "plain"

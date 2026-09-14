@@ -478,6 +478,40 @@ func (m Model) beginProjectLoadWithSSE(echo bool, selectName string, startSSE bo
 	return m, m.loadProjectsWithIDAndSSE(requestID, echo, selectName, startSSE)
 }
 
+func (m Model) beginProjectLoadWithCapacityAfterCatalog(echo bool, selectName string) (Model, tea.Cmd) {
+	requestID := nextProjectRequestID()
+	m.projectRequestID = requestID
+	m.projectsLoaded = false
+	return m, m.loadProjectsWithCapacityAfterCatalogWithID(requestID, echo, selectName)
+}
+
+func (m Model) loadProjectsWithCapacityAfterCatalogWithID(requestID uint64, echo bool, selectName string) tea.Cmd {
+	c := m.client
+	sessionGeneration := sessionGenerationOf(m)
+	projectGeneration := projectGenerationOf(m)
+	return func() tea.Msg {
+		baseCtx := m.cliContext
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 15*time.Second)
+		defer cancel()
+
+		projects, err := c.ListProjects(ctx)
+		if err != nil {
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: err, echo: echo}
+		}
+		caps, capsErr := c.GetProjectCapacities(ctx)
+		// Keep capacity enrichment best-effort just like the existing project
+		// loader. Authentication failures still enter the shared auth recovery
+		// path; ordinary capacity failures render the catalog without counts.
+		if client.IsAuthRequired(capsErr) {
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: capsErr, echo: echo}
+		}
+		return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projects: projects, capacities: caps, echo: echo, selectName: selectName}
+	}
+}
+
 // loadProjects is retained as a direct command helper for tests and callers
 // that do not need to update the model before receiving the response. Runtime
 // command paths use beginProjectLoad so a newer request immediately invalidates
