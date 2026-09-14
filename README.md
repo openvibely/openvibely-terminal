@@ -52,6 +52,7 @@ summarize the current project
 /tasks goal resume refactor
 /tasks steer refactor | stop and use the new interface
 /automations show "Nightly sweep"
+/personality delete-bulk old_one "Old Two"
 /projects delete demo
 /status
 /help tasks
@@ -69,6 +70,7 @@ openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
 openvibely-terminal -project demo chat "summarize the current project"
 openvibely-terminal --force projects delete demo
+openvibely-terminal -project demo --force personality delete-bulk old_one "Old Two"
 openvibely-terminal --json -project demo automations list
 ```
 
@@ -95,6 +97,7 @@ Common commands include:
 | `/skills` | Manage reusable skills; `skills always <skill>` and `skills load <skill>` are equivalent names for automatic loading |
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
+| `/personality` | Manage built-in and custom personalities; bulk deletion is limited to inactive non-preset custom entries |
 | `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |
 | `/channels` | Manage integrations, inbound webhooks, saved outbound targets, and project-scoped Telegram, Slack, Discord, X, Email, and GitHub authorized access with `channels access <provider> list\|add\|remove` and `channels targets list\|show\|add\|edit\|test\|remove\|policy` |
 | `/projects`, `/project` | Manage or select projects |

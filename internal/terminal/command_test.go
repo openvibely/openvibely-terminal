@@ -917,6 +917,26 @@ func TestAlertsShowHelpAndCompletion(t *testing.T) {
 	}
 }
 
+func TestPersonalityBulkDeleteHelpAndCompletion(t *testing.T) {
+	cmd := lookupCommand("personality")
+	if cmd == nil {
+		t.Fatal("personality command missing")
+	}
+	if got := completeSlashInput("/personality delete-b", *cmd); got != "/personality delete-bulk " {
+		t.Fatalf("personality bulk-delete completion = %q, want %q", got, "/personality delete-bulk ")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"/personality delete-bulk <key|name>...",
+		"delete inactive non-preset custom entries",
+		"personality delete-bulk old_one \"Old Two\"",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("personality help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestParseAlertListArgs(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1300,6 +1320,75 @@ func TestCommandsWithActionsDocumentTheirSyntax(t *testing.T) {
 		if len(c.examples) == 0 {
 			t.Errorf("%s%s has usage lines but no examples (VISION.md: help must include examples)", cmdPrefix, c.name)
 		}
+	}
+}
+
+func TestChannelsCompletionMetadataMatchesBetweenAddAndEdit(t *testing.T) {
+	baseWant := []string{
+		"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint",
+		"--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret",
+		"--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port",
+		"--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen",
+	}
+	if got := registryCompletionValues("channels", "add", "telegram"); !slices.Equal(got, baseWant) {
+		t.Fatalf("channels add completion = %#v, want %#v", got, baseWant)
+	}
+	if got := registryCompletionValues("channels", "edit", "telegram"); !slices.Equal(got, baseWant) {
+		t.Fatalf("channels edit completion = %#v, want %#v", got, baseWant)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		after  []string
+		values []string
+	}{
+		{
+			name: "auth mode", after: []string{"add", "github", "--auth-mode"},
+			values: []string{"pat", "app"},
+		},
+		{
+			name: "provider", after: []string{"add", "email", "--provider"},
+			values: []string{"gmail", "outlook", "yahoo", "fastmail", "icloud", "custom"},
+		},
+		{
+			name: "bot token mode", after: []string{"add", "slack", "--bot-token-mode"},
+			values: []string{"oauth", "manual"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := append(append([]string(nil), baseWant...), tc.values...)
+			var completions [2][]string
+			for i, action := range []string{"add", "edit"} {
+				after := append([]string{action}, tc.after[1:]...)
+				completions[i] = registryCompletionValues("channels", after...)
+				if !slices.Equal(completions[i], want) {
+					t.Errorf("channels %s completion after %v = %#v, want %#v", action, after, completions[i], want)
+				}
+			}
+			if !slices.Equal(completions[0], completions[1]) {
+				t.Errorf("channels add/edit completion after %v differ: add %#v, edit %#v", tc.after[1:], completions[0], completions[1])
+			}
+		})
+	}
+}
+
+func TestChannelsCompletionPreservesQuotedReferencesAndPartialOptions(t *testing.T) {
+	cmd := lookupCommand("channels")
+	if cmd == nil {
+		t.Fatal("channels command missing")
+	}
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: `/channels add "telegram" --ric`, want: `/channels add "telegram" --rich-messages `},
+		{input: `/channels edit "telegram" --tok`, want: `/channels edit "telegram" --token `},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := completeSlashInput(tc.input, *cmd); got != tc.want {
+				t.Fatalf("completion = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

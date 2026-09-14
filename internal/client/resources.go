@@ -3464,6 +3464,74 @@ func (c *Client) DeleteCustomPersonality(ctx context.Context, projectID, key str
 		"/personality/custom/"+url.PathEscape(key)+query("project_id", projectID), nil)
 }
 
+// DeleteCustomPersonalitiesBulk removes eligible custom personalities in one
+// project-scoped, all-or-nothing backend request and returns the deleted count.
+func (c *Client) DeleteCustomPersonalitiesBulk(ctx context.Context, projectID string, ids []string) (int, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return 0, fmt.Errorf("project ID is required for bulk personality deletion")
+	}
+	ids, err := validatePersonalityBulkIDs(ids)
+	if err != nil {
+		return 0, err
+	}
+
+	resp, err := c.doJSONResponse(ctx, http.MethodDelete,
+		"/personality/custom/bulk"+query("project_id", projectID), struct {
+			IDs []string `json:"ids"`
+		}{IDs: ids})
+	if err != nil {
+		return 0, err
+	}
+	defer drainAndClose(resp.Body)
+
+	var response struct {
+		Deleted *int            `json:"deleted"`
+		Error   json.RawMessage `json:"error"`
+	}
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&response); err != nil {
+		return 0, fmt.Errorf("decoding /personality/custom/bulk response: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
+		return 0, fmt.Errorf("decoding /personality/custom/bulk response: trailing JSON data: %w", err)
+	}
+	if len(response.Error) > 0 && strings.TrimSpace(string(response.Error)) != "null" {
+		return 0, fmt.Errorf("decoding /personality/custom/bulk response: received an error object")
+	}
+	if response.Deleted == nil {
+		return 0, fmt.Errorf("decoding /personality/custom/bulk response: missing required deleted count")
+	}
+	if *response.Deleted < 0 {
+		return 0, fmt.Errorf("decoding /personality/custom/bulk response: deleted count must not be negative")
+	}
+	return *response.Deleted, nil
+}
+
+func validatePersonalityBulkIDs(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("at least one personality ID is required")
+	}
+	seen := make(map[string]struct{}, len(ids))
+	validated := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, fmt.Errorf("personality IDs must not be empty")
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return nil, fmt.Errorf("personality ID %q was provided more than once", id)
+		}
+		seen[id] = struct{}{}
+		validated = append(validated, id)
+	}
+	return validated, nil
+}
+
 // GetPersonality returns the Personality screen as text.
 func (c *Client) GetPersonality(ctx context.Context, projectID string) (string, error) {
 	return c.paginatedPageText(ctx, "/personality"+query("project_id", projectID), "personality-container")

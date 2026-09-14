@@ -306,6 +306,12 @@ func TestSetupGuidanceIsTerminalSafe(t *testing.T) {
 	baseURL := "https://user:" + secret + "@remote.example:3001/path?token=also-secret#fragment\x1b[31m"
 	guidance := setupGuidance("linux", baseURL)
 	recovery := OfflineRecoveryMessage(baseURL, errors.New("dial refused"))
+	if !strings.Contains(guidance, "Invalid configured server URL") {
+		t.Fatalf("unsafe setup URL was not classified as invalid:\n%s", guidance)
+	}
+	if !strings.Contains(recovery, "remote.example:3001/path") {
+		t.Fatalf("safe remote host/path missing from recovery output:\n%s", recovery)
+	}
 	for _, text := range []string{guidance, recovery} {
 		if strings.Contains(text, secret) || strings.Contains(text, "also-secret") {
 			t.Errorf("server credentials or query leaked into terminal output:\n%s", text)
@@ -313,45 +319,50 @@ func TestSetupGuidanceIsTerminalSafe(t *testing.T) {
 		if strings.Contains(text, "\x1b") || strings.Contains(text, "\nremote.example") {
 			t.Errorf("unsafe terminal control or injected line in output:\n%q", text)
 		}
-		if !strings.Contains(text, "remote.example:3001/path") {
-			t.Errorf("safe remote host/path missing from output:\n%s", text)
-		}
+	}
+}
+
+func TestSetupGuidanceRejectsUnsafeServerURLComponents(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server string
+		secret string
+	}{
+		{name: "query", server: "https://remote.example:3001/path?tenant=setup-query-secret", secret: "setup-query-secret"},
+		{name: "fragment", server: "https://remote.example:3001/path#setup-fragment-secret", secret: "setup-fragment-secret"},
+		{name: "credentials", server: "https://setup-user:setup-password-secret@remote.example:3001/path", secret: "setup-password-secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			guidance := setupGuidance("linux", tc.server)
+			if !strings.Contains(guidance, "Invalid configured server URL") {
+				t.Fatalf("setup guidance did not classify %s URL as invalid:\n%s", tc.name, guidance)
+			}
+			if strings.Contains(guidance, tc.secret) || strings.Contains(guidance, "setup-user") {
+				t.Fatalf("setup guidance leaked %s URL data:\n%s", tc.name, guidance)
+			}
+			if strings.Contains(guidance, "Local backend") || strings.Contains(guidance, "./start.sh") {
+				t.Fatalf("setup guidance gave startup advice for invalid %s URL:\n%s", tc.name, guidance)
+			}
+		})
 	}
 }
 
 func TestConfiguredMixedCaseServerURLsRemainUsableAndTerminalSafe(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		server   string
-		username string
-		password string
-		token    string
-		fragment string
+		name   string
+		server string
+		prefix string
 	}{
-		{
-			name:     "server flag uppercase scheme",
-			server:   "HTTPS://flag-user:flag-password-must-not-appear@remote.example:3001/base?token=flag-token-must-not-appear#flag-fragment-must-not-appear\x1b[8m",
-			username: "flag-user",
-			password: "flag-password-must-not-appear",
-			token:    "flag-token-must-not-appear",
-			fragment: "flag-fragment-must-not-appear",
-		},
-		{
-			name:     "environment mixed case scheme",
-			server:   "hTtPs://environment-user:environment-password-must-not-appear@remote.example:3001/base?token=environment-token-must-not-appear#environment-fragment-must-not-appear\x1b[8m",
-			username: "environment-user",
-			password: "environment-password-must-not-appear",
-			token:    "environment-token-must-not-appear",
-			fragment: "environment-fragment-must-not-appear",
-		},
+		{name: "server flag uppercase scheme", server: "HTTPS://remote.example:3001/base", prefix: "https://"},
+		{name: "environment mixed case scheme", server: "hTtP://remote.example:3001/base", prefix: "http://"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := client.New(tc.server)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.HasPrefix(c.BaseURL(), "https://") {
-				t.Fatalf("BaseURL did not preserve an HTTPS endpoint: %q", c.BaseURL())
+			if !strings.HasPrefix(c.BaseURL(), tc.prefix) {
+				t.Fatalf("BaseURL did not normalize scheme: %q", c.BaseURL())
 			}
 
 			m := New(c)
@@ -365,22 +376,12 @@ func TestConfiguredMixedCaseServerURLsRemainUsableAndTerminalSafe(t *testing.T) 
 				stripANSI(rawStatus),
 			}
 			for _, output := range outputs {
-				for _, secret := range []string{tc.username, tc.password, tc.token, tc.fragment} {
-					if strings.Contains(output, secret) {
-						t.Errorf("configured server value leaked %q:\n%s", secret, output)
-					}
-				}
 				if strings.ContainsAny(output, "\x1b\r") {
 					t.Errorf("configured server value retained terminal control text: %q", output)
 				}
 				if !strings.Contains(output, "remote.example:3001/base") {
 					t.Errorf("configured server display lost its safe endpoint: %s", output)
 				}
-			}
-			// /status intentionally contains renderer-owned ANSI styles. Check the
-			// exact injected sequence without stripping that raw output first.
-			if strings.Contains(rawStatus, "\x1b[8m") {
-				t.Errorf("raw status retained injected configured-server control sequence: %q", rawStatus)
 			}
 		})
 	}

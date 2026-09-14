@@ -5726,6 +5726,519 @@ func TestPersonalityDeleteConfirmationCancellationDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestPersonalityDeleteBulkConfirmsAllResolvedTargetsAndUsesOneRequest(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="active_custom">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-id="personality-id-2" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="active_custom" data-personality-id="personality-id-active" data-personality-name="Active Custom" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	const remaining = `<div id="personality-section" data-selected-personality="active_custom">
+		<div data-personality-key="old_one" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="active_custom" data-personality-id="personality-id-active" data-personality-name="Active Custom" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var lists, deletes int
+	mutated := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("project_id") != "p2" {
+			t.Errorf("personality request lost project scope: %s", r.URL.RequestURI())
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			lists++
+			w.Header().Set("Content-Type", "text/html")
+			if mutated {
+				_, _ = io.WriteString(w, remaining)
+			} else {
+				_, _ = io.WriteString(w, catalog)
+			}
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			deletes++
+			if got := r.Header.Get("Content-Type"); got != "application/json" {
+				t.Errorf("bulk Content-Type = %q, want application/json", got)
+			}
+			var payload struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode bulk body: %v", err)
+			}
+			if want := []string{"personality-id-1", "personality-id-2"}; !reflect.DeepEqual(payload.IDs, want) {
+				t.Errorf("bulk IDs = %#v, want canonical IDs %#v", payload.IDs, want)
+			}
+			mutated = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p2", "other"
+	command := `/personality delete-bulk old_one "Old Two"`
+	m = runLine(t, m, command)
+	if m.pendingConfirmation == nil || deletes != 0 {
+		t.Fatalf("bulk deletion before confirmation: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
+	}
+	for _, target := range []string{"Old One", "old_one", "Old Two", "old_two"} {
+		if !strings.Contains(m.pendingConfirmation.message, target) {
+			t.Fatalf("confirmation omitted target %q: %s", target, m.pendingConfirmation.message)
+		}
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation != nil || deletes != 0 {
+		t.Fatalf("Esc cancellation state: cmd=%v pending=%v deletes=%d", cmd != nil, m.pendingConfirmation != nil, deletes)
+	}
+
+	m = runLine(t, m, command)
+	if m.pendingConfirmation == nil {
+		t.Fatal("second bulk deletion did not request confirmation")
+	}
+	m = runLine(t, m, "yes")
+	if deletes != 1 || lists != 3 {
+		t.Fatalf("confirmed bulk requests = lists %d deletes %d, want 3 and 1", lists, deletes)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "deleted 2 personalities") || !strings.Contains(out, "Active Custom") {
+		t.Fatalf("bulk output missing count or refreshed entries:\n%s", out)
+	}
+	resultOutput := out[strings.LastIndex(out, "result:Personalities:"):]
+	if strings.Contains(resultOutput, "Old One") || strings.Contains(resultOutput, "Old Two") {
+		t.Fatalf("deleted personalities were resurrected in refreshed output:\n%s", resultOutput)
+	}
+}
+
+func TestPersonalityDeleteBulkRejectsEveryIneligibleSelectionBeforeMutation(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="active_custom">
+		<div data-personality-key="" data-personality-id="base-id" data-personality-name="Base" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="active_custom" data-personality-id="personality-id-active" data-personality-name="Active Custom" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="builtin" data-personality-id="personality-id-builtin" data-personality-name="Built In" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+		<div data-personality-key="override" data-personality-id="personality-id-override" data-personality-name="Override" data-personality-is-preset="true" data-personality-has-custom="true"></div>
+		<div data-personality-key="review_one" data-personality-id="personality-id-review-1" data-personality-name="Review One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="review_two" data-personality-id="personality-id-review-2" data-personality-name="Review Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	cases := []struct {
+		name string
+		refs string
+		want string
+	}{
+		{name: "mixed valid and unknown", refs: "old_one missing", want: "nothing matches"},
+		{name: "ambiguous", refs: "Review", want: "ambiguous"},
+		{name: "base", refs: "Base", want: "base personality cannot be deleted"},
+		{name: "active", refs: "active_custom", want: "active personality"},
+		{name: "built-in", refs: "builtin", want: "built-in personality"},
+		{name: "built-in override", refs: "override", want: "built-in override"},
+		{name: "duplicate target", refs: `old_one "Old One"`, want: "selected more than once"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var lists, deletes int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/personality":
+					lists++
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, catalog)
+				case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+					deletes++
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID, m.selectedName = "p2", "other"
+			m = runLine(t, m, "/personality delete-bulk "+tc.refs)
+			if lists != 1 || deletes != 0 || m.pendingConfirmation != nil {
+				t.Fatalf("invalid bulk selection requests/state: lists=%d deletes=%d pending=%v", lists, deletes, m.pendingConfirmation != nil)
+			}
+			if out := strings.ToLower(stripANSI(transcript(m))); !strings.Contains(out, strings.ToLower(tc.want)) {
+				t.Fatalf("error output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
+func TestPersonalityDeleteBulkJSONOutputAndSingleDeletePathRemainDistinct(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-id="personality-id-2" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var bulkDeletes, singleDeletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, personalitiesHTML)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			bulkDeletes++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":2}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/old_one":
+			singleDeletes++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	previousJSON := jsonMode
+	jsonMode = true
+	t.Cleanup(func() { jsonMode = previousJSON })
+	m = runLine(t, m, "/personality delete-bulk old_one old_two")
+	if m.pendingConfirmation == nil {
+		t.Fatal("bulk delete did not request confirmation")
+	}
+	m = runLine(t, m, "yes")
+	if bulkDeletes != 1 || singleDeletes != 0 {
+		t.Fatalf("bulk/single requests = %d/%d, want one bulk request only", bulkDeletes, singleDeletes)
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, `{"deleted":2}`) || strings.Contains(out, `"action"`) {
+		t.Fatalf("bulk JSON output = %q, want only deleted count", out)
+	}
+}
+
+func TestPersonalityDeleteBulkRejectsMissingCanonicalID(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+	var bulkDeletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			bulkDeletes++
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, `/personality delete-bulk old_one old_two`)
+	if bulkDeletes != 0 || m.pendingConfirmation != nil {
+		t.Fatalf("missing canonical IDs mutated or prompted: deletes=%d pending=%v", bulkDeletes, m.pendingConfirmation != nil)
+	}
+	if out := strings.ToLower(stripANSI(transcript(m))); !strings.Contains(out, "no canonical id") {
+		t.Fatalf("missing canonical-ID error not reported:\n%s", transcript(m))
+	}
+}
+
+func TestPersonalityDeleteBulkAllowsInactiveNonPresetWithoutHasCustom(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	var bulkDeletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			bulkDeletes++
+			var payload struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode bulk body: %v", err)
+			}
+			if want := []string{"personality-id-1"}; !reflect.DeepEqual(payload.IDs, want) {
+				t.Errorf("bulk IDs = %#v, want %#v", payload.IDs, want)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, `/personality delete-bulk old_one`)
+	if bulkDeletes != 1 {
+		t.Fatalf("bulk DELETE requests = %d, want one", bulkDeletes)
+	}
+}
+
+func TestPersonalitySingleDeleteStillResetsBuiltInOverride(t *testing.T) {
+	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="pirate" data-personality-id="preset-id" data-personality-name="Pirate" data-personality-is-preset="true" data-personality-has-custom="true"></div>
+	</div>`
+	var singleDeletes, bulkDeletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, personalitiesHTML)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/pirate":
+			singleDeletes++
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			bulkDeletes++
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, "/personality delete pirate")
+	if singleDeletes != 1 || bulkDeletes != 0 {
+		t.Fatalf("single delete requests = %d, bulk requests = %d", singleDeletes, bulkDeletes)
+	}
+}
+
+func TestPersonalityDeleteBulkAuthRefreshEntersRecoveryWithoutFailingDeletion(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	var lists, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			lists++
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("personality refresh lost project scope: %s", r.URL.RequestURI())
+			}
+			if lists == 1 {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"do not expose this body"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			deletes++
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("bulk deletion lost project scope: %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, "/personality delete-bulk old_one")
+
+	if lists != 2 || deletes != 1 {
+		t.Fatalf("requests = lists %d deletes %d, want one lookup, one refresh, and one deletion", lists, deletes)
+	}
+	if !m.authRequired {
+		t.Fatal("authentication-required refresh did not enter recovery")
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "deleted 1 personalities") || !strings.Contains(out, "personality catalog refresh unavailable (authentication)") {
+		t.Fatalf("successful deletion or refresh diagnostic missing: %s", out)
+	}
+	for _, entry := range m.log {
+		if entry.role == "error" {
+			t.Fatalf("auth-only refresh failure became a fatal deletion error: %+v", entry)
+		}
+	}
+}
+
+func TestPersonalityDeleteBulkCancellationAfterLookupBeforeMutationDoesNotMutate(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	var deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			deletes++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m.cliContext = ctx
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = true, true
+	defer func() { cliMode, forceMode = oldCLI, oldForce }()
+
+	m, lookupCmd := typeLine(t, m, "/personality delete-bulk old_one")
+	if lookupCmd == nil {
+		t.Fatal("bulk lookup did not return a command")
+	}
+	lookupMsg := lookupCmd()
+	if lookupMsg == nil {
+		t.Fatal("bulk lookup returned no target message")
+	}
+	if _, ok := lookupMsg.(personalityBulkTargetMsg); !ok {
+		t.Fatalf("bulk lookup message = %T, want personalityBulkTargetMsg", lookupMsg)
+	}
+
+	// The target is resolved and captured. Cancellation happens before the
+	// follow-up command returned by Update can create the DELETE request.
+	cancel()
+	next, mutationCmd := m.Update(lookupMsg)
+	m = next.(Model)
+	if mutationCmd == nil {
+		t.Fatal("forced bulk deletion did not return a mutation command")
+	}
+	if result := mutationCmd(); result != nil {
+		next, _ = m.Update(result)
+		m = next.(Model)
+	}
+	if deletes != 0 {
+		t.Fatalf("post-lookup cancellation made %d bulk DELETE requests", deletes)
+	}
+}
+
+func TestPersonalityDeleteBulkLookupCancellationDoesNotPrompt(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	lookupStarted := make(chan struct{})
+	lookupCanceled := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var startOnce, cancelOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/personality" {
+			http.NotFound(w, r)
+			return
+		}
+		startOnce.Do(func() { close(lookupStarted) })
+		select {
+		case <-r.Context().Done():
+			cancelOnce.Do(func() { close(lookupCanceled) })
+		case <-releaseLookup:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m, lookupCmd := typeLine(t, m, "/personality delete-bulk old_one")
+	if lookupCmd == nil {
+		t.Fatal("bulk lookup did not return a command")
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- lookupCmd() }()
+	select {
+	case <-lookupStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk lookup did not start")
+	}
+	next, cancelCmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cancelCmd != nil || m.pendingConfirmation != nil || m.busy {
+		t.Fatalf("lookup cancellation state: cmd=%v pending=%v busy=%v", cancelCmd != nil, m.pendingConfirmation != nil, m.busy)
+	}
+	canceled := false
+	select {
+	case <-lookupCanceled:
+		canceled = true
+	case <-time.After(2 * time.Second):
+		close(releaseLookup)
+	}
+	msg := <-result
+	next, _ = m.Update(msg)
+	m = next.(Model)
+	if !canceled {
+		t.Error("Esc did not cancel the in-flight personality lookup")
+	}
+	if m.pendingConfirmation != nil {
+		t.Fatalf("canceled lookup opened confirmation: %q", m.pendingConfirmation.message)
+	}
+}
+
+func TestPersonalityDeleteBulkErrorOutputIsTerminalSafe(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	const hostile = "bulk rejected \x1b[31msecret\x1b[0m\nforged\x07"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": hostile})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, "/personality delete-bulk old_one")
+	out := transcript(m)
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "\x07") || strings.Contains(out, "secret\nforged") {
+		t.Fatalf("hostile bulk error was not terminal-safe: %q", out)
+	}
+	if !strings.Contains(out, "server error (400): bulk rejected secret forged") {
+		t.Fatalf("sanitized bulk error missing: %q", out)
+	}
+}
+
 func TestAlertsBulkActions(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	m = runLine(t, m, "/alerts read-all")
@@ -9094,6 +9607,7 @@ func TestPersonalityCommandsRequireSelectedProject(t *testing.T) {
 		"/personality edit release_coach | Updated | description | Keep releases safe in production deployments.",
 		"/personality set release_coach",
 		"/personality delete release_coach",
+		"/personality delete-bulk release_coach another",
 		"/personality show",
 		"/personality delete",
 	}
