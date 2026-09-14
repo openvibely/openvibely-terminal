@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -1503,6 +1504,33 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 	}
 }
 
+func TestAlertDeletePickerCancellation(t *testing.T) {
+	m, rec := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/alerts delete")
+	if !m.selectorActive {
+		t.Fatalf("delete picker did not open:\n%s", transcript(m))
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive || m.pendingConfirmation == nil {
+		t.Fatalf("delete selection state = active:%t confirmation:%v\n%s", m.selectorActive, m.pendingConfirmation != nil, transcript(m))
+	}
+	if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `Delete alert "Add retry logic"?`) {
+		t.Fatalf("delete confirmation prompt = %q", prompt)
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.pendingConfirmation != nil {
+		t.Fatalf("delete confirmation remained after Esc:\n%s", transcript(m))
+	}
+	if rec.saw(http.MethodDelete, "/alerts/a-1") {
+		t.Fatalf("cancelled delete made a request:\n%s", rec.all())
+	}
+	if !strings.Contains(transcript(m), "cancelled") {
+		t.Fatalf("delete cancellation was not reported:\n%s", transcript(m))
+	}
+}
+
 func TestAlertPickerAndTypedActionsHaveEquivalentResolvedOutput(t *testing.T) {
 	const deleteResponse = `<div data-alert-id="a-remaining" data-alert-scroll-anchor="a-remaining"><p class="font-semibold">Remaining alert</p></div>`
 
@@ -1570,6 +1598,182 @@ func TestAlertPickerAndTypedActionsHaveEquivalentResolvedOutput(t *testing.T) {
 				t.Fatalf("picker %s list calls = %d, want selection and refresh only:\n%s", action.action, got, pickerRec.all())
 			}
 		})
+	}
+}
+
+func TestAlertSelectorItemsShareRowsAndCaptureAlerts(t *testing.T) {
+	alerts := []client.Alert{
+		{ID: "title-id", Title: "Title label", Message: "message label", Text: "text label", Badges: []string{"custom", "pending"}},
+		{ID: "message-id", Message: "Message label", Text: "text fallback", Badges: []string{"approved"}},
+		{ID: "text-id", Text: "Text label", Badges: []string{"rejected", "unclaimed"}},
+		{ID: "123456789", Badges: []string{"dismissed", "completed"}},
+	}
+	wantRows := []selectorItem{
+		{ref: "title-id", label: "Title label", detail: "custom pending"},
+		{ref: "message-id", label: "Message label", detail: "approved"},
+		{ref: "text-id", label: "Text label", detail: "rejected unclaimed"},
+		{ref: "123456789", label: "12345678", detail: "dismissed completed"},
+	}
+
+	captured := func() (*[]string, func(client.Alert) selectorItemDispatch) {
+		ids := make([]string, 0, len(alerts))
+		return &ids, func(alert client.Alert) selectorItemDispatch {
+			return func(m Model) (Model, tea.Cmd) {
+				ids = append(ids, alert.ID)
+				return m, nil
+			}
+		}
+	}
+	showIDs, showDispatch := captured()
+	actionIDs, actionDispatch := captured()
+	showItems := alertSelectorItems(alerts, showDispatch)
+	actionItems := alertSelectorItems(alerts, actionDispatch)
+
+	if len(showItems) != len(wantRows) || len(actionItems) != len(wantRows) {
+		t.Fatalf("selector row counts = show:%d action:%d, want %d", len(showItems), len(actionItems), len(wantRows))
+	}
+	for i, want := range wantRows {
+		for name, items := range map[string][]selectorItem{"show": showItems, "action": actionItems} {
+			if items[i].ref != want.ref || items[i].label != want.label || items[i].detail != want.detail {
+				t.Errorf("%s row %d = {%q, %q, %q}, want {%q, %q, %q}", name, i,
+					items[i].ref, items[i].label, items[i].detail, want.ref, want.label, want.detail)
+			}
+			if items[i].dispatch == nil {
+				t.Errorf("%s row %d has no dispatch callback", name, i)
+			}
+		}
+	}
+
+	for i := len(showItems) - 1; i >= 0; i-- {
+		if _, cmd := showItems[i].dispatch(Model{}); cmd != nil {
+			t.Fatalf("show row %d returned unexpected command", i)
+		}
+		if _, cmd := actionItems[i].dispatch(Model{}); cmd != nil {
+			t.Fatalf("action row %d returned unexpected command", i)
+		}
+	}
+	wantCaptured := []string{"123456789", "text-id", "message-id", "title-id"}
+	if !reflect.DeepEqual(*showIDs, wantCaptured) || !reflect.DeepEqual(*actionIDs, wantCaptured) {
+		t.Fatalf("captured IDs = show:%v action:%v, want %v", *showIDs, *actionIDs, wantCaptured)
+	}
+}
+
+func TestAlertShowPickerLoadsDetailWithoutMutation(t *testing.T) {
+	const alertsHTML = `<div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div>
+		<div data-alert-id="a-second" data-alert-scroll-anchor="a-second"><p class="font-semibold">Second alert</p></div>`
+	const detailHTML = `<div data-alert-detail-loaded><div data-alert-markdown data-raw-content="Second alert full detail"></div></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"/alerts":                  alertsHTML,
+		"/alerts/a-second/details": detailHTML,
+	})
+
+	m = runLine(t, m, "/alerts show")
+	if !m.selectorActive || m.pendingCommand != "alerts show" {
+		t.Fatalf("show picker state = active:%t command:%q\n%s", m.selectorActive, m.pendingCommand, transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive || m.pendingCommand != "" {
+		t.Fatalf("show picker remained active after selection: active:%t command:%q", m.selectorActive, m.pendingCommand)
+	}
+	if !rec.saw(http.MethodGet, "/alerts/a-second/details") {
+		t.Fatalf("selected alert detail was not loaded:\n%s", rec.all())
+	}
+	if got := selectorCallCount(rec, http.MethodGet, "/alerts"); got != 1 {
+		t.Fatalf("show picker list calls = %d, want 1:\n%s", got, rec.all())
+	}
+	if rec.saw(http.MethodPost, "/alerts/a-second/read") || rec.saw(http.MethodPost, "/alerts/a-second/approve") || rec.saw(http.MethodDelete, "/alerts/a-second") {
+		t.Fatalf("show picker performed a mutation:\n%s", rec.all())
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "Second alert full detail") {
+		t.Fatalf("show picker omitted selected detail:\n%s", out)
+	}
+}
+
+func TestAlertPickerLifecycleForEmptySingleMultiAndFilteredLists(t *testing.T) {
+	const oneAlert = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">Only alert</p></div>`
+
+	t.Run("empty", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/alerts": `<div></div>`})
+		m = runLine(t, m, "/alerts read")
+		if m.selectorActive || m.pendingCommand != "" {
+			t.Fatalf("empty picker state = active:%t command:%q", m.selectorActive, m.pendingCommand)
+		}
+		if rec.saw(http.MethodPost, "/alerts/a-one/read") || !strings.Contains(stripANSI(transcript(m)), "no pending alerts in the current project") {
+			t.Fatalf("empty picker output or mutation incorrect:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("single auto-selects", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/alerts":                 oneAlert,
+			"POST /alerts/a-one/read": ``,
+		})
+		m = runLineWithFollowUp(t, m, "/alerts read")
+		if m.selectorActive || m.pendingCommand != "" || !rec.saw(http.MethodPost, "/alerts/a-one/read") {
+			t.Fatalf("single picker did not dispatch: active:%t command:%q calls:\n%s", m.selectorActive, m.pendingCommand, rec.all())
+		}
+	})
+
+	t.Run("multi cancels without mutation", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/alerts": selAlertsHTML})
+		m = runLine(t, m, "/alerts read")
+		if !m.selectorActive || len(m.selectorItems) != 2 {
+			t.Fatalf("multi picker state = active:%t items:%d", m.selectorActive, len(m.selectorItems))
+		}
+		m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+		if m.selectorActive || rec.saw(http.MethodPost, "/alerts/a-1/read") {
+			t.Fatalf("cancelled multi picker mutated or remained active:\n%s", rec.all())
+		}
+	})
+
+	t.Run("filter selects matching row", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"/alerts": selAlertsHTML})
+		m = runLine(t, m, "/alerts approve")
+		m = typeSelectorRunes(t, m, "refactor")
+		items := m.filteredSelectorItems()
+		if len(items) != 1 || items[0].ref != "a-2" {
+			t.Fatalf("filtered rows = %+v, want only a-2", items)
+		}
+		m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+		if !rec.saw(http.MethodPost, "/alerts/a-2/approve") {
+			t.Fatalf("filtered selection used wrong action target:\n%s", rec.all())
+		}
+	})
+}
+
+func TestAlertPickerLoadsLaterPageInSourceOrder(t *testing.T) {
+	var requests int
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/alerts" {
+			http.NotFound(w, r)
+			return
+		}
+		requests++
+		if r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("picker request lost project scope: %s", r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/html")
+		if requests == 1 {
+			w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="true"><div data-alert-id="a-first" data-alert-scroll-anchor="a-first"><p class="font-semibold">First alert</p></div></div>`)
+			return
+		}
+		if r.URL.Query().Get("card_page") != "1" || r.URL.Query().Get("offset") != "1" {
+			t.Errorf("later-page request = %s", r.URL.RequestURI())
+		}
+		w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+		_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"><div data-alert-id="a-later" data-alert-scroll-anchor="a-later"><p class="font-semibold">Later alert</p></div></div>`)
+	})
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/alerts approve")
+	if !m.selectorActive || len(m.selectorItems) != 2 || m.selectorItems[0].ref != "a-first" || m.selectorItems[1].ref != "a-later" {
+		t.Fatalf("later-page picker rows = %+v", m.selectorItems)
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.selectorActive || requests != 2 {
+		t.Fatalf("later-page picker lifecycle = active:%t requests:%d", m.selectorActive, requests)
 	}
 }
 

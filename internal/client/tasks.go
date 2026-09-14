@@ -872,7 +872,19 @@ func (c *Client) listTaskReviews(ctx context.Context, taskID, projectID string) 
 
 // AddTaskReviewComment creates an inline review comment and returns the updated list.
 func (c *Client) AddTaskReviewComment(ctx context.Context, taskID string, form ReviewCommentForm) ([]ReviewComment, error) {
-	root, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/reviews", form.values())
+	return c.addTaskReviewComment(ctx, taskID, "", form)
+}
+
+// AddTaskReviewCommentForProject creates an inline review comment within the selected project.
+func (c *Client) AddTaskReviewCommentForProject(ctx context.Context, taskID, projectID string, form ReviewCommentForm) ([]ReviewComment, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task reviews")
+	}
+	return c.addTaskReviewComment(ctx, taskID, projectID, form)
+}
+
+func (c *Client) addTaskReviewComment(ctx context.Context, taskID, projectID string, form ReviewCommentForm) ([]ReviewComment, error) {
+	root, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/reviews"+query("project_id", projectID), form.values())
 	if err != nil {
 		return nil, err
 	}
