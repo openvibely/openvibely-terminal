@@ -244,6 +244,9 @@ type Model struct {
 	selectorFilteredForLower string
 	selectorWarnings         []string
 	selectorCursor           int
+	selectorMulti            bool
+	selectorSelected         map[string]struct{}
+	selectorMultiDispatch    selectorMultiDispatch
 	pendingCommand           string // e.g. "tasks open"; re-dispatched with the chosen ref
 	selectorPrefill          bool   // prime the input instead of dispatching
 	selectorPrefillSuffix    string // appended after the chosen ref when priming input
@@ -1254,6 +1257,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case webhookBulkTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case channelAccessRemovalTargetMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1876,6 +1883,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return confirmWebhookMutation(m, msg.projectID, msg.action, msg.webhook)
+
+	case webhookBulkTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		projectID := msg.projectID
+		if projectID == "" {
+			projectID = m.selectedID
+		}
+		return confirmWebhookBulkMutation(m, projectID, msg.webhooks)
 
 	case channelAccessRemovalTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {

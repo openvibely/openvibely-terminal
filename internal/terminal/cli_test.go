@@ -9730,6 +9730,236 @@ func TestCLITaskGoalPauseFailureHasNoSuccessOutput(t *testing.T) {
 	}
 }
 
+func TestCLIWebhookDeleteBulkUsesOneRequestAndStableOutput(t *testing.T) {
+	const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div><div data-webhook-id="w-two" data-webhook-name="Second Hook" data-webhook-token="token-two"></div></div>`
+	const remaining = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"></div>`
+	for _, tc := range []struct {
+		name       string
+		jsonOutput bool
+		refreshErr bool
+		want       string
+	}{
+		{name: "plain", want: "deleted 2 webhooks"},
+		{name: "json", jsonOutput: true, want: `{"action":"delete-bulk","deleted":2}`},
+		{name: "plain refresh failure", refreshErr: true, want: "deleted 2 webhooks"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var listCalls, bulkCalls int
+			var bodyIDs []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/channels":
+					listCalls++
+					if tc.refreshErr && listCalls > 1 {
+						http.Error(w, "refresh unavailable", http.StatusBadGateway)
+						return
+					}
+					_, _ = io.WriteString(w, map[bool]string{true: remaining, false: selected}[bulkCalls > 0])
+				case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+					bulkCalls++
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("bulk project_id = %q", r.URL.Query().Get("project_id"))
+					}
+					var body struct {
+						IDs []string `json:"ids"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatalf("decode bulk body: %v", err)
+					}
+					bodyIDs = append([]string(nil), body.IDs...)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"deleted":2}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"channels", "webhooks", "delete-bulk", "First Hook", "Second Hook"}, true, tc.jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if bulkCalls != 1 || !reflect.DeepEqual(bodyIDs, []string{"w-one", "w-two"}) {
+				t.Fatalf("bulk calls = %d IDs = %#v, want one request with canonical IDs", bulkCalls, bodyIDs)
+			}
+			if tc.jsonOutput {
+				if got := strings.TrimSpace(out.String()); got != tc.want {
+					t.Fatalf("JSON output = %q, want %q", got, tc.want)
+				}
+			} else if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("plain output = %q, want %q", out.String(), tc.want)
+			}
+			if tc.jsonOutput && listCalls != 1 {
+				t.Fatalf("JSON bulk output made %d list requests, want only resolution", listCalls)
+			}
+		})
+	}
+}
+
+func TestCLIWebhookDeleteBulkRequiresForceAndRejectsInvalidTargets(t *testing.T) {
+	const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div><div data-webhook-id="w-two" data-webhook-name="Second Hook" data-webhook-token="token-two"></div></div>`
+	const foreignID = "fedcba9876543210fedcba9876543210"
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		force     bool
+		foreign   bool
+		wantError string
+	}{
+		{name: "missing force", args: []string{"channels", "webhooks", "delete-bulk", "First Hook", "Second Hook"}, wantError: "--force"},
+		{name: "duplicate", args: []string{"channels", "webhooks", "delete-bulk", "w-one", "First Hook"}, force: true, wantError: "selected more than once"},
+		{name: "unknown", args: []string{"channels", "webhooks", "delete-bulk", "missing"}, force: true, wantError: "nothing matches"},
+		{name: "foreign", args: []string{"channels", "webhooks", "delete-bulk", foreignID}, force: true, foreign: true, wantError: "does not belong to selected project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mutations int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/channels":
+					_, _ = io.WriteString(w, selected)
+				case r.Method == http.MethodGet && r.URL.Path == "/channels/webhooks/"+foreignID:
+					if tc.foreign {
+						_, _ = io.WriteString(w, canonicalWebhookDetailJSON(foreignID, "p2", "Foreign Hook"))
+						return
+					}
+					http.NotFound(w, r)
+				case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+					mutations++
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = RunCLI(c, &bytes.Buffer{}, "demo", tc.args, tc.force, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.wantError)) {
+				t.Fatalf("error = %v, want %q", err, tc.wantError)
+			}
+			if mutations != 0 {
+				t.Fatalf("invalid/unforced bulk deletion made %d mutation requests", mutations)
+			}
+		})
+	}
+}
+
+func TestCLIWebhookDeleteBulkAliasesRemainAvailable(t *testing.T) {
+	const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div><div data-webhook-id="w-two" data-webhook-name="Second Hook" data-webhook-token="token-two"></div></div>`
+	for _, root := range []string{"webhooks", "inbound-webhooks"} {
+		t.Run(root, func(t *testing.T) {
+			var mutations int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/channels":
+					_, _ = io.WriteString(w, selected)
+				case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+					mutations++
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"deleted":2}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{root, "delete-bulk", "First Hook", "Second Hook"}, true, false); err != nil {
+				t.Fatal(err)
+			}
+			if mutations != 1 {
+				t.Fatalf("alias mutation count = %d, want one", mutations)
+			}
+		})
+	}
+}
+
+func TestCLIWebhookDeleteBulkPreservesProjectIsolationAndEmptyOutput(t *testing.T) {
+	t.Run("selected non-default project", func(t *testing.T) {
+		const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="p2-one" data-webhook-name="Other First" data-webhook-token="token-one"></div><div data-webhook-id="p2-two" data-webhook-name="Other Second" data-webhook-token="token-two"></div></div>`
+		var mutations int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/channels":
+				if got := r.URL.Query().Get("project_id"); got != "p2" {
+					t.Errorf("list project_id = %q, want p2", got)
+				}
+				_, _ = io.WriteString(w, selected)
+			case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+				mutations++
+				if got := r.URL.Query().Get("project_id"); got != "p2" {
+					t.Errorf("bulk project_id = %q, want p2", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"deleted":2}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := RunCLI(c, &bytes.Buffer{}, "other", []string{"channels", "webhooks", "delete-bulk", "Other First", "Other Second"}, true, false); err != nil {
+			t.Fatal(err)
+		}
+		if mutations != 1 {
+			t.Fatalf("project-isolated bulk mutations = %d, want one", mutations)
+		}
+	})
+
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain empty", true: "JSON empty"}[jsonOutput], func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case "/channels":
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"></div>`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"channels", "webhooks", "list"}, false, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if jsonOutput {
+				if got := strings.TrimSpace(out.String()); got != "[]" {
+					t.Fatalf("empty JSON output = %q, want []", got)
+				}
+			} else if got := strings.ToLower(out.String()); !strings.Contains(got, "no inbound webhooks configured") || strings.Contains(got, "deleted") {
+				t.Fatalf("empty plain output = %q", out.String())
+			}
+		})
+	}
+}
+
 func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 	t.Run("list JSON is secret-free", func(t *testing.T) {
 		c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})

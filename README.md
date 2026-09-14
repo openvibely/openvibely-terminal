@@ -178,6 +178,19 @@ the selected project's results, then requires `yes` in the TUI or `--force` in
 CLI mode. Missing, foreign, ambiguous, or stale references are rejected without
 submitting a replacement form.
 
+`channels webhooks` manages project-scoped inbound webhooks. Single deletion remains
+available as `channels webhooks delete <webhook>`; delete several with
+`channels webhooks delete-bulk <webhook>...`. References may be IDs, names, or
+unique matches, but every reference is resolved in the selected project before
+any deletion. The TUI bulk selector uses Space to select, filtering to narrow
+visible rows, Enter to review the selected names/count, and
+`Type 'yes' to confirm or Esc to cancel`. Headless bulk deletion requires
+`--force` (or `-f`), and `--json` returns a stable object such as
+`{"action":"delete-bulk","deleted":2}`. Unknown, ambiguous, duplicate,
+foreign, or stale references make no deletion request; webhook secrets are
+never included in list, detail, or bulk output. The deprecated `webhooks` and
+`inbound-webhooks` aliases support the same lifecycle.
+
 ```text
 tasks goal <task> | <objective>
 tasks goal <task> | clear

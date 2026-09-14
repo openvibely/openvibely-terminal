@@ -32,6 +32,10 @@ func selectorDisplay(value string, width int) string {
 // a selector item. Items without one retain the text re-dispatch path.
 type selectorItemDispatch func(Model) (Model, tea.Cmd)
 
+// selectorMultiDispatch runs an action against all selector items selected by
+// the user, preserving the selector's original item order.
+type selectorMultiDispatch func(Model, []selectorItem) (Model, tea.Cmd)
+
 // selectorFor builds the tea.Cmd a command handler returns when its ref
 // argument is missing: it fetches the candidate list and hands it to the
 // model as a selectorActiveMsg.
@@ -49,6 +53,26 @@ func selectorForWithSuffix(title, command, emptyHint, prefillSuffix string, fetc
 			items, err := fetch(ctx)
 			return items, nil, err
 		})
+}
+
+// selectorForMulti builds a selector that uses Space to toggle items and Enter
+// to pass the captured selection to dispatch. It is opt-in so existing
+// single-selection selectors retain their filtering and keyboard behavior.
+func selectorForMulti(title, command, emptyHint string, dispatch selectorMultiDispatch, fetch func(context.Context) ([]selectorItem, error)) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		items, err := fetch(ctx)
+		return selectorActiveMsg{
+			title:         title,
+			command:       command,
+			emptyHint:     emptyHint,
+			items:         items,
+			multiSelect:   true,
+			multiDispatch: dispatch,
+			err:           err,
+		}
+	}
 }
 
 // selectorForWithWarnings is the selector variant for list sources that can
@@ -143,7 +167,7 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 		matchingIndexes, matchingAll = matchSelectorIndexesLower(msg.items, search, filterLower, nil, true)
 		matchingCount = len(matchingIndexes)
 	}
-	if matchingCount == 1 && !msg.forcePicker {
+	if matchingCount == 1 && !msg.forcePicker && !msg.multiSelect {
 		if len(warnings) > 0 {
 			m.append(entry{role: "result", head: selectorDisplay(msg.title, selectorTitleDisplayWidth), text: renderMemoryWarnings(warnings)})
 		}
@@ -159,6 +183,13 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	m.selectorTitle = msg.title
 	m.selectorItems = msg.items
 	m.selectorWarnings = warnings
+	if msg.multiSelect {
+		m.selectorSelected = make(map[string]struct{})
+	} else {
+		m.selectorSelected = nil
+	}
+	m.selectorMulti = msg.multiSelect
+	m.selectorMultiDispatch = msg.multiDispatch
 	if search == nil {
 		search = selectorSearchTexts(msg.items)
 	}
@@ -193,6 +224,9 @@ func (m Model) clearSelector() Model {
 	m.selectorFilteredForLower = ""
 	m.selectorWarnings = nil
 	m.selectorCursor = 0
+	m.selectorMulti = false
+	m.selectorSelected = nil
+	m.selectorMultiDispatch = nil
 	m.pendingCommand = ""
 	m.selectorPrefill = false
 	m.selectorPrefillSuffix = ""
@@ -400,6 +434,23 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
+		if m.selectorMulti {
+			if len(m.selectorSelected) == 0 {
+				return m, nil
+			}
+			selected := make([]selectorItem, 0, len(m.selectorSelected))
+			for _, item := range m.selectorItems {
+				if _, ok := m.selectorSelected[item.ref]; ok {
+					selected = append(selected, item)
+				}
+			}
+			dispatch := m.selectorMultiDispatch
+			m = m.clearSelector()
+			if dispatch == nil {
+				return m, nil
+			}
+			return dispatch(m, selected)
+		}
 		count := m.selectorFilteredCount()
 		if count == 0 {
 			return m, nil
@@ -415,6 +466,22 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch {
+	case msg.Type == tea.KeySpace && m.selectorMulti:
+		count := m.selectorFilteredCount()
+		if count == 0 {
+			return m, nil
+		}
+		cur := m.selectorCursor
+		if cur >= count {
+			cur = count - 1
+		}
+		item := m.selectorFilteredItemAt(cur)
+		if _, selected := m.selectorSelected[item.ref]; selected {
+			delete(m.selectorSelected, item.ref)
+		} else {
+			m.selectorSelected[item.ref] = struct{}{}
+		}
+		return m, nil
 	case msg.Type == tea.KeySpace:
 		m = m.setSelectorFilter(m.selectorFilter + " ")
 	case msg.Type == tea.KeyRunes:
@@ -460,6 +527,9 @@ func (m Model) renderSelector() string {
 	var rows []string
 	rows = append(rows, sectionStyle.Render("▸ "+selectorDisplay(m.selectorTitle, selectorTitleDisplayWidth)))
 	rows = append(rows, "> "+selectorDisplay(m.selectorFilter, selectorDetailDisplayWidth)+"█")
+	if m.selectorMulti {
+		rows = append(rows, dimStyle.Render(fmt.Sprintf("  %d selected · Space to select, Enter to continue, Esc to cancel", len(m.selectorSelected))))
+	}
 
 	itemsCount := m.selectorFilteredCount()
 	if itemsCount == 0 {
@@ -495,10 +565,17 @@ func (m Model) renderSelector() string {
 			line += dimStyle.Render("  " + detail)
 		}
 		line += dimStyle.Render("  " + selectorDisplay(shortID(it.ref), selectorReferenceDisplayWidth))
+		prefix := ""
+		if m.selectorMulti {
+			prefix = "□ "
+			if _, selected := m.selectorSelected[it.ref]; selected {
+				prefix = "✓ "
+			}
+		}
 		if i == cur {
-			rows = append(rows, paletteSelStyle.Render("▸ ")+line)
+			rows = append(rows, paletteSelStyle.Render("▸ ")+prefix+line)
 		} else {
-			rows = append(rows, dimStyle.Render("  ")+line)
+			rows = append(rows, dimStyle.Render("  ")+prefix+line)
 		}
 	}
 	if end < itemsCount || start > 0 {

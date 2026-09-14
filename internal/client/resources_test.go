@@ -4407,6 +4407,122 @@ func TestWebhookDetailAndMutationContracts(t *testing.T) {
 	_ = calls
 }
 
+func TestDeleteWebhooksBulkUsesScopedJSONRequestAndDeduplicatesIDs(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodDelete || r.URL.Path != "/channels/webhooks/bulk" {
+			t.Errorf("request = %s %s, want DELETE /channels/webhooks/bulk", r.Method, r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "project/one & two" {
+			t.Errorf("project_id = %q", got)
+		}
+		if got := r.URL.RawQuery; got != "project_id=project%2Fone+%26+two" {
+			t.Errorf("raw query = %q, want escaped project scope", got)
+		}
+		if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+			t.Errorf("content type = %q, want application/json", got)
+		}
+		var body struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if want := []string{"w1", "w2"}; !reflect.DeepEqual(body.IDs, want) {
+			t.Errorf("IDs = %#v, want %#v", body.IDs, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"deleted":2}`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := c.DeleteWebhooksBulk(context.Background(), "project/one & two", []string{" w1 ", "w1", "w2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 2 || requests != 1 {
+		t.Fatalf("deleted = %d, requests = %d, want 2 and 1", deleted, requests)
+	}
+}
+
+func TestDeleteWebhooksBulkRejectsEmptyIDsAndProjectBeforeRequest(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		projectID string
+		ids       []string
+		want      string
+	}{
+		{name: "empty ids", projectID: "p1", ids: nil, want: "at least one webhook ID"},
+		{name: "blank id", projectID: "p1", ids: []string{"w1", " "}, want: "webhook IDs must not be empty"},
+		{name: "empty project", projectID: " ", ids: []string{"w1"}, want: "project ID is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, callErr := c.DeleteWebhooksBulk(context.Background(), tc.projectID, tc.ids)
+			if callErr == nil || !strings.Contains(callErr.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", callErr, tc.want)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("invalid input made %d requests, want zero", requests)
+	}
+}
+
+func TestDeleteWebhooksBulkValidatesResponseAndBackendErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		wantErr   string
+		wantCount int
+	}{
+		{name: "missing count", status: http.StatusOK, body: `{}`, wantErr: "missing required deleted count"},
+		{name: "null count", status: http.StatusOK, body: `{"deleted":null}`, wantErr: "missing required deleted count"},
+		{name: "negative count", status: http.StatusOK, body: `{"deleted":-1}`, wantErr: "deleted count must not be negative"},
+		{name: "error object", status: http.StatusOK, body: `{"deleted":0,"error":"rejected"}`, wantErr: "received an error object"},
+		{name: "trailing JSON", status: http.StatusOK, body: `{"deleted":1}{"later":true}`, wantErr: "trailing JSON data"},
+		{name: "valid zero", status: http.StatusOK, body: `{"deleted":0}`, wantCount: 0},
+		{name: "backend error", status: http.StatusBadRequest, body: `{"error":"bulk rejected"}`, wantErr: "400"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, callErr := c.DeleteWebhooksBulk(context.Background(), "p1", []string{"w1"})
+			if tc.wantErr != "" {
+				if callErr == nil || !strings.Contains(callErr.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want %q", callErr, tc.wantErr)
+				}
+				return
+			}
+			if callErr != nil || count != tc.wantCount {
+				t.Fatalf("count = %d, error = %v, want %d and nil", count, callErr, tc.wantCount)
+			}
+		})
+	}
+}
+
 func TestListSkillsReturnsSummariesWithoutInstructionBodies(t *testing.T) {
 	const page = `<div>
 		<div data-skill-handle="deploy" data-skill-name="Deploy" data-skill-description="ship safely"

@@ -234,6 +234,32 @@ fails without changing any alert. Read bulk refreshes the alert list; selective
 delete asks for `yes` interactively and requires `--force` headlessly. In
 `--json` mode the commands emit the returned count as `{"updated":n}` or
 `{"deleted":n}`.
+`/channels webhooks` manages inbound webhook endpoints in the selected project.
+Keep single deletion for one target, or use the bulk form for several:
+
+```text
+/channels webhooks delete <webhook>
+/channels webhooks delete-bulk <webhook>...
+```
+
+Bulk references are fully resolved before mutation. With no references, the TUI
+opens a multi-select list: type to filter, press Space to select or deselect a
+row, and press Enter to review the selected names and count. The destructive
+prompt is `Type 'yes' to confirm or Esc to cancel`; Esc or an unsafe resolution
+sends no request. One-shot CLI deletion requires `--force` or `-f`:
+
+```bash
+openvibely-terminal -project demo --force channels webhooks delete-bulk "Pager Duty" "Build Hook"
+openvibely-terminal -project demo --force --json channels webhooks delete-bulk "Pager Duty" "Build Hook"
+# {"action":"delete-bulk","deleted":2}
+```
+
+All targets must belong to the selected project and unknown, ambiguous,
+duplicate, foreign, or stale references are rejected before deletion. Bulk
+output reports the deleted count; webhook secrets are omitted. The deprecated
+`webhooks` and `inbound-webhooks` command roots remain compatible with the same
+single and bulk lifecycle.
+
 ## Commands
 
 Every screen in the OpenVibely web UI sidebar has a command.
@@ -248,7 +274,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `watch`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete` |
+| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete|delete-bulk` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>`, `delete-bulk <key|name>...` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |

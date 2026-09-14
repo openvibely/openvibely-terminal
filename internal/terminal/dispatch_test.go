@@ -13672,6 +13672,167 @@ func TestWebhooksNoncanonicalReferencesKeepCatalogResolution(t *testing.T) {
 	}
 }
 
+func TestWebhookDeleteBulkConfirmsCapturesIDsAndRefreshes(t *testing.T) {
+	const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div><div data-webhook-id="w-two" data-webhook-name="Second Hook" data-webhook-token="token-two"></div></div>`
+	const changed = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-rebound" data-webhook-name="Rebound Hook" data-webhook-token="token-rebound"></div></div>`
+	var catalog string = selected
+	var lists, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels":
+			lists++
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+			deletes++
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("bulk project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			var body struct {
+				IDs []string `json:"ids"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode bulk body: %v", err)
+			}
+			if want := []string{"w-one", "w-two"}; !reflect.DeepEqual(body.IDs, want) {
+				t.Errorf("bulk IDs = %#v, want %#v", body.IDs, want)
+			}
+			catalog = changed
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+
+	m = runLine(t, m, `/channels webhooks delete-bulk "First Hook" "Second Hook"`)
+	if m.pendingConfirmation == nil || !strings.Contains(m.pendingConfirmation.message, "Delete 2 selected webhooks") || !strings.Contains(m.pendingConfirmation.message, `"First Hook"`) || deletes != 0 {
+		t.Fatalf("bulk confirmation = %#v, deletes = %d", m.pendingConfirmation, deletes)
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation != nil || deletes != 0 {
+		t.Fatalf("cancelled bulk delete = cmd:%v pending:%v deletes:%d", cmd != nil, m.pendingConfirmation != nil, deletes)
+	}
+
+	m = runLine(t, m, `/channels webhooks delete-bulk "First Hook" "Second Hook"`)
+	if m.pendingConfirmation == nil {
+		t.Fatal("second bulk delete did not open confirmation")
+	}
+	m = runLine(t, m, "yes")
+	if deletes != 1 || lists != 3 {
+		t.Fatalf("bulk requests = lists:%d deletes:%d, want 3 and 1", lists, deletes)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "deleted 2 webhooks") || !strings.Contains(out, "Rebound Hook") {
+		t.Fatalf("bulk output = %q", out)
+	}
+}
+
+func TestWebhookDeleteBulkSelectorSupportsFilteringAndCancellation(t *testing.T) {
+	var deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels":
+			_, _ = io.WriteString(w, webhookCardsHTML)
+		case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+			deletes++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/channels webhooks delete-bulk")
+	if !m.selectorActive || !m.selectorMulti {
+		t.Fatalf("bulk selector state = active:%v multi:%v", m.selectorActive, m.selectorMulti)
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeySpace})
+	for _, r := range []rune("build") {
+		m = selKey(t, m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if got := m.selectorFilteredCount(); got != 1 {
+		t.Fatalf("filtered selector count = %d, want 1", got)
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeySpace})
+	if len(m.selectorSelected) != 2 || !strings.Contains(stripANSI(m.renderSelector()), "2 selected") {
+		t.Fatalf("selected state = %v, selector:\n%s", m.selectorSelected, m.renderSelector())
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.pendingConfirmation == nil || !strings.Contains(m.pendingConfirmation.message, "Delete 2 selected webhooks") {
+		t.Fatalf("selector confirmation = %#v", m.pendingConfirmation)
+	}
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cmd != nil || deletes != 0 || m.pendingConfirmation != nil {
+		t.Fatalf("selector cancellation = cmd:%v deletes:%d pending:%v", cmd != nil, deletes, m.pendingConfirmation != nil)
+	}
+}
+
+func TestWebhookDeleteBulkRejectsInvalidReferencesBeforeMutation(t *testing.T) {
+	const own = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w1" data-webhook-name="Pager Duty" data-webhook-token="token-one"></div><div data-webhook-id="w2" data-webhook-name="Pager Build" data-webhook-token="token-two"></div></div>`
+	const foreignID = "fedcba9876543210fedcba9876543210"
+	cases := []struct {
+		name string
+		refs string
+		body string
+		want string
+	}{
+		{name: "unknown", refs: "missing", want: "nothing matches"},
+		{name: "ambiguous", refs: "Pager", want: "ambiguous"},
+		{name: "duplicate", refs: `w1 "Pager Duty"`, want: "selected more than once"},
+		{name: "foreign", refs: foreignID, body: canonicalWebhookDetailJSON(foreignID, "p2", "Foreign Hook"), want: "does not belong to selected project"},
+		{name: "stale", refs: canonicalWebhookID, body: "404", want: "nothing matches"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var deletes int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/channels":
+					_, _ = io.WriteString(w, own)
+				case r.Method == http.MethodGet && r.URL.Path == "/channels/webhooks/"+foreignID:
+					if tc.body == "404" {
+						http.Error(w, `{"error":"stale"}`, http.StatusNotFound)
+					} else {
+						_, _ = io.WriteString(w, tc.body)
+					}
+				case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+					deletes++
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, "/channels webhooks delete-bulk "+tc.refs)
+			if deletes != 0 || m.pendingConfirmation != nil {
+				t.Fatalf("invalid bulk selection mutated or prompted: deletes=%d pending=%v", deletes, m.pendingConfirmation != nil)
+			}
+			if out := strings.ToLower(stripANSI(transcript(m))); !strings.Contains(out, strings.ToLower(tc.want)) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 func webhookCatalogPageHTML(total, offset int) string {
 	end := min(offset+50, total)
 	var b strings.Builder
