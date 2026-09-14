@@ -58,6 +58,228 @@ func TestOutboundTargetAddAcceptsNegativeTelegramChatIDs(t *testing.T) {
 	}
 }
 
+func TestOutboundTargetsCLIAddJSONUsesCanonicalRefreshedTarget(t *testing.T) {
+	canonical := client.OutboundTarget{
+		ID: "target-email-1", ProjectID: "p1", Platform: "email", TargetKind: "email",
+		Name: "person", Destination: "person@example.com",
+	}
+	saveCalls := 0
+	refreshCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			refreshCalls++
+			w.Header().Set("Content-Type", "text/html")
+			if refreshCalls == 1 {
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", nil, false))
+			} else {
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{canonical}, false))
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			saveCalls++
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse save form: %v", err)
+			}
+			if got := r.PostForm.Get("target_target_id"); got != "PERSON@EXAMPLE.COM" {
+				t.Errorf("saved destination = %q, want raw submitted destination", got)
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div>saved</div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "add", "email", "PERSON@EXAMPLE.COM", "--kind", "email", "--name", "person"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+
+	var action outboundTargetActionJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &action); err != nil {
+		t.Fatalf("JSON output = %q: %v", out.String(), err)
+	}
+	if action.Action != "add" || action.Target.Destination != canonical.Destination {
+		t.Fatalf("add action = %#v, want canonical destination %q", action, canonical.Destination)
+	}
+	if saveCalls != 1 || refreshCalls != 2 {
+		t.Fatalf("save/refresh calls = %d/%d, want 1/2", saveCalls, refreshCalls)
+	}
+}
+
+func TestOutboundTargetsCLIAddJSONUsesCanonicalOtherDestination(t *testing.T) {
+	canonical := client.OutboundTarget{
+		ID: "target-slack-1", ProjectID: "p1", Platform: "slack", TargetKind: "channel",
+		Name: "ops", Destination: "c123",
+	}
+	refreshCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			refreshCalls++
+			w.Header().Set("Content-Type", "text/html")
+			if refreshCalls == 1 {
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", nil, false))
+			} else {
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{canonical}, false))
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div>saved</div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "add", "slack", "C123", "--kind", "channel", "--name", "ops"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var action outboundTargetActionJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &action); err != nil {
+		t.Fatalf("JSON output = %q: %v", out.String(), err)
+	}
+	if action.Target.Destination != canonical.Destination {
+		t.Fatalf("add action = %#v, want canonical destination %q", action.Target, canonical.Destination)
+	}
+	if refreshCalls != 2 {
+		t.Fatalf("refresh calls = %d, want 2", refreshCalls)
+	}
+}
+
+func TestOutboundTargetsPlainAddListAndShowUseCanonicalDestination(t *testing.T) {
+	canonical := client.OutboundTarget{
+		ID: "target-email-2", ProjectID: "p1", Platform: "email", TargetKind: "email",
+		Name: "person", Destination: "person@example.com",
+	}
+	var saved []client.OutboundTarget
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", saved, false))
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			saved = []client.OutboundTarget{canonical}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div>saved</div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain bytes.Buffer
+	if err := RunCLI(c, &plain, "demo", []string{"channels", "targets", "add", "email", "PERSON@EXAMPLE.COM", "--kind", "email"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.String(); !strings.Contains(got, canonical.Destination) || strings.Contains(got, "PERSON@EXAMPLE.COM") {
+		t.Fatalf("plain add output = %q, want only canonical destination", got)
+	}
+
+	var list bytes.Buffer
+	if err := RunCLI(c, &list, "demo", []string{"channels", "targets", "list"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var listed []client.OutboundTarget
+	if err := json.Unmarshal([]byte(strings.TrimSpace(list.String())), &listed); err != nil {
+		t.Fatalf("list JSON = %q: %v", list.String(), err)
+	}
+	if len(listed) != 1 || listed[0].Destination != canonical.Destination {
+		t.Fatalf("list targets = %#v, want canonical target", listed)
+	}
+
+	var show bytes.Buffer
+	if err := RunCLI(c, &show, "demo", []string{"channels", "targets", "show", "person"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var shown client.OutboundTarget
+	if err := json.Unmarshal([]byte(strings.TrimSpace(show.String())), &shown); err != nil {
+		t.Fatalf("show JSON = %q: %v", show.String(), err)
+	}
+	if shown.Destination != canonical.Destination {
+		t.Fatalf("show target = %#v, want canonical destination %q", shown, canonical.Destination)
+	}
+}
+
+func TestOutboundTargetsAmbiguousNormalizedRefreshDoesNotRebindAdd(t *testing.T) {
+	first := client.OutboundTarget{
+		ID: "target-email-first", ProjectID: "p1", Platform: "email", TargetKind: "email",
+		Name: "existing-first", Destination: "person@example.com",
+	}
+	second := client.OutboundTarget{
+		ID: "target-email-second", ProjectID: "p1", Platform: "email", TargetKind: "email",
+		Name: "existing-second", Destination: "PERSON@EXAMPLE.COM",
+	}
+	refreshCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			refreshCalls++
+			w.Header().Set("Content-Type", "text/html")
+			if refreshCalls == 1 {
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", nil, false))
+			} else {
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{first, second}, false))
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div>saved</div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "add", "email", "PERSON@EXAMPLE.COM", "--kind", "email", "--name", "new-target"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var action outboundTargetActionJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &action); err != nil {
+		t.Fatalf("JSON output = %q: %v", out.String(), err)
+	}
+	if action.Target.Name != "new-target" || action.Target.Destination != "PERSON@EXAMPLE.COM" {
+		t.Fatalf("ambiguous add rebound to a refreshed row: %#v", action.Target)
+	}
+	if refreshCalls != 2 {
+		t.Fatalf("refresh calls = %d, want 2", refreshCalls)
+	}
+}
+
 func TestOutboundTargetsTUIListShowEmptyAndNoProject(t *testing.T) {
 	target := client.OutboundTarget{ID: "target-a", Platform: "slack", TargetKind: "channel", Name: "ops", Destination: "C123", ThreadID: "42", Home: true, DefaultSubject: "Deploy"}
 	m, rec := dispatchModel(t, map[string]string{"/channels/outbound-targets": terminalOutboundTargetPage("p1", []client.OutboundTarget{target}, true)})
@@ -212,6 +434,42 @@ func TestOutboundTargetsMutationRefreshFailureAndTestFailure(t *testing.T) {
 	out = stripANSI(transcript(m))
 	if !strings.Contains(out, `outbound target test for "ops": failed`) || strings.Contains(out, "<span") || strings.Contains(out, "provider secret") {
 		t.Fatalf("test failure output was unsafe or unclear:\n%s", out)
+	}
+}
+
+func TestOutboundTargetMutationOutputJSONRefreshFailureKeepsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/channels/outbound-targets" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		http.Error(w, `<html><body>backend secret and raw markup</body></html>`, http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousJSON := jsonMode
+	jsonMode = true
+	defer func() { jsonMode = previousJSON }()
+
+	submitted := client.OutboundTarget{
+		Platform: "email", TargetKind: "email", Name: "person", Destination: "PERSON@EXAMPLE.COM",
+	}
+	out, err := outboundTargetMutationOutput(context.Background(), c, "p1", "add", "added outbound target person", submitted)
+	if err != nil {
+		t.Fatalf("refresh failure changed successful mutation into error: %v", err)
+	}
+	var action outboundTargetActionJSON
+	if err := json.Unmarshal([]byte(out), &action); err != nil {
+		t.Fatalf("JSON output = %q: %v", out, err)
+	}
+	if action.Action != "add" || action.Target.Destination != submitted.Destination {
+		t.Fatalf("refresh fallback action = %#v, want submitted target", action)
+	}
+	if strings.Contains(out, "backend secret") || strings.Contains(out, "<html") || strings.Contains(out, "raw markup") {
+		t.Fatalf("refresh fallback exposed backend response: %q", out)
 	}
 }
 

@@ -314,6 +314,21 @@ func outboundTargetTestOutput(target client.OutboundTarget, sent bool) (string, 
 	return fmt.Sprintf("outbound target test for %q: %s", outboundTargetName(target), status), nil
 }
 
+func outboundTargetMutationStatus(action string, target client.OutboundTarget) string {
+	verb := ""
+	switch action {
+	case "add":
+		verb = "added"
+	case "edit":
+		verb = "edited"
+	case "remove":
+		verb = "removed"
+	default:
+		return ""
+	}
+	return verb + " outbound target " + outboundTargetName(target)
+}
+
 func outboundTargetMutationOutput(ctx context.Context, c *client.Client, projectID, action, status string, target client.OutboundTarget) (string, error) {
 	targets, err := c.ListOutboundTargets(ctx, projectID)
 	if err != nil {
@@ -327,11 +342,24 @@ func outboundTargetMutationOutput(ctx context.Context, c *client.Client, project
 			target = candidate
 			break
 		}
-		if target.ID == "" && strings.EqualFold(candidate.Platform, target.Platform) &&
-			strings.EqualFold(candidate.TargetKind, target.TargetKind) &&
-			candidate.Destination == target.Destination && candidate.ThreadID == target.ThreadID {
+	}
+	if target.ID == "" {
+		var candidate client.OutboundTarget
+		matches := 0
+		for _, current := range targets {
+			if strings.EqualFold(current.Platform, target.Platform) &&
+				strings.EqualFold(current.TargetKind, target.TargetKind) &&
+				strings.EqualFold(current.Destination, target.Destination) &&
+				current.ThreadID == target.ThreadID {
+				candidate = current
+				matches++
+			}
+		}
+		if matches == 1 {
 			target = candidate
-			break
+			if canonicalStatus := outboundTargetMutationStatus(action, target); canonicalStatus != "" {
+				status = canonicalStatus
+			}
 		}
 	}
 	if jsonMode {
