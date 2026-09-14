@@ -551,6 +551,167 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 	}
 }
 
+func TestCLIPersonalityBulkDeleteRequiresForceUsesOneRequestAndKeepsJSONStable(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-id="personality-id-2" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+
+	t.Run("missing force does not mutate", func(t *testing.T) {
+		var bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+				http.Error(w, "unexpected mutation", http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one", "Old Two"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "--force") {
+			t.Fatalf("missing-force error = %v", err)
+		}
+		if bulkDeletes != 0 {
+			t.Fatalf("missing force made %d bulk DELETE requests", bulkDeletes)
+		}
+	})
+
+	t.Run("force sends one scoped bulk request and JSON is count only", func(t *testing.T) {
+		var bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+				if r.URL.Query().Get("project_id") != "p1" || r.Method != http.MethodDelete || r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("bulk request = %s %s query=%s content-type=%q", r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Content-Type"))
+				}
+				var payload struct {
+					IDs []string `json:"ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Errorf("decode bulk body: %v", err)
+				}
+				if want := []string{"personality-id-1", "personality-id-2"}; !reflect.DeepEqual(payload.IDs, want) {
+					t.Errorf("bulk IDs = %#v, want %#v", payload.IDs, want)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"deleted":2}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one", "Old Two"}, true, true); err != nil {
+			t.Fatalf("forced bulk delete: %v", err)
+		}
+		if bulkDeletes != 1 {
+			t.Fatalf("bulk DELETE requests = %d, want one", bulkDeletes)
+		}
+		if got := strings.TrimSpace(out.String()); got != `{"deleted":2}` {
+			t.Fatalf("JSON output = %q, want stable deleted-count record", got)
+		}
+	})
+}
+
+func TestCLIPersonalityBulkDeleteRejectsMixedSelectionBeforeMutationAndSwallowsRefreshFailure(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-id="personality-id-2" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+
+	t.Run("mixed valid and unknown references", func(t *testing.T) {
+		var bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = RunCLI(c, io.Discard, "demo", []string{"personality", "delete-bulk", "old_one", "missing"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "nothing matches") {
+			t.Fatalf("mixed-selection error = %v", err)
+		}
+		if bulkDeletes != 0 {
+			t.Fatalf("mixed selection made %d bulk DELETE requests", bulkDeletes)
+		}
+	})
+
+	t.Run("refresh failure does not undo successful deletion", func(t *testing.T) {
+		var lists, bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				lists++
+				if lists > 1 {
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = io.WriteString(w, `{"error":"refresh unavailable"}`)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"deleted":2}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one", "old_two"}, true, false); err != nil {
+			t.Fatalf("successful deletion with failed refresh: %v", err)
+		}
+		if lists != 2 || bulkDeletes != 1 || !strings.Contains(out.String(), "deleted 2 personalities") {
+			t.Fatalf("lists=%d bulkDeletes=%d output=%q", lists, bulkDeletes, out.String())
+		}
+	})
+}
+
 func TestCLIPersonalityAddLiteralDescriptionPrefixUsesExactTwoFieldPayload(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description=""

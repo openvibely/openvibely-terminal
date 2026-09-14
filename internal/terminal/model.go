@@ -1138,6 +1138,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case personalityBulkTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case threadOpenedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1768,6 +1772,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.busy = true
 		return m, cmd
+
+	case personalityBulkTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		projectID := msg.projectID
+		if projectID == "" {
+			projectID = m.selectedID
+		}
+		personalities := append([]client.Personality(nil), msg.personalities...)
+		cmd := run("Personalities", cmdTimeout, func(ctx context.Context) (string, error) {
+			return personalityBulkDeleteResult(ctx, m.client, projectID, personalities)
+		})
+		return confirmOr(m,
+			personalityBulkDeleteConfirmation(personalities),
+			fmt.Sprintf("use --force to confirm deletion of %d selected personalities", len(personalities)),
+			cmd)
 
 	case attachmentDeleteTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {

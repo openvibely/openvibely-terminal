@@ -6106,6 +6106,128 @@ type personalityActionJSON struct {
 	Active bool   `json:"active,omitempty"`
 }
 
+// personalityBulkDeleteConfirmation names every resolved target so the
+// interactive confirmation describes the complete captured selection.
+func personalityBulkDeleteConfirmation(personalities []client.Personality) string {
+	targets := make([]string, 0, len(personalities))
+	for _, personality := range personalities {
+		name := strings.TrimSpace(sanitizeAutomationDetailText(personality.Name))
+		key := strings.TrimSpace(sanitizeAutomationDetailText(personality.Key))
+		id := strings.TrimSpace(sanitizeAutomationDetailText(personality.ID))
+		display := firstNonEmpty(name, key, id, "(unknown personality)")
+		identity := firstNonEmpty(key, id)
+		if identity != "" && identity != display {
+			targets = append(targets, fmt.Sprintf("%q (%s)", display, identity))
+		} else {
+			targets = append(targets, fmt.Sprintf("%q", display))
+		}
+	}
+	return fmt.Sprintf("Delete %d selected personalities: %s? Type 'yes' to confirm or Esc to cancel.", len(personalities), strings.Join(targets, ", "))
+}
+
+func personalityBulkCanonicalID(personality client.Personality) string {
+	return strings.TrimSpace(personality.ID)
+}
+
+func personalityBulkTargetError(personality client.Personality) error {
+	name := sanitizeAutomationDetailText(firstNonEmpty(personality.Name, personality.Key, personality.ID, "(unknown personality)"))
+	switch {
+	case personality.Key == "":
+		return fmt.Errorf("base personality cannot be deleted in bulk; use personality delete to reset an override")
+	case personality.Active:
+		return fmt.Errorf("active personality %q cannot be deleted in bulk", name)
+	case personality.IsPreset && personality.HasCustom:
+		return fmt.Errorf("built-in override %q cannot be deleted in bulk; use personality delete to reset it", name)
+	case personality.IsPreset:
+		return fmt.Errorf("built-in personality %q cannot be deleted in bulk", name)
+	case strings.TrimSpace(personalityBulkCanonicalID(personality)) == "":
+		return fmt.Errorf("personality %q has no canonical ID and cannot be deleted in bulk", name)
+	default:
+		return nil
+	}
+}
+
+// resolvePersonalityBulkTargets resolves the complete selection from one
+// project-scoped catalog before a confirmation or force gate is applied.
+func resolvePersonalityBulkTargets(baseCtx context.Context, c *client.Client, projectID string, refs []string) tea.Cmd {
+	return func() tea.Msg {
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
+		defer cancel()
+		personalities, err := c.ListPersonalities(ctx, projectID)
+		if err != nil {
+			return personalityBulkTargetMsg{projectID: projectID, err: err}
+		}
+		resolved := make([]client.Personality, 0, len(refs))
+		seenIDs := make(map[string]struct{}, len(refs))
+		for _, ref := range refs {
+			personality, err := matchRefWithDisplay(personalities, ref,
+				func(p client.Personality) string { return p.Key },
+				func(p client.Personality) string { return p.Name },
+				sanitizeAutomationDetailText)
+			if err != nil {
+				return personalityBulkTargetMsg{projectID: projectID, err: err}
+			}
+			if err := personalityBulkTargetError(personality); err != nil {
+				return personalityBulkTargetMsg{projectID: projectID, err: err}
+			}
+			id := personalityBulkCanonicalID(personality)
+			if _, duplicate := seenIDs[id]; duplicate {
+				return personalityBulkTargetMsg{
+					projectID: projectID,
+					err:       fmt.Errorf("personality %q was selected more than once", sanitizeAutomationDetailText(ref)),
+				}
+			}
+			seenIDs[id] = struct{}{}
+			resolved = append(resolved, personality)
+		}
+		if len(resolved) == 0 {
+			return personalityBulkTargetMsg{projectID: projectID, err: fmt.Errorf("select at least one personality")}
+		}
+		return personalityBulkTargetMsg{projectID: projectID, personalities: resolved}
+	}
+}
+
+func personalityBulkDeleteResult(ctx context.Context, c *client.Client, projectID string, personalities []client.Personality) (string, error) {
+	ids := make([]string, 0, len(personalities))
+	deletedIdentifiers := make(map[string]struct{}, len(personalities)*2)
+	for _, personality := range personalities {
+		id := personalityBulkCanonicalID(personality)
+		ids = append(ids, id)
+		deletedIdentifiers[id] = struct{}{}
+		if key := strings.TrimSpace(personality.Key); key != "" {
+			deletedIdentifiers[key] = struct{}{}
+		}
+	}
+	count, err := c.DeleteCustomPersonalitiesBulk(ctx, projectID, ids)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(struct {
+			Deleted int `json:"deleted"`
+		}{Deleted: count})
+	}
+	status := fmt.Sprintf("deleted %d personalities", count)
+	return refreshAndRender(status,
+		func() ([]client.Personality, error) { return c.ListPersonalities(ctx, projectID) },
+		func(personalities []client.Personality, _ string) string {
+			remaining := make([]client.Personality, 0, len(personalities))
+			for _, personality := range personalities {
+				if _, deleted := deletedIdentifiers[personalityBulkCanonicalID(personality)]; deleted {
+					continue
+				}
+				if _, deleted := deletedIdentifiers[strings.TrimSpace(personality.Key)]; deleted {
+					continue
+				}
+				remaining = append(remaining, personality)
+			}
+			return renderPersonalities(remaining, "")
+		})
+}
+
 func personalitySelector(m Model, usage, command, action string, prefill bool) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
 	prefillSuffix := ""
@@ -6234,7 +6356,7 @@ func personalityDeleteCommand(c *client.Client, projectID string, personality cl
 }
 
 func personalityCommand() command {
-	actions := []string{"list", "show", "add", "edit", "set", "delete"}
+	actions := []string{"list", "show", "add", "edit", "set", "delete", "delete-bulk"}
 	return command{
 		name:          "personality",
 		args:          "[key|name]",
@@ -6250,6 +6372,7 @@ func personalityCommand() command {
 			"personality edit <key|name> | <name> | <description> | <system prompt>",
 			"personality set <key|name>                  activate a personality",
 			"personality delete <key|name>               delete a custom or reset an override",
+			"personality delete-bulk <key|name>...       delete inactive non-preset custom entries",
 			"omit <key|name> on show/edit/set/delete → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
@@ -6258,6 +6381,7 @@ func personalityCommand() command {
 			{action: "edit", args: "<key|name> | <name> | <description> | <system prompt>"},
 			{action: "set", args: "<key|name>"},
 			{action: "delete", args: "<key|name>"},
+			{action: "delete-bulk", args: "<key|name>..."},
 		},
 		examples: []string{
 			`personality list`,
@@ -6266,6 +6390,7 @@ func personalityCommand() command {
 			`personality edit release_coach | Release Coach | pragmatic release guidance | Keep advice practical, focused, and safe for production releases.`,
 			`personality set release_coach`,
 			`personality delete release_coach`,
+			`personality delete-bulk old_one "Old Two"`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
@@ -6274,7 +6399,7 @@ func personalityCommand() command {
 			}
 			action, rest := splitAction(actions, args)
 			if action == "" && len(rest) > 0 {
-				return m, errCmd(fmt.Sprintf("unknown personality action %q — use /personality list|show|add|edit|set|delete", rest[0]))
+				return m, errCmd(fmt.Sprintf("unknown personality action %q — use /personality list|show|add|edit|set|delete|delete-bulk", rest[0]))
 			}
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
@@ -6369,6 +6494,11 @@ func personalityCommand() command {
 					}
 					return personalitySetResult(ctx, c, pid, personality)
 				})
+			case "delete-bulk":
+				if len(rest) == 0 {
+					return m, errCmd(commandUsage("personality", "delete-bulk"))
+				}
+				return m, resolvePersonalityBulkTargets(m.cliContext, c, pid, rest)
 			case "delete":
 				if ref == "" {
 					return personalitySelector(m, commandUsage("personality", "delete"), "personality delete", "delete", false)

@@ -917,6 +917,26 @@ func TestAlertsShowHelpAndCompletion(t *testing.T) {
 	}
 }
 
+func TestPersonalityBulkDeleteHelpAndCompletion(t *testing.T) {
+	cmd := lookupCommand("personality")
+	if cmd == nil {
+		t.Fatal("personality command missing")
+	}
+	if got := completeSlashInput("/personality delete-b", *cmd); got != "/personality delete-bulk " {
+		t.Fatalf("personality bulk-delete completion = %q, want %q", got, "/personality delete-bulk ")
+	}
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"/personality delete-bulk <key|name>...",
+		"delete inactive non-preset custom entries",
+		"personality delete-bulk old_one \"Old Two\"",
+	} {
+		if !strings.Contains(help, want) {
+			t.Fatalf("personality help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestParseAlertListArgs(t *testing.T) {
 	tests := []struct {
 		name       string
