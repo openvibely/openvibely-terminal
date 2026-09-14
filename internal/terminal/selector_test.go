@@ -515,6 +515,75 @@ name: Nightly sweep
 	}
 }
 
+func TestAutomationPickerRowsPreserveCatalogParityAcrossFamilies(t *testing.T) {
+	automationsHTML := "<div>" +
+		automationCardHTML("automation-long-id", "", "paused") +
+		automationCardHTML("au-named", "Named automation", "active") +
+		automationCardHTML("au-draft", "", "draft") +
+		"</div>"
+	want := []selectorItem{
+		{ref: "automation-long-id", label: "automati", detail: "paused"},
+		{ref: "au-named", label: "Named automation", detail: "active"},
+		{ref: "au-draft", label: "au-draft", detail: "draft"},
+	}
+
+	for _, action := range []string{"edit", "show", "open", "run", "pause", "resume", "delete"} {
+		action := action
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/automations": automationsHTML})
+			m = runLine(t, m, "/automations "+action)
+			if !m.selectorActive {
+				t.Fatalf("expected %s picker:\n%s", action, transcript(m))
+			}
+			if len(m.selectorItems) != len(want) {
+				t.Fatalf("%s picker rows = %d, want %d: %+v", action, len(m.selectorItems), len(want), m.selectorItems)
+			}
+			for i, item := range m.selectorItems {
+				if item.ref != want[i].ref || item.label != want[i].label || item.detail != want[i].detail {
+					t.Fatalf("%s picker row %d = {ref:%q label:%q detail:%q}, want {ref:%q label:%q detail:%q}",
+						action, i, item.ref, item.label, item.detail, want[i].ref, want[i].label, want[i].detail)
+				}
+				if item.dispatch == nil {
+					t.Fatalf("%s picker row %d has no action callback", action, i)
+				}
+			}
+			if got := rec.count(http.MethodGet, "/automations"); got != 1 {
+				t.Fatalf("%s picker catalog requests = %d, want 1:\n%s", action, got, rec.all())
+			}
+			if !rec.sawQuery("GET /automations?project_id=p1") {
+				t.Fatalf("%s picker lost project scope:\n%s", action, rec.all())
+			}
+
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+			if m.selectorActive {
+				t.Fatalf("%s picker remained active after cancellation", action)
+			}
+			if rec.count(http.MethodGet, "/automations") != 1 || strings.Contains(rec.all(), "POST /automations/") {
+				t.Fatalf("%s picker cancellation caused extra requests or mutation:\n%s", action, rec.all())
+			}
+		})
+	}
+}
+
+func TestAutomationPickerCatalogErrorsUseSharedFailurePath(t *testing.T) {
+	for _, action := range []string{"edit", "show", "run"} {
+		action := action
+		t.Run(action, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && r.URL.Path == "/automations" {
+					http.Error(w, "catalog unavailable", http.StatusBadGateway)
+					return
+				}
+				http.NotFound(w, r)
+			})
+			m = runLine(t, m, "/automations "+action)
+			if m.selectorActive || !strings.Contains(transcript(m), "server error (502)") {
+				t.Fatalf("%s picker did not surface catalog failure:\n%s", action, transcript(m))
+			}
+		})
+	}
+}
+
 func TestAutomationShowSelectorDispatchesResolvedItemWithoutSecondList(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/automations":      selAutomationsHTML,

@@ -6785,20 +6785,9 @@ func automationsCommand() command {
 					return selectorOr(m, commandUsage("automations", "edit"),
 						selectorFor("Automations", "automations edit", automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
-								automations, err := c.ListAutomations(ctx, pid)
-								if err != nil {
-									return nil, err
-								}
-								items := make([]selectorItem, 0, len(automations))
-								for _, automation := range automations {
-									automation := automation
-									item := selectorItem{ref: automation.ID, label: firstNonEmpty(automation.Name, shortID(automation.ID)), detail: automation.State}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										return beginAutomationInteractiveEdit(m, c, pid, automation)
-									}
-									items = append(items, item)
-								}
-								return items, nil
+								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
+									return beginAutomationInteractiveEdit(m, c, pid, automation)
+								})
 							}))
 				}
 				if !cliMode && !automationEditArgsContainOption(rest) {
@@ -6849,28 +6838,13 @@ func automationsCommand() command {
 						selectorFor("Automations", "automations "+action,
 							automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
-								automations, err := c.ListAutomations(ctx, pid)
-								if err != nil {
-									return nil, err
-								}
-								items := make([]selectorItem, 0, len(automations))
-								for _, a := range automations {
-									a := a
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Name, shortID(a.ID)),
-										detail: a.State,
-									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										cmd := run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
-											return loadAutomationDetail(ctx, c, pid, a)
-										})
-										m.busy = true
-										return m, cmd
-									}
-									items = append(items, item)
-								}
-								return items, nil
+								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
+									cmd := run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
+										return loadAutomationDetail(ctx, c, pid, automation)
+									})
+									m.busy = true
+									return m, cmd
+								})
 							}))
 				}
 				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -6886,34 +6860,19 @@ func automationsCommand() command {
 						selectorFor("Automations", "automations "+action,
 							automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
-								automations, err := c.ListAutomations(ctx, pid)
-								if err != nil {
-									return nil, err
-								}
-								items := make([]selectorItem, 0, len(automations))
-								for _, a := range automations {
-									a := a
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Name, shortID(a.ID)),
-										detail: a.State,
+								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
+									cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+										return executeResolvedAction(ctx, automation)
+									})
+									if action == "delete" {
+										return confirmOr(m,
+											fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", automation.ID),
+											fmt.Sprintf("use --force to confirm deletion of automation %q", automation.ID),
+											cmd)
 									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
-											return executeResolvedAction(ctx, a)
-										})
-										if action == "delete" {
-											return confirmOr(m,
-												fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
-												fmt.Sprintf("use --force to confirm deletion of automation %q", a.ID),
-												cmd)
-										}
-										m.busy = true
-										return m, cmd
-									}
-									items = append(items, item)
-								}
-								return items, nil
+									m.busy = true
+									return m, cmd
+								})
 							}))
 				}
 				cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -6933,6 +6892,30 @@ func automationsCommand() command {
 			}
 		},
 	}
+}
+
+// automationSelectorItems loads the selected project's automation catalog and
+// builds the shared selector rows. Callers provide only the action-specific
+// behavior for a selected automation.
+func automationSelectorItems(ctx context.Context, c *client.Client, projectID string, dispatch func(Model, client.Automation) (Model, tea.Cmd)) ([]selectorItem, error) {
+	automations, err := c.ListAutomations(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]selectorItem, 0, len(automations))
+	for _, automation := range automations {
+		automation := automation
+		item := selectorItem{
+			ref:    automation.ID,
+			label:  firstNonEmpty(automation.Name, shortID(automation.ID)),
+			detail: automation.State,
+		}
+		item.dispatch = func(m Model) (Model, tea.Cmd) {
+			return dispatch(m, automation)
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 // resolveAutomationRef fetches the selected project's catalog exactly once and
