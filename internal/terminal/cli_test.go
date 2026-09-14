@@ -982,6 +982,13 @@ func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
 				if !strings.Contains(request[1], "project_id=p1") {
 					t.Errorf("analytics request lost selected project scope: %q", uri)
 				}
+				parsed, err := url.Parse(request[1])
+				if err != nil {
+					t.Fatalf("parse analytics request %q: %v", uri, err)
+				}
+				if parsed.Path == "/api/analytics/most-frequent-tasks" && parsed.Query().Get("limit") != "12" {
+					t.Errorf("frequent request limit = %q, want 12: %q", parsed.Query().Get("limit"), uri)
+				}
 				got[strings.SplitN(request[1], "?", 2)[0]]++
 			}
 			if !reflect.DeepEqual(got, want) {

@@ -6941,7 +6941,7 @@ func analyticsCommand() command {
 			"analytics usage                            token usage and cost by model",
 			"analytics rates                            success/failure rates",
 			"analytics agents                           average execution time by agent",
-			"analytics frequent                         most frequent tasks",
+			"analytics frequent                         backend-ranked top 12 most frequent tasks",
 			"analytics failures                         failed-task patterns",
 			"analytics skills                           skill usage and follow-through",
 			"analytics trends                           usage trends over time",

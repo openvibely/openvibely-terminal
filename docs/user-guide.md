@@ -835,8 +835,12 @@ failures, and backend errors retain the normal non-zero command behavior.
 
 `/analytics` renders everything; a section name narrows it. Charts are drawn as
 ASCII bars — usage by model with cost and share, success/failure gauges per
-period, average execution time by agent and by task, most frequent tasks,
-recurring failure patterns, and skill usage with follow-through rates.
+period, average execution time by agent and by task, the backend-ranked top 12
+most frequent tasks, recurring failure patterns, and skill usage with
+follow-through rates. The default `analytics frequent` view requests at most
+12 ranked rows from the backend, so its response and rendered output are
+bounded. The client’s explicit full-history method remains available for
+complete-data callers and is not silently truncated.
 
 ## CLI mode
 
@@ -995,7 +999,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
-| Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks`, `failed-task-patterns`, `skills` |
+| Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; full-history callers omit `limit`), `failed-task-patterns`, `skills` |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |
