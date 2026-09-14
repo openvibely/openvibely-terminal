@@ -6014,6 +6014,124 @@ func TestPersonalitySingleDeleteStillResetsBuiltInOverride(t *testing.T) {
 	}
 }
 
+func TestPersonalityDeleteBulkAuthRefreshEntersRecoveryWithoutFailingDeletion(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	var lists, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			lists++
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("personality refresh lost project scope: %s", r.URL.RequestURI())
+			}
+			if lists == 1 {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"do not expose this body"}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			deletes++
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("bulk deletion lost project scope: %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, "/personality delete-bulk old_one")
+
+	if lists != 2 || deletes != 1 {
+		t.Fatalf("requests = lists %d deletes %d, want one lookup, one refresh, and one deletion", lists, deletes)
+	}
+	if !m.authRequired {
+		t.Fatal("authentication-required refresh did not enter recovery")
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "deleted 1 personalities") || !strings.Contains(out, "personality catalog refresh unavailable (authentication)") {
+		t.Fatalf("successful deletion or refresh diagnostic missing: %s", out)
+	}
+	for _, entry := range m.log {
+		if entry.role == "error" {
+			t.Fatalf("auth-only refresh failure became a fatal deletion error: %+v", entry)
+		}
+	}
+}
+
+func TestPersonalityDeleteBulkCancellationAfterLookupBeforeMutationDoesNotMutate(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	var deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			deletes++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":1}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m.cliContext = ctx
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = true, true
+	defer func() { cliMode, forceMode = oldCLI, oldForce }()
+
+	m, lookupCmd := typeLine(t, m, "/personality delete-bulk old_one")
+	if lookupCmd == nil {
+		t.Fatal("bulk lookup did not return a command")
+	}
+	lookupMsg := lookupCmd()
+	if lookupMsg == nil {
+		t.Fatal("bulk lookup returned no target message")
+	}
+	if _, ok := lookupMsg.(personalityBulkTargetMsg); !ok {
+		t.Fatalf("bulk lookup message = %T, want personalityBulkTargetMsg", lookupMsg)
+	}
+
+	// The target is resolved and captured. Cancellation happens before the
+	// follow-up command returned by Update can create the DELETE request.
+	cancel()
+	next, mutationCmd := m.Update(lookupMsg)
+	m = next.(Model)
+	if mutationCmd == nil {
+		t.Fatal("forced bulk deletion did not return a mutation command")
+	}
+	if result := mutationCmd(); result != nil {
+		next, _ = m.Update(result)
+		m = next.(Model)
+	}
+	if deletes != 0 {
+		t.Fatalf("post-lookup cancellation made %d bulk DELETE requests", deletes)
+	}
+}
+
 func TestPersonalityDeleteBulkLookupCancellationDoesNotPrompt(t *testing.T) {
 	const catalog = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>

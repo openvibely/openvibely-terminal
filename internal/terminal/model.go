@@ -17,6 +17,7 @@ package terminal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -1647,6 +1648,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// transport, or ordinary error handling.
 			if strings.TrimSpace(msg.body) != "" {
 				m.append(entry{role: "result", head: msg.title, text: msg.body})
+			}
+			var refreshErr refreshAuthError
+			if errors.As(msg.err, &refreshErr) {
+				m.markAuthRequiredQuiet()
+				return m, nil
 			}
 			if m.handleAuthError(msg.err) {
 				return m, nil

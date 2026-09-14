@@ -100,6 +100,17 @@ func runBriefingCommand(m Model, args []string, command string, actions []string
 	})
 }
 
+// refreshAuthError marks a successful mutation whose best-effort refresh was
+// rejected by authentication. The result handler can preserve the mutation
+// output while entering quiet auth recovery instead of treating the mutation
+// as failed.
+type refreshAuthError struct {
+	cause error
+}
+
+func (e refreshAuthError) Error() string { return e.cause.Error() }
+func (e refreshAuthError) Unwrap() error { return e.cause }
+
 // refreshAndRender consolidates the "act, then reload the list, then format a
 // status line followed by the refreshed render" sequence shared by the
 // task/alert/skill/agent/model mutation commands. If the refresh fails after
@@ -6213,21 +6224,24 @@ func personalityBulkDeleteResult(ctx context.Context, c *client.Client, projectI
 		}{Deleted: count})
 	}
 	status := fmt.Sprintf("deleted %d personalities", count)
-	return refreshAndRender(status,
-		func() ([]client.Personality, error) { return c.ListPersonalities(ctx, projectID) },
-		func(personalities []client.Personality, _ string) string {
-			remaining := make([]client.Personality, 0, len(personalities))
-			for _, personality := range personalities {
-				if _, deleted := deletedIdentifiers[personalityBulkCanonicalID(personality)]; deleted {
-					continue
-				}
-				if _, deleted := deletedIdentifiers[strings.TrimSpace(personality.Key)]; deleted {
-					continue
-				}
-				remaining = append(remaining, personality)
-			}
-			return renderPersonalities(remaining, "")
-		})
+	personalitiesAfterDelete, refreshErr := c.ListPersonalities(ctx, projectID)
+	if refreshErr != nil {
+		if client.IsAuthRequired(refreshErr) {
+			return status + "\n" + fmt.Sprintf("personality catalog refresh unavailable (authentication): %s", safeConnectionDiagnosticText(refreshErr.Error())), refreshAuthError{cause: refreshErr}
+		}
+		return status, nil
+	}
+	remaining := make([]client.Personality, 0, len(personalitiesAfterDelete))
+	for _, personality := range personalitiesAfterDelete {
+		if _, deleted := deletedIdentifiers[personalityBulkCanonicalID(personality)]; deleted {
+			continue
+		}
+		if _, deleted := deletedIdentifiers[strings.TrimSpace(personality.Key)]; deleted {
+			continue
+		}
+		remaining = append(remaining, personality)
+	}
+	return status + "\n\n" + renderPersonalities(remaining, ""), nil
 }
 
 func personalitySelector(m Model, usage, command, action string, prefill bool) (Model, tea.Cmd) {
