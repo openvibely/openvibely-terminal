@@ -4199,6 +4199,17 @@ type channelWizardState struct {
 
 var channelEmailProviders = []string{"gmail", "outlook", "yahoo", "fastmail", "icloud", "custom"}
 
+var channelMutationOptionCompletions = []string{
+	"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint",
+	"--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret",
+	"--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port",
+	"--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen",
+}
+
+var channelAuthModeCompletions = []string{"pat", "app"}
+
+var channelSlackBotTokenModeCompletions = []string{"oauth", "manual"}
+
 func validChannelEmailProvider(value string) bool {
 	for _, provider := range channelEmailProviders {
 		if value == provider {
@@ -5475,28 +5486,43 @@ func runChannelAccess(m Model, args []string) (Model, tea.Cmd) {
 	}
 }
 
+func channelMutationCompletionRules() []commandCompletion {
+	definitions := []struct {
+		suffix []string
+		values []string
+	}{
+		{suffix: []string{"*", "**"}, values: channelMutationOptionCompletions},
+		{suffix: []string{"*", "--auth-mode"}, values: channelAuthModeCompletions},
+		{suffix: []string{"*", "--provider"}, values: channelEmailProviders},
+		{suffix: []string{"*", "--bot-token-mode"}, values: channelSlackBotTokenModeCompletions},
+	}
+	rules := make([]commandCompletion, 0, len(definitions)*2)
+	for _, definition := range definitions {
+		for _, action := range []string{"add", "edit"} {
+			rules = append(rules, commandCompletion{
+				after:  append([]string{action}, definition.suffix...),
+				values: definition.values,
+			})
+		}
+	}
+	return rules
+}
+
 func channelsCommand() command {
 	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}
 	webhookActions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
-	completions := []commandCompletion{
-		{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
-		{after: []string{"edit", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
-		{after: []string{"add", "*", "--auth-mode"}, values: []string{"pat", "app"}},
-		{after: []string{"edit", "*", "--auth-mode"}, values: []string{"pat", "app"}},
-		{after: []string{"add", "*", "--provider"}, values: channelEmailProviders},
-		{after: []string{"edit", "*", "--provider"}, values: channelEmailProviders},
-		{after: []string{"add", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
-		{after: []string{"edit", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
-		{after: []string{"access"}, values: channelAccessProviders},
-		{after: []string{"access", "*"}, values: channelAccessActions},
-		{after: []string{"targets"}, values: outboundTargetActions},
-		{after: []string{"targets", "add", "**"}, values: outboundTargetOptionCompletionValues()},
-		{after: []string{"targets", "edit", "*", "**"}, values: outboundTargetOptionCompletionValues()},
-		{after: []string{"targets", "test"}, values: []string{"draft"}},
-		{after: []string{"targets", "test", "draft", "**"}, values: outboundTargetOptionCompletionValues()},
-		{after: []string{"targets", "policy"}, values: []string{"show", "on", "off"}},
-		{after: []string{"webhooks"}, values: webhookActions},
-	}
+	completions := channelMutationCompletionRules()
+	completions = append(completions,
+		commandCompletion{after: []string{"access"}, values: channelAccessProviders},
+		commandCompletion{after: []string{"access", "*"}, values: channelAccessActions},
+		commandCompletion{after: []string{"targets"}, values: outboundTargetActions},
+		commandCompletion{after: []string{"targets", "add", "**"}, values: outboundTargetOptionCompletionValues()},
+		commandCompletion{after: []string{"targets", "edit", "*", "**"}, values: outboundTargetOptionCompletionValues()},
+		commandCompletion{after: []string{"targets", "test"}, values: []string{"draft"}},
+		commandCompletion{after: []string{"targets", "test", "draft", "**"}, values: outboundTargetOptionCompletionValues()},
+		commandCompletion{after: []string{"targets", "policy"}, values: []string{"show", "on", "off"}},
+		commandCompletion{after: []string{"webhooks"}, values: webhookActions},
+	)
 	completions = append(completions, webhookCompletionRules("webhooks")...)
 	return command{
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
