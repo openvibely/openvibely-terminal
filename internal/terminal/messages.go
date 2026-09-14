@@ -236,6 +236,17 @@ type alertBulkTargetMsg struct {
 	err               error
 }
 
+// personalityBulkTargetMsg carries the complete, project-scoped personality
+// selection resolved before a bulk deletion confirmation or force gate.
+type personalityBulkTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	requestID         uint64
+	projectID         string
+	personalities     []client.Personality
+	err               error
+}
+
 // attachmentDeleteTargetMsg carries the project-scoped task and attachment
 // resolved before an interactive delete confirmation is shown.
 type attachmentDeleteTargetMsg struct {

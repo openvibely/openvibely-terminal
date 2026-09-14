@@ -173,6 +173,7 @@ Commands take a resource, an optional action, and arguments:
 /alerts delete a1b2           delete one
 /alerts read-bulk a1b2 "Release approval"     mark selected alerts read
 /alerts delete-bulk a1b2 "Release approval"   delete selected alerts (confirm)
+/personality delete-bulk old_one "Old Two"   delete selected inactive custom personalities (confirm)
 /projects delete demo                  # type yes to confirm, or press Esc
 /skills add notes | writes release notes
 /skills load notes
@@ -251,7 +252,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete` |
-| `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>` |
+| `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>`, `delete-bulk <key|name>...` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
 | `/grades` | | `show`, `run` |
@@ -839,11 +840,21 @@ fetch a complete system prompt:
 /personality edit release_coach | Release Coach | updated description | Keep every release reversible and observable.
 /personality set release_coach
 /personality delete release_coach
+/personality delete-bulk old_one "Old Two"
 ```
 
 The add form without a description is `<name> | <system prompt>`; every character after the first separator, including literal `|` characters and a prompt beginning with `description:`, remains part of the prompt. To provide the optional description, use the explicit `description=<description> | <system prompt>` form. The `description=` marker is case-insensitive and reserved for the marked form; it must include non-empty description and prompt fields, and malformed marked fields are rejected before any backend mutation. Editing a built-in creates or updates its backend override. Deleting that built-in resets it to the built-in default, while deleting a custom entry removes it; both operations require the normal TUI
 confirmation or `--force` in CLI mode. Add `--json` to list/show and supported
 mutation commands for machine-readable records.
+
+`delete-bulk <key|name>...` resolves every reference in the selected project before
+making exactly one guarded bulk request. Only inactive, non-preset custom entries
+with canonical IDs are eligible; Base, active entries, built-ins, and built-in
+overrides are rejected without mutation. Interactive bulk deletion lists every
+captured target and requires `yes` or Esc; one-shot CLI deletion requires
+`--force`. Its plain result reports the deleted count, while `--json` emits only
+`{"deleted":n}`. Use the existing single `delete <key|name>` path for a built-in
+override reset.
 
 
 ```
@@ -901,6 +912,8 @@ openvibely-terminal -project demo alerts list --decision-state pending --process
 openvibely-terminal -project demo alerts "approved deployment" # free-text alert search
 openvibely-terminal -project demo alerts read-bulk a1b2 "Release approval"
 openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release approval"
+openvibely-terminal -project demo personality delete-bulk old_one "Old Two" # requires --force
+openvibely-terminal -project demo --force personality delete-bulk old_one "Old Two"
 openvibely-terminal -project demo analytics usage      # one analytics section
 openvibely-terminal -project demo chat "ship the docs" # ask the agent, print the reply
 openvibely-terminal projects create demo /Users/me/src/demo # local checkout; output includes backend ID
@@ -1042,7 +1055,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |
-| Personality | `POST /personality/custom`, `GET/PUT/DELETE /personality/custom/:key` (JSON custom CRUD); `/personality` remains the scoped HTML list |
+| Personality | `POST /personality/custom`, `GET/PUT/DELETE /personality/custom/:key`, `DELETE /personality/custom/bulk` (JSON custom CRUD and guarded bulk deletion); `/personality` remains the scoped HTML list |
 | Auth | `POST /login`, `GET /auth/me` |
 | Events | `GET /events/live` (SSE) |
 

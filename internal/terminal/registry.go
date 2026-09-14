@@ -100,6 +100,17 @@ func runBriefingCommand(m Model, args []string, command string, actions []string
 	})
 }
 
+// refreshAuthError marks a successful mutation whose best-effort refresh was
+// rejected by authentication. The result handler can preserve the mutation
+// output while entering quiet auth recovery instead of treating the mutation
+// as failed.
+type refreshAuthError struct {
+	cause error
+}
+
+func (e refreshAuthError) Error() string { return e.cause.Error() }
+func (e refreshAuthError) Unwrap() error { return e.cause }
+
 // refreshAndRender consolidates the "act, then reload the list, then format a
 // status line followed by the refreshed render" sequence shared by the
 // task/alert/skill/agent/model mutation commands. If the refresh fails after
@@ -4459,6 +4470,17 @@ type channelWizardState struct {
 
 var channelEmailProviders = []string{"gmail", "outlook", "yahoo", "fastmail", "icloud", "custom"}
 
+var channelMutationOptionCompletions = []string{
+	"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint",
+	"--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret",
+	"--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port",
+	"--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen",
+}
+
+var channelAuthModeCompletions = []string{"pat", "app"}
+
+var channelSlackBotTokenModeCompletions = []string{"oauth", "manual"}
+
 func validChannelEmailProvider(value string) bool {
 	for _, provider := range channelEmailProviders {
 		if value == provider {
@@ -5735,28 +5757,43 @@ func runChannelAccess(m Model, args []string) (Model, tea.Cmd) {
 	}
 }
 
+func channelMutationCompletionRules() []commandCompletion {
+	definitions := []struct {
+		suffix []string
+		values []string
+	}{
+		{suffix: []string{"*", "**"}, values: channelMutationOptionCompletions},
+		{suffix: []string{"*", "--auth-mode"}, values: channelAuthModeCompletions},
+		{suffix: []string{"*", "--provider"}, values: channelEmailProviders},
+		{suffix: []string{"*", "--bot-token-mode"}, values: channelSlackBotTokenModeCompletions},
+	}
+	rules := make([]commandCompletion, 0, len(definitions)*2)
+	for _, definition := range definitions {
+		for _, action := range []string{"add", "edit"} {
+			rules = append(rules, commandCompletion{
+				after:  append([]string{action}, definition.suffix...),
+				values: definition.values,
+			})
+		}
+	}
+	return rules
+}
+
 func channelsCommand() command {
 	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}
 	webhookActions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
-	completions := []commandCompletion{
-		{after: []string{"add", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
-		{after: []string{"edit", "*", "**"}, values: []string{"--token", "--rich-messages", "--auth-mode", "--pat", "--app-id", "--app-slug", "--private-key", "--api-endpoint", "--client-id", "--client-secret", "--app-token", "--bot-token-mode", "--bot-token", "--consumer-key", "--consumer-secret", "--access-token", "--access-token-secret", "--send-responses", "--provider", "--address", "--password", "--imap-host", "--imap-port", "--smtp-host", "--smtp-port", "--poll-interval", "--skip-attachments", "--mark-existing-seen"}},
-		{after: []string{"add", "*", "--auth-mode"}, values: []string{"pat", "app"}},
-		{after: []string{"edit", "*", "--auth-mode"}, values: []string{"pat", "app"}},
-		{after: []string{"add", "*", "--provider"}, values: channelEmailProviders},
-		{after: []string{"edit", "*", "--provider"}, values: channelEmailProviders},
-		{after: []string{"add", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
-		{after: []string{"edit", "*", "--bot-token-mode"}, values: []string{"oauth", "manual"}},
-		{after: []string{"access"}, values: channelAccessProviders},
-		{after: []string{"access", "*"}, values: channelAccessActions},
-		{after: []string{"targets"}, values: outboundTargetActions},
-		{after: []string{"targets", "add", "**"}, values: outboundTargetOptionCompletionValues()},
-		{after: []string{"targets", "edit", "*", "**"}, values: outboundTargetOptionCompletionValues()},
-		{after: []string{"targets", "test"}, values: []string{"draft"}},
-		{after: []string{"targets", "test", "draft", "**"}, values: outboundTargetOptionCompletionValues()},
-		{after: []string{"targets", "policy"}, values: []string{"show", "on", "off"}},
-		{after: []string{"webhooks"}, values: webhookActions},
-	}
+	completions := channelMutationCompletionRules()
+	completions = append(completions,
+		commandCompletion{after: []string{"access"}, values: channelAccessProviders},
+		commandCompletion{after: []string{"access", "*"}, values: channelAccessActions},
+		commandCompletion{after: []string{"targets"}, values: outboundTargetActions},
+		commandCompletion{after: []string{"targets", "add", "**"}, values: outboundTargetOptionCompletionValues()},
+		commandCompletion{after: []string{"targets", "edit", "*", "**"}, values: outboundTargetOptionCompletionValues()},
+		commandCompletion{after: []string{"targets", "test"}, values: []string{"draft"}},
+		commandCompletion{after: []string{"targets", "test", "draft", "**"}, values: outboundTargetOptionCompletionValues()},
+		commandCompletion{after: []string{"targets", "policy"}, values: []string{"show", "on", "off"}},
+		commandCompletion{after: []string{"webhooks"}, values: webhookActions},
+	)
 	completions = append(completions, webhookCompletionRules("webhooks")...)
 	return command{
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
@@ -6378,6 +6415,132 @@ type personalityActionJSON struct {
 	Active bool   `json:"active,omitempty"`
 }
 
+// personalityBulkDeleteConfirmation names every resolved target so the
+// interactive confirmation describes the complete captured selection.
+func personalityBulkDeleteConfirmation(personalities []client.Personality) string {
+	targets := make([]string, 0, len(personalities))
+	for _, personality := range personalities {
+		name := strings.TrimSpace(sanitizeAutomationDetailText(personality.Name))
+		key := strings.TrimSpace(sanitizeAutomationDetailText(personality.Key))
+		id := strings.TrimSpace(sanitizeAutomationDetailText(personality.ID))
+		display := firstNonEmpty(name, key, id, "(unknown personality)")
+		identity := firstNonEmpty(key, id)
+		if identity != "" && identity != display {
+			targets = append(targets, fmt.Sprintf("%q (%s)", display, identity))
+		} else {
+			targets = append(targets, fmt.Sprintf("%q", display))
+		}
+	}
+	return fmt.Sprintf("Delete %d selected personalities: %s? Type 'yes' to confirm or Esc to cancel.", len(personalities), strings.Join(targets, ", "))
+}
+
+func personalityBulkCanonicalID(personality client.Personality) string {
+	return strings.TrimSpace(personality.ID)
+}
+
+func personalityBulkTargetError(personality client.Personality) error {
+	name := sanitizeAutomationDetailText(firstNonEmpty(personality.Name, personality.Key, personality.ID, "(unknown personality)"))
+	switch {
+	case personality.Key == "":
+		return fmt.Errorf("base personality cannot be deleted in bulk; use personality delete to reset an override")
+	case personality.Active:
+		return fmt.Errorf("active personality %q cannot be deleted in bulk", name)
+	case personality.IsPreset && personality.HasCustom:
+		return fmt.Errorf("built-in override %q cannot be deleted in bulk; use personality delete to reset it", name)
+	case personality.IsPreset:
+		return fmt.Errorf("built-in personality %q cannot be deleted in bulk", name)
+	case strings.TrimSpace(personalityBulkCanonicalID(personality)) == "":
+		return fmt.Errorf("personality %q has no canonical ID and cannot be deleted in bulk", name)
+	default:
+		return nil
+	}
+}
+
+// resolvePersonalityBulkTargets resolves the complete selection from one
+// project-scoped catalog before a confirmation or force gate is applied.
+func resolvePersonalityBulkTargets(baseCtx context.Context, c *client.Client, projectID string, refs []string, requestID uint64) tea.Cmd {
+	return func() tea.Msg {
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
+		defer cancel()
+		personalities, err := c.ListPersonalities(ctx, projectID)
+		if err != nil {
+			return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: err}
+		}
+		resolved := make([]client.Personality, 0, len(refs))
+		seenIDs := make(map[string]struct{}, len(refs))
+		for _, ref := range refs {
+			personality, err := matchRefWithDisplay(personalities, ref,
+				func(p client.Personality) string { return p.Key },
+				func(p client.Personality) string { return p.Name },
+				sanitizeAutomationDetailText)
+			if err != nil {
+				return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: err}
+			}
+			if err := personalityBulkTargetError(personality); err != nil {
+				return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: err}
+			}
+			id := personalityBulkCanonicalID(personality)
+			if _, duplicate := seenIDs[id]; duplicate {
+				return personalityBulkTargetMsg{
+					requestID: requestID,
+					projectID: projectID,
+					err:       fmt.Errorf("personality %q was selected more than once", sanitizeAutomationDetailText(ref)),
+				}
+			}
+			seenIDs[id] = struct{}{}
+			resolved = append(resolved, personality)
+		}
+		if len(resolved) == 0 {
+			return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: fmt.Errorf("select at least one personality")}
+		}
+		return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, personalities: resolved}
+	}
+}
+
+func personalityBulkDeleteResult(ctx context.Context, c *client.Client, projectID string, personalities []client.Personality) (string, error) {
+	ids := make([]string, 0, len(personalities))
+	deletedIdentifiers := make(map[string]struct{}, len(personalities)*2)
+	for _, personality := range personalities {
+		id := personalityBulkCanonicalID(personality)
+		ids = append(ids, id)
+		deletedIdentifiers[id] = struct{}{}
+		if key := strings.TrimSpace(personality.Key); key != "" {
+			deletedIdentifiers[key] = struct{}{}
+		}
+	}
+	count, err := c.DeleteCustomPersonalitiesBulk(ctx, projectID, ids)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalJSON(struct {
+			Deleted int `json:"deleted"`
+		}{Deleted: count})
+	}
+	status := fmt.Sprintf("deleted %d personalities", count)
+	personalitiesAfterDelete, refreshErr := c.ListPersonalities(ctx, projectID)
+	if refreshErr != nil {
+		if client.IsAuthRequired(refreshErr) {
+			return status + "\n" + fmt.Sprintf("personality catalog refresh unavailable (authentication): %s", safeConnectionDiagnosticText(refreshErr.Error())), refreshAuthError{cause: refreshErr}
+		}
+		return status, nil
+	}
+	remaining := make([]client.Personality, 0, len(personalitiesAfterDelete))
+	for _, personality := range personalitiesAfterDelete {
+		if _, deleted := deletedIdentifiers[personalityBulkCanonicalID(personality)]; deleted {
+			continue
+		}
+		if _, deleted := deletedIdentifiers[strings.TrimSpace(personality.Key)]; deleted {
+			continue
+		}
+		remaining = append(remaining, personality)
+	}
+	return status + "\n\n" + renderPersonalities(remaining, ""), nil
+}
+
 func personalitySelector(m Model, usage, command, action string, prefill bool) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
 	prefillSuffix := ""
@@ -6506,7 +6669,7 @@ func personalityDeleteCommand(c *client.Client, projectID string, personality cl
 }
 
 func personalityCommand() command {
-	actions := []string{"list", "show", "add", "edit", "set", "delete"}
+	actions := []string{"list", "show", "add", "edit", "set", "delete", "delete-bulk"}
 	return command{
 		name:          "personality",
 		args:          "[key|name]",
@@ -6522,6 +6685,7 @@ func personalityCommand() command {
 			"personality edit <key|name> | <name> | <description> | <system prompt>",
 			"personality set <key|name>                  activate a personality",
 			"personality delete <key|name>               delete a custom or reset an override",
+			"personality delete-bulk <key|name>...       delete inactive non-preset custom entries",
 			"omit <key|name> on show/edit/set/delete → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
@@ -6530,6 +6694,7 @@ func personalityCommand() command {
 			{action: "edit", args: "<key|name> | <name> | <description> | <system prompt>"},
 			{action: "set", args: "<key|name>"},
 			{action: "delete", args: "<key|name>"},
+			{action: "delete-bulk", args: "<key|name>..."},
 		},
 		examples: []string{
 			`personality list`,
@@ -6538,6 +6703,7 @@ func personalityCommand() command {
 			`personality edit release_coach | Release Coach | pragmatic release guidance | Keep advice practical, focused, and safe for production releases.`,
 			`personality set release_coach`,
 			`personality delete release_coach`,
+			`personality delete-bulk old_one "Old Two"`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
@@ -6546,7 +6712,7 @@ func personalityCommand() command {
 			}
 			action, rest := splitAction(actions, args)
 			if action == "" && len(rest) > 0 {
-				return m, errCmd(fmt.Sprintf("unknown personality action %q — use /personality list|show|add|edit|set|delete", rest[0]))
+				return m, errCmd(fmt.Sprintf("unknown personality action %q — use /personality list|show|add|edit|set|delete|delete-bulk", rest[0]))
 			}
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
@@ -6641,6 +6807,18 @@ func personalityCommand() command {
 					}
 					return personalitySetResult(ctx, c, pid, personality)
 				})
+			case "delete-bulk":
+				if len(rest) == 0 {
+					return m, errCmd(commandUsage("personality", "delete-bulk"))
+				}
+				m.invalidatePersonalityBulkLookup()
+				baseCtx := m.cliContext
+				if baseCtx == nil {
+					baseCtx = context.Background()
+				}
+				lookupCtx, cancel := context.WithCancel(baseCtx)
+				m.personalityBulkLookupCancel = cancel
+				return m, resolvePersonalityBulkTargets(lookupCtx, c, pid, rest, m.personalityBulkLookupRequestID)
 			case "delete":
 				if ref == "" {
 					return personalitySelector(m, commandUsage("personality", "delete"), "personality delete", "delete", false)
@@ -6878,20 +7056,9 @@ func automationsCommand() command {
 					return selectorOr(m, commandUsage("automations", "edit"),
 						selectorFor("Automations", "automations edit", automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
-								automations, err := c.ListAutomations(ctx, pid)
-								if err != nil {
-									return nil, err
-								}
-								items := make([]selectorItem, 0, len(automations))
-								for _, automation := range automations {
-									automation := automation
-									item := selectorItem{ref: automation.ID, label: firstNonEmpty(automation.Name, shortID(automation.ID)), detail: automation.State}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										return beginAutomationInteractiveEdit(m, c, pid, automation)
-									}
-									items = append(items, item)
-								}
-								return items, nil
+								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
+									return beginAutomationInteractiveEdit(m, c, pid, automation)
+								})
 							}))
 				}
 				if !cliMode && !automationEditArgsContainOption(rest) {
@@ -6942,28 +7109,13 @@ func automationsCommand() command {
 						selectorFor("Automations", "automations "+action,
 							automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
-								automations, err := c.ListAutomations(ctx, pid)
-								if err != nil {
-									return nil, err
-								}
-								items := make([]selectorItem, 0, len(automations))
-								for _, a := range automations {
-									a := a
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Name, shortID(a.ID)),
-										detail: a.State,
-									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										cmd := run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
-											return loadAutomationDetail(ctx, c, pid, a)
-										})
-										m.busy = true
-										return m, cmd
-									}
-									items = append(items, item)
-								}
-								return items, nil
+								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
+									cmd := run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
+										return loadAutomationDetail(ctx, c, pid, automation)
+									})
+									m.busy = true
+									return m, cmd
+								})
 							}))
 				}
 				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -6979,34 +7131,19 @@ func automationsCommand() command {
 						selectorFor("Automations", "automations "+action,
 							automationEmptyStateHint, false,
 							func(ctx context.Context) ([]selectorItem, error) {
-								automations, err := c.ListAutomations(ctx, pid)
-								if err != nil {
-									return nil, err
-								}
-								items := make([]selectorItem, 0, len(automations))
-								for _, a := range automations {
-									a := a
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Name, shortID(a.ID)),
-										detail: a.State,
+								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
+									cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+										return executeResolvedAction(ctx, automation)
+									})
+									if action == "delete" {
+										return confirmOr(m,
+											fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", automation.ID),
+											fmt.Sprintf("use --force to confirm deletion of automation %q", automation.ID),
+											cmd)
 									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
-											return executeResolvedAction(ctx, a)
-										})
-										if action == "delete" {
-											return confirmOr(m,
-												fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", a.ID),
-												fmt.Sprintf("use --force to confirm deletion of automation %q", a.ID),
-												cmd)
-										}
-										m.busy = true
-										return m, cmd
-									}
-									items = append(items, item)
-								}
-								return items, nil
+									m.busy = true
+									return m, cmd
+								})
 							}))
 				}
 				cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -7026,6 +7163,30 @@ func automationsCommand() command {
 			}
 		},
 	}
+}
+
+// automationSelectorItems loads the selected project's automation catalog and
+// builds the shared selector rows. Callers provide only the action-specific
+// behavior for a selected automation.
+func automationSelectorItems(ctx context.Context, c *client.Client, projectID string, dispatch func(Model, client.Automation) (Model, tea.Cmd)) ([]selectorItem, error) {
+	automations, err := c.ListAutomations(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]selectorItem, 0, len(automations))
+	for _, automation := range automations {
+		automation := automation
+		item := selectorItem{
+			ref:    automation.ID,
+			label:  firstNonEmpty(automation.Name, shortID(automation.ID)),
+			detail: automation.State,
+		}
+		item.dispatch = func(m Model) (Model, tea.Cmd) {
+			return dispatch(m, automation)
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 // resolveAutomationRef fetches the selected project's catalog exactly once and
