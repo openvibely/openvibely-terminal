@@ -538,7 +538,7 @@ func TestFrequentAnalyticsPerformanceEvidence(t *testing.T) {
 
 	boundedP50, boundedP95 := frequentAnalyticsPercentiles(boundedDurations)
 	fullP50, fullP95 := frequentAnalyticsPercentiles(fullDurations)
-	t.Logf("frequent_analytics_perf fixture=%d limit=%d runs=%d bounded_response_bytes=%d full_response_bytes=%d bounded_p50=%s bounded_p95=%s full_p50=%s full_p95=%s bounded_decoded_rows=%d full_decoded_rows=%d bounded_allocated_bytes_per_op=%.0f full_allocated_bytes_per_op=%.0f bounded_allocs_per_op=%.1f full_allocs_per_op=%.1f bounded_mallocs_per_op=%.1f full_mallocs_per_op=%.1f", fixtureSize, maxFrequentRows, runs, len(boundedBody), len(fullBody), boundedP50, boundedP95, fullP50, fullP95, len(bounded), len(history), boundedAllocatedBytes, fullAllocatedBytes, boundedAllocs, fullAllocs, boundedMallocs, fullMallocs)
+	t.Logf("frequent_analytics_perf fixture=%d limit=%d runs=%d bounded_response_bytes=%d full_response_bytes=%d bounded_p50=%s bounded_p95=%s full_p50=%s full_p95=%s bounded_decoded_rows=%d full_decoded_rows=%d bounded_allocated_bytes_per_op=%.0f full_allocated_bytes_per_op=%.0f bounded_allocs_per_op=%.1f full_allocs_per_op=%.1f bounded_mallocs_per_op=%.1f full_mallocs_per_op=%.1f bounded_durations=%v full_durations=%v", fixtureSize, maxFrequentRows, runs, len(boundedBody), len(fullBody), boundedP50, boundedP95, fullP50, fullP95, len(bounded), len(history), boundedAllocatedBytes, fullAllocatedBytes, boundedAllocs, fullAllocs, boundedMallocs, fullMallocs, boundedDurations, fullDurations)
 
 	if len(boundedBody) >= len(fullBody) || len(bounded) > maxFrequentRows {
 		t.Fatalf("bounded response was not bounded: bytes=%d/%d rows=%d", len(boundedBody), len(fullBody), len(bounded))
