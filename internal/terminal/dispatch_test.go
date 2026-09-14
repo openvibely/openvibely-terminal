@@ -12043,6 +12043,9 @@ func dispatchProjectReviewModel(t *testing.T) (Model, *recorder) {
 
 		w.Header().Set("Content-Type", "text/html")
 		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForProjectTest(projectReviewBoardHTML(), "p2")))
 		case "/tasks":
 			if got := r.URL.Query().Get("project_id"); got != "p2" {
 				t.Errorf("task board project_id = %q, want p2", got)
