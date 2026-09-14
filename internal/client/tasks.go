@@ -1188,15 +1188,25 @@ func (c *Client) SteerTaskThreadQueuedInputForProject(ctx context.Context, taskI
 	if err != nil {
 		return nil, err
 	}
+	var steeringRows int
 	for _, node := range findAll(doc, func(n *html.Node) bool {
 		return attr(n, "data-input-mode") == "steering" && attr(n, "data-thread-input-id") != ""
 	}) {
-		if rowID := strings.TrimSpace(attr(node, "data-thread-input-id")); rowID != input.ID {
+		steeringRows++
+		rowID := strings.TrimSpace(attr(node, "data-thread-input-id"))
+		if rowID != input.ID {
 			return nil, fmt.Errorf("queued input %q steering response returned foreign input %q", input.ID, rowID)
 		}
-		if rowTask := strings.TrimSpace(attr(node, "data-task-id")); rowTask != "" && rowTask != taskID {
+		rowTask := strings.TrimSpace(attr(node, "data-task-id"))
+		if rowTask == "" {
+			return nil, fmt.Errorf("queued input %q steering response is missing task identity", input.ID)
+		}
+		if rowTask != taskID {
 			return nil, fmt.Errorf("queued input %q steering response belongs to another task", input.ID)
 		}
+	}
+	if steeringRows != 1 {
+		return nil, fmt.Errorf("queued input %q steering response did not confirm exactly one pending steering row", input.ID)
 	}
 	return &TaskThreadSteerAccepted{PendingInputID: input.ID}, nil
 }

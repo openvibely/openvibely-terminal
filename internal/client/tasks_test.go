@@ -1443,6 +1443,43 @@ func TestCancelTaskThreadInputForProjectValidatesBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestSteerTaskThreadQueuedInputRejectsUnconfirmedResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		response string
+		wantErr  string
+	}{
+		{name: "empty", wantErr: "exactly one"},
+		{name: "missing task identity", response: `<div data-thread-input-id="q1" data-input-mode="steering"></div>`, wantErr: "missing task identity"},
+		{name: "foreign input", response: `<div data-thread-input-id="q2" data-task-id="task-1" data-input-mode="steering"></div>`, wantErr: "foreign input"},
+		{name: "foreign task", response: `<div data-thread-input-id="q1" data-task-id="task-2" data-input-mode="steering"></div>`, wantErr: "another task"},
+		{name: "duplicate", response: `<div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="steering"></div><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="steering"></div>`, wantErr: "exactly one"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts int
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/tasks/task-1/thread/pending-inputs":
+					_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
+				case "/tasks/task-1/thread":
+					_, _ = fmt.Fprint(w, `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`)
+				case "/tasks/task-1/thread/queued/q1/steer":
+					posts++
+					_, _ = fmt.Fprint(w, tc.response)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+			if _, err := c.SteerTaskThreadQueuedInputForProject(context.Background(), "task-1", "project-2", "q1"); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tc.wantErr)
+			}
+			if posts != 1 {
+				t.Fatalf("steer POST count = %d, want 1", posts)
+			}
+		})
+	}
+}
+
 func TestSteerTaskThreadQueuedInputForProjectGuardsActiveTurnAndScope(t *testing.T) {
 	var posts int
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
