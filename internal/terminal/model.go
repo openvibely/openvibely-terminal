@@ -748,16 +748,20 @@ func (m *Model) stopPersonalityBulkLookup() {
 	}
 }
 
+func (m *Model) cancelWebhookBulkLookup() {
+	if m.webhookBulkLookupCancel != nil {
+		m.webhookBulkLookupCancel()
+		m.webhookBulkLookupCancel = nil
+	}
+	m.webhookBulkLookupID = 0
+}
+
 // setActiveProject installs the selected project and invalidates all work tied
 // to the previous project before any replacement stream or command is started.
 func (m *Model) setActiveProject(project client.Project) bool {
 	changed := m.selectedID != project.ID
 	if changed {
-		if m.webhookBulkLookupCancel != nil {
-			m.webhookBulkLookupCancel()
-			m.webhookBulkLookupCancel = nil
-		}
-		m.webhookBulkLookupID = 0
+		m.cancelWebhookBulkLookup()
 		// Preserve accepted bytes before project invalidation makes a queued
 		// cadence render stale and resets the old project's stream state.
 		m.flushChatStreamOutput()
@@ -1414,11 +1418,7 @@ func (m *Model) Cleanup() {
 	m.invalidatePersonalityBulkLookup()
 	m.invalidateWorkersLive()
 	m.invalidateChatStream()
-	if m.webhookBulkLookupCancel != nil {
-		m.webhookBulkLookupCancel()
-		m.webhookBulkLookupCancel = nil
-	}
-	m.webhookBulkLookupID = 0
+	m.cancelWebhookBulkLookup()
 	if m.sseCancel != nil {
 		m.sseCancel()
 	}
@@ -2480,6 +2480,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	if m.loginActive {
 		return m, nil
 	}
+	m.cancelWebhookBulkLookup()
 	// Preserve accepted bytes before the login/session transition invalidates
 	// the queued cadence render. Unaccepted sends retain the clearing behavior
 	// below because they cannot be correlated after the session epoch changes.
@@ -2839,6 +2840,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		}
 	}
 
+	m.cancelWebhookBulkLookup()
 	m.input.SetValue("")
 	m.menu = nil
 	commandInput := isSlashCommandInput(text)
@@ -3432,11 +3434,7 @@ func (m *Model) markAuthRequiredQuiet() {
 }
 
 func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
-	if m.webhookBulkLookupCancel != nil {
-		m.webhookBulkLookupCancel()
-		m.webhookBulkLookupCancel = nil
-	}
-	m.webhookBulkLookupID = 0
+	m.cancelWebhookBulkLookup()
 	// Preserve any accepted stream bytes before auth invalidation advances the
 	// stream generation and makes its queued cadence render stale.
 	m.flushChatStreamOutput()

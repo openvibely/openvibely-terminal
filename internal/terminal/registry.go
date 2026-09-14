@@ -6014,9 +6014,7 @@ func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string
 // reference or picker lookup. The request ID lets the model discard a result
 // after Esc even if the backend ignores context cancellation.
 func beginWebhookBulkLookup(m Model) (Model, context.Context, context.CancelFunc, uint64) {
-	if m.webhookBulkLookupCancel != nil {
-		m.webhookBulkLookupCancel()
-	}
+	m.cancelWebhookBulkLookup()
 	ctx, cancel := m.commandContext(cmdTimeout)
 	lookupID := nextProjectRequestID()
 	m.webhookBulkLookupCancel = cancel
