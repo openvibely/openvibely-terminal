@@ -543,7 +543,7 @@ steering row in the open task thread when the live stream is connected, and the
 CLI acknowledgement includes `status`, `task_id`, `expected_turn_id`, and the
 backend's `pending_input_id` when returned with `--json`.
 
-### Pending task-thread inputs
+### Pending Task-Thread Inputs And Queued Steering
 
 Use `tasks inputs` to inspect the selected project's pending task-thread
 inputs. The output distinguishes `queued follow-up` from `steering`, and shows
@@ -581,11 +581,14 @@ openvibely-terminal -project demo --json tasks inputs steer Refactor q1
 ```
 
 Missing, stale, already-applied, ambiguous, and foreign-task/project input
-references fail before mutation. The backend also rechecks the active turn
-atomically, so a race cannot redirect a queued input onto a different response.
-Cancellation posts only to the input-cancel route and never cancels the active
-task execution. Mutation output reports the canonical input ID and resulting
-state; `--json` emits stable fields and `[]` for an empty inspection.
+references fail before mutation. Cancellation reports success only when the
+backend confirms that the pending row was cancelled; already-applied or
+otherwise no-longer-pending rows return an error. The backend also rechecks the
+active turn atomically, so a race cannot redirect a queued input onto a
+different response. Cancellation posts only to the input-cancel route and never
+cancels the active task execution. Mutation output reports the canonical input
+ID and resulting state; `--json` emits stable fields and `[]` for an empty
+inspection.
 
 ### Task attachments
 

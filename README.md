@@ -196,10 +196,15 @@ openvibely-terminal -project demo --force tasks inputs cancel <task> <input-id>
 
 Input listings distinguish queued follow-ups from pending steering and include a
 canonical input ID, task/project identity, safe text preview, and attachment
-presence. `--json` emits stable fields and `[]` when empty. Cancellation never
-cancels the active task execution; one-shot cancellation requires `--force`,
-while queued-to-steering conversion rejects missing, stale, ambiguous,
-foreign-project, and no-active-turn references without mutation.
+presence. `pending` and `pending-inputs` are aliases for `inputs`; `cancel-input`
+and `steer-queued` are shorthand mutation forms. `--json` emits stable fields and
+`[]` when empty. Cancellation never cancels the active task execution; TUI
+cancellation requires typing `yes` (or `Esc` to cancel), one-shot cancellation
+requires `--force`, and the client reports an error unless the backend confirms
+that the cancellation mutation was applied. Queued-to-steering conversion
+requires the matching active turn and a confirmed steering response, rejecting
+missing, stale, ambiguous, foreign-project, and no-active-turn references without
+mutation.
 
 ```text
 /tasks steer <task> | <message>
