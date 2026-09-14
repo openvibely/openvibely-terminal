@@ -128,6 +128,11 @@ func TestTasksAttachmentsPartialUploadIsVisibleWithoutInflatedSuccess(t *testing
 	}
 
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
+			return
+		}
 		w.Header().Set("Content-Type", "text/html")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
@@ -165,6 +170,11 @@ func TestTasksAttachmentsUploadErrorIsVisibleWithoutSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
+			return
+		}
 		switch r.URL.Path {
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
@@ -372,6 +382,9 @@ func TestTasksAttachmentsConfirmedDeleteErrorIsVisibleWithoutSuccess(t *testing.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.recordURL(r.Method, r.URL.RequestURI())
 		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
@@ -432,6 +445,9 @@ func TestCLITaskAttachmentsPartialUploadReturnsFailureWithoutInflatedSuccess(t *
 		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
@@ -477,6 +493,9 @@ func TestCLITaskAttachmentsUploadErrorReturnsFailureWithoutSuccess(t *testing.T)
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(cliProjects))
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(attachmentTaskBoardHTML))

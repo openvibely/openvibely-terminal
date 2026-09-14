@@ -91,7 +91,154 @@ func TestListTasksScrapesBoard(t *testing.T) {
 	}
 }
 
-// The kebab menu ("Run"/"Cancel"/"Edit") is rendered before the title in the
+func TestListTaskReferencesDecodesCompactProjectCatalog(t *testing.T) {
+	const response = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Fix login bug","prompt":"Investigate the redirect","category":"active","status":"running","display_order":3,"badges":["Goal","Sonnet"]}]}`
+	var boardRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tasks" {
+			boardRequests++
+			t.Fatal("compact task lookup requested the full board")
+		}
+		if r.URL.Path != "/api/tasks/reference-catalog" {
+			t.Fatalf("path = %s, want /api/tasks/reference-catalog", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q, want p1", got)
+		}
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("Accept = %q, want application/json", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, response)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := c.ListTaskReferences(context.Background(), " p1 ")
+	if err != nil {
+		t.Fatalf("ListTaskReferences: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("tasks = %#v, want one task", tasks)
+	}
+	want := Task{ID: "t-1", ProjectID: "p1", Title: "Fix login bug", Prompt: "Investigate the redirect", Category: "active", Status: "running", DisplayOrder: 3, Badges: []string{"Goal", "Sonnet"}}
+	if !reflect.DeepEqual(tasks[0], want) {
+		t.Fatalf("task = %#v, want %#v", tasks[0], want)
+	}
+	if boardRequests != 0 {
+		t.Fatalf("board requests = %d, want 0", boardRequests)
+	}
+}
+
+func TestListTaskReferencesAcceptsArrayAndPreservesEmptyShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "array", body: `[{"id":"t-1","project_id":"p1","title":"One"}]`, want: 1},
+		{name: "empty envelope", body: `{"tasks":[]}`, want: 0},
+		{name: "empty array", body: `[]`, want: 0},
+		{name: "null", body: `null`, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/tasks/reference-catalog" {
+					t.Fatalf("path = %s", r.URL.Path)
+				}
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks, err := c.ListTaskReferences(context.Background(), "p1")
+			if err != nil {
+				t.Fatalf("ListTaskReferences: %v", err)
+			}
+			if len(tasks) != tc.want {
+				t.Fatalf("len(tasks) = %d, want %d", len(tasks), tc.want)
+			}
+			if tasks == nil {
+				t.Fatal("tasks is nil, want a non-nil empty collection")
+			}
+		})
+	}
+}
+
+func TestListTaskReferencesRejectsMalformedAndForeignResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "malformed JSON", body: `{"tasks":[`},
+		{name: "missing tasks", body: `{}`},
+		{name: "missing project identity", body: `{"tasks":[{"id":"t-1","title":"One"}]}`},
+		{name: "foreign project", body: `{"tasks":[{"id":"t-1","project_id":"p2","title":"Secret"}]}`},
+		{name: "missing task identity", body: `{"tasks":[{"project_id":"p1","title":"Unnamed"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tasks, err := c.ListTaskReferences(context.Background(), "p1"); err == nil || tasks != nil {
+				t.Fatalf("result = %#v, error = %v; want an error and no tasks", tasks, err)
+			}
+		})
+	}
+}
+
+func TestListTaskReferencesPreservesAuthAndCancellationDiagnostics(t *testing.T) {
+	t.Run("auth", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", "/login?next=/tasks")
+			w.WriteHeader(http.StatusFound)
+		}))
+		defer srv.Close()
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.ListTaskReferences(context.Background(), "p1"); err == nil || !IsAuthRequired(err) {
+			t.Fatalf("error = %v, want authentication-required error", err)
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		started := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(started)
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			_, err := c.ListTaskReferences(ctx, "p1")
+			result <- err
+		}()
+		<-started
+		cancel()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+	})
+}
+
 // DOM, so taking the card's first line of text yields a menu label instead of
 // the task title. Titles must come from the card's own task link.
 func TestListTasksTitleIsNotKebabMenuText(t *testing.T) {

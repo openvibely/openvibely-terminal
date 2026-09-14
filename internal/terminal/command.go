@@ -317,6 +317,9 @@ func (m Model) runCommandFields(fields []string) (tea.Model, tea.Cmd) {
 	}
 	m.busy = true
 	newModel, cmd := c.run(m, fields[1:])
+	if m.reviewPrefillTask != nil && m.reviewPrefillInputPrefix == "" {
+		newModel = newModel.clearReviewPrefill()
+	}
 	return newModel, withMessageGeneration(cmd, sessionGenerationOf(newModel), projectGenerationOf(newModel))
 }
 

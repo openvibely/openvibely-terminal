@@ -234,9 +234,8 @@ type Model struct {
 	selectorPrefill          bool   // prime the input instead of dispatching
 	selectorPrefillSuffix    string // appended after the chosen ref when priming input
 
-	// reviewPrefillTask carries the task record loaded by the review-add
-	// selector until the user submits its completed command. It avoids a
-	// second task-board lookup while remaining scoped to the exact generated
+	// task selector until the user submits its completed command. It avoids a
+	// second task-reference lookup while remaining scoped to the exact generated
 	// reference and project.
 	reviewPrefillTask        *client.Task
 	reviewPrefillTaskRef     string

@@ -331,7 +331,7 @@ func (m Model) runTaskSteer(c *client.Client, projectID, target, message string)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
 		defer cancel()
-		task, err := resolveTask(ctx, c, projectID, target)
+		task, err := resolveTaskForModel(m, ctx, c, projectID, target)
 		if err != nil {
 			result.err = safeTaskSteerError(err)
 			return result
@@ -380,7 +380,7 @@ func taskSelectorWithSuffix(m Model, usage, command, prefillSuffix string) (Mode
 	return selectorOr(m, usage, selectorForWithSuffix("Tasks", command,
 		taskEmptyStateHint, prefillSuffix,
 		func(ctx context.Context) ([]selectorItem, error) {
-			tasks, err := c.ListTasks(ctx, pid)
+			tasks, err := c.ListTaskReferences(ctx, pid)
 			if err != nil {
 				return nil, err
 			}
@@ -514,7 +514,7 @@ func tasksCommand() command {
 				return m, func() tea.Msg {
 					ctx, cancel := m.commandContext(cmdTimeout)
 					defer cancel()
-					t, err := resolveTask(ctx, c, pid, ref)
+					t, err := resolveTaskForModel(m, ctx, c, pid, ref)
 					if err != nil {
 						return threadOpenedMsg{requestID: requestID, projectID: pid, err: err}
 					}
@@ -573,7 +573,7 @@ func tasksCommand() command {
 						return renderTaskDetail(d.Task, d, tab), nil
 					}
 
-					t, err := resolveTask(ctx, c, pid, showRef)
+					t, err := resolveTaskForModel(m, ctx, c, pid, showRef)
 					if err != nil {
 						return "", err
 					}
@@ -616,7 +616,7 @@ func tasksCommand() command {
 						return taskSelector(m, "usage: /tasks reviews <task>", "tasks reviews", false)
 					}
 					return m, m.run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
-						t, err := resolveTask(ctx, c, pid, reviewRef)
+						t, err := resolveTaskForModel(m, ctx, c, pid, reviewRef)
 						if err != nil {
 							return "", err
 						}
@@ -698,7 +698,7 @@ func tasksCommand() command {
 					return m, errCmd(commandUsage("tasks", "edit"))
 				}
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, ref)
+					t, err := resolveTaskForModel(m, ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
@@ -727,7 +727,7 @@ func tasksCommand() command {
 				}
 				target := strings.Join(rest[:len(rest)-1], " ")
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, target)
+					t, err := resolveTaskForModel(m, ctx, c, pid, target)
 					if err != nil {
 						return "", err
 					}
@@ -744,7 +744,7 @@ func tasksCommand() command {
 					return taskSelector(m, "usage: /tasks "+action+" <task>", "tasks "+action, false)
 				}
 				cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, ref)
+					t, err := resolveTaskForModel(m, ctx, c, pid, ref)
 					if err != nil {
 						return "", err
 					}
@@ -799,7 +799,7 @@ func tasksCommand() command {
 				}
 				target := strings.Join(rest[:len(rest)-1], " ")
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, target)
+					t, err := resolveTaskForModel(m, ctx, c, pid, target)
 					if err != nil {
 						return "", err
 					}
@@ -822,7 +822,7 @@ func tasksCommand() command {
 						return m, errCmd(commandUsage("tasks", "goal") + "\nhint: separate the task reference and objective with a | character")
 					}
 					return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-						t, err := resolveTask(ctx, c, pid, target)
+						t, err := resolveTaskForModel(m, ctx, c, pid, target)
 						if err != nil {
 							return "", err
 						}
@@ -851,7 +851,7 @@ func tasksCommand() command {
 					return taskSelector(m, commandUsage("tasks", "goal "+goalAction), "tasks goal "+goalAction, false)
 				}
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, target)
+					t, err := resolveTaskForModel(m, ctx, c, pid, target)
 					if err != nil {
 						return "", err
 					}
@@ -876,7 +876,7 @@ func tasksCommand() command {
 					return m, errCmd("usage: /tasks reply <task> | <message>\nhint: separate the task reference and message with a | character")
 				}
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, target)
+					t, err := resolveTaskForModel(m, ctx, c, pid, target)
 					if err != nil {
 						return "", err
 					}
@@ -1110,13 +1110,31 @@ func isCanonicalFullID(ref string) bool {
 }
 
 func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {
-	tasks, err := c.ListTasks(ctx, projectID)
+	tasks, err := c.ListTaskReferences(ctx, projectID)
 	if err != nil {
 		return client.Task{}, err
 	}
 	return matchRef(tasks, ref,
 		func(t client.Task) string { return t.ID },
 		func(t client.Task) string { return t.Title })
+}
+
+func taskReferencesForModel(m Model, ctx context.Context, c *client.Client, projectID, taskRef string) ([]client.Task, error) {
+	if m.reviewPrefillTask != nil &&
+		m.reviewPrefillProjectID == projectID &&
+		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTask.ID), strings.TrimSpace(taskRef)) {
+		return []client.Task{*m.reviewPrefillTask}, nil
+	}
+	return c.ListTaskReferences(ctx, projectID)
+}
+
+func resolveTaskForModel(m Model, ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {
+	if m.reviewPrefillTask != nil &&
+		m.reviewPrefillProjectID == projectID &&
+		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTask.ID), strings.TrimSpace(ref)) {
+		return *m.reviewPrefillTask, nil
+	}
+	return resolveTask(ctx, c, projectID, ref)
 }
 
 func resolvePersonality(ctx context.Context, c *client.Client, projectID, ref string) (client.Personality, error) {
@@ -1135,7 +1153,7 @@ func (m Model) reviewTaskCandidates(ctx context.Context, c *client.Client, proje
 		strings.EqualFold(strings.TrimSpace(m.reviewPrefillTask.ID), strings.TrimSpace(m.reviewPrefillTaskRef)) {
 		return []client.Task{*m.reviewPrefillTask}, nil
 	}
-	return c.ListTasks(ctx, projectID)
+	return c.ListTaskReferences(ctx, projectID)
 }
 
 func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
@@ -1170,7 +1188,7 @@ func taskAttachmentsAddCommand(m Model, c *client.Client, projectID string, args
 	}
 
 	return m, m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-		tasks, err := c.ListTasks(ctx, projectID)
+		tasks, err := taskReferencesForModel(m, ctx, c, projectID, args[0])
 		if err != nil {
 			return "", err
 		}
@@ -1197,11 +1215,11 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 		return taskAttachmentSelector(m, c, projectID, args[0], usage)
 	}
 	if !cliMode {
-		return m, resolveTaskAttachmentTarget(c, projectID, args)
+		return m, resolveTaskAttachmentTarget(m, c, projectID, args)
 	}
 
 	cmd := m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-		task, attachment, err := lookupTaskAttachmentTarget(ctx, c, projectID, args)
+		task, attachment, err := lookupTaskAttachmentTargetForModel(m, ctx, c, projectID, args)
 		if err != nil {
 			return "", err
 		}
@@ -1213,9 +1231,13 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 }
 
 func lookupTaskAttachmentTarget(ctx context.Context, c *client.Client, projectID string, args []string) (client.Task, client.Attachment, error) {
+	return lookupTaskAttachmentTargetForModel(Model{}, ctx, c, projectID, args)
+}
+
+func lookupTaskAttachmentTargetForModel(m Model, ctx context.Context, c *client.Client, projectID string, args []string) (client.Task, client.Attachment, error) {
 	var zeroTask client.Task
 	var zeroAttachment client.Attachment
-	tasks, err := c.ListTasks(ctx, projectID)
+	tasks, err := c.ListTaskReferences(ctx, projectID)
 	if err != nil {
 		return zeroTask, zeroAttachment, err
 	}
@@ -1237,11 +1259,11 @@ func lookupTaskAttachmentTarget(ctx context.Context, c *client.Client, projectID
 	return task, attachment, err
 }
 
-func resolveTaskAttachmentTarget(c *client.Client, projectID string, args []string) tea.Cmd {
+func resolveTaskAttachmentTarget(m Model, c *client.Client, projectID string, args []string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		task, attachment, err := lookupTaskAttachmentTarget(ctx, c, projectID, args)
+		task, attachment, err := lookupTaskAttachmentTargetForModel(m, ctx, c, projectID, args)
 		return attachmentDeleteTargetMsg{
 			projectID:  projectID,
 			task:       task,
@@ -1273,7 +1295,7 @@ func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, arg
 		return taskSelectorWithSuffix(m, listUsage, "tasks attachments list", " ")
 	}
 	return m, m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-		task, err := resolveTask(ctx, c, projectID, strings.Join(args, " "))
+		task, err := resolveTaskForModel(m, ctx, c, projectID, strings.Join(args, " "))
 		if err != nil {
 			return "", err
 		}
@@ -1295,7 +1317,7 @@ func taskAttachmentSelector(m Model, c *client.Client, projectID, taskRef, usage
 	command := "tasks attachments delete " + taskRef
 	return m, selectorFor("Attachments", command, attachmentEmptyStateHint, false,
 		func(ctx context.Context) ([]selectorItem, error) {
-			task, err := resolveTask(ctx, c, projectID, taskRef)
+			task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
 			if err != nil {
 				return nil, err
 			}
@@ -1370,7 +1392,7 @@ func lifecycleCommand(m Model, c *client.Client, projectID, action string, args 
 		ctx, cancel := m.commandContext(cmdTimeout)
 		defer cancel()
 
-		tasks, err := c.ListTasks(ctx, projectID)
+		tasks, err := taskReferencesForModel(m, ctx, c, projectID, args[0])
 		if err != nil {
 			return resultMsg{title: "Task Lifecycle", err: err}
 		}
@@ -1753,7 +1775,7 @@ func scheduleCommand() command {
 				when := rest[len(rest)-1]
 				target := strings.Join(rest[:len(rest)-1], " ")
 				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTask(ctx, c, pid, target)
+					t, err := resolveTaskForModel(m, ctx, c, pid, target)
 					if err != nil {
 						return "", err
 					}
