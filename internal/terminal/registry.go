@@ -6149,7 +6149,7 @@ func personalityBulkTargetError(personality client.Personality) error {
 
 // resolvePersonalityBulkTargets resolves the complete selection from one
 // project-scoped catalog before a confirmation or force gate is applied.
-func resolvePersonalityBulkTargets(baseCtx context.Context, c *client.Client, projectID string, refs []string) tea.Cmd {
+func resolvePersonalityBulkTargets(baseCtx context.Context, c *client.Client, projectID string, refs []string, requestID uint64) tea.Cmd {
 	return func() tea.Msg {
 		if baseCtx == nil {
 			baseCtx = context.Background()
@@ -6158,7 +6158,7 @@ func resolvePersonalityBulkTargets(baseCtx context.Context, c *client.Client, pr
 		defer cancel()
 		personalities, err := c.ListPersonalities(ctx, projectID)
 		if err != nil {
-			return personalityBulkTargetMsg{projectID: projectID, err: err}
+			return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: err}
 		}
 		resolved := make([]client.Personality, 0, len(refs))
 		seenIDs := make(map[string]struct{}, len(refs))
@@ -6168,14 +6168,15 @@ func resolvePersonalityBulkTargets(baseCtx context.Context, c *client.Client, pr
 				func(p client.Personality) string { return p.Name },
 				sanitizeAutomationDetailText)
 			if err != nil {
-				return personalityBulkTargetMsg{projectID: projectID, err: err}
+				return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: err}
 			}
 			if err := personalityBulkTargetError(personality); err != nil {
-				return personalityBulkTargetMsg{projectID: projectID, err: err}
+				return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: err}
 			}
 			id := personalityBulkCanonicalID(personality)
 			if _, duplicate := seenIDs[id]; duplicate {
 				return personalityBulkTargetMsg{
+					requestID: requestID,
 					projectID: projectID,
 					err:       fmt.Errorf("personality %q was selected more than once", sanitizeAutomationDetailText(ref)),
 				}
@@ -6184,9 +6185,9 @@ func resolvePersonalityBulkTargets(baseCtx context.Context, c *client.Client, pr
 			resolved = append(resolved, personality)
 		}
 		if len(resolved) == 0 {
-			return personalityBulkTargetMsg{projectID: projectID, err: fmt.Errorf("select at least one personality")}
+			return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, err: fmt.Errorf("select at least one personality")}
 		}
-		return personalityBulkTargetMsg{projectID: projectID, personalities: resolved}
+		return personalityBulkTargetMsg{requestID: requestID, projectID: projectID, personalities: resolved}
 	}
 }
 
@@ -6498,7 +6499,14 @@ func personalityCommand() command {
 				if len(rest) == 0 {
 					return m, errCmd(commandUsage("personality", "delete-bulk"))
 				}
-				return m, resolvePersonalityBulkTargets(m.cliContext, c, pid, rest)
+				m.invalidatePersonalityBulkLookup()
+				baseCtx := m.cliContext
+				if baseCtx == nil {
+					baseCtx = context.Background()
+				}
+				lookupCtx, cancel := context.WithCancel(baseCtx)
+				m.personalityBulkLookupCancel = cancel
+				return m, resolvePersonalityBulkTargets(lookupCtx, c, pid, rest, m.personalityBulkLookupRequestID)
 			case "delete":
 				if ref == "" {
 					return personalitySelector(m, commandUsage("personality", "delete"), "personality delete", "delete", false)

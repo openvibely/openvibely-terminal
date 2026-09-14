@@ -6014,6 +6014,104 @@ func TestPersonalitySingleDeleteStillResetsBuiltInOverride(t *testing.T) {
 	}
 }
 
+func TestPersonalityDeleteBulkLookupCancellationDoesNotPrompt(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	lookupStarted := make(chan struct{})
+	lookupCanceled := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var startOnce, cancelOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/personality" {
+			http.NotFound(w, r)
+			return
+		}
+		startOnce.Do(func() { close(lookupStarted) })
+		select {
+		case <-r.Context().Done():
+			cancelOnce.Do(func() { close(lookupCanceled) })
+		case <-releaseLookup:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m, lookupCmd := typeLine(t, m, "/personality delete-bulk old_one")
+	if lookupCmd == nil {
+		t.Fatal("bulk lookup did not return a command")
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- lookupCmd() }()
+	select {
+	case <-lookupStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk lookup did not start")
+	}
+	next, cancelCmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cancelCmd != nil || m.pendingConfirmation != nil || m.busy {
+		t.Fatalf("lookup cancellation state: cmd=%v pending=%v busy=%v", cancelCmd != nil, m.pendingConfirmation != nil, m.busy)
+	}
+	canceled := false
+	select {
+	case <-lookupCanceled:
+		canceled = true
+	case <-time.After(2 * time.Second):
+		close(releaseLookup)
+	}
+	msg := <-result
+	next, _ = m.Update(msg)
+	m = next.(Model)
+	if !canceled {
+		t.Error("Esc did not cancel the in-flight personality lookup")
+	}
+	if m.pendingConfirmation != nil {
+		t.Fatalf("canceled lookup opened confirmation: %q", m.pendingConfirmation.message)
+	}
+}
+
+func TestPersonalityDeleteBulkErrorOutputIsTerminalSafe(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	const hostile = "bulk rejected \x1b[31msecret\x1b[0m\nforged\x07"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodDelete && r.URL.Path == "/personality/custom/bulk":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": hostile})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, "/personality delete-bulk old_one")
+	out := transcript(m)
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "\x07") || strings.Contains(out, "secret\nforged") {
+		t.Fatalf("hostile bulk error was not terminal-safe: %q", out)
+	}
+	if !strings.Contains(out, "server error (400): bulk rejected secret forged") {
+		t.Fatalf("sanitized bulk error missing: %q", out)
+	}
+}
+
 func TestAlertsBulkActions(t *testing.T) {
 	m, rec := dispatchModel(t, nil)
 	m = runLine(t, m, "/alerts read-all")

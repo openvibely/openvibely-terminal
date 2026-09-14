@@ -237,6 +237,7 @@ type alertBulkTargetMsg struct {
 type personalityBulkTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
+	requestID         uint64
 	projectID         string
 	personalities     []client.Personality
 	err               error

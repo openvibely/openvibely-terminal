@@ -76,6 +76,12 @@ type Model struct {
 	// Interactive commands use their existing per-operation contexts.
 	cliContext context.Context
 
+	// personalityBulkLookupCancel owns the pre-confirmation catalog lookup. It
+	// is canceled when Esc, project changes, or shutdown invalidate the pending
+	// destructive operation.
+	personalityBulkLookupCancel    context.CancelFunc
+	personalityBulkLookupRequestID uint64
+
 	transcript viewport.Model
 	input      textinput.Model
 	spin       spinner.Model
@@ -617,6 +623,21 @@ func (m *Model) clearAutomationEdit() {
 	m.busy = false
 }
 
+func (m *Model) invalidatePersonalityBulkLookup() {
+	if m.personalityBulkLookupCancel != nil {
+		m.personalityBulkLookupCancel()
+		m.personalityBulkLookupCancel = nil
+	}
+	m.personalityBulkLookupRequestID++
+}
+
+func (m *Model) stopPersonalityBulkLookup() {
+	if m.personalityBulkLookupCancel != nil {
+		m.personalityBulkLookupCancel()
+		m.personalityBulkLookupCancel = nil
+	}
+}
+
 // setActiveProject installs the selected project and invalidates all work tied
 // to the previous project before any replacement stream or command is started.
 func (m *Model) setActiveProject(project client.Project) bool {
@@ -636,6 +657,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.pendingMsgThreadRequestID = 0
 		m.chatSubmissionPending = false
 		m.busy = false
+		m.invalidatePersonalityBulkLookup()
 		m.pendingConfirmation = nil
 		m.clearAutomationEdit()
 		if m.selectorActive {
@@ -1261,6 +1283,7 @@ func (m Model) scheduleReconnect(generation int) tea.Cmd {
 // Cleanup releases all model-owned background work; called on shutdown.
 func (m *Model) Cleanup() {
 	m.clearAutomationEdit()
+	m.invalidatePersonalityBulkLookup()
 	m.invalidateChatStream()
 	if m.sseCancel != nil {
 		m.sseCancel()
@@ -1631,7 +1654,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.handleTransportError(msg.err) {
 				return m, nil
 			}
-			m.append(entry{role: "error", text: msg.err.Error()})
+			m.append(entry{role: "error", text: safeConnectionDiagnosticText(msg.err.Error())})
 			return m, nil
 		}
 		body := msg.body
@@ -1777,9 +1800,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil
 		}
+		if msg.requestID != m.personalityBulkLookupRequestID {
+			return m, nil
+		}
 		if msg.projectID != "" && msg.projectID != m.selectedID {
 			return m, nil
 		}
+		m.stopPersonalityBulkLookup()
 		m.busy = false
 		if m.handleCompletedRequestError(msg.err) {
 			return m, nil
@@ -1789,7 +1816,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			projectID = m.selectedID
 		}
 		personalities := append([]client.Personality(nil), msg.personalities...)
-		cmd := run("Personalities", cmdTimeout, func(ctx context.Context) (string, error) {
+		cmd := m.run("Personalities", cmdTimeout, func(ctx context.Context) (string, error) {
 			return personalityBulkDeleteResult(ctx, m.client, projectID, personalities)
 		})
 		return confirmOr(m,
@@ -2433,6 +2460,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.pendingConfirmation != nil {
 			m.pendingConfirmation = nil
+			m.input.SetValue("")
+			m.append(entry{role: "system", text: "cancelled"})
+			return m, nil
+		}
+		if m.personalityBulkLookupCancel != nil {
+			m.invalidatePersonalityBulkLookup()
+			m.busy = false
 			m.input.SetValue("")
 			m.append(entry{role: "system", text: "cancelled"})
 			return m, nil
@@ -3223,7 +3257,7 @@ func (m *Model) handleCompletedRequestError(err error) bool {
 	if m.handleTransportError(err) {
 		return true
 	}
-	m.append(entry{role: "error", text: err.Error()})
+	m.append(entry{role: "error", text: safeConnectionDiagnosticText(err.Error())})
 	return true
 }
 

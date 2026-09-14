@@ -712,6 +712,106 @@ func TestCLIPersonalityBulkDeleteRejectsMixedSelectionBeforeMutationAndSwallowsR
 	})
 }
 
+func TestCLIPersonalityBulkDeleteCancellationDuringMutationDoesNotMutate(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	deleteStarted := make(chan struct{})
+	allowMutation := make(chan struct{})
+	var startOnce sync.Once
+	var mutated bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case "/personality/custom/bulk":
+			startOnce.Do(func() { close(deleteStarted) })
+			select {
+			case <-r.Context().Done():
+			case <-allowMutation:
+				mutated = true
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"deleted":1}`)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	defer close(allowMutation)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, io.Discard, "demo", []string{"personality", "delete-bulk", "old_one"}, true, false)
+	}()
+	select {
+	case <-deleteStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk DELETE did not start")
+	}
+	cancel()
+	select {
+	case err = <-result:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled CLI result = %v, want nil or context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled bulk delete did not return promptly")
+	}
+	if mutated {
+		t.Fatal("caller cancellation allowed bulk mutation to complete")
+	}
+}
+
+func TestCLIPersonalityBulkDeleteErrorOutputIsTerminalSafe(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	const hostile = "bulk rejected \x1b[31msecret\x1b[0m\nforged\x07"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case "/personality/custom/bulk":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": hostile})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one"}, true, false)
+	if err == nil {
+		t.Fatal("hostile bulk error unexpectedly succeeded")
+	}
+	text := err.Error()
+	if strings.Contains(text, "\x1b") || strings.Contains(text, "\x07") || strings.Contains(text, "secret\nforged") {
+		t.Fatalf("hostile bulk error escaped through CLI error: %q", text)
+	}
+	if !strings.Contains(text, "server error (400): bulk rejected secret forged") {
+		t.Fatalf("sanitized CLI bulk error missing: %q", text)
+	}
+}
+
 func TestCLIPersonalityAddLiteralDescriptionPrefixUsesExactTwoFieldPayload(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description=""
