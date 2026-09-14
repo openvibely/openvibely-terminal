@@ -179,9 +179,24 @@ Steer only an actively running task response with the guarded form below. The
 terminal first reads the selected project's thread to obtain its exact active
 turn ID, then sends that ID with the steering request. If the response is no
 longer active or the turn changed, the command fails without sending a normal
-follow-up; use `tasks reply` explicitly when a queued follow-up is intended.
-Pending-input inspection, cancellation, and queued-input steering are not yet
-part of the terminal command surface.
+follow-up. Use `tasks reply` explicitly when a queued follow-up is intended.
+Pending task-thread inputs can be inspected and managed without exposing backend
+controls or secrets:
+
+```text
+tasks inputs <task>
+tasks inputs cancel <task> <input-id>       # asks for yes in the TUI
+tasks inputs steer <task> <input-id>        # queued only; active turn required
+openvibely-terminal -project demo --json tasks inputs <task>
+openvibely-terminal -project demo --force tasks inputs cancel <task> <input-id>
+```
+
+Input listings distinguish queued follow-ups from pending steering and include a
+canonical input ID, task/project identity, safe text preview, and attachment
+presence. `--json` emits stable fields and `[]` when empty. Cancellation never
+cancels the active task execution; one-shot cancellation requires `--force`,
+while queued-to-steering conversion rejects missing, stale, ambiguous,
+foreign-project, and no-active-turn references without mutation.
 
 ```text
 /tasks steer <task> | <message>

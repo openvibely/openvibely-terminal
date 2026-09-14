@@ -343,7 +343,176 @@ func (m Model) runTaskSteer(c *client.Client, projectID, target, message string)
 	}
 }
 
-// --- tasks ---
+// taskThreadInputAcknowledgement is the stable machine-facing result for
+// cancelling or redirecting one canonical pending task-thread input.
+type taskThreadInputAcknowledgement struct {
+	Status      string `json:"status"`
+	InputID     string `json:"input_id"`
+	TaskID      string `json:"task_id"`
+	ProjectID   string `json:"project_id"`
+	InputMode   string `json:"input_mode"`
+	InputStatus string `json:"input_status"`
+}
+
+func cancelTaskThreadInput(ctx context.Context, c *client.Client, task client.Task, input client.TaskThreadPendingInput, projectID string) (string, error) {
+	mutation, err := c.CancelTaskThreadInputForProject(ctx, task.ID, projectID, input.ID)
+	if err != nil {
+		return "", safeTaskThreadInputError(err)
+	}
+	ack := taskThreadInputAcknowledgement{
+		Status:      "cancelled",
+		InputID:     mutation.ID,
+		TaskID:      mutation.TaskID,
+		ProjectID:   mutation.ProjectID,
+		InputMode:   mutation.InputMode,
+		InputStatus: mutation.InputStatus,
+	}
+	if jsonMode {
+		return marshalJSON(ack)
+	}
+	kind := "pending input"
+	if ack.InputMode == "queued" {
+		kind = "queued follow-up"
+	} else if ack.InputMode == "steering" {
+		kind = "pending steering"
+	}
+	return fmt.Sprintf("cancelled %s %s for task %s", kind, sanitizeAutomationDetailText(ack.InputID), sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))), nil
+}
+
+func steerQueuedTaskThreadInput(ctx context.Context, c *client.Client, task client.Task, input client.TaskThreadPendingInput, projectID string) (string, error) {
+	accepted, err := c.SteerTaskThreadQueuedInputForProject(ctx, task.ID, projectID, input.ID)
+	if err != nil {
+		return "", safeTaskThreadInputError(err)
+	}
+	inputID := input.ID
+	if accepted != nil && strings.TrimSpace(accepted.PendingInputID) != "" {
+		inputID = strings.TrimSpace(accepted.PendingInputID)
+	}
+	ack := taskThreadInputAcknowledgement{
+		Status:      "steered",
+		InputID:     inputID,
+		TaskID:      task.ID,
+		ProjectID:   projectID,
+		InputMode:   "steering",
+		InputStatus: "pending",
+	}
+	if jsonMode {
+		return marshalJSON(ack)
+	}
+	return fmt.Sprintf("queued follow-up %s is now pending steering for task %s", sanitizeAutomationDetailText(ack.InputID), sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))), nil
+}
+
+func safeTaskThreadInputError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s", safeConnectionDiagnosticText(err.Error()))
+}
+
+func (m Model) runTaskThreadInputMutation(c *client.Client, projectID, action string, task client.Task, input client.TaskThreadPendingInput) tea.Cmd {
+	baseCtx := m.cliContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	result := resultMsg{
+		title:                 "Tasks",
+		taskThreadInputResult: true,
+		inputProjectID:        m.selectedID,
+		inputThreadID:         m.threadID,
+		inputOpenRequestID:    m.threadOpenRequestID,
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
+		defer cancel()
+		var body string
+		var err error
+		switch action {
+		case "cancel":
+			body, err = cancelTaskThreadInput(ctx, c, task, input, projectID)
+		case "steer":
+			body, err = steerQueuedTaskThreadInput(ctx, c, task, input, projectID)
+		default:
+			err = fmt.Errorf("unsupported pending task-thread input action")
+		}
+		result.body, result.err = body, err
+		if err == nil {
+			result.refreshTaskID = task.ID
+			result.refreshProjectID = projectID
+		}
+		return result
+	}
+}
+
+func newTaskThreadInputTarget(m Model, projectID, action string, task client.Task, input client.TaskThreadPendingInput, err error) taskThreadInputTargetMsg {
+	return taskThreadInputTargetMsg{
+		projectID:           projectID,
+		action:              action,
+		originThreadID:      m.threadID,
+		originOpenRequestID: m.threadOpenRequestID,
+		task:                task,
+		input:               input,
+		err:                 err,
+	}
+}
+
+func resolveTaskThreadInputTarget(m Model, c *client.Client, projectID, action string, args []string) tea.Cmd {
+	baseCtx := m.cliContext
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
+		defer cancel()
+		tasks, err := c.ListTasks(ctx, projectID)
+		if err != nil {
+			return newTaskThreadInputTarget(m, projectID, action, client.Task{}, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
+		}
+		task, inputRefParts, err := resolveTaskWithOperands(tasks, args, 1)
+		if err != nil {
+			return newTaskThreadInputTarget(m, projectID, action, client.Task{}, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
+		}
+		inputRef := strings.TrimSpace(strings.Join(inputRefParts, " "))
+		inputs, err := c.GetTaskThreadPendingInputsForProject(ctx, task.ID, projectID)
+		if err != nil {
+			return newTaskThreadInputTarget(m, projectID, action, task, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
+		}
+		input, err := matchRef(inputs, inputRef,
+			func(input client.TaskThreadPendingInput) string { return input.ID },
+			func(input client.TaskThreadPendingInput) string { return input.ID })
+		if err != nil {
+			return newTaskThreadInputTarget(m, projectID, action, task, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
+		}
+		if input.TaskID != task.ID || input.ProjectID != projectID {
+			return newTaskThreadInputTarget(m, projectID, action, task, input, fmt.Errorf("pending input %q does not belong to the selected task and project", sanitizeAutomationDetailText(input.ID)))
+		}
+		switch action {
+		case "cancel":
+			if input.InputStatus != "pending" || (input.InputMode != "queued" && input.InputMode != "steering") {
+				return newTaskThreadInputTarget(m, projectID, action, task, input, fmt.Errorf("pending input %q is no longer cancellable", sanitizeAutomationDetailText(input.ID)))
+			}
+		case "steer":
+			if input.InputStatus != "pending" || input.InputMode != "queued" {
+				return newTaskThreadInputTarget(m, projectID, action, task, input, fmt.Errorf("pending input %q is not a queued follow-up", sanitizeAutomationDetailText(input.ID)))
+			}
+		}
+		return newTaskThreadInputTarget(m, projectID, action, task, input, nil)
+	}
+}
+
+func taskThreadInputConfirmation(action string, task client.Task, input client.TaskThreadPendingInput) (string, string) {
+	kind := "pending input"
+	if input.InputMode == "queued" {
+		kind = "queued follow-up"
+	} else if input.InputMode == "steering" {
+		kind = "pending steering"
+	}
+	label := sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))
+	inputID := sanitizeAutomationDetailText(input.ID)
+	if action == "cancel" {
+		return fmt.Sprintf("Cancel %s %s for task %q? Type 'yes' to confirm or Esc to cancel.", kind, inputID, label), fmt.Sprintf("use --force to confirm cancelling %s %s", kind, inputID)
+	}
+	return "", ""
+}
 
 // taskSelectorItems converts tasks into selector rows.
 func taskSelectorItems(tasks []client.Task) []selectorItem {
@@ -402,13 +571,16 @@ func taskDetailCompletionValues() []string {
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear"}
+	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "inputs", "pending", "pending-inputs", "cancel-input", "steer-queued", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear"}
 	return command{
 		name:    "tasks",
 		aliases: []string{"task", "t", "board"},
 		args:    "[filter|id]",
 		actions: actions,
 		completions: []commandCompletion{
+			{after: []string{"inputs"}, values: []string{"list", "show", "inspect", "cancel", "steer", "redirect"}},
+			{after: []string{"pending"}, values: []string{"list", "show", "inspect", "cancel", "steer", "redirect"}},
+			{after: []string{"pending-inputs"}, values: []string{"list", "show", "inspect", "cancel", "steer", "redirect"}},
 			{after: []string{"goal"}, values: []string{"pause", "resume"}},
 			{after: []string{"reviews"}, values: []string{"list", "add"}},
 			{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
@@ -422,7 +594,10 @@ func tasksCommand() command {
 			{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
 			{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
 			{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
-			{"attachments"}, {"attachments", "add"}, {"attachments", "upload"},
+			{"inputs"}, {"inputs", "list"}, {"inputs", "show"}, {"inputs", "inspect"}, {"inputs", "cancel"}, {"inputs", "steer"}, {"inputs", "redirect"},
+			{"pending"}, {"pending", "list"}, {"pending", "show"}, {"pending", "inspect"}, {"pending", "cancel"}, {"pending", "steer"}, {"pending", "redirect"},
+			{"pending-inputs"}, {"pending-inputs", "list"}, {"pending-inputs", "show"}, {"pending-inputs", "inspect"}, {"pending-inputs", "cancel"}, {"pending-inputs", "steer"}, {"pending-inputs", "redirect"},
+			{"cancel-input"}, {"steer-queued"}, {"attachments"}, {"attachments", "add"}, {"attachments", "upload"},
 			{"attachments", "list"}, {"attachments", "show"}, {"attachments", "delete"},
 			{"attachments", "remove"},
 			{"attach"}, {"attach", "add"}, {"attach", "upload"}, {"attach", "list"}, {"attach", "show"}, {"attach", "delete"}, {"attach", "remove"},
@@ -446,12 +621,21 @@ func tasksCommand() command {
 			"tasks run|stop|delete <task>               run, cancel or delete",
 			"tasks move <task> <backlog|active|completed>",
 			"tasks order <task> <position>              reorder within its column",
+			"tasks inputs [list] <task>                 inspect queued follow-ups and pending steering",
+			"tasks inputs cancel <task> <input>         cancel one pending input (confirm)",
+			"tasks inputs steer <task> <input>          redirect a queued follow-up to steering",
+			"tasks pending|pending-inputs <task>        aliases for tasks inputs",
+			"tasks cancel-input <task> <input>         shorthand for inputs cancel",
+			"tasks steer-queued <task> <input>         shorthand for inputs steer",
 			"tasks reply <task> | <message>             post to the task thread",
 			"tasks activate                             activate the whole backlog",
 			"tasks sweep                                sweep finished tasks",
 			"tasks clear <backlog|completed>            clear a column",
 		},
 		actionUsages: []commandActionUsage{
+			{action: "inputs", args: "[list] <task>", description: "inspect queued and steering inputs"},
+			{action: "inputs cancel", args: "<task> <input>", description: "cancel a pending input"},
+			{action: "inputs steer", args: "<task> <input>", description: "redirect a queued follow-up to steering"},
 			{action: "goal", args: "<task> | <objective>", description: "set a goal (\"clear\" removes it)"},
 			{action: "steer", args: "<task> | <message>", description: "steer the active response"},
 			{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
@@ -475,6 +659,9 @@ func tasksCommand() command {
 			`tasks attachments delete "Fix login bug" request.txt`,
 			`tasks lifecycle "Fix login bug"`,
 			`tasks logs "Fix login bug" execution-id`,
+			`tasks inputs "Fix login bug"`,
+			`tasks inputs cancel "Fix login bug" input-id`,
+			`tasks inputs steer "Fix login bug" input-id`,
 			`tasks reply "Fix login bug" | PR is up — please review`,
 			`tasks steer "Fix login bug" | Stop and use the new interface`,
 		},
@@ -869,6 +1056,15 @@ func tasksCommand() command {
 					return goalAction + "d goal on " + t.Title, nil
 				})
 
+			case "inputs", "pending", "pending-inputs":
+				return taskThreadInputsCommand(m, c, pid, action, rest)
+
+			case "cancel-input":
+				return taskThreadInputActionCommand(m, c, pid, "cancel", rest)
+
+			case "steer-queued":
+				return taskThreadInputActionCommand(m, c, pid, "steer", rest)
+
 			case "reply":
 				if len(rest) < 1 {
 					return taskSelector(m, "usage: /tasks reply <task> | <message>", "tasks reply", true)
@@ -955,6 +1151,81 @@ func tasksCommand() command {
 	}
 }
 
+func taskThreadInputsCommand(m Model, c *client.Client, projectID, rootAction string, args []string) (Model, tea.Cmd) {
+	rest := append([]string(nil), args...)
+	if len(rest) > 0 {
+		switch strings.ToLower(rest[0]) {
+		case "list", "show", "inspect":
+			rest = rest[1:]
+		case "cancel", "delete", "remove":
+			return taskThreadInputActionCommand(m, c, projectID, "cancel", rest[1:])
+		case "steer", "redirect":
+			return taskThreadInputActionCommand(m, c, projectID, "steer", rest[1:])
+		}
+	}
+	if len(rest) == 0 {
+		return taskSelectorWithSuffix(m, commandUsage("tasks", rootAction), "tasks "+rootAction, " ")
+	}
+	return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+		task, err := resolveTask(ctx, c, projectID, strings.Join(rest, " "))
+		if err != nil {
+			return "", safeTaskThreadInputError(err)
+		}
+		inputs, err := c.GetTaskThreadPendingInputsForProject(ctx, task.ID, projectID)
+		if err != nil {
+			return "", safeTaskThreadInputError(err)
+		}
+		if jsonMode {
+			if inputs == nil {
+				inputs = make([]client.TaskThreadPendingInput, 0)
+			}
+			return marshalJSON(inputs)
+		}
+		return renderTaskThreadPendingInputs(task, projectID, inputs), nil
+	})
+}
+
+func taskThreadInputActionCommand(m Model, c *client.Client, projectID, action string, args []string) (Model, tea.Cmd) {
+	usageAction := "inputs cancel"
+	commandAction := "tasks inputs cancel"
+	if action == "steer" {
+		usageAction = "inputs steer"
+		commandAction = "tasks inputs steer"
+	}
+	if len(args) < 2 {
+		if len(args) == 0 {
+			return taskSelectorWithSuffix(m, commandUsage("tasks", usageAction), commandAction, " ")
+		}
+		return m, errCmd(commandUsage("tasks", usageAction))
+	}
+	return m, resolveTaskThreadInputTarget(m, c, projectID, action, args)
+}
+
+func renderTaskThreadPendingInputs(task client.Task, projectID string, inputs []client.TaskThreadPendingInput) string {
+	label := sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))
+	identity := fmt.Sprintf("task %s · project %s", sanitizeAutomationDetailText(task.ID), sanitizeAutomationDetailText(projectID))
+	if len(inputs) == 0 {
+		return "no pending task-thread inputs for " + label + " (" + identity + ")"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "pending task-thread inputs for %s (%s):\n", label, identity)
+	for _, input := range inputs {
+		mode := "steering"
+		if input.InputMode == "queued" {
+			mode = "queued follow-up"
+		}
+		preview := sanitizeAutomationDetailText(input.Preview)
+		if preview == "" {
+			preview = "(empty preview)"
+		}
+		attachments := ""
+		if input.HasAttachments {
+			attachments = " · attachments"
+		}
+		fmt.Fprintf(&b, "  %-15s %-24s %s%s\n", mode, sanitizeAutomationDetailText(input.ID), preview, attachments)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
 func detailTabNames() []string {
 	tabs := client.TaskDetailTabs()
 	names := make([]string, 0, len(tabs))

@@ -181,6 +181,9 @@ Commands take a resource, an optional action, and arguments:
 /tasks goal pause Refactor
 /tasks goal resume Refactor
 /tasks steer Refactor | stop and use the new interface
+/tasks inputs Refactor                 inspect queued and steering inputs
+/tasks inputs cancel Refactor q1        cancel after typing yes
+/tasks inputs steer Refactor q1         redirect queued input while active
 /tasks attachments add Refactor ./request.txt ./trace.json
 /tasks attachments delete Refactor att-123
 /agents edit reviewer description "Reviews Go and SQL" enabled true
@@ -239,7 +242,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 
 | Command | Aliases | Actions |
 |---|---|---|
-| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `steer`, `activate`, `sweep`, `clear` |
+| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `inputs` (`list`, `show`, `inspect`, `cancel`, `steer`), `pending`, `pending-inputs`, `cancel-input`, `steer-queued`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `steer`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `show`, `read`, `read-bulk`, `approve`, `reject`, `dismiss`, `delete`, `delete-bulk`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always`, `load` |
@@ -539,9 +542,49 @@ steering row in the open task thread when the live stream is connected, and the
 CLI acknowledgement includes `status`, `task_id`, `expected_turn_id`, and the
 backend's `pending_input_id` when returned with `--json`.
 
-This release intentionally exposes active steering only. Pending-input listing,
-cancellation, and redirection of already queued inputs remain available in the
-web task thread but do not yet have terminal commands.
+### Pending task-thread inputs
+
+Use `tasks inputs` to inspect the selected project's pending task-thread
+inputs. The output distinguishes `queued follow-up` from `steering`, and shows
+the stable input ID, task/project identity, safe preview, and whether
+attachments are present. HTML controls, backend routes, and secrets are never
+included in terminal output. `pending` and `pending-inputs` are aliases for
+`inputs`; `show` and `inspect` are list aliases, while `cancel-input` and
+`steer-queued` are shorthand mutation forms.
+
+```text
+/tasks inputs Refactor
+/tasks inputs list Refactor
+openvibely-terminal -project demo --json tasks inputs Refactor
+```
+
+Cancel either kind of pending input with the normal interactive confirmation:
+
+```text
+/tasks inputs cancel Refactor q1
+```
+
+Type `yes` to confirm in the TUI or press `Esc` to cancel. One-shot CLI
+cancellation requires the explicit headless gate:
+
+```bash
+openvibely-terminal -project demo --force tasks inputs cancel Refactor q1
+```
+
+Queued follow-ups can be redirected to pending steering only while the matching
+active response is still running:
+
+```text
+/tasks inputs steer Refactor q1
+openvibely-terminal -project demo --json tasks inputs steer Refactor q1
+```
+
+Missing, stale, already-applied, ambiguous, and foreign-task/project input
+references fail before mutation. The backend also rechecks the active turn
+atomically, so a race cannot redirect a queued input onto a different response.
+Cancellation posts only to the input-cancel route and never cancels the active
+task execution. Mutation output reports the canonical input ID and resulting
+state; `--json` emits stable fields and `[]` for an empty inspection.
 
 ### Task attachments
 

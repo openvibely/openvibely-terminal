@@ -146,17 +146,21 @@ type chatStreamReconnectMsg struct {
 // resultMsg is the generic outcome of a slash command: a rendered block to
 // append to the transcript, or an error.
 type resultMsg struct {
-	sessionGeneration  uint64
-	projectGeneration  uint64
-	title              string // optional heading
-	body               string
-	err                error
-	refreshTaskID      string
-	refreshProjectID   string
-	taskSteerResult    bool
-	steerProjectID     string
-	steerThreadID      string
-	steerOpenRequestID uint64
+	sessionGeneration     uint64
+	projectGeneration     uint64
+	title                 string // optional heading
+	body                  string
+	err                   error
+	refreshTaskID         string
+	refreshProjectID      string
+	taskSteerResult       bool
+	taskThreadInputResult bool
+	steerProjectID        string
+	steerThreadID         string
+	steerOpenRequestID    uint64
+	inputProjectID        string
+	inputThreadID         string
+	inputOpenRequestID    uint64
 }
 
 type agentDeleteTargetMsg struct {
@@ -241,6 +245,20 @@ type attachmentDeleteTargetMsg struct {
 	task              client.Task
 	attachment        client.Attachment
 	err               error
+}
+
+// taskThreadInputTargetMsg carries a canonical pending input resolved in the
+// selected task/project before confirmation or mutation.
+type taskThreadInputTargetMsg struct {
+	sessionGeneration   uint64
+	projectGeneration   uint64
+	projectID           string
+	action              string
+	originThreadID      string
+	originOpenRequestID uint64
+	task                client.Task
+	input               client.TaskThreadPendingInput
+	err                 error
 }
 
 // threadOpenedMsg enters task-thread mode: subsequent plain-text input is

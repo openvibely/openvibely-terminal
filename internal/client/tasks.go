@@ -15,7 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/net/html"
 )
 
@@ -937,6 +939,243 @@ func (c *Client) ReorderTask(ctx context.Context, taskID string, position int) e
 type TaskThreadState struct {
 	Body         string
 	ActiveTurnID string
+}
+
+// TaskThreadPendingInput is the safe terminal projection of one pending task
+// thread input. It intentionally contains no form controls, routes, or raw HTML.
+type TaskThreadPendingInput struct {
+	ID             string `json:"id"`
+	TaskID         string `json:"task_id"`
+	ProjectID      string `json:"project_id"`
+	InputMode      string `json:"input_mode"`
+	InputStatus    string `json:"input_status"`
+	Preview        string `json:"preview"`
+	HasAttachments bool   `json:"has_attachments"`
+}
+
+// TaskThreadInputMutation is the canonical identity and resulting state of a
+// pending-input mutation.
+type TaskThreadInputMutation struct {
+	ID          string `json:"id"`
+	TaskID      string `json:"task_id"`
+	ProjectID   string `json:"project_id"`
+	InputMode   string `json:"input_mode"`
+	InputStatus string `json:"input_status"`
+}
+
+const taskThreadPendingInputPreviewLimit = 240
+
+// GetTaskThreadPendingInputsForProject fetches the task-scoped pending-input
+// fragment and parses only its stable semantic row attributes. The selected
+// project is sent even though older backends may derive task ownership solely
+// from the task path.
+func (c *Client) GetTaskThreadPendingInputsForProject(ctx context.Context, taskID, projectID string) ([]TaskThreadPendingInput, error) {
+	taskID = strings.TrimSpace(taskID)
+	projectID = strings.TrimSpace(projectID)
+	if taskID == "" {
+		return nil, fmt.Errorf("task ID is required for pending task-thread inputs")
+	}
+	if projectID == "" {
+		return nil, fmt.Errorf("project ID is required for pending task-thread inputs")
+	}
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/thread/pending-inputs"+query("project_id", projectID))
+	if err != nil {
+		return nil, err
+	}
+	return parseTaskThreadPendingInputs(root, taskID, projectID)
+}
+
+// ListTaskThreadPendingInputsForProject is a descriptive alias used by callers
+// that prefer list terminology for read-only collection methods.
+func (c *Client) ListTaskThreadPendingInputsForProject(ctx context.Context, taskID, projectID string) ([]TaskThreadPendingInput, error) {
+	return c.GetTaskThreadPendingInputsForProject(ctx, taskID, projectID)
+}
+
+func parseTaskThreadPendingInputs(root *html.Node, taskID, projectID string) ([]TaskThreadPendingInput, error) {
+	if root == nil {
+		return make([]TaskThreadPendingInput, 0), nil
+	}
+	for _, container := range findAll(root, func(n *html.Node) bool {
+		return attr(n, "id") == "pending-thread-inputs"
+	}) {
+		if scopedProject := strings.TrimSpace(attr(container, "data-project-id")); scopedProject != "" && scopedProject != projectID {
+			return nil, fmt.Errorf("pending task-thread inputs belong to project %q, not selected project", scopedProject)
+		}
+	}
+
+	rows := findAll(root, func(n *html.Node) bool {
+		return strings.TrimSpace(attr(n, "data-thread-input-id")) != ""
+	})
+	inputs := make([]TaskThreadPendingInput, 0, len(rows))
+	seen := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		id := strings.TrimSpace(attr(row, "data-thread-input-id"))
+		rowTaskID := strings.TrimSpace(attr(row, "data-task-id"))
+		if rowTaskID == "" || rowTaskID != taskID {
+			return nil, fmt.Errorf("pending input %q is not owned by task %q", id, taskID)
+		}
+		if _, ok := seen[id]; ok {
+			return nil, fmt.Errorf("pending input %q appears more than once", id)
+		}
+		seen[id] = struct{}{}
+		mode := strings.ToLower(strings.TrimSpace(attr(row, "data-input-mode")))
+		if mode != "queued" && mode != "steering" {
+			return nil, fmt.Errorf("pending input %q has unsupported mode", id)
+		}
+		inputs = append(inputs, TaskThreadPendingInput{
+			ID:             id,
+			TaskID:         taskID,
+			ProjectID:      projectID,
+			InputMode:      mode,
+			InputStatus:    "pending",
+			Preview:        taskThreadPendingInputPreview(row),
+			HasAttachments: taskThreadPendingInputHasAttachments(row),
+		})
+	}
+	return inputs, nil
+}
+
+func taskThreadPendingInputPreview(row *html.Node) string {
+	// Both current queued and steering templates expose the user content in a
+	// descendant with the truncate class. This avoids labels, attachment badges,
+	// and button text without depending on visual row layout.
+	content := findNode(row, func(n *html.Node) bool {
+		return hasClassToken(attr(n, "class"), "truncate")
+	})
+	preview := ""
+	if content != nil {
+		preview = nodeConversationText(content)
+	}
+	if preview == "" {
+		text := nodeConversationText(row)
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.EqualFold(line, "steering pending") || strings.HasPrefix(strings.ToLower(line), "will be applied") {
+				continue
+			}
+			preview = line
+			break
+		}
+	}
+	preview = ansi.Strip(preview)
+	preview = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return -1
+		}
+		return r
+	}, preview)
+	preview = strings.Join(strings.Fields(preview), " ")
+	runes := []rune(preview)
+	if len(runes) > taskThreadPendingInputPreviewLimit {
+		return string(runes[:taskThreadPendingInputPreviewLimit-1]) + "…"
+	}
+	return preview
+}
+
+func taskThreadPendingInputHasAttachments(row *html.Node) bool {
+	return findNode(row, func(n *html.Node) bool {
+		label := strings.ToLower(strings.TrimSpace(attr(n, "aria-label")))
+		title := strings.ToLower(strings.TrimSpace(attr(n, "title")))
+		return strings.Contains(label, "attachment") || strings.Contains(title, "attachment")
+	}) != nil
+}
+
+func hasClassToken(classes, want string) bool {
+	for _, className := range strings.Fields(classes) {
+		if className == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) pendingTaskThreadInput(ctx context.Context, taskID, projectID, inputID string) (TaskThreadPendingInput, error) {
+	var zero TaskThreadPendingInput
+	inputID = strings.TrimSpace(inputID)
+	if inputID == "" {
+		return zero, fmt.Errorf("pending input ID is required")
+	}
+	inputs, err := c.GetTaskThreadPendingInputsForProject(ctx, taskID, projectID)
+	if err != nil {
+		return zero, err
+	}
+	var found *TaskThreadPendingInput
+	for i := range inputs {
+		if inputs[i].ID != inputID {
+			continue
+		}
+		if found != nil {
+			return zero, fmt.Errorf("pending input %q is ambiguous", inputID)
+		}
+		candidate := inputs[i]
+		found = &candidate
+	}
+	if found == nil {
+		return zero, fmt.Errorf("pending input %q is missing, stale, or already applied", inputID)
+	}
+	if found.TaskID != strings.TrimSpace(taskID) || found.ProjectID != strings.TrimSpace(projectID) {
+		return zero, fmt.Errorf("pending input %q does not belong to the selected task and project", inputID)
+	}
+	return *found, nil
+}
+
+// CancelTaskThreadInputForProject cancels one currently pending queued or
+// steering input after re-reading and validating its task/project relationship.
+// It never calls the task cancellation route, so the active execution is not
+// cancelled.
+func (c *Client) CancelTaskThreadInputForProject(ctx context.Context, taskID, projectID, inputID string) (*TaskThreadInputMutation, error) {
+	input, err := c.pendingTaskThreadInput(ctx, taskID, projectID, inputID)
+	if err != nil {
+		return nil, err
+	}
+	if input.InputStatus != "pending" || (input.InputMode != "queued" && input.InputMode != "steering") {
+		return nil, fmt.Errorf("pending input %q is no longer cancellable", input.ID)
+	}
+	if err := c.doForm(ctx, http.MethodPost, "/thread-inputs/"+url.PathEscape(input.ID)+"/cancel", nil); err != nil {
+		return nil, err
+	}
+	return &TaskThreadInputMutation{
+		ID:          input.ID,
+		TaskID:      input.TaskID,
+		ProjectID:   input.ProjectID,
+		InputMode:   input.InputMode,
+		InputStatus: "cancelled",
+	}, nil
+}
+
+// SteerTaskThreadQueuedInputForProject converts one queued follow-up to
+// steering. The active turn is read immediately before the mutation; the
+// backend repeats that identity check atomically and rejects stale races.
+func (c *Client) SteerTaskThreadQueuedInputForProject(ctx context.Context, taskID, projectID, inputID string) (*TaskThreadSteerAccepted, error) {
+	input, err := c.pendingTaskThreadInput(ctx, taskID, projectID, inputID)
+	if err != nil {
+		return nil, err
+	}
+	if input.InputMode != "queued" || input.InputStatus != "pending" {
+		return nil, fmt.Errorf("pending input %q is not a queued follow-up", input.ID)
+	}
+	state, err := c.GetTaskThreadStateForProject(ctx, taskID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(state.ActiveTurnID) == "" {
+		return nil, fmt.Errorf("no active response for queued input %q; it remains queued", input.ID)
+	}
+	doc, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/thread/queued/"+url.PathEscape(input.ID)+"/steer"+query("project_id", projectID), nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range findAll(doc, func(n *html.Node) bool {
+		return attr(n, "data-input-mode") == "steering" && attr(n, "data-thread-input-id") != ""
+	}) {
+		if rowID := strings.TrimSpace(attr(node, "data-thread-input-id")); rowID != input.ID {
+			return nil, fmt.Errorf("queued input %q steering response returned foreign input %q", input.ID, rowID)
+		}
+		if rowTask := strings.TrimSpace(attr(node, "data-task-id")); rowTask != "" && rowTask != taskID {
+			return nil, fmt.Errorf("queued input %q steering response belongs to another task", input.ID)
+		}
+	}
+	return &TaskThreadSteerAccepted{PendingInputID: input.ID}, nil
 }
 
 // TaskThreadSteerAccepted identifies the pending steering input returned by the

@@ -684,6 +684,18 @@ func (m Model) acceptsTaskSteerResult(msg resultMsg) bool {
 		msg.steerOpenRequestID == m.threadOpenRequestID
 }
 
+func (m Model) acceptsTaskThreadInputResult(msg resultMsg) bool {
+	if msg.inputProjectID == "" || msg.inputProjectID != m.selectedID {
+		return false
+	}
+	if msg.inputThreadID != "" {
+		return msg.inputThreadID == m.threadID && msg.inputOpenRequestID == m.threadOpenRequestID
+	}
+	// A mutation started from project chat must not appear after the user opens a
+	// different task before its result arrives.
+	return m.threadID == ""
+}
+
 func (m Model) acceptsSSEEvent(ev client.Event) bool {
 	var scope struct {
 		ProjectID string `json:"project_id"`
@@ -1127,6 +1139,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.projectGeneration = projectGeneration
 		return typed
 	case attachmentDeleteTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case taskThreadInputTargetMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
@@ -1613,6 +1629,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.taskSteerResult && !m.acceptsTaskSteerResult(msg) {
 			return m, nil // steering result belongs to a view that is no longer current
 		}
+		if msg.taskThreadInputResult && !m.acceptsTaskThreadInputResult(msg) {
+			return m, nil // pending-input result belongs to a view that is no longer current
+		}
 		m.busy = false
 		if msg.err != nil {
 			// Some commands can return useful partial output with an error.
@@ -1785,6 +1804,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			projectID = m.selectedID
 		}
 		return confirmTaskAttachmentDeletion(m, projectID, msg.task, msg.attachment)
+
+	case taskThreadInputTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		if msg.originThreadID != m.threadID || (msg.originThreadID != "" && msg.originOpenRequestID != m.threadOpenRequestID) {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		if msg.action == "cancel" {
+			cmd := m.runTaskThreadInputMutation(m.client, msg.projectID, msg.action, msg.task, msg.input)
+			m.busy = true
+			confirmation, cliHint := taskThreadInputConfirmation(msg.action, msg.task, msg.input)
+			return confirmOr(m, confirmation, cliHint, cmd)
+		}
+		m.busy = true
+		return m, m.runTaskThreadInputMutation(m.client, msg.projectID, msg.action, msg.task, msg.input)
+
 	case chatSentMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale chat acknowledgement from an older session or project

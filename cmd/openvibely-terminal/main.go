@@ -59,9 +59,9 @@ func run() error {
 	username := flag.String("user", os.Getenv("OPENVIBELY_AUTH_USERNAME"), "username (only needed when server auth is enabled)")
 	password := flag.String("pass", "", "password (only needed when server auth is enabled)")
 	project := flag.String("project", os.Getenv("OPENVIBELY_PROJECT"), "project to select: name, ID or unique prefix")
-	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear)")
+	force := flag.Bool("force", false, "skip confirmation prompt for destructive CLI commands (delete, clear, pending-input cancel)")
 	flag.BoolVar(force, "f", false, "shorthand for -force")
-	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, lifecycle, workflow-vote, project creation/deletion, and events commands")
+	json := flag.Bool("json", false, "emit machine-readable JSON output for supported list, show, pending-input, lifecycle, workflow-vote, project creation/deletion, and events commands")
 	flag.Usage = usage
 	if err := parseInterspersedFlags(flag.CommandLine, os.Args[1:]); err != nil {
 		if err == flag.ErrHelp {
