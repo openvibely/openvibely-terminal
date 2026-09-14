@@ -13907,6 +13907,92 @@ func TestWebhookDeleteBulkBackendErrorIsSafeInTUI(t *testing.T) {
 	}
 }
 
+func TestWebhookDeleteBulkSelectorLoadErrorIsSafeInTUI(t *testing.T) {
+	const secret = "selector-load-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/channels" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, `{"error":"token=%s \u001b[31mselector rejected"}`, secret)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m, cmd := typeLine(t, m, "/channels webhooks delete-bulk")
+	if cmd == nil {
+		t.Fatal("bulk selector did not start a lookup")
+	}
+	msg := cmd()
+	next, _ := m.Update(msg)
+	m = next.(Model)
+	out := transcript(m)
+	if strings.Contains(out, secret) || strings.Contains(out, "\x1b") {
+		t.Fatalf("selector backend error leaked secret or control sequence: %q", out)
+	}
+	if !strings.Contains(out, "token=[redacted]") || !strings.Contains(out, "selector rejected") {
+		t.Fatalf("sanitized selector error missing expected diagnostic:\n%s", out)
+	}
+}
+
+func TestWebhookDeleteBulkSelectorLookupEscCancelsLateResponse(t *testing.T) {
+	const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div></div>`
+	requestStarted := make(chan struct{})
+	release := make(chan struct{})
+	var started sync.Once
+	var releaseOnce sync.Once
+	releaseRequest := func() { releaseOnce.Do(func() { close(release) }) }
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/channels" {
+			started.Do(func() { close(requestStarted) })
+			<-release
+			_, _ = io.WriteString(w, selected)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	defer releaseRequest()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m, cmd := typeLine(t, m, "/channels webhooks delete-bulk")
+	if cmd == nil {
+		t.Fatal("bulk selector did not start a lookup")
+	}
+	result := make(chan tea.Msg, 1)
+	go func() { result <- cmd() }()
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk selector lookup did not reach backend")
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.busy || m.selectorActive || m.pendingConfirmation != nil {
+		t.Fatalf("Esc did not cancel in-flight lookup: busy:%v selector:%v pending:%v", m.busy, m.selectorActive, m.pendingConfirmation != nil)
+	}
+	releaseRequest()
+	msg := <-result
+	next, _ = m.Update(msg)
+	m = next.(Model)
+	if m.selectorActive || m.pendingConfirmation != nil {
+		t.Fatalf("late lookup response reopened destructive flow: selector:%v pending:%v", m.selectorActive, m.pendingConfirmation != nil)
+	}
+}
+
 func webhookCatalogPageHTML(total, offset int) string {
 	end := min(offset+50, total)
 	var b strings.Builder

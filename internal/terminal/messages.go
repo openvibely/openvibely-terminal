@@ -206,6 +206,7 @@ type webhookMutationTargetMsg struct {
 type webhookBulkTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
+	lookupID          uint64
 	projectID         string
 	webhooks          []client.Webhook
 	err               error
@@ -367,6 +368,7 @@ type selectorActiveMsg struct {
 	initialFilter string
 	forcePicker   bool // Tab completion must never auto-execute a unique resource
 	multiSelect   bool
+	multiLookupID uint64
 	multiDispatch selectorMultiDispatch
 	items         []selectorItem
 	warnings      []string

@@ -6010,13 +6010,27 @@ func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string
 	return webhookResolution{webhook: webhook}, nil
 }
 
+// beginWebhookBulkLookup creates the model-owned context used by a bulk
+// reference or picker lookup. The request ID lets the model discard a result
+// after Esc even if the backend ignores context cancellation.
+func beginWebhookBulkLookup(m Model) (Model, context.Context, context.CancelFunc, uint64) {
+	if m.webhookBulkLookupCancel != nil {
+		m.webhookBulkLookupCancel()
+	}
+	ctx, cancel := m.commandContext(cmdTimeout)
+	lookupID := nextProjectRequestID()
+	m.webhookBulkLookupCancel = cancel
+	m.webhookBulkLookupID = lookupID
+	return m, ctx, cancel, lookupID
+}
+
 // resolveWebhookBulkTargets resolves every reference before a bulk deletion
 // can be confirmed or sent. Canonical IDs use the scoped detail fast path;
 // ordinary references share one catalog lookup, and every failure stops before
 // any destructive request.
-func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs []string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := m.commandContext(cmdTimeout)
+func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs []string) (Model, tea.Cmd) {
+	m, ctx, cancel, lookupID := beginWebhookBulkLookup(m)
+	return m, func() tea.Msg {
 		defer cancel()
 		var (
 			catalog       []client.Webhook
@@ -6039,7 +6053,7 @@ func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs
 		for _, rawRef := range refs {
 			ref := strings.TrimSpace(rawRef)
 			if ref == "" {
-				return webhookBulkTargetMsg{projectID: projectID, err: errors.New("webhook reference must not be empty")}
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: errors.New("webhook reference must not be empty")}
 			}
 			var (
 				webhook client.Webhook
@@ -6059,7 +6073,7 @@ func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs
 							sanitizeAutomationDetailText)
 					}
 				} else {
-					return webhookBulkTargetMsg{projectID: projectID, err: safeWebhookBulkError(err)}
+					return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: safeWebhookBulkError(err)}
 				}
 			} else {
 				err = loadCatalog()
@@ -6071,21 +6085,21 @@ func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs
 				}
 			}
 			if err != nil {
-				return webhookBulkTargetMsg{projectID: projectID, err: safeWebhookBulkError(err)}
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: safeWebhookBulkError(err)}
 			}
 			if strings.TrimSpace(webhook.ID) == "" || webhook.ProjectID != projectID {
-				return webhookBulkTargetMsg{projectID: projectID, err: fmt.Errorf("webhook %q does not belong to selected project", sanitizeAutomationDetailText(ref))}
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: fmt.Errorf("webhook %q does not belong to selected project", sanitizeAutomationDetailText(ref))}
 			}
 			if _, duplicate := seen[webhook.ID]; duplicate {
-				return webhookBulkTargetMsg{projectID: projectID, err: fmt.Errorf("webhook %q was selected more than once", sanitizeAutomationDetailText(ref))}
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: fmt.Errorf("webhook %q was selected more than once", sanitizeAutomationDetailText(ref))}
 			}
 			seen[webhook.ID] = struct{}{}
 			resolved = append(resolved, webhook)
 		}
 		if len(resolved) == 0 {
-			return webhookBulkTargetMsg{projectID: projectID, err: errors.New("select at least one webhook")}
+			return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: errors.New("select at least one webhook")}
 		}
-		return webhookBulkTargetMsg{projectID: projectID, webhooks: resolved}
+		return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, webhooks: resolved}
 	}
 }
 
@@ -6251,12 +6265,16 @@ func webhookBulkSelector(m Model) (Model, tea.Cmd) {
 		}
 		return confirmWebhookBulkMutation(m, projectID, webhooks)
 	}
-	return selectorOr(m, webhookCommandUsage("delete-bulk"), selectorForMulti(
+	if cliMode {
+		return m, errCmd(webhookCommandUsage("delete-bulk"))
+	}
+	m, lookupCtx, lookupCancel, lookupID := beginWebhookBulkLookup(m)
+	return m, selectorForMulti(lookupCtx, lookupCancel, lookupID,
 		"Webhooks to delete", "channels webhooks delete-bulk", "no inbound webhooks configured", dispatch,
 		func(ctx context.Context) ([]selectorItem, error) {
 			webhooks, err := c.ListWebhooks(ctx, projectID)
 			if err != nil {
-				return nil, err
+				return nil, safeWebhookBulkError(err)
 			}
 			items := make([]selectorItem, 0, len(webhooks))
 			for _, webhook := range webhooks {
@@ -6269,7 +6287,7 @@ func webhookBulkSelector(m Model) (Model, tea.Cmd) {
 				})
 			}
 			return items, nil
-		}))
+		})
 }
 
 func renderWebhooks(webhooks []client.Webhook) string {
@@ -6422,7 +6440,7 @@ func runWebhooks(m Model, args []string) (Model, tea.Cmd) {
 		if len(rest) == 0 {
 			return webhookBulkSelector(m)
 		}
-		return m, resolveWebhookBulkTargets(m, c, projectID, rest)
+		return resolveWebhookBulkTargets(m, c, projectID, rest)
 	}
 	if action == "rotate" || action == "delete" {
 		return m, resolveWebhookMutation(c, projectID, action, ref)

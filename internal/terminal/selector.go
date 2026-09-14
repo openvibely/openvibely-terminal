@@ -58,17 +58,20 @@ func selectorForWithSuffix(title, command, emptyHint, prefillSuffix string, fetc
 // selectorForMulti builds a selector that uses Space to toggle items and Enter
 // to pass the captured selection to dispatch. It is opt-in so existing
 // single-selection selectors retain their filtering and keyboard behavior.
-func selectorForMulti(title, command, emptyHint string, dispatch selectorMultiDispatch, fetch func(context.Context) ([]selectorItem, error)) tea.Cmd {
+func selectorForMulti(baseCtx context.Context, cancel context.CancelFunc, lookupID uint64, title, command, emptyHint string, dispatch selectorMultiDispatch, fetch func(context.Context) ([]selectorItem, error)) tea.Cmd {
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 		defer cancel()
-		items, err := fetch(ctx)
+		items, err := fetch(baseCtx)
 		return selectorActiveMsg{
 			title:         title,
 			command:       command,
 			emptyHint:     emptyHint,
 			items:         items,
 			multiSelect:   true,
+			multiLookupID: lookupID,
 			multiDispatch: dispatch,
 			err:           err,
 		}
@@ -131,6 +134,13 @@ func optionSelectorWithFilter(m Model, title, command, usage string, values []st
 func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 		return m, nil // stale selector response from an older session or project
+	}
+	if msg.multiSelect && msg.multiLookupID != 0 && msg.multiLookupID != m.webhookBulkLookupID {
+		return m, nil // canceled or superseded bulk lookup
+	}
+	if msg.multiSelect && msg.multiLookupID != 0 {
+		m.webhookBulkLookupCancel = nil
+		m.webhookBulkLookupID = 0
 	}
 	m.busy = false
 	m = m.clearSelector()
