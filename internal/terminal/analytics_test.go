@@ -419,29 +419,23 @@ func TestFrequentAnalyticsResponseRowsBoundedAcrossFixtureSizes(t *testing.T) {
 }
 
 func frequentAnalyticsFixture(count int) []client.TaskFrequency {
-	items := make([]client.TaskFrequency, count)
-	for i := range items {
-		items[i] = client.TaskFrequency{
-			TaskID:         fmt.Sprintf("task-%05d", i),
-			TaskTitle:      fmt.Sprintf("task title %05d %s", i, strings.Repeat("x", 72)),
-			ExecutionCount: count - i,
-			LastExecutedAt: "2026-09-13T12:34:56Z",
-		}
-	}
-	return items
+	return evidenceFrequentAnalyticsFixture(count)
 }
 
 func TestFrequentAnalyticsPerformanceEvidence(t *testing.T) {
 	if os.Getenv("OPENVIBELY_ANALYTICS_PERF_EVIDENCE") != "1" {
 		t.Skip("set OPENVIBELY_ANALYTICS_PERF_EVIDENCE=1 to run the 5,000-record analytics evidence harness")
 	}
-	const fixtureSize = 5000
+	const fixtureSize = frequentAnalyticsFixtureSize
 	const runs = 20
 
 	history := frequentAnalyticsFixture(fixtureSize)
 	fullBody, err := json.Marshal(history)
 	if err != nil {
 		t.Fatalf("marshal full fixture: %v", err)
+	}
+	if len(fullBody) != frequentAnalyticsReviewedResponseSize {
+		t.Fatalf("full fixture response bytes = %d, want reviewed workload %d", len(fullBody), frequentAnalyticsReviewedResponseSize)
 	}
 	bounded := rankedFrequentTasks(history)
 	boundedBody, err := json.Marshal(bounded)
