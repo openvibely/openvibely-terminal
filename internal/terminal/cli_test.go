@@ -1785,6 +1785,65 @@ func TestCLIStatusUsesInvalidServerURLRecovery(t *testing.T) {
 	}
 }
 
+func TestCLIStatusUsesSharedInvalidServerURLValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server func(string) string
+		secret string
+	}{
+		{
+			name: "query",
+			server: func(base string) string {
+				return base + "?tenant=status-query-secret"
+			},
+			secret: "status-query-secret",
+		},
+		{
+			name: "fragment",
+			server: func(base string) string {
+				return base + "#status-fragment-secret"
+			},
+			secret: "status-fragment-secret",
+		},
+		{
+			name: "credentials",
+			server: func(base string) string {
+				return "http://status-user:status-password-secret@" + strings.TrimPrefix(base, "http://")
+			},
+			secret: "status-password-secret",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				_, _ = io.WriteString(w, `{"projects":[]}`)
+			}))
+			defer srv.Close()
+
+			c, err := client.New(tc.server(srv.URL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "", []string{"status"}, false, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid configured server url") {
+				t.Fatalf("status error = %v, want invalid configured server URL guidance", err)
+			}
+			visible := out.String() + "\n" + err.Error()
+			if !strings.Contains(strings.ToLower(visible), "-server <url>") || !strings.Contains(strings.ToLower(visible), "openvibely_server_url") {
+				t.Fatalf("status output omitted invalid URL guidance:\n%s", visible)
+			}
+			if strings.Contains(visible, tc.secret) || strings.Contains(visible, "status-user") {
+				t.Fatalf("status output leaked configured URL data:\n%s", visible)
+			}
+			if requests != 0 {
+				t.Fatalf("status made %d requests for invalid URL", requests)
+			}
+		})
+	}
+}
+
 func TestCLITaskCancellationPropagatesToBlockedBoardRequest(t *testing.T) {
 	boardStarted := make(chan struct{})
 	requestCanceled := make(chan struct{})
