@@ -457,7 +457,7 @@ func TestFrequentAnalyticsPerformanceEvidence(t *testing.T) {
 		switch r.URL.Query().Get("limit") {
 		case strconv.Itoa(maxFrequentRows):
 			body = boundedBody
-		case "":
+		case "0":
 			body = fullBody
 		default:
 			t.Errorf("unexpected limit %q", r.URL.Query().Get("limit"))

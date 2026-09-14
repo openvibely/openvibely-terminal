@@ -685,11 +685,13 @@ func TestGetMostFrequentTasks(t *testing.T) {
 		if got := r.URL.Query().Get("project_id"); got != "p2" {
 			t.Errorf("project_id = %q", got)
 		}
-		if got := r.URL.Query().Get("limit"); got != "" {
-			t.Errorf("unbounded request limit = %q, want omitted", got)
+		if got := r.URL.Query().Get("limit"); got != "0" {
+			t.Errorf("full-history request limit = %q, want 0", got)
 		}
 		json.NewEncoder(w).Encode([]TaskFrequency{
 			{TaskID: "t1", TaskTitle: "Triage", ExecutionCount: 42},
+			{TaskID: "t2", TaskTitle: "Deploy", ExecutionCount: 7},
+			{TaskID: "t3", TaskTitle: "Review", ExecutionCount: 1},
 		})
 	}))
 
@@ -697,8 +699,8 @@ func TestGetMostFrequentTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMostFrequentTasks: %v", err)
 	}
-	if len(items) != 1 || items[0].TaskTitle != "Triage" || items[0].ExecutionCount != 42 {
-		t.Errorf("unexpected items: %+v", items)
+	if len(items) != 3 || items[0].TaskTitle != "Triage" || items[0].ExecutionCount != 42 || items[2].TaskTitle != "Review" {
+		t.Errorf("unexpected complete history: %+v", items)
 	}
 }
 
