@@ -89,6 +89,81 @@ func TestMalformedConfiguredServerURLsAreInvalidNotTransportFailures(t *testing.
 	}
 }
 
+func TestUnsafeConfiguredServerURLComponentsAreRejectedBeforeHTTP(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server func(string) string
+		secret string
+	}{
+		{
+			name: "query",
+			server: func(base string) string {
+				return base + "?tenant=client-query-secret"
+			},
+			secret: "client-query-secret",
+		},
+		{
+			name: "fragment",
+			server: func(base string) string {
+				return base + "#client-fragment-secret"
+			},
+			secret: "client-fragment-secret",
+		},
+		{
+			name: "credentials",
+			server: func(base string) string {
+				return "http://client-user:client-password-secret@" + strings.TrimPrefix(base, "http://")
+			},
+			secret: "client-password-secret",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if got := r.Header.Get("Authorization"); got != "" {
+					t.Errorf("request unexpectedly carried Authorization header %q", got)
+				}
+				_, _ = io.WriteString(w, `{"projects":[]}`)
+			}))
+			defer srv.Close()
+
+			c, err := New(tc.server(srv.URL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			_, err = c.ListProjects(context.Background())
+			if err == nil || !IsInvalidServerURL(err) {
+				t.Fatalf("ListProjects error = %v, want invalid configured server URL", err)
+			}
+			if strings.Contains(err.Error(), tc.secret) {
+				t.Fatalf("invalid URL error leaked %q: %v", tc.secret, err)
+			}
+			if requests != 0 {
+				t.Fatalf("handler received %d requests for invalid URL", requests)
+			}
+		})
+	}
+}
+
+func TestPathPrefixRemainsSupportedForValidServerURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/tenant-prefix/api/projects"; got != want {
+			t.Errorf("path = %q, want %q", got, want)
+		}
+		_, _ = io.WriteString(w, `{"projects":[]}`)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL + "/tenant-prefix/")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.ListProjects(context.Background()); err != nil {
+		t.Fatalf("ListProjects through path prefix: %v", err)
+	}
+}
+
 func TestListProjects(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/projects" {
