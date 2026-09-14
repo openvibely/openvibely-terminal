@@ -36,6 +36,7 @@ func pendingCLIClient(t *testing.T, pending string, active bool, posts *int) *cl
 			}
 		case "/thread-inputs/q1/cancel", "/tasks/t-1/thread/queued/q1/steer":
 			(*posts)++
+			w.Header().Set("X-OpenVibely-Thread-Input-Status", "cancelled")
 			w.Header().Set("Content-Type", "text/html")
 			if r.URL.Path != "/thread-inputs/q1/cancel" {
 				_, _ = fmt.Fprint(w, `<div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="steering"></div>`)
@@ -54,7 +55,7 @@ func pendingCLIClient(t *testing.T, pending string, active bool, posts *int) *cl
 }
 
 func TestTaskThreadInputListSeparatesModesAndOmitsControls(t *testing.T) {
-	pending := `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div><button>secret</button></div><div data-thread-input-id="s1" data-task-id="t-1" data-input-mode="steering"><div class="truncate">stop now</div><button>Cancel</button></div></div>`
+	pending := `<div id="pending-thread-inputs" data-task-id="t-1"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div><button>secret</button></div><div data-thread-input-id="s1" data-task-id="t-1" data-input-mode="steering"><div class="truncate">stop now</div><button>Cancel</button></div></div>`
 	var posts int
 	c := pendingCLIClient(t, pending, true, &posts)
 	m := New(c)
@@ -70,7 +71,7 @@ func TestTaskThreadInputListSeparatesModesAndOmitsControls(t *testing.T) {
 }
 
 func TestTaskThreadInputEmptyJSONAndCancelConfirmationForce(t *testing.T) {
-	empty := `<div id="pending-thread-inputs"></div>`
+	empty := `<div id="pending-thread-inputs" data-task-id="t-1"></div>`
 	var posts int
 	c := pendingCLIClient(t, empty, true, &posts)
 	var out bytes.Buffer
@@ -81,7 +82,7 @@ func TestTaskThreadInputEmptyJSONAndCancelConfirmationForce(t *testing.T) {
 		t.Fatalf("empty JSON = %q, want []", out.String())
 	}
 
-	pending := `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
+	pending := `<div id="pending-thread-inputs" data-task-id="t-1"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
 	posts = 0
 	c = pendingCLIClient(t, pending, true, &posts)
 	out.Reset()
@@ -104,7 +105,7 @@ func TestTaskThreadInputEmptyJSONAndCancelConfirmationForce(t *testing.T) {
 }
 
 func TestTaskThreadQueuedInputSteerRequiresActiveTurnAndReportsCanonicalIdentity(t *testing.T) {
-	pending := `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
+	pending := `<div id="pending-thread-inputs" data-task-id="t-1"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
 	var posts int
 	c := pendingCLIClient(t, pending, true, &posts)
 	var out bytes.Buffer
@@ -131,7 +132,7 @@ func TestTaskThreadQueuedInputSteerRequiresActiveTurnAndReportsCanonicalIdentity
 }
 
 func TestTaskThreadInputInteractiveCancellationRequiresYes(t *testing.T) {
-	pending := `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
+	pending := `<div id="pending-thread-inputs" data-task-id="t-1"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
 	var posts int
 	c := pendingCLIClient(t, pending, true, &posts)
 	m := New(c)
@@ -156,7 +157,7 @@ func TestTaskThreadInputInteractiveCancellationRequiresYes(t *testing.T) {
 }
 
 func TestTaskThreadInputMutationResultIsIgnoredAfterThreadSwitch(t *testing.T) {
-	pending := `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
+	pending := `<div id="pending-thread-inputs" data-task-id="t-1"><div data-thread-input-id="q1" data-task-id="t-1" data-input-mode="queued"><div class="truncate">continue docs</div></div></div>`
 	var posts int
 	c := pendingCLIClient(t, pending, true, &posts)
 	m := New(c)

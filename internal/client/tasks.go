@@ -965,6 +965,8 @@ type TaskThreadInputMutation struct {
 
 const taskThreadPendingInputPreviewLimit = 240
 
+const taskThreadInputMutationStatusHeader = "X-OpenVibely-Thread-Input-Status"
+
 // GetTaskThreadPendingInputsForProject fetches the task-scoped pending-input
 // fragment and parses only its stable semantic row attributes. The selected
 // project is sent even though older backends may derive task ownership solely
@@ -995,9 +997,20 @@ func parseTaskThreadPendingInputs(root *html.Node, taskID, projectID string) ([]
 	if root == nil {
 		return make([]TaskThreadPendingInput, 0), nil
 	}
-	for _, container := range findAll(root, func(n *html.Node) bool {
+	containers := findAll(root, func(n *html.Node) bool {
 		return attr(n, "id") == "pending-thread-inputs"
-	}) {
+	})
+	if len(containers) == 0 {
+		return nil, fmt.Errorf("pending task-thread inputs are missing task identity")
+	}
+	for _, container := range containers {
+		scopedTask := strings.TrimSpace(attr(container, "data-task-id"))
+		if scopedTask == "" {
+			return nil, fmt.Errorf("pending task-thread inputs are missing task identity")
+		}
+		if scopedTask != taskID {
+			return nil, fmt.Errorf("pending task-thread inputs belong to task %q, not requested task %q", scopedTask, taskID)
+		}
 		if scopedProject := strings.TrimSpace(attr(container, "data-project-id")); scopedProject != "" && scopedProject != projectID {
 			return nil, fmt.Errorf("pending task-thread inputs belong to project %q, not selected project", scopedProject)
 		}
@@ -1131,16 +1144,26 @@ func (c *Client) CancelTaskThreadInputForProject(ctx context.Context, taskID, pr
 	if input.InputStatus != "pending" || (input.InputMode != "queued" && input.InputMode != "steering") {
 		return nil, fmt.Errorf("pending input %q is no longer cancellable", input.ID)
 	}
-	if err := c.doForm(ctx, http.MethodPost, "/thread-inputs/"+url.PathEscape(input.ID)+"/cancel", nil); err != nil {
+	resp, err := c.doFormResponse(ctx, http.MethodPost, "/thread-inputs/"+url.PathEscape(input.ID)+"/cancel", nil)
+	if err != nil {
 		return nil, err
 	}
-	return &TaskThreadInputMutation{
-		ID:          input.ID,
-		TaskID:      input.TaskID,
-		ProjectID:   input.ProjectID,
-		InputMode:   input.InputMode,
-		InputStatus: "cancelled",
-	}, nil
+	outcome := strings.ToLower(strings.TrimSpace(resp.Header.Get(taskThreadInputMutationStatusHeader)))
+	drainAndClose(resp.Body)
+	switch outcome {
+	case "cancelled":
+		return &TaskThreadInputMutation{
+			ID:          input.ID,
+			TaskID:      input.TaskID,
+			ProjectID:   input.ProjectID,
+			InputMode:   input.InputMode,
+			InputStatus: "cancelled",
+		}, nil
+	case "not_pending":
+		return nil, fmt.Errorf("pending input %q is no longer pending; cancellation was not applied", input.ID)
+	default:
+		return nil, fmt.Errorf("cancellation response for pending input %q did not report a mutation outcome", input.ID)
+	}
 }
 
 // SteerTaskThreadQueuedInputForProject converts one queued follow-up to

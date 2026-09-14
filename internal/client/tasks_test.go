@@ -1327,7 +1327,7 @@ func TestGetTaskThreadPendingInputsEmptyIsNonNilAndForeignTaskFails(t *testing.T
 		wantErr bool
 	}{
 		{name: "empty", body: `<div id="pending-thread-inputs" data-task-id="task-1"></div>`},
-		{name: "foreign", body: `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="task-2" data-input-mode="queued"></div></div>`, wantErr: true},
+		{name: "foreign", body: `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-2" data-input-mode="queued"></div></div>`, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprint(w, tc.body) }))
@@ -1351,15 +1351,61 @@ func TestGetTaskThreadPendingInputsEmptyIsNonNilAndForeignTaskFails(t *testing.T
 	}
 }
 
+func TestGetTaskThreadPendingInputsRejectsContainerTaskIdentityMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing", body: `<div id="pending-thread-inputs"></div>`, want: "missing task identity"},
+		{name: "foreign", body: `<div id="pending-thread-inputs" data-task-id="task-2"></div>`, want: "not requested task"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = fmt.Fprint(w, tc.body)
+			}))
+			_, err := c.GetTaskThreadPendingInputsForProject(context.Background(), "task-1", "project-2")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestCancelTaskThreadInputRequiresBackendMutationOutcome(t *testing.T) {
+	for _, outcome := range []string{"not_pending", ""} {
+		name := outcome
+		if name == "" {
+			name = "missing"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
+					return
+				}
+				if outcome != "" {
+					w.Header().Set(taskThreadInputMutationStatusHeader, outcome)
+				}
+			}))
+			_, err := c.CancelTaskThreadInputForProject(context.Background(), "task-1", "project-2", "q1")
+			if err == nil || !strings.Contains(err.Error(), "cancellation") {
+				t.Fatalf("error = %v, want cancellation outcome error", err)
+			}
+		})
+	}
+}
+
 func TestCancelTaskThreadInputForProjectValidatesBeforeMutation(t *testing.T) {
 	var posts, gets int
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet:
 			gets++
-			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
+			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
 		case r.Method == http.MethodPost:
 			posts++
+			w.Header().Set(taskThreadInputMutationStatusHeader, "cancelled")
 			if r.URL.Path != "/thread-inputs/q1/cancel" {
 				t.Fatalf("cancel path = %q", r.URL.Path)
 			}
@@ -1384,7 +1430,7 @@ func TestCancelTaskThreadInputForProjectValidatesBeforeMutation(t *testing.T) {
 	posts = 0
 	c = newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
-			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="task-2" data-input-mode="queued"></div></div>`)
+			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-2" data-input-mode="queued"></div></div>`)
 			return
 		}
 		posts++
@@ -1405,7 +1451,7 @@ func TestSteerTaskThreadQueuedInputForProjectGuardsActiveTurnAndScope(t *testing
 			if r.URL.Query().Get("project_id") != "project-2" {
 				t.Fatalf("pending project_id = %q", r.URL.Query().Get("project_id"))
 			}
-			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
+			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
 		case "/tasks/task-1/thread":
 			_, _ = fmt.Fprint(w, `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`)
 		case "/tasks/task-1/thread/queued/q1/steer":
@@ -1429,7 +1475,7 @@ func TestSteerTaskThreadQueuedInputForProjectGuardsActiveTurnAndScope(t *testing
 	posts = 0
 	c = newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tasks/task-1/thread/pending-inputs" {
-			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
+			_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`)
 			return
 		}
 		if r.URL.Path == "/tasks/task-1/thread" {
