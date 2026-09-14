@@ -5800,6 +5800,52 @@ type webhookBulkActionJSON struct {
 	Deleted int    `json:"deleted"`
 }
 
+// webhookBulkError keeps backend-controlled diagnostics safe for terminal and
+// CLI output while preserving the original typed error for auth/transport
+// classification.
+type webhookBulkError struct {
+	cause   error
+	message string
+}
+
+func (e *webhookBulkError) Error() string {
+	if e == nil {
+		return "webhook bulk operation failed"
+	}
+	return e.message
+}
+
+func (e *webhookBulkError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func safeWebhookBulkError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &webhookBulkError{cause: err, message: safeConnectionDiagnosticText(err.Error())}
+}
+
+// webhookBulkRefreshAuthError marks a successful deletion whose best-effort
+// refresh discovered an expired session. Its body remains useful success
+// output, while the model enters quiet authentication recovery without turning
+// the already-completed mutation into a failed command.
+type webhookBulkRefreshAuthError struct {
+	*webhookBulkError
+}
+
+func newWebhookBulkRefreshAuthError(err error) error {
+	return &webhookBulkRefreshAuthError{webhookBulkError: safeWebhookBulkError(err).(*webhookBulkError)}
+}
+
+func isWebhookBulkRefreshAuthError(err error) bool {
+	var refreshErr *webhookBulkRefreshAuthError
+	return errors.As(err, &refreshErr)
+}
+
 var webhookOptionNames = map[string]string{
 	"--name": "name", "--enabled": "enabled", "--priority": "priority", "--default-priority": "priority",
 	"--system-instructions": "system_instructions", "--title-template": "title_template", "--prompt-template": "prompt_template",
@@ -6013,7 +6059,7 @@ func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs
 							sanitizeAutomationDetailText)
 					}
 				} else {
-					return webhookBulkTargetMsg{projectID: projectID, err: err}
+					return webhookBulkTargetMsg{projectID: projectID, err: safeWebhookBulkError(err)}
 				}
 			} else {
 				err = loadCatalog()
@@ -6025,7 +6071,7 @@ func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs
 				}
 			}
 			if err != nil {
-				return webhookBulkTargetMsg{projectID: projectID, err: err}
+				return webhookBulkTargetMsg{projectID: projectID, err: safeWebhookBulkError(err)}
 			}
 			if strings.TrimSpace(webhook.ID) == "" || webhook.ProjectID != projectID {
 				return webhookBulkTargetMsg{projectID: projectID, err: fmt.Errorf("webhook %q does not belong to selected project", sanitizeAutomationDetailText(ref))}
@@ -6113,15 +6159,20 @@ func webhookBulkActionOutput(ctx context.Context, c *client.Client, projectID st
 	}
 	count, err := c.DeleteWebhooksBulk(ctx, projectID, ids)
 	if err != nil {
-		return "", err
+		return "", safeWebhookBulkError(err)
 	}
 	if jsonMode {
 		return marshalJSON(webhookBulkActionJSON{Action: "delete-bulk", Deleted: count})
 	}
 	status := fmt.Sprintf("deleted %d webhooks", count)
-	return refreshAndRender(status,
-		func() ([]client.Webhook, error) { return c.ListWebhooks(ctx, projectID) },
-		func(webhooks []client.Webhook, _ string) string { return renderWebhooks(webhooks) })
+	webhooks, refreshErr := c.ListWebhooks(ctx, projectID)
+	if refreshErr != nil {
+		if client.IsAuthRequired(refreshErr) {
+			return status, newWebhookBulkRefreshAuthError(refreshErr)
+		}
+		return status, nil
+	}
+	return status + "\n\n" + renderWebhooks(webhooks), nil
 }
 
 func confirmWebhookBulkMutation(m Model, projectID string, webhooks []client.Webhook) (Model, tea.Cmd) {

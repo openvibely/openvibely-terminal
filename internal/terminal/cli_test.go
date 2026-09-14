@@ -9960,6 +9960,44 @@ func TestCLIWebhookDeleteBulkPreservesProjectIsolationAndEmptyOutput(t *testing.
 	}
 }
 
+func TestCLIWebhookDeleteBulkBackendErrorIsSafe(t *testing.T) {
+	const secret = "webhook-cli-error-secret"
+	const selected = `<div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels":
+			_, _ = io.WriteString(w, selected)
+		case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, `{"error":"token=%s \u001b[31mbulk rejected"}`, secret)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"channels", "webhooks", "delete-bulk", "First Hook"}, true, false)
+	if err == nil {
+		t.Fatal("backend bulk error was reported as success")
+	}
+	combined := err.Error() + out.String()
+	if strings.Contains(combined, secret) || strings.Contains(combined, "\x1b") {
+		t.Fatalf("backend bulk error leaked secret or control sequence: %q", combined)
+	}
+	if !strings.Contains(combined, "token=[redacted]") || !strings.Contains(combined, "bulk rejected") {
+		t.Fatalf("sanitized backend error missing expected diagnostic: %q", combined)
+	}
+}
+
 func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 	t.Run("list JSON is secret-free", func(t *testing.T) {
 		c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})

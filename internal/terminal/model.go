@@ -1803,6 +1803,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // steering result belongs to a view that is no longer current
 		}
 		m.busy = false
+		if isWebhookBulkRefreshAuthError(msg.err) {
+			if strings.TrimSpace(msg.body) != "" {
+				m.append(entry{role: "result", head: msg.title, text: msg.body})
+			}
+			m.markAuthRequiredQuiet()
+			return m, nil
+		}
 		if msg.err != nil {
 			// Some commands can return useful partial output with an error.
 			// Keep that output visible before applying the existing auth,

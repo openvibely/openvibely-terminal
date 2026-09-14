@@ -756,6 +756,7 @@ Inbound webhooks use the nested `/channels webhooks` registry:
 /channels webhooks test pager
 /channels webhooks rotate pager
 /channels webhooks delete pager
+/channels webhooks delete-bulk "PagerDuty alerts" "Build alerts"
 ```
 
 Webhook `create` and `edit` accept `--name`, `--enabled`, `--priority` (or
@@ -1015,6 +1016,7 @@ $ openvibely-terminal help channels
   channels webhooks test <webhook>           create a synthetic test task
   channels webhooks rotate <webhook>         rotate its secret (confirmation required)
   channels webhooks delete <webhook>         delete a webhook (confirmation required)
+  channels webhooks delete-bulk <webhook>... delete selected webhooks (confirmation required)
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,

@@ -13833,6 +13833,80 @@ func TestWebhookDeleteBulkRejectsInvalidReferencesBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestWebhookDeleteBulkRefreshAuthEntersRecoveryWithoutFailingMutation(t *testing.T) {
+	const selected = `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div><div data-webhook-id="w-two" data-webhook-name="Second Hook" data-webhook-token="token-two"></div></div>`
+	var lists, deletes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels":
+			lists++
+			if lists > 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, selected)
+		case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+			deletes++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"deleted":2}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, `/channels webhooks delete-bulk "First Hook" "Second Hook"`)
+
+	if deletes != 1 || lists != 2 {
+		t.Fatalf("bulk requests = lists:%d deletes:%d, want 2 and 1", lists, deletes)
+	}
+	if !m.authRequired || m.connected {
+		t.Fatalf("refresh auth state = authRequired:%v connected:%v, want quiet recovery", m.authRequired, m.connected)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "deleted 2 webhooks") {
+		t.Fatalf("successful mutation output missing after auth refresh failure:\n%s", out)
+	}
+}
+
+func TestWebhookDeleteBulkBackendErrorIsSafeInTUI(t *testing.T) {
+	const secret = "webhook-error-secret"
+	const selected = `<div data-webhook-id="w-one" data-webhook-name="First Hook" data-webhook-token="token-one"></div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels":
+			_, _ = io.WriteString(w, selected)
+		case r.Method == http.MethodDelete && r.URL.Path == "/channels/webhooks/bulk":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = fmt.Fprintf(w, `{"error":"token=%s \u001b[31mbulk rejected"}`, secret)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = confirmDestructive(t, m, `/channels webhooks delete-bulk "First Hook"`)
+	out := transcript(m)
+	if strings.Contains(out, secret) || strings.Contains(out, "\x1b") {
+		t.Fatalf("backend bulk error leaked secret or control sequence:\n%q", out)
+	}
+	if !strings.Contains(out, "token=[redacted]") || !strings.Contains(out, "bulk rejected") {
+		t.Fatalf("sanitized backend error missing expected diagnostic:\n%s", out)
+	}
+}
+
 func webhookCatalogPageHTML(total, offset int) string {
 	end := min(offset+50, total)
 	var b strings.Builder
