@@ -11868,6 +11868,189 @@ const taskReviewHTML = `<div id="review-comments-list" data-task-id="t-1" data-c
 	</div>
 </div>`
 
+const (
+	projectReviewTaskID      = "same-task-id"
+	projectReviewCanonicalID = "0123456789abcdef0123456789abcdef"
+)
+
+func projectReviewBoardHTML() string {
+	return `<div>
+		<div class="card" data-task-id="` + projectReviewTaskID + `" data-task-status="pending" data-task-category="backlog">
+			<a href="/tasks/` + projectReviewTaskID + `" title="P2 selected task">P2 selected task</a>
+		</div>
+		<div class="card" data-task-id="` + projectReviewCanonicalID + `" data-task-status="pending" data-task-category="backlog">
+			<a href="/tasks/` + projectReviewCanonicalID + `" title="P2 canonical task">P2 canonical task</a>
+		</div>
+	</div>`
+}
+
+func projectReviewHTML(taskID, comment string) string {
+	return `<div id="review-comments-list" data-task-id="` + taskID + `" data-comment-count="1">
+		<div class="review-comment-item" data-comment-id="` + comment + `" data-task-id="` + taskID + `" data-file-path="internal/client/tasks.go" data-line-number="42" data-line-type="new" data-state="open">
+			<div><span data-author="alice">alice</span><p>` + comment + `</p></div>
+		</div>
+	</div>`
+}
+
+func dispatchProjectReviewModel(t *testing.T) (Model, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm: %v", err)
+		}
+		rec.mu.Lock()
+		rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
+		rec.mu.Unlock()
+
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/tasks":
+			if got := r.URL.Query().Get("project_id"); got != "p2" {
+				t.Errorf("task board project_id = %q, want p2", got)
+			}
+			_, _ = w.Write([]byte(projectReviewBoardHTML()))
+		case "/tasks/" + projectReviewCanonicalID:
+			if got := r.URL.Query().Get("project_id"); got != "p2" {
+				t.Errorf("canonical task project_id = %q, want p2", got)
+			}
+			_, _ = w.Write([]byte(canonicalTaskDetailHTML(projectReviewCanonicalID, "p2")))
+		default:
+			if !strings.HasSuffix(r.URL.Path, "/reviews") {
+				http.NotFound(w, r)
+				return
+			}
+			taskID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/tasks/"), "/reviews")
+			if r.URL.Query().Get("project_id") == "p2" {
+				_, _ = w.Write([]byte(projectReviewHTML(taskID, "selected project review")))
+				return
+			}
+			// Project p1 contains the same task ID. An unscoped review request
+			// must not be able to render this foreign project's comment.
+			_, _ = w.Write([]byte(projectReviewHTML(taskID, "foreign project review")))
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID, m.selectedName = "p2", "selected project"
+	return m, rec
+}
+
+func assertProjectReviewRequests(t *testing.T, rec *recorder, method string) {
+	t.Helper()
+	for _, recorded := range rec.urlsSnapshot() {
+		parts := strings.SplitN(recorded, " ", 2)
+		if len(parts) != 2 || parts[0] != method || !strings.HasSuffix(strings.SplitN(parts[1], "?", 2)[0], "/reviews") {
+			continue
+		}
+		u, err := url.Parse(parts[1])
+		if err != nil {
+			t.Fatalf("parse recorded review request %q: %v", recorded, err)
+		}
+		values, ok := u.Query()["project_id"]
+		if !ok || len(values) != 1 || values[0] != "p2" {
+			t.Fatalf("review request %q has project_id values %v, want exactly [p2]", recorded, values)
+		}
+	}
+}
+
+func TestTaskReviewReadPathsUseSelectedProjectForEveryRoute(t *testing.T) {
+	tests := []struct {
+		name   string
+		line   string
+		picker bool
+	}{
+		{name: "reviews title", line: "/tasks reviews P2 selected task"},
+		{name: "reviews ordinary ID", line: "/tasks reviews " + projectReviewTaskID},
+		{name: "show title", line: "/tasks show P2 selected task review"},
+		{name: "show ordinary ID", line: "/tasks show " + projectReviewTaskID + " review"},
+		{name: "reviews picker", line: "/tasks reviews", picker: true},
+		{name: "show canonical full ID", line: "/tasks show " + projectReviewCanonicalID + " review"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchProjectReviewModel(t)
+			m = runLine(t, m, tc.line)
+			if tc.picker {
+				if !m.selectorActive {
+					t.Fatalf("expected review picker, transcript:\n%s", transcript(m))
+				}
+				m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			}
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "selected project review") {
+				t.Fatalf("selected project's review was not rendered:\n%s", transcript(m))
+			}
+			if strings.Contains(out, "foreign project review") {
+				t.Fatalf("foreign project's same-ID review was rendered:\n%s", transcript(m))
+			}
+			assertProjectReviewRequests(t, rec, http.MethodGet)
+			if got := rec.count("GET", "/tasks/"+projectReviewCanonicalID+"/reviews"); tc.name == "show canonical full ID" && got != 1 {
+				t.Fatalf("canonical review requests = %d, want 1; calls:\n%s", got, rec.all())
+			}
+		})
+	}
+}
+
+func TestTaskReviewAddPathsUseSelectedProjectForTitleOrdinaryPickerAndCanonical(t *testing.T) {
+	const operands = "internal/client/tasks.go:42 Needs selected project isolation"
+	tests := []struct {
+		name   string
+		line   string
+		picker bool
+	}{
+		{name: "title", line: "/tasks reviews add P2 selected task " + operands},
+		{name: "ordinary ID", line: "/tasks reviews add " + projectReviewTaskID + " " + operands},
+		{name: "canonical full ID", line: "/tasks reviews add " + projectReviewCanonicalID + " " + operands},
+		{name: "picker", line: "/tasks reviews add", picker: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchProjectReviewModel(t)
+			if tc.picker {
+				m = runLine(t, m, tc.line)
+				if !m.selectorActive {
+					t.Fatalf("expected review add picker, transcript:\n%s", transcript(m))
+				}
+				m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+				m = runLine(t, m, operands)
+			} else {
+				m = runLine(t, m, tc.line)
+			}
+			expectedTaskID := projectReviewTaskID
+			if tc.name == "canonical full ID" {
+				expectedTaskID = projectReviewCanonicalID
+			}
+			if got := rec.count("POST", "/tasks/"+expectedTaskID+"/reviews"); got != 1 {
+				t.Fatalf("review submission requests = %d, want 1; calls:\n%s", got, rec.all())
+			}
+			assertProjectReviewRequests(t, rec, http.MethodPost)
+			for _, want := range []string{
+				"file_path=internal%2Fclient%2Ftasks.go",
+				"line_number=42",
+				"line_type=new",
+				"comment_text=Needs+selected+project+isolation",
+			} {
+				if !rec.sawForm(want) {
+					t.Errorf("review form missing %q: %v", want, rec.forms)
+				}
+			}
+			out := stripANSI(transcript(m))
+			if strings.Contains(out, "foreign project review") || !strings.Contains(out, "added review comment") {
+				t.Fatalf("review add did not stay in selected project:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
 func TestTasksShowReviewTabListsInlineComments(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/tasks":             taskBoardHTML,

@@ -1102,6 +1102,78 @@ func TestAddTaskReviewCommentPostsFormAndParsesHTMLFragment(t *testing.T) {
 	}
 }
 
+func TestTaskReviewProjectMethodsScopeAndEncode(t *testing.T) {
+	const projectID = "team p2/project?&"
+	wantQuery := url.Values{"project_id": []string{projectID}}.Encode()
+	var requests []string
+	var gotForm url.Values
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Method == http.MethodPost {
+			gotForm = r.PostForm
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(reviewCommentsHTML))
+	}))
+
+	ctx := context.Background()
+	if _, err := c.ListTaskReviewsForProject(ctx, "task/one", projectID); err != nil {
+		t.Fatalf("ListTaskReviewsForProject: %v", err)
+	}
+	form := ReviewCommentForm{FilePath: "internal/client/tasks.go", LineNumber: 42, LineType: "new", CommentText: "Needs error handling"}
+	if _, err := c.AddTaskReviewCommentForProject(ctx, "task/one", projectID, form); err != nil {
+		t.Fatalf("AddTaskReviewCommentForProject: %v", err)
+	}
+
+	want := []string{
+		"GET /tasks/task%2Fone/reviews?" + wantQuery,
+		"POST /tasks/task%2Fone/reviews?" + wantQuery,
+	}
+	if fmt.Sprint(requests) != fmt.Sprint(want) {
+		t.Fatalf("requests = %q, want %q", requests, want)
+	}
+	for key, value := range map[string]string{
+		"file_path": "internal/client/tasks.go", "line_number": "42", "line_type": "new", "comment_text": "Needs error handling",
+	} {
+		if got := gotForm.Get(key); got != value {
+			t.Errorf("form %s = %q, want %q", key, got, value)
+		}
+	}
+}
+
+func TestTaskReviewProjectMethodsRejectEmptyProjectBeforeHTTP(t *testing.T) {
+	var requests int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+	}))
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "list", call: func() error {
+			_, err := c.ListTaskReviewsForProject(ctx, "task", " ")
+			return err
+		}},
+		{name: "add", call: func() error {
+			_, err := c.AddTaskReviewCommentForProject(ctx, "task", "", ReviewCommentForm{})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.call(); err == nil || !strings.Contains(err.Error(), "project ID is required") {
+				t.Fatalf("error = %v, want project ID guard", err)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("request count = %d, want zero", requests)
+	}
+}
+
 func TestGetTaskThreadStateRequiresOneExplicitActiveTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name string

@@ -191,8 +191,6 @@ func confirmScheduleDeletion(m Model, projectID string, schedule client.Schedule
 }
 
 // taskReviewsOutput fetches and formats the read-only review view for a task.
-// Callers supply the fetch function so their intentional ordinary-versus-scoped
-// request behavior remains unchanged.
 func taskReviewsOutput(ctx context.Context, t client.Task, fetch func(context.Context, string) ([]client.ReviewComment, error)) (string, error) {
 	reviews, err := fetch(ctx, t.ID)
 	if err != nil {
@@ -578,7 +576,9 @@ func tasksCommand() command {
 						return "", err
 					}
 					if isReviewTab(tab) {
-						return taskReviewsOutput(ctx, t, c.ListTaskReviews)
+						return taskReviewsOutput(ctx, t, func(ctx context.Context, taskID string) ([]client.ReviewComment, error) {
+							return c.ListTaskReviewsForProject(ctx, taskID, pid)
+						})
 					}
 					if jsonMode {
 						return marshalJSON(t)
@@ -620,7 +620,9 @@ func tasksCommand() command {
 						if err != nil {
 							return "", err
 						}
-						return taskReviewsOutput(ctx, t, c.ListTaskReviews)
+						return taskReviewsOutput(ctx, t, func(ctx context.Context, taskID string) ([]client.ReviewComment, error) {
+							return c.ListTaskReviewsForProject(ctx, taskID, pid)
+						})
 					})
 				case "add":
 					if len(reviewRest) == 0 {
@@ -643,7 +645,7 @@ func tasksCommand() command {
 							return "", fmt.Errorf("%s", commandUsage("tasks", "reviews add"))
 						}
 						form := client.ReviewCommentForm{FilePath: location.filePath, LineNumber: location.lineNumber, LineType: "new", CommentText: commentText}
-						reviews, err := c.AddTaskReviewComment(ctx, t.ID, form)
+						reviews, err := c.AddTaskReviewCommentForProject(ctx, t.ID, pid, form)
 						if err != nil {
 							return "", err
 						}
