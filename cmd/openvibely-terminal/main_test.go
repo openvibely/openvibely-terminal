@@ -202,12 +202,6 @@ func TestLoginWithConfiguredCredentialsReusesCookieSession(t *testing.T) {
 }
 
 func TestConfiguredLoginFailureRedactsConfiguredServerURL(t *testing.T) {
-	const (
-		username = "configured-url-user"
-		password = "configured-url-password-must-not-appear"
-		token    = "configured-url-token-must-not-appear"
-		fragment = "configured-url-fragment-must-not-appear"
-	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -215,7 +209,7 @@ func TestConfiguredLoginFailureRedactsConfiguredServerURL(t *testing.T) {
 
 	for _, scheme := range []string{"HTTP", "hTtP"} {
 		t.Run(scheme, func(t *testing.T) {
-			server := scheme + "://" + username + ":" + password + "@" + strings.TrimPrefix(srv.URL, "http://") + "?token=" + token + "#" + fragment
+			server := scheme + "://" + strings.TrimPrefix(srv.URL, "http://") + "/tenant"
 			c, err := client.New(server)
 			if err != nil {
 				t.Fatal(err)
@@ -224,12 +218,12 @@ func TestConfiguredLoginFailureRedactsConfiguredServerURL(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected configured login failure")
 			}
-			for _, secret := range []string{username, password, token, fragment} {
+			for _, secret := range []string{"configured-user", "configured-password"} {
 				if strings.Contains(err.Error(), secret) {
 					t.Errorf("configured login failure leaked %q: %v", secret, err)
 				}
 			}
-			if !strings.Contains(err.Error(), "authenticating with http://") {
+			if !strings.Contains(err.Error(), "authenticating with http://") || !strings.Contains(err.Error(), "/tenant") {
 				t.Errorf("configured login failure omitted safe server context: %v", err)
 			}
 		})

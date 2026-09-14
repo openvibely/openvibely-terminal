@@ -551,6 +551,267 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 	}
 }
 
+func TestCLIPersonalityBulkDeleteRequiresForceUsesOneRequestAndKeepsJSONStable(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-id="personality-id-2" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+
+	t.Run("missing force does not mutate", func(t *testing.T) {
+		var bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+				http.Error(w, "unexpected mutation", http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one", "Old Two"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "--force") {
+			t.Fatalf("missing-force error = %v", err)
+		}
+		if bulkDeletes != 0 {
+			t.Fatalf("missing force made %d bulk DELETE requests", bulkDeletes)
+		}
+	})
+
+	t.Run("force sends one scoped bulk request and JSON is count only", func(t *testing.T) {
+		var bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+				if r.URL.Query().Get("project_id") != "p1" || r.Method != http.MethodDelete || r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("bulk request = %s %s query=%s content-type=%q", r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("Content-Type"))
+				}
+				var payload struct {
+					IDs []string `json:"ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Errorf("decode bulk body: %v", err)
+				}
+				if want := []string{"personality-id-1", "personality-id-2"}; !reflect.DeepEqual(payload.IDs, want) {
+					t.Errorf("bulk IDs = %#v, want %#v", payload.IDs, want)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"deleted":2}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one", "Old Two"}, true, true); err != nil {
+			t.Fatalf("forced bulk delete: %v", err)
+		}
+		if bulkDeletes != 1 {
+			t.Fatalf("bulk DELETE requests = %d, want one", bulkDeletes)
+		}
+		if got := strings.TrimSpace(out.String()); got != `{"deleted":2}` {
+			t.Fatalf("JSON output = %q, want stable deleted-count record", got)
+		}
+	})
+}
+
+func TestCLIPersonalityBulkDeleteRejectsMixedSelectionBeforeMutationAndSwallowsRefreshFailure(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+		<div data-personality-key="old_two" data-personality-id="personality-id-2" data-personality-name="Old Two" data-personality-is-preset="false" data-personality-has-custom="true"></div>
+	</div>`
+
+	t.Run("mixed valid and unknown references", func(t *testing.T) {
+		var bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = RunCLI(c, io.Discard, "demo", []string{"personality", "delete-bulk", "old_one", "missing"}, true, false)
+		if err == nil || !strings.Contains(err.Error(), "nothing matches") {
+			t.Fatalf("mixed-selection error = %v", err)
+		}
+		if bulkDeletes != 0 {
+			t.Fatalf("mixed selection made %d bulk DELETE requests", bulkDeletes)
+		}
+	})
+
+	t.Run("refresh failure does not undo successful deletion", func(t *testing.T) {
+		var lists, bulkDeletes int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/personality":
+				lists++
+				if lists > 1 {
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = io.WriteString(w, `{"error":"refresh unavailable"}`)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, catalog)
+			case "/personality/custom/bulk":
+				bulkDeletes++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"deleted":2}`)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one", "old_two"}, true, false); err != nil {
+			t.Fatalf("successful deletion with failed refresh: %v", err)
+		}
+		if lists != 2 || bulkDeletes != 1 || !strings.Contains(out.String(), "deleted 2 personalities") {
+			t.Fatalf("lists=%d bulkDeletes=%d output=%q", lists, bulkDeletes, out.String())
+		}
+	})
+}
+
+func TestCLIPersonalityBulkDeleteCancellationDuringMutationDoesNotMutate(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	deleteStarted := make(chan struct{})
+	allowMutation := make(chan struct{})
+	var startOnce sync.Once
+	var mutated bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case "/personality/custom/bulk":
+			startOnce.Do(func() { close(deleteStarted) })
+			select {
+			case <-r.Context().Done():
+			case <-allowMutation:
+				mutated = true
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"deleted":1}`)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	defer close(allowMutation)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, io.Discard, "demo", []string{"personality", "delete-bulk", "old_one"}, true, false)
+	}()
+	select {
+	case <-deleteStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("bulk DELETE did not start")
+	}
+	cancel()
+	select {
+	case err = <-result:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled CLI result = %v, want nil or context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled bulk delete did not return promptly")
+	}
+	if mutated {
+		t.Fatal("caller cancellation allowed bulk mutation to complete")
+	}
+}
+
+func TestCLIPersonalityBulkDeleteErrorOutputIsTerminalSafe(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="old_one" data-personality-id="personality-id-1" data-personality-name="Old One" data-personality-is-preset="false" data-personality-has-custom="false"></div>
+	</div>`
+	const hostile = "bulk rejected \x1b[31msecret\x1b[0m\nforged\x07"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case "/personality/custom/bulk":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": hostile})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"personality", "delete-bulk", "old_one"}, true, false)
+	if err == nil {
+		t.Fatal("hostile bulk error unexpectedly succeeded")
+	}
+	text := err.Error()
+	if strings.Contains(text, "\x1b") || strings.Contains(text, "\x07") || strings.Contains(text, "secret\nforged") {
+		t.Fatalf("hostile bulk error escaped through CLI error: %q", text)
+	}
+	if !strings.Contains(text, "server error (400): bulk rejected secret forged") {
+		t.Fatalf("sanitized CLI bulk error missing: %q", text)
+	}
+}
+
 func TestCLIPersonalityAddLiteralDescriptionPrefixUsesExactTwoFieldPayload(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description=""
@@ -1521,6 +1782,65 @@ func TestCLIStatusUsesInvalidServerURLRecovery(t *testing.T) {
 		if strings.Contains(output, secret) || strings.Contains(err.Error(), secret) {
 			t.Errorf("invalid URL status leaked %q:\noutput=%s\nerror=%v", secret, output, err)
 		}
+	}
+}
+
+func TestCLIStatusUsesSharedInvalidServerURLValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		server func(string) string
+		secret string
+	}{
+		{
+			name: "query",
+			server: func(base string) string {
+				return base + "?tenant=status-query-secret"
+			},
+			secret: "status-query-secret",
+		},
+		{
+			name: "fragment",
+			server: func(base string) string {
+				return base + "#status-fragment-secret"
+			},
+			secret: "status-fragment-secret",
+		},
+		{
+			name: "credentials",
+			server: func(base string) string {
+				return "http://status-user:status-password-secret@" + strings.TrimPrefix(base, "http://")
+			},
+			secret: "status-password-secret",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				_, _ = io.WriteString(w, `{"projects":[]}`)
+			}))
+			defer srv.Close()
+
+			c, err := client.New(tc.server(srv.URL))
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "", []string{"status"}, false, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "invalid configured server url") {
+				t.Fatalf("status error = %v, want invalid configured server URL guidance", err)
+			}
+			visible := out.String() + "\n" + err.Error()
+			if !strings.Contains(strings.ToLower(visible), "-server <url>") || !strings.Contains(strings.ToLower(visible), "openvibely_server_url") {
+				t.Fatalf("status output omitted invalid URL guidance:\n%s", visible)
+			}
+			if strings.Contains(visible, tc.secret) || strings.Contains(visible, "status-user") {
+				t.Fatalf("status output leaked configured URL data:\n%s", visible)
+			}
+			if requests != 0 {
+				t.Fatalf("status made %d requests for invalid URL", requests)
+			}
+		})
 	}
 }
 

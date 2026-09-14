@@ -2792,6 +2792,109 @@ func TestPersonalityJSONMutationsUseScopedRoutesAndPayloads(t *testing.T) {
 	}
 }
 
+func TestDeleteCustomPersonalitiesBulkUsesScopedJSONAndReturnsDeletedCount(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodDelete || r.URL.Path != "/personality/custom/bulk" || r.URL.Query().Get("project_id") != "project-2" {
+			t.Errorf("request = %s %s, want scoped bulk DELETE", r.Method, r.URL.RequestURI())
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", got)
+		}
+		var payload struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode bulk body: %v", err)
+		}
+		if want := []string{"custom-id-1", "custom-id-2"}; !reflect.DeepEqual(payload.IDs, want) {
+			t.Errorf("ids = %#v, want %#v", payload.IDs, want)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"deleted":2}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, err := c.DeleteCustomPersonalitiesBulk(context.Background(), "project-2", []string{" custom-id-1 ", "custom-id-2"})
+	if err != nil {
+		t.Fatalf("bulk delete: %v", err)
+	}
+	if count != 2 || requests != 1 {
+		t.Fatalf("count = %d, requests = %d, want count 2 and one request", count, requests)
+	}
+}
+
+func TestDeleteCustomPersonalitiesBulkValidatesInputAndResponse(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"deleted":1}`)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		call func() (int, error)
+	}{
+		{name: "empty project", call: func() (int, error) {
+			return c.DeleteCustomPersonalitiesBulk(context.Background(), " ", []string{"id-1"})
+		}},
+		{name: "empty IDs", call: func() (int, error) {
+			return c.DeleteCustomPersonalitiesBulk(context.Background(), "p1", nil)
+		}},
+		{name: "blank ID", call: func() (int, error) {
+			return c.DeleteCustomPersonalitiesBulk(context.Background(), "p1", []string{" "})
+		}},
+		{name: "duplicate ID", call: func() (int, error) {
+			return c.DeleteCustomPersonalitiesBulk(context.Background(), "p1", []string{"id-1", " id-1 "})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := tc.call(); err == nil {
+				t.Fatal("invalid bulk input unexpectedly succeeded")
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("invalid bulk inputs made %d requests, want zero", requests)
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "missing count", body: `{}`, want: "missing required deleted count"},
+		{name: "null count", body: `{"deleted":null}`, want: "missing required deleted count"},
+		{name: "negative count", body: `{"deleted":-1}`, want: "deleted count must not be negative"},
+		{name: "error object", body: `{"deleted":1,"error":"rejected"}`, want: "received an error object"},
+		{name: "trailing JSON", body: `{"deleted":1}{}`, want: "trailing JSON data"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			responseServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(responseServer.Close)
+			responseClient, err := New(responseServer.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := responseClient.DeleteCustomPersonalitiesBulk(context.Background(), "p1", []string{"id-1"}); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("response error = %v, want text %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestPersonalityMutationErrorsPropagateValidationDuplicateAndNotFound(t *testing.T) {
 	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

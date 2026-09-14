@@ -206,9 +206,17 @@ func New(baseURL string) (*Client, error) {
 // BaseURL returns the normalized server base URL.
 func (c *Client) BaseURL() string { return c.baseURL }
 
-func validServerURL(baseURL string) bool {
+// IsValidServerURL reports whether baseURL is a supported backend base URL.
+// It accepts only HTTP(S) URLs with an authority and optional path prefix. URL
+// userinfo, queries, and fragments are rejected because they are not part of a
+// safe backend base URL and could alter or expose request data.
+func IsValidServerURL(baseURL string) bool {
+	baseURL = strings.TrimSpace(baseURL)
 	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if u.User != nil || strings.ContainsAny(baseURL, "?#") {
 		return false
 	}
 	if port := u.Port(); port != "" {
@@ -221,7 +229,7 @@ func validServerURL(baseURL string) bool {
 }
 
 func (c *Client) newRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Request, error) {
-	if !validServerURL(c.baseURL) {
+	if !IsValidServerURL(c.baseURL) {
 		return nil, &InvalidServerURLError{}
 	}
 	return http.NewRequestWithContext(ctx, method, c.baseURL+endpoint, body)

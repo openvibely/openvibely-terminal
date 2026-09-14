@@ -3167,7 +3167,7 @@ func renderPersonalities(personalities []client.Personality, filter string) stri
 		return dimStyle.Render("no personalities yet — /personality add <name> | <system prompt> creates one")
 	}
 	return table(rows) + "\n\n" +
-		dimStyle.Render("/personality show <key|name> · /personality set <key|name> · /personality edit|delete <key|name>")
+		dimStyle.Render("/personality show <key|name> · /personality set <key|name> · /personality edit|delete <key|name> · /personality delete-bulk <key|name>...")
 }
 
 func renderPersonalityDetail(p client.Personality) string {
