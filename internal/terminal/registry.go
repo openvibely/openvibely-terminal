@@ -1882,6 +1882,21 @@ func isRepeat(s string) bool {
 
 // --- alerts ---
 
+func alertSelectorItems(alerts []client.Alert, dispatch func(client.Alert) selectorItemDispatch) []selectorItem {
+	items := make([]selectorItem, 0, len(alerts))
+	for _, alert := range alerts {
+		alert := alert
+		item := selectorItem{
+			ref:    alert.ID,
+			label:  firstNonEmpty(alert.Title, alert.Message, alert.Text, shortID(alert.ID)),
+			detail: strings.Join(alert.Badges, " "),
+		}
+		item.dispatch = dispatch(alert)
+		items = append(items, item)
+	}
+	return items
+}
+
 func alertInspectionOutput(ctx context.Context, c *client.Client, projectID string, alert client.Alert) (string, error) {
 	detail, err := c.GetAlertDetail(ctx, alert.ID, projectID)
 	if err != nil {
@@ -2195,22 +2210,14 @@ func alertsCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(alerts))
-								for _, alert := range alerts {
-									a := alert
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Title, a.Message, a.Text, shortID(a.ID)),
-										detail: strings.Join(a.Badges, " "),
-									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
+								items := alertSelectorItems(alerts, func(a client.Alert) selectorItemDispatch {
+									return func(m Model) (Model, tea.Cmd) {
 										m.busy = true
 										return m, run("Alert", cmdTimeout, func(ctx context.Context) (string, error) {
 											return alertInspectionOutput(ctx, c, pid, a)
 										})
 									}
-									items = append(items, item)
-								}
+								})
 								return items, nil
 							}))
 				}
@@ -2278,15 +2285,8 @@ func alertsCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(alerts))
-								for _, a := range alerts {
-									a := a
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Title, a.Message, a.Text, shortID(a.ID)),
-										detail: strings.Join(a.Badges, " "),
-									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
+								items := alertSelectorItems(alerts, func(a client.Alert) selectorItemDispatch {
+									return func(m Model) (Model, tea.Cmd) {
 										cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
 											return resolvedAlertActionOutput(ctx, c, pid, action, a)
 										})
@@ -2300,8 +2300,7 @@ func alertsCommand() command {
 										m.busy = true
 										return m, cmd
 									}
-									items = append(items, item)
-								}
+								})
 								return items, nil
 							}))
 				}
