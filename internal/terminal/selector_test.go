@@ -1504,6 +1504,33 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 	}
 }
 
+func TestAlertDeletePickerCancellation(t *testing.T) {
+	m, rec := dispatchModel(t, selFixtures())
+	m = runLine(t, m, "/alerts delete")
+	if !m.selectorActive {
+		t.Fatalf("delete picker did not open:\n%s", transcript(m))
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive || m.pendingConfirmation == nil {
+		t.Fatalf("delete selection state = active:%t confirmation:%v\n%s", m.selectorActive, m.pendingConfirmation != nil, transcript(m))
+	}
+	if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `Delete alert "Add retry logic"?`) {
+		t.Fatalf("delete confirmation prompt = %q", prompt)
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if m.pendingConfirmation != nil {
+		t.Fatalf("delete confirmation remained after Esc:\n%s", transcript(m))
+	}
+	if rec.saw(http.MethodDelete, "/alerts/a-1") {
+		t.Fatalf("cancelled delete made a request:\n%s", rec.all())
+	}
+	if !strings.Contains(transcript(m), "cancelled") {
+		t.Fatalf("delete cancellation was not reported:\n%s", transcript(m))
+	}
+}
+
 func TestAlertPickerAndTypedActionsHaveEquivalentResolvedOutput(t *testing.T) {
 	const deleteResponse = `<div data-alert-id="a-remaining" data-alert-scroll-anchor="a-remaining"><p class="font-semibold">Remaining alert</p></div>`
 
