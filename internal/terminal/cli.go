@@ -111,6 +111,7 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 	m := New(c)
 	m.cliContext = ctx
 	m.cliSecretInput = input
+	m.wantProject = projectRef
 	m.width, m.height = 100, 40
 	m.transcript.Width = m.width
 	m.log = nil // drop the interactive banner
@@ -1444,12 +1445,16 @@ func (c command) needsBackend() bool {
 }
 
 // needsProjectLoad reports whether CLI startup should resolve a selected
-// project before running the command. Project creation is intentionally
-// independent of the existing project list, so first-run creation works even
+// project before running the command. Global project-list output loads its
+// catalog in the command itself, while project creation is intentionally
+// independent of the existing project list so first-run creation works even
 // when the backend has no projects yet.
 func (c command) needsProjectLoad(args []string) bool {
-	if c.name == "projects" && len(args) > 1 && (strings.EqualFold(args[1], "create") || strings.EqualFold(args[1], "github-create")) {
-		return false
+	if c.name == "projects" {
+		action, _ := splitAction(c.actions, args[1:])
+		if action == "" || strings.EqualFold(action, "list") || strings.EqualFold(action, "create") || strings.EqualFold(action, "github-create") {
+			return false
+		}
 	}
 	if c.name == "models" && len(args) > 0 && !c.cliProjectScoped(args[1:]) {
 		return false

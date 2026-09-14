@@ -7206,16 +7206,29 @@ func projectsCommand() command {
 			}
 			if jsonMode {
 				c := m.client
-				return m, run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
+				selectName := strings.TrimSpace(m.wantProject)
+				return m, m.run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
 					projects, err := c.ListProjects(ctx)
 					if err != nil {
-						return "", err
+						if client.IsAuthRequired(err) {
+							return "", err
+						}
+						return "", fmt.Errorf("loading projects: %s", connectionErrorMessage(c.BaseURL(), err))
+					}
+					if cliMode && selectName != "" {
+						if _, err := matchProject(projects, selectName); err != nil {
+							return "", err
+						}
 					}
 					return marshalJSON(projects)
 				})
 			}
 			var cmd tea.Cmd
-			m, cmd = m.beginProjectLoadWithSSE(true, "", !cliMode)
+			selectName := ""
+			if cliMode {
+				selectName = m.wantProject
+			}
+			m, cmd = m.beginProjectLoadWithSSE(true, selectName, !cliMode)
 			return m, cmd
 		},
 	}

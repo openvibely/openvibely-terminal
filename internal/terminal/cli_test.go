@@ -6922,6 +6922,313 @@ func TestCLIJSONAutomationsEmptyListIsArray(t *testing.T) {
 	}
 }
 
+func TestCLIProjectsListUsesSingleCatalogRequest(t *testing.T) {
+	const records = 1000
+	projects := make([]client.Project, records)
+	capacities := make([]client.ProjectCapacity, records)
+	for i := range records {
+		id := fmt.Sprintf("project-%04d", i)
+		projects[i] = client.Project{
+			ID:   id,
+			Name: fmt.Sprintf("Project %04d", i),
+			Path: fmt.Sprintf("/workspace/projects/%04d", i),
+		}
+		capacities[i] = client.ProjectCapacity{
+			ID:        id,
+			Name:      projects[i].Name,
+			Running:   i % 7,
+			QueueSize: i % 11,
+		}
+	}
+	catalogBytes, err := json.Marshal(struct {
+		Projects []client.Project `json:"projects"`
+	}{Projects: projects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capacityBytes, err := json.Marshal(capacities)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		json       bool
+		wantCaps   int
+		wantOutput []string
+	}{
+		{
+			name:       "json implicit list",
+			args:       []string{"projects"},
+			json:       true,
+			wantOutput: []string{},
+		},
+		{
+			name:       "json explicit list",
+			args:       []string{"projects", "list"},
+			json:       true,
+			wantOutput: []string{},
+		},
+		{
+			name:       "plain implicit list",
+			args:       []string{"projects"},
+			wantCaps:   1,
+			wantOutput: []string{"Project 0000", "Project 0999", "5", "9", "/workspace/projects/0999"},
+		},
+		{
+			name:       "plain explicit list",
+			args:       []string{"projects", "list"},
+			wantCaps:   1,
+			wantOutput: []string{"Project 0000", "Project 0999", "5", "9", "/workspace/projects/0999"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":          string(catalogBytes),
+				"/api/capacity/projects": string(capacityBytes),
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "", tc.args, false, tc.json); err != nil {
+				t.Fatalf("project list failed: %v\n%s", err, out.String())
+			}
+			if got := rec.count(http.MethodGet, "/api/projects"); got != 1 {
+				t.Fatalf("catalog requests = %d, want one:\n%s", got, rec.all())
+			}
+			if got := rec.count(http.MethodGet, "/api/capacity/projects"); got != tc.wantCaps {
+				t.Fatalf("capacity requests = %d, want %d:\n%s", got, tc.wantCaps, rec.all())
+			}
+			if tc.json {
+				var got []client.Project
+				if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+					t.Fatalf("project JSON is invalid: %v\n%s", err, out.String())
+				}
+				if len(got) != len(projects) {
+					t.Fatalf("project JSON changed catalog length or ordering: got %d projects, want %d", len(got), len(projects))
+				}
+				if !reflect.DeepEqual(got, projects) {
+					t.Fatalf("project JSON changed catalog values or ordering: got first/last=%+v/%+v, want first/last=%+v/%+v", got[0], got[len(got)-1], projects[0], projects[len(projects)-1])
+				}
+				return
+			}
+			plain := stripANSI(out.String())
+			for _, want := range tc.wantOutput {
+				if !strings.Contains(plain, want) {
+					t.Errorf("plain output missing %q:\n%s", want, plain)
+				}
+			}
+		})
+	}
+}
+
+func TestCLIProjectListCapacityFailurePreservesCatalogOutput(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":          cliProjects,
+		"/api/capacity/projects": `{"error":"capacity service unavailable"}`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"projects", "list"}, false, false); err != nil {
+		t.Fatalf("capacity failure should remain best-effort: %v\n%s", err, out.String())
+	}
+	if got := rec.count(http.MethodGet, "/api/projects"); got != 1 {
+		t.Fatalf("catalog requests = %d, want one", got)
+	}
+	if got := rec.count(http.MethodGet, "/api/capacity/projects"); got != 1 {
+		t.Fatalf("capacity requests = %d, want one", got)
+	}
+	plain := stripANSI(out.String())
+	for _, want := range []string{"demo", "other", "—"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("capacity-failure output missing %q:\n%s", want, plain)
+		}
+	}
+}
+
+func TestCLIProjectListPreservesExplicitReferenceWithoutStartupPreload(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		mode := "plain"
+		if jsonOutput {
+			mode = "JSON"
+		}
+		t.Run(mode, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":          cliProjects,
+				"/api/capacity/projects": `[{"id":"p1","name":"demo","running":1,"queue_size":2},{"id":"p2","name":"other","running":3,"queue_size":4}]`,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "other", []string{"projects", "list"}, false, jsonOutput); err != nil {
+				t.Fatalf("project list with explicit reference failed: %v\n%s", err, out.String())
+			}
+			if got := rec.count(http.MethodGet, "/api/projects"); got != 1 {
+				t.Fatalf("catalog requests = %d, want one", got)
+			}
+			if jsonOutput {
+				var projects []client.Project
+				if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &projects); err != nil {
+					t.Fatalf("project list JSON is invalid: %v\n%s", err, out.String())
+				}
+				if len(projects) != 2 || projects[1].ID != "p2" {
+					t.Fatalf("project list JSON = %+v", projects)
+				}
+				return
+			}
+			plain := stripANSI(out.String())
+			if !strings.Contains(plain, "●") || !strings.Contains(plain, "other") {
+				t.Fatalf("plain list did not retain selected project marker:\n%s", plain)
+			}
+			if strings.Contains(plain, "active project: other") {
+				t.Fatalf("plain list leaked the selection notice into command output:\n%s", plain)
+			}
+			if got := rec.count(http.MethodGet, "/api/capacity/projects"); got != 1 {
+				t.Fatalf("capacity requests = %d, want one", got)
+			}
+		})
+	}
+}
+
+func TestCLIProjectListCatalogDiagnosticsRemainActionable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		wantError string
+	}{
+		{name: "malformed response", status: http.StatusOK, body: `{"projects":`, wantError: "decoding /api/projects response"},
+		{name: "auth required", status: http.StatusUnauthorized, body: `{"error":"login required"}`, wantError: "requires sign-in"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var catalogRequests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/projects" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				catalogRequests++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "", []string{"projects", "list"}, false, true)
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("project list error = %v, want %q\noutput=%q", err, tc.wantError, out.String())
+			}
+			if got := catalogRequests; got != 1 {
+				t.Fatalf("catalog requests = %d, want one", got)
+			}
+		})
+	}
+}
+
+func TestCLIProjectListCapacityAuthFailureRetainsAuthDiagnostic(t *testing.T) {
+	var rec recorder
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/api/capacity/projects":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":"login required"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"projects", "list"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "requires sign-in") {
+		t.Fatalf("capacity auth error = %v, want sign-in diagnostic\noutput=%q", err, out.String())
+	}
+	if got := rec.count(http.MethodGet, "/api/projects"); got != 1 {
+		t.Fatalf("catalog requests = %d, want one", got)
+	}
+	if got := rec.count(http.MethodGet, "/api/capacity/projects"); got != 1 {
+		t.Fatalf("capacity requests = %d, want one", got)
+	}
+}
+
+func TestCLIProjectListTransportFailureRetainsLoadingDiagnostic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/projects" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("response writer cannot hijack connection")
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = RunCLI(c, io.Discard, "", []string{"projects", "list"}, false, true)
+	if err == nil || !strings.Contains(err.Error(), "loading projects") || !strings.Contains(err.Error(), "Unable to reach") {
+		t.Fatalf("transport error = %v, want loading/offline diagnostic", err)
+	}
+}
+
+func TestCLICanceledProjectListStopsCatalogRequest(t *testing.T) {
+	started := make(chan struct{})
+	var startOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/projects" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		startOnce.Do(func() { close(started) })
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, io.Discard, "", []string{"projects", "list"}, false, true)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("project catalog request did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("canceled project list returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled project list did not return promptly")
+	}
+}
+
 func TestCLIJSONProjectsList(t *testing.T) {
 	c, _ := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

@@ -1436,7 +1436,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ambiguous or unknown.
 		m.projects = msg.projects
 		if msg.selectName != "" {
-			return m.pickProject(msg.selectName)
+			logStart := len(m.log)
+			m, reconnect := m.pickProject(msg.selectName)
+			if msg.echo && len(m.log) > logStart && m.log[len(m.log)-1].role == "system" {
+				m.log = m.log[:len(m.log)-1]
+				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
+			}
+			return m, reconnect
 		}
 		// Interactive startup retains its convenient first-project default. A
 		// headless run leaves multiple projects unselected so CLI preflight can
