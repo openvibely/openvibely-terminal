@@ -168,6 +168,20 @@ func TestAgentsEditDeletePickersShareRowsAndActionBoundaries(t *testing.T) {
 	if deleteRec.saw(http.MethodDelete, "/agents/ag-second") {
 		t.Fatalf("Esc cancellation sent DELETE:\n%s", deleteRec.all())
 	}
+
+	negativeModel, negativeRec, _ := captureRows(t, "/agents delete")
+	negativeModel = selKey(t, negativeModel, tea.KeyMsg{Type: tea.KeyDown})
+	negativeModel = selKey(t, negativeModel, tea.KeyMsg{Type: tea.KeyEnter})
+	if negativeModel.pendingConfirmation == nil {
+		t.Fatalf("negative-response delete selection did not open confirmation:\n%s", transcript(negativeModel))
+	}
+	negativeModel = runLine(t, negativeModel, "no")
+	if negativeModel.pendingConfirmation != nil {
+		t.Fatal("negative response left delete confirmation active")
+	}
+	if negativeRec.saw(http.MethodDelete, "/agents/ag-second") {
+		t.Fatalf("negative response sent DELETE:\n%s", negativeRec.all())
+	}
 }
 
 func TestTasksLifecycleTaskSelectorSelectionRendersOneItemPageWithoutImplicitEvents(t *testing.T) {
