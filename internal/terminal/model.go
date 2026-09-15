@@ -2444,6 +2444,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
+	m.invalidateWorkersLive()
 	m.loginResumeSSE = m.sseCancel != nil && !m.authRequired && m.selectedID != ""
 	m.invalidateSSE()
 	m.loginRestorePrompt = m.input.Prompt

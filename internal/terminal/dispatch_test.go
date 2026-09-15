@@ -2634,6 +2634,45 @@ func TestWorkersWatchEscCancelsFurtherRefreshes(t *testing.T) {
 	}
 }
 
+func TestWorkersWatchLoginCancelsFurtherRefreshes(t *testing.T) {
+	previousTick := workersLiveTick
+	workersLiveTick = func(_ time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+		return func() tea.Msg { return fn(time.Now()) }
+	}
+	t.Cleanup(func() { workersLiveTick = previousTick })
+
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/capacity/global":   `{"total_running":1,"max_workers":4,"queue_size":0}`,
+		"/api/capacity/projects": `[]`,
+		"/api/capacity/models":   `[]`,
+	})
+	m, cmd := typeLine(t, m, "/workers watch")
+	if cmd == nil {
+		t.Fatal("workers watch returned no initial fetch")
+	}
+	next, tickCmd := m.Update(cmd())
+	m = next.(Model)
+	if tickCmd == nil {
+		t.Fatal("workers watch did not schedule refresh")
+	}
+	if got := rec.count("GET", "/api/capacity/global"); got != 1 {
+		t.Fatalf("initial global requests = %d, want 1", got)
+	}
+
+	m, loginCmd := typeLine(t, m, "/login")
+	if loginCmd != nil || !m.loginActive || m.workersLiveActive {
+		t.Fatalf("/login did not enter login mode while canceling workers live: loginActive=%t workersLiveActive=%t cmd=%v", m.loginActive, m.workersLiveActive, loginCmd)
+	}
+	next, fetchCmd := m.Update(tickCmd())
+	m = next.(Model)
+	if fetchCmd != nil {
+		t.Fatal("stale workers live tick scheduled another fetch after /login")
+	}
+	if got := rec.count("GET", "/api/capacity/global"); got != 1 {
+		t.Fatalf("global requests after /login = %d, want still 1\n%s", got, rec.all())
+	}
+}
+
 func TestWorkersWatchIgnoresStaleProjectAndSessionResults(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
