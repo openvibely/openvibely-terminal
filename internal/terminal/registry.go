@@ -6756,7 +6756,8 @@ func automationsCommand() command {
 		selectorPaths: [][]string{{"show"}, {"open"}, {"edit"}, {"run"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
 		desc:          "recurring automations and workflow rules",
 		usage: []string{
-			"automations [filter]                       list automations",
+			"automations [filter]                       list automations (bounded when unfiltered)",
+			"automations list --all                     list the complete automation catalog",
 			"automations show <automation>              show live graph, runtime and resources",
 			"automations open <automation>              compatibility alias for show",
 			"automations edit <automation>               open the complete definition in the terminal editor",
@@ -6778,6 +6779,7 @@ func automationsCommand() command {
 		},
 		examples: []string{
 			`automations list`,
+			`automations list --all`,
 			`automations show "Nightly sweep"`,
 			`automations open automation-id`,
 			`automations edit "Nightly sweep" --export automation.yaml`,
@@ -6814,7 +6816,20 @@ func automationsCommand() command {
 
 			switch action {
 			case "", "list":
+				completeList := action == "list" && len(rest) == 1 && rest[0] == "--all"
+				if completeList {
+					ref = ""
+				} else if action == "list" && len(rest) > 0 {
+					ref = strings.Join(rest, " ")
+				}
 				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+					if !jsonMode && ref == "" && !completeList {
+						result, err := c.ListAutomationsBounded(ctx, pid, client.DefaultAutomationListLimit)
+						if err != nil {
+							return "", err
+						}
+						return renderAutomationList(result), nil
+					}
 					automations, err := c.ListAutomations(ctx, pid)
 					if err != nil {
 						return "", err

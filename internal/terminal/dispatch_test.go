@@ -8102,6 +8102,93 @@ func TestAutomationsListFiltersStructuredRows(t *testing.T) {
 		t.Errorf("filtered automations output:\n%s", out)
 	}
 }
+
+func automationPaginatedHTML(start, end, total int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="%t" data-card-pagination-total="%d">`, end < total, total)
+	for i := start; i < end; i++ {
+		b.WriteString(automationCardHTML(fmt.Sprintf("au-%04d", i), fmt.Sprintf("Automation %04d", i), "active"))
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+func paginatedAutomationModel(t *testing.T, total int) (Model, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		if r.Method != http.MethodGet || r.URL.Path != "/automations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		end := offset + 50
+		if end > total {
+			end = total
+		}
+		w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(end < total))
+		w.Header().Set("X-OpenVibely-Card-Page-Total", strconv.Itoa(total))
+		_, _ = io.WriteString(w, automationPaginatedHTML(offset, end, total))
+	})
+	return m, rec
+}
+
+func TestAutomationsListDefaultIsBoundedAndShowsTruncation(t *testing.T) {
+	m, rec := paginatedAutomationModel(t, 150)
+	m = runLine(t, m, "/automations")
+	if got := rec.count(http.MethodGet, "/automations"); got != 2 {
+		t.Fatalf("requests = %d, want 2: %s", got, rec.all())
+	}
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Automation 0000", "Automation 0099", "showing 100 of 150 automations; 50 omitted", "/automations list --all"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("bounded output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Automation 0100") {
+		t.Fatalf("bounded output rendered beyond the display limit:\n%s", out)
+	}
+}
+
+func TestAutomationsListAllAndFiltersUseCompleteCatalog(t *testing.T) {
+	t.Run("all", func(t *testing.T) {
+		m, rec := paginatedAutomationModel(t, 150)
+		m = runLine(t, m, "/automations list --all")
+		if got := rec.count(http.MethodGet, "/automations"); got != 3 {
+			t.Fatalf("requests = %d, want complete catalog 3: %s", got, rec.all())
+		}
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "Automation 0149") || strings.Contains(out, "omitted") {
+			t.Fatalf("complete list output =\n%s", out)
+		}
+	})
+
+	t.Run("late filter", func(t *testing.T) {
+		m, rec := paginatedAutomationModel(t, 150)
+		m = runLine(t, m, "/automations Automation 0149")
+		if got := rec.count(http.MethodGet, "/automations"); got != 3 {
+			t.Fatalf("requests = %d, want complete catalog for exact filtering: %s", got, rec.all())
+		}
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "Automation 0149") || strings.Contains(out, "Automation 0000") {
+			t.Fatalf("late filter output =\n%s", out)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		m, rec := paginatedAutomationModel(t, 150)
+		m = runLine(t, m, "/automations does-not-exist")
+		if got := rec.count(http.MethodGet, "/automations"); got != 3 {
+			t.Fatalf("requests = %d, want complete catalog for no-match filtering: %s", got, rec.all())
+		}
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "no automations match does-not-exist") || strings.Contains(out, "omitted") {
+			t.Fatalf("no-match output =\n%s", out)
+		}
+	})
+}
+
 func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +

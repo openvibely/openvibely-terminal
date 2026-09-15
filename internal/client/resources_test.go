@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1106,6 +1107,272 @@ func TestListAutomationsReadsCardMarkup(t *testing.T) {
 	if automations[1].ID != "au2" || automations[1].Name != "GitHub SDLC" || automations[1].State != "paused" {
 		t.Errorf("automation[1] = %+v", automations[1])
 	}
+}
+
+func automationPaginatedPage(start, end, total int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="%t" data-card-pagination-total="%d">`, end < total, total)
+	for i := start; i < end; i++ {
+		state := "active"
+		if i%2 == 1 {
+			state = "paused"
+		}
+		fmt.Fprintf(&b, `<div class="card" data-automation-url="/automations/au-%04d?project_id=p1"><span class="badge">%s</span><button data-automation-card-delete="au-%04d" data-automation-name="Automation %04d"></button></div>`, i, state, i, i)
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+func automationCatalogServer(t *testing.T, total int, delay time.Duration) (*Client, *int, *int, func(int) int) {
+	t.Helper()
+	requests := 0
+	bytesServed := 0
+	pageBytes := func(offset int) int {
+		end := offset + cardPageSize
+		if end > total {
+			end = total
+		}
+		return len(automationPaginatedPage(offset, end, total))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/automations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		requests++
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		end := offset + cardPageSize
+		if end > total {
+			end = total
+		}
+		page := automationPaginatedPage(offset, end, total)
+		bytesServed += len(page)
+		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(end < total))
+		w.Header().Set(cardPageTotalHeader, strconv.Itoa(total))
+		_, _ = io.WriteString(w, page)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, &requests, &bytesServed, pageBytes
+}
+
+func TestListAutomationsBoundedRequestBytesAndParsedCards(t *testing.T) {
+	for _, total := range []int{0, 1, 100, 1000, 5000} {
+		t.Run(fmt.Sprintf("cards=%d", total), func(t *testing.T) {
+			c, requests, bytesServed, pageBytes := automationCatalogServer(t, total, 0)
+			result, err := c.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRequests := 1
+			if total > cardPageSize {
+				wantRequests = 2
+			}
+			if got := *requests; got != wantRequests {
+				t.Fatalf("requests = %d, want %d", got, wantRequests)
+			}
+			wantBytes := pageBytes(0)
+			if wantRequests == 2 {
+				wantBytes += pageBytes(cardPageSize)
+			}
+			if got := *bytesServed; got != wantBytes {
+				t.Fatalf("response bytes = %d, want %d", got, wantBytes)
+			}
+			wantShown := total
+			if wantShown > DefaultAutomationListLimit {
+				wantShown = DefaultAutomationListLimit
+			}
+			if len(result.Automations) != wantShown {
+				t.Fatalf("shown automations = %d, want %d", len(result.Automations), wantShown)
+			}
+			if result.ParsedCards != wantShown {
+				t.Fatalf("parsed cards = %d, want %d", result.ParsedCards, wantShown)
+			}
+			if result.RetainedPages != 0 {
+				t.Fatalf("retained pages = %d, want 0", result.RetainedPages)
+			}
+			wantComplete := total <= DefaultAutomationListLimit
+			if result.Complete != wantComplete || result.MoreAvailable != !wantComplete {
+				t.Fatalf("complete/more = %t/%t, want %t/%t", result.Complete, result.MoreAvailable, wantComplete, !wantComplete)
+			}
+			if !result.TotalKnown || result.Total != total {
+				t.Fatalf("total = %d known=%t, want %d known", result.Total, result.TotalKnown, total)
+			}
+		})
+	}
+}
+
+func TestListAutomationsBoundedDeduplicatesAcrossContinuationPages(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		switch r.URL.Query().Get("offset") {
+		case "":
+			_, _ = io.WriteString(w, automationPaginatedPage(0, 50, 101))
+		case "50":
+			page := `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true" data-card-pagination-total="101">` +
+				`<div data-automation-url="/automations/au-0000?project_id=p1"><span class="badge">active</span><button data-automation-card-delete="au-0000" data-automation-name="Duplicate"></button></div>` +
+				automationPaginatedPage(50, 99, 101) + `</div>`
+			_, _ = io.WriteString(w, page)
+		case "100":
+			_, _ = io.WriteString(w, automationPaginatedPage(99, 101, 101))
+		default:
+			t.Fatalf("unexpected offset %q", r.URL.Query().Get("offset"))
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := c.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+	if len(result.Automations) != DefaultAutomationListLimit || result.Automations[0].Name != "Automation 0000" || result.Automations[99].ID != "au-0099" {
+		t.Fatalf("deduped automations = %d first=%+v last=%+v", len(result.Automations), result.Automations[0], result.Automations[len(result.Automations)-1])
+	}
+	if !result.MoreAvailable || result.Complete {
+		t.Fatalf("complete/more = %t/%t, want truncated", result.Complete, result.MoreAvailable)
+	}
+}
+
+func TestListAutomationsBoundedSurfacesContinuationFailureAndCancellation(t *testing.T) {
+	t.Run("page failure", func(t *testing.T) {
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			if requests == 1 {
+				_, _ = io.WriteString(w, automationPaginatedPage(0, 50, 100))
+				return
+			}
+			http.Error(w, "page failed", http.StatusBadGateway)
+		}))
+		defer srv.Close()
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = c.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+		if err == nil || !strings.Contains(err.Error(), "server error (502)") {
+			t.Fatalf("error = %v, want page failure", err)
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			if requests == 1 {
+				_, _ = io.WriteString(w, automationPaginatedPage(0, 50, 100))
+				cancel()
+				return
+			}
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = c.ListAutomationsBounded(ctx, "p1", DefaultAutomationListLimit)
+		if err == nil || !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context canceled", err)
+		}
+	})
+}
+
+func TestListAutomationsCompleteCatalogStillFetchesAllPages(t *testing.T) {
+	c, requests, bytesServed, pageBytes := automationCatalogServer(t, 1000, 0)
+	automations, err := c.ListAutomations(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(automations) != 1000 {
+		t.Fatalf("automations = %d, want 1000", len(automations))
+	}
+	if *requests != 20 {
+		t.Fatalf("requests = %d, want 20", *requests)
+	}
+	wantBytes := 0
+	for offset := 0; offset < 1000; offset += cardPageSize {
+		wantBytes += pageBytes(offset)
+	}
+	if *bytesServed != wantBytes {
+		t.Fatalf("response bytes = %d, want %d", *bytesServed, wantBytes)
+	}
+}
+
+func TestListAutomationsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
+	const total = 5000
+	const samples = 3
+
+	delayedClient, _, _, _ := automationCatalogServer(t, total, 25*time.Millisecond)
+	fullDurations := make([]time.Duration, 0, samples)
+	for i := 0; i < samples; i++ {
+		start := time.Now()
+		if automations, err := delayedClient.ListAutomations(context.Background(), "p1"); err != nil || len(automations) != total {
+			t.Fatalf("complete sample %d returned %d automations, err=%v", i, len(automations), err)
+		}
+		fullDurations = append(fullDurations, time.Since(start))
+	}
+	boundedDurations := make([]time.Duration, 0, samples)
+	for i := 0; i < samples; i++ {
+		start := time.Now()
+		result, err := delayedClient.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+		if err != nil || len(result.Automations) != DefaultAutomationListLimit || !result.MoreAvailable {
+			t.Fatalf("bounded sample %d result=%+v err=%v", i, result, err)
+		}
+		boundedDurations = append(boundedDurations, time.Since(start))
+	}
+	fullMedian := durationPercentile(fullDurations, 50)
+	boundedMedian := durationPercentile(boundedDurations, 50)
+	if improvement := latencyImprovement(fullMedian, boundedMedian); improvement < 75 {
+		t.Fatalf("median latency improvement = %.1f%% (%s -> %s), want at least 75%%", improvement, fullMedian, boundedMedian)
+	}
+	fullP95 := durationPercentile(fullDurations, 95)
+	boundedP95 := durationPercentile(boundedDurations, 95)
+	if boundedP95 > fullP95 {
+		t.Fatalf("bounded p95 regressed: %s versus complete %s", boundedP95, fullP95)
+	}
+
+	zeroDelayClient, _, _, _ := automationCatalogServer(t, total, 0)
+	_, _ = zeroDelayClient.ListAutomations(context.Background(), "p1")
+	_, _ = zeroDelayClient.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+	fullAllocated := allocatedBytesDuring(func() {
+		automations, err := zeroDelayClient.ListAutomations(context.Background(), "p1")
+		if err != nil || len(automations) != total {
+			t.Fatalf("complete allocation run returned %d automations, err=%v", len(automations), err)
+		}
+	})
+	boundedAllocated := allocatedBytesDuring(func() {
+		result, err := zeroDelayClient.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+		if err != nil || len(result.Automations) != DefaultAutomationListLimit {
+			t.Fatalf("bounded allocation run returned %+v, err=%v", result, err)
+		}
+	})
+	if boundedAllocated >= fullAllocated*40/100 {
+		t.Fatalf("bounded allocated bytes = %d, complete = %d; want at least 60%% lower", boundedAllocated, fullAllocated)
+	}
+}
+
+func allocatedBytesDuring(fn func()) uint64 {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
 }
 
 func parseAutomationCardFixture(t *testing.T, badges string) Automation {

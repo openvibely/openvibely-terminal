@@ -2370,6 +2370,19 @@ func renderSchedule(entries []client.ScheduleEntry, summary string) string {
 
 // --- automations ---
 
+func renderAutomationList(result client.AutomationListResult) string {
+	out := renderAutomations(result.Automations, "")
+	if !result.MoreAvailable {
+		return out
+	}
+	shown := len(result.Automations)
+	message := fmt.Sprintf("showing %d automations; more records omitted", shown)
+	if result.TotalKnown && result.Total > shown {
+		message = fmt.Sprintf("showing %d of %d automations; %d omitted", shown, result.Total, result.Total-shown)
+	}
+	return out + "\n" + dimStyle.Render(message+"; use /automations list --all for the complete list")
+}
+
 func renderAutomations(automations []client.Automation, filter string) string {
 	rows := [][]string{{"ID", "NAME", "STATE"}}
 	for _, a := range automations {

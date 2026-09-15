@@ -3598,6 +3598,20 @@ type Automation struct {
 	State string `json:"state"`
 }
 
+const DefaultAutomationListLimit = 100
+
+// AutomationListResult is the bounded human-list view of automation cards.
+type AutomationListResult struct {
+	Automations   []Automation
+	Limit         int
+	Complete      bool
+	MoreAvailable bool
+	Total         int
+	TotalKnown    bool
+	ParsedCards   int
+	RetainedPages int
+}
+
 // ListAutomations scrapes the automations screen for a project. Each card
 // carries the automation id/name via its delete-menu button's
 // data-automation-card-delete/data-automation-name attributes; lifecycle
@@ -3612,6 +3626,124 @@ func (c *Client) ListAutomations(ctx context.Context, projectID string) ([]Autom
 		func(automation Automation) string { return automation.ID },
 	)
 	return out, nil
+}
+
+// ListAutomationsBounded scrapes at most limit first-seen automation cards for
+// the ordinary human list. It parses and discards each page immediately so the
+// bounded path does not retain page roots or aggregate beyond the display limit.
+func (c *Client) ListAutomationsBounded(ctx context.Context, projectID string, limit int) (AutomationListResult, error) {
+	if limit <= 0 {
+		limit = DefaultAutomationListLimit
+	}
+	path := "/automations" + query("project_id", projectID)
+	root, meta, err := c.getHTMLPageMeta(ctx, path)
+	if err != nil {
+		return AutomationListResult{}, err
+	}
+	return c.listAutomationsBoundedFromInitial(ctx, path, root, meta, limit)
+}
+
+func (c *Client) listAutomationsBoundedFromInitial(ctx context.Context, path string, root *html.Node, meta htmlPageMeta, limit int) (AutomationListResult, error) {
+	result := AutomationListResult{Limit: limit, Total: meta.total, TotalKnown: meta.totalKnown}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	if paginationRoot == nil {
+		if meta.hasMore {
+			return AutomationListResult{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
+		}
+		seen := make(map[string]struct{})
+		var stopped bool
+		result.Automations, result.ParsedCards, stopped = collectBoundedAutomations(root, result.Automations, seen, limit)
+		result.MoreAvailable = stopped
+		result.Complete = !stopped
+		return result, nil
+	}
+	selector := attr(paginationRoot, "data-card-pagination-card-selector")
+	keyAttr := attr(paginationRoot, "data-card-pagination-key")
+	if meta.hasMore {
+		marker, _ := paginationSelector(selector)
+		if marker == "" || strings.TrimSpace(keyAttr) == "" {
+			return AutomationListResult{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
+		}
+	}
+	seen := make(map[string]struct{})
+	offset := countPaginationCards(root, selector, keyAttr)
+	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+		return AutomationListResult{}, err
+	}
+	var stopped bool
+	result.Automations, result.ParsedCards, stopped = collectBoundedAutomations(root, result.Automations, seen, limit)
+	if stopped || (len(result.Automations) >= limit && meta.hasMore) {
+		result.MoreAvailable = true
+		return result, nil
+	}
+	for page := 1; meta.hasMore; page++ {
+		continuation, err := cardContinuationPath(path, page, offset)
+		if err != nil {
+			return AutomationListResult{}, err
+		}
+		next, nextMeta, err := c.getHTMLPageMeta(ctx, continuation)
+		if err != nil {
+			return AutomationListResult{}, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
+		}
+		count := countPaginationCards(next, selector, keyAttr)
+		if count == 0 && nextMeta.hasMore {
+			return AutomationListResult{}, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
+		}
+		if offset+count > maxPaginatedCards {
+			return AutomationListResult{}, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
+		}
+		if nextMeta.totalKnown {
+			result.Total, result.TotalKnown = nextMeta.total, true
+		}
+		offset += count
+		meta.hasMore = nextMeta.hasMore
+		if err := validateCardContinuation(page+1, offset, meta.hasMore); err != nil {
+			return AutomationListResult{}, err
+		}
+		var parsed int
+		result.Automations, parsed, stopped = collectBoundedAutomations(next, result.Automations, seen, limit)
+		result.ParsedCards += parsed
+		if stopped || (len(result.Automations) >= limit && meta.hasMore) {
+			result.MoreAvailable = true
+			return result, nil
+		}
+	}
+	result.Complete = true
+	return result, nil
+}
+
+func collectBoundedAutomations(root *html.Node, out []Automation, seen map[string]struct{}, limit int) ([]Automation, int, bool) {
+	parsed := 0
+	stopped := false
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if stopped {
+			return
+		}
+		if n.Type == html.ElementNode && attr(n, "data-automation-url") != "" {
+			parsed++
+			if a := parseAutomationCard(n); a.ID != "" {
+				if _, ok := seen[a.ID]; ok {
+					return
+				}
+				if len(out) >= limit {
+					stopped = true
+					return
+				}
+				seen[a.ID] = struct{}{}
+				out = append(out, a)
+			}
+			return
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+			if stopped {
+				return
+			}
+		}
+	}
+	walk(root)
+	return out, parsed, stopped
 }
 
 func parseAutomations(root *html.Node) []Automation {

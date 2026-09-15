@@ -748,7 +748,7 @@ automation inspection, graph editing, and lifecycle controls. The supported acti
 `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, and `delete`; `show` is
 the canonical detail action and `open` is a compatibility alias with identical
 selection and output. `run-now` remains accepted as a compatibility alias for `run`.
-`show` renders the saved graph topology, node and transition status/config summaries,
+Plain human `list` output is bounded for large catalogs; use `list --all` when you need the complete catalog. `show` renders the saved graph topology, node and transition status/config summaries,
 runtime totals, resources, external state, and explicit unavailable or empty sections.
 `edit` consumes the backend builder's complete YAML definition, previews it through
 the backend validator, and saves only a valid changed definition. Automation creation
@@ -758,6 +758,7 @@ In the interactive TUI:
 
 ```
 /automations list
+/automations list --all
 /automations show "Nightly sweep"
 /automations open automation-id
 /automations edit "Nightly sweep"        # opens the multiline terminal editor; Ctrl+S saves, Esc cancels
@@ -774,6 +775,7 @@ command:
 
 ```bash
 openvibely-terminal -project demo automations list
+openvibely-terminal -project demo automations list --all
 openvibely-terminal -project demo automations show "Nightly sweep"
 openvibely-terminal -project demo automations open automation-id
 openvibely-terminal -project demo automations edit "Nightly sweep" --export automation.yaml
