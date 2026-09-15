@@ -145,7 +145,12 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 			go func() { projectResult <- projectLoad() }()
 			go func() { statusResult <- statusCheck() }()
 			statusCheckResult = statusResult
-			m = drain(m, func() tea.Msg { return <-projectResult })
+			projectMsg := <-projectResult
+			if loaded, ok := projectMsg.(projectsLoadedMsg); ok && client.IsAuthRequired(loaded.err) {
+				m.append(entry{role: "error", text: "loading projects: " + authRecoveryMessage(m.client.BaseURL())})
+			} else {
+				m = drain(m, func() tea.Msg { return projectMsg })
+			}
 		} else {
 			m = drain(m, projectLoad)
 		}

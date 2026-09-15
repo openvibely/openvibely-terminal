@@ -1677,6 +1677,13 @@ func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
 			wantError: "503",
 		},
 		{
+			name: "auth required",
+			projectList: func(w http.ResponseWriter) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			},
+			wantError: "loading projects",
+		},
+		{
 			name: "connection dropped",
 			projectList: func(w http.ResponseWriter) {
 				hijacker, ok := w.(http.Hijacker)
