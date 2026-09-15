@@ -368,7 +368,9 @@ func (m Model) renderStatus() string {
 	} else {
 		row("events", dimStyle.Render("off (/events on)"))
 	}
-	row("projects", fmt.Sprintf("%d", len(m.projects)))
+	if !m.statusProjectsUnavailable {
+		row("projects", fmt.Sprintf("%d", len(m.projects)))
+	}
 	return strings.TrimRight(b.String(), "\n")
 }
 

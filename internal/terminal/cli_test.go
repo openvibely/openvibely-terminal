@@ -1643,6 +1643,26 @@ func TestCLITaskListFilterJSONParityAndUnfilteredSchema(t *testing.T) {
 	}
 }
 
+func statusRowsForKey(output, key string) []string {
+	var rows []string
+	for _, line := range strings.Split(stripANSI(output), "\n") {
+		trimmed := strings.TrimLeft(line, " \t")
+		if !strings.HasPrefix(trimmed, key) {
+			continue
+		}
+		rest := strings.TrimPrefix(trimmed, key)
+		if rest == "" || (rest[0] != ' ' && rest[0] != '\t') {
+			continue
+		}
+		rows = append(rows, trimmed)
+	}
+	return rows
+}
+
+func normalizedStatusRow(row string) string {
+	return strings.Join(strings.Fields(stripANSI(row)), " ")
+}
+
 func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -1701,10 +1721,21 @@ func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
 				t.Fatalf("status error = %v, want substring %q", err, tc.wantError)
 			}
 			got := stripANSI(out.String())
-			for _, want := range []string{"Status", "connected", "signed in as operator", "2 running / 5 max, 1 queued, 3 free", "projects", "unavailable", "partial failure"} {
+			for _, want := range []string{"Status", "connected", "signed in as operator", "2 running / 5 max, 1 queued, 3 free"} {
 				if !strings.Contains(strings.ToLower(got), strings.ToLower(want)) {
 					t.Errorf("partial status missing %q:\n%s", want, got)
 				}
+			}
+			projectRows := statusRowsForKey(got, "projects")
+			if len(projectRows) != 1 {
+				t.Fatalf("partial status rendered %d projects rows, want exactly one:\n%s", len(projectRows), got)
+			}
+			projectRow := strings.ToLower(normalizedStatusRow(projectRows[0]))
+			if !strings.Contains(projectRow, "unavailable") || !strings.Contains(projectRow, "partial failure") {
+				t.Errorf("partial status project row = %q, want unavailable partial failure", projectRow)
+			}
+			if strings.Contains(projectRow, "projects 0") || strings.Contains(strings.ToLower(got), "projects 0") {
+				t.Errorf("partial status included misleading project count:\n%s", got)
 			}
 			if rec.count("GET", "/api/capacity/global") != 1 || rec.count("GET", "/auth/me") != 1 {
 				t.Errorf("global status checks did not run exactly once:\n%s", rec.all())
@@ -1754,6 +1785,17 @@ func TestCLIStatusZeroProjectsSkipsScopedCounts(t *testing.T) {
 	var out bytes.Buffer
 	if err := RunCLI(c, &out, "", []string{"status"}, false, false); err != nil {
 		t.Fatalf("status failed: %v", err)
+	}
+	got := stripANSI(out.String())
+	projectRows := statusRowsForKey(got, "projects")
+	if len(projectRows) != 1 {
+		t.Fatalf("zero-project status rendered %d projects rows, want exactly one:\n%s", len(projectRows), got)
+	}
+	if row := normalizedStatusRow(projectRows[0]); row != "projects 0" {
+		t.Fatalf("zero-project status project row = %q, want projects 0\n%s", row, got)
+	}
+	if strings.Contains(strings.ToLower(got), "unavailable") {
+		t.Fatalf("zero-project status included unavailable marker:\n%s", got)
 	}
 	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me"} {
 		if got := rec.count("GET", path); got != 1 {
@@ -2141,7 +2183,15 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	if err := RunCLI(c, &out, "demo", []string{"status"}, false, false); err != nil {
 		t.Fatalf("status failed: %v", err)
 	}
-	got := out.String()
+	got := stripANSI(out.String())
+	selectedProjectRows := statusRowsForKey(got, "project")
+	if len(selectedProjectRows) != 1 || normalizedStatusRow(selectedProjectRows[0]) != "project demo" {
+		t.Fatalf("selected-project status row = %v, want exactly project demo\n%s", selectedProjectRows, got)
+	}
+	projectRows := statusRowsForKey(got, "projects")
+	if len(projectRows) != 1 || normalizedStatusRow(projectRows[0]) != "projects 2" {
+		t.Fatalf("project catalog status rows = %v, want exactly projects 2\n%s", projectRows, got)
+	}
 	if !rec.saw("GET", "/api/alerts/pending-count") {
 		t.Errorf("expected compact pending-alert fetch during CLI status:\n%s", rec.all())
 	}
