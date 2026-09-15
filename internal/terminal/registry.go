@@ -2785,6 +2785,14 @@ func parseAgentEdit(args []string) (string, agentEdit, error) {
 	return strings.Join(args[:optionAt], " "), update, nil
 }
 
+func agentSelectorRows(agents []client.AgentDef) []selectorItem {
+	items := make([]selectorItem, 0, len(agents))
+	for _, a := range agents {
+		items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, a.Key, shortID(a.ID)), detail: truncate(a.Description, 40)})
+	}
+	return items
+}
+
 func matchAgentRef(agents []client.AgentDef, ref string) (client.AgentDef, error) {
 	var zero client.AgentDef
 	ref = strings.TrimSpace(ref)
@@ -3034,11 +3042,7 @@ func agentsCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(agents))
-								for _, a := range agents {
-									items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, a.Key, shortID(a.ID)), detail: truncate(a.Description, 40)})
-								}
-								return items, nil
+								return agentSelectorRows(agents), nil
 							}))
 				}
 				ref, edit, err := parseAgentEdit(rest)
@@ -3112,18 +3116,12 @@ func agentsCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(agents))
-								for _, a := range agents {
-									a := a
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Name, a.Key, shortID(a.ID)),
-										detail: truncate(a.Description, 40),
+								items := agentSelectorRows(agents)
+								for i := range items {
+									agent := agents[i]
+									items[i].dispatch = func(m Model) (Model, tea.Cmd) {
+										return confirmAgentDeletion(m, pid, agent)
 									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										return confirmAgentDeletion(m, pid, a)
-									}
-									items = append(items, item)
 								}
 								return items, nil
 							}))

@@ -16,6 +16,31 @@ import (
 const agentEditListHTML = `<div data-agent-id="ag-1" data-agent-key="reviewer" data-agent-name="Code Reviewer" data-agent-description="old" data-agent-model="inherit" data-agent-scope="project"></div>`
 const agentEditJSON = `{"id":"ag-1","name":"Code Reviewer","description":"old","system_prompt":"prompt","model":"inherit","tools":[],"tool_config":{},"plugins":[],"mcp_servers":[],"skills":[],"key":"reviewer","scope":"project","project_id":"p1","selectable_as_primary":true,"enabled":true,"permission_defaults":{},"generated_status":"user_edited","source_refs":[]}`
 
+func TestAgentSelectorRowsPreserveCatalogProjection(t *testing.T) {
+	longDescription := "0123456789 0123456789 0123456789 0123456789 0123456789"
+	agents := []client.AgentDef{
+		{ID: "ag-key", Key: "key-only", Description: longDescription},
+		{ID: "0123456789abcdef", Description: "short"},
+	}
+
+	got := agentSelectorRows(agents)
+	want := []selectorItem{
+		{ref: "ag-key", label: "key-only", detail: truncate(longDescription, 40)},
+		{ref: "0123456789abcdef", label: "01234567", detail: "short"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].ref != want[i].ref || got[i].label != want[i].label || got[i].detail != want[i].detail {
+			t.Fatalf("row %d = %#v, want %#v", i, got[i], want[i])
+		}
+		if got[i].dispatch != nil {
+			t.Fatalf("row %d unexpectedly has dispatch", i)
+		}
+	}
+}
+
 func TestAgentsEditQuotedValuesAndRoundTrip(t *testing.T) {
 	var puts, lists int
 	var formDescription, formPrompt, formEnabled string
