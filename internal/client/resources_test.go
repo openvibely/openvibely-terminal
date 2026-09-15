@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"reflect"
 	"runtime"
 	"sort"
@@ -1364,6 +1366,15 @@ func TestListAutomationsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
 	if boundedAllocated >= fullAllocated*40/100 {
 		t.Fatalf("bounded allocated bytes = %d, complete = %d; want at least 60%% lower", boundedAllocated, fullAllocated)
 	}
+
+	fullRSSDelta := automationListPeakRSSDelta(t, "complete")
+	boundedRSSDelta := automationListPeakRSSDelta(t, "bounded")
+	if fullRSSDelta == 0 {
+		t.Fatalf("complete peak RSS delta = 0; measurement did not capture resident-memory growth")
+	}
+	if boundedRSSDelta >= fullRSSDelta*80/100 {
+		t.Fatalf("bounded peak RSS delta = %d, complete = %d; want at least 20%% lower", boundedRSSDelta, fullRSSDelta)
+	}
 }
 
 func allocatedBytesDuring(fn func()) uint64 {
@@ -1373,6 +1384,116 @@ func allocatedBytesDuring(fn func()) uint64 {
 	fn()
 	runtime.ReadMemStats(&after)
 	return after.TotalAlloc - before.TotalAlloc
+}
+
+var automationRSSSink any
+
+func automationListPeakRSSDelta(t *testing.T, mode string) uint64 {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("peak RSS probe uses ps(1), which is unavailable on Windows")
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAutomationListRSSProbe$", "-test.v=false")
+	cmd.Env = append(os.Environ(), "OPENVIBELY_AUTOMATION_RSS_PROBE="+mode)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("automation RSS probe %s failed: %v\n%s", mode, err, out)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "RSS_DELTA_BYTES=") {
+			continue
+		}
+		value := strings.TrimPrefix(line, "RSS_DELTA_BYTES=")
+		delta, parseErr := strconv.ParseUint(value, 10, 64)
+		if parseErr != nil {
+			t.Fatalf("automation RSS probe %s returned malformed delta %q: %v\n%s", mode, value, parseErr, out)
+		}
+		return delta
+	}
+	t.Fatalf("automation RSS probe %s did not report RSS_DELTA_BYTES:\n%s", mode, out)
+	return 0
+}
+
+func TestAutomationListRSSProbe(t *testing.T) {
+	mode := os.Getenv("OPENVIBELY_AUTOMATION_RSS_PROBE")
+	if mode == "" {
+		t.Skip("helper test for peak RSS measurement")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("peak RSS probe uses ps(1), which is unavailable on Windows")
+	}
+
+	const total = 5000
+	client, _, _, _ := automationCatalogServer(t, total, 0)
+	baseline, err := currentRSSBytes()
+	if err != nil {
+		t.Fatalf("read baseline RSS: %v", err)
+	}
+	peak := baseline
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		switch mode {
+		case "complete":
+			automations, err := client.ListAutomations(context.Background(), "p1")
+			if err != nil || len(automations) != total {
+				t.Errorf("complete RSS probe returned %d automations, err=%v", len(automations), err)
+				return
+			}
+			automationRSSSink = automations
+		case "bounded":
+			result, err := client.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+			if err != nil || len(result.Automations) != DefaultAutomationListLimit || !result.MoreAvailable {
+				t.Errorf("bounded RSS probe returned %+v, err=%v", result, err)
+				return
+			}
+			automationRSSSink = result
+		default:
+			t.Errorf("unknown RSS probe mode %q", mode)
+		}
+	}()
+
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			if current, err := currentRSSBytes(); err == nil && current > peak {
+				peak = current
+			}
+			if peak < baseline {
+				peak = baseline
+			}
+			fmt.Fprintf(os.Stdout, "RSS_DELTA_BYTES=%d\n", peak-baseline)
+			return
+		case <-ticker.C:
+			current, err := currentRSSBytes()
+			if err != nil {
+				t.Fatalf("read RSS during probe: %v", err)
+			}
+			if current > peak {
+				peak = current
+			}
+		}
+	}
+}
+
+func currentRSSBytes() (uint64, error) {
+	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		return 0, err
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return 0, fmt.Errorf("empty ps rss output")
+	}
+	fields := strings.Fields(raw)
+	rssKB, err := strconv.ParseUint(fields[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse ps rss output %q: %w", raw, err)
+	}
+	return rssKB * 1024, nil
 }
 
 func parseAutomationCardFixture(t *testing.T, badges string) Automation {
