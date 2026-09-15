@@ -4071,31 +4071,102 @@ func modelsCommand() command {
 
 // --- workers ---
 
+var workersLiveRefreshInterval = 3 * time.Second
+
+const workersLiveRequestTimeout = 10 * time.Second
+
+var workersLiveTick = tea.Tick
+
+func fetchWorkersOverview(ctx context.Context, c *client.Client) (workersOverview, error) {
+	var (
+		wg          sync.WaitGroup
+		capacity    *client.GlobalCapacity
+		capacityErr error
+		projects    []client.ProjectCapacity
+		projectsErr error
+		models      []client.ModelCapacity
+		modelsErr   error
+	)
+	wg.Add(3)
+	go func() { defer wg.Done(); capacity, capacityErr = c.GetGlobalCapacity(ctx) }()
+	go func() { defer wg.Done(); projects, projectsErr = c.GetProjectCapacities(ctx) }()
+	go func() { defer wg.Done(); models, modelsErr = c.GetModelCapacities(ctx) }()
+	wg.Wait()
+	if capacityErr != nil {
+		return workersOverview{}, capacityErr
+	}
+	warnings := make([]string, 0, 2)
+	if projectsErr != nil {
+		projects = []client.ProjectCapacity{}
+		warnings = append(warnings, "project worker capacity unavailable")
+	}
+	if modelsErr != nil {
+		models = []client.ModelCapacity{}
+		warnings = append(warnings, "model worker capacity unavailable")
+	}
+	return newWorkersOverview(capacity, projects, models, warnings, modelsErr == nil), nil
+}
+
+func validateWorkersArgs(args []string) error {
+	action, rest := splitAction([]string{"show", "watch", "limit", "project"}, args)
+	if action == "" {
+		if len(args) == 0 {
+			return nil
+		}
+		return errors.New("usage: " + cmdPrefix + "workers [show|watch|limit <n>|project <n>]")
+	}
+	switch action {
+	case "show", "watch":
+		if len(rest) != 0 {
+			return errors.New("usage: " + cmdPrefix + "workers " + action)
+		}
+	case "limit", "project":
+		_, err := parseWorkerLimit(action, rest)
+		return err
+	}
+	return nil
+}
+
 func workersCommand() command {
-	actions := []string{"show", "limit", "project"}
+	actions := []string{"show", "watch", "limit", "project"}
 	return command{
 		name:    "workers",
 		aliases: []string{"works"},
-		args:    "[show|limit <n>|project <n>]",
+		args:    "[show|watch|limit <n>|project <n>]",
 		actions: actions,
 		completions: []commandCompletion{
 			{after: []string{"limit"}, values: []string{"0", "1", "2", "4", "8", "16", "32"}},
 			{after: []string{"project"}, values: []string{"0", "1", "2", "4", "8", "16", "32"}},
 		},
-		desc: "worker pool stats and concurrency caps",
+		desc:         "worker pool stats and concurrency caps",
+		validateArgs: validateWorkersArgs,
 		usage: []string{
-			"workers                                    show pool stats and settings",
+			"workers                                    show one worker-capacity snapshot",
+			"workers watch                              live worker-capacity view (refreshes every 3s; Esc stops)",
 			"workers limit <n>                          set the global worker cap (0 = unlimited)",
 			"workers project <n>                        set this project's worker cap (0 = no limit)",
 		},
 		examples: []string{
+			`workers watch`,
 			`workers limit 4`,
 			`workers project 2`,
-			`workers limit 0`,
+			`openvibely-terminal workers show`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
+			if action == "" && len(rest) > 0 {
+				return m, errCmd("usage: " + cmdPrefix + "workers [show|watch|limit <n>|project <n>]")
+			}
+			if (action == "show" || action == "watch") && len(rest) > 0 {
+				return m, errCmd("usage: " + cmdPrefix + "workers " + action)
+			}
+			if action == "watch" {
+				if cliMode {
+					return m, errCmd("workers watch runs in the foreground; use Ctrl-C to stop")
+				}
+				return m.beginWorkersLive()
+			}
 			if action == "project" && len(rest) == 0 && !cliMode {
 				mm, cmd, ok := m.needProject()
 				if !ok {
@@ -4139,33 +4210,10 @@ func workersCommand() command {
 				})
 			}
 			return m, run("Workers", cmdTimeout, func(ctx context.Context) (string, error) {
-				var (
-					wg          sync.WaitGroup
-					capacity    *client.GlobalCapacity
-					capacityErr error
-					projects    []client.ProjectCapacity
-					projectsErr error
-					models      []client.ModelCapacity
-					modelsErr   error
-				)
-				wg.Add(3)
-				go func() { defer wg.Done(); capacity, capacityErr = c.GetGlobalCapacity(ctx) }()
-				go func() { defer wg.Done(); projects, projectsErr = c.GetProjectCapacities(ctx) }()
-				go func() { defer wg.Done(); models, modelsErr = c.GetModelCapacities(ctx) }()
-				wg.Wait()
-				if capacityErr != nil {
-					return "", capacityErr
+				overview, err := fetchWorkersOverview(ctx, c)
+				if err != nil {
+					return "", err
 				}
-				warnings := make([]string, 0, 2)
-				if projectsErr != nil {
-					projects = []client.ProjectCapacity{}
-					warnings = append(warnings, "project worker capacity unavailable")
-				}
-				if modelsErr != nil {
-					models = []client.ModelCapacity{}
-					warnings = append(warnings, "model worker capacity unavailable")
-				}
-				overview := newWorkersOverview(capacity, projects, models, warnings, modelsErr == nil)
 				if jsonMode {
 					return marshalJSON(overview)
 				}

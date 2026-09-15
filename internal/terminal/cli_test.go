@@ -26,6 +26,22 @@ import (
 
 const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
 
+type cancelAfterLineWriter struct {
+	bytes.Buffer
+	cancel context.CancelFunc
+	lines  int
+}
+
+func (w *cancelAfterLineWriter) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	w.lines += bytes.Count(p, []byte("\n"))
+	if w.lines >= 2 && w.cancel != nil {
+		w.cancel()
+		w.cancel = nil
+	}
+	return n, err
+}
+
 // cliServer stubs the backend for headless runs.
 func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorder) {
 	t.Helper()
@@ -351,6 +367,93 @@ func TestCLIWorkersShowJSONWithoutProject(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Worker capacity") || strings.Contains(out.String(), "available_slots") {
 		t.Fatalf("workers JSON contains presentation or unrelated data: %s", out.String())
+	}
+}
+
+func TestCLIWorkersShowPlainLabelsPartialCapacityFailures(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/capacity/global":   `{"total_running":1,"max_workers":4,"queue_size":0,"available_slots":3}`,
+		"/api/capacity/projects": `{"error":"capacity service unavailable"}`,
+		"/api/capacity/models":   `not-json`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"workers", "show"}, false, false); err != nil {
+		t.Fatalf("workers show should keep global capacity despite partial failures: %v", err)
+	}
+	plain := stripANSI(out.String())
+	for _, want := range []string{"Worker capacity", "All Projects", "1 / 4", "model worker capacity unavailable", "warning: project worker capacity unavailable", "warning: model worker capacity unavailable"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("workers partial-failure output missing %q:\n%s", want, plain)
+		}
+	}
+	for _, path := range []string{"/api/capacity/global", "/api/capacity/projects", "/api/capacity/models"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Fatalf("%s requests = %d, want 1\n%s", path, got, rec.all())
+		}
+	}
+}
+
+func TestCLIWorkersWatchRefreshesUntilContextCancellation(t *testing.T) {
+	previousInterval := workersLiveRefreshInterval
+	workersLiveRefreshInterval = time.Millisecond
+	t.Cleanup(func() { workersLiveRefreshInterval = previousInterval })
+
+	var mu sync.Mutex
+	global := 0
+	c, rec := cliServer(t, nil)
+	// Replace the default client with a deterministic server whose global running
+	// count changes on each complete watch refresh.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		current := global
+		if r.URL.Path == "/api/capacity/global" {
+			global++
+			current = global
+		}
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/capacity/global":
+			fmt.Fprintf(w, `{"total_running":%d,"max_workers":4,"queue_size":0}`, current)
+		case "/api/capacity/projects":
+			fmt.Fprintf(w, `[{"id":"p1","name":"demo","running":%d,"queue_size":0,"max_workers":2}]`, current)
+		case "/api/capacity/models":
+			fmt.Fprintf(w, `[{"name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":3}]`, current)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	var err error
+	c, err = client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := &cancelAfterLineWriter{cancel: cancel}
+	if err := RunCLIContext(ctx, c, out, "", []string{"workers", "watch"}, false, true); err != nil {
+		t.Fatalf("workers watch returned error after cancellation: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("workers watch JSON snapshots = %d, want 2:\n%s", len(lines), out.String())
+	}
+	for i, line := range lines {
+		var snapshot struct {
+			Workers []workerCapacityRow `json:"workers"`
+		}
+		if err := json.Unmarshal([]byte(line), &snapshot); err != nil {
+			t.Fatalf("snapshot %d is invalid JSON: %v\n%s", i, err, line)
+		}
+		wantRunning := i + 1
+		if len(snapshot.Workers) == 0 || snapshot.Workers[0].Running != wantRunning {
+			t.Fatalf("snapshot %d running = %+v, want %d", i, snapshot.Workers, wantRunning)
+		}
+	}
+	if got := rec.count("GET", "/api/capacity/global"); got != 2 {
+		t.Fatalf("global capacity requests = %d, want 2\n%s", got, rec.all())
 	}
 }
 

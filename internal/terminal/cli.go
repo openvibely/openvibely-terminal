@@ -278,6 +278,16 @@ type cliExecutionRecord struct {
 }
 
 func runCLIStreamingCommand(ctx context.Context, c *client.Client, out io.Writer, m Model, def command, fields []string, jsonOutput bool, implicit client.Project, hasImplicit bool) (bool, error) {
+	if def.name == "workers" {
+		action, rest := splitAction(def.actions, fields[1:])
+		if action == "watch" {
+			if len(rest) != 0 {
+				return true, errors.New("usage: workers " + action)
+			}
+			return true, runCLIWorkersWatch(ctx, c, out, jsonOutput)
+		}
+	}
+
 	if def.name == "chat" && len(fields) > 1 {
 		if hasImplicit && !jsonOutput {
 			writeScopedEntries(out, nil, implicit)
@@ -542,6 +552,56 @@ func writeCLIExecutionRecord(out io.Writer, record cliExecutionRecord, jsonOutpu
 		return fmt.Errorf("writing streamed output: %w", err)
 	}
 	return nil
+}
+
+func runCLIWorkersWatch(ctx context.Context, c *client.Client, out io.Writer, jsonOutput bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return cliContextResult(ctx)
+	}
+	first := true
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, workersLiveRequestTimeout)
+		overview, err := fetchWorkersOverview(requestCtx, c)
+		cancel()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				return cliContextResult(ctx)
+			}
+			return cliStreamDiagnostic(c, err)
+		}
+		if jsonOutput {
+			body, err := marshalJSON(overview)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(out, body); err != nil {
+				return fmt.Errorf("writing workers watch output: %w", err)
+			}
+		} else {
+			if first {
+				if _, err := fmt.Fprintf(out, "workers watch: refreshes every %s; press Ctrl-C to stop\n\n", workersLiveRefreshIntervalLabel()); err != nil {
+					return fmt.Errorf("writing workers watch output: %w", err)
+				}
+			} else if _, err := io.WriteString(out, "\n\n"); err != nil {
+				return fmt.Errorf("writing workers watch output: %w", err)
+			}
+			if _, err := io.WriteString(out, renderWorkers(overview)); err != nil {
+				return fmt.Errorf("writing workers watch output: %w", err)
+			}
+		}
+		first = false
+
+		timer := time.NewTimer(workersLiveRefreshInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return cliContextResult(ctx)
+		case <-timer.C:
+		}
+	}
 }
 
 func cliContextResult(ctx context.Context) error {

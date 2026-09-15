@@ -3627,6 +3627,12 @@ func compactProviderText(s string) string {
 
 // --- workers ---
 
+const workersLiveHead = "Workers · live"
+
+func workersLiveRefreshIntervalLabel() string {
+	return workersLiveRefreshInterval.String()
+}
+
 type workerCapacityRow struct {
 	Scope   string `json:"scope"`
 	Name    string `json:"name"`
@@ -3772,6 +3778,10 @@ func renderWorkers(overview workersOverview) string {
 	}
 	b.WriteString("\n\n" + dimStyle.Render("/workers limit <n> sets the global cap"))
 	return b.String()
+}
+
+func renderWorkersLive(overview workersOverview) string {
+	return renderWorkers(overview) + "\n" + dimStyle.Render("live refresh every "+workersLiveRefreshIntervalLabel()+" · press Esc to stop")
 }
 
 // --- projects ---
