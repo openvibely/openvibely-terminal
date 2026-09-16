@@ -219,6 +219,13 @@ type Model struct {
 	activeTaskCount   int
 	queuedTaskCount   int
 
+	// live workers view
+	workersLiveActive    bool
+	workersLiveContext   context.Context
+	workersLiveCancel    context.CancelFunc
+	workersLiveRequestID uint64
+	workersLiveProjectID string
+
 	// pendingConfirmation holds a destructive command awaiting explicit
 	// confirmation ("yes" + Enter executes it; Esc or anything else cancels).
 	pendingConfirmation *pendingCmd
@@ -467,6 +474,73 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 	}
 }
 
+func (m Model) beginWorkersLive() (Model, tea.Cmd) {
+	m.invalidateWorkersLive()
+	m.workersLiveRequestID++
+	if m.workersLiveRequestID == 0 {
+		m.workersLiveRequestID = 1
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.workersLiveActive = true
+	m.workersLiveContext = ctx
+	m.workersLiveCancel = cancel
+	m.workersLiveProjectID = m.selectedID
+	m.busy = false
+	m.replaceWorkersLiveBody(dimStyle.Render("starting live worker capacity refresh every " + workersLiveRefreshIntervalLabel() + " · press Esc to stop"))
+	return m, m.fetchWorkersLive()
+}
+
+func (m Model) fetchWorkersLive() tea.Cmd {
+	if !m.workersLiveActive || m.workersLiveContext == nil {
+		return nil
+	}
+	c := m.client
+	liveCtx := m.workersLiveContext
+	requestID := m.workersLiveRequestID
+	projectID := m.workersLiveProjectID
+	sessionGeneration := sessionGenerationOf(m)
+	projectGeneration := projectGenerationOf(m)
+	return func() tea.Msg {
+		if err := liveCtx.Err(); err != nil {
+			return workersLiveMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projectID: projectID, err: err}
+		}
+		ctx, cancel := context.WithTimeout(liveCtx, workersLiveRequestTimeout)
+		defer cancel()
+		overview, err := fetchWorkersOverview(ctx, c)
+		return workersLiveMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projectID: projectID, overview: overview, err: err}
+	}
+}
+
+func (m Model) scheduleWorkersLiveTick(requestID uint64, projectID string) tea.Cmd {
+	sessionGeneration := sessionGenerationOf(m)
+	projectGeneration := projectGenerationOf(m)
+	return workersLiveTick(workersLiveRefreshInterval, func(time.Time) tea.Msg {
+		return workersLiveTickMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projectID: projectID}
+	})
+}
+
+func (m *Model) invalidateWorkersLive() {
+	if m.workersLiveCancel != nil {
+		m.workersLiveCancel()
+	}
+	m.workersLiveActive = false
+	m.workersLiveContext = nil
+	m.workersLiveCancel = nil
+	m.workersLiveProjectID = ""
+	m.workersLiveRequestID++
+}
+
+func (m *Model) replaceWorkersLiveBody(body string) {
+	for i := len(m.log) - 1; i >= 0; i-- {
+		if m.log[i].role == "result" && m.log[i].head == workersLiveHead {
+			m.log[i].text = body
+			m.refreshTranscript()
+			return
+		}
+	}
+	m.append(entry{role: "result", head: workersLiveHead, text: body})
+}
+
 func (m Model) beginProjectLoad(echo bool, selectName string) (Model, tea.Cmd) {
 	return m.beginProjectLoadWithSSE(echo, selectName, m.sseRetryAfterProject)
 }
@@ -476,6 +550,36 @@ func (m Model) beginProjectLoadWithSSE(echo bool, selectName string, startSSE bo
 	m.projectRequestID = requestID
 	m.projectsLoaded = false
 	return m, m.loadProjectsWithIDAndSSE(requestID, echo, selectName, startSSE)
+}
+
+func (m Model) beginProjectCapacityLoad(echo bool) (Model, tea.Cmd) {
+	requestID := nextProjectRequestID()
+	m.projectRequestID = requestID
+	return m, m.loadProjectCapacitiesWithID(requestID, echo)
+}
+
+func (m Model) loadProjectCapacitiesWithID(requestID uint64, echo bool) tea.Cmd {
+	c := m.client
+	projects := m.projects
+	sessionGeneration := sessionGenerationOf(m)
+	projectGeneration := projectGenerationOf(m)
+	return func() tea.Msg {
+		baseCtx := m.cliContext
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(baseCtx, 15*time.Second)
+		defer cancel()
+
+		capacities, err := c.GetProjectCapacities(ctx)
+		// Keep capacity enrichment best-effort just like the existing project
+		// loader. Authentication failures still enter the shared auth recovery
+		// path; ordinary capacity failures render the catalog without counts.
+		if client.IsAuthRequired(err) {
+			return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, err: err, echo: echo}
+		}
+		return projectsLoadedMsg{sessionGeneration: sessionGeneration, projectGeneration: projectGeneration, requestID: requestID, projects: projects, capacities: capacities, echo: echo}
+	}
 }
 
 // loadProjects is retained as a direct command helper for tests and callers
@@ -659,6 +763,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.chatSubmissionPending = false
 		m.busy = false
 		m.invalidatePersonalityBulkLookup()
+		m.invalidateWorkersLive()
 		m.pendingConfirmation = nil
 		m.clearAutomationEdit()
 		if m.selectorActive {
@@ -1129,6 +1234,14 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case workersLiveMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case workersLiveTickMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case agentDeleteTargetMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1285,6 +1398,7 @@ func (m Model) scheduleReconnect(generation int) tea.Cmd {
 func (m *Model) Cleanup() {
 	m.clearAutomationEdit()
 	m.invalidatePersonalityBulkLookup()
+	m.invalidateWorkersLive()
 	m.invalidateChatStream()
 	if m.sseCancel != nil {
 		m.sseCancel()
@@ -1464,7 +1578,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ambiguous or unknown.
 		m.projects = msg.projects
 		if msg.selectName != "" {
-			return m.pickProject(msg.selectName)
+			logStart := len(m.log)
+			m, reconnect := m.pickProject(msg.selectName)
+			if msg.echo && len(m.log) > logStart && m.log[len(m.log)-1].role == "system" {
+				m.log = m.log[:len(m.log)-1]
+				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
+			}
+			return m, reconnect
 		}
 		// Interactive startup retains its convenient first-project default. A
 		// headless run leaves multiple projects unselected so CLI preflight can
@@ -1633,6 +1753,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "result", head: "Project", text: "updated project " + sanitizeAutomationDetailText(settings.Name) + "\n\n" + renderProjectSettings(settings)})
 		}
 		return m, nil
+
+	case workersLiveMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			!m.workersLiveActive || msg.requestID != m.workersLiveRequestID || msg.projectID != m.workersLiveProjectID {
+			return m, nil
+		}
+		m.busy = false
+		if msg.err != nil {
+			m.invalidateWorkersLive()
+			if errors.Is(msg.err, context.Canceled) {
+				return m, nil
+			}
+			if client.IsAuthRequired(msg.err) {
+				m.markAuthRequired()
+				return m, nil
+			}
+			if m.handleTransportError(msg.err) {
+				return m, nil
+			}
+			m.append(entry{role: "error", text: "workers live refresh failed: " + safeConnectionDiagnosticText(msg.err.Error())})
+			return m, nil
+		}
+		m.replaceWorkersLiveBody(renderWorkersLive(msg.overview))
+		return m, m.scheduleWorkersLiveTick(msg.requestID, msg.projectID)
+
+	case workersLiveTickMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			!m.workersLiveActive || msg.requestID != m.workersLiveRequestID || msg.projectID != m.workersLiveProjectID {
+			return m, nil
+		}
+		if m.workersLiveContext == nil || m.workersLiveContext.Err() != nil {
+			return m, nil
+		}
+		return m, m.fetchWorkersLive()
 
 	case resultMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
@@ -2290,6 +2444,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
+	m.invalidateWorkersLive()
 	m.loginResumeSSE = m.sseCancel != nil && !m.authRequired && m.selectedID != ""
 	m.invalidateSSE()
 	m.loginRestorePrompt = m.input.Prompt
@@ -2464,6 +2619,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc":
+		if m.workersLiveActive {
+			m.invalidateWorkersLive()
+			m.busy = false
+			m.input.SetValue("")
+			m.append(entry{role: "system", text: "workers live refresh stopped"})
+			return m, nil
+		}
 		if m.pendingConfirmation != nil {
 			m.pendingConfirmation = nil
 			m.input.SetValue("")
@@ -3233,9 +3395,9 @@ func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
 	if !wasRequired {
 		m.advanceSessionGeneration()
 		m.clearAutomationEdit()
+		m.invalidateWorkersLive()
 		m.invalidateSSE()
-	}
-	// An auth failure can arrive from project/SSE work while a health check is
+	} // An auth failure can arrive from project/SSE work while a health check is
 	// still running. Invalidate every in-flight check before it can clear the
 	// sign-in-required state.
 	m.invalidateConnectionChecks()

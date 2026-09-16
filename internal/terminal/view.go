@@ -368,7 +368,9 @@ func (m Model) renderStatus() string {
 	} else {
 		row("events", dimStyle.Render("off (/events on)"))
 	}
-	row("projects", fmt.Sprintf("%d", len(m.projects)))
+	if !m.statusProjectsUnavailable {
+		row("projects", fmt.Sprintf("%d", len(m.projects)))
+	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
@@ -2370,6 +2372,19 @@ func renderSchedule(entries []client.ScheduleEntry, summary string) string {
 
 // --- automations ---
 
+func renderAutomationList(result client.AutomationListResult) string {
+	out := renderAutomations(result.Automations, "")
+	if !result.MoreAvailable {
+		return out
+	}
+	shown := len(result.Automations)
+	message := fmt.Sprintf("showing %d automations; more records omitted", shown)
+	if result.TotalKnown && result.Total > shown {
+		message = fmt.Sprintf("showing %d of %d automations; %d omitted", shown, result.Total, result.Total-shown)
+	}
+	return out + "\n" + dimStyle.Render(message+"; use /automations list --all for the complete list")
+}
+
 func renderAutomations(automations []client.Automation, filter string) string {
 	rows := [][]string{{"ID", "NAME", "STATE"}}
 	for _, a := range automations {
@@ -3627,6 +3642,12 @@ func compactProviderText(s string) string {
 
 // --- workers ---
 
+const workersLiveHead = "Workers · live"
+
+func workersLiveRefreshIntervalLabel() string {
+	return workersLiveRefreshInterval.String()
+}
+
 type workerCapacityRow struct {
 	Scope   string `json:"scope"`
 	Name    string `json:"name"`
@@ -3772,6 +3793,10 @@ func renderWorkers(overview workersOverview) string {
 	}
 	b.WriteString("\n\n" + dimStyle.Render("/workers limit <n> sets the global cap"))
 	return b.String()
+}
+
+func renderWorkersLive(overview workersOverview) string {
+	return renderWorkers(overview) + "\n" + dimStyle.Render("live refresh every "+workersLiveRefreshIntervalLabel()+" · press Esc to stop")
 }
 
 // --- projects ---
