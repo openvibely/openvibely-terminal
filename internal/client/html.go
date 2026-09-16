@@ -56,50 +56,98 @@ func (c *Client) getHTML(ctx context.Context, path string) (*html.Node, error) {
 }
 
 const (
-	cardPageSize       = 50
-	maxCardPages       = 200
-	maxPaginatedCards  = 10000
-	cardPageMoreHeader = "X-OpenVibely-Card-Page-Has-More"
+	cardPageSize        = 50
+	maxCardPages        = 200
+	maxPaginatedCards   = 10000
+	cardPageMoreHeader  = "X-OpenVibely-Card-Page-Has-More"
+	cardPageTotalHeader = "X-OpenVibely-Card-Page-Total"
 )
 
 type htmlPage struct {
 	root *html.Node
 }
 
+type htmlPageMeta struct {
+	hasMore    bool
+	total      int
+	totalKnown bool
+}
+
 func (c *Client) getHTMLPage(ctx context.Context, path string) (*html.Node, bool, error) {
+	root, meta, err := c.getHTMLPageMeta(ctx, path)
+	return root, meta.hasMore, err
+}
+
+func (c *Client) getHTMLPageMeta(ctx context.Context, path string) (*html.Node, htmlPageMeta, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, htmlPageMeta{}, err
 	}
 	req.Header.Set("Accept", "text/html")
 	req.Header.Set("HX-Request", "true")
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, false, fmt.Errorf("GET %s: %w", path, err)
+		return nil, htmlPageMeta{}, fmt.Errorf("GET %s: %w", path, err)
 	}
 	defer drainAndClose(resp.Body)
 
 	if isReadAuthResponse(resp) {
-		return nil, false, newAuthRequiredError(http.MethodGet, path, resp)
+		return nil, htmlPageMeta{}, newAuthRequiredError(http.MethodGet, path, resp)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, false, apiError(resp)
+		return nil, htmlPageMeta{}, apiError(resp)
 	}
 	root, err := html.Parse(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return nil, false, err
+		return nil, htmlPageMeta{}, err
+	}
+	meta := htmlPageMeta{}
+	rawTotal := strings.TrimSpace(resp.Header.Get(cardPageTotalHeader))
+	if rawTotal != "" {
+		total, parseErr := strconv.Atoi(rawTotal)
+		if parseErr != nil || total < 0 {
+			if parseErr == nil {
+				parseErr = fmt.Errorf("negative total")
+			}
+			return nil, htmlPageMeta{}, fmt.Errorf("invalid %s header %q: %w", cardPageTotalHeader, rawTotal, parseErr)
+		}
+		meta.total, meta.totalKnown = total, true
+	}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	if paginationRoot != nil && !meta.totalKnown {
+		if total, ok, err := parseCardPaginationTotal(paginationRoot); err != nil {
+			return nil, htmlPageMeta{}, err
+		} else if ok {
+			meta.total, meta.totalKnown = total, true
+		}
 	}
 	rawHasMore := strings.TrimSpace(resp.Header.Get(cardPageMoreHeader))
 	if rawHasMore != "" {
 		hasMore, parseErr := strconv.ParseBool(rawHasMore)
 		if parseErr != nil {
-			return nil, false, fmt.Errorf("invalid %s header %q: %w", cardPageMoreHeader, rawHasMore, parseErr)
+			return nil, htmlPageMeta{}, fmt.Errorf("invalid %s header %q: %w", cardPageMoreHeader, rawHasMore, parseErr)
 		}
-		return root, hasMore, nil
+		meta.hasMore = hasMore
+		return root, meta, nil
 	}
-	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
-	return root, paginationRoot != nil && attr(paginationRoot, "data-card-pagination-has-more") == "true", nil
+	meta.hasMore = paginationRoot != nil && attr(paginationRoot, "data-card-pagination-has-more") == "true"
+	return root, meta, nil
+}
+
+func parseCardPaginationTotal(paginationRoot *html.Node) (int, bool, error) {
+	rawTotal := strings.TrimSpace(attr(paginationRoot, "data-card-pagination-total"))
+	if rawTotal == "" {
+		return 0, false, nil
+	}
+	total, err := strconv.Atoi(rawTotal)
+	if err != nil || total < 0 {
+		if err == nil {
+			err = fmt.Errorf("negative total")
+		}
+		return 0, false, fmt.Errorf("invalid data-card-pagination-total %q: %w", rawTotal, err)
+	}
+	return total, true, nil
 }
 
 // getCardPages follows the backend's card-page continuation contract. The first

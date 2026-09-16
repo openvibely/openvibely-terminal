@@ -2521,6 +2521,194 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 	}
 }
 
+func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
+	previousTick := workersLiveTick
+	workersLiveTick = func(_ time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+		return func() tea.Msg { return fn(time.Now()) }
+	}
+	t.Cleanup(func() { workersLiveTick = previousTick })
+
+	var mu sync.Mutex
+	refresh := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		current := refresh
+		if r.URL.Path == "/api/capacity/global" {
+			refresh++
+			current = refresh
+		}
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/capacity/global":
+			fmt.Fprintf(w, `{"total_running":%d,"max_workers":4,"queue_size":%d}`, current, current+1)
+		case "/api/capacity/projects":
+			fmt.Fprintf(w, `[{"id":"p1","name":"demo","running":%d,"queue_size":%d,"max_workers":2}]`, current, current+2)
+		case "/api/capacity/models":
+			fmt.Fprintf(w, `[{"name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":3}]`, current)
+		default:
+			fmt.Fprint(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m, cmd := typeLine(t, m, "/workers watch")
+	if cmd == nil || !m.workersLiveActive || m.busy {
+		t.Fatalf("workers watch did not start a non-blocking live refresh: active=%t busy=%t cmd=%v", m.workersLiveActive, m.busy, cmd)
+	}
+	defer m.Cleanup()
+
+	next, tickCmd := m.Update(cmd())
+	m = next.(Model)
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "1 / 4") || !strings.Contains(out, "live refresh every 3s") {
+		t.Fatalf("first live workers response not rendered:\n%s", out)
+	}
+	if tickCmd == nil {
+		t.Fatal("first live workers response did not schedule a refresh")
+	}
+
+	next, fetchCmd := m.Update(tickCmd())
+	m = next.(Model)
+	if fetchCmd == nil {
+		t.Fatal("live workers tick did not fetch the next snapshot")
+	}
+	next, tickCmd = m.Update(fetchCmd())
+	m = next.(Model)
+	out = stripANSI(transcript(m))
+	if !strings.Contains(out, "2 / 4") || strings.Contains(out, "1 / 4") || strings.Count(out, "Worker capacity") != 1 {
+		t.Fatalf("changed live workers response did not replace the prior table:\n%s", out)
+	}
+	if tickCmd == nil {
+		t.Fatal("second live workers response did not keep the refresh active")
+	}
+}
+
+func TestWorkersWatchEscCancelsFurtherRefreshes(t *testing.T) {
+	previousTick := workersLiveTick
+	workersLiveTick = func(_ time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+		return func() tea.Msg { return fn(time.Now()) }
+	}
+	t.Cleanup(func() { workersLiveTick = previousTick })
+
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/capacity/global":   `{"total_running":1,"max_workers":4,"queue_size":0}`,
+		"/api/capacity/projects": `[]`,
+		"/api/capacity/models":   `[]`,
+	})
+	m, cmd := typeLine(t, m, "/workers watch")
+	if cmd == nil {
+		t.Fatal("workers watch returned no initial fetch")
+	}
+	next, tickCmd := m.Update(cmd())
+	m = next.(Model)
+	if tickCmd == nil {
+		t.Fatal("workers watch did not schedule refresh")
+	}
+	if got := rec.count("GET", "/api/capacity/global"); got != 1 {
+		t.Fatalf("initial global requests = %d, want 1", got)
+	}
+
+	next, followup := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if followup != nil || m.workersLiveActive {
+		t.Fatalf("Esc did not cancel workers live mode: active=%t followup=%v", m.workersLiveActive, followup)
+	}
+	next, fetchCmd := m.Update(tickCmd())
+	m = next.(Model)
+	if fetchCmd != nil {
+		t.Fatal("stale workers live tick scheduled another fetch after Esc")
+	}
+	if got := rec.count("GET", "/api/capacity/global"); got != 1 {
+		t.Fatalf("global requests after Esc = %d, want still 1\n%s", got, rec.all())
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "workers live refresh stopped") {
+		t.Fatalf("Esc cancellation was not reported:\n%s", out)
+	}
+}
+
+func TestWorkersWatchLoginCancelsFurtherRefreshes(t *testing.T) {
+	previousTick := workersLiveTick
+	workersLiveTick = func(_ time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+		return func() tea.Msg { return fn(time.Now()) }
+	}
+	t.Cleanup(func() { workersLiveTick = previousTick })
+
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/capacity/global":   `{"total_running":1,"max_workers":4,"queue_size":0}`,
+		"/api/capacity/projects": `[]`,
+		"/api/capacity/models":   `[]`,
+	})
+	m, cmd := typeLine(t, m, "/workers watch")
+	if cmd == nil {
+		t.Fatal("workers watch returned no initial fetch")
+	}
+	next, tickCmd := m.Update(cmd())
+	m = next.(Model)
+	if tickCmd == nil {
+		t.Fatal("workers watch did not schedule refresh")
+	}
+	if got := rec.count("GET", "/api/capacity/global"); got != 1 {
+		t.Fatalf("initial global requests = %d, want 1", got)
+	}
+
+	m, loginCmd := typeLine(t, m, "/login")
+	if loginCmd != nil || !m.loginActive || m.workersLiveActive {
+		t.Fatalf("/login did not enter login mode while canceling workers live: loginActive=%t workersLiveActive=%t cmd=%v", m.loginActive, m.workersLiveActive, loginCmd)
+	}
+	next, fetchCmd := m.Update(tickCmd())
+	m = next.(Model)
+	if fetchCmd != nil {
+		t.Fatal("stale workers live tick scheduled another fetch after /login")
+	}
+	if got := rec.count("GET", "/api/capacity/global"); got != 1 {
+		t.Fatalf("global requests after /login = %d, want still 1\n%s", got, rec.all())
+	}
+}
+
+func TestWorkersWatchIgnoresStaleProjectAndSessionResults(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Model)
+	}{
+		{name: "project", mutate: func(m *Model) { m.setActiveProject(client.Project{ID: "p2", Name: "other"}) }},
+		{name: "session", mutate: func(m *Model) { m.markAuthRequiredQuiet() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, nil)
+			m, _ = m.beginWorkersLive()
+			requestID := m.workersLiveRequestID
+			projectID := m.workersLiveProjectID
+			sessionGeneration := sessionGenerationOf(m)
+			projectGeneration := projectGenerationOf(m)
+			tc.mutate(&m)
+
+			overview := newWorkersOverview(&client.GlobalCapacity{TotalRunning: 9, MaxWorkers: 9, QueueSize: 9}, nil, nil, nil, true)
+			next, followup := m.Update(workersLiveMsg{
+				sessionGeneration: sessionGeneration,
+				projectGeneration: projectGeneration,
+				requestID:         requestID,
+				projectID:         projectID,
+				overview:          overview,
+			})
+			m = next.(Model)
+			if followup != nil {
+				t.Fatal("stale workers live result scheduled a refresh")
+			}
+			if strings.Contains(stripANSI(transcript(m)), "9 / 9") {
+				t.Fatalf("stale workers live result was rendered:\n%s", stripANSI(transcript(m)))
+			}
+		})
+	}
+}
+
 func TestModelsCapacityRendersCapacityOnlyResponse(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/api/capacity/models": `[{"name":"Sonnet","running":1,"max_workers":4,"available_slots":3}]`,
@@ -7914,6 +8102,93 @@ func TestAutomationsListFiltersStructuredRows(t *testing.T) {
 		t.Errorf("filtered automations output:\n%s", out)
 	}
 }
+
+func automationPaginatedHTML(start, end, total int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="%t" data-card-pagination-total="%d">`, end < total, total)
+	for i := start; i < end; i++ {
+		b.WriteString(automationCardHTML(fmt.Sprintf("au-%04d", i), fmt.Sprintf("Automation %04d", i), "active"))
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+func paginatedAutomationModel(t *testing.T, total int) (Model, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		if r.Method != http.MethodGet || r.URL.Path != "/automations" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		end := offset + 50
+		if end > total {
+			end = total
+		}
+		w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(end < total))
+		w.Header().Set("X-OpenVibely-Card-Page-Total", strconv.Itoa(total))
+		_, _ = io.WriteString(w, automationPaginatedHTML(offset, end, total))
+	})
+	return m, rec
+}
+
+func TestAutomationsListDefaultIsBoundedAndShowsTruncation(t *testing.T) {
+	m, rec := paginatedAutomationModel(t, 150)
+	m = runLine(t, m, "/automations")
+	if got := rec.count(http.MethodGet, "/automations"); got != 2 {
+		t.Fatalf("requests = %d, want 2: %s", got, rec.all())
+	}
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Automation 0000", "Automation 0099", "showing 100 of 150 automations; 50 omitted", "/automations list --all"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("bounded output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Automation 0100") {
+		t.Fatalf("bounded output rendered beyond the display limit:\n%s", out)
+	}
+}
+
+func TestAutomationsListAllAndFiltersUseCompleteCatalog(t *testing.T) {
+	t.Run("all", func(t *testing.T) {
+		m, rec := paginatedAutomationModel(t, 150)
+		m = runLine(t, m, "/automations list --all")
+		if got := rec.count(http.MethodGet, "/automations"); got != 3 {
+			t.Fatalf("requests = %d, want complete catalog 3: %s", got, rec.all())
+		}
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "Automation 0149") || strings.Contains(out, "omitted") {
+			t.Fatalf("complete list output =\n%s", out)
+		}
+	})
+
+	t.Run("late filter", func(t *testing.T) {
+		m, rec := paginatedAutomationModel(t, 150)
+		m = runLine(t, m, "/automations Automation 0149")
+		if got := rec.count(http.MethodGet, "/automations"); got != 3 {
+			t.Fatalf("requests = %d, want complete catalog for exact filtering: %s", got, rec.all())
+		}
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "Automation 0149") || strings.Contains(out, "Automation 0000") {
+			t.Fatalf("late filter output =\n%s", out)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		m, rec := paginatedAutomationModel(t, 150)
+		m = runLine(t, m, "/automations does-not-exist")
+		if got := rec.count(http.MethodGet, "/automations"); got != 3 {
+			t.Fatalf("requests = %d, want complete catalog for no-match filtering: %s", got, rec.all())
+		}
+		out := stripANSI(transcript(m))
+		if !strings.Contains(out, "no automations match does-not-exist") || strings.Contains(out, "omitted") {
+			t.Fatalf("no-match output =\n%s", out)
+		}
+	})
+}
+
 func TestAutomationsCommandResolvesReferencesAndDispatches(t *testing.T) {
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +

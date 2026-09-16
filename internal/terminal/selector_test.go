@@ -91,6 +91,99 @@ func selFixtures() map[string]string {
 	}
 }
 
+func TestAgentsEditDeletePickersShareRowsAndActionBoundaries(t *testing.T) {
+	longDescription := "0123456789 0123456789 0123456789 0123456789 0123456789"
+	agentsHTML := `<div>
+		<div data-agent-id="ag-first" data-agent-key="first" data-agent-name="First Agent"
+			data-agent-description="short" data-agent-model="claude" data-agent-scope="project"></div>
+		<div data-agent-id="ag-second" data-agent-key="second" data-agent-name="Second Agent"
+			data-agent-description="` + longDescription + `" data-agent-model="gpt" data-agent-scope="project"></div>
+	</div>`
+	type row struct {
+		ref, label, detail string
+	}
+	want := []row{
+		{ref: "ag-first", label: "First Agent", detail: "short"},
+		{ref: "ag-second", label: "Second Agent", detail: truncate(longDescription, 40)},
+	}
+	captureRows := func(t *testing.T, command string) (Model, *recorder, []row) {
+		t.Helper()
+		m, rec := dispatchModel(t, map[string]string{"/agents": agentsHTML})
+		m = runLine(t, m, command)
+		if !m.selectorActive {
+			t.Fatalf("%s did not open selector:\n%s", command, transcript(m))
+		}
+		got := make([]row, 0, len(m.selectorItems))
+		for _, item := range m.selectorItems {
+			got = append(got, row{ref: item.ref, label: item.label, detail: item.detail})
+		}
+		return m, rec, got
+	}
+
+	editModel, editRec, editRows := captureRows(t, "/agents edit")
+	if !reflect.DeepEqual(editRows, want) {
+		t.Fatalf("edit rows = %#v, want %#v", editRows, want)
+	}
+	for i, item := range editModel.selectorItems {
+		if item.dispatch != nil {
+			t.Fatalf("edit row %d unexpectedly has direct dispatch", i)
+		}
+	}
+	editModel = selKey(t, editModel, tea.KeyMsg{Type: tea.KeyEnter})
+	if got := editModel.input.Value(); got != "/agents edit ag-first " {
+		t.Fatalf("edit selection input = %q, want prefilled edit command", got)
+	}
+	if editModel.pendingConfirmation != nil {
+		t.Fatal("edit selection opened destructive confirmation")
+	}
+	if editRec.saw(http.MethodDelete, "/agents/ag-first") || editRec.saw(http.MethodDelete, "/agents/ag-second") {
+		t.Fatalf("edit selection sent DELETE:\n%s", editRec.all())
+	}
+
+	deleteModel, deleteRec, deleteRows := captureRows(t, "/agents delete")
+	if !reflect.DeepEqual(deleteRows, want) {
+		t.Fatalf("delete rows = %#v, want %#v", deleteRows, want)
+	}
+	for i, item := range deleteModel.selectorItems {
+		if item.dispatch == nil {
+			t.Fatalf("delete row %d missing confirmation dispatch", i)
+		}
+	}
+	deleteModel = selKey(t, deleteModel, tea.KeyMsg{Type: tea.KeyDown})
+	deleteModel = selKey(t, deleteModel, tea.KeyMsg{Type: tea.KeyEnter})
+	if deleteModel.pendingConfirmation == nil {
+		t.Fatalf("delete selection did not open confirmation:\n%s", transcript(deleteModel))
+	}
+	if prompt := deleteModel.pendingConfirmation.message; !strings.Contains(prompt, `Delete agent "Second Agent"?`) {
+		t.Fatalf("delete confirmation prompt = %q", prompt)
+	}
+	if deleteRec.saw(http.MethodDelete, "/agents/ag-second") {
+		t.Fatalf("delete occurred before confirmation:\n%s", deleteRec.all())
+	}
+	next, _ := deleteModel.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	deleteModel = next.(Model)
+	if deleteModel.pendingConfirmation != nil {
+		t.Fatal("Esc left delete confirmation active")
+	}
+	if deleteRec.saw(http.MethodDelete, "/agents/ag-second") {
+		t.Fatalf("Esc cancellation sent DELETE:\n%s", deleteRec.all())
+	}
+
+	negativeModel, negativeRec, _ := captureRows(t, "/agents delete")
+	negativeModel = selKey(t, negativeModel, tea.KeyMsg{Type: tea.KeyDown})
+	negativeModel = selKey(t, negativeModel, tea.KeyMsg{Type: tea.KeyEnter})
+	if negativeModel.pendingConfirmation == nil {
+		t.Fatalf("negative-response delete selection did not open confirmation:\n%s", transcript(negativeModel))
+	}
+	negativeModel = runLine(t, negativeModel, "no")
+	if negativeModel.pendingConfirmation != nil {
+		t.Fatal("negative response left delete confirmation active")
+	}
+	if negativeRec.saw(http.MethodDelete, "/agents/ag-second") {
+		t.Fatalf("negative response sent DELETE:\n%s", negativeRec.all())
+	}
+}
+
 func TestTasksLifecycleTaskSelectorSelectionRendersOneItemPageWithoutImplicitEvents(t *testing.T) {
 	const tasks = `<div>
 		<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>

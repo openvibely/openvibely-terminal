@@ -163,6 +163,22 @@ type resultMsg struct {
 	inputOpenRequestID    uint64
 }
 
+type workersLiveMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	requestID         uint64
+	projectID         string
+	overview          workersOverview
+	err               error
+}
+
+type workersLiveTickMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	requestID         uint64
+	projectID         string
+}
+
 type agentDeleteTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64

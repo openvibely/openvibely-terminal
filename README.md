@@ -98,12 +98,19 @@ Common commands include:
 | `/automations` | Inspect, edit, and control automations |
 | `/schedule` | Manage task schedules |
 | `/personality` | Manage built-in and custom personalities; bulk deletion is limited to inactive non-preset custom entries |
-| `/agents`, `/models`, `/workers` | Inspect execution resources; `/models add` configures providers and `/models edit` safely updates existing configurations |
+| `/agents`, `/models`, `/workers` | Inspect execution resources; `/workers` shows a single snapshot and `/workers watch` keeps capacity current every 3s until Esc |
 | `/channels` | Manage integrations, inbound webhooks, saved outbound targets, and project-scoped Telegram, Slack, Discord, X, Email, and GitHub authorized access with `channels access <provider> list\|add\|remove` and `channels targets list\|show\|add\|edit\|test\|remove\|policy` |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/help <command>` | Show complete command syntax |
+
+Use `help workers` for worker-capacity options. `/workers` and `/workers show` render one stable snapshot for scripts; `/workers watch` starts a live terminal view that refreshes global, project, and dedicated model worker values every 3 seconds and stops on Esc. Headless scripts can keep the stable snapshot path:
+
+```text
+/workers watch
+openvibely-terminal workers show
+```
 
 Use `help channels` for integration-specific options. Channel access management is scoped to the selected project in every request. Telegram, Slack, Discord, X, Email, and GitHub expose `channels access <provider> list|add|remove`; GitHub actors are a system-level allowlist viewed with the selected project as request context. GitHub logins are normalized by removing a leading `@` and lowercasing them. A display name is optional and must be one quoted operand when it contains spaces:
 
