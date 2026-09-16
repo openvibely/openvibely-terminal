@@ -2807,6 +2807,14 @@ func parseAgentEdit(args []string) (string, agentEdit, error) {
 	return strings.Join(args[:optionAt], " "), update, nil
 }
 
+func agentSelectorRows(agents []client.AgentDef) []selectorItem {
+	items := make([]selectorItem, 0, len(agents))
+	for _, a := range agents {
+		items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, a.Key, shortID(a.ID)), detail: truncate(a.Description, 40)})
+	}
+	return items
+}
+
 func matchAgentRef(agents []client.AgentDef, ref string) (client.AgentDef, error) {
 	var zero client.AgentDef
 	ref = strings.TrimSpace(ref)
@@ -3056,11 +3064,7 @@ func agentsCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(agents))
-								for _, a := range agents {
-									items = append(items, selectorItem{ref: a.ID, label: firstNonEmpty(a.Name, a.Key, shortID(a.ID)), detail: truncate(a.Description, 40)})
-								}
-								return items, nil
+								return agentSelectorRows(agents), nil
 							}))
 				}
 				ref, edit, err := parseAgentEdit(rest)
@@ -3134,18 +3138,12 @@ func agentsCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(agents))
-								for _, a := range agents {
-									a := a
-									item := selectorItem{
-										ref:    a.ID,
-										label:  firstNonEmpty(a.Name, a.Key, shortID(a.ID)),
-										detail: truncate(a.Description, 40),
+								items := agentSelectorRows(agents)
+								for i := range items {
+									agent := agents[i]
+									items[i].dispatch = func(m Model) (Model, tea.Cmd) {
+										return confirmAgentDeletion(m, pid, agent)
 									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
-										return confirmAgentDeletion(m, pid, a)
-									}
-									items = append(items, item)
 								}
 								return items, nil
 							}))
@@ -4093,31 +4091,102 @@ func modelsCommand() command {
 
 // --- workers ---
 
+var workersLiveRefreshInterval = 3 * time.Second
+
+const workersLiveRequestTimeout = 10 * time.Second
+
+var workersLiveTick = tea.Tick
+
+func fetchWorkersOverview(ctx context.Context, c *client.Client) (workersOverview, error) {
+	var (
+		wg          sync.WaitGroup
+		capacity    *client.GlobalCapacity
+		capacityErr error
+		projects    []client.ProjectCapacity
+		projectsErr error
+		models      []client.ModelCapacity
+		modelsErr   error
+	)
+	wg.Add(3)
+	go func() { defer wg.Done(); capacity, capacityErr = c.GetGlobalCapacity(ctx) }()
+	go func() { defer wg.Done(); projects, projectsErr = c.GetProjectCapacities(ctx) }()
+	go func() { defer wg.Done(); models, modelsErr = c.GetModelCapacities(ctx) }()
+	wg.Wait()
+	if capacityErr != nil {
+		return workersOverview{}, capacityErr
+	}
+	warnings := make([]string, 0, 2)
+	if projectsErr != nil {
+		projects = []client.ProjectCapacity{}
+		warnings = append(warnings, "project worker capacity unavailable")
+	}
+	if modelsErr != nil {
+		models = []client.ModelCapacity{}
+		warnings = append(warnings, "model worker capacity unavailable")
+	}
+	return newWorkersOverview(capacity, projects, models, warnings, modelsErr == nil), nil
+}
+
+func validateWorkersArgs(args []string) error {
+	action, rest := splitAction([]string{"show", "watch", "limit", "project"}, args)
+	if action == "" {
+		if len(args) == 0 {
+			return nil
+		}
+		return errors.New("usage: " + cmdPrefix + "workers [show|watch|limit <n>|project <n>]")
+	}
+	switch action {
+	case "show", "watch":
+		if len(rest) != 0 {
+			return errors.New("usage: " + cmdPrefix + "workers " + action)
+		}
+	case "limit", "project":
+		_, err := parseWorkerLimit(action, rest)
+		return err
+	}
+	return nil
+}
+
 func workersCommand() command {
-	actions := []string{"show", "limit", "project"}
+	actions := []string{"show", "watch", "limit", "project"}
 	return command{
 		name:    "workers",
 		aliases: []string{"works"},
-		args:    "[show|limit <n>|project <n>]",
+		args:    "[show|watch|limit <n>|project <n>]",
 		actions: actions,
 		completions: []commandCompletion{
 			{after: []string{"limit"}, values: []string{"0", "1", "2", "4", "8", "16", "32"}},
 			{after: []string{"project"}, values: []string{"0", "1", "2", "4", "8", "16", "32"}},
 		},
-		desc: "worker pool stats and concurrency caps",
+		desc:         "worker pool stats and concurrency caps",
+		validateArgs: validateWorkersArgs,
 		usage: []string{
-			"workers                                    show pool stats and settings",
+			"workers                                    show one worker-capacity snapshot",
+			"workers watch                              live worker-capacity view (refreshes every 3s; Esc stops)",
 			"workers limit <n>                          set the global worker cap (0 = unlimited)",
 			"workers project <n>                        set this project's worker cap (0 = no limit)",
 		},
 		examples: []string{
+			`workers watch`,
 			`workers limit 4`,
 			`workers project 2`,
-			`workers limit 0`,
+			`openvibely-terminal workers show`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
+			if action == "" && len(rest) > 0 {
+				return m, errCmd("usage: " + cmdPrefix + "workers [show|watch|limit <n>|project <n>]")
+			}
+			if (action == "show" || action == "watch") && len(rest) > 0 {
+				return m, errCmd("usage: " + cmdPrefix + "workers " + action)
+			}
+			if action == "watch" {
+				if cliMode {
+					return m, errCmd("workers watch runs in the foreground; use Ctrl-C to stop")
+				}
+				return m.beginWorkersLive()
+			}
 			if action == "project" && len(rest) == 0 && !cliMode {
 				mm, cmd, ok := m.needProject()
 				if !ok {
@@ -4161,33 +4230,10 @@ func workersCommand() command {
 				})
 			}
 			return m, run("Workers", cmdTimeout, func(ctx context.Context) (string, error) {
-				var (
-					wg          sync.WaitGroup
-					capacity    *client.GlobalCapacity
-					capacityErr error
-					projects    []client.ProjectCapacity
-					projectsErr error
-					models      []client.ModelCapacity
-					modelsErr   error
-				)
-				wg.Add(3)
-				go func() { defer wg.Done(); capacity, capacityErr = c.GetGlobalCapacity(ctx) }()
-				go func() { defer wg.Done(); projects, projectsErr = c.GetProjectCapacities(ctx) }()
-				go func() { defer wg.Done(); models, modelsErr = c.GetModelCapacities(ctx) }()
-				wg.Wait()
-				if capacityErr != nil {
-					return "", capacityErr
+				overview, err := fetchWorkersOverview(ctx, c)
+				if err != nil {
+					return "", err
 				}
-				warnings := make([]string, 0, 2)
-				if projectsErr != nil {
-					projects = []client.ProjectCapacity{}
-					warnings = append(warnings, "project worker capacity unavailable")
-				}
-				if modelsErr != nil {
-					models = []client.ModelCapacity{}
-					warnings = append(warnings, "model worker capacity unavailable")
-				}
-				overview := newWorkersOverview(capacity, projects, models, warnings, modelsErr == nil)
 				if jsonMode {
 					return marshalJSON(overview)
 				}
@@ -6730,7 +6776,8 @@ func automationsCommand() command {
 		selectorPaths: [][]string{{"show"}, {"open"}, {"edit"}, {"run"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
 		desc:          "recurring automations and workflow rules",
 		usage: []string{
-			"automations [filter]                       list automations",
+			"automations [filter]                       list automations (bounded when unfiltered)",
+			"automations list --all                     list the complete automation catalog",
 			"automations show <automation>              show live graph, runtime and resources",
 			"automations open <automation>              compatibility alias for show",
 			"automations edit <automation>               open the complete definition in the terminal editor",
@@ -6752,6 +6799,7 @@ func automationsCommand() command {
 		},
 		examples: []string{
 			`automations list`,
+			`automations list --all`,
 			`automations show "Nightly sweep"`,
 			`automations open automation-id`,
 			`automations edit "Nightly sweep" --export automation.yaml`,
@@ -6788,7 +6836,20 @@ func automationsCommand() command {
 
 			switch action {
 			case "", "list":
+				completeList := action == "list" && len(rest) == 1 && rest[0] == "--all"
+				if completeList {
+					ref = ""
+				} else if action == "list" && len(rest) > 0 {
+					ref = strings.Join(rest, " ")
+				}
 				return m, run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {
+					if !jsonMode && ref == "" && !completeList {
+						result, err := c.ListAutomationsBounded(ctx, pid, client.DefaultAutomationListLimit)
+						if err != nil {
+							return "", err
+						}
+						return renderAutomationList(result), nil
+					}
 					automations, err := c.ListAutomations(ctx, pid)
 					if err != nil {
 						return "", err
@@ -7388,17 +7449,29 @@ func projectsCommand() command {
 					deleteCmd)
 			}
 			if jsonMode {
+				if cliMode && m.projectsLoaded {
+					return m, m.run("Projects", cmdTimeout, func(context.Context) (string, error) {
+						return marshalJSON(m.projects)
+					})
+				}
 				c := m.client
-				return m, run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
+				return m, m.run("Projects", cmdTimeout, func(ctx context.Context) (string, error) {
 					projects, err := c.ListProjects(ctx)
 					if err != nil {
+						if client.IsTransportError(err) {
+							return "", fmt.Errorf("loading projects: %s", OfflineRecoveryMessage(c.BaseURL(), err))
+						}
 						return "", err
 					}
 					return marshalJSON(projects)
 				})
 			}
 			var cmd tea.Cmd
-			m, cmd = m.beginProjectLoadWithSSE(true, "", !cliMode)
+			if cliMode && m.projectsLoaded {
+				m, cmd = m.beginProjectCapacityLoad(true)
+				return m, cmd
+			}
+			m, cmd = m.beginProjectLoadWithSSE(true, "", true)
 			return m, cmd
 		},
 	}

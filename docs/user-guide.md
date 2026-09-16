@@ -247,7 +247,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
-| `/workers` | | `show`, `limit <n>`, `project <n>` |
+| `/workers` | | `show`, `watch`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>`, `delete-bulk <key|name>...` |
 | `/pulse` | `upcoming` | `show`, `summary` |
@@ -271,6 +271,18 @@ Every screen in the OpenVibely web UI sidebar has a command.
 pool, matching the global row in `/workers`. In that mode the status summary
 shows running and queued work but omits the backend's sentinel free-slot value;
 finite pools continue to show maximum and free counts.
+
+`/workers` and `/workers show` render one stable snapshot of global, project,
+and dedicated model worker capacity. Interactive users can run `/workers watch`
+for a live view that refreshes every 3 seconds and updates the same table until
+Esc, project changes, sign-in changes, or shutdown cancel it. Headless scripts
+should keep using `workers show`; foreground CLI monitoring is available with
+`workers watch` and stops on Ctrl-C or caller context cancellation.
+
+```text
+/workers watch
+openvibely-terminal workers show
+```
 
 ### Channel access
 
@@ -736,7 +748,7 @@ automation inspection, graph editing, and lifecycle controls. The supported acti
 `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, and `delete`; `show` is
 the canonical detail action and `open` is a compatibility alias with identical
 selection and output. `run-now` remains accepted as a compatibility alias for `run`.
-`show` renders the saved graph topology, node and transition status/config summaries,
+Plain human `list` output is bounded for large catalogs; use `list --all` when you need the complete catalog. `show` renders the saved graph topology, node and transition status/config summaries,
 runtime totals, resources, external state, and explicit unavailable or empty sections.
 `edit` consumes the backend builder's complete YAML definition, previews it through
 the backend validator, and saves only a valid changed definition. Automation creation
@@ -746,6 +758,7 @@ In the interactive TUI:
 
 ```
 /automations list
+/automations list --all
 /automations show "Nightly sweep"
 /automations open automation-id
 /automations edit "Nightly sweep"        # opens the multiline terminal editor; Ctrl+S saves, Esc cancels
@@ -762,6 +775,7 @@ command:
 
 ```bash
 openvibely-terminal -project demo automations list
+openvibely-terminal -project demo automations list --all
 openvibely-terminal -project demo automations show "Nightly sweep"
 openvibely-terminal -project demo automations open automation-id
 openvibely-terminal -project demo automations edit "Nightly sweep" --export automation.yaml
