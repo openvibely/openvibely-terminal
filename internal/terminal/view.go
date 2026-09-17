@@ -3967,7 +3967,7 @@ func loadAnalytics(ctx context.Context, c *client.Client, projectID, section str
 					slots[i].err = err
 				}
 			case "frequent":
-				if f, err := c.GetMostFrequentTasks(ctx, projectID); err == nil {
+				if f, err := c.GetMostFrequentTasksWithLimit(ctx, projectID, maxFrequentRows); err == nil {
 					slots[i].out = renderFrequent(f) + "\n\n"
 				} else {
 					slots[i].err = err
@@ -4077,7 +4077,11 @@ func renderRates(rates []client.SuccessFailureRate) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-const maxExecTimeRows = 12
+const (
+	maxExecTimeRows = 12
+	// maxFrequentRows is the backend-ranked presentation bound for the terminal.
+	maxFrequentRows = 12
+)
 
 type execTimeCandidate struct {
 	value client.AvgExecutionTime

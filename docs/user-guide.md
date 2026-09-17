@@ -237,6 +237,32 @@ fails without changing any alert. Read bulk refreshes the alert list; selective
 delete asks for `yes` interactively and requires `--force` headlessly. In
 `--json` mode the commands emit the returned count as `{"updated":n}` or
 `{"deleted":n}`.
+`/channels webhooks` manages inbound webhook endpoints in the selected project.
+Keep single deletion for one target, or use the bulk form for several:
+
+```text
+/channels webhooks delete <webhook>
+/channels webhooks delete-bulk <webhook>...
+```
+
+Bulk references are fully resolved before mutation. With no references, the TUI
+opens a multi-select list: type to filter, press Space to select or deselect a
+row, and press Enter to review the selected names and count. The destructive
+prompt is `Type 'yes' to confirm or Esc to cancel`; Esc or an unsafe resolution
+sends no request. One-shot CLI deletion requires `--force` or `-f`:
+
+```bash
+openvibely-terminal -project demo --force channels webhooks delete-bulk "Pager Duty" "Build Hook"
+openvibely-terminal -project demo --force --json channels webhooks delete-bulk "Pager Duty" "Build Hook"
+# {"action":"delete-bulk","deleted":2}
+```
+
+All targets must belong to the selected project and unknown, ambiguous,
+duplicate, foreign, or stale references are rejected before deletion. Bulk
+output reports the deleted count; webhook secrets are omitted. The deprecated
+`webhooks` and `inbound-webhooks` command roots remain compatible with the same
+single and bulk lifecycle.
+
 ## Commands
 
 Every screen in the OpenVibely web UI sidebar has a command.
@@ -251,7 +277,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/agents` | `agent` | `list`, `edit`, `delete`, `generate`, `metrics`, `votes` |
 | `/models` | `model` | `list`, `add`, `edit`, `default`, `delete`, `capacity` |
 | `/workers` | | `show`, `watch`, `limit <n>`, `project <n>` |
-| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete` |
+| `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete|delete-bulk` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>`, `delete-bulk <key|name>...` |
 | `/pulse` | `upcoming` | `show`, `summary` |
 | `/reflection` | `history` | `show`, `summary` |
@@ -776,6 +802,7 @@ Inbound webhooks use the nested `/channels webhooks` registry:
 /channels webhooks test pager
 /channels webhooks rotate pager
 /channels webhooks delete pager
+/channels webhooks delete-bulk "PagerDuty alerts" "Build alerts"
 ```
 
 Webhook `create` and `edit` accept `--name`, `--enabled`, `--priority` (or
@@ -906,8 +933,12 @@ failures, and backend errors retain the normal non-zero command behavior.
 
 `/analytics` renders everything; a section name narrows it. Charts are drawn as
 ASCII bars — usage by model with cost and share, success/failure gauges per
-period, average execution time by agent and by task, most frequent tasks,
-recurring failure patterns, and skill usage with follow-through rates.
+period, average execution time by agent and by task, the backend-ranked top 12
+most frequent tasks, recurring failure patterns, and skill usage with
+follow-through rates. The default `analytics frequent` view requests at most
+12 ranked rows from the backend, so its response and rendered output are
+bounded. The client’s explicit full-history method requests `limit=0` and
+remains available for complete-data callers; it is not silently truncated.
 
 ## CLI mode
 
@@ -1035,6 +1066,7 @@ $ openvibely-terminal help channels
   channels webhooks test <webhook>           create a synthetic test task
   channels webhooks rotate <webhook>         rotate its secret (confirmation required)
   channels webhooks delete <webhook>         delete a webhook (confirmation required)
+  channels webhooks delete-bulk <webhook>... delete selected webhooks (confirmation required)
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,
@@ -1068,7 +1100,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
-| Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks`, `failed-task-patterns`, `skills` |
+| Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |

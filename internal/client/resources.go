@@ -3247,6 +3247,64 @@ func (c *Client) DeleteWebhook(ctx context.Context, projectID, id string) error 
 	return c.doForm(ctx, http.MethodDelete, "/channels/webhooks/"+url.PathEscape(id)+query("project_id", projectID), nil)
 }
 
+// DeleteWebhooksBulk removes the supplied project-scoped webhooks and returns
+// the backend's affected count. IDs are trimmed and deduplicated before the
+// single atomic request is sent.
+func (c *Client) DeleteWebhooksBulk(ctx context.Context, projectID string, ids []string) (int, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return 0, fmt.Errorf("project ID is required for bulk webhook deletion")
+	}
+	ids, err := dedupeWebhookIDs(ids)
+	if err != nil {
+		return 0, err
+	}
+	var response struct {
+		Deleted *int            `json:"deleted"`
+		Error   json.RawMessage `json:"error"`
+	}
+	path := "/channels/webhooks/bulk"
+	resp, err := c.doJSONResponse(ctx, http.MethodDelete, path+query("project_id", projectID), struct {
+		IDs []string `json:"ids"`
+	}{IDs: ids})
+	if err != nil {
+		return 0, err
+	}
+	defer drainAndClose(resp.Body)
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&response); err != nil {
+		return 0, fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
+		return 0, fmt.Errorf("decoding %s response: trailing JSON data: %w", path, err)
+	}
+	return validateAlertBulkMutationCount(path, "deleted", response.Deleted, response.Error)
+}
+
+func dedupeWebhookIDs(ids []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return nil, fmt.Errorf("webhook IDs must not be empty")
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return nil, fmt.Errorf("at least one webhook ID is required")
+	}
+	return unique, nil
+}
+
 func (c *Client) doSafeChannelTest(ctx context.Context, path string) error {
 	req, err := c.newRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {

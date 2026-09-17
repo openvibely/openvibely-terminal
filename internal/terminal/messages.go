@@ -204,6 +204,18 @@ type webhookMutationTargetMsg struct {
 	err               error
 }
 
+// webhookBulkTargetMsg carries every project-scoped webhook resolved before a
+// bulk delete confirmation is shown. The captured records prevent a later
+// catalog change from rebinding the destructive request.
+type webhookBulkTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	lookupID          uint64
+	projectID         string
+	webhooks          []client.Webhook
+	err               error
+}
+
 type channelAccessRemovalTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
@@ -347,11 +359,12 @@ type sseConnectedMsg struct {
 
 // selectorItem is one choice in the inline ref selector.
 type selectorItem struct {
-	ref          string               // dispatched as the command argument (ID/handle/type)
-	label        string               // primary display text (name/title)
-	detail       string               // dimmed secondary text (status, description…)
-	resolvedTask *client.Task         // optional task record already loaded for selector dispatch
-	dispatch     selectorItemDispatch // optional direct action for an already-resolved item
+	ref             string               // dispatched as the command argument (ID/handle/type)
+	label           string               // primary display text (name/title)
+	detail          string               // dimmed secondary text (status, description…)
+	resolvedTask    *client.Task         // optional task record already loaded for selector dispatch
+	resolvedWebhook *client.Webhook      // optional webhook record already loaded for bulk dispatch
+	dispatch        selectorItemDispatch // optional direct action for an already-resolved item
 }
 
 // selectorActiveMsg asks the model to open the inline ref selector for a
@@ -372,6 +385,9 @@ type selectorActiveMsg struct {
 	prefillSuffix string
 	initialFilter string
 	forcePicker   bool // Tab completion must never auto-execute a unique resource
+	multiSelect   bool
+	multiLookupID uint64
+	multiDispatch selectorMultiDispatch
 	items         []selectorItem
 	warnings      []string
 	err           error
