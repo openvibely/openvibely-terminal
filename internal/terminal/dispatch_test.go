@@ -2438,6 +2438,15 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 				if !strings.Contains(parts[1], "project_id="+projectID) {
 					t.Errorf("analytics request lost selected project scope: %q", uri)
 				}
+				if request[0] == "/api/analytics/most-frequent-tasks" {
+					parsed, err := url.Parse(parts[1])
+					if err != nil {
+						t.Fatalf("parse analytics request %q: %v", uri, err)
+					}
+					if got := parsed.Query().Get("limit"); got != strconv.Itoa(maxFrequentRows) {
+						t.Errorf("frequent limit = %q, want %d", got, maxFrequentRows)
+					}
+				}
 				got[request[0]]++
 			}
 			if !reflect.DeepEqual(got, want) {

@@ -3,13 +3,17 @@ package terminal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
@@ -168,8 +172,8 @@ func TestLoadAnalyticsRendersIndependentAgentAndTaskExecutionTimes(t *testing.T)
 			}
 			_ = json.NewEncoder(w).Encode([]client.SuccessFailureRate{})
 		case "/api/analytics/most-frequent-tasks":
-			if got := r.URL.Query().Get("limit"); got != "" {
-				t.Errorf("frequent limit = %q, want omitted", got)
+			if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxFrequentRows) {
+				t.Errorf("frequent limit = %q, want %d", got, maxFrequentRows)
 			}
 			_ = json.NewEncoder(w).Encode([]client.TaskFrequency{})
 		case "/api/analytics/failed-task-patterns":
@@ -256,6 +260,7 @@ func TestLoadAnalyticsPreservesExecutionTimeSectionErrorSemantics(t *testing.T) 
 	}{
 		{section: "agents", path: "/api/analytics/avg-execution-time-by-agent", title: "Avg execution time by agent"},
 		{section: "trends", path: "/api/analytics/avg-execution-time-by-task", title: "Avg execution time by task"},
+		{section: "frequent", path: "/api/analytics/most-frequent-tasks", title: "Most frequent tasks"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.section, func(t *testing.T) {
@@ -274,4 +279,288 @@ func TestLoadAnalyticsPreservesExecutionTimeSectionErrorSemantics(t *testing.T) 
 			}
 		})
 	}
+}
+
+func rankedFrequentTasks(history []client.TaskFrequency) []client.TaskFrequency {
+	if len(history) == 0 {
+		return make([]client.TaskFrequency, 0)
+	}
+	ranked := append([]client.TaskFrequency(nil), history...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return ranked[i].ExecutionCount > ranked[j].ExecutionCount
+	})
+	if len(ranked) > maxFrequentRows {
+		ranked = ranked[:maxFrequentRows]
+	}
+	return ranked
+}
+
+func TestLoadAnalyticsFrequentBoundPreservesVisibleOutput(t *testing.T) {
+	cases := []struct {
+		name    string
+		records []client.TaskFrequency
+	}{
+		{name: "empty", records: []client.TaskFrequency{}},
+		{name: "one", records: []client.TaskFrequency{{TaskID: "one", TaskTitle: "one", ExecutionCount: 4}}},
+		{name: "exactly at limit", records: func() []client.TaskFrequency {
+			records := make([]client.TaskFrequency, maxFrequentRows)
+			for i := range records {
+				records[i] = client.TaskFrequency{
+					TaskID:         fmt.Sprintf("exact-%02d", i),
+					TaskTitle:      fmt.Sprintf("exact title %02d", i),
+					ExecutionCount: maxFrequentRows - i,
+				}
+			}
+			return records
+		}()},
+		{name: "limit plus one and stable cutoff", records: func() []client.TaskFrequency {
+			records := make([]client.TaskFrequency, 0, maxFrequentRows+1)
+			for i := 0; i < maxFrequentRows-1; i++ {
+				records = append(records, client.TaskFrequency{
+					TaskID:         fmt.Sprintf("rank-%02d", i),
+					TaskTitle:      fmt.Sprintf("ranked task %02d", i),
+					ExecutionCount: 100 - i,
+				})
+			}
+			records = append(records,
+				client.TaskFrequency{TaskID: "tie-early", TaskTitle: "tie early", ExecutionCount: 50},
+				client.TaskFrequency{TaskID: "tie-late", TaskTitle: "tie late", ExecutionCount: 50},
+			)
+			return records
+		}()},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ranked := rankedFrequentTasks(tc.records)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "analytics-project" {
+					t.Errorf("project_id = %q, want analytics-project", got)
+				}
+				if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxFrequentRows) {
+					t.Errorf("limit = %q, want %d", got, maxFrequentRows)
+				}
+				if err := json.NewEncoder(w).Encode(ranked); err != nil {
+					t.Errorf("encode ranked tasks: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatalf("client.New: %v", err)
+			}
+
+			got, err := loadAnalytics(context.Background(), c, "analytics-project", "frequent")
+			if err != nil {
+				t.Fatalf("loadAnalytics: %v", err)
+			}
+			want := renderFrequent(ranked)
+			if got != want {
+				t.Fatalf("frequent output changed for %s\n got: %q\nwant: %q", tc.name, got, want)
+			}
+			if len(ranked) > maxFrequentRows {
+				t.Fatalf("backend-ranked response has %d rows, want at most %d", len(ranked), maxFrequentRows)
+			}
+			if tc.name == "limit plus one and stable cutoff" {
+				plain := stripANSI(got)
+				if !strings.Contains(plain, "tie early") || strings.Contains(plain, "tie late") {
+					t.Fatalf("ranked stable cutoff changed:\n%s", plain)
+				}
+			}
+		})
+	}
+}
+
+func TestFrequentAnalyticsResponseRowsBoundedAcrossFixtureSizes(t *testing.T) {
+	for _, size := range []int{0, 1, maxFrequentRows, maxFrequentRows + 1, 100, 1000, 5000} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			history := frequentAnalyticsFixture(size)
+			ranked := rankedFrequentTasks(history)
+			body, err := json.Marshal(ranked)
+			if err != nil {
+				t.Fatalf("marshal fixture: %v", err)
+			}
+			var gotBytes int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("project_id") != "fixture-project" {
+					t.Errorf("project_id = %q, want fixture-project", r.URL.Query().Get("project_id"))
+				}
+				if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxFrequentRows) {
+					t.Errorf("limit = %q, want %d", got, maxFrequentRows)
+				}
+				gotBytes = len(body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatalf("client.New: %v", err)
+			}
+			items, err := c.GetMostFrequentTasksWithLimit(context.Background(), "fixture-project", maxFrequentRows)
+			if err != nil {
+				t.Fatalf("GetMostFrequentTasksWithLimit: %v", err)
+			}
+			wantRows := size
+			if wantRows > maxFrequentRows {
+				wantRows = maxFrequentRows
+			}
+			if len(items) != wantRows {
+				t.Fatalf("decoded rows = %d, want %d", len(items), wantRows)
+			}
+			if gotBytes != len(body) {
+				t.Fatalf("response bytes = %d, want %d", gotBytes, len(body))
+			}
+			if rendered := renderFrequent(items); rendered != renderFrequent(ranked) {
+				t.Fatalf("rendered rows differ from ranked response")
+			}
+		})
+	}
+}
+
+func frequentAnalyticsFixture(count int) []client.TaskFrequency {
+	return evidenceFrequentAnalyticsFixture(count)
+}
+
+func TestFrequentAnalyticsPerformanceEvidence(t *testing.T) {
+	if os.Getenv("OPENVIBELY_ANALYTICS_PERF_EVIDENCE") != "1" {
+		t.Skip("set OPENVIBELY_ANALYTICS_PERF_EVIDENCE=1 to run the 5,000-record analytics evidence harness")
+	}
+	const fixtureSize = frequentAnalyticsFixtureSize
+	const runs = 20
+
+	history := frequentAnalyticsFixture(fixtureSize)
+	fullBody, err := json.Marshal(history)
+	if err != nil {
+		t.Fatalf("marshal full fixture: %v", err)
+	}
+	if len(fullBody) != frequentAnalyticsReviewedResponseSize {
+		t.Fatalf("full fixture response bytes = %d, want reviewed workload %d", len(fullBody), frequentAnalyticsReviewedResponseSize)
+	}
+	bounded := rankedFrequentTasks(history)
+	boundedBody, err := json.Marshal(bounded)
+	if err != nil {
+		t.Fatalf("marshal bounded fixture: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "perf-project" {
+			t.Errorf("project_id = %q, want perf-project", got)
+		}
+		var body []byte
+		switch r.URL.Query().Get("limit") {
+		case strconv.Itoa(maxFrequentRows):
+			body = boundedBody
+		case "0":
+			body = fullBody
+		default:
+			t.Errorf("unexpected limit %q", r.URL.Query().Get("limit"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	run := func(isBounded bool) (int, time.Duration, error) {
+		started := time.Now()
+		var items []client.TaskFrequency
+		var err error
+		if isBounded {
+			items, err = c.GetMostFrequentTasksWithLimit(context.Background(), "perf-project", maxFrequentRows)
+		} else {
+			items, err = c.GetMostFrequentTasks(context.Background(), "perf-project")
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+		_ = renderFrequent(items)
+		return len(items), time.Since(started), nil
+	}
+
+	for _, boundedRun := range []bool{true, false} {
+		if _, _, err := run(boundedRun); err != nil {
+			t.Fatalf("warm-up bounded=%t: %v", boundedRun, err)
+		}
+	}
+	boundedDurations := make([]time.Duration, 0, runs)
+	fullDurations := make([]time.Duration, 0, runs)
+	for i := 0; i < runs; i++ {
+		boundedRows, elapsed, err := run(true)
+		if err != nil {
+			t.Fatalf("bounded run %d: %v", i+1, err)
+		}
+		if boundedRows != maxFrequentRows {
+			t.Fatalf("bounded decoded rows = %d, want %d", boundedRows, maxFrequentRows)
+		}
+		boundedDurations = append(boundedDurations, elapsed)
+
+		fullRows, elapsed, err := run(false)
+		if err != nil {
+			t.Fatalf("full run %d: %v", i+1, err)
+		}
+		if fullRows != fixtureSize {
+			t.Fatalf("full decoded rows = %d, want %d", fullRows, fixtureSize)
+		}
+		fullDurations = append(fullDurations, elapsed)
+	}
+
+	boundedAllocs := testing.AllocsPerRun(runs, func() {
+		if _, _, err := run(true); err != nil {
+			panic(err)
+		}
+	})
+	fullAllocs := testing.AllocsPerRun(runs, func() {
+		if _, _, err := run(false); err != nil {
+			panic(err)
+		}
+	})
+	boundedAllocatedBytes, boundedMallocs := measureFrequentAnalyticsAllocations(runs, func() {
+		if _, _, err := run(true); err != nil {
+			panic(err)
+		}
+	})
+	fullAllocatedBytes, fullMallocs := measureFrequentAnalyticsAllocations(runs, func() {
+		if _, _, err := run(false); err != nil {
+			panic(err)
+		}
+	})
+
+	boundedP50, boundedP95 := frequentAnalyticsPercentiles(boundedDurations)
+	fullP50, fullP95 := frequentAnalyticsPercentiles(fullDurations)
+	t.Logf("frequent_analytics_perf fixture=%d limit=%d runs=%d bounded_response_bytes=%d full_response_bytes=%d bounded_p50=%s bounded_p95=%s full_p50=%s full_p95=%s bounded_decoded_rows=%d full_decoded_rows=%d bounded_allocated_bytes_per_op=%.0f full_allocated_bytes_per_op=%.0f bounded_allocs_per_op=%.1f full_allocs_per_op=%.1f bounded_mallocs_per_op=%.1f full_mallocs_per_op=%.1f bounded_durations=%v full_durations=%v", fixtureSize, maxFrequentRows, runs, len(boundedBody), len(fullBody), boundedP50, boundedP95, fullP50, fullP95, len(bounded), len(history), boundedAllocatedBytes, fullAllocatedBytes, boundedAllocs, fullAllocs, boundedMallocs, fullMallocs, boundedDurations, fullDurations)
+
+	if len(boundedBody) >= len(fullBody) || len(bounded) > maxFrequentRows {
+		t.Fatalf("bounded response was not bounded: bytes=%d/%d rows=%d", len(boundedBody), len(fullBody), len(bounded))
+	}
+	if boundedP50*2 >= 15*time.Millisecond+800*time.Microsecond {
+		t.Fatalf("bounded p50 = %s, want below 50%% of the reviewed 15.8ms baseline", boundedP50)
+	}
+	if boundedP50*2 >= fullP50 {
+		t.Fatalf("bounded p50 = %s, want at least 50%% below full p50 %s", boundedP50, fullP50)
+	}
+	if boundedAllocatedBytes*2 >= fullAllocatedBytes || boundedMallocs*2 >= fullMallocs {
+		t.Fatalf("bounded allocations were not materially reduced: bytes/op %.0f vs %.0f, mallocs/op %.1f vs %.1f", boundedAllocatedBytes, fullAllocatedBytes, boundedMallocs, fullMallocs)
+	}
+}
+
+func measureFrequentAnalyticsAllocations(runs int, operation func()) (bytesPerOp, mallocsPerOp float64) {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		operation()
+	}
+	runtime.ReadMemStats(&after)
+	return float64(after.TotalAlloc-before.TotalAlloc) / float64(runs), float64(after.Mallocs-before.Mallocs) / float64(runs)
+}
+
+func frequentAnalyticsPercentiles(values []time.Duration) (time.Duration, time.Duration) {
+	sorted := append([]time.Duration(nil), values...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	return sorted[len(sorted)/2], sorted[(len(sorted)*95)/100]
 }
