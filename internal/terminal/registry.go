@@ -2320,12 +2320,18 @@ var validAlertProcessingStates = map[string]struct{}{
 
 // parseAlertListArgs keeps free-text matching distinct from exact workflow
 // predicates. Only the documented flags are sent to the backend; all other
-// terms retain the existing client-side text-filter behavior.
-func parseAlertListArgs(args []string) (client.AlertListFilter, string, error) {
+// terms retain the existing client-side text-filter behavior. The --all flag is
+// the explicit human full-history path; JSON list output is also always full.
+func parseAlertListArgs(args []string) (client.AlertListFilter, string, bool, error) {
 	var filter client.AlertListFilter
+	fullHistory := false
 	text := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--all" {
+			fullHistory = true
+			continue
+		}
 		name, value, matched := alertListOption(arg, "--decision-state")
 		if !matched {
 			name, value, matched = alertListOption(arg, "--processing-state")
@@ -2336,7 +2342,7 @@ func parseAlertListArgs(args []string) (client.AlertListFilter, string, error) {
 		}
 		if value == "" {
 			if i+1 >= len(args) {
-				return client.AlertListFilter{}, "", fmt.Errorf("%s requires a value", name)
+				return client.AlertListFilter{}, "", false, fmt.Errorf("%s requires a value", name)
 			}
 			i++
 			value = args[i]
@@ -2345,17 +2351,17 @@ func parseAlertListArgs(args []string) (client.AlertListFilter, string, error) {
 		switch name {
 		case "--decision-state":
 			if _, ok := validAlertDecisionStates[value]; !ok {
-				return client.AlertListFilter{}, "", fmt.Errorf("invalid %s %q; valid values: pending, approved, rejected, dismissed", name, value)
+				return client.AlertListFilter{}, "", false, fmt.Errorf("invalid %s %q; valid values: pending, approved, rejected, dismissed", name, value)
 			}
 			filter.DecisionState = value
 		case "--processing-state":
 			if _, ok := validAlertProcessingStates[value]; !ok {
-				return client.AlertListFilter{}, "", fmt.Errorf("invalid %s %q; valid values: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed", name, value)
+				return client.AlertListFilter{}, "", false, fmt.Errorf("invalid %s %q; valid values: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed", name, value)
 			}
 			filter.ProcessingState = value
 		}
 	}
-	return filter, strings.Join(text, " "), nil
+	return filter, strings.Join(text, " "), fullHistory, nil
 }
 
 // alertListOption recognizes either "--name value" or "--name=value".
@@ -2469,8 +2475,9 @@ func alertsCommand() command {
 		selectorPaths: [][]string{{"show"}, {"read"}, {"approve"}, {"reject"}, {"dismiss"}, {"delete"}},
 		desc:          "notifications awaiting review",
 		usage: []string{
-			"alerts [filter]                            list alerts with optional free-text matching",
+			"alerts [filter]                            list first alert page with optional free-text matching",
 			"alerts list [filter] --decision-state <state> [--processing-state <state>]",
+			"alerts list --all                          retrieve and render full alert history",
 			"  decision states: pending, approved, rejected, dismissed",
 			"  processing states: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed",
 			"alerts show <alert>                         inspect full body and metadata",
@@ -2504,19 +2511,27 @@ func alertsCommand() command {
 
 			switch action {
 			case "", "list":
-				workflowFilter, textFilter, err := parseAlertListArgs(rest)
+				workflowFilter, textFilter, fullHistory, err := parseAlertListArgs(rest)
 				if err != nil {
 					return m, errCmd(err.Error())
 				}
 				return m, run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
-					alerts, err := c.ListAlertsWithFilter(ctx, pid, workflowFilter)
+					filtered := textFilter != "" || workflowFilter.DecisionState != "" || workflowFilter.ProcessingState != ""
+					if jsonMode || fullHistory || filtered {
+						alerts, err := c.ListAlertsWithFilter(ctx, pid, workflowFilter)
+						if err != nil {
+							return "", err
+						}
+						if jsonMode {
+							return marshalJSON(filterAlertsByText(alerts, textFilter))
+						}
+						return renderAlertsWithWorkflowFilter(alerts, textFilter, workflowFilter), nil
+					}
+					result, err := c.ListAlertsBounded(ctx, pid, workflowFilter, client.DefaultAlertListLimit)
 					if err != nil {
 						return "", err
 					}
-					if jsonMode {
-						return marshalJSON(filterAlertsByText(alerts, textFilter))
-					}
-					return renderAlertsWithWorkflowFilter(alerts, textFilter, workflowFilter), nil
+					return renderAlertListResult(result, textFilter, workflowFilter), nil
 				})
 			case "show":
 				if ref == "" {

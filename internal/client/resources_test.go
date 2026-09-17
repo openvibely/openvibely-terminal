@@ -239,6 +239,195 @@ func TestListAlertsWithFilterEmptyResultUsesStableJSONShape(t *testing.T) {
 	}
 }
 
+func alertPaginatedPage(start, end, total int) string {
+	var body strings.Builder
+	fmt.Fprintf(&body, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-page-size="%d" data-card-pagination-total="%d" data-card-pagination-has-more="%t">`, cardPageSize, total, end < total)
+	for i := start; i < end; i++ {
+		fmt.Fprintf(&body, `<div data-alert-id="alert-%04d" data-alert-scroll-anchor="alert-%04d" data-search-text="alert %04d custom warning pending unclaimed"><p class="font-semibold">Alert %04d</p><p class="text-sm opacity-60">Message %04d</p><span class="badge">custom</span><span class="badge">warning</span><span class="badge">pending</span><span class="badge">unclaimed</span></div>`, i, i, i, i, i)
+	}
+	body.WriteString(`</div>`)
+	return body.String()
+}
+
+func alertCatalogServer(t *testing.T, total int, delay time.Duration) (*Client, *int, *int, func(int) int) {
+	t.Helper()
+	requests := 0
+	bytesServed := 0
+	pageBytes := func(offset int) int {
+		end := offset + cardPageSize
+		if end > total {
+			end = total
+		}
+		return len(alertPaginatedPage(offset, end, total))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/alerts" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		requests++
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		end := offset + cardPageSize
+		if end > total {
+			end = total
+		}
+		page := alertPaginatedPage(offset, end, total)
+		bytesServed += len(page)
+		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(end < total))
+		w.Header().Set(cardPageTotalHeader, strconv.Itoa(total))
+		_, _ = io.WriteString(w, page)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, &requests, &bytesServed, pageBytes
+}
+
+func TestListAlertsBoundedUsesOnlyFirstPageAndPreservesFullPath(t *testing.T) {
+	c, requests, bytesServed, pageBytes := alertCatalogServer(t, cardPageSize+1, 0)
+	result, err := c.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, DefaultAlertListLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *requests != 1 {
+		t.Fatalf("bounded requests = %d, want 1", *requests)
+	}
+	if *bytesServed != pageBytes(0) {
+		t.Fatalf("bounded response bytes = %d, want first page %d", *bytesServed, pageBytes(0))
+	}
+	if len(result.Alerts) != DefaultAlertListLimit || result.ParsedAlerts != DefaultAlertListLimit || result.RetainedPages != 0 {
+		t.Fatalf("bounded result = %+v, want exactly one page retained", result)
+	}
+	if !result.MoreAvailable || result.Complete || !result.TotalKnown || result.Total != cardPageSize+1 {
+		t.Fatalf("bounded continuation metadata = %+v", result)
+	}
+	if result.Alerts[len(result.Alerts)-1].ID != "alert-0049" {
+		t.Fatalf("last bounded alert = %+v", result.Alerts[len(result.Alerts)-1])
+	}
+
+	full, err := c.ListAlerts(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full) != cardPageSize+1 || full[len(full)-1].ID != "alert-0050" {
+		t.Fatalf("full alerts = %d last=%+v, want complete history", len(full), full[len(full)-1])
+	}
+	if *requests != 3 {
+		t.Fatalf("total requests after full path = %d, want 3", *requests)
+	}
+}
+
+func TestListAlertsBoundedPreservesWorkflowPredicatesAndMalformedPagination(t *testing.T) {
+	t.Run("workflow predicates", func(t *testing.T) {
+		requests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			q := r.URL.Query()
+			if r.URL.Path != "/alerts" || q.Get("project_id") != "project-2" || q.Get("decision_state") != "pending" || q.Get("processing_state") != "unclaimed" {
+				t.Errorf("bounded filtered request = %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set(cardPageMoreHeader, "true")
+			_, _ = io.WriteString(w, alertListPage([]string{"a-first"}, true))
+		}))
+		defer srv.Close()
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := c.ListAlertsBounded(context.Background(), "project-2", AlertListFilter{DecisionState: "pending", ProcessingState: "unclaimed"}, DefaultAlertListLimit)
+		if err != nil {
+			t.Fatalf("ListAlertsBounded: %v", err)
+		}
+		if requests != 1 || len(result.Alerts) != 1 || !result.MoreAvailable {
+			t.Fatalf("result=%+v requests=%d, want one bounded page with continuation", result, requests)
+		}
+	})
+
+	t.Run("malformed metadata", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set(cardPageMoreHeader, "true")
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="" data-card-pagination-key="" data-card-pagination-has-more="true"><div data-alert-id="a1" data-alert-scroll-anchor="a1"><p class="font-semibold">A1</p></div></div>`)
+		}))
+		defer srv.Close()
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = c.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, DefaultAlertListLimit)
+		if err == nil || !strings.Contains(err.Error(), "invalid pagination metadata") {
+			t.Fatalf("error = %v, want malformed pagination metadata", err)
+		}
+	})
+}
+
+func TestListAlertsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
+	const total = 1000
+	const samples = 3
+
+	delayedClient, _, _, _ := alertCatalogServer(t, total, 25*time.Millisecond)
+	fullDurations := make([]time.Duration, 0, samples)
+	for i := 0; i < samples; i++ {
+		start := time.Now()
+		alerts, err := delayedClient.ListAlerts(context.Background(), "p1")
+		if err != nil || len(alerts) != total {
+			t.Fatalf("complete sample %d returned %d alerts, err=%v", i, len(alerts), err)
+		}
+		fullDurations = append(fullDurations, time.Since(start))
+	}
+	boundedDurations := make([]time.Duration, 0, samples)
+	for i := 0; i < samples; i++ {
+		start := time.Now()
+		result, err := delayedClient.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, DefaultAlertListLimit)
+		if err != nil || len(result.Alerts) != DefaultAlertListLimit || !result.MoreAvailable {
+			t.Fatalf("bounded sample %d result=%+v err=%v", i, result, err)
+		}
+		boundedDurations = append(boundedDurations, time.Since(start))
+	}
+	fullMedian := durationPercentile(fullDurations, 50)
+	boundedMedian := durationPercentile(boundedDurations, 50)
+	if improvement := latencyImprovement(fullMedian, boundedMedian); improvement < 50 {
+		t.Fatalf("median latency improvement = %.1f%% (%s -> %s), want at least 50%%", improvement, fullMedian, boundedMedian)
+	}
+
+	zeroDelayClient, _, _, _ := alertCatalogServer(t, total, 0)
+	_, _ = zeroDelayClient.ListAlerts(context.Background(), "p1")
+	_, _ = zeroDelayClient.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, DefaultAlertListLimit)
+	fullAllocated, fullMallocs := allocatedBytesAndMallocsDuring(func() {
+		alerts, err := zeroDelayClient.ListAlerts(context.Background(), "p1")
+		if err != nil || len(alerts) != total {
+			t.Fatalf("complete allocation run returned %d alerts, err=%v", len(alerts), err)
+		}
+	})
+	boundedAllocated, boundedMallocs := allocatedBytesAndMallocsDuring(func() {
+		result, err := zeroDelayClient.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, DefaultAlertListLimit)
+		if err != nil || len(result.Alerts) != DefaultAlertListLimit {
+			t.Fatalf("bounded allocation run returned %+v, err=%v", result, err)
+		}
+	})
+	t.Logf("alert_list_perf fixture=%d limit=%d full_p50=%s bounded_p50=%s full_alloc_bytes=%d bounded_alloc_bytes=%d full_mallocs=%d bounded_mallocs=%d", total, DefaultAlertListLimit, fullMedian, boundedMedian, fullAllocated, boundedAllocated, fullMallocs, boundedMallocs)
+	if boundedAllocated >= fullAllocated*60/100 {
+		t.Fatalf("bounded allocated bytes = %d, complete = %d; want at least 40%% lower", boundedAllocated, fullAllocated)
+	}
+	if boundedMallocs >= fullMallocs*60/100 {
+		t.Fatalf("bounded mallocs = %d, complete = %d; want at least 40%% lower", boundedMallocs, fullMallocs)
+	}
+}
+
+func allocatedBytesAndMallocsDuring(fn func()) (uint64, uint64) {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc, after.Mallocs - before.Mallocs
+}
+
 func TestFindAlertByIDStopsOnMatchingPageBoundaries(t *testing.T) {
 	const total = 151
 	ids := make([]string, total)

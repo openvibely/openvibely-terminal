@@ -3114,6 +3114,27 @@ func filterAlertsByText(alerts []client.Alert, textFilter string) []client.Alert
 }
 
 func renderAlertsWithWorkflowFilter(alerts []client.Alert, textFilter string, workflowFilter client.AlertListFilter) string {
+	return renderAlertsTable(alerts, textFilter, workflowFilter)
+}
+
+func renderAlertListResult(result client.AlertListResult, textFilter string, workflowFilter client.AlertListFilter) string {
+	out := renderAlertsTable(result.Alerts, textFilter, workflowFilter)
+	if !result.MoreAvailable {
+		return out
+	}
+	shown := len(filterAlertsByText(result.Alerts, textFilter))
+	message := fmt.Sprintf("showing first %d alerts", len(result.Alerts))
+	if shown != len(result.Alerts) {
+		message = fmt.Sprintf("showing %d matching alerts from first %d alerts", shown, len(result.Alerts))
+	}
+	if result.TotalKnown {
+		message += fmt.Sprintf(" of %d", result.Total)
+	}
+	message += "; more available — use " + cmdPrefix + "alerts list --all for full history or --json to export complete results"
+	return out + "\n\n" + dimStyle.Render(message)
+}
+
+func renderAlertsTable(alerts []client.Alert, textFilter string, workflowFilter client.AlertListFilter) string {
 	rows := [][]string{{"ID", "", "ALERT", "STATE"}}
 	unread := 0
 	for _, a := range filterAlertsByText(alerts, textFilter) {

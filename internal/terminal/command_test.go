@@ -943,6 +943,7 @@ func TestParseAlertListArgs(t *testing.T) {
 		args       []string
 		wantFilter client.AlertListFilter
 		wantText   string
+		wantAll    bool
 		wantErr    string
 	}{
 		{
@@ -954,6 +955,12 @@ func TestParseAlertListArgs(t *testing.T) {
 			name:     "state words remain free text",
 			args:     []string{"approved", "deployment"},
 			wantText: "approved deployment",
+		},
+		{
+			name:     "all flag requests full history",
+			args:     []string{"--all", "deployment"},
+			wantText: "deployment",
+			wantAll:  true,
 		},
 		{
 			name:    "invalid decision state",
@@ -968,7 +975,7 @@ func TestParseAlertListArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			filter, text, err := parseAlertListArgs(tt.args)
+			filter, text, all, err := parseAlertListArgs(tt.args)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("parse error = %v, want %q", err, tt.wantErr)
@@ -978,19 +985,19 @@ func TestParseAlertListArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseAlertListArgs: %v", err)
 			}
-			if !reflect.DeepEqual(filter, tt.wantFilter) || text != tt.wantText {
-				t.Fatalf("parsed filter=%+v text=%q, want %+v and %q", filter, text, tt.wantFilter, tt.wantText)
+			if !reflect.DeepEqual(filter, tt.wantFilter) || text != tt.wantText || all != tt.wantAll {
+				t.Fatalf("parsed filter=%+v text=%q all=%t, want %+v and %q all=%t", filter, text, all, tt.wantFilter, tt.wantText, tt.wantAll)
 			}
 		})
 	}
 	for _, state := range []string{"pending", "approved", "rejected", "dismissed"} {
 		t.Run("accepted decision state "+state, func(t *testing.T) {
-			filter, text, err := parseAlertListArgs([]string{"--decision-state", state})
+			filter, text, all, err := parseAlertListArgs([]string{"--decision-state", state})
 			if err != nil {
 				t.Fatalf("parseAlertListArgs: %v", err)
 			}
-			if filter.DecisionState != state || filter.ProcessingState != "" || text != "" {
-				t.Fatalf("parsed filter=%+v text=%q", filter, text)
+			if filter.DecisionState != state || filter.ProcessingState != "" || text != "" || all {
+				t.Fatalf("parsed filter=%+v text=%q all=%t", filter, text, all)
 			}
 		})
 	}

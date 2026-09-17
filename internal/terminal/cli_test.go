@@ -7090,6 +7090,82 @@ func TestCLIJSONAlertsList(t *testing.T) {
 	}
 }
 
+func TestCLIPlainAlertsListIsBoundedUnlessAllRequested(t *testing.T) {
+	alertPage := func(start, end, total int) string {
+		var body strings.Builder
+		fmt.Fprintf(&body, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-page-size="50" data-card-pagination-total="%d" data-card-pagination-has-more="%t">`, total, end < total)
+		for i := start; i < end; i++ {
+			fmt.Fprintf(&body, `<div data-alert-id="alert-%04d" data-alert-scroll-anchor="alert-%04d"><p class="font-semibold">Alert %04d</p></div>`, i, i, i)
+		}
+		body.WriteString(`</div>`)
+		return body.String()
+	}
+
+	run := func(t *testing.T, args []string) (string, int) {
+		t.Helper()
+		alertRequests := 0
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case "/alerts":
+				alertRequests++
+				if r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("alerts request lost project scope: %s", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				if r.URL.Query().Get("card_page") == "1" {
+					if r.URL.Query().Get("offset") != "50" || r.URL.Query().Get("page_size") != "50" {
+						t.Errorf("bad continuation query: %s", r.URL.RawQuery)
+					}
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", "false")
+					_, _ = io.WriteString(w, alertPage(50, 51, 51))
+					return
+				}
+				w.Header().Set("X-OpenVibely-Card-Page-Has-More", "true")
+				_, _ = io.WriteString(w, alertPage(0, 50, 51))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", args, false, false); err != nil {
+			t.Fatalf("RunCLI %v: %v", args, err)
+		}
+		return stripANSI(out.String()), alertRequests
+	}
+
+	bounded, boundedRequests := run(t, []string{"alerts"})
+	if boundedRequests != 1 {
+		t.Fatalf("bounded alert requests = %d, want 1", boundedRequests)
+	}
+	if !strings.Contains(bounded, "Alert 0049") || strings.Contains(bounded, "Alert 0050") {
+		t.Fatalf("bounded output did not stay on first page:\n%s", bounded)
+	}
+	for _, want := range []string{"showing first 50 alerts of 51", "more available", "alerts list --all", "--json"} {
+		if !strings.Contains(bounded, want) {
+			t.Fatalf("bounded output missing %q:\n%s", want, bounded)
+		}
+	}
+
+	full, fullRequests := run(t, []string{"alerts", "list", "--all"})
+	if fullRequests != 2 {
+		t.Fatalf("full-history alert requests = %d, want 2", fullRequests)
+	}
+	if !strings.Contains(full, "Alert 0049") || !strings.Contains(full, "Alert 0050") {
+		t.Fatalf("full-history output omitted alerts:\n%s", full)
+	}
+	if strings.Contains(full, "more available") {
+		t.Fatalf("full-history output should not show bounded continuation:\n%s", full)
+	}
+}
+
 func TestCLIAlertsListJSONMatchesPlainTextFilter(t *testing.T) {
 	const alertsHTML = `<div data-alert-id="a-title" data-alert-scroll-anchor="a-title">
 		<p class="font-semibold">Title match</p>

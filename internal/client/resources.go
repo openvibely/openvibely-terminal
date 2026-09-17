@@ -82,11 +82,25 @@ type AlertInspection struct {
 	Detail  AlertDetail  `json:"detail"`
 }
 
+const DefaultAlertListLimit = cardPageSize
+
 // AlertListFilter contains optional exact backend predicates for alert card lists.
 // Empty fields are omitted so callers can preserve the existing all-alert view.
 type AlertListFilter struct {
 	DecisionState   string
 	ProcessingState string
+}
+
+// AlertListResult is the bounded human-list view of alert cards.
+type AlertListResult struct {
+	Alerts        []Alert
+	Limit         int
+	Complete      bool
+	MoreAvailable bool
+	Total         int
+	TotalKnown    bool
+	ParsedAlerts  int
+	RetainedPages int
 }
 
 // aggregateFirstSeenPages parses each page in order and retains the first item
@@ -126,6 +140,59 @@ func (c *Client) ListAlertsWithFilter(ctx context.Context, projectID string, fil
 		return nil, err
 	}
 	return aggregateAlertPages(pages, projectID), nil
+}
+
+// ListAlertsBounded scrapes only the first alert card page for ordinary human
+// lists. It validates pagination metadata and caps decoded/retained alerts at
+// limit while preserving ListAlertsWithFilter as the explicit full-history path.
+func (c *Client) ListAlertsBounded(ctx context.Context, projectID string, filter AlertListFilter, limit int) (AlertListResult, error) {
+	if limit <= 0 {
+		limit = DefaultAlertListLimit
+	}
+	path := "/alerts" + query(
+		"project_id", projectID,
+		"decision_state", filter.DecisionState,
+		"processing_state", filter.ProcessingState,
+	)
+	root, meta, err := c.getHTMLPageMeta(ctx, path)
+	if err != nil {
+		return AlertListResult{}, err
+	}
+	return listAlertsBoundedFromFirstPage(root, meta, projectID, limit)
+}
+
+func listAlertsBoundedFromFirstPage(root *html.Node, meta htmlPageMeta, projectID string, limit int) (AlertListResult, error) {
+	result := AlertListResult{Limit: limit, Total: meta.total, TotalKnown: meta.totalKnown}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	if paginationRoot == nil {
+		if meta.hasMore {
+			return AlertListResult{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
+		}
+		seen := make(map[string]struct{})
+		var stopped bool
+		result.Alerts, result.ParsedAlerts, stopped = collectBoundedAlerts(root, result.Alerts, seen, projectID, limit)
+		result.MoreAvailable = stopped
+		result.Complete = !stopped
+		return result, nil
+	}
+	selector := attr(paginationRoot, "data-card-pagination-card-selector")
+	keyAttr := attr(paginationRoot, "data-card-pagination-key")
+	if meta.hasMore {
+		marker, _ := paginationSelector(selector)
+		if marker == "" || strings.TrimSpace(keyAttr) == "" {
+			return AlertListResult{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
+		}
+	}
+	offset := countPaginationCards(root, selector, keyAttr)
+	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+		return AlertListResult{}, err
+	}
+	seen := make(map[string]struct{})
+	var stopped bool
+	result.Alerts, result.ParsedAlerts, stopped = collectBoundedAlerts(root, result.Alerts, seen, projectID, limit)
+	result.MoreAvailable = stopped || meta.hasMore
+	result.Complete = !result.MoreAvailable
+	return result, nil
 }
 
 // FindAlertByID incrementally traverses alert cards and stops after the first
@@ -175,71 +242,111 @@ func parseAlerts(root *html.Node, projectID string) []Alert {
 			continue
 		}
 		seen[id] = true
-
-		badges := cardBadges(n)
-		a := Alert{
-			ID:              id,
-			ProjectID:       projectID,
-			Scope:           firstAlertAttribute(n, "data-alert-scope"),
-			Type:            firstAlertAttribute(n, "data-alert-type"),
-			Severity:        firstAlertAttribute(n, "data-alert-severity"),
-			Source:          firstAlertAttribute(n, "data-alert-source"),
-			DecisionState:   firstAlertAttribute(n, "data-alert-decision-state", "data-alert-decision"),
-			ProcessingState: firstAlertAttribute(n, "data-alert-processing-state", "data-alert-processing"),
-			Text:            attr(n, "data-search-text"),
-			Read:            strings.Contains(attr(n, "class"), "opacity-60"),
-			Badges:          badges,
-		}
-		if a.Scope == "" {
-			a.Scope = "project"
-		}
-		if a.Type == "" {
-			a.Type = alertTypeFromBadges(badges)
-		}
-		if a.DecisionState == "" {
-			a.DecisionState = alertDecisionFromBadges(badges)
-		}
-		if a.ProcessingState == "" {
-			a.ProcessingState = alertProcessingFromBadges(badges)
-		}
-		if a.Severity == "" {
-			a.Severity = alertSeverityFromCard(n)
-		}
-		if a.Type == "" || a.DecisionState == "" || a.ProcessingState == "" || a.Severity == "" {
-			// data-search-text is a stable bounded summary marker on the backend
-			// card. It also keeps parsing compatible with compact fixtures that do
-			// not include all of the visual badge/icon markup.
-			searchType, searchSeverity, searchDecision, searchProcessing := alertValuesFromSearchText(a.Text)
-			if a.Type == "" {
-				a.Type = searchType
-			}
-			if a.Severity == "" {
-				a.Severity = searchSeverity
-			}
-			if a.DecisionState == "" {
-				a.DecisionState = searchDecision
-			}
-			if a.ProcessingState == "" {
-				a.ProcessingState = searchProcessing
-			}
-		}
-		if p := findNode(n, func(e *html.Node) bool {
-			return e.Data == "p" && strings.Contains(attr(e, "class"), "font-semibold")
-		}); p != nil {
-			a.Title = strings.TrimSpace(NodeText(p))
-		}
-		if p := findNode(n, func(e *html.Node) bool {
-			cls := attr(e, "class")
-			return e.Data == "p" && strings.Contains(cls, "text-sm") && strings.Contains(cls, "opacity-60")
-		}); p != nil {
-			a.Message = strings.TrimSpace(NodeText(p))
-		}
-		if a.Title == "" {
-			a.Title = firstLine(NodeText(n))
-		}
-		out = append(out, a)
+		out = append(out, parseAlertCard(n, projectID))
 	}
 	return out
+}
+
+func collectBoundedAlerts(root *html.Node, out []Alert, seen map[string]struct{}, projectID string, limit int) ([]Alert, int, bool) {
+	parsed := 0
+	stopped := false
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if stopped {
+			return
+		}
+		if n.Type == html.ElementNode && attr(n, "data-alert-id") != "" {
+			id := attr(n, "data-alert-id")
+			// Nested action buttons repeat the id but not the row markers.
+			if id == "" || attr(n, "data-alert-scroll-anchor") == "" {
+				return
+			}
+			if _, ok := seen[id]; ok {
+				return
+			}
+			if len(out) >= limit {
+				stopped = true
+				return
+			}
+			seen[id] = struct{}{}
+			parsed++
+			out = append(out, parseAlertCard(n, projectID))
+			return
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+			if stopped {
+				return
+			}
+		}
+	}
+	walk(root)
+	return out, parsed, stopped
+}
+
+func parseAlertCard(n *html.Node, projectID string) Alert {
+	badges := cardBadges(n)
+	a := Alert{
+		ID:              attr(n, "data-alert-id"),
+		ProjectID:       projectID,
+		Scope:           firstAlertAttribute(n, "data-alert-scope"),
+		Type:            firstAlertAttribute(n, "data-alert-type"),
+		Severity:        firstAlertAttribute(n, "data-alert-severity"),
+		Source:          firstAlertAttribute(n, "data-alert-source"),
+		DecisionState:   firstAlertAttribute(n, "data-alert-decision-state", "data-alert-decision"),
+		ProcessingState: firstAlertAttribute(n, "data-alert-processing-state", "data-alert-processing"),
+		Text:            attr(n, "data-search-text"),
+		Read:            strings.Contains(attr(n, "class"), "opacity-60"),
+		Badges:          badges,
+	}
+	if a.Scope == "" {
+		a.Scope = "project"
+	}
+	if a.Type == "" {
+		a.Type = alertTypeFromBadges(badges)
+	}
+	if a.DecisionState == "" {
+		a.DecisionState = alertDecisionFromBadges(badges)
+	}
+	if a.ProcessingState == "" {
+		a.ProcessingState = alertProcessingFromBadges(badges)
+	}
+	if a.Severity == "" {
+		a.Severity = alertSeverityFromCard(n)
+	}
+	if a.Type == "" || a.DecisionState == "" || a.ProcessingState == "" || a.Severity == "" {
+		// data-search-text is a stable bounded summary marker on the backend
+		// card. It also keeps parsing compatible with compact fixtures that do
+		// not include all of the visual badge/icon markup.
+		searchType, searchSeverity, searchDecision, searchProcessing := alertValuesFromSearchText(a.Text)
+		if a.Type == "" {
+			a.Type = searchType
+		}
+		if a.Severity == "" {
+			a.Severity = searchSeverity
+		}
+		if a.DecisionState == "" {
+			a.DecisionState = searchDecision
+		}
+		if a.ProcessingState == "" {
+			a.ProcessingState = searchProcessing
+		}
+	}
+	if p := findNode(n, func(e *html.Node) bool {
+		return e.Data == "p" && strings.Contains(attr(e, "class"), "font-semibold")
+	}); p != nil {
+		a.Title = strings.TrimSpace(NodeText(p))
+	}
+	if p := findNode(n, func(e *html.Node) bool {
+		cls := attr(e, "class")
+		return e.Data == "p" && strings.Contains(cls, "text-sm") && strings.Contains(cls, "opacity-60")
+	}); p != nil {
+		a.Message = strings.TrimSpace(NodeText(p))
+	}
+	if a.Title == "" {
+		a.Title = firstLine(NodeText(n))
+	}
+	return a
 }
 
 func firstAlertAttribute(node *html.Node, names ...string) string {
