@@ -2811,6 +2811,109 @@ func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
 	}
 }
 
+func scheduleEntriesForRenderTest(total int, textPrefix string) []client.ScheduleEntry {
+	entries := make([]client.ScheduleEntry, 0, total)
+	for i := 1; i <= total; i++ {
+		entries = append(entries, client.ScheduleEntry{
+			ScheduleID: fmt.Sprintf("schedule-%04d", i),
+			TaskID:     fmt.Sprintf("task-%04d", i),
+			Text:       fmt.Sprintf("%s %03d", textPrefix, i),
+		})
+	}
+	return entries
+}
+
+func TestRenderScheduleBoundsLargeHumanListsAndKeepsFullMode(t *testing.T) {
+	entries := scheduleEntriesForRenderTest(defaultScheduleDisplayLimit+2, "Schedule row")
+
+	small := stripANSI(renderSchedule(entries[:3], ""))
+	for _, want := range []string{"Schedule row 001", "Schedule row 002", "Schedule row 003"} {
+		if !strings.Contains(small, want) {
+			t.Fatalf("small schedule list missing %q:\n%s", want, small)
+		}
+	}
+	if strings.Contains(small, "omitted") || strings.Contains(small, "--all") {
+		t.Fatalf("small schedule list unexpectedly showed continuation hint:\n%s", small)
+	}
+
+	bounded := stripANSI(renderSchedule(entries, ""))
+	if !strings.Contains(bounded, "Schedule row 100") {
+		t.Fatalf("bounded schedule list dropped a row within the display limit:\n%s", bounded)
+	}
+	if strings.Contains(bounded, "Schedule row 101") || strings.Contains(bounded, "Schedule row 102") {
+		t.Fatalf("bounded schedule list rendered rows past the display limit:\n%s", bounded)
+	}
+	for _, want := range []string{"showing 100 of 102 schedules", "2 omitted", "/schedule list --all"} {
+		if !strings.Contains(bounded, want) {
+			t.Fatalf("bounded schedule list missing continuation hint %q:\n%s", want, bounded)
+		}
+	}
+
+	full := stripANSI(renderScheduleAll(entries, ""))
+	if !strings.Contains(full, "Schedule row 102") {
+		t.Fatalf("full schedule list did not render all rows:\n%s", full)
+	}
+	if strings.Contains(full, "omitted") {
+		t.Fatalf("full schedule list unexpectedly showed continuation hint:\n%s", full)
+	}
+}
+
+func TestScheduleMutationOutputUsesBoundedHumanRefresh(t *testing.T) {
+	entries := scheduleEntriesForRenderTest(defaultScheduleDisplayLimit+2, "Refresh row")
+	out, err := scheduleMutationOutput("updated schedule schedule-001", func() ([]client.ScheduleEntry, string, error) {
+		return entries, "", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "updated schedule schedule-001") || !strings.Contains(plain, "Refresh row 100") {
+		t.Fatalf("mutation refresh lost status or rows within limit:\n%s", plain)
+	}
+	if strings.Contains(plain, "Refresh row 101") || !strings.Contains(plain, "/schedule list --all") {
+		t.Fatalf("mutation refresh was not bounded with a full-output hint:\n%s", plain)
+	}
+}
+
+func TestRenderScheduleLargeListMateriallyReducesOutput(t *testing.T) {
+	entries := scheduleEntriesForRenderTest(5000, "Schedule row")
+	bounded := renderSchedule(entries, "")
+	full := renderScheduleAll(entries, "")
+	if !strings.Contains(stripANSI(bounded), "showing 100 of 5000 schedules") {
+		t.Fatalf("bounded output missing 5000-card continuation hint")
+	}
+	if len(bounded)*10 >= len(full) {
+		t.Fatalf("bounded output was not materially smaller: bounded_bytes=%d full_bytes=%d", len(bounded), len(full))
+	}
+	t.Logf("schedule_output_bytes bounded=%d full=%d", len(bounded), len(full))
+}
+
+func BenchmarkRenderScheduleLists(b *testing.B) {
+	large := scheduleEntriesForRenderTest(5000, "Schedule row")
+	b.Run("large/bounded", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = renderSchedule(large, "")
+		}
+	})
+	b.Run("large/full", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = renderScheduleAll(large, "")
+		}
+	})
+
+	hundred := scheduleEntriesForRenderTest(defaultScheduleDisplayLimit, "Schedule row")
+	b.Run("hundred/bounded", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = renderSchedule(hundred, "")
+		}
+	})
+	b.Run("hundred/full", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_ = renderScheduleAll(hundred, "")
+		}
+	})
+}
+
 func TestRenderScheduleInspectionIsTerminalSafe(t *testing.T) {
 	out := renderScheduleInspection(
 		client.ScheduleEntry{ScheduleID: "sched\x1b]8;;bad\a-id", TaskID: "task\n-id", Text: "Nightly\x1b[31m\nrun"},

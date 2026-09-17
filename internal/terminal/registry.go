@@ -1812,7 +1812,7 @@ func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
 
 func validateScheduleArgs(args []string) error {
 	action, rest := splitAction([]string{"list", "show", "open", "add", "edit", "delete", "toggle"}, args)
-	if action == "" && len(args) > 0 || action == "list" && len(rest) > 0 {
+	if action == "" && len(args) > 0 || action == "list" && !scheduleListArgsFull(rest) {
 		return fmt.Errorf("usage: /schedule [list|show|open|add|edit|delete|toggle]")
 	}
 	if (action == "show" || action == "open") && len(rest) == 0 {
@@ -1823,6 +1823,10 @@ func validateScheduleArgs(args []string) error {
 		return err
 	}
 	return nil
+}
+
+func scheduleListArgsFull(args []string) bool {
+	return len(args) == 0 || len(args) == 1 && args[0] == "--all"
 }
 
 func isScheduleEditSetting(value string) bool {
@@ -1941,6 +1945,7 @@ func scheduleCommand() command {
 		actions:      actions,
 		validateArgs: validateScheduleArgs,
 		completions: []commandCompletion{
+			{after: []string{"list"}, values: []string{"--all"}},
 			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
 			{after: []string{"edit", "*"}, values: []string{"run-at", "repeat", "interval", "clear-context"}},
 			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours"}},
@@ -1949,7 +1954,8 @@ func scheduleCommand() command {
 		selectorPaths: [][]string{{"show"}, {"open"}, {"add"}, {"edit"}, {"delete"}, {"toggle"}},
 		desc:          "scheduled/recurring task runs",
 		usage: []string{
-			"schedule                                   list schedules",
+			"schedule                                   list schedules (first 100 shown)",
+			"schedule list --all                        list every schedule",
 			"schedule show <id|name>                    inspect a schedule and its bound task",
 			"schedule open <id|name>                    compatibility alias for show",
 			"omit <id|name> on show/open → interactive selector",
@@ -1960,6 +1966,7 @@ func scheduleCommand() command {
 			"omit <id> on edit/delete/toggle → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
+			{action: "list", args: "[--all]", description: "list schedules; default output shows the first 100"},
 			{action: "show", args: "<id|name>", description: "inspect a schedule and its bound task"},
 			{action: "open", args: "<id|name>", description: "compatibility alias for show"},
 			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]"},
@@ -1978,12 +1985,13 @@ func scheduleCommand() command {
 			}
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
-			if (action == "" && len(rest) > 0) || (action == "list" && len(rest) > 0) {
+			if (action == "" && len(rest) > 0) || (action == "list" && !scheduleListArgsFull(rest)) {
 				return m, errCmd("usage: /schedule [list|show|open|add|edit|delete|toggle]")
 			}
 
 			switch action {
 			case "", "list":
+				fullList := action == "list" && len(rest) == 1 && rest[0] == "--all"
 				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
 					entries, summary, err := c.GetSchedule(ctx, pid)
 					if err != nil {
@@ -1991,6 +1999,9 @@ func scheduleCommand() command {
 					}
 					if jsonMode {
 						return marshalJSON(entries)
+					}
+					if fullList {
+						return renderScheduleAll(entries, summary), nil
 					}
 					return renderSchedule(entries, summary), nil
 				})

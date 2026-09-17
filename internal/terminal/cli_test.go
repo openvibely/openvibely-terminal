@@ -4748,6 +4748,66 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	}
 }
 
+func scheduleListHTMLForTest(total int) string {
+	var b strings.Builder
+	b.WriteString(`<div id="schedule-content">`)
+	for i := 1; i <= total; i++ {
+		fmt.Fprintf(&b, `<div data-task-id="task-%03d" data-schedule-id="schedule-%03d">Schedule row %03d</div>`, i, i, i)
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+func TestCLIScheduleListBoundsPlainOutputAndPreservesFullModes(t *testing.T) {
+	const total = 102
+	scheduleHTML := scheduleListHTMLForTest(total)
+
+	c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": scheduleHTML})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"schedule"}, false, false); err != nil {
+		t.Fatalf("plain schedule list: %v", err)
+	}
+	plain := stripANSI(out.String())
+	if !strings.Contains(plain, "Schedule row 100") {
+		t.Fatalf("default schedule output dropped rows within limit:\n%s", plain)
+	}
+	if strings.Contains(plain, "Schedule row 101") || strings.Contains(plain, "Schedule row 102") {
+		t.Fatalf("default schedule output rendered beyond limit:\n%s", plain)
+	}
+	if !strings.Contains(plain, "showing 100 of 102 schedules") || !strings.Contains(plain, "schedule list --all") {
+		t.Fatalf("default schedule output missing continuation hint:\n%s", plain)
+	}
+
+	c, _ = cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": scheduleHTML})
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"schedule", "list", "--all"}, false, false); err != nil {
+		t.Fatalf("full schedule list: %v", err)
+	}
+	full := stripANSI(out.String())
+	if !strings.Contains(full, "Schedule row 001") || !strings.Contains(full, "Schedule row 102") {
+		t.Fatalf("full schedule output did not preserve all rows:\n%s", full)
+	}
+	if strings.Contains(full, "omitted") {
+		t.Fatalf("full schedule output unexpectedly showed bounded hint:\n%s", full)
+	}
+	if strings.Index(full, "Schedule row 001") > strings.Index(full, "Schedule row 102") {
+		t.Fatalf("full schedule output order changed:\n%s", full)
+	}
+
+	c, _ = cliServer(t, map[string]string{"/api/projects": cliProjects, "/schedule": scheduleHTML})
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"schedule"}, false, true); err != nil {
+		t.Fatalf("JSON schedule list: %v", err)
+	}
+	var entries []client.ScheduleEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &entries); err != nil {
+		t.Fatalf("schedule JSON = %q: %v", out.String(), err)
+	}
+	if len(entries) != total || entries[0].ScheduleID != "schedule-001" || entries[total-1].ScheduleID != "schedule-102" {
+		t.Fatalf("schedule JSON did not preserve full stable list: len=%d first=%q last=%q", len(entries), entries[0].ScheduleID, entries[len(entries)-1].ScheduleID)
+	}
+}
+
 func TestCLIScheduleShowAliasScopingAndMissingReference(t *testing.T) {
 	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-2" data-schedule-id="schedule-full-id">Weekly report</div></div>`
 	const taskHTML = `<div data-task-id="t-2" data-project-id="p1"><h2 class="font-bold">Ship the docs</h2><div data-task-status="running"></div></div>`

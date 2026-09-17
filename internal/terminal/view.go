@@ -2356,18 +2356,37 @@ func renderScheduleInspection(entry client.ScheduleEntry, task *client.Task) str
 	return strings.TrimSpace(b.String())
 }
 
+const defaultScheduleDisplayLimit = 100
+
 func renderSchedule(entries []client.ScheduleEntry, summary string) string {
+	return renderScheduleLimited(entries, summary, defaultScheduleDisplayLimit)
+}
+
+func renderScheduleAll(entries []client.ScheduleEntry, summary string) string {
+	return renderScheduleLimited(entries, summary, 0)
+}
+
+func renderScheduleLimited(entries []client.ScheduleEntry, summary string, limit int) string {
 	if len(entries) == 0 {
 		if strings.TrimSpace(summary) != "" {
 			return clamp(strings.TrimSpace(summary), 40)
 		}
 		return dimStyle.Render(scheduleEmptyStateHint)
 	}
+	shown := entries
+	if limit > 0 && len(entries) > limit {
+		shown = entries[:limit]
+	}
 	rows := [][]string{{"SCHEDULE", "TASK", "WHEN"}}
-	for _, e := range entries {
+	for _, e := range shown {
 		rows = append(rows, []string{shortID(e.ScheduleID), shortID(e.TaskID), truncate(e.Text, 60)})
 	}
-	return table(rows)
+	out := table(rows)
+	if len(shown) < len(entries) {
+		omitted := len(entries) - len(shown)
+		out += "\n" + dimStyle.Render(fmt.Sprintf("showing %d of %d schedules; %d omitted; use /schedule list --all for the complete list", len(shown), len(entries), omitted))
+	}
+	return out
 }
 
 // --- automations ---
