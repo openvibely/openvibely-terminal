@@ -3770,9 +3770,9 @@ func TestCLIBriefingCommandsRequireProjectWhenProjectListIsEmpty(t *testing.T) {
 		{name: "reflection", args: []string{"reflection"}, fetchPath: "/history"},
 		{name: "reflection show", args: []string{"reflection", "show"}, fetchPath: "/history"},
 		{name: "reflection summary", args: []string{"reflection", "summary"}, fetchPath: "/history", triggerPath: "/history/summary"},
-		{name: "grades", args: []string{"grades"}, fetchPath: "/history"},
-		{name: "grades show", args: []string{"grades", "show"}, fetchPath: "/history"},
-		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/history", triggerPath: "/history/grade-ideas"},
+		{name: "grades", args: []string{"grades"}, fetchPath: "/insights"},
+		{name: "grades show", args: []string{"grades", "show"}, fetchPath: "/insights"},
+		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/insights", triggerPath: "/history/grade-ideas"},
 		{name: "insights", args: []string{"insights"}, fetchPath: "/insights"},
 		{name: "insights show", args: []string{"insights", "show"}, fetchPath: "/insights"},
 		{name: "insights analyze", args: []string{"insights", "analyze"}, fetchPath: "/insights", triggerPath: "/insights/analyze"},
@@ -3809,9 +3809,9 @@ func TestCLIBriefingCommandsPreserveSupportedActions(t *testing.T) {
 		{name: "reflection bare", args: []string{"reflection"}, fetchPath: "/history", body: "<div>history debrief</div>"},
 		{name: "reflection show", args: []string{"reflection", "show"}, fetchPath: "/history", body: "<div>history debrief</div>"},
 		{name: "reflection summary", args: []string{"reflection", "summary"}, fetchPath: "/history", triggerPath: "/history/summary", body: "<div>history debrief</div>"},
-		{name: "grades bare", args: []string{"grades"}, fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
-		{name: "grades show", args: []string{"grades", "show"}, fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
-		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/history", triggerPath: "/history/grade-ideas", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades bare", args: []string{"grades"}, fetchPath: "/insights", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades show", args: []string{"grades", "show"}, fetchPath: "/insights", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/insights", triggerPath: "/history/grade-ideas", body: `<div id="idea-grade-content">grades</div>`},
 		{name: "insights bare", args: []string{"insights"}, fetchPath: "/insights", body: "<div>insights</div>"},
 		{name: "insights show", args: []string{"insights", "show"}, fetchPath: "/insights", body: "<div>insights</div>"},
 		{name: "insights analyze", args: []string{"insights", "analyze"}, fetchPath: "/insights", triggerPath: "/insights/analyze", body: "<div>insights</div>"},
@@ -3872,6 +3872,71 @@ func TestCLIBriefingCommandsPreserveSupportedActions(t *testing.T) {
 				t.Fatalf("RunCLI(%v) requests = %s, want POST %s before one GET %s", tc.args, strings.Join(requests, "\n"), tc.triggerPath, tc.fetchPath)
 			}
 		})
+	}
+}
+
+func TestCLIGradesShowReadsInsightsGradeCardNotReflection(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/history":      `<div id="history-container">Reflection text that must not render</div>`,
+		"/insights":     `<main><section id="idea-grade-content"><p>Grade result: A</p></section></main>`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"grades", "show"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "Grade result: A") || strings.Contains(got, "Reflection text") {
+		t.Fatalf("output = %q, want grade content without reflection", got)
+	}
+	if got := rec.count("GET", "/insights"); got != 1 {
+		t.Fatalf("grades show made %d /insights requests, want 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/history"); got != 0 {
+		t.Fatalf("grades show made %d /history requests, want 0:\n%s", got, rec.all())
+	}
+	if requests := strings.Join(rec.urlsSnapshot(), "\n"); !strings.Contains(requests, "GET /insights?project_id=p1") {
+		t.Fatalf("grades show lost project scope:\n%s", requests)
+	}
+}
+
+func TestCLIGradesRunDisplaysGeneratedGradePartial(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        cliProjects,
+		"/history/grade-ideas": `<section id="idea-grade-content"><p>Generated grade: B+</p></section>`,
+		"/insights":            `<section id="idea-grade-content"><p>Refreshed grade</p></section>`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"grades", "run"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "Generated grade: B+") {
+		t.Fatalf("output = %q, want generated grade partial", got)
+	}
+	if got := rec.count("POST", "/history/grade-ideas"); got != 1 {
+		t.Fatalf("grades run made %d grading POST requests, want 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/insights"); got != 0 {
+		t.Fatalf("grades run fetched /insights despite generated partial (%d requests):\n%s", got, rec.all())
+	}
+	if requests := strings.Join(rec.urlsSnapshot(), "\n"); !strings.Contains(requests, "POST /history/grade-ideas?project_id=p1") {
+		t.Fatalf("grades run lost project scope:\n%s", requests)
+	}
+}
+
+func TestCLIGradesShowReportsMissingGradeSection(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/insights":     `<main><div id="history-container">Reflection fallback text</div></main>`,
+	})
+
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"grades", "show"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "idea grades unavailable") {
+		t.Fatalf("err = %v, want explicit unavailable error", err)
+	}
+	if got := rec.count("GET", "/insights"); got != 1 {
+		t.Fatalf("grades show made %d /insights requests, want 1:\n%s", got, rec.all())
 	}
 }
 

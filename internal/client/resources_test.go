@@ -39,6 +39,82 @@ func htmlServer(t *testing.T, body string) *Client {
 	return c
 }
 
+func TestGetGradesReadsIdeaGradeContentFromInsights(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/history":
+			_, _ = w.Write([]byte(`<div id="history-container">Reflection text that must not render</div>`))
+		case "/insights":
+			_, _ = w.Write([]byte(`<main><section id="idea-grade-content"><h2>Idea Grades</h2><p>Grade: A</p></section></main>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := c.GetGrades(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "Grade: A") || strings.Contains(text, "Reflection text") {
+		t.Fatalf("grades text = %q, want grade content without reflection", text)
+	}
+	if len(requests) != 1 || requests[0] != "GET /insights?project_id=p1" {
+		t.Fatalf("requests = %v, want only scoped /insights", requests)
+	}
+}
+
+func TestGradeIdeasReturnsGeneratedPartialWhenPresent(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/history/grade-ideas":
+			_, _ = w.Write([]byte(`<section id="idea-grade-content"><p>Generated grade: B+</p></section>`))
+		case "/insights":
+			_, _ = w.Write([]byte(`<section id="idea-grade-content"><p>Refreshed grade should not be needed</p></section>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := c.GradeIdeas(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "Generated grade: B+") {
+		t.Fatalf("grade text = %q, want generated partial", text)
+	}
+	if len(requests) != 1 || requests[0] != "POST /history/grade-ideas?project_id=p1" {
+		t.Fatalf("requests = %v, want only scoped grading POST", requests)
+	}
+}
+
+func TestGetGradesReportsMissingIdeaGradeContent(t *testing.T) {
+	c := htmlServer(t, `<main><div id="history-container">Reflection fallback text</div></main>`)
+
+	text, err := c.GetGrades(context.Background(), "p1")
+	if err == nil || !strings.Contains(err.Error(), "idea grades unavailable") {
+		t.Fatalf("err = %v, want explicit unavailable error", err)
+	}
+	if text != "" {
+		t.Fatalf("text = %q, want empty text on missing grade section", text)
+	}
+}
+
 func TestAggregateAlertPagesPreservesFirstSeenAndEmptyShape(t *testing.T) {
 	parsePage := func(body string) htmlPage {
 		root, err := html.Parse(strings.NewReader(body))

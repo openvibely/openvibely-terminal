@@ -2628,7 +2628,7 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 		{"/reflection", "GET", "/history"},
 		{"/insights", "GET", "/insights"},
 		{"/automations", "GET", "/automations"},
-		{"/grades", "GET", "/history"},
+		{"/grades", "GET", "/insights"},
 		{"/models capacity", "GET", "/api/capacity/models"},
 		{"/agents metrics", "GET", "/api/workflows/metrics"},
 		{"/analytics usage", "GET", "/api/analytics/usage"},
@@ -11942,10 +11942,10 @@ func TestBriefingCommandLifecycleTable(t *testing.T) {
 		{name: "reflection show", line: "/reflection show", fetchPath: "/history", fetchBody: "<div>history</div>"},
 		{name: "reflection summary", line: "/reflection summary", fetchPath: "/history", fetchBody: "<div>history</div>", triggerPath: "/history/summary"},
 		{name: "reflection failed summary", line: "/reflection summary", fetchPath: "/history", fetchBody: "<div>history</div>", triggerPath: "/history/summary", triggerFail: true},
-		{name: "grades bare", line: "/grades", fetchPath: "/history", fetchBody: `<div id="idea-grade-content">grades</div>`},
-		{name: "grades show", line: "/grades show", fetchPath: "/history", fetchBody: `<div id="idea-grade-content">grades</div>`},
-		{name: "grades run", line: "/grades run", fetchPath: "/history", fetchBody: `<div id="idea-grade-content">grades</div>`, triggerPath: "/history/grade-ideas"},
-		{name: "grades failed run", line: "/grades run", fetchPath: "/history", fetchBody: `<div id="idea-grade-content">grades</div>`, triggerPath: "/history/grade-ideas", triggerFail: true},
+		{name: "grades bare", line: "/grades", fetchPath: "/insights", fetchBody: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades show", line: "/grades show", fetchPath: "/insights", fetchBody: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades run", line: "/grades run", fetchPath: "/insights", fetchBody: `<div id="idea-grade-content">grades</div>`, triggerPath: "/history/grade-ideas"},
+		{name: "grades failed run", line: "/grades run", fetchPath: "/insights", fetchBody: `<div id="idea-grade-content">grades</div>`, triggerPath: "/history/grade-ideas", triggerFail: true},
 		{name: "insights bare", line: "/insights", fetchPath: "/insights", fetchBody: "<div>insights</div>"},
 		{name: "insights show", line: "/insights show", fetchPath: "/insights", fetchBody: "<div>insights</div>"},
 		{name: "insights analyze", line: "/insights analyze", fetchPath: "/insights", fetchBody: "<div>insights</div>", triggerPath: "/insights/analyze"},
@@ -12036,7 +12036,7 @@ func TestBriefingCommandsAcceptShowAction(t *testing.T) {
 	}{
 		{name: "pulse", line: "/pulse show", fetchPath: "/upcoming", body: "<div>upcoming briefing</div>"},
 		{name: "reflection", line: "/reflection show", fetchPath: "/history", body: "<div>history debrief</div>"},
-		{name: "grades", line: "/grades show", fetchPath: "/history", body: `<div id="idea-grade-content">grades</div>`},
+		{name: "grades", line: "/grades show", fetchPath: "/insights", body: `<div id="idea-grade-content">grades</div>`},
 		{name: "insights", line: "/insights show", fetchPath: "/insights", body: "<div>insights</div>"},
 	}
 
@@ -12055,6 +12055,68 @@ func TestBriefingCommandsAcceptShowAction(t *testing.T) {
 				t.Fatalf("%s returned an error:\n%s", tc.line, transcript(m))
 			}
 		})
+	}
+}
+
+func TestGradesShowReadsInsightsGradeCardNotReflection(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/history":  `<div id="history-container">Reflection text that must not render</div>`,
+		"/insights": `<main><section id="idea-grade-content"><p>Grade result: A</p></section></main>`,
+	})
+
+	m = runLine(t, m, "/grades show")
+	out := transcript(m)
+	if !strings.Contains(out, "Grade result: A") || strings.Contains(out, "Reflection text") {
+		t.Fatalf("transcript = %q, want grade content without reflection", out)
+	}
+	if got := rec.count("GET", "/insights"); got != 1 {
+		t.Fatalf("grades show made %d /insights requests, want 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/history"); got != 0 {
+		t.Fatalf("grades show made %d /history requests, want 0:\n%s", got, rec.all())
+	}
+	if requests := strings.Join(rec.urlsSnapshot(), "\n"); !strings.Contains(requests, "GET /insights?project_id=p1") {
+		t.Fatalf("grades show lost project scope:\n%s", requests)
+	}
+}
+
+func TestGradesRunDisplaysGeneratedGradePartial(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"POST /history/grade-ideas": `<section id="idea-grade-content"><p>Generated grade: B+</p></section>`,
+		"/insights":                 `<section id="idea-grade-content"><p>Refreshed grade</p></section>`,
+	})
+
+	m = runLine(t, m, "/grades run")
+	out := transcript(m)
+	if !strings.Contains(out, "Generated grade: B+") {
+		t.Fatalf("transcript = %q, want generated grade partial", out)
+	}
+	if got := rec.count("POST", "/history/grade-ideas"); got != 1 {
+		t.Fatalf("grades run made %d grading POST requests, want 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/insights"); got != 0 {
+		t.Fatalf("grades run fetched /insights despite generated partial (%d requests):\n%s", got, rec.all())
+	}
+	if requests := strings.Join(rec.urlsSnapshot(), "\n"); !strings.Contains(requests, "POST /history/grade-ideas?project_id=p1") {
+		t.Fatalf("grades run lost project scope:\n%s", requests)
+	}
+}
+
+func TestGradesShowReportsMissingGradeSection(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"/insights": `<main><div id="history-container">Reflection fallback text</div></main>`,
+	})
+
+	m = runLine(t, m, "/grades show")
+	out := transcript(m)
+	if !strings.Contains(out, "error:") || !strings.Contains(out, "idea grades unavailable") {
+		t.Fatalf("transcript = %q, want explicit unavailable error", out)
+	}
+	if strings.Contains(out, "Reflection fallback text") {
+		t.Fatalf("transcript leaked unrelated fallback text: %q", out)
+	}
+	if got := rec.count("GET", "/insights"); got != 1 {
+		t.Fatalf("grades show made %d /insights requests, want 1:\n%s", got, rec.all())
 	}
 }
 
@@ -12105,9 +12167,9 @@ func TestProjectScopedBriefingCommandsRequireSelectionAndPreserveScope(t *testin
 		{name: "reflection", line: "/reflection", fetchPath: "/history", fetchOutput: "reflection output"},
 		{name: "reflection show", line: "/reflection show", fetchPath: "/history", fetchOutput: "reflection output"},
 		{name: "reflection summary", line: "/reflection summary", fetchPath: "/history", fetchOutput: "reflection output", triggerPath: "/history/summary"},
-		{name: "grades", line: "/grades", fetchPath: "/history", fetchOutput: "grades output"},
-		{name: "grades show", line: "/grades show", fetchPath: "/history", fetchOutput: "grades output"},
-		{name: "grades run", line: "/grades run", fetchPath: "/history", fetchOutput: "grades output", triggerPath: "/history/grade-ideas"},
+		{name: "grades", line: "/grades", fetchPath: "/insights", fetchOutput: "grades output"},
+		{name: "grades show", line: "/grades show", fetchPath: "/insights", fetchOutput: "grades output"},
+		{name: "grades run", line: "/grades run", fetchPath: "/insights", fetchOutput: "grades output", triggerPath: "/history/grade-ideas"},
 		{name: "insights", line: "/insights", fetchPath: "/insights", fetchOutput: "insights output"},
 		{name: "insights show", line: "/insights show", fetchPath: "/insights", fetchOutput: "insights output"},
 		{name: "insights analyze", line: "/insights analyze", fetchPath: "/insights", fetchOutput: "insights output", triggerPath: "/insights/analyze"},
@@ -12116,8 +12178,12 @@ func TestProjectScopedBriefingCommandsRequireSelectionAndPreserveScope(t *testin
 	for _, tc := range cases {
 		tc := tc
 		t.Run("no project/"+tc.name, func(t *testing.T) {
+			fetchBody := "<div>" + tc.fetchOutput + "</div>"
+			if strings.HasPrefix(tc.name, "grades") {
+				fetchBody = `<div id="idea-grade-content">` + tc.fetchOutput + `</div>`
+			}
 			m, rec := dispatchModel(t, map[string]string{
-				tc.fetchPath: "<div>" + tc.fetchOutput + "</div>",
+				tc.fetchPath: fetchBody,
 			})
 			m.selectedID = ""
 			m.selectedName = ""
@@ -12142,8 +12208,12 @@ func TestProjectScopedBriefingCommandsRequireSelectionAndPreserveScope(t *testin
 		})
 
 		t.Run("selected project/"+tc.name, func(t *testing.T) {
+			fetchBody := "<div>" + tc.fetchOutput + "</div>"
+			if strings.HasPrefix(tc.name, "grades") {
+				fetchBody = `<div id="idea-grade-content">` + tc.fetchOutput + `</div>`
+			}
 			m, rec := dispatchModel(t, map[string]string{
-				tc.fetchPath: "<div>" + tc.fetchOutput + "</div>",
+				tc.fetchPath: fetchBody,
 			})
 			m = runLine(t, m, tc.line)
 

@@ -80,7 +80,7 @@ func page(name, desc string, fetch func(c *client.Client, ctx context.Context, p
 // and trigger-then-fetch lifecycle for the project-scoped briefing commands.
 // Each command keeps its own metadata, title, trigger callback, and fetch
 // callback at the call site.
-func runBriefingCommand(m Model, args []string, command string, actions []string, triggerAction, title string, trigger func(context.Context, *client.Client, string) error, fetch func(context.Context, *client.Client, string) (string, error)) (Model, tea.Cmd) {
+func runBriefingCommand(m Model, args []string, command string, actions []string, triggerAction, title string, trigger func(context.Context, *client.Client, string) (string, error), fetch func(context.Context, *client.Client, string) (string, error)) (Model, tea.Cmd) {
 	mm, cmd, ok := m.needProject()
 	if !ok {
 		return mm, cmd
@@ -92,8 +92,12 @@ func runBriefingCommand(m Model, args []string, command string, actions []string
 	c, pid := m.client, m.selectedID
 	return m, run(title, cmdTimeout, func(ctx context.Context) (string, error) {
 		if action == triggerAction {
-			if err := trigger(ctx, c, pid); err != nil {
+			text, err := trigger(ctx, c, pid)
+			if err != nil {
 				return "", err
+			}
+			if strings.TrimSpace(text) != "" {
+				return text, nil
 			}
 		}
 		return fetch(ctx, c, pid)
@@ -7656,8 +7660,8 @@ func pulseCommand() command {
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			return runBriefingCommand(m, args, "pulse", actions, "summary", "Pulse",
-				func(ctx context.Context, c *client.Client, pid string) error {
-					return c.GeneratePulseSummary(ctx, pid)
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
+					return "", c.GeneratePulseSummary(ctx, pid)
 				},
 				func(ctx context.Context, c *client.Client, pid string) (string, error) {
 					return c.GetPulse(ctx, pid)
@@ -7684,8 +7688,8 @@ func reflectionCommand() command {
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			return runBriefingCommand(m, args, "reflection", actions, "summary", "Reflection",
-				func(ctx context.Context, c *client.Client, pid string) error {
-					return c.GenerateReflectionSummary(ctx, pid)
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
+					return "", c.GenerateReflectionSummary(ctx, pid)
 				},
 				func(ctx context.Context, c *client.Client, pid string) (string, error) {
 					return c.GetReflection(ctx, pid)
@@ -7708,7 +7712,7 @@ func gradesCommand() command {
 		examples: []string{`grades`, `grades run`},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			return runBriefingCommand(m, args, "grades", actions, "run", "Grades",
-				func(ctx context.Context, c *client.Client, pid string) error {
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
 					return c.GradeIdeas(ctx, pid)
 				},
 				func(ctx context.Context, c *client.Client, pid string) (string, error) {
@@ -7736,8 +7740,8 @@ func insightsCommand() command {
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			return runBriefingCommand(m, args, "insights", actions, "analyze", "Insights",
-				func(ctx context.Context, c *client.Client, pid string) error {
-					return c.RunInsightsAnalysis(ctx, pid)
+				func(ctx context.Context, c *client.Client, pid string) (string, error) {
+					return "", c.RunInsightsAnalysis(ctx, pid)
 				},
 				func(ctx context.Context, c *client.Client, pid string) (string, error) {
 					return c.GetInsights(ctx, pid)

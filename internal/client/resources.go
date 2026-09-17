@@ -3867,12 +3867,39 @@ func (c *Client) GenerateReflectionSummary(ctx context.Context, projectID string
 
 // GetGrades returns the current idea grades without triggering a new grading run.
 func (c *Client) GetGrades(ctx context.Context, projectID string) (string, error) {
-	return c.pageText(ctx, "/history"+query("project_id", projectID), "idea-grade-content")
+	root, err := c.getHTML(ctx, "/insights"+query("project_id", projectID))
+	if err != nil {
+		return "", err
+	}
+	if text, ok := ideaGradeText(root); ok {
+		return text, nil
+	}
+	return "", missingIdeaGradeError("/insights")
 }
 
-// GradeIdeas triggers a fresh grading pass (the Grades view on the history screen).
-func (c *Client) GradeIdeas(ctx context.Context, projectID string) error {
-	return c.doForm(ctx, http.MethodPost, "/history/grade-ideas"+query("project_id", projectID), nil)
+// GradeIdeas triggers a fresh grading pass and returns the generated grade partial
+// when the backend includes it. Older/no-content responses fall back to the
+// refreshed idea-grade section from the Insights page.
+func (c *Client) GradeIdeas(ctx context.Context, projectID string) (string, error) {
+	root, err := c.doFormHTML(ctx, http.MethodPost, "/history/grade-ideas"+query("project_id", projectID), nil)
+	if err != nil {
+		return "", err
+	}
+	if text, ok := ideaGradeText(root); ok {
+		return text, nil
+	}
+	return c.GetGrades(ctx, projectID)
+}
+
+func ideaGradeText(root *html.Node) (string, bool) {
+	if n := findByID(root, "idea-grade-content"); n != nil {
+		return NodeText(n), true
+	}
+	return "", false
+}
+
+func missingIdeaGradeError(path string) error {
+	return fmt.Errorf("idea grades unavailable: %s did not include #idea-grade-content", path)
 }
 
 // GetInsights returns the proactive insights screen as text.

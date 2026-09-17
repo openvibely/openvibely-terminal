@@ -1293,6 +1293,20 @@ func TestHelpListsEveryRegisteredCommand(t *testing.T) {
 	}
 }
 
+func TestGradesHelpDocumentsShowAndRun(t *testing.T) {
+	detail := renderCommandHelp(gradesCommand())
+	for _, want := range []string{
+		"grades                                     show the current idea grades",
+		"grades run                                 run a fresh grading pass",
+		"examples:",
+		"grades run",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("grades help missing %q:\n%s", want, detail)
+		}
+	}
+}
+
 func TestSkillsHelpDocumentsEquivalentAutomaticLoadingAliases(t *testing.T) {
 	detail := renderCommandHelp(skillsCommand())
 	for _, want := range []string{
