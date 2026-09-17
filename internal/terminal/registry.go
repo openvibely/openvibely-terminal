@@ -3284,6 +3284,9 @@ func agentsPluginMarketplacesCommand(m Model, c *client.Client, args []string) (
 			}
 			state, err := c.GetAgentPluginState(ctx)
 			if err != nil {
+				if jsonMode {
+					return marshalJSON(map[string]any{"status": status, "refresh_error": "saved; plugin state refresh failed"})
+				}
 				return status, nil
 			}
 			if jsonMode {

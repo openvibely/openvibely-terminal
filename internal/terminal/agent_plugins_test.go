@@ -114,6 +114,62 @@ func TestAgentsPluginMarketplaceCommandsUseExpectedRoutes(t *testing.T) {
 	}
 }
 
+func TestAgentsPluginMarketplaceJSONRefreshFailuresStayParseable(t *testing.T) {
+	commands := []struct {
+		name  string
+		args  []string
+		force bool
+	}{
+		{name: "add", args: []string{"agents", "plugins", "marketplaces", "add", "github.com/example/plugins"}},
+		{name: "sync", args: []string{"agents", "plugins", "marketplaces", "sync", "official"}},
+		{name: "remove", args: []string{"agents", "plugins", "marketplaces", "remove", "official"}, force: true},
+		{name: "reset", args: []string{"agents", "plugins", "marketplaces", "reset"}, force: true},
+	}
+	for _, command := range commands {
+		t.Run(command.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodPost && r.URL.Path == "/agents/plugins/marketplaces":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"ok":true}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/agents/plugins/marketplaces/official/update":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"ok":true}`)
+				case r.Method == http.MethodDelete && r.URL.Path == "/agents/plugins/marketplaces/official":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"ok":true}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/agents/plugins/marketplaces/reset-defaults":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"ok":true}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/agents/plugins/state":
+					http.Error(w, "state refresh failed", http.StatusInternalServerError)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", command.args, command.force, true); err != nil {
+				t.Fatalf("marketplace %s: %v\n%s", command.name, err, out.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &body); err != nil {
+				t.Fatalf("marketplace %s emitted non-JSON: %v\n%s", command.name, err, out.String())
+			}
+			if body["status"] == "" || body["refresh_error"] != "saved; plugin state refresh failed" {
+				t.Fatalf("marketplace %s JSON = %#v", command.name, body)
+			}
+		})
+	}
+}
+
 func TestAgentsPluginInstallCanIncludeAgent(t *testing.T) {
 	srv, rec := agentPluginCommandServer(t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON, nil)
 	c, err := client.New(srv.URL)
