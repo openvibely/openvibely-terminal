@@ -3184,7 +3184,7 @@ func applyAgentEdit(agent client.AgentDefinition, update agentEdit) client.Agent
 }
 
 func validateAgentArgs(args []string) error {
-	action, rest := splitAction([]string{"list", "edit", "delete", "generate", "metrics", "votes"}, args)
+	action, rest := splitAction([]string{"list", "edit", "delete", "generate", "metrics", "votes", "plugins"}, args)
 	if action == "edit" && len(rest) > 0 {
 		_, _, err := parseAgentEdit(rest)
 		return err
@@ -3222,8 +3222,322 @@ func confirmAgentDeletion(m Model, projectID string, agent client.AgentDef) (Mod
 		cmd)
 }
 
+type agentPluginCommandResult struct {
+	Status string                           `json:"status"`
+	Result *client.AgentPluginInstallResult `json:"result,omitempty"`
+	State  client.AgentPluginState          `json:"state"`
+}
+
+func agentsPluginsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	action := strings.ToLower(args[0])
+	rest := args[1:]
+	switch action {
+	case "list", "state", "status":
+		if len(rest) != 0 {
+			return m, errCmd("usage: /agents plugins [list]")
+		}
+		return m, run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
+			state, err := c.GetAgentPluginState(ctx)
+			if err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(state)
+			}
+			return renderAgentPlugins(state), nil
+		})
+	case "marketplaces", "marketplace":
+		return agentsPluginMarketplacesCommand(m, c, rest)
+	case "install":
+		return agentsPluginInstallCommand(m, c, projectID, rest)
+	case "uninstall", "remove":
+		return agentsPluginUninstallCommand(m, c, rest)
+	case "enable", "disable":
+		return agentsPluginToggleCommand(m, c, projectID, action == "enable", rest)
+	default:
+		return m, errCmd("usage: /agents plugins [list|marketplaces|install|uninstall|enable|disable]")
+	}
+}
+
+func agentsPluginMarketplacesCommand(m Model, c *client.Client, args []string) (Model, tea.Cmd) {
+	if len(args) == 0 {
+		return m, run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
+			state, err := c.GetAgentPluginState(ctx)
+			if err != nil {
+				return "", err
+			}
+			if jsonMode {
+				return marshalJSON(state)
+			}
+			return renderPluginMarketplaces(state.Marketplaces), nil
+		})
+	}
+	action := strings.ToLower(args[0])
+	rest := args[1:]
+	mutation := func(status string, act func(context.Context) error) tea.Cmd {
+		return run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
+			if err := act(ctx); err != nil {
+				return "", err
+			}
+			state, err := c.GetAgentPluginState(ctx)
+			if err != nil {
+				return status, nil
+			}
+			if jsonMode {
+				return marshalJSON(agentPluginCommandResult{Status: status, State: state})
+			}
+			return status + "\n\n" + renderAgentPlugins(state), nil
+		})
+	}
+	switch action {
+	case "add":
+		if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
+			return m, errCmd("usage: /agents plugins marketplaces add <source>")
+		}
+		source := strings.TrimSpace(rest[0])
+		return m, mutation("added marketplace "+sanitizeAutomationDetailText(source), func(ctx context.Context) error {
+			return c.AddAgentPluginMarketplace(ctx, source, "user")
+		})
+	case "sync", "update":
+		if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
+			return m, errCmd("usage: /agents plugins marketplaces sync <marketplace>")
+		}
+		name := strings.TrimSpace(rest[0])
+		return m, mutation("synced marketplace "+sanitizeAutomationDetailText(name), func(ctx context.Context) error {
+			return c.UpdateAgentPluginMarketplace(ctx, name)
+		})
+	case "remove", "delete":
+		if len(rest) != 1 || strings.TrimSpace(rest[0]) == "" {
+			return m, errCmd("usage: /agents plugins marketplaces remove <marketplace>")
+		}
+		name := strings.TrimSpace(rest[0])
+		cmd := mutation("removed marketplace "+sanitizeAutomationDetailText(name), func(ctx context.Context) error {
+			return c.DeleteAgentPluginMarketplace(ctx, name)
+		})
+		return confirmOr(m,
+			fmt.Sprintf("Remove marketplace %q? Type 'yes' to confirm or Esc to cancel.", sanitizeAutomationDetailText(name)),
+			fmt.Sprintf("use --force to confirm removal of marketplace %q", sanitizeAutomationDetailText(name)),
+			cmd)
+	case "reset", "reset-defaults":
+		if len(rest) != 0 {
+			return m, errCmd("usage: /agents plugins marketplaces reset")
+		}
+		cmd := mutation("reset default marketplaces", func(ctx context.Context) error {
+			return c.ResetAgentPluginMarketplaces(ctx)
+		})
+		return confirmOr(m,
+			"Reset default plugin marketplaces? Type 'yes' to confirm or Esc to cancel.",
+			"use --force to confirm resetting default plugin marketplaces",
+			cmd)
+	default:
+		return m, errCmd("usage: /agents plugins marketplaces [add|sync|remove|reset]")
+	}
+}
+
+func agentsPluginInstallCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
+	if len(args) < 1 || strings.TrimSpace(args[0]) == "" {
+		return m, errCmd("usage: /agents plugins install <plugin-id> [agent]")
+	}
+	pluginID := strings.TrimSpace(args[0])
+	agentRef := strings.TrimSpace(strings.Join(args[1:], " "))
+	return m, run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
+		state, err := c.GetAgentPluginState(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !pluginKnownForInstall(state, pluginID) {
+			return "", fmt.Errorf("plugin %q was not found in available or installed plugins", sanitizeAutomationDetailText(pluginID))
+		}
+		agentID := ""
+		agentName := ""
+		if agentRef != "" {
+			agents, err := c.ListAgents(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			agent, err := matchAgentRef(agents, agentRef)
+			if err != nil {
+				return "", err
+			}
+			agentID = agent.ID
+			agentName = firstNonEmpty(agent.Name, agent.Key, agent.ID)
+		}
+		result, err := c.InstallAgentPlugin(ctx, pluginID, "user", agentID)
+		if err != nil {
+			return "", err
+		}
+		state, refreshErr := c.GetAgentPluginState(ctx)
+		status := "installed " + sanitizeAutomationDetailText(pluginID)
+		if agentID != "" {
+			if result.EnabledForAgent {
+				status += " and enabled for " + sanitizeAutomationDetailText(agentName)
+			} else if result.EnableError != "" {
+				status += "; enabling for " + sanitizeAutomationDetailText(agentName) + " failed: " + sanitizeAutomationDetailText(result.EnableError)
+			}
+		}
+		if result.Warning != "" {
+			status += "; warning: " + sanitizeAutomationDetailText(result.Warning)
+		}
+		if jsonMode {
+			if refreshErr != nil {
+				return marshalJSON(map[string]any{"status": status, "result": result, "refresh_error": "saved; plugin state refresh failed"})
+			}
+			return marshalJSON(agentPluginCommandResult{Status: status, Result: &result, State: state})
+		}
+		if refreshErr != nil {
+			return status + " (saved; refresh failed)", nil
+		}
+		return status + "\n\n" + renderAgentPlugins(state), nil
+	})
+}
+
+func agentsPluginUninstallCommand(m Model, c *client.Client, args []string) (Model, tea.Cmd) {
+	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+		return m, errCmd("usage: /agents plugins uninstall <plugin-id>")
+	}
+	pluginID := strings.TrimSpace(args[0])
+	checkInstalled := func(ctx context.Context) error {
+		state, err := c.GetAgentPluginState(ctx)
+		if err != nil {
+			return err
+		}
+		if !pluginInstalled(state, pluginID) {
+			return fmt.Errorf("plugin %q is not installed", sanitizeAutomationDetailText(pluginID))
+		}
+		return nil
+	}
+	if cliMode && !forceMode {
+		return m, run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
+			if err := checkInstalled(ctx); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("use --force to confirm uninstalling plugin %q", sanitizeAutomationDetailText(pluginID))
+		})
+	}
+	cmd := run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
+		if err := checkInstalled(ctx); err != nil {
+			return "", err
+		}
+		if err := c.UninstallAgentPlugin(ctx, pluginID); err != nil {
+			return "", err
+		}
+		state, refreshErr := c.GetAgentPluginState(ctx)
+		status := "uninstalled " + sanitizeAutomationDetailText(pluginID)
+		if jsonMode {
+			if refreshErr != nil {
+				return marshalJSON(map[string]any{"status": status, "refresh_error": "saved; plugin state refresh failed"})
+			}
+			return marshalJSON(agentPluginCommandResult{Status: status, State: state})
+		}
+		if refreshErr != nil {
+			return status + " (saved; refresh failed)", nil
+		}
+		return status + "\n\n" + renderAgentPlugins(state), nil
+	})
+	return confirmOr(m,
+		fmt.Sprintf("Uninstall plugin %q? This removes local plugin files. Type 'yes' to confirm or Esc to cancel.", sanitizeAutomationDetailText(pluginID)),
+		fmt.Sprintf("use --force to confirm uninstalling plugin %q", sanitizeAutomationDetailText(pluginID)),
+		cmd)
+}
+
+func agentsPluginToggleCommand(m Model, c *client.Client, projectID string, enable bool, args []string) (Model, tea.Cmd) {
+	verb := "enable"
+	if !enable {
+		verb = "disable"
+	}
+	if len(args) < 2 || strings.TrimSpace(args[len(args)-1]) == "" {
+		return m, errCmd("usage: /agents plugins " + verb + " <agent> <plugin-id>")
+	}
+	agentRef := strings.TrimSpace(strings.Join(args[:len(args)-1], " "))
+	pluginID := strings.TrimSpace(args[len(args)-1])
+	if agentRef == "" {
+		return m, errCmd("usage: /agents plugins " + verb + " <agent> <plugin-id>")
+	}
+	return m, run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
+		state, err := c.GetAgentPluginState(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !pluginInstalled(state, pluginID) {
+			return "", fmt.Errorf("plugin %q is not installed", sanitizeAutomationDetailText(pluginID))
+		}
+		agents, err := c.ListAgents(ctx, projectID)
+		if err != nil {
+			return "", err
+		}
+		matched, err := matchAgentRef(agents, agentRef)
+		if err != nil {
+			return "", err
+		}
+		definition, err := c.GetAgent(ctx, projectID, matched.ID)
+		if err != nil {
+			return "", err
+		}
+		definition.Plugins = setAgentPluginEnabled(definition.Plugins, pluginID, enable)
+		if err := c.UpdateAgent(ctx, projectID, definition); err != nil {
+			return "", err
+		}
+		status := verb + "d " + sanitizeAutomationDetailText(pluginID) + " for " + sanitizeAutomationDetailText(firstNonEmpty(definition.Name, definition.Key, definition.ID))
+		if jsonMode {
+			persisted, refreshErr := c.GetAgent(ctx, projectID, matched.ID)
+			if refreshErr != nil {
+				return marshalJSON(map[string]any{"status": status, "refresh_error": "saved; authoritative refresh failed"})
+			}
+			return marshalJSON(persisted)
+		}
+		state, refreshErr := c.GetAgentPluginState(ctx)
+		if refreshErr != nil {
+			return status + " (saved; refresh failed)", nil
+		}
+		return status + "\n\n" + renderAgentPlugins(state), nil
+	})
+}
+
+func pluginInstalled(state client.AgentPluginState, pluginID string) bool {
+	for _, plugin := range state.Installed {
+		if strings.EqualFold(strings.TrimSpace(plugin.ID), pluginID) {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginKnownForInstall(state client.AgentPluginState, pluginID string) bool {
+	if pluginInstalled(state, pluginID) {
+		return true
+	}
+	for _, plugin := range state.Available {
+		if strings.EqualFold(strings.TrimSpace(plugin.PluginID), pluginID) {
+			return true
+		}
+	}
+	return false
+}
+
+func setAgentPluginEnabled(plugins []string, pluginID string, enable bool) []string {
+	out := make([]string, 0, len(plugins)+1)
+	seen := false
+	for _, plugin := range plugins {
+		if strings.EqualFold(strings.TrimSpace(plugin), pluginID) {
+			seen = true
+			if enable {
+				out = append(out, pluginID)
+			}
+			continue
+		}
+		out = append(out, plugin)
+	}
+	if enable && !seen {
+		out = append(out, pluginID)
+	}
+	return out
+}
+
 func agentsCommand() command {
-	actions := []string{"list", "edit", "delete", "generate", "metrics", "votes"}
+	actions := []string{"list", "edit", "delete", "generate", "metrics", "votes", "plugins"}
 	return command{
 		name:         "agents",
 		aliases:      []string{"agent"},
@@ -3239,10 +3553,19 @@ func agentsCommand() command {
 		selectorPaths: [][]string{{"edit"}, {"delete"}},
 		desc:          "agent definitions, workflow metrics and vote audits",
 		usage: []string{
-			"agents [filter]                            list agent definitions",
-			"agents generate <description>              create an agent from a description",
-			"agents delete <agent>                      remove an agent definition (omit <agent> → interactive selector)",
-			"agents metrics                             per-agent workflow metrics",
+			"agents [filter]                                      list agent definitions",
+			"agents generate <description>                        create an agent from a description",
+			"agents delete <agent>                                remove an agent definition (omit <agent> → interactive selector)",
+			"agents metrics                                       per-agent workflow metrics",
+			"agents plugins [list]                                list marketplaces, plugins, and runtime status",
+			"agents plugins marketplaces add <source>             add a plugin marketplace",
+			"agents plugins marketplaces sync <marketplace>       sync a plugin marketplace",
+			"agents plugins marketplaces remove <marketplace>     remove a plugin marketplace (--force in CLI)",
+			"agents plugins marketplaces reset                    restore default marketplaces (--force in CLI)",
+			"agents plugins install <plugin-id> [agent]           install a plugin and optionally enable it for an agent",
+			"agents plugins uninstall <plugin-id>                 uninstall a plugin (--force in CLI)",
+			"agents plugins enable <agent> <plugin-id>            enable an installed plugin for an agent",
+			"agents plugins disable <agent> <plugin-id>           disable an installed plugin for an agent",
 		},
 		actionUsages: []commandActionUsage{
 			{action: "edit", args: "<agent> <field> <value> [...]", description: "edit name, prompt, model, identity, scope, or state"},
@@ -3252,10 +3575,13 @@ func agentsCommand() command {
 			`agents edit reviewer description "Reviews Go changes" enabled true`,
 			`agents generate A code reviewer that checks Go PRs for style and correctness`,
 			`agents delete reviewer`,
-			`agents metrics`,
+			`agents plugins`,
+			`agents plugins marketplaces add github.com/example/plugins`,
+			`agents plugins install stagehand@official reviewer`,
+			`agents plugins enable reviewer playwright@official`,
+			`agents plugins uninstall playwright@official`, `agents metrics`,
 			`agents votes step-exec-123`,
-		},
-		run: func(m Model, args []string) (Model, tea.Cmd) {
+		}, run: func(m Model, args []string) (Model, tea.Cmd) {
 			if len(args) == 0 || !strings.EqualFold(args[0], "metrics") {
 				mm, cmd, ok := m.needProject()
 				if !ok {
@@ -3313,6 +3639,8 @@ func agentsCommand() command {
 					}
 					return renderVoteRecords(stepExecID, records), nil
 				})
+			case "plugins":
+				return agentsPluginsCommand(m, c, pid, rest)
 			case "generate":
 				if ref == "" {
 					return m, errCmd("usage: /agents generate <description>")

@@ -1670,6 +1670,140 @@ func (c *Client) GenerateAgent(ctx context.Context, projectID, description strin
 	return c.doForm(ctx, http.MethodPost, "/agents/generate"+query("project_id", projectID), v)
 }
 
+// AgentPluginState is the backend plugin marketplace/install/runtime view.
+type AgentPluginState struct {
+	Marketplaces []PluginMarketplace `json:"marketplaces"`
+	Installed    []InstalledPlugin   `json:"installed"`
+	Available    []AvailablePlugin   `json:"available"`
+	Runtime      []PluginRuntimeMCP  `json:"runtime,omitempty"`
+	Error        string              `json:"error,omitempty"`
+}
+
+type PluginMarketplace struct {
+	Name            string `json:"name"`
+	Source          string `json:"source"`
+	URL             string `json:"url,omitempty"`
+	Repo            string `json:"repo,omitempty"`
+	InstallLocation string `json:"installLocation,omitempty"`
+}
+
+type InstalledPlugin struct {
+	ID          string   `json:"id"`
+	Version     string   `json:"version,omitempty"`
+	Scope       string   `json:"scope,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	InstallPath string   `json:"installPath,omitempty"`
+	InstalledAt string   `json:"installedAt,omitempty"`
+	LastUpdated string   `json:"lastUpdated,omitempty"`
+	Errors      []string `json:"errors,omitempty"`
+}
+
+type AvailablePlugin struct {
+	PluginID        string `json:"pluginId"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	MarketplaceName string `json:"marketplaceName"`
+	Source          string `json:"source,omitempty"`
+}
+
+type PluginRuntimeMCP struct {
+	Name      string `json:"name"`
+	PluginID  string `json:"plugin_id,omitempty"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	ToolCount int    `json:"tool_count,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+type AgentPluginInstallResult struct {
+	OK              bool   `json:"ok"`
+	Warning         string `json:"warning,omitempty"`
+	EnabledForAgent bool   `json:"enabled_for_agent,omitempty"`
+	EnableError     string `json:"enable_error,omitempty"`
+}
+
+func (c *Client) GetAgentPluginState(ctx context.Context) (AgentPluginState, error) {
+	var out AgentPluginState
+	if err := c.getJSON(ctx, "/agents/plugins/state", &out); err != nil {
+		return AgentPluginState{}, err
+	}
+	if out.Marketplaces == nil {
+		out.Marketplaces = []PluginMarketplace{}
+	}
+	if out.Installed == nil {
+		out.Installed = []InstalledPlugin{}
+	}
+	if out.Available == nil {
+		out.Available = []AvailablePlugin{}
+	}
+	return out, nil
+}
+
+func (c *Client) AddAgentPluginMarketplace(ctx context.Context, source, scope string) error {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return errors.New("marketplace source is required")
+	}
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "user"
+	}
+	return c.doJSON(ctx, http.MethodPost, "/agents/plugins/marketplaces", map[string]string{"source": source, "scope": scope})
+}
+
+func (c *Client) UpdateAgentPluginMarketplace(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("marketplace name is required")
+	}
+	return c.doJSON(ctx, http.MethodPost, "/agents/plugins/marketplaces/"+url.PathEscape(name)+"/update", map[string]string{})
+}
+
+func (c *Client) DeleteAgentPluginMarketplace(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("marketplace name is required")
+	}
+	return c.doJSON(ctx, http.MethodDelete, "/agents/plugins/marketplaces/"+url.PathEscape(name), map[string]string{})
+}
+
+func (c *Client) ResetAgentPluginMarketplaces(ctx context.Context) error {
+	return c.doJSON(ctx, http.MethodPost, "/agents/plugins/marketplaces/reset-defaults", map[string]string{})
+}
+
+func (c *Client) InstallAgentPlugin(ctx context.Context, pluginID, scope, agentID string) (AgentPluginInstallResult, error) {
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return AgentPluginInstallResult{}, errors.New("plugin ID is required")
+	}
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		scope = "user"
+	}
+	payload := map[string]string{"plugin_id": pluginID, "scope": scope}
+	if strings.TrimSpace(agentID) != "" {
+		payload["agent_id"] = strings.TrimSpace(agentID)
+	}
+	resp, err := c.doJSONResponse(ctx, http.MethodPost, "/agents/plugins/install", payload)
+	if err != nil {
+		return AgentPluginInstallResult{}, err
+	}
+	defer drainAndClose(resp.Body)
+	var out AgentPluginInstallResult
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return AgentPluginInstallResult{}, fmt.Errorf("decoding plugin install response: %w", err)
+	}
+	return out, nil
+}
+
+func (c *Client) UninstallAgentPlugin(ctx context.Context, pluginID string) error {
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return errors.New("plugin ID is required")
+	}
+	return c.doJSON(ctx, http.MethodPost, "/agents/plugins/uninstall", map[string]string{"plugin_id": pluginID})
+}
+
 // --- schedule ---
 
 // ScheduleEntry is one scheduled task occurrence.

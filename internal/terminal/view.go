@@ -3433,7 +3433,90 @@ func renderAgents(agents []client.AgentDef, filter string) string {
 		return dimStyle.Render("no agent definitions — /agents generate <description> creates one")
 	}
 	return table(append([][]string{{"NAME", "SCOPE", "MODEL", "DESCRIPTION"}}, rows...)) + "\n\n" +
-		dimStyle.Render("/agents metrics · /agents generate <description> · /agents edit <name> <field> <value> · /agents delete <name>")
+		dimStyle.Render("/agents metrics · /agents plugins · /agents generate <description> · /agents edit <name> <field> <value> · /agents delete <name>")
+}
+
+func renderAgentPlugins(state client.AgentPluginState) string {
+	var b strings.Builder
+	if strings.TrimSpace(state.Error) != "" {
+		fmt.Fprintf(&b, "%s %s\n\n", noticeStyle.Render("warning:"), sanitizeAutomationDetailText(state.Error))
+	}
+	b.WriteString(sectionStyle.Render("Marketplaces") + "\n")
+	b.WriteString(renderPluginMarketplaces(state.Marketplaces) + "\n\n")
+	b.WriteString(sectionStyle.Render("Installed") + "\n")
+	b.WriteString(renderInstalledPlugins(state.Installed) + "\n\n")
+	b.WriteString(sectionStyle.Render("Available") + "\n")
+	b.WriteString(renderAvailablePlugins(state.Available) + "\n\n")
+	b.WriteString(sectionStyle.Render("Runtime") + "\n")
+	b.WriteString(renderPluginRuntime(state.Runtime) + "\n\n")
+	b.WriteString(dimStyle.Render("/agents plugins marketplaces add <source> · /agents plugins install <plugin-id> [agent] · /agents plugins enable <agent> <plugin-id>"))
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderPluginMarketplaces(marketplaces []client.PluginMarketplace) string {
+	if len(marketplaces) == 0 {
+		return dimStyle.Render("no marketplaces configured")
+	}
+	rows := [][]string{{"NAME", "SOURCE", "LOCATION"}}
+	for _, marketplace := range marketplaces {
+		location := firstNonEmpty(marketplace.URL, marketplace.Repo, marketplace.InstallLocation)
+		rows = append(rows, []string{
+			truncate(sanitizeAutomationDetailText(marketplace.Name), 28),
+			truncate(sanitizeAutomationDetailText(marketplace.Source), 42),
+			truncate(sanitizeAutomationDetailText(location), 36),
+		})
+	}
+	return table(rows)
+}
+
+func renderInstalledPlugins(plugins []client.InstalledPlugin) string {
+	if len(plugins) == 0 {
+		return dimStyle.Render("no installed plugins")
+	}
+	rows := [][]string{{"PLUGIN", "VERSION", "SCOPE", "ENABLED", "ERRORS"}}
+	for _, plugin := range plugins {
+		rows = append(rows, []string{
+			truncate(sanitizeAutomationDetailText(plugin.ID), 34),
+			truncate(sanitizeAutomationDetailText(plugin.Version), 12),
+			truncate(sanitizeAutomationDetailText(plugin.Scope), 10),
+			strconv.FormatBool(plugin.Enabled),
+			truncate(sanitizeAutomationDetailText(strings.Join(plugin.Errors, "; ")), 36),
+		})
+	}
+	return table(rows)
+}
+
+func renderAvailablePlugins(plugins []client.AvailablePlugin) string {
+	if len(plugins) == 0 {
+		return dimStyle.Render("no available plugins discovered")
+	}
+	rows := [][]string{{"PLUGIN", "NAME", "MARKETPLACE", "DESCRIPTION"}}
+	for _, plugin := range plugins {
+		rows = append(rows, []string{
+			truncate(sanitizeAutomationDetailText(plugin.PluginID), 34),
+			truncate(sanitizeAutomationDetailText(plugin.Name), 20),
+			truncate(sanitizeAutomationDetailText(plugin.MarketplaceName), 22),
+			truncate(sanitizeAutomationDetailText(plugin.Description), 42),
+		})
+	}
+	return table(rows)
+}
+
+func renderPluginRuntime(runtime []client.PluginRuntimeMCP) string {
+	if len(runtime) == 0 {
+		return dimStyle.Render("no plugin runtime warnings")
+	}
+	rows := [][]string{{"SERVER", "PLUGIN", "STATUS", "TOOLS", "ERROR"}}
+	for _, item := range runtime {
+		rows = append(rows, []string{
+			truncate(sanitizeAutomationDetailText(item.Name), 26),
+			truncate(sanitizeAutomationDetailText(item.PluginID), 34),
+			truncate(sanitizeAutomationDetailText(item.Status), 12),
+			fmt.Sprint(item.ToolCount),
+			truncate(sanitizeAutomationDetailText(item.Error), 42),
+		})
+	}
+	return table(rows)
 }
 
 func renderAgentMetrics(metrics []client.AgentMetric, best, cheapest *client.AgentRecommendation) string {
