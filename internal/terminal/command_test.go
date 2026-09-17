@@ -1771,6 +1771,42 @@ func TestModelsCompletionAndHelpDocumentAdd(t *testing.T) {
 	}
 }
 
+func TestModelsEditOptionGuidanceMatchesParserOptions(t *testing.T) {
+	cmd := lookupCommand("models")
+	if cmd == nil {
+		t.Fatal("models command missing")
+	}
+	want := modelEditOptionNames()
+	if got := registryCompletionValues("models", "edit", "OpenAI"); !slices.Equal(got, want) {
+		t.Fatalf("models edit completions = %v, want %v", got, want)
+	}
+	help := renderCommandHelp(*cmd)
+	actionUsage := cmd.actionSyntax("edit")
+	for _, option := range want {
+		if !strings.Contains(help, option) {
+			t.Errorf("models help missing edit option %q:\n%s", option, help)
+		}
+		if !strings.Contains(actionUsage, option) {
+			t.Errorf("models edit action usage missing %q: %s", option, actionUsage)
+		}
+	}
+	for _, wantText := range []string{"--api-key (interactive masked prompt)", "--api-key-stdin (CLI)"} {
+		if !strings.Contains(help, wantText) {
+			t.Errorf("models help missing API-key mode guidance %q:\n%s", wantText, help)
+		}
+	}
+	const addSyntax = "models add <provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>]"
+	if got := cmd.actionSyntax("add"); got != addSyntax {
+		t.Fatalf("models add syntax = %q, want %q", got, addSyntax)
+	}
+	if strings.Contains(cmd.actionSyntax("add"), "--max-workers") || strings.Contains(cmd.actionSyntax("add"), "--worker-timeout") {
+		t.Fatalf("models add syntax picked up edit-only options: %s", cmd.actionSyntax("add"))
+	}
+	if !strings.Contains(help, "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>") {
+		t.Fatalf("models add guidance changed unexpectedly:\n%s", help)
+	}
+}
+
 func TestTaskGoalLifecycleHelpCompletionAndDocumentation(t *testing.T) {
 	cmd := lookupCommand("tasks")
 	if cmd == nil {

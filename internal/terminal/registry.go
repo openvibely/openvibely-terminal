@@ -3984,6 +3984,71 @@ type modelEditSpec struct {
 	APIKeyPrompt    bool
 }
 
+type modelEditOptionKind uint8
+
+const (
+	modelEditOptionName modelEditOptionKind = iota
+	modelEditOptionModel
+	modelEditOptionDefault
+	modelEditOptionNonnegativeInteger
+	modelEditOptionEndpoint
+	modelEditOptionAPIKeyPrompt
+	modelEditOptionAPIKeyStdin
+)
+
+type modelEditOption struct {
+	name  string
+	usage string
+	kind  modelEditOptionKind
+}
+
+var modelEditOptions = []modelEditOption{
+	{name: "--name", usage: "--name <name>", kind: modelEditOptionName},
+	{name: "--model", usage: "--model <id>", kind: modelEditOptionModel},
+	{name: "--default", usage: "--default <true|false>", kind: modelEditOptionDefault},
+	{name: "--max-workers", usage: "--max-workers <n>", kind: modelEditOptionNonnegativeInteger},
+	{name: "--worker-timeout", usage: "--worker-timeout <seconds>", kind: modelEditOptionNonnegativeInteger},
+	{name: "--endpoint", usage: "--endpoint <http(s)://host>", kind: modelEditOptionEndpoint},
+	{name: "--api-key", usage: "--api-key", kind: modelEditOptionAPIKeyPrompt},
+	{name: "--api-key-stdin", usage: "--api-key-stdin", kind: modelEditOptionAPIKeyStdin},
+}
+
+func modelEditOptionNames() []string {
+	names := make([]string, len(modelEditOptions))
+	for i, option := range modelEditOptions {
+		names[i] = option.name
+	}
+	return names
+}
+
+func lookupModelEditOption(name string) (modelEditOption, bool) {
+	for _, option := range modelEditOptions {
+		if option.name == name {
+			return option, true
+		}
+	}
+	return modelEditOption{}, false
+}
+
+func modelEditOptionsUsageLines() []string {
+	usages := make([]string, len(modelEditOptions))
+	for i, option := range modelEditOptions {
+		usages[i] = option.usage
+	}
+	return []string{
+		"  options: " + strings.Join(usages[:5], " "),
+		"           " + usages[5] + " " + usages[6] + " (interactive masked prompt) | " + usages[7] + " (CLI)",
+	}
+}
+
+func modelEditActionUsageArgs() string {
+	usages := make([]string, len(modelEditOptions))
+	for i, option := range modelEditOptions {
+		usages[i] = option.usage
+	}
+	return "<model> [" + strings.Join(usages[:6], "|") + "|" + usages[6] + " (interactive)|" + usages[7] + " (CLI)]"
+}
+
 func parseModelEditArgs(args []string, interactive bool) (modelEditSpec, error) {
 	if len(args) == 0 {
 		return modelEditSpec{}, errors.New(commandUsage("models", "edit"))
@@ -4012,14 +4077,18 @@ func parseModelEditArgs(args []string, interactive bool) (modelEditSpec, error) 
 		return args[*i], nil
 	}
 	for i := boundary; i < len(args); i++ {
-		option := strings.ToLower(args[i])
-		if seen[option] {
-			return modelEditSpec{}, fmt.Errorf("%s may only be provided once", option)
+		optionName := strings.ToLower(args[i])
+		option, ok := lookupModelEditOption(optionName)
+		if !ok {
+			return modelEditSpec{}, errors.New("unsupported models edit option")
 		}
-		seen[option] = true
-		switch option {
-		case "--name":
-			value, err := nextValue(&i, option)
+		if seen[optionName] {
+			return modelEditSpec{}, fmt.Errorf("%s may only be provided once", optionName)
+		}
+		seen[optionName] = true
+		switch option.kind {
+		case modelEditOptionName:
+			value, err := nextValue(&i, optionName)
 			if err != nil {
 				return modelEditSpec{}, err
 			}
@@ -4028,14 +4097,14 @@ func parseModelEditArgs(args []string, interactive bool) (modelEditSpec, error) 
 				return modelEditSpec{}, err
 			}
 			spec.Update.Name = &value
-		case "--model":
-			value, err := nextValue(&i, option)
+		case modelEditOptionModel:
+			value, err := nextValue(&i, optionName)
 			if err != nil {
 				return modelEditSpec{}, err
 			}
 			spec.Update.Model = &value
-		case "--default":
-			value, err := nextValue(&i, option)
+		case modelEditOptionDefault:
+			value, err := nextValue(&i, optionName)
 			if err != nil {
 				return modelEditSpec{}, err
 			}
@@ -4044,22 +4113,22 @@ func parseModelEditArgs(args []string, interactive bool) (modelEditSpec, error) 
 				return modelEditSpec{}, err
 			}
 			spec.Update.IsDefault = &parsed
-		case "--max-workers", "--worker-timeout":
-			value, err := nextValue(&i, option)
+		case modelEditOptionNonnegativeInteger:
+			value, err := nextValue(&i, optionName)
 			if err != nil {
 				return modelEditSpec{}, err
 			}
 			parsed, err := strconv.Atoi(value)
 			if err != nil || parsed < 0 {
-				return modelEditSpec{}, fmt.Errorf("%s must be a nonnegative integer", option)
+				return modelEditSpec{}, fmt.Errorf("%s must be a nonnegative integer", optionName)
 			}
-			if option == "--max-workers" {
+			if optionName == "--max-workers" {
 				spec.Update.MaxWorkers = &parsed
 			} else {
 				spec.Update.WorkerTimeout = &parsed
 			}
-		case "--endpoint":
-			value, err := nextValue(&i, option)
+		case modelEditOptionEndpoint:
+			value, err := nextValue(&i, optionName)
 			if err != nil {
 				return modelEditSpec{}, err
 			}
@@ -4068,18 +4137,16 @@ func parseModelEditArgs(args []string, interactive bool) (modelEditSpec, error) 
 				return modelEditSpec{}, err
 			}
 			spec.Update.Endpoint = &endpoint
-		case "--api-key-stdin":
+		case modelEditOptionAPIKeyStdin:
 			if interactive {
 				return modelEditSpec{}, errors.New("interactive API-key replacement uses --api-key and a masked prompt")
 			}
 			spec.APIKeyFromStdin = true
-		case "--api-key":
+		case modelEditOptionAPIKeyPrompt:
 			if !interactive {
 				return modelEditSpec{}, errors.New("API-key replacement requires --api-key-stdin from non-terminal standard input")
 			}
 			spec.APIKeyPrompt = true
-		default:
-			return modelEditSpec{}, errors.New("unsupported models edit option")
 		}
 	}
 	return spec, nil
@@ -4470,45 +4537,55 @@ func (m Model) handleModelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func modelsCommand() command {
 	actions := []string{"list", "add", "edit", "default", "delete", "capacity"}
+	usage := append([]string{
+		"models [filter]                            list configured models",
+		"models add                                  guided provider setup with masked API-key input",
+		"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
+		"  providers: anthropic, openai, ollama; API keys require piped --api-key-stdin", "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>",
+		"models edit <model> [options]               safely update explicit fields of an existing model",
+	}, append(modelEditOptionsUsageLines(),
+		"models default <model>                     set the default model",
+		"models delete <model>                      remove a model",
+		"omit <model> on edit/default/delete → interactive selector",
+		"models capacity                            worker capacity plus provider/account-limit health (see analytics usage)",
+	)...)
+	actionUsages := []commandActionUsage{
+		{
+			action:      "add",
+			args:        "<provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>]",
+			description: "add a provider (guided when interactive)",
+		},
+		{
+			action:      "edit",
+			args:        modelEditActionUsageArgs(),
+			description: "update explicit saved settings",
+		},
+	}
+	examples := []string{
+		`models add`,
+		`printf '%s' "$OPENAI_API_KEY" | models add openai "OpenAI" gpt-4o --api-key-stdin`,
+		`models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434`,
+		`models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth`,
+		`models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434`,
+		`printf '%s' "$OPENAI_API_KEY" | models edit OpenAI --api-key-stdin`,
+		`models default gpt-4o`,
+		`models capacity`,
+		`models delete claude-haiku`,
+	}
 	return command{
 		name:    "models",
 		aliases: []string{"model"},
 		args:    "[name]",
 		actions: actions,
 		completions: []commandCompletion{
-			{after: []string{"edit", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"--name", "--model", "--default", "--max-workers", "--worker-timeout", "--endpoint", "--api-key", "--api-key-stdin"}},
+			{after: []string{"edit", "**"}, partialAfter: completionAfterQuotedOperand, values: modelEditOptionNames()},
 		},
 		selectorPaths: [][]string{{"edit"}, {"default"}, {"delete"}},
 		desc:          "configured LLM models, provider setup, worker capacity and health",
-		usage: []string{
-			"models [filter]                            list configured models",
-			"models add                                  guided provider setup with masked API-key input",
-			"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
-			"  providers: anthropic, openai, ollama; API keys require piped --api-key-stdin", "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>",
-			"models edit <model> [options]               safely update explicit fields of an existing model",
-			"  options: --name <name> --model <id> --default <true|false> --max-workers <n> --worker-timeout <seconds>",
-			"           --endpoint <http(s)://host> --api-key (interactive masked prompt) | --api-key-stdin (CLI)",
-			"models default <model>                     set the default model",
-			"models delete <model>                      remove a model",
-			"omit <model> on edit/default/delete → interactive selector",
-			"models capacity                            worker capacity plus provider/account-limit health (see analytics usage)",
-		},
-		actionUsages: []commandActionUsage{
-			{action: "add", args: "<provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>]", description: "add a provider (guided when interactive)"},
-			{action: "edit", args: "<model> [--name <name>|--model <id>|--default <true|false>|--max-workers <n>|--worker-timeout <seconds>|--endpoint <url>|--api-key|--api-key-stdin]", description: "update explicit saved settings"},
-		},
-		examples: []string{
-			`models add`,
-			`printf '%s' "$OPENAI_API_KEY" | models add openai "OpenAI" gpt-4o --api-key-stdin`,
-			`models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434`,
-			`models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth`,
-			`models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434`,
-			`printf '%s' "$OPENAI_API_KEY" | models edit OpenAI --api-key-stdin`,
-			`models default gpt-4o`,
-			`models capacity`,
-			`models delete claude-haiku`,
-		},
-		validateArgs: validateModelsArgs,
+		usage:         usage,
+		actionUsages:  actionUsages,
+		examples:      examples,
+		validateArgs:  validateModelsArgs,
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			action, rest := splitAction(actions, args)
 			c := m.client

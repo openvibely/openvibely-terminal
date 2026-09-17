@@ -15,6 +15,60 @@ import (
 
 const modelEditCard = `<div data-model-id="model-1" data-model-name="OpenAI" data-model-provider="openai" data-model-model="gpt-5.6-sol"></div>`
 
+func TestParseModelEditArgsRejectsInvalidOptions(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		interactive bool
+		want        string
+	}{
+		{
+			name: "unknown flag",
+			args: []string{"OpenAI", "--unknown"},
+			want: "unsupported models edit option",
+		},
+		{
+			name: "duplicate flag",
+			args: []string{"OpenAI", "--model", "gpt-4o", "--model", "gpt-4.1"},
+			want: "--model may only be provided once",
+		},
+		{
+			name: "missing value",
+			args: []string{"OpenAI", "--model"},
+			want: "--model requires a value",
+		},
+		{
+			name: "invalid default",
+			args: []string{"OpenAI", "--default", "maybe"},
+			want: "--default must be true or false",
+		},
+		{
+			name: "invalid endpoint",
+			args: []string{"OpenAI", "--endpoint", "https://user:secret@example.com"},
+			want: "--endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment",
+		},
+		{
+			name: "CLI api key argument",
+			args: []string{"OpenAI", "--api-key"},
+			want: "API-key replacement requires --api-key-stdin from non-terminal standard input",
+		},
+		{
+			name:        "interactive stdin api key",
+			args:        []string{"OpenAI", "--api-key-stdin"},
+			interactive: true,
+			want:        "interactive API-key replacement uses --api-key and a masked prompt",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseModelEditArgs(tc.args, tc.interactive)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("parseModelEditArgs error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestModelsEditAppliesOnlyExplicitFieldsAndRefreshes(t *testing.T) {
 	var lists, details, updates int
 	var form url.Values
