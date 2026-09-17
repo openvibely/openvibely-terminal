@@ -4628,7 +4628,7 @@ func modelsCommand() command {
 						return "", err
 					}
 					if jsonMode {
-						return marshalJSON(list)
+						return marshalJSON(filterModels(list, ref))
 					}
 					return renderModels(list, ref), nil
 				})

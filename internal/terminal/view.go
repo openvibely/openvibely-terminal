@@ -3635,12 +3635,22 @@ func renderVoteRecords(stepExecID string, records []client.VoteRecord) string {
 
 // --- models ---
 
+func filterModels(list []client.LLMModel, filter string) []client.LLMModel {
+	if filter == "" {
+		return list
+	}
+	filtered := make([]client.LLMModel, 0, len(list))
+	for _, mo := range list {
+		if filterMatch(filter, mo.Name, mo.Model, mo.Provider) {
+			filtered = append(filtered, mo)
+		}
+	}
+	return filtered
+}
+
 func renderModels(list []client.LLMModel, filter string) string {
 	var rows [][]string
-	for _, mo := range list {
-		if !filterMatch(filter, mo.Name, mo.Model, mo.Provider) {
-			continue
-		}
+	for _, mo := range filterModels(list, filter) {
 		rows = append(rows, []string{truncate(mo.Name, 26), mo.Provider, truncate(mo.Model, 30)})
 	}
 	if len(rows) == 0 {

@@ -2885,6 +2885,82 @@ func TestCLIModelsFilterOutputDistinguishesMatchesFromNoMatches(t *testing.T) {
 	}
 }
 
+func TestCLIModelsFilterJSONParityAndUnfilteredSchema(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-name" data-model-name="Claude Sonnet"
+		data-model-provider="Anthropic" data-model-model="sonnet-4"></div>
+		<div data-model-id="m-provider" data-model-name="Provider Match"
+		data-model-provider="Claude Provider" data-model-model="provider-special"></div>
+		<div data-model-id="m-model" data-model-name="Model Match"
+		data-model-provider="Anthropic" data-model-model="claude-opus-4"></div>
+		<div data-model-id="m-other" data-model-name="GPT"
+		data-model-provider="OpenAI" data-model-model="gpt-4o"></div>`
+	run := func(t *testing.T, args ...string) ([]client.LLMModel, *recorder) {
+		t.Helper()
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": `{"projects":[]}`,
+			"/models":       modelsHTML,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "", args, false, true); err != nil {
+			t.Fatalf("models JSON failed: %v", err)
+		}
+		var got []client.LLMModel
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+			t.Fatalf("models JSON is invalid: %v\n%s", err, out.String())
+		}
+		if !rec.saw("GET", "/models") || rec.sawQuery("GET /models?") {
+			t.Fatalf("models JSON was not requested globally:\n%s", rec.all())
+		}
+		return got, rec
+	}
+
+	for _, args := range [][]string{{"models"}, {"models", "list"}} {
+		t.Run(strings.Join(args, " ")+" unfiltered", func(t *testing.T) {
+			got, _ := run(t, args...)
+			if len(got) != 4 {
+				t.Fatalf("unfiltered models count = %d, want 4: %+v", len(got), got)
+			}
+			wantIDs := []string{"m-name", "m-provider", "m-model", "m-other"}
+			for i, want := range wantIDs {
+				if got[i].ID != want {
+					t.Fatalf("unfiltered model order = %+v, want IDs %v", got, wantIDs)
+				}
+			}
+			if got[0].Name != "Claude Sonnet" || got[0].Provider != "Anthropic" || got[0].Model != "sonnet-4" {
+				t.Fatalf("unfiltered model schema fields = %+v", got[0])
+			}
+		})
+	}
+
+	t.Run("filtered by name provider and model fields", func(t *testing.T) {
+		got, _ := run(t, "models", "claude")
+		wantIDs := []string{"m-name", "m-provider", "m-model"}
+		if len(got) != len(wantIDs) {
+			t.Fatalf("filtered models = %+v, want IDs %v", got, wantIDs)
+		}
+		for i, want := range wantIDs {
+			if got[i].ID != want {
+				t.Fatalf("filtered model order = %+v, want IDs %v", got, wantIDs)
+			}
+		}
+		for _, mo := range got {
+			if mo.ID == "m-other" || mo.Name == "GPT" || mo.Model == "gpt-4o" {
+				t.Fatalf("filtered JSON included unrelated model: %+v", got)
+			}
+		}
+	})
+
+	t.Run("filtered no match is empty array", func(t *testing.T) {
+		got, _ := run(t, "models", "missing")
+		if got == nil {
+			t.Fatal("no-match JSON decoded to nil instead of []")
+		}
+		if len(got) != 0 {
+			t.Fatalf("no-match JSON models = %+v, want empty", got)
+		}
+	})
+}
+
 func TestCLIGlobalModelsListWorksAcrossProjectStates(t *testing.T) {
 	const modelsHTML = `<div data-model-id="m-1" data-model-name="Sonnet"
 		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
