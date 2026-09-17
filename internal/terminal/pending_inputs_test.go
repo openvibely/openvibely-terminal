@@ -21,6 +21,9 @@ func pendingCLIClient(t *testing.T, pending string, active bool, posts *int) *cl
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor","status":"running","category":"active"}]}`)
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = fmt.Fprint(w, pendingTaskBoard)
