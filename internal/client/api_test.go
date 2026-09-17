@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +35,171 @@ func TestGetUsageAnalytics(t *testing.T) {
 	if u.Totals.CallCount != 10 || len(u.ModelBreakdown) != 1 {
 		t.Errorf("unexpected usage: %+v", u)
 	}
+}
+
+func TestGetUsageProviderLimitsRequestsProjectionAndDecodesAccountLimits(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/usage" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "p1" {
+			t.Errorf("project_id = %q", got)
+		}
+		if got := r.URL.Query().Get("projection"); got != "account_limits" {
+			t.Errorf("projection = %q, want account_limits", got)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"totals":          UsageTotals{CallCount: 5000},
+			"model_breakdown": []ModelUsagePoint{{Provider: "openai", Model: "gpt-x", CallCount: 5000}},
+			"account_limits": []AccountUsage{{
+				Provider:    "OpenAI",
+				StatusLabel: "healthy",
+				Limits:      []AccountLimit{{Label: "requests", UsedPercent: 42.5}},
+			}},
+		})
+	}))
+
+	limits, err := c.GetUsageProviderLimits(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetUsageProviderLimits: %v", err)
+	}
+	if len(limits.AccountLimits) != 1 || limits.AccountLimits[0].Provider != "OpenAI" || limits.AccountLimits[0].StatusLabel != "healthy" {
+		t.Fatalf("unexpected provider limits: %+v", limits)
+	}
+}
+
+func TestUsageProviderLimitsProjectionLargeFixtureMeasurement(t *testing.T) {
+	fullPayload, compactPayload := usageProviderLimitFixturePayloads(t, 5000)
+	if got, wantMax := len(compactPayload), len(fullPayload)/10; got > wantMax {
+		t.Fatalf("compact response bytes = %d, want <= 10%% of full response bytes %d", got, len(fullPayload))
+	}
+
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/usage" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("projection") == "account_limits" {
+			_, _ = w.Write(compactPayload)
+			return
+		}
+		_, _ = w.Write(fullPayload)
+	}))
+
+	fullStats := measureUsageAnalyticsCall(t, 24, func(ctx context.Context) error {
+		_, err := c.GetUsageAnalytics(ctx, "p1")
+		return err
+	})
+	compactStats := measureUsageAnalyticsCall(t, 24, func(ctx context.Context) error {
+		_, err := c.GetUsageProviderLimits(ctx, "p1")
+		return err
+	})
+
+	t.Logf("usage provider-limit projection fixture rows=5000 full_bytes=%d compact_bytes=%d reduction=%.1f%%", len(fullPayload), len(compactPayload), 100*(1-float64(len(compactPayload))/float64(len(fullPayload))))
+	t.Logf("full usage path: p50=%s p95=%s alloc_p50=%dB alloc_p95=%dB", fullStats.p50, fullStats.p95, fullStats.allocP50, fullStats.allocP95)
+	t.Logf("compact provider-limit path: p50=%s p95=%s alloc_p50=%dB alloc_p95=%dB", compactStats.p50, compactStats.p95, compactStats.allocP50, compactStats.allocP95)
+
+	if compactStats.p50 >= fullStats.p50 {
+		t.Fatalf("compact p50 latency = %s, want below full p50 %s", compactStats.p50, fullStats.p50)
+	}
+	if compactStats.allocP50 >= fullStats.allocP50 {
+		t.Fatalf("compact p50 allocated bytes = %d, want below full p50 allocated bytes %d", compactStats.allocP50, fullStats.allocP50)
+	}
+}
+
+func usageProviderLimitFixturePayloads(t *testing.T, rows int) ([]byte, []byte) {
+	t.Helper()
+	accountLimits := `[{"provider":"OpenAI","plan_type":"team","status_label":"healthy","primary_limit":{"label":"requests","status":"healthy","used_percent":42.5,"resets_at":"2026-09-17T00:00:00Z"},"limits":[{"label":"requests","status":"healthy","used_percent":42.5,"resets_at":"2026-09-17T00:00:00Z"}]}]`
+
+	var full bytes.Buffer
+	full.WriteString(`{"totals":{"call_count":5000,"input_tokens":123456,"output_tokens":654321,"total_tokens":777777,"cached_input_tokens":111,"cost_usd":12.34,"cost_available":true},"model_breakdown":[`)
+	for i := 0; i < rows; i++ {
+		if i > 0 {
+			full.WriteByte(',')
+		}
+		fmt.Fprintf(&full, `{"provider":"openai","model":"fixture-model-%04d","call_count":%d,"total_tokens":%d,"cost_usd":%.4f,"percent":%.6f}`, i, i+1, (i+1)*100, float64(i+1)/1000, float64(i+1)/float64(rows))
+	}
+	full.WriteString(`],"account_limits":`)
+	full.WriteString(accountLimits)
+	full.WriteString(`,"errors":[],"last_updated_at":"2026-09-17T00:00:00Z"}`)
+
+	compact := []byte(`{"account_limits":` + accountLimits + `,"errors":[],"last_updated_at":"2026-09-17T00:00:00Z"}`)
+	if !json.Valid(full.Bytes()) {
+		t.Fatal("full fixture is not valid JSON")
+	}
+	if !json.Valid(compact) {
+		t.Fatal("compact fixture is not valid JSON")
+	}
+	return full.Bytes(), compact
+}
+
+type usageMeasurementStats struct {
+	p50      time.Duration
+	p95      time.Duration
+	allocP50 uint64
+	allocP95 uint64
+}
+
+func measureUsageAnalyticsCall(t *testing.T, samples int, call func(context.Context) error) usageMeasurementStats {
+	t.Helper()
+	ctx := context.Background()
+	for i := 0; i < 3; i++ {
+		if err := call(ctx); err != nil {
+			t.Fatalf("warm usage call failed: %v", err)
+		}
+	}
+
+	durations := make([]time.Duration, 0, samples)
+	allocs := make([]uint64, 0, samples)
+	for i := 0; i < samples; i++ {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		start := time.Now()
+		if err := call(ctx); err != nil {
+			t.Fatalf("measured usage call failed: %v", err)
+		}
+		durations = append(durations, time.Since(start))
+		runtime.ReadMemStats(&after)
+		allocs = append(allocs, after.TotalAlloc-before.TotalAlloc)
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	sort.Slice(allocs, func(i, j int) bool { return allocs[i] < allocs[j] })
+	return usageMeasurementStats{
+		p50:      percentileDuration(durations, 50),
+		p95:      percentileDuration(durations, 95),
+		allocP50: percentileUint64(allocs, 50),
+		allocP95: percentileUint64(allocs, 95),
+	}
+}
+
+func percentileDuration(values []time.Duration, pct int) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	idx := (len(values)*pct + 99) / 100
+	if idx < 1 {
+		idx = 1
+	}
+	if idx > len(values) {
+		idx = len(values)
+	}
+	return values[idx-1]
+}
+
+func percentileUint64(values []uint64, pct int) uint64 {
+	if len(values) == 0 {
+		return 0
+	}
+	idx := (len(values)*pct + 99) / 100
+	if idx < 1 {
+		idx = 1
+	}
+	if idx > len(values) {
+		idx = len(values)
+	}
+	return values[idx-1]
 }
 
 func TestGetSkillAnalytics(t *testing.T) {

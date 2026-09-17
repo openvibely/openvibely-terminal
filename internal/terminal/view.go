@@ -3682,15 +3682,16 @@ func renderModelCapacity(caps []client.ModelCapacity) string {
 	return table(rows)
 }
 
-// renderModelCapacityWithUsage keeps the worker-capacity table independent from
-// provider health. Analytics is best-effort here: a provider/account failure
-// must not hide the capacity data that the command was asked to show.
-func renderModelCapacityWithUsage(caps []client.ModelCapacity, usage *client.UsageAnalytics) string {
+// renderModelCapacityWithProviderLimits keeps the worker-capacity table
+// independent from provider health. Provider-limit lookup is best-effort here:
+// a provider/account failure must not hide the capacity data that the command
+// was asked to show.
+func renderModelCapacityWithProviderLimits(caps []client.ModelCapacity, provider *client.UsageProviderLimits) string {
 	capacity := renderModelCapacity(caps)
-	if usage == nil || len(usage.AccountLimits) == 0 {
+	if provider == nil || len(provider.AccountLimits) == 0 {
 		return capacity + "\n\n" + dimStyle.Render("provider limits unavailable — run /analytics usage for details")
 	}
-	return capacity + "\n\n" + renderProviderLimits(usage.AccountLimits)
+	return capacity + "\n\n" + renderProviderLimits(provider.AccountLimits)
 }
 
 func renderProviderLimits(accounts []client.AccountUsage) string {

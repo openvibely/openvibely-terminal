@@ -3458,8 +3458,8 @@ func TestRenderModelCapacityWithoutProviderLimits(t *testing.T) {
 	caps := []client.ModelCapacity{{Name: "Sonnet", Running: 1, MaxWorkers: 4, AvailableSlots: 3}}
 	base := stripANSI(renderModelCapacity(caps))
 
-	for _, usage := range []*client.UsageAnalytics{nil, {}} {
-		out := stripANSI(renderModelCapacityWithUsage(caps, usage))
+	for _, provider := range []*client.UsageProviderLimits{nil, {}} {
+		out := stripANSI(renderModelCapacityWithProviderLimits(caps, provider))
 		if !strings.HasPrefix(out, base) {
 			t.Errorf("capacity table changed when provider limits are unavailable:\n%s", out)
 		}
@@ -3471,9 +3471,9 @@ func TestRenderModelCapacityWithoutProviderLimits(t *testing.T) {
 
 func TestRenderModelCapacityProviderLimits(t *testing.T) {
 	secret := "sk-provider-secret"
-	out := stripANSI(renderModelCapacityWithUsage(
+	out := stripANSI(renderModelCapacityWithProviderLimits(
 		[]client.ModelCapacity{{Model: "gpt-4o", Running: 2, MaxWorkers: 4, AvailableSlots: 2}},
-		&client.UsageAnalytics{AccountLimits: []client.AccountUsage{
+		&client.UsageProviderLimits{AccountLimits: []client.AccountUsage{
 			{
 				Provider:      "OpenAI",
 				PlanType:      "team",
