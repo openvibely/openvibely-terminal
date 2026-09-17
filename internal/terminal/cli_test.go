@@ -1769,6 +1769,92 @@ func TestCLIStatusProjectListFailureStillRendersGlobalStatus(t *testing.T) {
 	}
 }
 
+func TestCLITaskMutationsStayScopedToSelectedProject(t *testing.T) {
+	const board = `<div data-task-id="task-1" data-task-status="running" data-task-category="active" data-display-order="7">
+		<a href="/tasks/task-1?from=tasks" title="Scoped Task">Scoped Task</a>
+		<p class="line-clamp-2">Original prompt</p>
+	</div>`
+
+	tests := []struct {
+		name         string
+		args         []string
+		force        bool
+		wantMethod   string
+		wantPath     string
+		wantFormPart string
+	}{
+		{name: "run", args: []string{"tasks", "run", "Scoped Task"}, wantMethod: http.MethodPost, wantPath: "/tasks/task-1/run"},
+		{name: "stop", args: []string{"tasks", "stop", "Scoped Task"}, wantMethod: http.MethodPost, wantPath: "/tasks/task-1/cancel"},
+		{name: "delete", args: []string{"tasks", "delete", "Scoped Task"}, force: true, wantMethod: http.MethodDelete, wantPath: "/tasks/task-1"},
+		{name: "move", args: []string{"tasks", "move", "Scoped Task", "completed"}, wantMethod: http.MethodPatch, wantPath: "/tasks/task-1/category", wantFormPart: "category=completed"},
+		{name: "edit", args: []string{"tasks", "edit", "Scoped Task", "|", "Retitled Task", "|", "New prompt"}, wantMethod: http.MethodPut, wantPath: "/tasks/task-1", wantFormPart: "prompt=New+prompt"},
+		{name: "order", args: []string{"tasks", "order", "Scoped Task", "4"}, wantMethod: http.MethodPatch, wantPath: "/tasks/task-1/reorder", wantFormPart: "position=4"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recorder{}
+			var mutationForms []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				rec.recordURL(r.Method, r.URL.RequestURI())
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+					if got := r.URL.Query().Get("project_id"); got != "p2" {
+						t.Errorf("reference lookup project_id = %q, want p2", got)
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, compactTaskCatalogForProjectTest(board, "p2"))
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+					if got := r.URL.Query().Get("project_id"); got != "p2" {
+						t.Errorf("task refresh project_id = %q, want p2", got)
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, board)
+				case r.Method == tc.wantMethod && r.URL.Path == tc.wantPath:
+					if got := r.URL.Query().Get("project_id"); got != "p2" {
+						http.Error(w, "mutation missing selected project_id", http.StatusInternalServerError)
+						return
+					}
+					_ = r.ParseForm()
+					mutationForms = append(mutationForms, r.PostForm.Encode())
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "other", tc.args, tc.force, false); err != nil {
+				t.Fatalf("RunCLI(%v) failed: %v\noutput:\n%s\nrequests:\n%s", tc.args, err, out.String(), strings.Join(rec.urlsSnapshot(), "\n"))
+			}
+
+			urls := rec.urlsSnapshot()
+			wantLookup := "GET /api/tasks/reference-catalog?project_id=p2"
+			if !slices.Contains(urls, wantLookup) {
+				t.Fatalf("missing scoped lookup %q in:\n%s", wantLookup, strings.Join(urls, "\n"))
+			}
+			wantMutation := tc.wantMethod + " " + tc.wantPath + "?project_id=p2"
+			if !slices.Contains(urls, wantMutation) {
+				t.Fatalf("missing scoped mutation %q in:\n%s", wantMutation, strings.Join(urls, "\n"))
+			}
+			wantRefresh := "GET /tasks?project_id=p2"
+			if !slices.Contains(urls, wantRefresh) {
+				t.Fatalf("missing scoped refresh %q in:\n%s", wantRefresh, strings.Join(urls, "\n"))
+			}
+			if tc.wantFormPart != "" && (len(mutationForms) != 1 || !strings.Contains(mutationForms[0], tc.wantFormPart)) {
+				t.Fatalf("mutation forms = %v, want to contain %q", mutationForms, tc.wantFormPart)
+			}
+		})
+	}
+}
+
 func TestCLIStatusMultipleProjectsIsGlobalAndUnambiguous(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":        cliProjects,
@@ -5708,8 +5794,8 @@ func TestCLIDestructiveCommandsRequireForce(t *testing.T) {
 		if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"tasks", "delete", "Refactor"}, true, false); err != nil {
 			t.Fatalf("expected zero exit with --force: %v", err)
 		}
-		if !rec.saw("DELETE", "/tasks/t-1") {
-			t.Errorf("expected backend call with --force:\n%s", rec.all())
+		if !slices.Contains(rec.urlsSnapshot(), "DELETE /tasks/t-1?project_id=p1") {
+			t.Errorf("expected scoped backend call with --force:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
 		}
 	})
 

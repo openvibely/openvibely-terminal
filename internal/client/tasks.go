@@ -977,9 +977,25 @@ func (c *Client) UpdateTask(ctx context.Context, taskID string, form TaskForm) e
 	return c.doForm(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID), form.values())
 }
 
+// UpdateTaskForProject updates a task's editable fields in the selected project.
+func (c *Client) UpdateTaskForProject(ctx context.Context, taskID, projectID string, form TaskForm) error {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return err
+	}
+	return c.doForm(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), form.values())
+}
+
 // DeleteTask removes a task.
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
 	return c.doForm(ctx, http.MethodDelete, "/tasks/"+url.PathEscape(taskID), nil)
+}
+
+// DeleteTaskForProject removes a task from the selected project.
+func (c *Client) DeleteTaskForProject(ctx context.Context, taskID, projectID string) error {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return err
+	}
+	return c.doForm(ctx, http.MethodDelete, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), nil)
 }
 
 // RunTask (re-)submits a task for execution.
@@ -987,9 +1003,25 @@ func (c *Client) RunTask(ctx context.Context, taskID string) error {
 	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/run", nil)
 }
 
+// RunTaskForProject (re-)submits a task for execution in the selected project.
+func (c *Client) RunTaskForProject(ctx context.Context, taskID, projectID string) error {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return err
+	}
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/run"+query("project_id", projectID), nil)
+}
+
 // CancelTask stops a queued/running task.
 func (c *Client) CancelTask(ctx context.Context, taskID string) error {
 	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/cancel", nil)
+}
+
+// CancelTaskForProject stops a queued/running task in the selected project.
+func (c *Client) CancelTaskForProject(ctx context.Context, taskID, projectID string) error {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return err
+	}
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/cancel"+query("project_id", projectID), nil)
 }
 
 // MoveTask moves a task between kanban columns (drag & drop equivalent).
@@ -999,11 +1031,38 @@ func (c *Client) MoveTask(ctx context.Context, taskID, category string) error {
 	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/category", v)
 }
 
+// MoveTaskForProject moves a task between kanban columns in the selected project.
+func (c *Client) MoveTaskForProject(ctx context.Context, taskID, projectID, category string) error {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return err
+	}
+	v := url.Values{}
+	v.Set("category", category)
+	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/category"+query("project_id", projectID), v)
+}
+
 // ReorderTask moves a task to a new position within its column.
 func (c *Client) ReorderTask(ctx context.Context, taskID string, position int) error {
 	v := url.Values{}
 	v.Set("position", strconv.Itoa(position))
 	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/reorder", v)
+}
+
+// ReorderTaskForProject moves a task to a new position within its column in the selected project.
+func (c *Client) ReorderTaskForProject(ctx context.Context, taskID, projectID string, position int) error {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return err
+	}
+	v := url.Values{}
+	v.Set("position", strconv.Itoa(position))
+	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/reorder"+query("project_id", projectID), v)
+}
+
+func requireTaskMutationProjectID(projectID string) error {
+	if strings.TrimSpace(projectID) == "" {
+		return fmt.Errorf("project ID is required for task mutations")
+	}
+	return nil
 }
 
 // TaskThreadState is the project-scoped task-thread snapshot needed for guarded

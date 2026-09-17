@@ -906,7 +906,7 @@ func tasksCommand() command {
 						prompt = t.Prompt
 					}
 					form := client.TaskForm{Title: title, Prompt: prompt, Category: t.Category}
-					if err := c.UpdateTask(ctx, t.ID, form); err != nil {
+					if err := c.UpdateTaskForProject(ctx, t.ID, pid, form); err != nil {
 						return "", err
 					}
 					return refreshAndRender("updated "+title,
@@ -931,7 +931,7 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.ReorderTask(ctx, t.ID, pos); err != nil {
+					if err := c.ReorderTaskForProject(ctx, t.ID, pid, pos); err != nil {
 						return "", err
 					}
 					return refreshAndRender(fmt.Sprintf("moved %s to position %d", t.Title, pos),
@@ -953,11 +953,11 @@ func tasksCommand() command {
 					}
 					switch action {
 					case "run":
-						err = c.RunTask(ctx, t.ID)
+						err = c.RunTaskForProject(ctx, t.ID, pid)
 					case "stop":
-						err = c.CancelTask(ctx, t.ID)
+						err = c.CancelTaskForProject(ctx, t.ID, pid)
 					case "delete":
-						err = c.DeleteTask(ctx, t.ID)
+						err = c.DeleteTaskForProject(ctx, t.ID, pid)
 					}
 					if err != nil {
 						return "", err
@@ -1003,7 +1003,7 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.MoveTask(ctx, t.ID, category); err != nil {
+					if err := c.MoveTaskForProject(ctx, t.ID, pid, category); err != nil {
 						return "", err
 					}
 					return refreshAndRender(t.Title+" → "+category,

@@ -683,6 +683,90 @@ func TestTaskMutationsUseWebUIRoutes(t *testing.T) {
 	}
 }
 
+func TestProjectScopedTaskMutationsUseEncodedProjectQuery(t *testing.T) {
+	type call struct{ method, uri, body string }
+	var got call
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 512)
+		n, _ := r.Body.Read(buf)
+		got = call{r.Method, r.URL.RequestURI(), string(buf[:n])}
+		if r.Header.Get("HX-Request") != "true" {
+			t.Error("mutations must send HX-Request")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	ctx := context.Background()
+	projectID := "team 2/alpha?x=1&y"
+	encodedProjectQuery := "project_id=team+2%2Falpha%3Fx%3D1%26y"
+
+	tests := []struct {
+		name   string
+		fn     func() error
+		method string
+		uri    string
+		body   string
+	}{
+		{"update", func() error {
+			return c.UpdateTaskForProject(ctx, "t 1", projectID, TaskForm{Title: "Ship", Prompt: "do", Category: "backlog"})
+		}, "PUT", "/tasks/t%201?" + encodedProjectQuery, "title=Ship"},
+		{"run", func() error { return c.RunTaskForProject(ctx, "t 1", projectID) }, "POST", "/tasks/t%201/run?" + encodedProjectQuery, ""},
+		{"cancel", func() error { return c.CancelTaskForProject(ctx, "t 1", projectID) }, "POST", "/tasks/t%201/cancel?" + encodedProjectQuery, ""},
+		{"delete", func() error { return c.DeleteTaskForProject(ctx, "t 1", projectID) }, "DELETE", "/tasks/t%201?" + encodedProjectQuery, ""},
+		{"move", func() error { return c.MoveTaskForProject(ctx, "t 1", projectID, "active") }, "PATCH", "/tasks/t%201/category?" + encodedProjectQuery, "category=active"},
+		{"reorder", func() error { return c.ReorderTaskForProject(ctx, "t 1", projectID, 3) }, "PATCH", "/tasks/t%201/reorder?" + encodedProjectQuery, "position=3"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got = call{}
+			if err := tc.fn(); err != nil {
+				t.Fatal(err)
+			}
+			if got.method != tc.method || got.uri != tc.uri {
+				t.Errorf("got %s %s, want %s %s", got.method, got.uri, tc.method, tc.uri)
+			}
+			if tc.body != "" && !strings.Contains(got.body, tc.body) {
+				t.Errorf("body = %q, want to contain %q", got.body, tc.body)
+			}
+		})
+	}
+}
+
+func TestProjectScopedTaskMutationsRejectEmptyProjectID(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{"update", func() error { return c.UpdateTaskForProject(ctx, "t1", " ", TaskForm{Title: "Ship"}) }},
+		{"run", func() error { return c.RunTaskForProject(ctx, "t1", " ") }},
+		{"cancel", func() error { return c.CancelTaskForProject(ctx, "t1", " ") }},
+		{"delete", func() error { return c.DeleteTaskForProject(ctx, "t1", " ") }},
+		{"move", func() error { return c.MoveTaskForProject(ctx, "t1", " ", "active") }},
+		{"reorder", func() error { return c.ReorderTaskForProject(ctx, "t1", " ", 3) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.fn(); err == nil || !strings.Contains(err.Error(), "project ID is required") {
+				t.Fatalf("err = %v, want project ID required", err)
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("empty project ID sent %d requests", requests)
+	}
+}
+
 func TestCreateTaskPostsForm(t *testing.T) {
 	var form url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
