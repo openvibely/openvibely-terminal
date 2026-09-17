@@ -8158,23 +8158,18 @@ func validateAnalyticsArgs(actions, args []string) error {
 }
 
 func analyticsCommand() command {
-	actions := []string{"usage", "rates", "agents", "frequent", "failures", "skills", "trends"}
+	return analyticsCommandForSections(analyticsSections)
+}
+
+func analyticsCommandForSections(sections []analyticsSection) command {
+	actions := analyticsSectionNames(sections)
 	return command{
 		name:         "analytics",
 		aliases:      []string{"stats"},
 		actions:      actions,
 		validateArgs: func(args []string) error { return validateAnalyticsArgs(actions, args) },
 		desc:         "usage, cost, success rates and trends",
-		usage: []string{
-			"analytics                                  every section",
-			"analytics usage                            token usage and cost by model",
-			"analytics rates                            success/failure rates",
-			"analytics agents                           average execution time by agent",
-			"analytics frequent                         backend-ranked top 12 most frequent tasks",
-			"analytics failures                         failed-task patterns",
-			"analytics skills                           skill usage and follow-through",
-			"analytics trends                           usage trends over time",
-		},
+		usage:        analyticsUsageLines(sections),
 		examples: []string{
 			`analytics`,
 			`analytics usage`,
@@ -8192,7 +8187,7 @@ func analyticsCommand() command {
 			action, _ := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			return m, run("Analytics", cmdTimeout, func(ctx context.Context) (string, error) {
-				return loadAnalytics(ctx, c, pid, action)
+				return loadAnalyticsSections(ctx, c, pid, action, sections)
 			})
 		},
 	}

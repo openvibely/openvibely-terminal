@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -54,6 +55,74 @@ func newAnalyticsTestClient(t *testing.T, failPaths map[string]bool) *client.Cli
 		t.Fatalf("client.New: %v", err)
 	}
 	return c
+}
+
+func TestAnalyticsCommandActionsUseSharedSections(t *testing.T) {
+	cmd := analyticsCommand()
+	want := analyticsSectionNames(analyticsSections)
+	if !reflect.DeepEqual(cmd.actions, want) {
+		t.Fatalf("analytics command actions = %v, want shared sections %v", cmd.actions, want)
+	}
+
+	seen := make(map[string]bool, len(cmd.actions))
+	help := strings.Split(stripANSI(renderCommandHelp(cmd)), "examples:")[0]
+	for _, action := range cmd.actions {
+		if seen[action] {
+			t.Fatalf("analytics action %q listed more than once in command metadata", action)
+		}
+		seen[action] = true
+		if got := strings.Count(help, "analytics "+action); got != 1 {
+			t.Fatalf("analytics help lists action %q %d times, want exactly once:\n%s", action, got, help)
+		}
+	}
+}
+
+func TestAnalyticsSectionDefinitionDrivesCommandAndLoading(t *testing.T) {
+	sections := []analyticsSection{
+		{
+			name:             "current",
+			usageDescription: "current report",
+			load: func(context.Context, *client.Client, string) (string, error) {
+				return "Current section", nil
+			},
+		},
+		{
+			name:             "future",
+			usageDescription: "future report",
+			load: func(context.Context, *client.Client, string) (string, error) {
+				return "Future section", nil
+			},
+		},
+	}
+
+	cmd := analyticsCommandForSections(sections)
+	if !reflect.DeepEqual(cmd.actions, []string{"current", "future"}) {
+		t.Fatalf("actions = %v, want both shared sections", cmd.actions)
+	}
+	if err := cmd.validateArgs([]string{"future"}); err != nil {
+		t.Fatalf("future action was not accepted by validation: %v", err)
+	}
+	help := strings.Split(stripANSI(renderCommandHelp(cmd)), "examples:")[0]
+	for _, action := range cmd.actions {
+		if got := strings.Count(help, "analytics "+action); got != 1 {
+			t.Fatalf("help lists action %q %d times, want exactly once:\n%s", action, got, help)
+		}
+	}
+
+	out, err := loadAnalyticsSections(context.Background(), nil, "", "future", sections)
+	if err != nil {
+		t.Fatalf("loadAnalyticsSections named future: %v", err)
+	}
+	if strings.TrimSpace(out) != "Future section" {
+		t.Fatalf("named future output = %q", out)
+	}
+	out, err = loadAnalyticsSections(context.Background(), nil, "", "", sections)
+	if err != nil {
+		t.Fatalf("loadAnalyticsSections all: %v", err)
+	}
+	if out != "Current section\n\nFuture section" {
+		t.Fatalf("all-section output = %q", out)
+	}
 }
 
 func TestLoadAnalyticsAllSectionsSucceed(t *testing.T) {

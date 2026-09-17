@@ -4039,8 +4039,115 @@ func renderCommandHelp(c command) string {
 
 // --- analytics ---
 
+type analyticsSection struct {
+	name             string
+	usageDescription string
+	load             func(context.Context, *client.Client, string) (string, error)
+}
+
+var analyticsSections = []analyticsSection{
+	{
+		name:             "usage",
+		usageDescription: "token usage and cost by model",
+		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
+			u, err := c.GetUsageAnalytics(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			return renderUsage(u), nil
+		},
+	},
+	{
+		name:             "rates",
+		usageDescription: "success/failure rates",
+		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
+			r, err := c.GetSuccessFailureRates(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			return renderRates(r), nil
+		},
+	},
+	{
+		name:             "agents",
+		usageDescription: "average execution time by agent",
+		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
+			a, err := c.GetAvgExecutionTimeByAgentWithLimit(ctx, projectID, maxExecTimeRows)
+			if err != nil {
+				return "", err
+			}
+			return renderExecTimes("Avg execution time by agent", a), nil
+		},
+	},
+	{
+		name:             "trends",
+		usageDescription: "usage trends over time",
+		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
+			t, err := c.GetAvgExecutionTimeByTaskWithLimit(ctx, projectID, maxExecTimeRows)
+			if err != nil {
+				return "", err
+			}
+			return renderExecTimes("Avg execution time by task", t), nil
+		},
+	},
+	{
+		name:             "frequent",
+		usageDescription: "backend-ranked top 12 most frequent tasks",
+		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
+			f, err := c.GetMostFrequentTasksWithLimit(ctx, projectID, maxFrequentRows)
+			if err != nil {
+				return "", err
+			}
+			return renderFrequent(f), nil
+		},
+	},
+	{
+		name:             "failures",
+		usageDescription: "failed-task patterns",
+		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
+			f, err := c.GetFailedTaskPatterns(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			return renderFailures(f), nil
+		},
+	},
+	{
+		name:             "skills",
+		usageDescription: "skill usage and follow-through",
+		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
+			s, err := c.GetSkillAnalytics(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			return renderSkillAnalytics(s), nil
+		},
+	},
+}
+
+func analyticsSectionNames(sections []analyticsSection) []string {
+	names := make([]string, 0, len(sections))
+	for _, section := range sections {
+		names = append(names, section.name)
+	}
+	return names
+}
+
+func analyticsUsageLines(sections []analyticsSection) []string {
+	lines := make([]string, 0, len(sections)+1)
+	lines = append(lines, "analytics                                  every section")
+	for _, section := range sections {
+		lines = append(lines, fmt.Sprintf("analytics %-34s %s", section.name, section.usageDescription))
+	}
+	return lines
+}
+
 // loadAnalytics fetches and renders one analytics section (or all of them).
 func loadAnalytics(ctx context.Context, c *client.Client, projectID, section string) (string, error) {
+	return loadAnalyticsSections(ctx, c, projectID, section, analyticsSections)
+}
+
+func loadAnalyticsSections(ctx context.Context, c *client.Client, projectID, section string, sections []analyticsSection) (string, error) {
 	want := func(name string) bool { return section == "" || section == name }
 
 	type slot struct {
@@ -4049,65 +4156,21 @@ func loadAnalytics(ctx context.Context, c *client.Client, projectID, section str
 		err  error
 	}
 
-	names := []string{"usage", "rates", "agents", "trends", "frequent", "failures", "skills"}
-	slots := make([]slot, len(names))
-	for i, n := range names {
-		slots[i].name = n
+	slots := make([]slot, len(sections))
+	for i, section := range sections {
+		slots[i].name = section.name
 	}
 
 	var wg sync.WaitGroup
-	for i, name := range names {
-		if !want(name) {
+	for i, section := range sections {
+		if !want(section.name) {
 			continue
 		}
-		i, name := i, name
+		i, section := i, section
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			switch name {
-			case "usage":
-				if u, err := c.GetUsageAnalytics(ctx, projectID); err == nil {
-					slots[i].out = renderUsage(u) + "\n\n"
-				} else {
-					slots[i].err = err
-				}
-			case "rates":
-				if r, err := c.GetSuccessFailureRates(ctx, projectID); err == nil {
-					slots[i].out = renderRates(r) + "\n\n"
-				} else {
-					slots[i].err = err
-				}
-			case "agents":
-				if a, err := c.GetAvgExecutionTimeByAgentWithLimit(ctx, projectID, maxExecTimeRows); err == nil {
-					slots[i].out = renderExecTimes("Avg execution time by agent", a) + "\n\n"
-				} else {
-					slots[i].err = err
-				}
-			case "trends":
-				if t, err := c.GetAvgExecutionTimeByTaskWithLimit(ctx, projectID, maxExecTimeRows); err == nil {
-					slots[i].out = renderExecTimes("Avg execution time by task", t) + "\n\n"
-				} else {
-					slots[i].err = err
-				}
-			case "frequent":
-				if f, err := c.GetMostFrequentTasksWithLimit(ctx, projectID, maxFrequentRows); err == nil {
-					slots[i].out = renderFrequent(f) + "\n\n"
-				} else {
-					slots[i].err = err
-				}
-			case "failures":
-				if f, err := c.GetFailedTaskPatterns(ctx, projectID); err == nil {
-					slots[i].out = renderFailures(f) + "\n\n"
-				} else {
-					slots[i].err = err
-				}
-			case "skills":
-				if s, err := c.GetSkillAnalytics(ctx, projectID); err == nil {
-					slots[i].out = renderSkillAnalytics(s) + "\n\n"
-				} else {
-					slots[i].err = err
-				}
-			}
+			slots[i].out, slots[i].err = section.load(ctx, c, projectID)
 		}()
 	}
 	wg.Wait()
@@ -4123,7 +4186,10 @@ func loadAnalytics(ctx context.Context, c *client.Client, projectID, section str
 			}
 			continue
 		}
-		b.WriteString(s.out)
+		if s.out != "" {
+			b.WriteString(s.out)
+			b.WriteString("\n\n")
+		}
 	}
 
 	out := strings.TrimRight(b.String(), "\n")

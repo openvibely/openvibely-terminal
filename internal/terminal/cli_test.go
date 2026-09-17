@@ -1284,7 +1284,8 @@ func TestCLIAnalyticsRejectsUnknownAndSurplusOperandsBeforeRequests(t *testing.T
 				c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
 				var out bytes.Buffer
 				err := RunCLI(c, &out, "demo", tc.args, false, jsonOutput)
-				if err == nil || !strings.Contains(err.Error(), "usage: analytics [usage|rates|agents|frequent|failures|skills|trends]") {
+				wantUsage := "usage: analytics [" + strings.Join(analyticsSectionNames(analyticsSections), "|") + "]"
+				if err == nil || !strings.Contains(err.Error(), wantUsage) {
 					t.Fatalf("invalid analytics invocation error = %v", err)
 				}
 				if out.Len() != 0 {

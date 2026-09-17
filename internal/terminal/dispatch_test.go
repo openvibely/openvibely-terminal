@@ -2491,7 +2491,8 @@ func TestAnalyticsInteractiveRejectsUnknownAndSurplusOperands(t *testing.T) {
 				t.Fatal("invalid analytics command left the model busy")
 			}
 			out := stripANSI(transcript(m))
-			if !strings.Contains(out, "usage: /analytics [usage|rates|agents|frequent|failures|skills|trends]") {
+			wantUsage := "usage: /analytics [" + strings.Join(analyticsSectionNames(analyticsSections), "|") + "]"
+			if !strings.Contains(out, wantUsage) {
 				t.Fatalf("invalid analytics command did not report canonical usage:\n%s", out)
 			}
 			if strings.Contains(out, "Usage & cost") {
