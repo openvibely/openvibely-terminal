@@ -2178,6 +2178,41 @@ func TestSelectorPrefillPrimesInput(t *testing.T) {
 	rec.mu.Unlock()
 }
 
+func TestTaskSelectorCompactMetadataSurvivesPrefill(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog" data-display-order="4">
+		<a href="/tasks/t-1" title="Refactor the API">Refactor the API</a>
+		<p class="line-clamp-2">Preserve this prompt for edit.</p>
+		<span class="badge">Goal</span><span class="badge">Sonnet</span>
+	</div>
+	<div data-task-id="t-2" data-task-status="running" data-task-category="active">
+		<a href="/tasks/t-2" title="Ship the docs">Ship the docs</a>
+	</div>`
+	m, rec := dispatchModel(t, map[string]string{"/tasks": board})
+	m = runLine(t, m, "/tasks edit")
+	if !m.selectorActive || len(m.selectorItems) != 2 {
+		t.Fatalf("task selector = active:%t items:%d\n%s", m.selectorActive, len(m.selectorItems), transcript(m))
+	}
+	if got, want := m.selectorItems[0].detail, "backlog · pending"; got != want {
+		t.Fatalf("selector detail = %q, want %q", got, want)
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.reviewPrefillTask == nil {
+		t.Fatal("selector did not retain its resolved task")
+	}
+	if got := m.reviewPrefillTask.Prompt; got != "Preserve this prompt for edit." {
+		t.Fatalf("prefilled prompt = %q", got)
+	}
+	if got := m.reviewPrefillTask.Category; got != "backlog" || m.reviewPrefillTask.Status != "pending" {
+		t.Fatalf("prefilled state = category:%q status:%q", got, m.reviewPrefillTask.Status)
+	}
+	if !reflect.DeepEqual(m.reviewPrefillTask.Badges, []string{"Goal", "Sonnet"}) {
+		t.Fatalf("prefilled badges = %#v", m.reviewPrefillTask.Badges)
+	}
+	if rec.count("GET", "/api/tasks/reference-catalog") != 1 || rec.count("GET", "/tasks") != 0 {
+		t.Fatalf("selector requests = %s", rec.all())
+	}
+}
+
 func TestSelectorSpacePrefillPrimesInput(t *testing.T) {
 	cases := []struct {
 		name string

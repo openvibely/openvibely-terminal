@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
+	"golang.org/x/net/html"
 )
 
 // recorder is a stub backend that records the requests commands make.
@@ -116,7 +118,82 @@ func (r *recorder) all() string {
 	return strings.Join(r.calls, "\n")
 }
 
-// dispatchModel wires a model to a recording server with a project selected.
+func compactTaskCatalogForTest(board string) string {
+	return compactTaskCatalogForProjectTest(board, "p1")
+}
+
+func compactTaskCatalogForProjectTest(board, projectID string) string {
+	if projectID == "" {
+		projectID = "p1"
+	}
+	root, err := html.Parse(strings.NewReader(board))
+	if err != nil {
+		return `{"tasks":[]}`
+	}
+	var tasks []client.Task
+	seen := map[string]bool{}
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.ElementNode {
+			id, category := testHTMLAttr(node, "data-task-id"), testHTMLAttr(node, "data-task-category")
+			if id != "" && category != "" && !seen[id] {
+				seen[id] = true
+				task := client.Task{
+					ID: id, ProjectID: projectID, Title: id, Category: category, Status: testHTMLAttr(node, "data-task-status"),
+					DisplayOrder: atoiSafe(testHTMLAttr(node, "data-display-order")),
+				}
+				var find func(*html.Node)
+				find = func(child *html.Node) {
+					if child.Type == html.ElementNode {
+						if child.Data == "a" && task.Title == id {
+							title := testHTMLAttr(child, "title")
+							if title != "" {
+								task.Title = title
+							} else {
+								href := testHTMLAttr(child, "href")
+								if strings.HasPrefix(href, "/tasks/"+id) && !strings.Contains(href, "tab=") {
+									task.Title = strings.TrimSpace(client.NodeText(child))
+								}
+							}
+						}
+						if child.Data == "span" && strings.Contains(testHTMLAttr(child, "class"), "badge") {
+							badge := strings.TrimSpace(client.NodeText(child))
+							if badge != "" && !slices.Contains(task.Badges, badge) {
+								task.Badges = append(task.Badges, badge)
+							}
+						}
+						if child.Data == "p" && strings.Contains(testHTMLAttr(child, "class"), "line-clamp") && task.Prompt == "" {
+							task.Prompt = strings.TrimSpace(client.NodeText(child))
+						}
+					}
+					for nested := child.FirstChild; nested != nil; nested = nested.NextSibling {
+						find(nested)
+					}
+				}
+				find(node)
+				tasks = append(tasks, task)
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	encoded, _ := json.Marshal(struct {
+		Tasks []client.Task `json:"tasks"`
+	}{Tasks: tasks})
+	return string(encoded)
+}
+
+func testHTMLAttr(node *html.Node, key string) string {
+	for _, attr := range node.Attr {
+		if attr.Key == key {
+			return attr.Val
+		}
+	}
+	return ""
+}
+
 func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 	t.Helper()
 	rec := &recorder{}
@@ -130,8 +207,26 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 		if !ok {
 			body, ok = bodies[r.URL.Path]
 		}
+		compactCatalog := false
+		if !ok && r.URL.Path == "/api/tasks/reference-catalog" {
+			board, boardOK := bodies["GET /tasks"]
+			if !boardOK {
+				board, boardOK = bodies["/tasks"]
+			}
+			if boardOK {
+				body, ok = compactTaskCatalogForTest(board), true
+				compactCatalog = true
+			} else {
+				body, ok = `{"tasks":[]}`, true
+				compactCatalog = true
+			}
+		}
 		if ok {
-			w.Header().Set("Content-Type", "text/html")
+			if compactCatalog || strings.HasPrefix(strings.TrimSpace(body), "{") || strings.HasPrefix(strings.TrimSpace(body), "[") {
+				w.Header().Set("Content-Type", "application/json")
+			} else {
+				w.Header().Set("Content-Type", "text/html")
+			}
 			_, _ = w.Write([]byte(body))
 			return
 		}
@@ -1247,8 +1342,13 @@ func TestTasksShowCanonicalFullIDLargeBoardPerformance(t *testing.T) {
 	}
 
 	var boardRequests atomic.Int32
+	var catalogRequests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			catalogRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"tasks":[{"id":"%s","project_id":"p1","title":"Target large task","category":"backlog","status":"pending"}]}`, taskID)
 		case "/tasks":
 			boardRequests.Add(1)
 			time.Sleep(20 * time.Millisecond)
@@ -1273,31 +1373,29 @@ func TestTasksShowCanonicalFullIDLargeBoardPerformance(t *testing.T) {
 		m.selectedID, m.selectedName = "p1", "demo"
 		_ = runLine(t, m, "/tasks show "+ref)
 	}
-	measure := func(ref string, runs int) (time.Duration, int32) {
-		before := boardRequests.Load()
+	measure := func(ref string, runs int) (time.Duration, int32, int32) {
+		beforeBoards := boardRequests.Load()
+		beforeCatalogs := catalogRequests.Load()
 		start := time.Now()
 		for i := 0; i < runs; i++ {
 			runShow(ref)
 		}
-		return time.Since(start), boardRequests.Load() - before
+		return time.Since(start), boardRequests.Load() - beforeBoards, catalogRequests.Load() - beforeCatalogs
 	}
 
 	const runs = 3
-	directTime, directBoards := measure(taskID, runs)
-	boardTime, fuzzyBoards := measure("Target large task", runs)
-	if directBoards != 0 || fuzzyBoards != runs {
-		t.Fatalf("board request evidence: direct=%d fuzzy=%d, want 0 and %d", directBoards, fuzzyBoards, runs)
+	directTime, directBoards, directCatalogs := measure(taskID, runs)
+	compactTime, compactBoards, compactCatalogs := measure("Target large task", runs)
+	if directBoards != 0 || directCatalogs != 0 {
+		t.Fatalf("canonical full-ID routing changed: board=%d catalog=%d, want both 0", directBoards, directCatalogs)
 	}
-	if directTime*5 > boardTime*4 {
-		t.Fatalf("large-board timing improved less than 20%%: direct=%v board=%v", directTime, boardTime)
+	if compactBoards != 0 || compactCatalogs != runs {
+		t.Fatalf("reference routing made unexpected requests: board=%d catalog=%d, want board=0 catalog=%d", compactBoards, compactCatalogs, runs)
 	}
 
 	directAllocs := testing.AllocsPerRun(3, func() { runShow(taskID) })
-	boardAllocs := testing.AllocsPerRun(3, func() { runShow("Target large task") })
-	if directAllocs*5 > boardAllocs*4 {
-		t.Fatalf("large-board allocations improved less than 20%%: direct=%.0f board=%.0f", directAllocs, boardAllocs)
-	}
-	t.Logf("large-board evidence: board requests %d -> %d; elapsed %v -> %v; allocations %.0f -> %.0f", fuzzyBoards, directBoards, boardTime, directTime, boardAllocs, directAllocs)
+	compactAllocs := testing.AllocsPerRun(3, func() { runShow("Target large task") })
+	t.Logf("large-board routing evidence: board requests canonical=%d compact=%d; catalog requests canonical=%d compact=%d; elapsed canonical=%v compact=%v; allocations canonical=%.0f compact=%.0f", directBoards, compactBoards, directCatalogs, compactCatalogs, directTime, compactTime, directAllocs, compactAllocs)
 }
 
 func TestTasksShowCanonicalFullIDRejectsForeignMetadataWithoutFallback(t *testing.T) {
@@ -1352,7 +1450,7 @@ func TestTasksShowUnknownCanonicalFullIDDoesNotScanBoard(t *testing.T) {
 	}
 }
 
-func TestTasksShowNoncanonicalReferencesKeepBoardResolution(t *testing.T) {
+func TestTasksShowNoncanonicalReferencesUseCompactResolution(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
 	board := `<div data-task-id="` + taskID + `" data-task-status="running" data-task-category="active"><a href="/tasks/` + taskID + `" title="Exact task">Exact task</a></div>`
 	for _, ref := range []string{"Exact task", taskID[:12], strings.ToUpper(taskID)} {
@@ -1364,8 +1462,8 @@ func TestTasksShowNoncanonicalReferencesKeepBoardResolution(t *testing.T) {
 				"/tasks/" + taskID + "/changes": `<div>changes</div>`,
 			})
 			m = runLine(t, m, "/tasks show "+ref)
-			if rec.count("GET", "/tasks") != 1 {
-				t.Fatalf("noncanonical ref %q did not retain board matching:\n%s", ref, rec.all())
+			if rec.count("GET", "/tasks") != 0 || rec.count("GET", "/api/tasks/reference-catalog") != 1 {
+				t.Fatalf("noncanonical ref %q did not use one compact lookup:\n%s", ref, rec.all())
 			}
 			if strings.Contains(stripANSI(transcript(m)), "error:") {
 				t.Fatalf("noncanonical ref failed:\n%s", transcript(m))
@@ -1379,7 +1477,7 @@ func TestTasksRunCanonicalFullIDStillUsesBoard(t *testing.T) {
 	board := `<div data-task-id="` + taskID + `" data-task-status="pending" data-task-category="backlog"><a href="/tasks/` + taskID + `" title="Exact task">Exact task</a></div>`
 	m, rec := dispatchModel(t, map[string]string{"/tasks": board})
 	m = runLine(t, m, "/tasks run "+taskID)
-	if rec.count("GET", "/tasks") != 2 || rec.count("POST", "/tasks/"+taskID+"/run") != 1 {
+	if rec.count("GET", "/tasks") != 1 || rec.count("GET", "/api/tasks/reference-catalog") != 1 || rec.count("POST", "/tasks/"+taskID+"/run") != 1 {
 		t.Fatalf("non-show action changed behavior:\n%s", rec.all())
 	}
 }
@@ -1493,6 +1591,11 @@ func TestTasksShowSurfacesLazyFailuresAndPartialOutput(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/tasks/reference-catalog" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, compactTaskCatalogForTest(taskBoardHTML))
+					return
+				}
 				if r.URL.Path == tc.failedPath {
 					w.WriteHeader(http.StatusInternalServerError)
 					_, _ = w.Write([]byte(tc.failedBody))
@@ -1555,6 +1658,11 @@ func TestTasksShowSurfacesLazyFailuresAndPartialOutput(t *testing.T) {
 
 func TestTasksShowLazyAuthFailureRemainsVisibleAndMarksSession(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tasks/reference-catalog" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, compactTaskCatalogForTest(taskBoardHTML))
+			return
+		}
 		switch r.URL.Path {
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
@@ -1609,6 +1717,11 @@ func TestTasksShowLazyAuthFailureRemainsVisibleAndMarksSession(t *testing.T) {
 
 func TestTasksShowSuccessfulEmptyLazyFragmentRendersEmptyState(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tasks/reference-catalog" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, compactTaskCatalogForTest(taskBoardHTML))
+			return
+		}
 		switch r.URL.Path {
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
@@ -1782,6 +1895,11 @@ func TestTasksLifecycleRejectsAmbiguousTaskAndExecutionRefs(t *testing.T) {
 
 func TestTasksLifecycleEventBackendError(t *testing.T) {
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tasks/reference-catalog" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(taskBoardHTML)))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/tasks":
@@ -3184,6 +3302,9 @@ func TestTaskSteerUsesScopedActiveTurnAndReportsPendingInput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests = append(requests, r.Method+" "+r.URL.RequestURI())
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 			_, _ = fmt.Fprint(w, board)
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
@@ -3318,6 +3439,9 @@ func TestTaskSteerConflictSanitizesBackendError(t *testing.T) {
 			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, compactTaskCatalogForTest(board))
 			case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 				_, _ = fmt.Fprint(w, board)
 			case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
@@ -3409,6 +3533,9 @@ func TestTaskSteerNonConflictSanitizesBackendError(t *testing.T) {
 			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, compactTaskCatalogForTest(board))
 			case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 				_, _ = fmt.Fprint(w, board)
 			case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
@@ -3486,6 +3613,9 @@ func TestTaskSteerNoActiveResponseDoesNotPostOrFallback(t *testing.T) {
 	steerPosts := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 			_, _ = fmt.Fprint(w, board)
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
@@ -3522,6 +3652,9 @@ func TestTaskSteerMissingActiveTurnIDDoesNotPostOrFallback(t *testing.T) {
 	steerPosts := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 			_, _ = fmt.Fprint(w, board)
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
@@ -3645,6 +3778,9 @@ func TestTaskGoalLifecycleRejectsUnresolvableReferencesBeforeMutation(t *testing
 func TestTaskGoalLifecycleFailureDoesNotClaimSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(taskBoardHTML)))
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(taskBoardHTML))
@@ -3899,12 +4035,12 @@ func TestScheduleMutationsUseExactSelectedProjectForDirectAndPickerPaths(t *test
 			var mutations int
 			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				switch {
-				case tc.needsTasks && r.Method == http.MethodGet && r.URL.Path == "/tasks":
+				case tc.needsTasks && r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
 					if got := r.URL.Query().Get("project_id"); got != projectB {
 						t.Errorf("task resolution project_id = %q, want %q", got, projectB)
 					}
-					w.Header().Set("Content-Type", "text/html")
-					_, _ = w.Write([]byte(taskBoardHTML))
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(compactTaskCatalogForProjectTest(taskBoardHTML, projectB)))
 				case r.Method == http.MethodGet && r.URL.Path == "/schedule":
 					if got := r.URL.Query().Get("project_id"); got != projectB {
 						t.Errorf("schedule read project_id = %q, want %q", got, projectB)
@@ -4142,9 +4278,9 @@ func TestScheduleMutationsKeepStatusWhenRefreshFails(t *testing.T) {
 				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 					rec.recordURL(r.Method, r.URL.RequestURI())
 					switch {
-					case tc.needsTaskBoard && r.Method == http.MethodGet && r.URL.Path == "/tasks":
-						w.Header().Set("Content-Type", "text/html")
-						_, _ = w.Write([]byte(taskBoardHTML))
+					case tc.needsTaskBoard && r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(compactTaskCatalogForTest(taskBoardHTML)))
 					case r.Method == http.MethodGet && r.URL.Path == "/schedule":
 						scheduleGET := scheduleGETs.Add(1)
 						if got := r.URL.Query().Get("project_id"); got != "p1" {
@@ -4268,6 +4404,9 @@ func TestScheduleMutationsSurfaceActionFailures(t *testing.T) {
 			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 				rec.recordURL(r.Method, r.URL.RequestURI())
 				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = fmt.Fprint(w, compactTaskCatalogForTest(taskBoardHTML))
 				case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 					w.Header().Set("Content-Type", "text/html")
 					_, _ = w.Write([]byte(taskBoardHTML))
@@ -6814,15 +6953,13 @@ func TestRefreshFailureAfterMutationIsSwallowed(t *testing.T) {
 	var taskGETs int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == "GET" && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(taskBoardHTML)))
 		case r.Method == "GET" && r.URL.Path == "/tasks":
 			taskGETs++
-			if taskGETs > 1 {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte(`{"error":"refresh failed"}`))
-				return
-			}
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(taskBoardHTML))
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"refresh failed"}`))
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
@@ -12704,6 +12841,9 @@ func dispatchProjectReviewModel(t *testing.T) (Model, *recorder) {
 
 		w.Header().Set("Content-Type", "text/html")
 		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForProjectTest(projectReviewBoardHTML(), "p2")))
 		case "/tasks":
 			if got := r.URL.Query().Get("project_id"); got != "p2" {
 				t.Errorf("task board project_id = %q, want p2", got)
@@ -12905,8 +13045,11 @@ func TestTaskReviewReadPathsHaveEquivalentPlainOutputAndSingleFetch(t *testing.T
 			})
 			m = runLine(t, m, tc.line)
 
-			if got := rec.count("GET", "/tasks"); got != 1 {
-				t.Fatalf("task resolution should make exactly one board request, got %d:\n%s", got, rec.all())
+			if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+				t.Fatalf("task resolution should make exactly one compact catalog request, got %d:\n%s", got, rec.all())
+			}
+			if got := rec.count("GET", "/tasks"); got != 0 {
+				t.Fatalf("task resolution must not make a board request, got %d:\n%s", got, rec.all())
 			}
 			if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
 				t.Fatalf("review display should make exactly one review request, got %d:\n%s", got, rec.all())
@@ -12978,8 +13121,10 @@ func TestTaskReviewReadPathsHaveEquivalentJSONOutputAndCanonicalRouting(t *testi
 				if !rec.sawQuery("GET /tasks/" + taskID + "/reviews?project_id=p1") {
 					t.Fatalf("canonical review request was not project scoped: %v", rec.urlsSnapshot())
 				}
-			} else if got := rec.count("GET", "/tasks"); got != 1 {
-				t.Fatalf("ordinary review resolution should make exactly one board request, got %d:\n%s", got, rec.all())
+			} else if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+				t.Fatalf("ordinary review resolution should make exactly one compact catalog request, got %d:\n%s", got, rec.all())
+			} else if got := rec.count("GET", "/tasks"); got != 0 {
+				t.Fatalf("ordinary review resolution must not make a board request, got %d:\n%s", got, rec.all())
 			}
 		})
 	}
@@ -13022,6 +13167,9 @@ func dispatchModelWithReviewError(t *testing.T) (Model, *recorder) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.recordURL(r.Method, r.URL.RequestURI())
 		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(taskBoardHTML)))
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(taskBoardHTML))
@@ -13166,16 +13314,22 @@ func TestTasksReviewsAddPickerPrefillsAndSubmitsOneComment(t *testing.T) {
 	if got, want := m.input.Value(), "/tasks reviews add t-1 "; got != want {
 		t.Fatalf("prefilled input = %q, want %q", got, want)
 	}
-	if got := rec.count("GET", "/tasks"); got != 1 {
-		t.Fatalf("picker selection must reuse its one task-list lookup, got %d requests; calls:\n%s", got, rec.all())
+	if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+		t.Fatalf("picker selection must reuse its one compact catalog lookup, got %d requests; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("picker selection must not fetch the full board, got %d requests; calls:\n%s", got, rec.all())
 	}
 	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 0 {
 		t.Fatalf("picker selection must not submit before operands, got %d POSTs", got)
 	}
 
 	m = runLine(t, m, "internal/client/tasks.go:42 Needs error handling")
-	if got := rec.count("GET", "/tasks"); got != 1 {
-		t.Fatalf("picker submission must not resolve the selected task again, got %d task-list requests; calls:\n%s", got, rec.all())
+	if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+		t.Fatalf("picker submission must not resolve the selected task again, got %d compact catalog requests; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("picker submission must not fetch the full board, got %d requests; calls:\n%s", got, rec.all())
 	}
 	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
 		t.Fatalf("expected exactly one review submission, got %d; calls:\n%s", got, rec.all())

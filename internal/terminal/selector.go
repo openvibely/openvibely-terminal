@@ -506,15 +506,20 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // direct-action items, the already-resolved resource is passed to its callback.
 func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix string, it selectorItem) (tea.Model, tea.Cmd) {
 	line := "/" + command + " " + it.ref
+	m = m.clearReviewPrefill()
+	if it.resolvedTask != nil {
+		m.reviewPrefillTask = it.resolvedTask
+		m.reviewPrefillTaskRef = it.ref
+		m.reviewPrefillProjectID = m.selectedID
+		if prefill {
+			m.reviewPrefillInputPrefix = line + prefillSuffix
+		}
+	}
 	if prefill {
-		m = m.clearReviewPrefill()
 		if prefillSuffix == "" {
 			prefillSuffix = " "
 		}
-		if command == "tasks reviews add" && it.resolvedTask != nil {
-			m.reviewPrefillTask = it.resolvedTask
-			m.reviewPrefillTaskRef = it.ref
-			m.reviewPrefillProjectID = m.selectedID
+		if it.resolvedTask != nil {
 			m.reviewPrefillInputPrefix = line + prefillSuffix
 		}
 		m.input.SetValue(line + prefillSuffix)

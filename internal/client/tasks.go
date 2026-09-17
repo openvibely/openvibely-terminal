@@ -8,7 +8,9 @@ package client
 // web UI posts to.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -264,6 +266,78 @@ func (c *Client) ListTasks(ctx context.Context, projectID string) ([]Task, error
 		return nil, err
 	}
 	return parseTaskCards(root, projectID), nil
+}
+
+// ListTaskReferences fetches the complete compact task catalog for one project.
+// The reference-catalog route is a JSON-only projection of Task: it includes the
+// metadata needed by terminal selectors, matching, and downstream actions, but
+// does not render the full kanban board or its controls.
+//
+// The endpoint accepts either the documented {"tasks": [...]} envelope or a
+// bare task array so clients remain compatible with servers that expose the
+// same projection as a direct JSON list.
+func (c *Client) ListTaskReferences(ctx context.Context, projectID string) ([]Task, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("project ID is required for task references")
+	}
+
+	var raw json.RawMessage
+	const path = "/api/tasks/reference-catalog"
+	if err := c.getJSON(ctx, path+query("project_id", projectID), &raw); err != nil {
+		return nil, err
+	}
+
+	tasks, err := decodeTaskReferenceCatalog(raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, task := range tasks {
+		if strings.TrimSpace(task.ID) == "" || strings.TrimSpace(task.ProjectID) == "" || task.ProjectID != projectID {
+			return nil, fmt.Errorf("invalid task reference catalog response")
+		}
+	}
+	if tasks == nil {
+		tasks = make([]Task, 0)
+	}
+	return tasks, nil
+}
+
+func decodeTaskReferenceCatalog(raw json.RawMessage) ([]Task, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("decoding task reference catalog: empty response")
+	}
+	if string(trimmed) == "null" {
+		return make([]Task, 0), nil
+	}
+	if trimmed[0] == '[' {
+		var tasks []Task
+		if err := json.Unmarshal(trimmed, &tasks); err != nil {
+			return nil, fmt.Errorf("decoding task reference catalog: %w", err)
+		}
+		return tasks, nil
+	}
+	if trimmed[0] != '{' {
+		return nil, fmt.Errorf("decoding task reference catalog: expected JSON array or object")
+	}
+	var envelope struct {
+		Tasks json.RawMessage `json:"tasks"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return nil, fmt.Errorf("decoding task reference catalog: %w", err)
+	}
+	if len(envelope.Tasks) == 0 {
+		return nil, fmt.Errorf("decoding task reference catalog: missing tasks")
+	}
+	if string(bytes.TrimSpace(envelope.Tasks)) == "null" {
+		return make([]Task, 0), nil
+	}
+	var tasks []Task
+	if err := json.Unmarshal(envelope.Tasks, &tasks); err != nil {
+		return nil, fmt.Errorf("decoding task reference catalog: %w", err)
+	}
+	return tasks, nil
 }
 
 // parseTaskCards extracts tasks from rendered kanban cards.

@@ -82,8 +82,11 @@ func TestRunningOpenTaskRefreshesAfterSteeringMutation(t *testing.T) {
 	var steerForm url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(strings.Replace(taskBoardHTML, `data-task-status="pending"`, `data-task-status="running"`, 1))))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
-			_, _ = w.Write([]byte(strings.Replace(taskBoardHTML, `data-task-status="pending"`, `data-task-status="running"`, 1)))
+			t.Fatalf("task reference lookup fetched full board")
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/thread":
 			threadGets++
 			if r.URL.Query().Get("project_id") != "p1" {
@@ -947,11 +950,17 @@ func TestTaskOpenRequestErrorsPreserveActiveReply(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var fail bool
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if fail && ((tt.phase == "tasks" && r.URL.Path == "/tasks") || (tt.phase == "thread" && r.URL.Path == "/tasks/t-2/thread")) {
+				if fail && ((tt.phase == "tasks" && r.URL.Path == "/api/tasks/reference-catalog") || (tt.phase == "thread" && r.URL.Path == "/tasks/t-2/thread")) {
 					w.WriteHeader(tt.status)
 					return
 				}
 				switch r.URL.Path {
+				case "/api/tasks/reference-catalog":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(compactTaskCatalogForTest(`<div>
+						<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>
+						<div data-task-id="t-2" data-task-status="running" data-task-category="active"><a href="/tasks/t-2" title="Other">Other</a></div>
+					</div>`)))
 				case "/tasks":
 					_, _ = w.Write([]byte(`<div>
 						<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>
@@ -1108,8 +1117,10 @@ func TestInteractiveTaskReplyIdentitylessFallbackFailureIsExplicit(t *testing.T)
 			threadGets := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(compactTaskCatalogForTest(`<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`)))
 				case r.URL.Path == "/tasks":
-					_, _ = w.Write([]byte(`<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`))
 				case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread":
 					_, _ = w.Write([]byte(`<div data-task-id="t-1" data-input-mode="swarm"></div>`))
 				case r.URL.Path == "/tasks/t-1/thread":
@@ -1152,8 +1163,10 @@ func TestInteractiveTaskReplyIdentitylessFallbackTransportFailureIsExplicit(t *t
 	threadGets := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(`<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`)))
 		case r.URL.Path == "/tasks":
-			_, _ = w.Write([]byte(`<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`))
 		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/thread":
 			_, _ = w.Write([]byte(`<div data-task-id="t-1" data-input-mode="swarm"></div>`))
 		case r.URL.Path == "/tasks/t-1/thread":

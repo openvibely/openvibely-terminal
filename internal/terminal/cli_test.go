@@ -62,6 +62,14 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 			_, _ = w.Write([]byte(body))
 			return
 		}
+		if r.URL.Path == "/api/tasks/reference-catalog" {
+			if board, ok := bodies["/tasks"]; ok {
+				w.Header().Set("Content-Type", "application/json")
+				projectID := r.URL.Query().Get("project_id")
+				_, _ = w.Write([]byte(compactTaskCatalogForProjectTest(board, projectID)))
+				return
+			}
+		}
 		if strings.HasPrefix(r.URL.Path, "/channels/") && strings.HasSuffix(r.URL.Path, "/test") {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<div class="text-success"><span>Connection successful!</span></div>`))
@@ -2071,7 +2079,7 @@ func TestCLICanceledForcedTaskDeleteDoesNotMutateAfterLookupRelease(t *testing.T
 		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
 			startOnce.Do(func() { close(lookupStarted) })
 			go func() {
 				<-r.Context().Done()
@@ -2079,8 +2087,10 @@ func TestCLICanceledForcedTaskDeleteDoesNotMutateAfterLookupRelease(t *testing.T
 			}()
 			<-releaseLookup
 			defer close(lookupDone)
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = io.WriteString(w, taskBoard)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, compactTaskCatalogForTest(taskBoard))
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+			t.Fatalf("forced delete lookup fetched full board")
 		case r.Method == http.MethodDelete && r.URL.Path == "/tasks/t-1":
 			deleteMu.Lock()
 			deleteCalls++
@@ -4161,6 +4171,9 @@ func TestCLITaskReplyRecoversMissedPromotionThroughStatus(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/projects":
 			fmt.Fprint(w, cliProjects)
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case "/tasks":
 			fmt.Fprint(w, board)
 		case "/events/live":
@@ -4248,8 +4261,9 @@ func TestCLITaskReplySwarmParentAcceptedWithoutExecutionIdentity(t *testing.T) {
 				switch r.URL.Path {
 				case "/api/projects":
 					fmt.Fprint(w, cliProjects)
-				case "/tasks":
-					fmt.Fprint(w, board)
+				case "/api/tasks/reference-catalog":
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, compactTaskCatalogForTest(board))
 				case "/tasks/swarm-1/thread":
 					posts++
 					if r.URL.Query().Get("project_id") != "p1" || r.FormValue("message") != "continue coordination" {
@@ -4296,6 +4310,9 @@ func TestCLITaskReplyStreamsScopedExecution(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/projects":
 			fmt.Fprint(w, cliProjects)
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case "/tasks":
 			fmt.Fprint(w, board)
 		case "/events/live":
@@ -4372,6 +4389,9 @@ func TestCLITaskReplyQueuedPromotionUsesAuthoritativeStatus(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/projects":
 			fmt.Fprint(w, cliProjects)
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case "/tasks":
 			fmt.Fprint(w, board)
 		case "/tasks/task-1/thread":
@@ -4430,6 +4450,9 @@ func TestCLITaskSteerJSONAcknowledgementAndConflict(t *testing.T) {
 				case "/api/projects":
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = io.WriteString(w, cliProjects)
+				case "/api/tasks/reference-catalog":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, compactTaskCatalogForTest(board))
 				case "/tasks":
 					w.Header().Set("Content-Type", "text/html")
 					_, _ = io.WriteString(w, board)
@@ -8008,7 +8031,7 @@ func TestCLILifecycleUsesRequestedProjectScope(t *testing.T) {
 		t.Fatalf("tasks lifecycle for selected project failed: %v", err)
 	}
 	for _, want := range []string{
-		"GET /tasks?project_id=p2",
+		"GET /api/tasks/reference-catalog?project_id=p2",
 		"GET /api/tasks/t-1/lifecycle-executions?project_id=p2",
 		"GET /api/lifecycle-executions/exec-1/events?project_id=p2",
 	} {
@@ -8246,8 +8269,11 @@ func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing
 					if tc.wantCount == 1 && (reviews[0].ID != "rc-1" || reviews[0].FilePath != "internal/client/tasks.go" || reviews[0].LineNumber != 42) {
 						t.Fatalf("%v returned unexpected review: %+v", path.name, reviews[0])
 					}
-					if got := rec.count("GET", "/tasks"); got != 1 {
-						t.Fatalf("%v should make exactly one board request, got %d:\n%s", path.name, got, rec.all())
+					if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+						t.Fatalf("%v should make exactly one compact catalog request, got %d:\n%s", path.name, got, rec.all())
+					}
+					if got := rec.count("GET", "/tasks"); got != 0 {
+						t.Fatalf("%v must not make a board request, got %d:\n%s", path.name, got, rec.all())
 					}
 					if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
 						t.Fatalf("%v should make exactly one review request, got %d:\n%s", path.name, got, rec.all())
@@ -8272,6 +8298,9 @@ func cliReviewErrorServer(t *testing.T) (*client.Client, *recorder) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(cliProjects))
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(taskBoardHTML)))
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(taskBoardHTML))
@@ -8311,8 +8340,11 @@ func TestCLIJSONTaskReviewReadPathsPropagateFetchErrorsIdentically(t *testing.T)
 			if err == nil || err.Error() != wantError {
 				t.Fatalf("%v error = %v, want %q; output: %s", path.name, err, wantError, out.String())
 			}
-			if got := rec.count("GET", "/tasks"); got != 1 {
-				t.Fatalf("%v should make exactly one board request, got %d:\n%s", path.name, got, rec.all())
+			if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+				t.Fatalf("%v should make exactly one compact catalog request, got %d:\n%s", path.name, got, rec.all())
+			}
+			if got := rec.count("GET", "/tasks"); got != 0 {
+				t.Fatalf("%v must not make a board request, got %d:\n%s", path.name, got, rec.all())
 			}
 			if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
 				t.Fatalf("%v should make exactly one review request, got %d:\n%s", path.name, got, rec.all())
@@ -9708,6 +9740,9 @@ func TestCLITaskGoalPauseFailureHasNoSuccessOutput(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(cliProjects))
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(taskBoardHTML)))
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(taskBoardHTML))
