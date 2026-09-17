@@ -244,6 +244,11 @@ type Model struct {
 	selectorFilteredForLower string
 	selectorWarnings         []string
 	selectorCursor           int
+	selectorMulti            bool
+	selectorSelected         map[string]struct{}
+	selectorMultiDispatch    selectorMultiDispatch
+	webhookBulkLookupCancel  context.CancelFunc
+	webhookBulkLookupID      uint64
 	pendingCommand           string // e.g. "tasks open"; re-dispatched with the chosen ref
 	selectorPrefill          bool   // prime the input instead of dispatching
 	selectorPrefillSuffix    string // appended after the chosen ref when priming input
@@ -742,11 +747,20 @@ func (m *Model) stopPersonalityBulkLookup() {
 	}
 }
 
+func (m *Model) cancelWebhookBulkLookup() {
+	if m.webhookBulkLookupCancel != nil {
+		m.webhookBulkLookupCancel()
+		m.webhookBulkLookupCancel = nil
+	}
+	m.webhookBulkLookupID = 0
+}
+
 // setActiveProject installs the selected project and invalidates all work tied
 // to the previous project before any replacement stream or command is started.
 func (m *Model) setActiveProject(project client.Project) bool {
 	changed := m.selectedID != project.ID
 	if changed {
+		m.cancelWebhookBulkLookup()
 		// Preserve accepted bytes before project invalidation makes a queued
 		// cadence render stale and resets the old project's stream state.
 		m.flushChatStreamOutput()
@@ -1253,6 +1267,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case webhookBulkTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case channelAccessRemovalTargetMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1399,6 +1417,7 @@ func (m *Model) Cleanup() {
 	m.invalidatePersonalityBulkLookup()
 	m.invalidateWorkersLive()
 	m.invalidateChatStream()
+	m.cancelWebhookBulkLookup()
 	if m.sseCancel != nil {
 		m.sseCancel()
 	}
@@ -1795,6 +1814,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // steering result belongs to a view that is no longer current
 		}
 		m.busy = false
+		if isWebhookBulkRefreshAuthError(msg.err) {
+			if strings.TrimSpace(msg.body) != "" {
+				m.append(entry{role: "result", head: msg.title, text: msg.body})
+			}
+			m.markAuthRequiredQuiet()
+			return m, nil
+		}
 		if msg.err != nil {
 			// Some commands can return useful partial output with an error.
 			// Keep that output visible before applying the existing auth,
@@ -1875,6 +1901,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return confirmWebhookMutation(m, msg.projectID, msg.action, msg.webhook)
+
+	case webhookBulkTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.lookupID != 0 && msg.lookupID != m.webhookBulkLookupID {
+			return m, nil
+		}
+		if msg.lookupID != 0 {
+			m.webhookBulkLookupCancel = nil
+			m.webhookBulkLookupID = 0
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		projectID := msg.projectID
+		if projectID == "" {
+			projectID = m.selectedID
+		}
+		return confirmWebhookBulkMutation(m, projectID, msg.webhooks)
 
 	case channelAccessRemovalTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
@@ -2429,6 +2479,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 	if m.loginActive {
 		return m, nil
 	}
+	m.cancelWebhookBulkLookup()
 	// Preserve accepted bytes before the login/session transition invalidates
 	// the queued cadence render. Unaccepted sends retain the clearing behavior
 	// below because they cannot be correlated after the session epoch changes.
@@ -2638,6 +2689,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "system", text: "cancelled"})
 			return m, nil
 		}
+		if m.webhookBulkLookupCancel != nil {
+			m.webhookBulkLookupCancel()
+			m.webhookBulkLookupCancel = nil
+			m.webhookBulkLookupID = 0
+			m.busy = false
+			m.input.SetValue("")
+			m.menu = nil
+			m.append(entry{role: "system", text: "cancelled"})
+			return m, nil
+		}
 		if len(m.menu) > 0 {
 			m.menu = nil
 			return m, nil
@@ -2778,6 +2839,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		}
 	}
 
+	m.cancelWebhookBulkLookup()
 	m.input.SetValue("")
 	m.menu = nil
 	commandInput := isSlashCommandInput(text)
@@ -3371,6 +3433,7 @@ func (m *Model) markAuthRequiredQuiet() {
 }
 
 func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
+	m.cancelWebhookBulkLookup()
 	// Preserve any accepted stream bytes before auth invalidation advances the
 	// stream generation and makes its queued cadence render stale.
 	m.flushChatStreamOutput()

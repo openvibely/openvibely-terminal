@@ -5578,7 +5578,7 @@ func channelMutationCompletionRules() []commandCompletion {
 
 func channelsCommand() command {
 	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}
-	webhookActions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
+	webhookActions := []string{"list", "show", "create", "edit", "test", "rotate", "delete", "delete-bulk"}
 	completions := channelMutationCompletionRules()
 	completions = append(completions,
 		commandCompletion{after: []string{"access"}, values: channelAccessProviders},
@@ -5594,7 +5594,7 @@ func channelsCommand() command {
 	completions = append(completions, webhookCompletionRules("webhooks")...)
 	return command{
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
-		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"targets", "show"}, {"targets", "edit"}, {"targets", "test"}, {"targets", "remove"}, {"access", "telegram", "remove"}, {"access", "slack", "remove"}, {"access", "discord", "remove"}, {"access", "x", "remove"}, {"access", "email", "remove"}, {"access", "github", "remove"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}},
+		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"targets", "show"}, {"targets", "edit"}, {"targets", "test"}, {"targets", "remove"}, {"access", "telegram", "remove"}, {"access", "slack", "remove"}, {"access", "discord", "remove"}, {"access", "x", "remove"}, {"access", "email", "remove"}, {"access", "github", "remove"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}, {"webhooks", "delete-bulk"}},
 		completions:   completions,
 		desc:          "manage GitHub, Slack, Telegram, Discord, X, and Email integrations",
 		actionUsages: []commandActionUsage{
@@ -5625,6 +5625,7 @@ func channelsCommand() command {
 			{action: "webhooks test", args: "<webhook>", description: "create a synthetic test task"},
 			{action: "webhooks rotate", args: "<webhook>", description: "rotate the webhook secret (confirmation required)"},
 			{action: "webhooks delete", args: "<webhook>", description: "delete a webhook (confirmation required)"},
+			{action: "webhooks delete-bulk", args: "<webhook>...", description: "delete selected webhooks (confirmation required)"},
 		},
 		usage: []string{
 			"options: --token, --rich-messages, --auth-mode, --pat, --app-id, --app-slug, --private-key, --api-endpoint",
@@ -5639,6 +5640,7 @@ func channelsCommand() command {
 			"Slack requires client ID, client secret, and app token; manual mode requires --bot-token.",
 			"X requires --consumer-key, --consumer-secret, --access-token, and --access-token-secret; X poll interval must be 15 to 300 seconds.",
 			"Webhook options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents.",
+			"Bulk webhook deletion resolves every selected reference within the project before one request; use yes in the TUI or --force in CLI mode.",
 			"Access providers: Telegram accepts a numeric ID or username; Slack requires a Slack user ID; Discord requires a numeric ID; X requires a numeric ID and accepts an optional username; Email is normalized before it is authorized; GitHub accepts a normalized login and optional display name.",
 			"Outbound targets: targets add <platform> <destination> [--kind channel|user] [--name name] [--thread-id id] [--home] [--default-subject subject].",
 			"Outbound target references resolve only within the selected project; removal captures the canonical ID, then requires yes or --force.",
@@ -5672,6 +5674,7 @@ func channelsCommand() command {
 			"channels access email remove person@example.com",
 			`channels webhooks create "PagerDuty alerts" --priority 3`,
 			"channels webhooks test pager",
+			"channels webhooks delete-bulk pager build-hook",
 		},
 		validateArgs: validateChannelsArgs,
 		run: func(m Model, args []string) (Model, tea.Cmd) {
@@ -5812,6 +5815,59 @@ type webhookActionJSON struct {
 	Name   string `json:"name"`
 }
 
+// webhookBulkActionJSON is the stable machine-readable acknowledgement for a
+// project-scoped bulk delete. It intentionally contains no webhook metadata.
+type webhookBulkActionJSON struct {
+	Action  string `json:"action"`
+	Deleted int    `json:"deleted"`
+}
+
+// webhookBulkError keeps backend-controlled diagnostics safe for terminal and
+// CLI output while preserving the original typed error for auth/transport
+// classification.
+type webhookBulkError struct {
+	cause   error
+	message string
+}
+
+func (e *webhookBulkError) Error() string {
+	if e == nil {
+		return "webhook bulk operation failed"
+	}
+	return e.message
+}
+
+func (e *webhookBulkError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func safeWebhookBulkError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &webhookBulkError{cause: err, message: safeConnectionDiagnosticText(err.Error())}
+}
+
+// webhookBulkRefreshAuthError marks a successful deletion whose best-effort
+// refresh discovered an expired session. Its body remains useful success
+// output, while the model enters quiet authentication recovery without turning
+// the already-completed mutation into a failed command.
+type webhookBulkRefreshAuthError struct {
+	*webhookBulkError
+}
+
+func newWebhookBulkRefreshAuthError(err error) error {
+	return &webhookBulkRefreshAuthError{webhookBulkError: safeWebhookBulkError(err).(*webhookBulkError)}
+}
+
+func isWebhookBulkRefreshAuthError(err error) bool {
+	var refreshErr *webhookBulkRefreshAuthError
+	return errors.As(err, &refreshErr)
+}
+
 var webhookOptionNames = map[string]string{
 	"--name": "name", "--enabled": "enabled", "--priority": "priority", "--default-priority": "priority",
 	"--system-instructions": "system_instructions", "--title-template": "title_template", "--prompt-template": "prompt_template",
@@ -5918,7 +5974,7 @@ func validateWebhooksArgs(args []string) error {
 			return errors.New(webhookCommandUsage("list"))
 		}
 		return nil
-	case "show", "test", "rotate", "delete":
+	case "show", "test", "rotate", "delete", "delete-bulk":
 		return nil
 	case "create", "edit":
 		boundary := webhookOptionBoundary(rest)
@@ -5976,6 +6032,97 @@ func resolveWebhook(ctx context.Context, c *client.Client, projectID, ref string
 	return webhookResolution{webhook: webhook}, nil
 }
 
+// beginWebhookBulkLookup creates the model-owned context used by a bulk
+// reference or picker lookup. The request ID lets the model discard a result
+// after Esc even if the backend ignores context cancellation.
+func beginWebhookBulkLookup(m Model) (Model, context.Context, context.CancelFunc, uint64) {
+	m.cancelWebhookBulkLookup()
+	ctx, cancel := m.commandContext(cmdTimeout)
+	lookupID := nextProjectRequestID()
+	m.webhookBulkLookupCancel = cancel
+	m.webhookBulkLookupID = lookupID
+	return m, ctx, cancel, lookupID
+}
+
+// resolveWebhookBulkTargets resolves every reference before a bulk deletion
+// can be confirmed or sent. Canonical IDs use the scoped detail fast path;
+// ordinary references share one catalog lookup, and every failure stops before
+// any destructive request.
+func resolveWebhookBulkTargets(m Model, c *client.Client, projectID string, refs []string) (Model, tea.Cmd) {
+	m, ctx, cancel, lookupID := beginWebhookBulkLookup(m)
+	return m, func() tea.Msg {
+		defer cancel()
+		var (
+			catalog       []client.Webhook
+			catalogLoaded bool
+		)
+		loadCatalog := func() error {
+			if catalogLoaded {
+				return nil
+			}
+			var err error
+			catalog, err = c.ListWebhooks(ctx, projectID)
+			if err != nil {
+				return err
+			}
+			catalogLoaded = true
+			return nil
+		}
+		resolved := make([]client.Webhook, 0, len(refs))
+		seen := make(map[string]struct{}, len(refs))
+		for _, rawRef := range refs {
+			ref := strings.TrimSpace(rawRef)
+			if ref == "" {
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: errors.New("webhook reference must not be empty")}
+			}
+			var (
+				webhook client.Webhook
+				err     error
+			)
+			if isCanonicalWebhookID(ref) {
+				var detail *client.Webhook
+				detail, err = c.GetWebhook(ctx, projectID, ref)
+				if err == nil {
+					webhook = *detail
+				} else if client.IsNotFoundError(err) {
+					err = loadCatalog()
+					if err == nil {
+						webhook, err = matchRefWithDisplay(catalog, ref,
+							func(w client.Webhook) string { return w.ID },
+							func(w client.Webhook) string { return w.Name },
+							sanitizeAutomationDetailText)
+					}
+				} else {
+					return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: safeWebhookBulkError(err)}
+				}
+			} else {
+				err = loadCatalog()
+				if err == nil {
+					webhook, err = matchRefWithDisplay(catalog, ref,
+						func(w client.Webhook) string { return w.ID },
+						func(w client.Webhook) string { return w.Name },
+						sanitizeAutomationDetailText)
+				}
+			}
+			if err != nil {
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: safeWebhookBulkError(err)}
+			}
+			if strings.TrimSpace(webhook.ID) == "" || webhook.ProjectID != projectID {
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: fmt.Errorf("webhook %q does not belong to selected project", sanitizeAutomationDetailText(ref))}
+			}
+			if _, duplicate := seen[webhook.ID]; duplicate {
+				return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: fmt.Errorf("webhook %q was selected more than once", sanitizeAutomationDetailText(ref))}
+			}
+			seen[webhook.ID] = struct{}{}
+			resolved = append(resolved, webhook)
+		}
+		if len(resolved) == 0 {
+			return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, err: errors.New("select at least one webhook")}
+		}
+		return webhookBulkTargetMsg{lookupID: lookupID, projectID: projectID, webhooks: resolved}
+	}
+}
+
 func resolveWebhookMutation(c *client.Client, projectID, action, ref string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
@@ -6016,6 +6163,76 @@ func confirmWebhookMutation(m Model, projectID, action string, webhook client.We
 		cmd)
 }
 
+func webhookBulkDeleteConfirmation(webhooks []client.Webhook) string {
+	targets := make([]string, 0, len(webhooks))
+	for _, webhook := range webhooks {
+		name := strings.TrimSpace(sanitizeAutomationDetailText(webhook.Name))
+		id := strings.TrimSpace(sanitizeAutomationDetailText(webhook.ID))
+		switch {
+		case name != "" && id != "":
+			targets = append(targets, fmt.Sprintf("%q (%s)", name, id))
+		case id != "":
+			targets = append(targets, id)
+		case name != "":
+			targets = append(targets, fmt.Sprintf("%q", name))
+		default:
+			targets = append(targets, "(unknown webhook)")
+		}
+	}
+	noun := "webhooks"
+	if len(webhooks) == 1 {
+		noun = "webhook"
+	}
+	return fmt.Sprintf("Delete %d selected %s: %s? Type 'yes' to confirm or Esc to cancel.", len(webhooks), noun, strings.Join(targets, ", "))
+}
+
+func webhookBulkActionOutput(ctx context.Context, c *client.Client, projectID string, webhooks []client.Webhook) (string, error) {
+	ids := make([]string, 0, len(webhooks))
+	for _, webhook := range webhooks {
+		ids = append(ids, webhook.ID)
+	}
+	count, err := c.DeleteWebhooksBulk(ctx, projectID, ids)
+	if err != nil {
+		return "", safeWebhookBulkError(err)
+	}
+	if jsonMode {
+		return marshalJSON(webhookBulkActionJSON{Action: "delete-bulk", Deleted: count})
+	}
+	status := fmt.Sprintf("deleted %d webhooks", count)
+	webhooks, refreshErr := c.ListWebhooks(ctx, projectID)
+	if refreshErr != nil {
+		if client.IsAuthRequired(refreshErr) {
+			return status, newWebhookBulkRefreshAuthError(refreshErr)
+		}
+		return status, nil
+	}
+	return status + "\n\n" + renderWebhooks(webhooks), nil
+}
+
+func confirmWebhookBulkMutation(m Model, projectID string, webhooks []client.Webhook) (Model, tea.Cmd) {
+	if strings.TrimSpace(projectID) == "" || projectID != m.selectedID || len(webhooks) == 0 {
+		return m, errCmd("selected webhooks are no longer valid in the active project")
+	}
+	seen := make(map[string]struct{}, len(webhooks))
+	for _, webhook := range webhooks {
+		if strings.TrimSpace(webhook.ID) == "" || webhook.ProjectID != projectID {
+			return m, errCmd("selected webhook is no longer valid in the active project")
+		}
+		if _, duplicate := seen[webhook.ID]; duplicate {
+			return m, errCmd("a webhook was selected more than once")
+		}
+		seen[webhook.ID] = struct{}{}
+	}
+	captured := append([]client.Webhook(nil), webhooks...)
+	cmd := m.run("Webhooks", cmdTimeout, func(ctx context.Context) (string, error) {
+		return webhookBulkActionOutput(ctx, m.client, projectID, captured)
+	})
+	return confirmOr(m,
+		webhookBulkDeleteConfirmation(captured),
+		fmt.Sprintf("use --force to confirm deletion of %d selected webhooks", len(captured)),
+		cmd)
+}
+
 func webhookSelector(m Model, action string, prefill bool) (Model, tea.Cmd) {
 	c, projectID := m.client, m.selectedID
 	prefillSuffix := ""
@@ -6043,6 +6260,58 @@ func webhookSelector(m Model, action string, prefill bool) (Model, tea.Cmd) {
 		}
 		return items, nil
 	}))
+}
+
+func webhookBulkSelectorItem(webhook client.Webhook) selectorItem {
+	label := strings.ReplaceAll(sanitizeAutomationDetailText(webhook.Name), "\n", " ")
+	return selectorItem{
+		ref:             webhook.ID,
+		label:           label,
+		detail:          strings.ReplaceAll(sanitizeAutomationDetailText(webhook.Path), "\n", " "),
+		resolvedWebhook: &webhook,
+	}
+}
+
+func webhookBulkSelector(m Model) (Model, tea.Cmd) {
+	c, projectID := m.client, m.selectedID
+	dispatch := func(m Model, selected []selectorItem) (Model, tea.Cmd) {
+		if projectID != m.selectedID {
+			return m, errCmd("selected webhooks are no longer in the active project")
+		}
+		webhooks := make([]client.Webhook, 0, len(selected))
+		seen := make(map[string]struct{}, len(selected))
+		for _, item := range selected {
+			if item.resolvedWebhook == nil || strings.TrimSpace(item.resolvedWebhook.ID) == "" || item.resolvedWebhook.ProjectID != projectID {
+				return m, errCmd("selected webhook is no longer valid in the active project")
+			}
+			if _, duplicate := seen[item.resolvedWebhook.ID]; duplicate {
+				return m, errCmd("a webhook was selected more than once")
+			}
+			seen[item.resolvedWebhook.ID] = struct{}{}
+			webhooks = append(webhooks, *item.resolvedWebhook)
+		}
+		if len(webhooks) == 0 {
+			return m, errCmd("select at least one webhook")
+		}
+		return confirmWebhookBulkMutation(m, projectID, webhooks)
+	}
+	if cliMode {
+		return m, errCmd(webhookCommandUsage("delete-bulk"))
+	}
+	m, lookupCtx, lookupCancel, lookupID := beginWebhookBulkLookup(m)
+	return m, selectorForMulti(lookupCtx, lookupCancel, lookupID,
+		"Webhooks to delete", "channels webhooks delete-bulk", "no inbound webhooks configured", dispatch,
+		func(ctx context.Context) ([]selectorItem, error) {
+			webhooks, err := c.ListWebhooks(ctx, projectID)
+			if err != nil {
+				return nil, safeWebhookBulkError(err)
+			}
+			items := make([]selectorItem, 0, len(webhooks))
+			for _, webhook := range webhooks {
+				items = append(items, webhookBulkSelectorItem(webhook))
+			}
+			return items, nil
+		})
 }
 
 func renderWebhooks(webhooks []client.Webhook) string {
@@ -6122,19 +6391,20 @@ func webhookResolvedResult(ctx context.Context, c *client.Client, projectID, act
 }
 
 func webhooksCommand() command {
-	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
+	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete", "delete-bulk"}
 	return command{
 		name: "webhooks", aliases: []string{"inbound-webhooks"}, args: "[action] [webhook]", actions: actions,
 		completions:   webhookCompletionRules(),
-		selectorPaths: [][]string{{"show"}, {"edit"}, {"test"}, {"rotate"}, {"delete"}},
+		selectorPaths: [][]string{{"show"}, {"edit"}, {"test"}, {"rotate"}, {"delete"}, {"delete-bulk"}},
 		desc:          "Deprecated: use /channels webhooks (legacy alias retained for compatibility)",
 		hidden:        true,
 		actionUsages: []commandActionUsage{
-			{action: "", args: "[list|show <webhook>|create <name> [options]|edit <webhook> <options>|test <webhook>|rotate <webhook>|delete <webhook>]"},
+			{action: "", args: "[list|show <webhook>|create <name> [options]|edit <webhook> <options>|test <webhook>|rotate <webhook>|delete <webhook>|delete-bulk <webhook>...]"},
 			{action: "list", description: "deprecated alias for /channels webhooks list"}, {action: "show", args: "<webhook>", description: "deprecated alias for /channels webhooks show"},
 			{action: "create", args: "<name> [options]", description: "deprecated alias for /channels webhooks create"}, {action: "edit", args: "<webhook> <options>", description: "deprecated alias for /channels webhooks edit"},
 			{action: "test", args: "<webhook>", description: "deprecated alias for /channels webhooks test"}, {action: "rotate", args: "<webhook>", description: "deprecated alias for /channels webhooks rotate"},
 			{action: "delete", args: "<webhook>", description: "deprecated alias for /channels webhooks delete"},
+			{action: "delete-bulk", args: "<webhook>...", description: "deprecated alias for /channels webhooks delete-bulk"},
 		},
 		usage:        []string{"DEPRECATED: use /channels webhooks; inbound-webhooks is also retained as a deprecated alias"},
 		examples:     []string{`channels webhooks create "PagerDuty alerts" --priority 3`, `channels webhooks test pager`},
@@ -6144,7 +6414,7 @@ func webhooksCommand() command {
 }
 
 func runWebhooks(m Model, args []string) (Model, tea.Cmd) {
-	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete"}
+	actions := []string{"list", "show", "create", "edit", "test", "rotate", "delete", "delete-bulk"}
 	mm, noProject, ok := m.needProject()
 	if !ok {
 		return mm, noProject
@@ -6173,7 +6443,7 @@ func runWebhooks(m Model, args []string) (Model, tea.Cmd) {
 		options, _ = parseWebhookOptions(rest[boundary:])
 	}
 	ref := strings.TrimSpace(strings.Join(rest[:boundary], " "))
-	if ref == "" && action != "create" {
+	if ref == "" && action != "create" && action != "delete-bulk" {
 		return webhookSelector(m, action, action == "edit")
 	}
 	if action == "create" {
@@ -6189,6 +6459,12 @@ func runWebhooks(m Model, args []string) (Model, tea.Cmd) {
 			}
 			return "created webhook\n\n" + renderWebhookDetail(*created), nil
 		})
+	}
+	if action == "delete-bulk" {
+		if len(rest) == 0 {
+			return webhookBulkSelector(m)
+		}
+		return resolveWebhookBulkTargets(m, c, projectID, rest)
 	}
 	if action == "rotate" || action == "delete" {
 		return m, resolveWebhookMutation(c, projectID, action, ref)
@@ -7185,7 +7461,7 @@ func analyticsCommand() command {
 			"analytics usage                            token usage and cost by model",
 			"analytics rates                            success/failure rates",
 			"analytics agents                           average execution time by agent",
-			"analytics frequent                         most frequent tasks",
+			"analytics frequent                         backend-ranked top 12 most frequent tasks",
 			"analytics failures                         failed-task patterns",
 			"analytics skills                           skill usage and follow-through",
 			"analytics trends                           usage trends over time",

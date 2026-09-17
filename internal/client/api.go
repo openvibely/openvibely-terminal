@@ -120,8 +120,8 @@ func (c *Client) GetUsageAnalytics(ctx context.Context, projectID string) (*Usag
 
 // analyticsSlice is the shared fetch/decode helper for analytics endpoints that
 // return a JSON array. segment is the URL path segment after /api/analytics/.
-// A positive limit opts into the endpoint's bounded-result contract; zero keeps
-// the endpoint's full-array behavior.
+// A positive limit opts into the endpoint's bounded-result contract; zero omits
+// the parameter and lets the backend apply its endpoint default.
 func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID string, limit int) ([]T, error) {
 	var out []T
 	limitValue := ""
@@ -157,9 +157,19 @@ func (c *Client) GetAvgExecutionTimeByAgentWithLimit(ctx context.Context, projec
 	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID, limit)
 }
 
-// GetMostFrequentTasks fetches the most frequently executed tasks.
+// GetMostFrequentTasks fetches the complete most-frequently-executed task history.
+// It uses the backend's explicit limit=0 full-history contract. Callers that
+// render a bounded report should use GetMostFrequentTasksWithLimit.
 func (c *Client) GetMostFrequentTasks(ctx context.Context, projectID string) ([]TaskFrequency, error) {
-	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID, 0)
+	var out []TaskFrequency
+	err := c.getJSON(ctx, "/api/analytics/most-frequent-tasks"+query("project_id", projectID, "limit", "0"), &out)
+	return out, err
+}
+
+// GetMostFrequentTasksWithLimit fetches the backend-ranked most-frequently-
+// executed tasks up to limit records.
+func (c *Client) GetMostFrequentTasksWithLimit(ctx context.Context, projectID string, limit int) ([]TaskFrequency, error) {
+	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID, limit)
 }
 
 // GetFailedTaskPatterns fetches recurring task failure patterns.

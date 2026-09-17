@@ -1668,6 +1668,7 @@ func TestChannelsWebhooksHelpCompletionAndDeprecatedAliases(t *testing.T) {
 		"channels webhooks show <webhook>",
 		"channels webhooks create <name> [options]",
 		"channels webhooks rotate <webhook>",
+		"channels webhooks delete-bulk <webhook>...",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("channels help missing %q:\n%s", want, help)
@@ -1676,7 +1677,7 @@ func TestChannelsWebhooksHelpCompletionAndDeprecatedAliases(t *testing.T) {
 	if got := registryCompletionValues("channels"); !slices.Contains(got, "webhooks") {
 		t.Fatalf("channels completions = %v, want webhooks", got)
 	}
-	for _, action := range []string{"list", "show", "create", "edit", "test", "rotate", "delete"} {
+	for _, action := range []string{"list", "show", "create", "edit", "test", "rotate", "delete", "delete-bulk"} {
 		if got := registryCompletionValues("channels", "webhooks"); !slices.Contains(got, action) {
 			t.Errorf("channels webhooks completions = %v, want %q", got, action)
 		}

@@ -231,6 +231,7 @@ func suggest(word string) []command {
 // input is one shell-like line, so quoted arguments are grouped and their
 // matching delimiters are removed before command dispatch.
 func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
+	m.cancelWebhookBulkLookup()
 	if !cliMode {
 		if next, cmd, ok := m.partialOperandOptionSelector(line); ok {
 			return next, cmd
