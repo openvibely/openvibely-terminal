@@ -67,6 +67,16 @@ type UsageAnalytics struct {
 	LastUpdatedAt  string            `json:"last_updated_at"`
 }
 
+// UsageProviderLimits is a compact usage projection for callers that only need
+// provider/account quota health. It intentionally omits totals, model
+// breakdowns, usage rates, and evidence rows so those sections are not decoded
+// by capacity-only views.
+type UsageProviderLimits struct {
+	AccountLimits []AccountUsage `json:"account_limits"`
+	Errors        []string       `json:"errors"`
+	LastUpdatedAt string         `json:"last_updated_at"`
+}
+
 // SuccessFailureRate mirrors repository.SuccessFailureRate.
 type SuccessFailureRate struct {
 	Period       string  `json:"period"`
@@ -116,6 +126,18 @@ func analyticsObject[T any](ctx context.Context, c *Client, segment, projectID s
 // GetUsageAnalytics fetches LLM usage/cost analytics.
 func (c *Client) GetUsageAnalytics(ctx context.Context, projectID string) (*UsageAnalytics, error) {
 	return analyticsObject[UsageAnalytics](ctx, c, "usage", projectID)
+}
+
+// GetUsageProviderLimits fetches the compact provider/account limit projection
+// from usage analytics. Older backends may ignore the projection parameter and
+// return the full usage object; this method still decodes only account-limit
+// fields for capacity-only callers.
+func (c *Client) GetUsageProviderLimits(ctx context.Context, projectID string) (*UsageProviderLimits, error) {
+	var out UsageProviderLimits
+	if err := c.getJSON(ctx, "/api/analytics/usage"+query("project_id", projectID, "projection", "account_limits"), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // analyticsSlice is the shared fetch/decode helper for analytics endpoints that

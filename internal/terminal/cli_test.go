@@ -3642,7 +3642,7 @@ func TestCLISingleProjectModelsActionsRemainScoped(t *testing.T) {
 		wantPath   string
 		wantQuery  string
 	}{
-		{name: "capacity", args: []string{"models", "capacity"}, wantMethod: "GET", wantPath: "/api/analytics/usage", wantQuery: "project_id=p1"},
+		{name: "capacity", args: []string{"models", "capacity"}, wantMethod: "GET", wantPath: "/api/analytics/usage", wantQuery: "project_id=p1&projection=account_limits"},
 		{name: "default", args: []string{"models", "default", "Sonnet"}, wantMethod: "POST", wantPath: "/models/m-1/set-default", wantQuery: "project_id=p1"},
 		{name: "delete", args: []string{"models", "delete", "Sonnet"}, force: true, wantMethod: "DELETE", wantPath: "/models/m-1", wantQuery: "project_id=p1"},
 	}

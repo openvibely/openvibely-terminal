@@ -2952,12 +2952,12 @@ func TestModelsCapacityRequestsOverlap(t *testing.T) {
 func TestModelsCapacityBothSuccessPreservesOutputAndScope(t *testing.T) {
 	var mu sync.Mutex
 	counts := map[string]int{}
-	var usageProjects []string
+	var usageQueries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		counts[r.URL.Path]++
 		if r.URL.Path == "/api/analytics/usage" {
-			usageProjects = append(usageProjects, r.URL.Query().Get("project_id"))
+			usageQueries = append(usageQueries, r.URL.Query().Encode())
 		}
 		mu.Unlock()
 
@@ -2999,13 +2999,13 @@ func TestModelsCapacityBothSuccessPreservesOutputAndScope(t *testing.T) {
 	mu.Lock()
 	capCount := counts["/api/capacity/models"]
 	usageCount := counts["/api/analytics/usage"]
-	gotUsageProjects := append([]string(nil), usageProjects...)
+	gotUsageQueries := append([]string(nil), usageQueries...)
 	mu.Unlock()
 	if capCount != 1 || usageCount != 1 {
 		t.Errorf("expected exactly one request per endpoint, got capacity=%d usage=%d", capCount, usageCount)
 	}
-	if len(gotUsageProjects) != 1 || gotUsageProjects[0] != "selected-project" {
-		t.Errorf("usage project scope = %v, want [selected-project]", gotUsageProjects)
+	if len(gotUsageQueries) != 1 || gotUsageQueries[0] != "project_id=selected-project&projection=account_limits" {
+		t.Errorf("usage provider-limit query = %v, want compact selected-project projection", gotUsageQueries)
 	}
 
 	for _, want := range []string{"First", "Second", "Provider limits", "OpenAI", "team", "healthy", "42.5%", "tomorrow"} {
@@ -3027,12 +3027,12 @@ func TestModelsCapacityBothSuccessPreservesOutputAndScope(t *testing.T) {
 func TestModelsCapacityUsageFailureKeepsCapacityAndFallback(t *testing.T) {
 	var mu sync.Mutex
 	counts := map[string]int{}
-	var usageProjects []string
+	var usageQueries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		counts[r.URL.Path]++
 		if r.URL.Path == "/api/analytics/usage" {
-			usageProjects = append(usageProjects, r.URL.Query().Get("project_id"))
+			usageQueries = append(usageQueries, r.URL.Query().Encode())
 		}
 		mu.Unlock()
 
@@ -3069,25 +3069,25 @@ func TestModelsCapacityUsageFailureKeepsCapacityAndFallback(t *testing.T) {
 	mu.Lock()
 	capCount := counts["/api/capacity/models"]
 	usageCount := counts["/api/analytics/usage"]
-	gotUsageProjects := append([]string(nil), usageProjects...)
+	gotUsageQueries := append([]string(nil), usageQueries...)
 	mu.Unlock()
 	if capCount != 1 || usageCount != 1 {
 		t.Errorf("expected exactly one request per endpoint, got capacity=%d usage=%d", capCount, usageCount)
 	}
-	if len(gotUsageProjects) != 1 || gotUsageProjects[0] != "selected-project" {
-		t.Errorf("usage project scope = %v, want [selected-project]", gotUsageProjects)
+	if len(gotUsageQueries) != 1 || gotUsageQueries[0] != "project_id=selected-project&projection=account_limits" {
+		t.Errorf("usage provider-limit query = %v, want compact selected-project projection", gotUsageQueries)
 	}
 }
 
 func TestModelsCapacityFailureRemainsFatal(t *testing.T) {
 	var mu sync.Mutex
 	counts := map[string]int{}
-	var usageProjects []string
+	var usageQueries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		counts[r.URL.Path]++
 		if r.URL.Path == "/api/analytics/usage" {
-			usageProjects = append(usageProjects, r.URL.Query().Get("project_id"))
+			usageQueries = append(usageQueries, r.URL.Query().Encode())
 		}
 		mu.Unlock()
 
@@ -3126,17 +3126,17 @@ func TestModelsCapacityFailureRemainsFatal(t *testing.T) {
 	mu.Lock()
 	capCount := counts["/api/capacity/models"]
 	usageCount := counts["/api/analytics/usage"]
-	gotUsageProjects := append([]string(nil), usageProjects...)
+	gotUsageQueries := append([]string(nil), usageQueries...)
 	mu.Unlock()
 	if capCount != 1 || usageCount != 1 {
 		t.Errorf("expected exactly one request per endpoint, got capacity=%d usage=%d", capCount, usageCount)
 	}
-	if len(gotUsageProjects) != 1 || gotUsageProjects[0] != "selected-project" {
-		t.Errorf("usage project scope = %v, want [selected-project]", gotUsageProjects)
+	if len(gotUsageQueries) != 1 || gotUsageQueries[0] != "project_id=selected-project&projection=account_limits" {
+		t.Errorf("usage provider-limit query = %v, want compact selected-project projection", gotUsageQueries)
 	}
 }
 
-func TestFetchModelCapacityWithUsageRespectsCanceledContext(t *testing.T) {
+func TestFetchModelCapacityWithProviderLimitsRespectsCanceledContext(t *testing.T) {
 	started := make(chan string, 2)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -3158,7 +3158,7 @@ func TestFetchModelCapacityWithUsageRespectsCanceledContext(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := fetchModelCapacityWithUsage(ctx, c, "selected-project")
+		_, _, err := fetchModelCapacityWithProviderLimits(ctx, c, "selected-project")
 		done <- err
 	}()
 

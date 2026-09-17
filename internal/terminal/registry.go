@@ -3789,14 +3789,15 @@ func agentsCommand() command {
 
 // --- models ---
 
-// fetchModelCapacityWithUsage fetches model capacity and optional provider
-// usage independently. Capacity is the primary result; usage failures leave
-// the usage value nil so the renderer can show its existing fallback.
-func fetchModelCapacityWithUsage(ctx context.Context, c *client.Client, projectID string) ([]client.ModelCapacity, *client.UsageAnalytics, error) {
+// fetchModelCapacityWithProviderLimits fetches model capacity and optional
+// provider/account quota health independently. Capacity is the primary result;
+// provider-limit failures leave the limit value nil so the renderer can show
+// its existing fallback.
+func fetchModelCapacityWithProviderLimits(ctx context.Context, c *client.Client, projectID string) ([]client.ModelCapacity, *client.UsageProviderLimits, error) {
 	var (
-		caps   []client.ModelCapacity
-		capErr error
-		usage  *client.UsageAnalytics
+		caps     []client.ModelCapacity
+		capErr   error
+		provider *client.UsageProviderLimits
 	)
 
 	var wg sync.WaitGroup
@@ -3807,14 +3808,14 @@ func fetchModelCapacityWithUsage(ctx context.Context, c *client.Client, projectI
 	}()
 	go func() {
 		defer wg.Done()
-		usage, _ = c.GetUsageAnalytics(ctx, projectID)
+		provider, _ = c.GetUsageProviderLimits(ctx, projectID)
 	}()
 	wg.Wait()
 
 	if capErr != nil {
 		return nil, nil, capErr
 	}
-	return caps, usage, nil
+	return caps, provider, nil
 }
 
 type modelAddSpec struct {
@@ -4731,11 +4732,11 @@ func modelsCommand() command {
 			switch action {
 			case "capacity":
 				return m, run("Model capacity", cmdTimeout, func(ctx context.Context) (string, error) {
-					caps, usage, err := fetchModelCapacityWithUsage(ctx, c, pid)
+					caps, provider, err := fetchModelCapacityWithProviderLimits(ctx, c, pid)
 					if err != nil {
 						return "", err
 					}
-					return renderModelCapacityWithUsage(caps, usage), nil
+					return renderModelCapacityWithProviderLimits(caps, provider), nil
 				})
 			default:
 				if ref == "" {
