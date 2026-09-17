@@ -276,6 +276,78 @@ func TestCLIAgentsVotesPlainJSONAndEmptyOutput(t *testing.T) {
 	})
 }
 
+func TestCLIAgentsJSONListAppliesFilter(t *testing.T) {
+	const agentsHTML = `<div>
+		<div data-agent-id="ag-reviewer" data-agent-key="code-check" data-agent-name="Code Reviewer" data-agent-description="reviews code" data-agent-model="claude" data-agent-scope="project"></div>
+		<div data-agent-id="ag-qa" data-agent-key="qa-key" data-agent-name="Quality Gate" data-agent-description="test coverage" data-agent-model="gpt" data-agent-scope="project"></div>
+		<div data-agent-id="ag-reliability" data-agent-key="ops" data-agent-name="Runtime Sentinel" data-agent-description="monitors stability regressions" data-agent-model="gemini" data-agent-scope="global"></div>
+	</div>`
+
+	run := func(t *testing.T, args ...string) ([]client.AgentDef, string, *recorder) {
+		t.Helper()
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/agents":       agentsHTML,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", args, false, true); err != nil {
+			t.Fatalf("RunCLI(%v) failed: %v", args, err)
+		}
+		var got []client.AgentDef
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+			t.Fatalf("JSON agent output is invalid: %v\n%s", err, out.String())
+		}
+		if !rec.sawQuery("GET /agents?project_id=p1") {
+			t.Fatalf("agent list request was not scoped to selected project: %v", rec.urlsSnapshot())
+		}
+		return got, strings.TrimSpace(out.String()), rec
+	}
+
+	assertIDs := func(t *testing.T, got []client.AgentDef, want ...string) {
+		t.Helper()
+		ids := make([]string, 0, len(got))
+		for _, agent := range got {
+			ids = append(ids, agent.ID)
+		}
+		if !slices.Equal(ids, want) {
+			t.Fatalf("agent IDs = %v, want %v", ids, want)
+		}
+	}
+
+	t.Run("name filter", func(t *testing.T) {
+		got, _, _ := run(t, "agents", "ReViEwEr")
+		assertIDs(t, got, "ag-reviewer")
+	})
+
+	t.Run("key filter", func(t *testing.T) {
+		got, _, _ := run(t, "agents", "QA-KEY")
+		assertIDs(t, got, "ag-qa")
+	})
+
+	t.Run("description filter", func(t *testing.T) {
+		got, _, _ := run(t, "agents", "STABILITY")
+		assertIDs(t, got, "ag-reliability")
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		got, raw, _ := run(t, "agents", "missing")
+		assertIDs(t, got)
+		if raw != "[]" {
+			t.Fatalf("no-match JSON = %q, want []", raw)
+		}
+	})
+
+	t.Run("unfiltered default", func(t *testing.T) {
+		got, _, _ := run(t, "agents")
+		assertIDs(t, got, "ag-reviewer", "ag-qa", "ag-reliability")
+	})
+
+	t.Run("unfiltered list action", func(t *testing.T) {
+		got, _, _ := run(t, "agents", "list")
+		assertIDs(t, got, "ag-reviewer", "ag-qa", "ag-reliability")
+	})
+}
+
 func TestCLIAgentsVotesErrorsAndUnresolvedReferences(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

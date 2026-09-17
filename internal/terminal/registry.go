@@ -3634,7 +3634,7 @@ func agentsCommand() command {
 						return "", err
 					}
 					if jsonMode {
-						return marshalJSON(agents)
+						return marshalJSON(filterAgents(agents, ref))
 					}
 					return renderAgents(agents, ref), nil
 				})
