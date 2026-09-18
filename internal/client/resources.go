@@ -1964,6 +1964,9 @@ func scheduleCardName(node *html.Node) string {
 }
 
 func scheduleCardNextRun(node *html.Node) (*time.Time, bool) {
+	if nextRun, ok := parseExactScheduleNextRun(attr(node, "data-schedule-next-run")); ok {
+		return cloneTime(nextRun), true
+	}
 	var date string
 	var hourText string
 	for n := node; n != nil; n = n.Parent {
@@ -2013,7 +2016,7 @@ func scheduleCardRenderedClock(node *html.Node) (int, int, bool) {
 	if text == "" {
 		return 0, 0, false
 	}
-	for _, layout := range []string{"3:04 PM", "3:04PM", "15:04"} {
+	for _, layout := range []string{"3:04:05 PM", "3:04:05PM", "15:04:05", "3:04 PM", "3:04PM", "15:04"} {
 		parsed, err := time.ParseInLocation(layout, strings.ToUpper(text), time.Local)
 		if err == nil {
 			return parsed.Hour(), parsed.Minute(), true
@@ -4075,21 +4078,40 @@ func (c *Client) getTaskScheduleNextRuns(ctx context.Context, projectID, taskID 
 }
 
 func parseTaskScheduleNextRun(node *html.Node) (time.Time, bool) {
+	if nextRun, ok := parseExactScheduleNextRun(attr(node, "data-schedule-next-run")); ok {
+		return nextRun, true
+	}
 	text := strings.Join(strings.Fields(NodeText(node)), " ")
 	idx := strings.Index(text, "Next:")
 	if idx < 0 {
 		return time.Time{}, false
 	}
-	fields := strings.Fields(strings.TrimSpace(text[idx+len("Next:"):]))
-	candidates := []string{}
+	return parseExactScheduleNextRun(strings.TrimSpace(text[idx+len("Next:"):]))
+}
+
+func parseExactScheduleNextRun(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	upper := strings.ToUpper(value)
+	fields := strings.Fields(upper)
+	candidates := []string{upper}
 	if len(fields) >= 3 {
-		candidates = append(candidates, fields[0]+" "+fields[1]+" "+strings.ToUpper(fields[2]))
+		candidates = append(candidates, fields[0]+" "+fields[1]+" "+fields[2])
 	}
 	if len(fields) >= 2 {
 		candidates = append(candidates, fields[0]+" "+fields[1])
 	}
 	for _, candidate := range candidates {
-		for _, layout := range []string{"2006-01-02 3:04 PM", "2006-01-02 15:04"} {
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02 3:04:05 PM",
+			"2006-01-02 15:04:05",
+			"2006-01-02 3:04 PM",
+			"2006-01-02 15:04",
+		} {
 			parsed, err := time.ParseInLocation(layout, candidate, time.Local)
 			if err == nil {
 				return parsed, true
