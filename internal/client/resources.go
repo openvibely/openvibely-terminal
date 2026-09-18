@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1995,6 +1996,14 @@ func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleE
 }
 
 func (c *Client) getScheduleWeek(ctx context.Context, projectID string, weekOffset int) ([]ScheduleEntry, string, error) {
+	return c.getScheduleWeekEntries(ctx, projectID, weekOffset, true)
+}
+
+func (c *Client) getScheduleWeekOccurrences(ctx context.Context, projectID string, weekOffset int) ([]ScheduleEntry, string, error) {
+	return c.getScheduleWeekEntries(ctx, projectID, weekOffset, false)
+}
+
+func (c *Client) getScheduleWeekEntries(ctx context.Context, projectID string, weekOffset int, dedupe bool) ([]ScheduleEntry, string, error) {
 	path := "/schedule" + query("project_id", projectID)
 	if weekOffset != 0 {
 		path = "/schedule" + query("project_id", projectID, "week", strconv.Itoa(weekOffset))
@@ -2003,7 +2012,10 @@ func (c *Client) getScheduleWeek(ctx context.Context, projectID string, weekOffs
 	if err != nil {
 		return nil, "", err
 	}
-	cards := dedupeScrapedCards(scrapeCardNodes(root, "data-schedule-id"), "data-schedule-id")
+	cards := scrapeCardNodes(root, "data-schedule-id")
+	if dedupe {
+		cards = dedupeScrapedCards(cards, "data-schedule-id")
+	}
 	out := make([]ScheduleEntry, 0, len(cards))
 	for _, card := range cards {
 		text := strings.TrimSpace(cardNodeText(card.node))
@@ -3964,11 +3976,11 @@ func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*Pul
 	if err != nil {
 		return nil, err
 	}
-	schedules, _, err := c.GetSchedule(ctx, projectID)
+	schedules, _, err := c.getScheduleWeekOccurrences(ctx, projectID, 0)
 	if err != nil {
 		return nil, err
 	}
-	nextWeek, _, err := c.getScheduleWeek(ctx, projectID, 1)
+	nextWeek, _, err := c.getScheduleWeekOccurrences(ctx, projectID, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -4010,12 +4022,7 @@ func buildPulseProjectionFromCatalog(projectID string, tasks []Task, schedules [
 	}
 	out.WaitingCount = len(out.PendingTasks) + len(out.QueuedTasks)
 	lookaheadEnd := generatedAt.AddDate(0, 0, out.LookaheadDays)
-	seenSchedules := map[string]bool{}
-	for _, schedule := range schedules {
-		if schedule.Disabled || strings.TrimSpace(schedule.ScheduleID) == "" || seenSchedules[schedule.ScheduleID] || pulseScheduleBeyondLookahead(schedule.NextRun, lookaheadEnd) {
-			continue
-		}
-		seenSchedules[schedule.ScheduleID] = true
+	for _, schedule := range selectPulseScheduleOccurrences(schedules, generatedAt, lookaheadEnd) {
 		task, ok := byID[schedule.TaskID]
 		entry := PulseTaskEntry{
 			TaskID:     schedule.TaskID,
@@ -4094,6 +4101,64 @@ func accumulatePulseSummary(summary *PulseTaskSummary, task Task) {
 			summary.Priority.Low++
 		}
 	}
+}
+
+func selectPulseScheduleOccurrences(schedules []ScheduleEntry, generatedAt, lookaheadEnd time.Time) []ScheduleEntry {
+	selected := map[string]ScheduleEntry{}
+	var order []string
+	for _, schedule := range schedules {
+		scheduleID := strings.TrimSpace(schedule.ScheduleID)
+		if schedule.Disabled || scheduleID == "" || pulseScheduleBeyondLookahead(schedule.NextRun, lookaheadEnd) {
+			continue
+		}
+		current, seen := selected[scheduleID]
+		if !seen {
+			selected[scheduleID] = schedule
+			order = append(order, scheduleID)
+			continue
+		}
+		if pulseScheduleOccurrencePreferred(schedule, current, generatedAt) {
+			selected[scheduleID] = schedule
+		}
+	}
+	out := make([]ScheduleEntry, 0, len(order))
+	for _, scheduleID := range order {
+		out = append(out, selected[scheduleID])
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := out[i].NextRun, out[j].NextRun
+		switch {
+		case left == nil && right == nil:
+			return false
+		case left == nil:
+			return false
+		case right == nil:
+			return true
+		case left.Equal(*right):
+			return false
+		default:
+			return left.Before(*right)
+		}
+	})
+	return out
+}
+
+func pulseScheduleOccurrencePreferred(candidate, current ScheduleEntry, generatedAt time.Time) bool {
+	if candidate.NextRun == nil {
+		return false
+	}
+	if current.NextRun == nil {
+		return true
+	}
+	candidateUpcoming := !candidate.NextRun.Before(generatedAt)
+	currentUpcoming := !current.NextRun.Before(generatedAt)
+	if candidateUpcoming != currentUpcoming {
+		return candidateUpcoming
+	}
+	if candidateUpcoming {
+		return candidate.NextRun.Before(*current.NextRun)
+	}
+	return candidate.NextRun.After(*current.NextRun)
 }
 
 func pulseScheduleBeyondLookahead(nextRun *time.Time, lookaheadEnd time.Time) bool {
