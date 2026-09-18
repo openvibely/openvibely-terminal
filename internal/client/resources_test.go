@@ -5845,7 +5845,7 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 				_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+nextWeekDate+`" data-hour="10"><div data-task-id="sched-2" data-schedule-id="schedule-2" data-schedule-enabled="true"><div class="font-semibold">Next week work</div></div></div></div>`)
 				return
 			}
-			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+currentDate+`" data-hour="0"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div></div></div><div data-date="`+tomorrowDate+`" data-hour="10"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div></div></div><div data-date="`+currentDate+`" data-hour="21"><div data-task-id="sched-disabled" data-schedule-id="schedule-disabled" data-schedule-enabled="false"><div class="font-semibold">Paused schedule</div></div></div></div>`)
+			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+currentDate+`" data-hour="0"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div><div class="opacity-60 leading-tight">12:15 AM</div></div></div><div data-date="`+tomorrowDate+`" data-hour="10"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div><div class="opacity-60 leading-tight">10:45 AM</div></div></div><div data-date="`+currentDate+`" data-hour="21"><div data-task-id="sched-disabled" data-schedule-id="schedule-disabled" data-schedule-enabled="false"><div class="font-semibold">Paused schedule</div><div class="opacity-60 leading-tight">9:30 PM</div></div></div></div>`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -5876,8 +5876,8 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	for _, task := range got.ScheduledTasks {
 		seenScheduled[task.ScheduleID] = clientlessPulseSchedule{taskID: task.TaskID, nextRun: task.NextRun}
 	}
-	if seenScheduled["schedule-1"].taskID != "sched-1" || seenScheduled["schedule-1"].nextRun == nil || seenScheduled["schedule-1"].nextRun.Format("2006-01-02") != tomorrowDate {
-		t.Fatalf("current-week recurring task did not use upcoming timing: %+v", got.ScheduledTasks)
+	if seenScheduled["schedule-1"].taskID != "sched-1" || seenScheduled["schedule-1"].nextRun == nil || seenScheduled["schedule-1"].nextRun.Format("2006-01-02") != tomorrowDate || seenScheduled["schedule-1"].nextRun.Hour() != 10 || seenScheduled["schedule-1"].nextRun.Minute() != 45 {
+		t.Fatalf("current-week recurring task did not use minute-precise upcoming timing: %+v", got.ScheduledTasks)
 	}
 	if seenScheduled["schedule-2"].taskID != "sched-2" || seenScheduled["schedule-2"].nextRun == nil {
 		t.Fatalf("next-week scheduled task within lookahead not included with timing: %+v", got.ScheduledTasks)
@@ -5977,23 +5977,23 @@ func TestBuildPulseProjectionFiltersKnownSchedulesBeyondLookahead(t *testing.T) 
 	}
 }
 
-func TestBuildPulseProjectionPrefersUpcomingRecurringOccurrence(t *testing.T) {
-	generatedAt := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
-	past := generatedAt.Add(-3 * time.Hour)
-	future := generatedAt.Add(2 * time.Hour)
-	later := generatedAt.Add(4 * time.Hour)
+func TestBuildPulseProjectionPrefersMinutePreciseUpcomingRecurringOccurrence(t *testing.T) {
+	generatedAt := time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC)
+	pastSameHour := time.Date(2026, 9, 18, 10, 15, 0, 0, time.UTC)
+	futureSameHour := time.Date(2026, 9, 18, 10, 45, 0, 0, time.UTC)
+	later := time.Date(2026, 9, 18, 11, 15, 0, 0, time.UTC)
 
 	got := buildPulseProjectionFromCatalog("p1", []Task{
 		{ID: "recurring", ProjectID: "p1", Title: "Recurring schedule", Category: "scheduled", Status: "pending"},
 	}, []ScheduleEntry{
-		{TaskID: "recurring", ScheduleID: "schedule-recurring", Name: "Recurring schedule", NextRun: &past},
+		{TaskID: "recurring", ScheduleID: "schedule-recurring", Name: "Recurring schedule", NextRun: &pastSameHour},
 		{TaskID: "recurring", ScheduleID: "schedule-recurring", Name: "Recurring schedule", NextRun: &later},
-		{TaskID: "recurring", ScheduleID: "schedule-recurring", Name: "Recurring schedule", NextRun: &future},
+		{TaskID: "recurring", ScheduleID: "schedule-recurring", Name: "Recurring schedule", NextRun: &futureSameHour},
 	}, generatedAt)
 	got.normalize()
 
-	if len(got.ScheduledTasks) != 1 || got.ScheduledTasks[0].NextRun == nil || !got.ScheduledTasks[0].NextRun.Equal(future) {
-		t.Fatalf("scheduled tasks = %+v, want earliest upcoming recurring occurrence", got.ScheduledTasks)
+	if len(got.ScheduledTasks) != 1 || got.ScheduledTasks[0].NextRun == nil || !got.ScheduledTasks[0].NextRun.Equal(futureSameHour) {
+		t.Fatalf("scheduled tasks = %+v, want same-hour minute-precise upcoming recurring occurrence", got.ScheduledTasks)
 	}
 	if got.TaskSummary.Scheduled.Overdue != 0 || got.TaskSummary.Scheduled.DueToday != 1 {
 		t.Fatalf("scheduled summary = %+v, want future occurrence counted due today", got.TaskSummary.Scheduled)
