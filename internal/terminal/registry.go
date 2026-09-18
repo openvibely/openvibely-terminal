@@ -7896,14 +7896,32 @@ func pulseCommand() command {
 		validateArgs: func(args []string) error { return validateBriefingArgs("pulse", actions, args) },
 		desc:         "briefing on upcoming work",
 		usage: []string{
-			"pulse                                      show the upcoming-work briefing",
+			"pulse                                      show the upcoming-work briefing; --json emits structured JSON",
 			"pulse summary                              regenerate the briefing",
 		},
 		examples: []string{
 			`pulse`,
 			`pulse summary`,
+			`openvibely-terminal -project demo --json pulse`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
+			if jsonMode {
+				action, _ := splitAction(actions, args)
+				if action != "summary" {
+					mm, cmd, ok := m.needProject()
+					if !ok {
+						return mm, cmd
+					}
+					c, pid := m.client, m.selectedID
+					return m, m.run("Pulse", cmdTimeout, func(ctx context.Context) (string, error) {
+						pulse, err := c.GetPulseProjection(ctx, pid)
+						if err != nil {
+							return "", err
+						}
+						return marshalJSON(pulse)
+					})
+				}
+			}
 			return runBriefingCommand(m, args, "pulse", actions, "summary", "Pulse",
 				func(ctx context.Context, c *client.Client, pid string) (string, error) {
 					return "", c.GeneratePulseSummary(ctx, pid)

@@ -3845,6 +3845,98 @@ func (c *Client) SavePersonality(ctx context.Context, projectID, personality str
 
 // --- pulse / reflection / insights / grades ---
 
+// PulseProjection is the compact, prompt-safe upcoming-work projection used by
+// machine-readable Pulse output.
+type PulseProjection struct {
+	OK             bool             `json:"ok"`
+	ProjectID      string           `json:"project_id"`
+	GeneratedAt    time.Time        `json:"generated_at"`
+	LookaheadDays  int              `json:"lookahead_days"`
+	RunningTasks   []PulseTaskEntry `json:"running_tasks"`
+	WaitingCount   int              `json:"waiting_count"`
+	PendingTasks   []PulseTaskEntry `json:"pending_tasks"`
+	QueuedTasks    []PulseTaskEntry `json:"queued_tasks"`
+	BlockedTasks   []PulseTaskEntry `json:"blocked_tasks"`
+	ScheduledTasks []PulseTaskEntry `json:"scheduled_tasks"`
+	TaskSummary    PulseTaskSummary `json:"task_summary"`
+}
+
+// PulseTaskEntry is one bounded task row in Pulse JSON output.
+type PulseTaskEntry struct {
+	TaskID         string     `json:"task_id"`
+	Title          string     `json:"title"`
+	Status         string     `json:"status"`
+	Category       string     `json:"category"`
+	Priority       int        `json:"priority"`
+	Tag            string     `json:"tag,omitempty"`
+	AgentName      string     `json:"agent_name,omitempty"`
+	PromptPreview  string     `json:"prompt_preview,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	ScheduleID     string     `json:"schedule_id,omitempty"`
+	NextRun        *time.Time `json:"next_run,omitempty"`
+	RepeatType     string     `json:"repeat_type,omitempty"`
+	RepeatInterval int        `json:"repeat_interval,omitempty"`
+	RepeatLabel    string     `json:"repeat_label,omitempty"`
+}
+
+// PulseTaskSummary is the aggregate count block in Pulse JSON output.
+type PulseTaskSummary struct {
+	TotalPending int `json:"total_pending"`
+	Priority     struct {
+		Urgent int `json:"urgent"`
+		High   int `json:"high"`
+		Normal int `json:"normal"`
+		Low    int `json:"low"`
+	} `json:"priority"`
+	Status struct {
+		Pending   int `json:"pending"`
+		Queued    int `json:"queued"`
+		Running   int `json:"running"`
+		Completed int `json:"completed"`
+		Failed    int `json:"failed"`
+		Blocked   int `json:"blocked"`
+	} `json:"status"`
+	Category struct {
+		Active    int `json:"active"`
+		Backlog   int `json:"backlog"`
+		Scheduled int `json:"scheduled"`
+	} `json:"category"`
+	Scheduled struct {
+		Overdue     int `json:"overdue"`
+		DueToday    int `json:"due_today"`
+		DueThisWeek int `json:"due_this_week"`
+	} `json:"scheduled"`
+}
+
+// GetPulseProjection returns the structured upcoming-work projection for scripts.
+func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*PulseProjection, error) {
+	var out PulseProjection
+	if err := c.getJSON(ctx, "/api/pulse"+query("project_id", projectID), &out); err != nil {
+		return nil, err
+	}
+	out.normalize()
+	return &out, nil
+}
+
+func (p *PulseProjection) normalize() {
+	if p.RunningTasks == nil {
+		p.RunningTasks = []PulseTaskEntry{}
+	}
+	if p.PendingTasks == nil {
+		p.PendingTasks = []PulseTaskEntry{}
+	}
+	if p.QueuedTasks == nil {
+		p.QueuedTasks = []PulseTaskEntry{}
+	}
+	if p.BlockedTasks == nil {
+		p.BlockedTasks = []PulseTaskEntry{}
+	}
+	if p.ScheduledTasks == nil {
+		p.ScheduledTasks = []PulseTaskEntry{}
+	}
+}
+
 // GetPulse returns the upcoming (Pulse) screen as text.
 func (c *Client) GetPulse(ctx context.Context, projectID string) (string, error) {
 	return c.pageText(ctx, "/upcoming"+query("project_id", projectID), "upcoming-container")

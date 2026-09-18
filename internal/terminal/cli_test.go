@@ -10863,3 +10863,108 @@ func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 		}
 	})
 }
+
+func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
+	const longPrompt = "this full prompt must not leak into pulse JSON output"
+	pulseJSON := `{
+		"ok": true,
+		"project_id": "p1",
+		"generated_at": "2026-09-18T12:00:00Z",
+		"lookahead_days": 7,
+		"running_tasks": [{"task_id":"run-1","title":"Running implementation","status":"running","category":"active","priority":4,"agent_name":"Builder","prompt_preview":"bounded preview","created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
+		"waiting_count": 2,
+		"pending_tasks": [{"task_id":"pending-1","title":"Pending follow-up","status":"pending","category":"active","priority":3,"created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
+		"queued_tasks": [{"task_id":"queued-1","title":"Queued follow-up","status":"queued","category":"active","priority":3,"created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
+		"blocked_tasks": [{"task_id":"blocked-1","title":"Blocked dependency","status":"blocked","category":"active","priority":2,"created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
+		"scheduled_tasks": [{"task_id":"sched-1","title":"Scheduled today","status":"pending","category":"scheduled","priority":1,"schedule_id":"schedule-1","next_run":"2026-09-18T20:00:00Z","repeat_type":"daily","repeat_interval":1,"repeat_label":"daily","created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
+		"task_summary": {"total_pending":5,"priority":{"urgent":1,"high":2,"normal":1,"low":1},"status":{"pending":3,"queued":1,"running":1,"completed":0,"failed":0,"blocked":1},"category":{"active":4,"backlog":0,"scheduled":1},"scheduled":{"overdue":0,"due_today":1,"due_this_week":1}}
+	}`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/api/pulse":    strings.ReplaceAll(pulseJSON, longPrompt, "bounded preview"),
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"pulse"}, false, true); err != nil {
+		t.Fatalf("RunCLI pulse --json: %v", err)
+	}
+	if !rec.sawQuery("GET /api/pulse?project_id=p1") {
+		t.Fatalf("pulse JSON did not request scoped projection: %v", rec.urlsSnapshot())
+	}
+	if rec.saw("GET", "/upcoming") {
+		t.Fatalf("pulse JSON fetched HTML briefing")
+	}
+	if strings.Contains(out.String(), longPrompt) {
+		t.Fatalf("pulse JSON leaked full prompt: %s", out.String())
+	}
+
+	var got client.PulseProjection
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &got); err != nil {
+		t.Fatalf("pulse output is not valid JSON: %v\n%s", err, out.String())
+	}
+	if got.ProjectID != "p1" || got.WaitingCount != 2 || got.TaskSummary.Status.Blocked != 1 {
+		t.Fatalf("pulse projection = %+v", got)
+	}
+	if len(got.RunningTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 1 {
+		t.Fatalf("pulse task groups = running %d queued %d blocked %d scheduled %d", len(got.RunningTasks), len(got.QueuedTasks), len(got.BlockedTasks), len(got.ScheduledTasks))
+	}
+}
+
+func TestCLIPulseJSONEmptyProjectUsesEmptyArrays(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/api/pulse": `{
+			"ok": true,
+			"project_id": "p1",
+			"generated_at": "2026-09-18T12:00:00Z",
+			"lookahead_days": 7,
+			"waiting_count": 0,
+			"task_summary": {"total_pending":0,"priority":{"urgent":0,"high":0,"normal":0,"low":0},"status":{"pending":0,"queued":0,"running":0,"completed":0,"failed":0,"blocked":0},"category":{"active":0,"backlog":0,"scheduled":0},"scheduled":{"overdue":0,"due_today":0,"due_this_week":0}}
+		}`,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"pulse", "show"}, false, true); err != nil {
+		t.Fatalf("RunCLI pulse show --json: %v", err)
+	}
+	encoded := out.String()
+	for _, want := range []string{`"running_tasks":[]`, `"pending_tasks":[]`, `"queued_tasks":[]`, `"blocked_tasks":[]`, `"scheduled_tasks":[]`, `"blocked":0`} {
+		if !strings.Contains(encoded, want) {
+			t.Fatalf("empty pulse JSON missing %s: %s", want, encoded)
+		}
+	}
+}
+
+func TestCLIPulsePlainAndSummaryUseHumanBriefingFlow(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":     cliProjects,
+		"/api/pulse":        `{"ok":true,"project_id":"p1"}`,
+		"/upcoming":         `<main><section id="upcoming-container"><p>Human upcoming briefing</p></section></main>`,
+		"/upcoming/summary": `<div>Generated summary</div>`,
+	})
+
+	var plain bytes.Buffer
+	if err := RunCLI(c, &plain, "demo", []string{"pulse"}, false, false); err != nil {
+		t.Fatalf("RunCLI pulse: %v", err)
+	}
+	if !strings.Contains(plain.String(), "Human upcoming briefing") {
+		t.Fatalf("plain pulse did not render briefing: %s", plain.String())
+	}
+	if rec.saw("GET", "/api/pulse") {
+		t.Fatalf("plain pulse requested JSON projection")
+	}
+
+	var summary bytes.Buffer
+	if err := RunCLI(c, &summary, "demo", []string{"pulse", "summary"}, false, true); err != nil {
+		t.Fatalf("RunCLI pulse summary: %v", err)
+	}
+	if !rec.sawQuery("POST /upcoming/summary?project_id=p1") || !rec.sawQuery("GET /upcoming?project_id=p1") {
+		t.Fatalf("pulse summary did not post then fetch briefing: %v", rec.urlsSnapshot())
+	}
+	if rec.sawQuery("GET /api/pulse?project_id=p1") {
+		t.Fatalf("pulse summary should preserve briefing fetch behavior, got %v", rec.urlsSnapshot())
+	}
+	if !strings.Contains(summary.String(), "Human upcoming briefing") {
+		t.Fatalf("pulse summary did not print refreshed briefing: %s", summary.String())
+	}
+}
