@@ -3456,12 +3456,22 @@ func sanitizeMemoryText(value string) string {
 
 // --- agents ---
 
+func filterAgents(agents []client.AgentDef, filter string) []client.AgentDef {
+	if filter == "" {
+		return agents
+	}
+	out := make([]client.AgentDef, 0)
+	for _, a := range agents {
+		if filterMatch(filter, a.Name, a.Key, a.Description) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func renderAgents(agents []client.AgentDef, filter string) string {
 	var rows [][]string
-	for _, a := range agents {
-		if !filterMatch(filter, a.Name, a.Key, a.Description) {
-			continue
-		}
+	for _, a := range filterAgents(agents, filter) {
 		rows = append(rows, []string{
 			truncate(sanitizeAutomationDetailText(a.Name), 24),
 			truncate(sanitizeAutomationDetailText(a.Scope), 16),
