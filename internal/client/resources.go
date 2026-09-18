@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1986,8 +1987,36 @@ func scheduleCardNextRun(node *html.Node) *time.Time {
 	if err != nil || hour < 0 || hour > 23 {
 		return nil
 	}
-	next := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, time.Local)
+	minute := 0
+	if renderedHour, renderedMinute, ok := scheduleCardRenderedClock(node); ok && renderedHour == hour {
+		minute = renderedMinute
+	}
+	next := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, time.Local)
 	return &next
+}
+
+func scheduleCardRenderedClock(node *html.Node) (int, int, bool) {
+	detail := findNode(node, func(n *html.Node) bool {
+		if n.Type != html.ElementNode {
+			return false
+		}
+		classes := strings.Fields(attr(n, "class"))
+		return slices.Contains(classes, "opacity-60") && slices.Contains(classes, "leading-tight")
+	})
+	if detail == nil {
+		return 0, 0, false
+	}
+	text := strings.TrimSpace(NodeText(detail))
+	if text == "" {
+		return 0, 0, false
+	}
+	for _, layout := range []string{"3:04 PM", "3:04PM", "15:04"} {
+		parsed, err := time.ParseInLocation(layout, strings.ToUpper(text), time.Local)
+		if err == nil {
+			return parsed.Hour(), parsed.Minute(), true
+		}
+	}
+	return 0, 0, false
 }
 
 // GetSchedule scrapes the Schedule screen for a project.
