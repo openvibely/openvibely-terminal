@@ -465,6 +465,35 @@ func TestWorksAliasCompletesCanonicalCommandAtDepth(t *testing.T) {
 	}
 }
 
+func TestProjectEditOptionMetadataMatchesParserCompletionAndHelp(t *testing.T) {
+	cmd := lookupCommand("projects")
+	if cmd == nil {
+		t.Fatal("projects command missing")
+	}
+	if got, want := projectEditOptionNames(), []string{"--name", "--description", "--repository-source", "--repository-path", "--github-url", "--default-agent", "--max-workers"}; !slices.Equal(got, want) {
+		t.Fatalf("project edit options = %v, want %v", got, want)
+	}
+
+	help := renderCommandHelp(*cmd)
+	completionOptions := registryCompletionValues("projects", "edit", "demo")
+	for _, option := range projectEditOptions {
+		if !containsString(completionOptions, option.name) {
+			t.Errorf("completion options missing parser-supported option %q: %v", option.name, completionOptions)
+		}
+		if want := option.name + " " + option.valueLabel; !strings.Contains(help, want) {
+			t.Errorf("projects help missing parser-supported option label %q:\n%s", want, help)
+		}
+		if len(option.completionValues) > 0 {
+			gotValues := registryCompletionValues("projects", "edit", "demo", option.name)
+			for _, want := range option.completionValues {
+				if !containsString(gotValues, want) {
+					t.Errorf("completion values for %s = %v, missing %q", option.name, gotValues, want)
+				}
+			}
+		}
+	}
+}
+
 func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	cmd := lookupCommand("projects")
 	if cmd == nil {

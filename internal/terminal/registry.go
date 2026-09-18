@@ -8233,6 +8233,24 @@ func projectCommand() command {
 
 func projectsCommand() command {
 	actions := []string{"list", "show", "create", "github-create", "edit", "delete"}
+	usage := []string{
+		"projects [list]                              list projects with running/queued counts",
+		"projects show <project>                     show authoritative project settings",
+		"projects create <name> <path>                create and select a local-path project",
+		"projects create <name> | <path>              use | when the name or path contains spaces",
+		"projects github-create <name> <url>           create and select a GitHub-backed project",
+		"  use | when the project name contains spaces",
+		"  GitHub creation remains available when local repository paths are disabled",
+		"projects edit <project> [options]            update only explicitly supplied settings",
+		"projects edit <project> | [options]          separate a project name containing option-like words",
+		"projects delete <project>                    delete project and all backend-owned project data",
+		"  one-shot flag-like name: [global flags] -- projects edit <project> | [options]",
+	}
+	usage = append(usage, projectEditOptionHelpLines()...)
+	usage = append(usage,
+		"  repository replacement requires confirmation (CLI: --force)",
+		"  deletion requires confirmation (CLI: --force) and removes backend-owned project data",
+	)
 	return command{
 		name:    "projects",
 		actions: actions,
@@ -8244,24 +8262,7 @@ func projectsCommand() command {
 		selectorPaths: [][]string{{"show"}, {"edit"}, {"delete"}},
 		completions:   projectEditCompletions(),
 		desc:          "list, show, create, edit, or delete backend-owned projects",
-		usage: []string{
-			"projects [list]                              list projects with running/queued counts",
-			"projects show <project>                     show authoritative project settings",
-			"projects create <name> <path>                create and select a local-path project",
-			"projects create <name> | <path>              use | when the name or path contains spaces",
-			"projects github-create <name> <url>           create and select a GitHub-backed project",
-			"  use | when the project name contains spaces",
-			"  GitHub creation remains available when local repository paths are disabled",
-			"projects edit <project> [options]            update only explicitly supplied settings",
-			"projects edit <project> | [options]          separate a project name containing option-like words",
-			"projects delete <project>                    delete project and all backend-owned project data",
-			"  one-shot flag-like name: [global flags] -- projects edit <project> | [options]",
-			"  --name <name> --description <text>",
-			"  --repository-source <local|github> --repository-path <path> --github-url <url>",
-			"  --default-agent <name|id|inherit> --max-workers <n|inherit>",
-			"  repository replacement requires confirmation (CLI: --force)",
-			"  deletion requires confirmation (CLI: --force) and removes backend-owned project data",
-		},
+		usage:         usage,
 		examples: []string{
 			`projects show demo`,
 			`projects create demo /Users/me/src/demo`,
@@ -8535,8 +8536,51 @@ func projectDeleteActionOutput(msg projectDeletedMsg, selected client.Project) (
 	return status + "\n\n" + renderProjects(msg.projects, nil, selected.ID), nil
 }
 
+type projectEditOptionSpec struct {
+	name             string
+	valueLabel       string
+	helpGroup        int
+	completionValues []string
+}
+
+var projectEditOptions = []projectEditOptionSpec{
+	{name: "--name", valueLabel: "<name>", helpGroup: 0},
+	{name: "--description", valueLabel: "<text>", helpGroup: 0},
+	{name: "--repository-source", valueLabel: "<local|github>", helpGroup: 1, completionValues: []string{"local", "github"}},
+	{name: "--repository-path", valueLabel: "<path>", helpGroup: 1},
+	{name: "--github-url", valueLabel: "<url>", helpGroup: 1},
+	{name: "--default-agent", valueLabel: "<name|id|inherit>", helpGroup: 2, completionValues: []string{"inherit"}},
+	{name: "--max-workers", valueLabel: "<n|inherit>", helpGroup: 2, completionValues: []string{"inherit", "0"}},
+}
+
 func projectEditOptionNames() []string {
-	return []string{"--name", "--description", "--repository-source", "--repository-path", "--github-url", "--default-agent", "--max-workers"}
+	names := make([]string, 0, len(projectEditOptions))
+	for _, option := range projectEditOptions {
+		names = append(names, option.name)
+	}
+	return names
+}
+
+func projectEditOptionHelpLines() []string {
+	var lines []string
+	var parts []string
+	currentGroup := -1
+	flush := func() {
+		if len(parts) == 0 {
+			return
+		}
+		lines = append(lines, "  "+strings.Join(parts, " "))
+		parts = nil
+	}
+	for _, option := range projectEditOptions {
+		if option.helpGroup != currentGroup {
+			flush()
+			currentGroup = option.helpGroup
+		}
+		parts = append(parts, option.name+" "+option.valueLabel)
+	}
+	flush()
+	return lines
 }
 
 func projectEditCompletions() []commandCompletion {
@@ -8552,16 +8596,12 @@ func projectEditCompletions() []commandCompletion {
 			append([]string{"edit", "**", "|"}, pairSuffix...),
 		} {
 			completions = append(completions, commandCompletion{after: base, values: options})
-			for _, valueCompletion := range []struct {
-				option string
-				values []string
-			}{
-				{option: "--repository-source", values: []string{"local", "github"}},
-				{option: "--max-workers", values: []string{"inherit", "0"}},
-				{option: "--default-agent", values: []string{"inherit"}},
-			} {
-				after := append(append([]string(nil), base...), valueCompletion.option)
-				completions = append(completions, commandCompletion{after: after, values: valueCompletion.values})
+			for _, option := range projectEditOptions {
+				if len(option.completionValues) == 0 {
+					continue
+				}
+				after := append(append([]string(nil), base...), option.name)
+				completions = append(completions, commandCompletion{after: after, values: option.completionValues})
 			}
 		}
 	}
