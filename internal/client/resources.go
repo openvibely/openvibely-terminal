@@ -1915,10 +1915,11 @@ func (c *Client) UninstallAgentPlugin(ctx context.Context, pluginID string) erro
 
 // ScheduleEntry is one scheduled task occurrence.
 type ScheduleEntry struct {
-	TaskID     string `json:"task_id"`
-	ScheduleID string `json:"schedule_id"`
-	Name       string `json:"-"`
-	Text       string `json:"text"`
+	TaskID     string     `json:"task_id"`
+	ScheduleID string     `json:"schedule_id"`
+	Name       string     `json:"-"`
+	Text       string     `json:"text"`
+	NextRun    *time.Time `json:"next_run,omitempty"`
 }
 
 // ScheduleConfig is the editable state of one existing schedule.
@@ -1958,6 +1959,35 @@ func scheduleCardName(node *html.Node) string {
 	return strings.TrimSpace(NodeText(title))
 }
 
+func scheduleCardNextRun(node *html.Node) *time.Time {
+	var date string
+	var hourText string
+	for n := node; n != nil; n = n.Parent {
+		if date == "" {
+			date = strings.TrimSpace(attr(n, "data-date"))
+		}
+		if hourText == "" {
+			hourText = strings.TrimSpace(attr(n, "data-hour"))
+		}
+		if date != "" && hourText != "" {
+			break
+		}
+	}
+	if date == "" || hourText == "" {
+		return nil
+	}
+	day, err := time.ParseInLocation("2006-01-02", date, time.Local)
+	if err != nil {
+		return nil
+	}
+	hour, err := strconv.Atoi(hourText)
+	if err != nil || hour < 0 || hour > 23 {
+		return nil
+	}
+	next := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, time.Local)
+	return &next
+}
+
 // GetSchedule scrapes the Schedule screen for a project.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
 	root, err := c.getHTML(ctx, "/schedule"+query("project_id", projectID))
@@ -1977,6 +2007,7 @@ func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleE
 			ScheduleID: card.attrs["data-schedule-id"],
 			Name:       name,
 			Text:       text,
+			NextRun:    scheduleCardNextRun(card.node),
 		})
 	}
 	summary := ""
@@ -3909,112 +3940,160 @@ type PulseTaskSummary struct {
 	} `json:"scheduled"`
 }
 
-// GetPulseProjection returns the structured upcoming-work projection for scripts.
+// GetPulseProjection returns a deterministic, project-scoped, prompt-safe
+// upcoming-work projection for scripts. The backend does not expose Pulse's
+// compact runtime-tool projection as a direct HTTP route, so the terminal builds
+// the same public JSON shape from supported read-only task and schedule
+// projections instead of creating an ordinary chat turn.
 func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*PulseProjection, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return nil, fmt.Errorf("project ID is required for pulse projection")
 	}
-	accepted, err := c.SendChatMessage(ctx, projectID, pulseProjectionToolPrompt)
+	tasks, err := c.ListTaskReferences(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	if accepted == nil || strings.TrimSpace(accepted.MessageID) == "" {
-		return nil, fmt.Errorf("pulse projection request failed: empty acknowledgement")
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		status, err := c.GetChatStatus(ctx, accepted.MessageID)
-		if err != nil {
-			return nil, err
-		}
-		if status != nil {
-			switch status.Status {
-			case "completed":
-				out, err := decodePulseProjectionToolOutput(status.Response)
-				if err != nil {
-					return nil, err
-				}
-				out.normalize()
-				return out, nil
-			case "failed", "cancelled":
-				detail := strings.TrimSpace(status.Error)
-				if detail == "" {
-					detail = strings.TrimSpace(status.Response)
-				}
-				if detail != "" {
-					return nil, fmt.Errorf("pulse projection %s: %s", status.Status, detail)
-				}
-				return nil, fmt.Errorf("pulse projection %s", status.Status)
-			}
-		}
-		timer := time.NewTimer(250 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-}
-
-const pulseProjectionToolPrompt = "Call the view_pulse runtime tool with {} for the current project. Return only the tool's raw JSON object, with no Markdown, prose, or extra text."
-
-func decodePulseProjectionToolOutput(output string) (*PulseProjection, error) {
-	jsonText, err := extractFirstJSONObject(output)
+	schedules, _, err := c.GetSchedule(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("decoding pulse projection: %w", err)
+		return nil, err
 	}
-	var out PulseProjection
-	if err := json.Unmarshal([]byte(jsonText), &out); err != nil {
-		return nil, fmt.Errorf("decoding pulse projection: %w", err)
-	}
-	return &out, nil
+	out := buildPulseProjectionFromCatalog(projectID, tasks, schedules, time.Now().UTC())
+	out.normalize()
+	return out, nil
 }
 
-func extractFirstJSONObject(s string) (string, error) {
-	start := strings.IndexByte(s, '{')
-	if start < 0 {
-		return "", fmt.Errorf("missing JSON object")
+func buildPulseProjectionFromCatalog(projectID string, tasks []Task, schedules []ScheduleEntry, generatedAt time.Time) *PulseProjection {
+	out := &PulseProjection{
+		OK:            true,
+		ProjectID:     projectID,
+		GeneratedAt:   generatedAt,
+		LookaheadDays: 7,
 	}
-	depth := 0
-	inString := false
-	escaped := false
-	for i := start; i < len(s); i++ {
-		ch := s[i]
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			switch ch {
-			case '\\':
-				escaped = true
-			case '"':
-				inString = false
-			}
+	byID := make(map[string]Task, len(tasks))
+	for _, task := range tasks {
+		if strings.TrimSpace(task.ID) == "" || task.Category == "chat" {
 			continue
 		}
-		switch ch {
-		case '"':
-			inString = true
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return s[start : i+1], nil
+		byID[task.ID] = task
+		entry := pulseTaskEntryFromTask(task)
+		switch task.Status {
+		case "running":
+			out.RunningTasks = append(out.RunningTasks, entry)
+		case "pending":
+			if task.Category == "active" {
+				out.PendingTasks = append(out.PendingTasks, entry)
 			}
+		case "queued":
+			if task.Category == "active" {
+				out.QueuedTasks = append(out.QueuedTasks, entry)
+			}
+		case "blocked":
+			out.BlockedTasks = append(out.BlockedTasks, entry)
+		}
+		accumulatePulseSummary(&out.TaskSummary, task)
+	}
+	out.WaitingCount = len(out.PendingTasks) + len(out.QueuedTasks)
+	seenSchedules := map[string]bool{}
+	for _, schedule := range schedules {
+		if strings.TrimSpace(schedule.ScheduleID) == "" || seenSchedules[schedule.ScheduleID] {
+			continue
+		}
+		seenSchedules[schedule.ScheduleID] = true
+		task, ok := byID[schedule.TaskID]
+		entry := PulseTaskEntry{
+			TaskID:     schedule.TaskID,
+			Title:      strings.TrimSpace(schedule.Name),
+			Status:     "pending",
+			Category:   "scheduled",
+			ScheduleID: schedule.ScheduleID,
+			NextRun:    schedule.NextRun,
+		}
+		if ok {
+			entry = pulseTaskEntryFromTask(task)
+			entry.ScheduleID = schedule.ScheduleID
+			entry.NextRun = schedule.NextRun
+			if entry.Title == "" {
+				entry.Title = strings.TrimSpace(schedule.Name)
+			}
+		} else {
+			accumulatePulseSummary(&out.TaskSummary, Task{ID: schedule.TaskID, Category: "scheduled", Status: "pending"})
+		}
+		if entry.Title == "" {
+			entry.Title = strings.TrimSpace(schedule.Text)
+		}
+		accumulatePulseScheduleSummary(&out.TaskSummary, schedule.NextRun, generatedAt)
+		out.ScheduledTasks = append(out.ScheduledTasks, entry)
+	}
+	return out
+}
+
+func pulseTaskEntryFromTask(task Task) PulseTaskEntry {
+	return PulseTaskEntry{
+		TaskID:   task.ID,
+		Title:    task.Title,
+		Status:   task.Status,
+		Category: task.Category,
+		Priority: task.Priority,
+	}
+}
+
+func accumulatePulseSummary(summary *PulseTaskSummary, task Task) {
+	switch task.Status {
+	case "pending":
+		summary.Status.Pending++
+	case "queued":
+		summary.Status.Queued++
+	case "running":
+		summary.Status.Running++
+	case "completed":
+		summary.Status.Completed++
+	case "failed":
+		summary.Status.Failed++
+	case "blocked":
+		summary.Status.Blocked++
+	}
+	switch task.Category {
+	case "active":
+		summary.Category.Active++
+	case "backlog":
+		summary.Category.Backlog++
+	case "scheduled":
+		summary.Category.Scheduled++
+	}
+	if task.Status == "completed" || task.Status == "cancelled" {
+		return
+	}
+	switch task.Category {
+	case "active", "backlog", "scheduled":
+		summary.TotalPending++
+		switch task.Priority {
+		case 4:
+			summary.Priority.Urgent++
+		case 3:
+			summary.Priority.High++
+		case 2:
+			summary.Priority.Normal++
+		case 1:
+			summary.Priority.Low++
 		}
 	}
-	return "", fmt.Errorf("unterminated JSON object")
+}
+
+func accumulatePulseScheduleSummary(summary *PulseTaskSummary, nextRun *time.Time, now time.Time) {
+	if nextRun == nil {
+		return
+	}
+	if nextRun.Before(now) {
+		summary.Scheduled.Overdue++
+	}
+	endOfToday := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, 0, now.Location())
+	if !nextRun.After(endOfToday) {
+		summary.Scheduled.DueToday++
+	}
+	if !nextRun.After(now.AddDate(0, 0, 7)) {
+		summary.Scheduled.DueThisWeek++
+	}
 }
 
 func (p *PulseProjection) normalize() {

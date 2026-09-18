@@ -10864,7 +10864,7 @@ func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 	})
 }
 
-func cliPulseJSONServer(t *testing.T, pulseJSON string) (*client.Client, *recorder) {
+func cliPulseJSONServer(t *testing.T, tasksJSON, scheduleHTML string) (*client.Client, *recorder) {
 	t.Helper()
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -10873,28 +10873,24 @@ func cliPulseJSONServer(t *testing.T, pulseJSON string) (*client.Client, *record
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, cliProjects)
-		case "/api/chat/message":
-			if r.Method != http.MethodPost {
-				t.Errorf("chat method = %s", r.Method)
-				http.Error(w, "bad method", http.StatusMethodNotAllowed)
+		case "/api/tasks/reference-catalog":
+			if r.Method != http.MethodGet || r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("catalog request = %s %s", r.Method, r.URL.RequestURI())
+				http.Error(w, "bad catalog request", http.StatusBadRequest)
 				return
 			}
-			if err := r.ParseForm(); err != nil {
-				t.Error(err)
-				http.Error(w, "bad form", http.StatusBadRequest)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, tasksJSON)
+		case "/schedule":
+			if r.Method != http.MethodGet || r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("schedule request = %s %s", r.Method, r.URL.RequestURI())
+				http.Error(w, "bad schedule request", http.StatusBadRequest)
 				return
 			}
-			rec.mu.Lock()
-			rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
-			rec.mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(w, `{"message_id":"exec-pulse","status":"processing"}`)
-		case "/api/chat/message/exec-pulse":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(client.ChatStatus{MessageID: "exec-pulse", Status: "completed", Response: pulseJSON})
-		case "/api/pulse":
-			t.Errorf("unexpected request to nonexistent /api/pulse route")
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, scheduleHTML)
+		case "/api/pulse", "/api/chat/message":
+			t.Errorf("unexpected pulse JSON request to %s", r.URL.Path)
 			http.NotFound(w, r)
 		default:
 			t.Errorf("unexpected pulse JSON request %s %s", r.Method, r.URL.RequestURI())
@@ -10911,30 +10907,25 @@ func cliPulseJSONServer(t *testing.T, pulseJSON string) (*client.Client, *record
 
 func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 	const longPrompt = "this full prompt must not leak into pulse JSON output"
-	pulseJSON := `{
-		"ok": true,
-		"project_id": "p1",
-		"generated_at": "2026-09-18T12:00:00Z",
-		"lookahead_days": 7,
-		"running_tasks": [{"task_id":"run-1","title":"Running implementation","status":"running","category":"active","priority":4,"agent_name":"Builder","prompt_preview":"bounded preview","created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
-		"waiting_count": 2,
-		"pending_tasks": [{"task_id":"pending-1","title":"Pending follow-up","status":"pending","category":"active","priority":3,"created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
-		"queued_tasks": [{"task_id":"queued-1","title":"Queued follow-up","status":"queued","category":"active","priority":3,"created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
-		"blocked_tasks": [{"task_id":"blocked-1","title":"Blocked dependency","status":"blocked","category":"active","priority":2,"created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
-		"scheduled_tasks": [{"task_id":"sched-1","title":"Scheduled today","status":"pending","category":"scheduled","priority":1,"schedule_id":"schedule-1","next_run":"2026-09-18T20:00:00Z","repeat_type":"daily","repeat_interval":1,"repeat_label":"daily","created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
-		"task_summary": {"total_pending":5,"priority":{"urgent":1,"high":2,"normal":1,"low":1},"status":{"pending":3,"queued":1,"running":1,"completed":0,"failed":0,"blocked":1},"category":{"active":4,"backlog":0,"scheduled":1},"scheduled":{"overdue":0,"due_today":1,"due_this_week":1}}
-	}`
-	c, rec := cliPulseJSONServer(t, strings.ReplaceAll(pulseJSON, longPrompt, "bounded preview"))
+	tasksJSON := `{"tasks":[
+		{"id":"run-1","project_id":"p1","title":"Running implementation","prompt":"` + longPrompt + `","category":"active","status":"running","priority":4},
+		{"id":"pending-1","project_id":"p1","title":"Pending follow-up","category":"active","status":"pending","priority":3},
+		{"id":"queued-1","project_id":"p1","title":"Queued follow-up","category":"active","status":"queued","priority":3},
+		{"id":"blocked-1","project_id":"p1","title":"Blocked dependency","category":"active","status":"blocked","priority":2},
+		{"id":"sched-1","project_id":"p1","title":"Scheduled today","category":"scheduled","status":"pending","priority":1}
+	]}`
+	scheduleHTML := `<div id="schedule-content"><div data-date="2026-09-18" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1"><div class="font-semibold">Scheduled today</div></div></div></div>`
+	c, rec := cliPulseJSONServer(t, tasksJSON, scheduleHTML)
 
 	var out bytes.Buffer
 	if err := RunCLI(c, &out, "demo", []string{"pulse"}, false, true); err != nil {
 		t.Fatalf("RunCLI pulse --json: %v", err)
 	}
-	if !rec.sawForm("project_id=p1") || !rec.sawForm("view_pulse") {
-		t.Fatalf("pulse JSON did not request scoped view_pulse tool: forms=%v urls=%v", rec.forms, rec.urlsSnapshot())
+	if !rec.sawQuery("GET /api/tasks/reference-catalog?project_id=p1") || !rec.sawQuery("GET /schedule?project_id=p1") {
+		t.Fatalf("pulse JSON did not use scoped deterministic reads: urls=%v", rec.urlsSnapshot())
 	}
-	if rec.saw("GET", "/api/pulse") || rec.saw("POST", "/api/pulse") {
-		t.Fatalf("pulse JSON requested nonexistent /api/pulse route")
+	if rec.saw("POST", "/api/chat/message") || rec.saw("GET", "/api/pulse") || rec.saw("POST", "/api/pulse") {
+		t.Fatalf("pulse JSON used chat or nonexistent pulse route: %v", rec.urlsSnapshot())
 	}
 	if rec.saw("GET", "/upcoming") {
 		t.Fatalf("pulse JSON fetched HTML briefing")
@@ -10950,20 +10941,16 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 	if got.ProjectID != "p1" || got.WaitingCount != 2 || got.TaskSummary.Status.Blocked != 1 {
 		t.Fatalf("pulse projection = %+v", got)
 	}
-	if len(got.RunningTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 1 {
-		t.Fatalf("pulse task groups = running %d queued %d blocked %d scheduled %d", len(got.RunningTasks), len(got.QueuedTasks), len(got.BlockedTasks), len(got.ScheduledTasks))
+	if len(got.RunningTasks) != 1 || len(got.PendingTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 1 {
+		t.Fatalf("pulse task groups = running %d pending %d queued %d blocked %d scheduled %d", len(got.RunningTasks), len(got.PendingTasks), len(got.QueuedTasks), len(got.BlockedTasks), len(got.ScheduledTasks))
+	}
+	if got.ScheduledTasks[0].ScheduleID != "schedule-1" || got.ScheduledTasks[0].NextRun == nil {
+		t.Fatalf("scheduled task missing schedule ID or timing: %+v", got.ScheduledTasks[0])
 	}
 }
 
 func TestCLIPulseJSONEmptyProjectUsesEmptyArrays(t *testing.T) {
-	c, _ := cliPulseJSONServer(t, `{
-		"ok": true,
-		"project_id": "p1",
-		"generated_at": "2026-09-18T12:00:00Z",
-		"lookahead_days": 7,
-		"waiting_count": 0,
-		"task_summary": {"total_pending":0,"priority":{"urgent":0,"high":0,"normal":0,"low":0},"status":{"pending":0,"queued":0,"running":0,"completed":0,"failed":0,"blocked":0},"category":{"active":0,"backlog":0,"scheduled":0},"scheduled":{"overdue":0,"due_today":0,"due_this_week":0}}
-	}`)
+	c, _ := cliPulseJSONServer(t, `{"tasks":[]}`, `<div id="schedule-content"></div>`)
 
 	var out bytes.Buffer
 	if err := RunCLI(c, &out, "demo", []string{"pulse", "show"}, false, true); err != nil {

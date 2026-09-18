@@ -31,6 +31,7 @@ type Task struct {
 	Prompt       string   `json:"prompt"`
 	Category     string   `json:"category"` // backlog | active | completed | scheduled
 	Status       string   `json:"status"`   // pending | queued | running | completed | failed | cancelled | blocked
+	Priority     int      `json:"priority,omitempty"`
 	DisplayOrder int      `json:"display_order"`
 	Badges       []string `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
 }
