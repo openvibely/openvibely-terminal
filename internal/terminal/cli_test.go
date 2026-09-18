@@ -10914,7 +10914,7 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 		{"id":"blocked-1","project_id":"p1","title":"Blocked dependency","category":"active","status":"blocked","priority":2},
 		{"id":"sched-1","project_id":"p1","title":"Scheduled today","category":"scheduled","status":"pending","priority":1}
 	]}`
-	scheduleHTML := `<div id="schedule-content"><div data-date="2026-09-18" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1"><div class="font-semibold">Scheduled today</div></div></div></div>`
+	scheduleHTML := `<div id="schedule-content"><div data-date="2026-09-18" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled today</div></div></div><div data-date="2026-09-18" data-hour="21"><div data-task-id="paused-1" data-schedule-id="schedule-paused" data-schedule-enabled="false"><div class="font-semibold">Paused schedule</div></div></div></div>`
 	c, rec := cliPulseJSONServer(t, tasksJSON, scheduleHTML)
 
 	var out bytes.Buffer
@@ -10946,6 +10946,9 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 	}
 	if got.ScheduledTasks[0].ScheduleID != "schedule-1" || got.ScheduledTasks[0].NextRun == nil {
 		t.Fatalf("scheduled task missing schedule ID or timing: %+v", got.ScheduledTasks[0])
+	}
+	if strings.Contains(out.String(), "schedule-paused") || strings.Contains(out.String(), "Paused schedule") {
+		t.Fatalf("pulse JSON included disabled schedule: %s", out.String())
 	}
 }
 

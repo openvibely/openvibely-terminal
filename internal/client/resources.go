@@ -1920,6 +1920,7 @@ type ScheduleEntry struct {
 	Name       string     `json:"-"`
 	Text       string     `json:"text"`
 	NextRun    *time.Time `json:"next_run,omitempty"`
+	Disabled   bool       `json:"-"`
 }
 
 // ScheduleConfig is the editable state of one existing schedule.
@@ -2016,6 +2017,7 @@ func (c *Client) getScheduleWeek(ctx context.Context, projectID string, weekOffs
 			Name:       name,
 			Text:       text,
 			NextRun:    scheduleCardNextRun(card.node),
+			Disabled:   strings.EqualFold(strings.TrimSpace(card.attrs["data-schedule-enabled"]), "false"),
 		})
 	}
 	summary := ""
@@ -4010,7 +4012,7 @@ func buildPulseProjectionFromCatalog(projectID string, tasks []Task, schedules [
 	lookaheadEnd := generatedAt.AddDate(0, 0, out.LookaheadDays)
 	seenSchedules := map[string]bool{}
 	for _, schedule := range schedules {
-		if strings.TrimSpace(schedule.ScheduleID) == "" || seenSchedules[schedule.ScheduleID] || pulseScheduleBeyondLookahead(schedule.NextRun, lookaheadEnd) {
+		if schedule.Disabled || strings.TrimSpace(schedule.ScheduleID) == "" || seenSchedules[schedule.ScheduleID] || pulseScheduleBeyondLookahead(schedule.NextRun, lookaheadEnd) {
 			continue
 		}
 		seenSchedules[schedule.ScheduleID] = true
