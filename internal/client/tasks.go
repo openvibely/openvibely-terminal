@@ -214,6 +214,25 @@ type TaskForm struct {
 	Tag      string // "", feature, bug
 }
 
+// SwarmTaskForm carries create fields for an autonomous swarm parent task.
+type SwarmTaskForm struct {
+	Title                   string
+	Prompt                  string
+	Goal                    string
+	Category                string // backlog | active
+	Priority                int    // 1-4
+	AgentID                 string
+	AgentDefinitionID       string
+	Tag                     string // "", feature, bug
+	MaxWorkers              int
+	WorkerIsolation         string // worktree | read_only | shared
+	ReviewerEnabled         bool
+	MergerEnabled           bool
+	AutoMerge               bool
+	AutoMergeOnGoalAchieved bool
+	MergeTargetBranch       string
+}
+
 // ReviewComment is one inline code review comment attached to a task diff line.
 type ReviewComment struct {
 	ID          string `json:"id"`
@@ -244,6 +263,45 @@ func (f TaskForm) values() url.Values {
 	}
 	v.Set("priority", strconv.Itoa(f.Priority))
 	v.Set("tag", f.Tag)
+	return v
+}
+
+func (f SwarmTaskForm) values() url.Values {
+	v := url.Values{}
+	v.Set("swarm_mode", "true")
+	v.Set("title", f.Title)
+	v.Set("prompt", f.Prompt)
+	v.Set("goal", f.Goal)
+	if f.Category != "" {
+		v.Set("category", f.Category)
+	}
+	if f.Priority != 0 {
+		v.Set("priority", strconv.Itoa(f.Priority))
+	}
+	if f.AgentID != "" {
+		v.Set("agent_id", f.AgentID)
+	}
+	if f.AgentDefinitionID != "" {
+		v.Set("agent_definition_id", f.AgentDefinitionID)
+	}
+	v.Set("tag", f.Tag)
+	if f.MaxWorkers != 0 {
+		v.Set("swarm_max_workers", strconv.Itoa(f.MaxWorkers))
+	}
+	if f.WorkerIsolation != "" {
+		v.Set("swarm_worker_isolation", f.WorkerIsolation)
+	}
+	v.Set("swarm_reviewer_enabled", strconv.FormatBool(f.ReviewerEnabled))
+	v.Set("swarm_merger_enabled", strconv.FormatBool(f.MergerEnabled))
+	if f.AutoMerge {
+		v.Set("auto_merge", "true")
+	}
+	if f.AutoMergeOnGoalAchieved {
+		v.Set("auto_merge_on_goal_achieved", "true")
+	}
+	if f.MergeTargetBranch != "" {
+		v.Set("merge_target_branch", f.MergeTargetBranch)
+	}
 	return v
 }
 
@@ -970,6 +1028,29 @@ func (c *Client) addTaskReviewComment(ctx context.Context, taskID, projectID str
 // CreateTask creates a task. Category "active" submits it immediately.
 func (c *Client) CreateTask(ctx context.Context, projectID string, form TaskForm) error {
 	return c.doForm(ctx, http.MethodPost, "/tasks"+query("project_id", projectID), form.values())
+}
+
+// CreateSwarmTask creates an autonomous swarm parent task and returns the parent
+// parsed from the refreshed board fragment when the backend includes it.
+func (c *Client) CreateSwarmTask(ctx context.Context, projectID string, form SwarmTaskForm) (Task, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return Task{}, fmt.Errorf("project ID is required for swarm task creation")
+	}
+	root, err := c.doFormHTML(ctx, http.MethodPost, "/tasks"+query("project_id", projectID), form.values())
+	if err != nil {
+		return Task{}, err
+	}
+	tasks := parseTaskCards(root, projectID)
+	for _, task := range tasks {
+		if strings.EqualFold(strings.TrimSpace(task.Title), strings.TrimSpace(form.Title)) {
+			return task, nil
+		}
+	}
+	if len(tasks) == 1 {
+		return tasks[0], nil
+	}
+	return Task{ProjectID: projectID, Title: form.Title, Prompt: form.Prompt, Category: form.Category}, nil
 }
 
 // UpdateTask updates a task's editable fields.

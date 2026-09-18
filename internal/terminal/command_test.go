@@ -1705,6 +1705,12 @@ func TestRuntimeUsageMatchesCanonicalHelpSyntax(t *testing.T) {
 	if got := c.usageMessage("new"); got != "usage: tasks new <title> [| <prompt>]" {
 		t.Fatalf("CLI usage = %q, want a bare command", got)
 	}
+	if got := c.usageMessage("swarm"); got != "usage: tasks swarm [options] <title> | <prompt>" {
+		t.Fatalf("swarm CLI usage = %q, want a bare command", got)
+	}
+	if help := renderCommandHelp(*c); !strings.Contains(help, "tasks swarm [options] <title> | <prompt>") || !strings.Contains(help, "--worker-isolation") {
+		t.Fatalf("tasks swarm help missing syntax/options:\n%s", help)
+	}
 }
 
 func TestChannelsWebhooksHelpCompletionAndDeprecatedAliases(t *testing.T) {

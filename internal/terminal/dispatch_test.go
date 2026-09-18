@@ -1923,6 +1923,67 @@ func TestTasksLifecycleEventBackendError(t *testing.T) {
 	}
 }
 
+func TestTasksSwarmCreateValidationAndOutput(t *testing.T) {
+	const swarmBoard = `<div data-task-id="swarm-parent" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-parent" title="Coordinate release">Coordinate release</a></div>`
+
+	t.Run("backlog posts selected options and defers planner", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{"POST /tasks": swarmBoard})
+		m = runLine(t, m, `/tasks swarm --category backlog --priority 3 --goal "ship safely" --tag feature --max-workers 4 --worker-isolation read_only --agent-id model-1 --agent-definition-id agent-1 --no-reviewer --no-merger --auto-merge --auto-merge-on-goal-achieved --merge-target-branch main Coordinate release | Split validation across workers`)
+		if !rec.saw("POST", "/tasks") || !rec.sawQuery("POST /tasks?project_id=p1") {
+			t.Fatalf("swarm create was not posted with project scope:\n%s", rec.all())
+		}
+		for _, want := range []string{
+			"swarm_mode=true", "title=Coordinate+release", "prompt=Split+validation+across+workers", "goal=ship+safely",
+			"category=backlog", "priority=3", "tag=feature", "swarm_max_workers=4", "swarm_worker_isolation=read_only",
+			"agent_id=model-1", "agent_definition_id=agent-1", "swarm_reviewer_enabled=false", "swarm_merger_enabled=false",
+			"auto_merge=true", "auto_merge_on_goal_achieved=true", "merge_target_branch=main",
+		} {
+			if !rec.sawForm(want) {
+				t.Errorf("form missing %q; forms: %v", want, rec.forms)
+			}
+		}
+		out := transcript(m)
+		for _, want := range []string{"created swarm task", "TASK_ID:swarm-parent", "Planner starts when this swarm parent becomes Active"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("output missing %q:\n%s", want, out)
+			}
+		}
+	})
+
+	t.Run("active starts planner message", func(t *testing.T) {
+		activeBoard := `<div data-task-id="swarm-active" data-task-status="queued" data-task-category="active"><a href="/tasks/swarm-active" title="Coordinate release">Coordinate release</a></div>`
+		m, _ := dispatchModel(t, map[string]string{"POST /tasks": activeBoard})
+		m = runLine(t, m, `/tasks swarm --category active Coordinate release | Split validation across workers`)
+		out := transcript(m)
+		if !strings.Contains(out, "Planner starts immediately because the swarm parent is Active") {
+			t.Fatalf("active planner message missing:\n%s", out)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "missing prompt", line: `/tasks swarm Coordinate release`, want: "usage: /tasks swarm"},
+		{name: "invalid max workers", line: `/tasks swarm --max-workers 0 Coordinate release | work`, want: "max workers must be between 1 and 8"},
+		{name: "invalid worker isolation", line: `/tasks swarm --worker-isolation host Coordinate release | work`, want: "worker isolation must be worktree, read_only, or shared"},
+		{name: "unsupported category", line: `/tasks swarm --category completed Coordinate release | work`, want: "category must be active or backlog"},
+		{name: "invalid priority", line: `/tasks swarm --priority 5 Coordinate release | work`, want: "priority must be between 1 and 4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.line)
+			if rec.saw("POST", "/tasks") {
+				t.Fatalf("invalid swarm command posted unexpectedly:\n%s", rec.all())
+			}
+			if out := transcript(m); !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
+}
+
 func TestTasksNewEmptyTitleFromPipeInput(t *testing.T) {
 	t.Run("pipe_only_is_rejected", func(t *testing.T) {
 		m, rec := dispatchModel(t, nil)

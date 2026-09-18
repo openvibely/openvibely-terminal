@@ -6916,6 +6916,38 @@ func TestCLIJSONScopedSingleEntryKeepsDataShape(t *testing.T) {
 	}
 }
 
+func TestCLIJSONTasksSwarmCreate(t *testing.T) {
+	const board = `<div data-task-id="swarm-json" data-task-status="queued" data-task-category="active"><a href="/tasks/swarm-json" title="Coordinate release">Coordinate release</a></div>`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        board,
+	})
+
+	const secret = "json-swarm-prompt-secret"
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"tasks", "swarm", "--category", "active", "--priority", "4", "--tag", "bug", "--max-workers", "3", "--worker-isolation", "shared", "--no-reviewer", "Coordinate release", "|", "Do not echo " + secret}, false, true)
+	if err != nil {
+		t.Fatalf("tasks swarm --json failed: %v", err)
+	}
+	if !rec.saw("POST", "/tasks") || !rec.sawQuery("POST /tasks?project_id=p1") {
+		t.Fatalf("swarm create was not scoped to the selected project:\n%s", rec.all())
+	}
+	got := strings.TrimSpace(out.String())
+	if strings.Contains(got, secret) || strings.Contains(strings.ToLower(got), "api_key") || strings.Contains(strings.ToLower(got), "token") {
+		t.Fatalf("JSON output leaked secret-like content:\n%s", got)
+	}
+	var created taskSwarmCreateOutput
+	if err := json.Unmarshal([]byte(got), &created); err != nil {
+		t.Fatalf("output is not valid swarm JSON: %v\noutput: %s", err, got)
+	}
+	if created.Status != "created" || created.TaskID != "swarm-json" || created.ProjectID != "p1" || created.Category != "active" || created.Planner != "started" {
+		t.Fatalf("unexpected JSON output: %#v", created)
+	}
+	if created.Priority != 4 || created.Tag != "bug" || created.MaxWorkers != 3 || created.WorkerIsolation != "shared" || created.ReviewerEnabled || !created.MergerEnabled {
+		t.Fatalf("swarm options missing from JSON: %#v", created)
+	}
+}
+
 func TestCLIJSONTasksList(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
