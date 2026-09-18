@@ -10921,8 +10921,8 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 	if err := RunCLI(c, &out, "demo", []string{"pulse"}, false, true); err != nil {
 		t.Fatalf("RunCLI pulse --json: %v", err)
 	}
-	if !rec.sawQuery("GET /api/tasks/reference-catalog?project_id=p1") || !rec.sawQuery("GET /schedule?project_id=p1") {
-		t.Fatalf("pulse JSON did not use scoped deterministic reads: urls=%v", rec.urlsSnapshot())
+	if !rec.sawQuery("GET /api/tasks/reference-catalog?project_id=p1") || !rec.sawQuery("GET /schedule?project_id=p1") || !rec.sawQuery("GET /schedule?project_id=p1&week=1") {
+		t.Fatalf("pulse JSON did not use scoped deterministic rolling-lookahead reads: urls=%v", rec.urlsSnapshot())
 	}
 	if rec.saw("POST", "/api/chat/message") || rec.saw("GET", "/api/pulse") || rec.saw("POST", "/api/pulse") {
 		t.Fatalf("pulse JSON used chat or nonexistent pulse route: %v", rec.urlsSnapshot())

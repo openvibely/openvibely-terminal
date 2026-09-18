@@ -5806,7 +5806,15 @@ func TestXAuthorizedUsersPreserveAuthTransportAndMalformedDiagnostics(t *testing
 
 func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	const longPrompt = "this full prompt must not appear in pulse JSON"
-	var sawCatalog, sawSchedule bool
+	now := time.Now()
+	daysUntilNextSunday := (7 - int(now.Weekday())) % 7
+	if daysUntilNextSunday == 0 {
+		daysUntilNextSunday = 7
+	}
+	currentDate := now.Format("2006-01-02")
+	nextWeekDate := now.AddDate(0, 0, daysUntilNextSunday).Format("2006-01-02")
+	sawScheduleWeeks := map[string]bool{}
+	var sawCatalog bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/pulse", "/api/chat/message":
@@ -5822,15 +5830,21 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 				{"id":"pending-1","project_id":"p1","title":"Pending work","category":"active","status":"pending","priority":3},
 				{"id":"queued-1","project_id":"p1","title":"Queued work","category":"active","status":"queued","priority":3},
 				{"id":"blocked-1","project_id":"p1","title":"Blocked work","category":"active","status":"blocked","priority":2},
-				{"id":"sched-1","project_id":"p1","title":"Scheduled work","category":"scheduled","status":"pending","priority":1}
+				{"id":"sched-1","project_id":"p1","title":"Scheduled work","category":"scheduled","status":"pending","priority":1},
+				{"id":"sched-2","project_id":"p1","title":"Next week work","category":"scheduled","status":"pending","priority":1}
 			]}`)
 		case "/schedule":
-			sawSchedule = true
 			if r.Method != http.MethodGet || r.URL.Query().Get("project_id") != "p1" {
 				t.Fatalf("schedule request = %s %s", r.Method, r.URL.RequestURI())
 			}
+			week := r.URL.Query().Get("week")
+			sawScheduleWeeks[week] = true
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="2026-09-18" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1"><div class="font-semibold">Scheduled work</div></div></div></div>`)
+			if week == "1" {
+				_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+nextWeekDate+`" data-hour="10"><div data-task-id="sched-2" data-schedule-id="schedule-2"><div class="font-semibold">Next week work</div></div></div></div>`)
+				return
+			}
+			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+currentDate+`" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1"><div class="font-semibold">Scheduled work</div></div></div></div>`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -5845,20 +5859,27 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPulseProjection: %v", err)
 	}
-	if !sawCatalog || !sawSchedule {
-		t.Fatalf("missing deterministic reads: catalog=%v schedule=%v", sawCatalog, sawSchedule)
+	if !sawCatalog || !sawScheduleWeeks[""] || !sawScheduleWeeks["1"] {
+		t.Fatalf("missing deterministic reads: catalog=%v scheduleWeeks=%v", sawCatalog, sawScheduleWeeks)
 	}
 	if got.ProjectID != "p1" || !got.OK || got.LookaheadDays != 7 {
 		t.Fatalf("pulse projection identity = %+v", got)
 	}
-	if len(got.RunningTasks) != 1 || len(got.PendingTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 1 {
+	if len(got.RunningTasks) != 1 || len(got.PendingTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 2 {
 		t.Fatalf("pulse task groups = running %d pending %d queued %d blocked %d scheduled %d", len(got.RunningTasks), len(got.PendingTasks), len(got.QueuedTasks), len(got.BlockedTasks), len(got.ScheduledTasks))
 	}
-	if got.WaitingCount != 2 || got.TaskSummary.Status.Blocked != 1 || got.TaskSummary.Status.Queued != 1 || got.TaskSummary.Category.Scheduled != 1 {
+	if got.WaitingCount != 2 || got.TaskSummary.Status.Blocked != 1 || got.TaskSummary.Status.Queued != 1 || got.TaskSummary.Category.Scheduled != 2 {
 		t.Fatalf("pulse summary = %+v", got.TaskSummary)
 	}
-	if got.ScheduledTasks[0].ScheduleID != "schedule-1" || got.ScheduledTasks[0].TaskID != "sched-1" || got.ScheduledTasks[0].NextRun == nil {
-		t.Fatalf("scheduled task not included with timing: %+v", got.ScheduledTasks[0])
+	seenScheduled := map[string]clientlessPulseSchedule{}
+	for _, task := range got.ScheduledTasks {
+		seenScheduled[task.ScheduleID] = clientlessPulseSchedule{taskID: task.TaskID, nextRun: task.NextRun}
+	}
+	if seenScheduled["schedule-1"].taskID != "sched-1" || seenScheduled["schedule-1"].nextRun == nil {
+		t.Fatalf("current-week scheduled task not included with timing: %+v", got.ScheduledTasks)
+	}
+	if seenScheduled["schedule-2"].taskID != "sched-2" || seenScheduled["schedule-2"].nextRun == nil {
+		t.Fatalf("next-week scheduled task within lookahead not included with timing: %+v", got.ScheduledTasks)
 	}
 	encoded, err := json.Marshal(got)
 	if err != nil {
@@ -5867,6 +5888,11 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	if strings.Contains(string(encoded), longPrompt) {
 		t.Fatalf("pulse JSON leaked full prompt: %s", encoded)
 	}
+}
+
+type clientlessPulseSchedule struct {
+	taskID  string
+	nextRun *time.Time
 }
 
 func TestGetPulseProjectionNormalizesEmptyArrays(t *testing.T) {
@@ -5922,5 +5948,27 @@ func TestGetPulseProjectionSurfacesDeterministicReadFailures(t *testing.T) {
 	_, err = c.GetPulseProjection(context.Background(), "p1")
 	if err == nil || !strings.Contains(err.Error(), "catalog unavailable") {
 		t.Fatalf("GetPulseProjection error = %v, want catalog failure", err)
+	}
+}
+
+func TestBuildPulseProjectionFiltersKnownSchedulesBeyondLookahead(t *testing.T) {
+	generatedAt := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	within := generatedAt.AddDate(0, 0, 7)
+	beyond := generatedAt.AddDate(0, 0, 8)
+
+	got := buildPulseProjectionFromCatalog("p1", []Task{
+		{ID: "within", ProjectID: "p1", Title: "Within lookahead", Category: "scheduled", Status: "pending"},
+		{ID: "beyond", ProjectID: "p1", Title: "Beyond lookahead", Category: "scheduled", Status: "pending"},
+	}, []ScheduleEntry{
+		{TaskID: "within", ScheduleID: "schedule-within", Name: "Within lookahead", NextRun: &within},
+		{TaskID: "beyond", ScheduleID: "schedule-beyond", Name: "Beyond lookahead", NextRun: &beyond},
+	}, generatedAt)
+	got.normalize()
+
+	if len(got.ScheduledTasks) != 1 || got.ScheduledTasks[0].ScheduleID != "schedule-within" {
+		t.Fatalf("scheduled tasks = %+v, want only within lookahead", got.ScheduledTasks)
+	}
+	if got.TaskSummary.Scheduled.DueThisWeek != 1 {
+		t.Fatalf("scheduled summary = %+v, want one due this week", got.TaskSummary.Scheduled)
 	}
 }
