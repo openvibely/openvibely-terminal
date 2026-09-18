@@ -5812,7 +5812,9 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 		daysUntilNextSunday = 7
 	}
 	currentDate := now.Format("2006-01-02")
-	tomorrowDate := now.AddDate(0, 0, 1).Format("2006-01-02")
+	tomorrow := now.AddDate(0, 0, 1)
+	tomorrowDate := tomorrow.Format("2006-01-02")
+	scheduleOneNextRun := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 10, 45, 30, 0, time.Local)
 	nextWeekDate := now.AddDate(0, 0, daysUntilNextSunday).Format("2006-01-02")
 	sawScheduleWeeks := map[string]bool{}
 	var sawCatalog bool
@@ -5845,7 +5847,7 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 				_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+nextWeekDate+`" data-hour="10"><div data-task-id="sched-2" data-schedule-id="schedule-2" data-schedule-enabled="true"><div class="font-semibold">Next week work</div><div class="opacity-60 leading-tight">10:00 AM</div></div></div></div>`)
 				return
 			}
-			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+currentDate+`" data-hour="0"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div><div class="opacity-60 leading-tight">12:15 AM</div></div></div><div data-date="`+tomorrowDate+`" data-hour="10"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div><div class="opacity-60 leading-tight">10:45 AM</div></div></div><div data-date="`+currentDate+`" data-hour="21"><div data-task-id="sched-disabled" data-schedule-id="schedule-disabled" data-schedule-enabled="false"><div class="font-semibold">Paused schedule</div><div class="opacity-60 leading-tight">9:30 PM</div></div></div></div>`)
+			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+currentDate+`" data-hour="0"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div><div class="opacity-60 leading-tight">12:15 AM</div></div></div><div data-date="`+tomorrowDate+`" data-hour="10"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-next-run="`+scheduleOneNextRun.Format(time.RFC3339Nano)+`" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div><div class="opacity-60 leading-tight">10:45 AM</div></div></div><div data-date="`+currentDate+`" data-hour="21"><div data-task-id="sched-disabled" data-schedule-id="schedule-disabled" data-schedule-enabled="false"><div class="font-semibold">Paused schedule</div><div class="opacity-60 leading-tight">9:30 PM</div></div></div></div>`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -5876,8 +5878,8 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	for _, task := range got.ScheduledTasks {
 		seenScheduled[task.ScheduleID] = clientlessPulseSchedule{taskID: task.TaskID, nextRun: task.NextRun}
 	}
-	if seenScheduled["schedule-1"].taskID != "sched-1" || seenScheduled["schedule-1"].nextRun == nil || seenScheduled["schedule-1"].nextRun.Format("2006-01-02") != tomorrowDate || seenScheduled["schedule-1"].nextRun.Hour() != 10 || seenScheduled["schedule-1"].nextRun.Minute() != 45 {
-		t.Fatalf("current-week recurring task did not use minute-precise upcoming timing: %+v", got.ScheduledTasks)
+	if seenScheduled["schedule-1"].taskID != "sched-1" || seenScheduled["schedule-1"].nextRun == nil || !seenScheduled["schedule-1"].nextRun.Equal(scheduleOneNextRun) {
+		t.Fatalf("current-week recurring task did not use exact upcoming timing: %+v", got.ScheduledTasks)
 	}
 	if seenScheduled["schedule-2"].taskID != "sched-2" || seenScheduled["schedule-2"].nextRun == nil {
 		t.Fatalf("next-week scheduled task within lookahead not included with timing: %+v", got.ScheduledTasks)
@@ -5903,6 +5905,7 @@ func TestGetPulseProjectionEnrichesSubdailyScheduleNextRunFromTaskDetail(t *test
 	now := time.Now()
 	tomorrow := now.AddDate(0, 0, 1)
 	tomorrowDate := tomorrow.Format("2006-01-02")
+	exactNextRun := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 10, 45, 30, 0, time.Local)
 	var sawTaskScheduleDetail bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -5923,7 +5926,7 @@ func TestGetPulseProjectionEnrichesSubdailyScheduleNextRunFromTaskDetail(t *test
 				t.Fatalf("task schedule detail request = %s", r.URL.RequestURI())
 			}
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = io.WriteString(w, `<div id="schedule-card-schedule-subdaily"><span>hours</span><span class="text-sm ml-2 opacity-60">Next: `+tomorrowDate+` 10:45 AM</span><div data-schedule-id="schedule-subdaily"><form hx-put="/schedules/schedule-subdaily?project_id=p1"><input name="run_at" value="`+tomorrowDate+`T10:45"><input name="repeat_interval" value="1"><select name="repeat_type"><option value="hours" selected>Hours</option></select><input type="checkbox" name="clear_context_on_start" checked></form></div></div>`)
+			_, _ = io.WriteString(w, `<div id="schedule-card-schedule-subdaily" data-schedule-next-run="`+exactNextRun.Format(time.RFC3339Nano)+`"><span>seconds</span><span class="text-sm ml-2 opacity-60">Next: `+tomorrowDate+` 10:45 AM</span><div data-schedule-id="schedule-subdaily"><form hx-put="/schedules/schedule-subdaily?project_id=p1"><input name="run_at" value="`+tomorrowDate+`T10:45"><input name="repeat_interval" value="7"><select name="repeat_type"><option value="seconds" selected>Seconds</option></select><input type="checkbox" name="clear_context_on_start" checked></form></div></div>`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -5944,8 +5947,8 @@ func TestGetPulseProjectionEnrichesSubdailyScheduleNextRunFromTaskDetail(t *test
 	if len(got.ScheduledTasks) != 1 || got.ScheduledTasks[0].NextRun == nil {
 		t.Fatalf("scheduled tasks = %+v, want one subdaily task with timing", got.ScheduledTasks)
 	}
-	if got.ScheduledTasks[0].NextRun.Format("2006-01-02") != tomorrowDate || got.ScheduledTasks[0].NextRun.Hour() != 10 || got.ScheduledTasks[0].NextRun.Minute() != 45 {
-		t.Fatalf("subdaily next_run = %v, want exact 10:45 from task detail", got.ScheduledTasks[0].NextRun)
+	if !got.ScheduledTasks[0].NextRun.Equal(exactNextRun) {
+		t.Fatalf("subdaily next_run = %v, want exact %v from task detail", got.ScheduledTasks[0].NextRun, exactNextRun)
 	}
 	if got.TaskSummary.Scheduled.Overdue != 0 || got.TaskSummary.Scheduled.DueThisWeek != 1 {
 		t.Fatalf("scheduled summary = %+v, want exact upcoming subdaily occurrence counted", got.TaskSummary.Scheduled)
