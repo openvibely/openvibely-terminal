@@ -122,6 +122,42 @@ func TestProjectsShowAndEditPreserveOmittedSettingsAndSameIDContext(t *testing.T
 	}
 }
 
+func TestProjectsEditPreservesExplicitSelectedRepositoryAndAgent(t *testing.T) {
+	githubAgentForm := strings.Replace(projectEditFixture, `<option value="local" selected>Local</option><option value="github">GitHub</option>`, `<option value="local">Local</option><option value="github" selected>GitHub</option>`, 1)
+	githubAgentForm = strings.Replace(githubAgentForm, `<input name="repo_url" value="">`, `<input name="repo_url" value="https://github.com/acme/alpha">`, 1)
+	githubAgentForm = strings.Replace(githubAgentForm, `<option value="" selected>Global</option><option value="agent-1">Builder</option>`, `<option value="">Global</option><option value="agent-1" selected>Builder</option>`, 1)
+	var putForm url.Values
+	saved := false
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+			html := githubAgentForm
+			if saved {
+				html = strings.Replace(html, `value="Alpha Project"`, `value="Renamed"`, 1)
+			}
+			_, _ = io.WriteString(w, html)
+		case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+			_ = r.ParseForm()
+			putForm = r.PostForm
+			saved = true
+			w.Header().Set("HX-Refresh", "true")
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	m.projects = []client.Project{{ID: "p1", Name: "Alpha Project", Path: "/tmp/alpha path"}}
+	m.projectsLoaded = true
+	m = runLine(t, m, `/projects edit p1 --name Renamed`)
+	if putForm == nil {
+		t.Fatalf("edit did not PUT: %q", transcript(m))
+	}
+	for key, want := range map[string]string{"name": "Renamed", "repo_source": "github", "repo_url": "https://github.com/acme/alpha", "default_agent_config_id": "agent-1"} {
+		if got := putForm.Get(key); got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestProjectsEditResolvesNamesContainingOptionLikeTokens(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -479,23 +515,97 @@ func assertTerminalSafeProjectShowError(t *testing.T, output, want string) {
 	}
 }
 
-func TestProjectsEditRejectsIncompleteFormBeforeMutation(t *testing.T) {
-	puts := 0
-	incomplete := strings.Replace(projectEditFixture, `<textarea name="description">kept</textarea>`, ``, 1)
-	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			puts++
+func TestProjectsShowJSONRejectsUnselectedProjectSelects(t *testing.T) {
+	malformed := strings.Replace(projectEditFixture, `<option value="local" selected>Local</option>`, `<option value="local">Local</option>`, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects":
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"Alpha Project","path":"/tmp/alpha path"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+			_, _ = io.WriteString(w, malformed)
+		default:
+			http.NotFound(w, r)
 		}
-		_, _ = io.WriteString(w, incomplete)
-	})
-	m.projects = []client.Project{{ID: "p1", Name: "Alpha Project"}}
-	m.projectsLoaded = true
-	m = runLine(t, m, `/projects edit p1 --name Renamed`)
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "", []string{"projects", "show", "p1"}, false, true)
+	if err == nil || !strings.Contains(err.Error(), "repo_source") {
+		t.Fatalf("error = %v, output = %q", err, out.String())
+	}
+	if strings.Contains(out.String(), `"repository_source":"local"`) {
+		t.Fatalf("show JSON guessed repository source: %q", out.String())
+	}
+}
+
+func TestCLIProjectsEditRejectsUnselectedSelectBeforeMutation(t *testing.T) {
+	malformed := strings.Replace(projectEditFixture, `<option value="local" selected>Local</option>`, `<option value="local">Local</option>`, 1)
+	malformed = strings.Replace(malformed, `<option value="" selected>Global</option>`, `<option value="">Global</option>`, 1)
+	puts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/projects":
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"Alpha Project","path":"/tmp/alpha path"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
+			_, _ = io.WriteString(w, malformed)
+		case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+			puts++
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	err := RunCLI(c, io.Discard, "", []string{"projects", "edit", "p1", "--name", "Renamed"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "repo_source") {
+		t.Fatalf("error = %v, want repo_source", err)
+	}
 	if puts != 0 {
 		t.Fatalf("PUTs = %d", puts)
 	}
-	if out := transcript(m); !strings.Contains(out, "required field description") {
-		t.Fatalf("missing strict form error: %q", out)
+}
+
+func TestProjectsEditRejectsIncompleteFormBeforeMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		form string
+		want string
+	}{
+		{
+			name: "missing description",
+			form: strings.Replace(projectEditFixture, `<textarea name="description">kept</textarea>`, ``, 1),
+			want: "required field description",
+		},
+		{
+			name: "repo source select without selected option",
+			form: strings.Replace(projectEditFixture, `<option value="local" selected>Local</option>`, `<option value="local">Local</option>`, 1),
+			want: "repo_source",
+		},
+		{
+			name: "default agent select without selected option",
+			form: strings.Replace(projectEditFixture, `<option value="" selected>Global</option>`, `<option value="">Global</option>`, 1),
+			want: "default_agent_config_id",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			puts := 0
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					puts++
+				}
+				_, _ = io.WriteString(w, tc.form)
+			})
+			m.projects = []client.Project{{ID: "p1", Name: "Alpha Project"}}
+			m.projectsLoaded = true
+			m = runLine(t, m, `/projects edit p1 --name Renamed`)
+			if puts != 0 {
+				t.Fatalf("PUTs = %d", puts)
+			}
+			if out := transcript(m); !strings.Contains(out, tc.want) {
+				t.Fatalf("missing strict form error %q: %q", tc.want, out)
+			}
+		})
 	}
 }
 

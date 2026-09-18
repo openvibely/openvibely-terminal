@@ -105,7 +105,10 @@ func parseProjectSettings(root *html.Node, projectID string) (*ProjectSettings, 
 	setting := &ProjectSettings{ID: projectID, LocalRepositoryPathsEnabled: localPathsEnabled, AvailableAgents: make([]ProjectAgentOption, 0)}
 	setting.Name = projectFieldValue(form, "name")
 	setting.Description = projectFieldValue(form, "description")
-	setting.RepositorySource = projectFieldValue(form, "repo_source")
+	setting.RepositorySource, err = projectSelectedFieldValue(form, "repo_source")
+	if err != nil {
+		return nil, false, err
+	}
 	repositoryPathCount := countProjectFields(form, "repo_path")
 	if repositoryPathCount > 1 {
 		return nil, false, fmt.Errorf("project settings: backend response included duplicate field repo_path")
@@ -116,7 +119,10 @@ func parseProjectSettings(root *html.Node, projectID string) (*ProjectSettings, 
 	}
 	setting.RepositoryPath = projectFieldValue(form, "repo_path")
 	setting.GitHubURL = projectFieldValue(form, "repo_url")
-	setting.DefaultAgentID = projectFieldValue(form, "default_agent_config_id")
+	setting.DefaultAgentID, err = projectSelectedFieldValue(form, "default_agent_config_id")
+	if err != nil {
+		return nil, false, err
+	}
 	if raw := strings.TrimSpace(projectFieldValue(form, "max_workers")); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil || value < 0 {
@@ -168,6 +174,23 @@ func findProjectField(form *html.Node, name string) *html.Node {
 	})
 }
 
+func projectSelectedFieldValue(form *html.Node, name string) (string, error) {
+	n := findProjectField(form, name)
+	if n == nil || n.Data != "select" {
+		return projectFieldValue(form, name), nil
+	}
+	options := findAll(n, func(option *html.Node) bool { return option.Data == "option" })
+	for _, option := range options {
+		if hasHTMLAttr(option, "selected") {
+			return attr(option, "value"), nil
+		}
+	}
+	if len(options) > 0 {
+		return "", fmt.Errorf("project settings: backend response select %s has options but no selected option", name)
+	}
+	return "", nil
+}
+
 func projectFieldValue(form *html.Node, name string) string {
 	n := findProjectField(form, name)
 	if n == nil {
@@ -182,9 +205,6 @@ func projectFieldValue(form *html.Node, name string) string {
 			if hasHTMLAttr(option, "selected") {
 				return attr(option, "value")
 			}
-		}
-		if len(options) > 0 {
-			return attr(options[0], "value")
 		}
 	}
 	return attr(n, "value")

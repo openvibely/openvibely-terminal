@@ -1016,6 +1016,169 @@ func TestStreamChatOutputParsesChunksAndTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestSSEStreamsSendSharedHeadersAndBlockLoginRedirects(t *testing.T) {
+	type streamRequest struct {
+		method       string
+		escapedPath  string
+		rawQuery     string
+		accept       string
+		cacheControl string
+	}
+
+	for _, tc := range []struct {
+		name          string
+		wantPath      string
+		wantRawQuery  string
+		stream        func(context.Context, *Client) (<-chan ChatOutputEvent, <-chan Event, <-chan error)
+		assertNoEvent func(*testing.T, <-chan ChatOutputEvent, <-chan Event)
+	}{
+		{
+			name:         "chat output",
+			wantPath:     "/events/chat/exec%2Fone",
+			wantRawQuery: "offset=13",
+			stream: func(ctx context.Context, c *Client) (<-chan ChatOutputEvent, <-chan Event, <-chan error) {
+				events, errs := c.StreamChatOutput(ctx, "exec/one", 13)
+				return events, nil, errs
+			},
+			assertNoEvent: func(t *testing.T, chatEvents <-chan ChatOutputEvent, _ <-chan Event) {
+				t.Helper()
+				for event := range chatEvents {
+					t.Fatalf("unexpected chat event after auth redirect: %#v", event)
+				}
+			},
+		},
+		{
+			name:         "live events",
+			wantPath:     "/events/live",
+			wantRawQuery: "project_id=project%2Ftwo",
+			stream: func(ctx context.Context, c *Client) (<-chan ChatOutputEvent, <-chan Event, <-chan error) {
+				events, errs := c.StreamEvents(ctx, "project/two")
+				return nil, events, errs
+			},
+			assertNoEvent: func(t *testing.T, _ <-chan ChatOutputEvent, liveEvents <-chan Event) {
+				t.Helper()
+				for event := range liveEvents {
+					t.Fatalf("unexpected live event after auth redirect: %#v", event)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requests := make(chan streamRequest, 1)
+			loginRequests := make(chan struct{}, 1)
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/login" {
+					select {
+					case loginRequests <- struct{}{}:
+					default:
+					}
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: followed\n\n")
+					return
+				}
+				requests <- streamRequest{
+					method:       r.Method,
+					escapedPath:  r.URL.EscapedPath(),
+					rawQuery:     r.URL.RawQuery,
+					accept:       r.Header.Get("Accept"),
+					cacheControl: r.Header.Get("Cache-Control"),
+				}
+				w.Header().Set("Location", "/login?next=%2F")
+				w.WriteHeader(http.StatusFound)
+			}))
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			chatEvents, liveEvents, errs := tc.stream(ctx, c)
+
+			select {
+			case err, ok := <-errs:
+				if !ok {
+					t.Fatal("stream error channel closed without auth error")
+				}
+				if !IsAuthRequired(err) {
+					t.Fatalf("stream error = %v, want auth required", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for auth redirect error")
+			}
+			tc.assertNoEvent(t, chatEvents, liveEvents)
+
+			select {
+			case got := <-requests:
+				if got.method != http.MethodGet {
+					t.Fatalf("method = %q, want GET", got.method)
+				}
+				if got.escapedPath != tc.wantPath || got.rawQuery != tc.wantRawQuery {
+					t.Fatalf("request URI = %s?%s, want %s?%s", got.escapedPath, got.rawQuery, tc.wantPath, tc.wantRawQuery)
+				}
+				if got.accept != "text/event-stream" {
+					t.Fatalf("Accept = %q, want text/event-stream", got.accept)
+				}
+				if got.cacheControl != "no-cache" {
+					t.Fatalf("Cache-Control = %q, want no-cache", got.cacheControl)
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for stream request")
+			}
+			select {
+			case <-loginRequests:
+				t.Fatal("stream client followed login redirect")
+			default:
+			}
+		})
+	}
+}
+
+func TestSSEStreamsPreserveStatusErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		wantError string
+		stream    func(context.Context, *Client) (<-chan error, func())
+	}{
+		{
+			name:      "chat output",
+			wantError: "chat output stream returned status 503",
+			stream: func(ctx context.Context, c *Client) (<-chan error, func()) {
+				events, errs := c.StreamChatOutput(ctx, "exec", 0)
+				return errs, func() {
+					for range events {
+					}
+				}
+			},
+		},
+		{
+			name:      "live events",
+			wantError: "event stream returned status 503",
+			stream: func(ctx context.Context, c *Client) (<-chan error, func()) {
+				events, errs := c.StreamEvents(ctx, "")
+				return errs, func() {
+					for range events {
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			errs, drainEvents := tc.stream(ctx, c)
+			drainEvents()
+			select {
+			case err := <-errs:
+				if err == nil || err.Error() != tc.wantError {
+					t.Fatalf("error = %v, want %q", err, tc.wantError)
+				}
+			case <-ctx.Done():
+				t.Fatal("timed out waiting for status error")
+			}
+		})
+	}
+}
+
 func TestSSEStreamsReportOversizedFrames(t *testing.T) {
 	const oversizedDataBytes = 1024*1024 + 1
 	for _, tc := range []struct {
