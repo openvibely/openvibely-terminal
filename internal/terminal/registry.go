@@ -4222,6 +4222,18 @@ func validateModelsArgs(args []string) error {
 	}
 }
 
+func modelSelectorRows(models []client.LLMModel) []selectorItem {
+	items := make([]selectorItem, 0, len(models))
+	for _, mo := range models {
+		items = append(items, selectorItem{
+			ref:    mo.ID,
+			label:  firstNonEmpty(mo.Name, mo.Model, shortID(mo.ID)),
+			detail: strings.TrimSpace(mo.Provider + " " + mo.Model),
+		})
+	}
+	return items
+}
+
 func modelEditResult(ctx context.Context, c *client.Client, projectID string, spec modelEditSpec, apiKey string) (string, error) {
 	defer func() { apiKey = "" }()
 	models, err := c.ListModels(ctx, projectID)
@@ -4679,15 +4691,7 @@ func modelsCommand() command {
 									if err != nil {
 										return nil, err
 									}
-									items := make([]selectorItem, 0, len(list))
-									for _, mo := range list {
-										items = append(items, selectorItem{
-											ref:    mo.ID,
-											label:  firstNonEmpty(mo.Name, mo.Model, shortID(mo.ID)),
-											detail: strings.TrimSpace(mo.Provider + " " + mo.Model),
-										})
-									}
-									return items, nil
+									return modelSelectorRows(list), nil
 								}))
 					}
 					return m, errCmd(err.Error())
@@ -4748,15 +4752,10 @@ func modelsCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(list))
-								for _, mo := range list {
-									mo := mo
-									item := selectorItem{
-										ref:    mo.ID,
-										label:  firstNonEmpty(mo.Name, mo.Model, shortID(mo.ID)),
-										detail: strings.TrimSpace(mo.Provider + " " + mo.Model),
-									}
-									item.dispatch = func(m Model) (Model, tea.Cmd) {
+								items := modelSelectorRows(list)
+								for i := range items {
+									mo := list[i]
+									items[i].dispatch = func(m Model) (Model, tea.Cmd) {
 										cmd := run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
 											return executeResolvedAction(ctx, mo, action)
 										})
@@ -4769,7 +4768,6 @@ func modelsCommand() command {
 										m.busy = true
 										return m, cmd
 									}
-									items = append(items, item)
 								}
 								return items, nil
 							}))
