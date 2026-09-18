@@ -3758,6 +3758,159 @@ func TestCLISingleProjectModelsActionsRemainScoped(t *testing.T) {
 	}
 }
 
+func TestCLIModelsDefaultDeleteJSONMutations(t *testing.T) {
+	const initialModelsHTML = `<div data-model-id="m-openai" data-model-name="OpenAI"
+		data-model-provider="openai" data-model-model="gpt-4o"></div>
+		<div data-model-id="m-other" data-model-name="Other"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+	const defaultRefreshHTML = `<div data-model-id="m-openai" data-model-name="OpenAI"
+		data-model-provider="openai" data-model-model="gpt-4.1"></div>
+		<div data-model-id="m-other" data-model-name="Other"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+	const deleteRefreshHTML = `<div data-model-id="m-other" data-model-name="Other"
+		data-model-provider="anthropic" data-model-model="claude-sonnet-4"></div>`
+
+	type mutationOutput struct {
+		Status string            `json:"status"`
+		Models []client.LLMModel `json:"models,omitempty"`
+	}
+	decode := func(t *testing.T, out string) mutationOutput {
+		t.Helper()
+		var got mutationOutput
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+			t.Fatalf("model mutation JSON is invalid: %v\n%s", err, out)
+		}
+		return got
+	}
+	newServer := func(t *testing.T, refreshHTML string, failRefresh bool) (*client.Client, *recorder) {
+		t.Helper()
+		rec := &recorder{}
+		var modelGETs int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/models":
+				modelGETs++
+				if modelGETs > 1 && failRefresh {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"error":"refresh failed"}`)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				if modelGETs > 1 {
+					_, _ = io.WriteString(w, refreshHTML)
+					return
+				}
+				_, _ = io.WriteString(w, initialModelsHTML)
+			case r.Method == http.MethodPost && r.URL.Path == "/models/m-openai/set-default":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/models/m-openai":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{}`)
+			default:
+				t.Errorf("unexpected model mutation request %s %s", r.Method, r.URL.RequestURI())
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, rec
+	}
+
+	t.Run("default JSON includes status and refreshed models", func(t *testing.T) {
+		c, rec := newServer(t, defaultRefreshHTML, false)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"models", "default", "OpenAI"}, false, true); err != nil {
+			t.Fatalf("models default JSON failed: %v\n%s", err, rec.all())
+		}
+		got := decode(t, out.String())
+		if got.Status != "default: OpenAI" {
+			t.Fatalf("status = %q, want default mutation status", got.Status)
+		}
+		if len(got.Models) != 2 || got.Models[0].ID != "m-openai" || got.Models[0].Model != "gpt-4.1" {
+			t.Fatalf("refreshed models = %+v", got.Models)
+		}
+		if !rec.sawQuery("POST /models/m-openai/set-default?project_id=p1") {
+			t.Fatalf("default mutation lost project scope:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
+		}
+	})
+
+	t.Run("delete JSON includes status and refreshed models", func(t *testing.T) {
+		c, rec := newServer(t, deleteRefreshHTML, false)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"models", "delete", "OpenAI"}, true, true); err != nil {
+			t.Fatalf("models delete JSON failed: %v\n%s", err, rec.all())
+		}
+		got := decode(t, out.String())
+		if got.Status != "delete: OpenAI" {
+			t.Fatalf("status = %q, want delete mutation status", got.Status)
+		}
+		if len(got.Models) != 1 || got.Models[0].ID != "m-other" {
+			t.Fatalf("refreshed models = %+v", got.Models)
+		}
+		if !rec.sawQuery("DELETE /models/m-openai?project_id=p1") {
+			t.Fatalf("delete mutation lost project scope:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
+		}
+	})
+
+	t.Run("refresh failure JSON remains status only", func(t *testing.T) {
+		c, rec := newServer(t, defaultRefreshHTML, true)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"models", "default", "OpenAI"}, false, true); err != nil {
+			t.Fatalf("models default JSON with refresh failure failed: %v\n%s", err, rec.all())
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &payload); err != nil {
+			t.Fatalf("status-only output is not parseable JSON: %v\n%s", err, out.String())
+		}
+		var status string
+		if err := json.Unmarshal(payload["status"], &status); err != nil || status != "default: OpenAI" {
+			t.Fatalf("status = %q err=%v payload=%s", status, err, out.String())
+		}
+		if _, ok := payload["models"]; ok {
+			t.Fatalf("refresh-failure JSON must not pretend to have a refreshed model list: %s", out.String())
+		}
+	})
+}
+
+func TestCLIModelsDefaultDeletePlainOutputUnchanged(t *testing.T) {
+	const modelsHTML = `<div data-model-id="m-openai" data-model-name="OpenAI"
+		data-model-provider="openai" data-model-model="gpt-4o"></div>`
+	cases := []struct {
+		name  string
+		args  []string
+		force bool
+		want  string
+	}{
+		{name: "default", args: []string{"models", "default", "OpenAI"}, want: "default: OpenAI"},
+		{name: "delete", args: []string{"models", "delete", "OpenAI"}, force: true, want: "delete: OpenAI"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/models":       modelsHTML,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, tc.force, false); err != nil {
+				t.Fatalf("models %s plain failed: %v\n%s", tc.name, err, rec.all())
+			}
+			plain := stripANSI(out.String())
+			if !strings.Contains(plain, tc.want) || !strings.Contains(plain, "NAME") || !strings.Contains(plain, "OpenAI") {
+				t.Fatalf("plain output changed or omitted refreshed table:\n%s", plain)
+			}
+		})
+	}
+}
+
 func TestCLIGlobalProjectListRemainsUsableWithoutProject(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,
