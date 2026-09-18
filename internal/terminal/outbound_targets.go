@@ -475,16 +475,16 @@ func confirmOutboundTargetRemoval(m Model, projectID string, target client.Outbo
 }
 
 func outboundTargetPolicyOutput(ctx context.Context, c *client.Client, projectID string, status string, allowed bool) (string, error) {
-	// A final read makes successful policy writes visible and keeps plain output
-	// consistent with the target list. A failed refresh is non-fatal.
-	current, err := c.GetOutboundTargets(ctx, projectID)
+	// A final read makes successful policy writes visible. A failed refresh is
+	// non-fatal and falls back to the state just submitted.
+	current, err := c.GetOutboundTargetPolicy(ctx, projectID)
 	if err != nil {
 		if jsonMode {
 			return marshalJSON(outboundTargetPolicyJSON{ExplicitUnsavedTargetsAllowed: allowed})
 		}
 		return status, nil
 	}
-	allowed = current.ExplicitUnsavedTargetsAllowed
+	allowed = current
 	if jsonMode {
 		return marshalJSON(outboundTargetPolicyJSON{ExplicitUnsavedTargetsAllowed: allowed})
 	}
