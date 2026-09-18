@@ -98,9 +98,11 @@ func TestInterspersedGlobalFlagsDispatch(t *testing.T) {
 			_, _ = io.WriteString(w, `{"message_id":"m1","status":"processing"}`)
 		case strings.HasPrefix(r.URL.Path, "/api/chat/message/"):
 			_, _ = io.WriteString(w, `{"status":"completed","response":"a deer story"}`)
-		case r.URL.Path == "/tasks":
-			w.Header().Set("Content-Type", "text/html")
-			_, _ = io.WriteString(w, `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-1?from=tasks" title="Task with spaces">Task with spaces</a></div>`)
+		case r.URL.Path == "/api/tasks/reference-catalog":
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Errorf("task catalog project_id = %q, want p1", got)
+			}
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Task with spaces","category":"backlog","status":"pending"}]}`)
 		default:
 			http.Error(w, "unexpected request", http.StatusNotFound)
 		}

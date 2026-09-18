@@ -1616,8 +1616,14 @@ func TestCLIRunsCommandAndPrintsResult(t *testing.T) {
 	if err := RunCLI(c, &out, "demo", []string{"tasks"}, false, false); err != nil {
 		t.Fatalf("tasks failed: %v", err)
 	}
-	if !rec.saw("GET", "/tasks") {
-		t.Fatalf("no board fetch, calls:\n%s", rec.all())
+	if rec.saw("GET", "/tasks") {
+		t.Fatalf("task list fetched rendered board instead of compact catalog, calls:\n%s", rec.all())
+	}
+	if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+		t.Fatalf("compact task catalog requests = %d, want 1; calls:\n%s", got, rec.all())
+	}
+	if !rec.sawQuery("GET /api/tasks/reference-catalog?project_id=p1") {
+		t.Fatalf("compact task request lost project scope:\n%s", rec.all())
 	}
 	if !strings.Contains(out.String(), "Refactor the API") {
 		t.Errorf("output missing task title:\n%s", out.String())
@@ -1714,13 +1720,15 @@ func TestCLITaskListFilterJSONParityAndUnfilteredSchema(t *testing.T) {
 				t.Fatal("filtered no-match JSON decoded to nil instead of []")
 			}
 			for _, rec := range []*recorder{plainRec, jsonRec} {
-				if !slices.Contains(rec.urlsSnapshot(), "GET /tasks?project_id=p1") {
-					t.Errorf("task request lost project scope: %v", rec.urlsSnapshot())
+				urls := rec.urlsSnapshot()
+				if !slices.Contains(urls, "GET /api/tasks/reference-catalog?project_id=p1") {
+					t.Errorf("compact task request lost project scope: %v", urls)
 				}
-				for _, uri := range rec.urlsSnapshot() {
-					if strings.HasPrefix(uri, "GET /tasks?") && uri != "GET /tasks?project_id=p1" {
-						t.Errorf("task request changed unexpectedly: %s", uri)
-					}
+				if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+					t.Errorf("compact task catalog requests = %d, want 1; calls:\n%s", got, rec.all())
+				}
+				if got := rec.count("GET", "/tasks"); got != 0 {
+					t.Errorf("task list fetched rendered board %d times, want 0; calls:\n%s", got, rec.all())
 				}
 			}
 
@@ -2170,8 +2178,8 @@ func TestCLIStatusUsesSharedInvalidServerURLValidation(t *testing.T) {
 	}
 }
 
-func TestCLITaskCancellationPropagatesToBlockedBoardRequest(t *testing.T) {
-	boardStarted := make(chan struct{})
+func TestCLITaskCancellationPropagatesToBlockedCompactCatalogRequest(t *testing.T) {
+	catalogStarted := make(chan struct{})
 	requestCanceled := make(chan struct{})
 	var startOnce, cancelOnce sync.Once
 
@@ -2180,10 +2188,16 @@ func TestCLITaskCancellationPropagatesToBlockedBoardRequest(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/tasks":
-			startOnce.Do(func() { close(boardStarted) })
+		case "/api/tasks/reference-catalog":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("catalog request lost project scope: %s", r.URL.RequestURI())
+			}
+			startOnce.Do(func() { close(catalogStarted) })
 			<-r.Context().Done()
 			cancelOnce.Do(func() { close(requestCanceled) })
+		case "/tasks":
+			t.Errorf("task list fetched rendered board during cancellation test")
+			http.NotFound(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -2202,9 +2216,9 @@ func TestCLITaskCancellationPropagatesToBlockedBoardRequest(t *testing.T) {
 	}()
 
 	select {
-	case <-boardStarted:
+	case <-catalogStarted:
 	case <-time.After(time.Second):
-		t.Fatal("tasks board request did not start")
+		t.Fatal("tasks compact catalog request did not start")
 	}
 	cancel()
 
@@ -2219,7 +2233,7 @@ func TestCLITaskCancellationPropagatesToBlockedBoardRequest(t *testing.T) {
 	select {
 	case <-requestCanceled:
 	case <-time.After(time.Second):
-		t.Fatal("tasks board request did not observe caller cancellation")
+		t.Fatal("tasks compact catalog request did not observe caller cancellation")
 	}
 }
 
@@ -3948,8 +3962,11 @@ func TestCLISingleProjectImplicitScopeIsVisibleInPlainAndJSONOutput(t *testing.T
 	if !strings.Contains(plain.String(), "project: solo (project_id=p1)") || !strings.Contains(plain.String(), "Implicit project task") {
 		t.Fatalf("plain output did not identify its implicit scope:\n%s", plain.String())
 	}
-	if !rec.sawQuery("GET /tasks?project_id=p1") {
-		t.Fatalf("implicit plain task request lost project scope:\n%s", rec.all())
+	if rec.saw("GET", "/tasks") {
+		t.Fatalf("implicit plain tasks fetched rendered board instead of compact catalog:\n%s", rec.all())
+	}
+	if !rec.sawQuery("GET /api/tasks/reference-catalog?project_id=p1") {
+		t.Fatalf("implicit plain compact task request lost project scope:\n%s", rec.all())
 	}
 
 	var machine bytes.Buffer
@@ -3998,8 +4015,11 @@ func TestCLIExplicitProjectNameIDAndPrefixRemainScoped(t *testing.T) {
 			if err := RunCLI(c, &bytes.Buffer{}, tc.ref, []string{"tasks"}, false, false); err != nil {
 				t.Fatalf("explicit project %q failed: %v", tc.ref, err)
 			}
-			if !rec.sawQuery("GET /tasks?project_id=" + tc.want) {
-				t.Fatalf("project %q was not preserved on the task request:\n%s", tc.ref, rec.all())
+			if rec.saw("GET", "/tasks") {
+				t.Fatalf("project %q fetched rendered task board instead of compact catalog:\n%s", tc.ref, rec.all())
+			}
+			if !rec.sawQuery("GET /api/tasks/reference-catalog?project_id=" + tc.want) {
+				t.Fatalf("project %q was not preserved on the compact task request:\n%s", tc.ref, rec.all())
 			}
 		})
 	}
@@ -6900,7 +6920,7 @@ func TestCLIJSONTasksList(t *testing.T) {
 	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active">
 		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
 	</div>`
-	c, _ := cliServer(t, map[string]string{
+	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,
 		"/tasks":        board,
 	})
@@ -6920,6 +6940,93 @@ func TestCLIJSONTasksList(t *testing.T) {
 	if tasks[0].ID != "t-1" {
 		t.Errorf("unexpected task ID: %s", tasks[0].ID)
 	}
+	if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+		t.Fatalf("compact task catalog requests = %d, want 1; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks"); got != 0 {
+		t.Fatalf("JSON task list fetched rendered board %d times, want 0; calls:\n%s", got, rec.all())
+	}
+}
+
+func TestCLITaskListCompactCatalogFailureModes(t *testing.T) {
+	t.Run("empty project plain and JSON", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":                `{"projects":[{"id":"p1","name":"demo"}]}`,
+			"/api/tasks/reference-catalog": `{"tasks":[]}`,
+		})
+
+		var plain bytes.Buffer
+		if err := RunCLI(c, &plain, "demo", []string{"tasks"}, false, false); err != nil {
+			t.Fatalf("empty plain tasks failed: %v", err)
+		}
+		if !strings.Contains(stripANSI(plain.String()), taskEmptyStateHint) {
+			t.Fatalf("empty plain tasks output missing hint:\n%s", plain.String())
+		}
+
+		var machine bytes.Buffer
+		if err := RunCLI(c, &machine, "demo", []string{"tasks"}, false, true); err != nil {
+			t.Fatalf("empty JSON tasks failed: %v", err)
+		}
+		if got := strings.TrimSpace(machine.String()); got != "[]" {
+			t.Fatalf("empty JSON tasks = %q, want []", got)
+		}
+		if got := rec.count("GET", "/tasks"); got != 0 {
+			t.Fatalf("empty task list fetched rendered board %d times, want 0; calls:\n%s", got, rec.all())
+		}
+	})
+
+	t.Run("authentication failure", func(t *testing.T) {
+		rec := &recorder{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+			case "/api/tasks/reference-catalog":
+				w.WriteHeader(http.StatusUnauthorized)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "demo", []string{"tasks"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "requires sign-in") {
+			t.Fatalf("tasks auth error = %v, want sign-in guidance", err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("auth failure printed partial output: %q", out.String())
+		}
+		if got := rec.count("GET", "/tasks"); got != 0 {
+			t.Fatalf("auth failure fell back to board %d times, want 0; calls:\n%s", got, rec.all())
+		}
+	})
+
+	t.Run("malformed compact response", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":                `{"projects":[{"id":"p1","name":"demo"}]}`,
+			"/api/tasks/reference-catalog": `{"tasks":[`,
+		})
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", []string{"tasks"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "decoding /api/tasks/reference-catalog") {
+			t.Fatalf("malformed compact error = %v", err)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("malformed compact response printed partial output: %q", out.String())
+		}
+		if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+			t.Fatalf("compact task catalog requests = %d, want 1; calls:\n%s", got, rec.all())
+		}
+		if got := rec.count("GET", "/tasks"); got != 0 {
+			t.Fatalf("malformed compact response fell back to board %d times, want 0; calls:\n%s", got, rec.all())
+		}
+	})
 }
 
 func TestCLILaterPageAlertCommands(t *testing.T) {
