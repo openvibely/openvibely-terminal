@@ -5841,10 +5841,10 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 			sawScheduleWeeks[week] = true
 			w.Header().Set("Content-Type", "text/html")
 			if week == "1" {
-				_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+nextWeekDate+`" data-hour="10"><div data-task-id="sched-2" data-schedule-id="schedule-2"><div class="font-semibold">Next week work</div></div></div></div>`)
+				_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+nextWeekDate+`" data-hour="10"><div data-task-id="sched-2" data-schedule-id="schedule-2" data-schedule-enabled="true"><div class="font-semibold">Next week work</div></div></div></div>`)
 				return
 			}
-			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+currentDate+`" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1"><div class="font-semibold">Scheduled work</div></div></div></div>`)
+			_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+currentDate+`" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled work</div></div></div><div data-date="`+currentDate+`" data-hour="21"><div data-task-id="sched-disabled" data-schedule-id="schedule-disabled" data-schedule-enabled="false"><div class="font-semibold">Paused schedule</div></div></div></div>`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -5880,6 +5880,9 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	}
 	if seenScheduled["schedule-2"].taskID != "sched-2" || seenScheduled["schedule-2"].nextRun == nil {
 		t.Fatalf("next-week scheduled task within lookahead not included with timing: %+v", got.ScheduledTasks)
+	}
+	if _, ok := seenScheduled["schedule-disabled"]; ok {
+		t.Fatalf("disabled schedule included in pulse scheduled tasks: %+v", got.ScheduledTasks)
 	}
 	encoded, err := json.Marshal(got)
 	if err != nil {
@@ -5970,5 +5973,24 @@ func TestBuildPulseProjectionFiltersKnownSchedulesBeyondLookahead(t *testing.T) 
 	}
 	if got.TaskSummary.Scheduled.DueThisWeek != 1 {
 		t.Fatalf("scheduled summary = %+v, want one due this week", got.TaskSummary.Scheduled)
+	}
+}
+
+func TestBuildPulseProjectionSkipsDisabledSchedules(t *testing.T) {
+	generatedAt := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	enabledRun := generatedAt.Add(2 * time.Hour)
+	disabledRun := generatedAt.Add(3 * time.Hour)
+
+	got := buildPulseProjectionFromCatalog("p1", nil, []ScheduleEntry{
+		{TaskID: "enabled", ScheduleID: "schedule-enabled", Name: "Enabled schedule", NextRun: &enabledRun},
+		{TaskID: "disabled", ScheduleID: "schedule-disabled", Name: "Disabled schedule", NextRun: &disabledRun, Disabled: true},
+	}, generatedAt)
+	got.normalize()
+
+	if len(got.ScheduledTasks) != 1 || got.ScheduledTasks[0].ScheduleID != "schedule-enabled" {
+		t.Fatalf("scheduled tasks = %+v, want only enabled schedule", got.ScheduledTasks)
+	}
+	if got.TaskSummary.Category.Scheduled != 1 || got.TaskSummary.Scheduled.DueToday != 1 {
+		t.Fatalf("pulse summary = %+v, want only enabled schedule counted", got.TaskSummary)
 	}
 }
