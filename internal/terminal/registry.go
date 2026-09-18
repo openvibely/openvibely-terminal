@@ -4728,9 +4728,7 @@ func modelsCommand() command {
 				if err != nil {
 					return "", err
 				}
-				return refreshAndRender(action+": "+mo.Name,
-					func() ([]client.LLMModel, error) { return c.ListModels(ctx, pid) },
-					renderModels)
+				return modelMutationResult(ctx, c, pid, action+": "+mo.Name, nil, nil)
 			}
 
 			switch action {
