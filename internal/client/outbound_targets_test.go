@@ -27,6 +27,14 @@ const outboundTargetsFixture = `<div id="outbound-targets-section" data-project-
 
 const emptyOutboundTargetsFixture = `<div id="outbound-targets-section" data-project-id="project-2"><form><input type="hidden" name="project_id" value="project-2"><input type="checkbox" name="enabled" value="true"></form><table><tbody><tr id="outbound-targets-empty-row"><td>No outbound targets saved yet.</td></tr></tbody></table><div id="outbound-targets-draft-fields"></div></div>`
 
+func outboundTargetPolicyFixture(projectID string, allowed bool) string {
+	checked := ""
+	if allowed {
+		checked = " checked"
+	}
+	return `<div id="outbound-targets-section" data-project-id="` + projectID + `"><form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="` + projectID + `"><input type="checkbox" name="enabled" value="true"` + checked + `></form></div>`
+}
+
 func TestGetOutboundTargetsParsesScopedSafeRowsAndPolicy(t *testing.T) {
 	var request string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +88,111 @@ func TestListOutboundTargetsEmptyUsesNonNilJSONArray(t *testing.T) {
 	}
 	if string(encoded) != "[]" {
 		t.Fatalf("empty JSON = %s, want []", encoded)
+	}
+}
+
+func TestGetOutboundTargetPolicyUsesCompactPolicyFormOnly(t *testing.T) {
+	var requests []string
+	var noisyRows strings.Builder
+	for i := 0; i < 200; i++ {
+		noisyRows.WriteString(`<tr data-outbound-target-draft-key="dup"><td>broken</td></tr>`)
+		noisyRows.WriteString(`<div data-outbound-target-draft-key="dup"><input name="target_platform" value="slack"></div>`)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/send-message-explicit-targets":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, strings.Replace(outboundTargetPolicyFixture("project-2", true), `</div>`, noisyRows.String()+`</div>`, 1))
+		case r.URL.Path == "/channels/outbound-targets":
+			t.Fatal("policy read fetched saved destination page")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := c.GetOutboundTargetPolicy(context.Background(), "project-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("policy = blocked, want allowed")
+	}
+	if len(requests) != 1 || requests[0] != "GET /channels/send-message-explicit-targets?project_id=project-2" {
+		t.Fatalf("requests = %v", requests)
+	}
+}
+
+func TestSetOutboundTargetPolicyPostsOnlyPolicyFields(t *testing.T) {
+	var requests []string
+	var posts []url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		if r.Method != http.MethodPost || r.URL.Path != "/channels/send-message-explicit-targets" {
+			t.Fatalf("unexpected policy request %s %s", r.Method, r.URL.RequestURI())
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		posts = append(posts, r.PostForm)
+		for key := range r.PostForm {
+			if strings.HasPrefix(key, "target_") {
+				t.Fatalf("policy write reposted saved target field %q in %v", key, r.PostForm)
+			}
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, `<div>saved</div>`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetOutboundTargetPolicy(context.Background(), "project-2", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetOutboundTargetPolicy(context.Background(), "project-2", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 2 || requests[0] != "POST /channels/send-message-explicit-targets" || requests[1] != "POST /channels/send-message-explicit-targets" {
+		t.Fatalf("requests = %v", requests)
+	}
+	if len(posts) != 2 || posts[0].Get("project_id") != "project-2" || posts[0].Get("enabled") != "true" || posts[1].Get("enabled") != "" {
+		t.Fatalf("policy posts = %#v", posts)
+	}
+}
+
+func TestOutboundTargetPolicyRejectsMalformedScopeAndAuth(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing form":  `<div id="outbound-targets-section" data-project-id="project-2"></div>`,
+		"wrong project": outboundTargetPolicyFixture("other", true),
+		"bad input":     `<form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="other"></form>`,
+	} {
+		root, err := parseHTML(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseOutboundTargetPolicy(root, "project-2"); err == nil {
+			t.Fatalf("%s: malformed policy unexpectedly parsed", name)
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetOutboundTargetPolicy(context.Background(), "project-2"); !IsAuthRequired(err) {
+		t.Fatalf("auth error = %v, want auth-required", err)
+	}
+	if err := c.SetOutboundTargetPolicy(context.Background(), "", true); err == nil {
+		t.Fatal("empty project policy write succeeded")
 	}
 }
 

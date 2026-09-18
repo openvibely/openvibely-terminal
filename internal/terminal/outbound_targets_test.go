@@ -15,6 +15,14 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
+func terminalOutboundTargetPolicy(projectID string, allowed bool) string {
+	checked := ""
+	if allowed {
+		checked = " checked"
+	}
+	return `<div id="outbound-targets-section" data-project-id="` + projectID + `"><form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="` + projectID + `"><input type="checkbox" name="enabled" value="true"` + checked + `></form></div>`
+}
+
 func terminalOutboundTargetPage(projectID string, targets []client.OutboundTarget, allowed bool) string {
 	var b strings.Builder
 	b.WriteString(`<div id="outbound-targets-section" data-project-id="` + projectID + `"><form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="` + projectID + `"><input type="checkbox" name="enabled" value="true"`)
@@ -316,6 +324,82 @@ func TestOutboundTargetsTUIListShowEmptyAndNoProject(t *testing.T) {
 	}
 }
 
+func TestOutboundTargetsCLIPolicyShowUsesPolicyEndpointOnly(t *testing.T) {
+	var noisyRows strings.Builder
+	for i := 0; i < 200; i++ {
+		noisyRows.WriteString(`<tr data-outbound-target-draft-key="dup"><td>broken</td></tr>`)
+		noisyRows.WriteString(`<div data-outbound-target-draft-key="dup"><input name="target_platform" value="slack"></div>`)
+	}
+	body := strings.Replace(terminalOutboundTargetPolicy("p1", true), `</div>`, noisyRows.String()+`</div>`, 1)
+	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels/send-message-explicit-targets": body})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "policy", "show"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "explicit unsaved targets: allowed") {
+		t.Fatalf("policy output = %q", out.String())
+	}
+	if !rec.sawQuery("GET /channels/send-message-explicit-targets?project_id=p1") {
+		t.Fatalf("policy show did not use policy endpoint:\n%s", rec.all())
+	}
+	if rec.saw("GET", "/channels/outbound-targets") {
+		t.Fatalf("policy show fetched saved targets:\n%s", rec.all())
+	}
+
+	c, rec = cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels/send-message-explicit-targets": terminalOutboundTargetPolicy("p1", false)})
+	out.Reset()
+	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "policy", "show"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var policy outboundTargetPolicyJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &policy); err != nil {
+		t.Fatalf("policy JSON = %q: %v", out.String(), err)
+	}
+	if policy.ExplicitUnsavedTargetsAllowed {
+		t.Fatalf("policy JSON = %#v, want blocked", policy)
+	}
+	if rec.saw("GET", "/channels/outbound-targets") {
+		t.Fatalf("JSON policy show fetched saved targets:\n%s", rec.all())
+	}
+}
+
+func TestOutboundTargetPolicyOutputRefreshFailureKeepsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/channels/send-message-explicit-targets" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		http.Error(w, `<html><body>backend secret and raw markup</body></html>`, http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousJSON := jsonMode
+	defer func() { jsonMode = previousJSON }()
+	jsonMode = false
+	out, err := outboundTargetPolicyOutput(context.Background(), c, "p1", "updated outbound target policy", true)
+	if err != nil {
+		t.Fatalf("plain refresh failure changed successful policy write into error: %v", err)
+	}
+	if out != "updated outbound target policy" || strings.Contains(out, "backend secret") || strings.Contains(out, "<html") {
+		t.Fatalf("plain fallback = %q", out)
+	}
+	jsonMode = true
+	out, err = outboundTargetPolicyOutput(context.Background(), c, "p1", "updated outbound target policy", true)
+	jsonMode = previousJSON
+	if err != nil {
+		t.Fatalf("JSON refresh failure changed successful policy write into error: %v", err)
+	}
+	var policy outboundTargetPolicyJSON
+	if err := json.Unmarshal([]byte(out), &policy); err != nil {
+		t.Fatalf("policy JSON fallback = %q: %v", out, err)
+	}
+	if !policy.ExplicitUnsavedTargetsAllowed || strings.Contains(out, "backend secret") || strings.Contains(out, "<html") {
+		t.Fatalf("JSON fallback = %q", out)
+	}
+}
+
 func TestOutboundTargetsTUIAddEditPolicyAndDraftTest(t *testing.T) {
 	old := client.OutboundTarget{ID: "target-a", Platform: "slack", TargetKind: "channel", Name: "ops", Destination: "C123"}
 	newTarget := client.OutboundTarget{ID: "target-b", Platform: "email", TargetKind: "email", Name: "client", Destination: "person@example.com", DefaultSubject: "Hello"}
@@ -330,6 +414,11 @@ func TestOutboundTargetsTUIAddEditPolicyAndDraftTest(t *testing.T) {
 			} else {
 				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", savedTargets, savedPolicy))
 			}
+			return
+		}
+		if r.URL.Path == "/channels/send-message-explicit-targets" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, terminalOutboundTargetPolicy("p1", savedPolicy))
 			return
 		}
 		if r.URL.Path == "/channels/send-message-explicit-targets" && r.Method == http.MethodPost {
@@ -349,6 +438,11 @@ func TestOutboundTargetsTUIAddEditPolicyAndDraftTest(t *testing.T) {
 			postForm["thread"] = last("target_thread_id")
 			postForm["home"] = last("target_is_home")
 			postForm["enabled"] = last("enabled")
+			for key := range r.PostForm {
+				if strings.HasPrefix(key, "target_") {
+					postForm["targetFields"] = "present"
+				}
+			}
 			savedPolicy = last("enabled") == "true"
 			if strings.Contains(last("target_target_id"), "person@example.com") {
 				savedTargets = []client.OutboundTarget{old, newTarget}
@@ -381,9 +475,10 @@ func TestOutboundTargetsTUIAddEditPolicyAndDraftTest(t *testing.T) {
 	if postForm["thread"] != "9" || postForm["home"] != "true" {
 		t.Fatalf("edit form = %#v", postForm)
 	}
+	postForm = make(map[string]string)
 	m = runLine(t, m, `/channels targets policy on`)
-	if postForm["enabled"] != "true" {
-		t.Fatalf("policy form did not enable explicit targets: %#v", postForm)
+	if postForm["enabled"] != "true" || postForm["targetFields"] != "" {
+		t.Fatalf("policy form did not submit only policy fields: %#v", postForm)
 	}
 	m = runLine(t, m, `/channels targets test draft email person@example.com --name draft`)
 	if !strings.Contains(stripANSI(transcript(m)), `outbound target test for "draft": sent`) {
