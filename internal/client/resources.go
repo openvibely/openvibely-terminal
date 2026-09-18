@@ -1917,12 +1917,13 @@ func (c *Client) UninstallAgentPlugin(ctx context.Context, pluginID string) erro
 
 // ScheduleEntry is one scheduled task occurrence.
 type ScheduleEntry struct {
-	TaskID     string     `json:"task_id"`
-	ScheduleID string     `json:"schedule_id"`
-	Name       string     `json:"-"`
-	Text       string     `json:"text"`
-	NextRun    *time.Time `json:"next_run,omitempty"`
-	Disabled   bool       `json:"-"`
+	TaskID         string     `json:"task_id"`
+	ScheduleID     string     `json:"schedule_id"`
+	Name           string     `json:"-"`
+	Text           string     `json:"text"`
+	NextRun        *time.Time `json:"next_run,omitempty"`
+	Disabled       bool       `json:"-"`
+	NextRunPrecise bool       `json:"-"`
 }
 
 // ScheduleConfig is the editable state of one existing schedule.
@@ -1962,7 +1963,7 @@ func scheduleCardName(node *html.Node) string {
 	return strings.TrimSpace(NodeText(title))
 }
 
-func scheduleCardNextRun(node *html.Node) *time.Time {
+func scheduleCardNextRun(node *html.Node) (*time.Time, bool) {
 	var date string
 	var hourText string
 	for n := node; n != nil; n = n.Parent {
@@ -1977,22 +1978,24 @@ func scheduleCardNextRun(node *html.Node) *time.Time {
 		}
 	}
 	if date == "" || hourText == "" {
-		return nil
+		return nil, false
 	}
 	day, err := time.ParseInLocation("2006-01-02", date, time.Local)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	hour, err := strconv.Atoi(hourText)
 	if err != nil || hour < 0 || hour > 23 {
-		return nil
+		return nil, false
 	}
 	minute := 0
+	precise := false
 	if renderedHour, renderedMinute, ok := scheduleCardRenderedClock(node); ok && renderedHour == hour {
 		minute = renderedMinute
+		precise = true
 	}
 	next := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, time.Local)
-	return &next
+	return &next, precise
 }
 
 func scheduleCardRenderedClock(node *html.Node) (int, int, bool) {
@@ -2052,13 +2055,15 @@ func (c *Client) getScheduleWeekEntries(ctx context.Context, projectID string, w
 		if name == "" {
 			name = text
 		}
+		nextRun, nextRunPrecise := scheduleCardNextRun(card.node)
 		out = append(out, ScheduleEntry{
-			TaskID:     card.attrs["data-task-id"],
-			ScheduleID: card.attrs["data-schedule-id"],
-			Name:       name,
-			Text:       text,
-			NextRun:    scheduleCardNextRun(card.node),
-			Disabled:   strings.EqualFold(strings.TrimSpace(card.attrs["data-schedule-enabled"]), "false"),
+			TaskID:         card.attrs["data-task-id"],
+			ScheduleID:     card.attrs["data-schedule-id"],
+			Name:           name,
+			Text:           text,
+			NextRun:        nextRun,
+			Disabled:       strings.EqualFold(strings.TrimSpace(card.attrs["data-schedule-enabled"]), "false"),
+			NextRunPrecise: nextRunPrecise,
 		})
 	}
 	summary := ""
@@ -4014,9 +4019,89 @@ func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*Pul
 		return nil, err
 	}
 	schedules = append(schedules, nextWeek...)
+	if err := c.enrichPulseScheduleNextRuns(ctx, projectID, schedules); err != nil {
+		return nil, err
+	}
 	out := buildPulseProjectionFromCatalog(projectID, tasks, schedules, time.Now().UTC())
 	out.normalize()
 	return out, nil
+}
+
+func (c *Client) enrichPulseScheduleNextRuns(ctx context.Context, projectID string, schedules []ScheduleEntry) error {
+	byTask := map[string]map[string]time.Time{}
+	for i := range schedules {
+		schedule := schedules[i]
+		if schedule.Disabled || schedule.NextRunPrecise || strings.TrimSpace(schedule.TaskID) == "" || strings.TrimSpace(schedule.ScheduleID) == "" {
+			continue
+		}
+		nextRuns, ok := byTask[schedule.TaskID]
+		if !ok {
+			var err error
+			nextRuns, err = c.getTaskScheduleNextRuns(ctx, projectID, schedule.TaskID)
+			if err != nil {
+				return err
+			}
+			byTask[schedule.TaskID] = nextRuns
+		}
+		nextRun, ok := nextRuns[schedule.ScheduleID]
+		if !ok {
+			return fmt.Errorf("schedule %q next run was not found in task %q", schedule.ScheduleID, schedule.TaskID)
+		}
+		schedules[i].NextRun = cloneTime(nextRun)
+		schedules[i].NextRunPrecise = true
+	}
+	return nil
+}
+
+func (c *Client) getTaskScheduleNextRuns(ctx context.Context, projectID, taskID string) (map[string]time.Time, error) {
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("tab", "schedules", "project_id", projectID))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]time.Time{}
+	cards := findAll(root, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && n.Data == "div" && strings.HasPrefix(attr(n, "id"), "schedule-card-")
+	})
+	for _, card := range cards {
+		scheduleID := strings.TrimPrefix(attr(card, "id"), "schedule-card-")
+		if strings.TrimSpace(scheduleID) == "" {
+			continue
+		}
+		if nextRun, ok := parseTaskScheduleNextRun(card); ok {
+			out[scheduleID] = nextRun
+		}
+	}
+	return out, nil
+}
+
+func parseTaskScheduleNextRun(node *html.Node) (time.Time, bool) {
+	text := strings.Join(strings.Fields(NodeText(node)), " ")
+	idx := strings.Index(text, "Next:")
+	if idx < 0 {
+		return time.Time{}, false
+	}
+	fields := strings.Fields(strings.TrimSpace(text[idx+len("Next:"):]))
+	candidates := []string{}
+	if len(fields) >= 3 {
+		candidates = append(candidates, fields[0]+" "+fields[1]+" "+strings.ToUpper(fields[2]))
+	}
+	if len(fields) >= 2 {
+		candidates = append(candidates, fields[0]+" "+fields[1])
+	}
+	for _, candidate := range candidates {
+		for _, layout := range []string{"2006-01-02 3:04 PM", "2006-01-02 15:04"} {
+			parsed, err := time.ParseInLocation(layout, candidate, time.Local)
+			if err == nil {
+				return parsed, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func cloneTime(t time.Time) *time.Time {
+	cloned := t
+	return &cloned
 }
 
 func buildPulseProjectionFromCatalog(projectID string, tasks []Task, schedules []ScheduleEntry, generatedAt time.Time) *PulseProjection {

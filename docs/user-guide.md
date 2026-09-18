@@ -1101,7 +1101,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
-| Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1` |
+| Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1`; schedule-tab detail is read only when a card needs exact `Next:` timing |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |
@@ -1114,7 +1114,8 @@ workers, channels, personality list, reflection, grades, insights and
 automations screens are served as templ-rendered fragments with no JSON list
 equivalent. Pulse still uses the HTML briefing for plain output and `summary`,
 while `--json pulse` combines the compact task catalog with current- and
-next-week structured schedule card attributes to avoid chat/model-dependent
+next-week structured schedule card attributes, reading schedule-tab `Next:`
+detail only for cards that need exact timing, to avoid chat/model-dependent
 output. Personality custom detail
 and CRUD mutations use the JSON routes listed above. For the HTML screens the
 client:
