@@ -5804,69 +5804,96 @@ func TestXAuthorizedUsersPreserveAuthTransportAndMalformedDiagnostics(t *testing
 	}
 }
 
-func TestGetPulseProjectionUsesProjectScopedCompactJSON(t *testing.T) {
-	var gotPath, gotQuery, gotAccept string
+func TestGetPulseProjectionUsesProjectScopedRuntimeTool(t *testing.T) {
+	var gotPostPath, gotPostProject, gotMessage, gotContentType string
+	var gotStatusPath, gotStatusAccept string
 	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
 	nextRun := now.Add(2 * time.Hour)
+	projection := PulseProjection{
+		OK:            true,
+		ProjectID:     "p1",
+		GeneratedAt:   now,
+		LookaheadDays: 7,
+		RunningTasks: []PulseTaskEntry{{
+			TaskID:        "run-1",
+			Title:         "Running work",
+			Status:        "running",
+			Category:      "active",
+			Priority:      4,
+			AgentName:     "Builder",
+			PromptPreview: strings.Repeat("x", 200),
+			CreatedAt:     now,
+			UpdatedAt:     now,
+		}},
+		QueuedTasks: []PulseTaskEntry{{
+			TaskID:    "queued-1",
+			Title:     "Queued work",
+			Status:    "queued",
+			Category:  "active",
+			Priority:  3,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}},
+		BlockedTasks: []PulseTaskEntry{{
+			TaskID:    "blocked-1",
+			Title:     "Blocked work",
+			Status:    "blocked",
+			Category:  "active",
+			Priority:  2,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}},
+		ScheduledTasks: []PulseTaskEntry{{
+			TaskID:         "sched-1",
+			Title:          "Scheduled work",
+			Status:         "pending",
+			Category:       "scheduled",
+			Priority:       1,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			ScheduleID:     "schedule-1",
+			NextRun:        &nextRun,
+			RepeatType:     "daily",
+			RepeatInterval: 1,
+			RepeatLabel:    "daily",
+		}},
+		TaskSummary: PulseTaskSummary{TotalPending: 4},
+	}
+	projection.TaskSummary.Status.Blocked = 1
+	payload, err := json.Marshal(projection)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotQuery = r.URL.RawQuery
-		gotAccept = r.Header.Get("Accept")
-		if r.URL.Path != "/api/pulse" {
-			http.NotFound(w, r)
-			return
+		switch r.URL.Path {
+		case "/api/pulse":
+			t.Fatalf("GetPulseProjection must not call nonexistent /api/pulse route")
+		case "/api/chat/message":
+			if r.Method != http.MethodPost {
+				t.Fatalf("chat request method = %s", r.Method)
+			}
+			gotPostPath = r.URL.Path
+			gotContentType = r.Header.Get("Content-Type")
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			gotPostProject = r.PostForm.Get("project_id")
+			gotMessage = r.PostForm.Get("message")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"message_id":"exec-pulse","status":"processing"}`)
+		case "/api/chat/message/exec-pulse":
+			if r.Method != http.MethodGet {
+				t.Fatalf("status request method = %s", r.Method)
+			}
+			gotStatusPath = r.URL.Path
+			gotStatusAccept = r.Header.Get("Accept")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ChatStatus{MessageID: "exec-pulse", Status: "completed", Response: "```json\n" + string(payload) + "\n```"})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(PulseProjection{
-			OK:            true,
-			ProjectID:     "p1",
-			GeneratedAt:   now,
-			LookaheadDays: 7,
-			RunningTasks: []PulseTaskEntry{{
-				TaskID:        "run-1",
-				Title:         "Running work",
-				Status:        "running",
-				Category:      "active",
-				Priority:      4,
-				AgentName:     "Builder",
-				PromptPreview: strings.Repeat("x", 200),
-				CreatedAt:     now,
-				UpdatedAt:     now,
-			}},
-			QueuedTasks: []PulseTaskEntry{{
-				TaskID:    "queued-1",
-				Title:     "Queued work",
-				Status:    "queued",
-				Category:  "active",
-				Priority:  3,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}},
-			BlockedTasks: []PulseTaskEntry{{
-				TaskID:    "blocked-1",
-				Title:     "Blocked work",
-				Status:    "blocked",
-				Category:  "active",
-				Priority:  2,
-				CreatedAt: now,
-				UpdatedAt: now,
-			}},
-			ScheduledTasks: []PulseTaskEntry{{
-				TaskID:         "sched-1",
-				Title:          "Scheduled work",
-				Status:         "pending",
-				Category:       "scheduled",
-				Priority:       1,
-				CreatedAt:      now,
-				UpdatedAt:      now,
-				ScheduleID:     "schedule-1",
-				NextRun:        &nextRun,
-				RepeatType:     "daily",
-				RepeatInterval: 1,
-				RepeatLabel:    "daily",
-			}},
-			TaskSummary: PulseTaskSummary{TotalPending: 4},
-		})
 	}))
 	defer srv.Close()
 	c, err := New(srv.URL)
@@ -5874,15 +5901,24 @@ func TestGetPulseProjectionUsesProjectScopedCompactJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := c.GetPulseProjection(context.Background(), "p1")
+	got, err := c.GetPulseProjection(context.Background(), " p1 ")
 	if err != nil {
 		t.Fatalf("GetPulseProjection: %v", err)
 	}
-	if gotPath != "/api/pulse" || gotQuery != "project_id=p1" || gotAccept != "application/json" {
-		t.Fatalf("request = path %q query %q accept %q", gotPath, gotQuery, gotAccept)
+	if gotPostPath != "/api/chat/message" || gotPostProject != "p1" || !strings.HasPrefix(gotContentType, "application/x-www-form-urlencoded") {
+		t.Fatalf("chat request = path %q project %q content-type %q", gotPostPath, gotPostProject, gotContentType)
+	}
+	if !strings.Contains(gotMessage, "view_pulse") || !strings.Contains(gotMessage, "Return only") {
+		t.Fatalf("pulse prompt did not request raw view_pulse JSON: %q", gotMessage)
+	}
+	if gotStatusPath != "/api/chat/message/exec-pulse" || gotStatusAccept != "application/json" {
+		t.Fatalf("status request = path %q accept %q", gotStatusPath, gotStatusAccept)
 	}
 	if got.ProjectID != "p1" || len(got.RunningTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 1 {
 		t.Fatalf("pulse projection = %+v", got)
+	}
+	if got.TaskSummary.Status.Blocked != 1 {
+		t.Fatalf("blocked summary = %d", got.TaskSummary.Status.Blocked)
 	}
 	if got.ScheduledTasks[0].ScheduleID != "schedule-1" || got.ScheduledTasks[0].NextRun == nil {
 		t.Fatalf("scheduled task not decoded: %+v", got.ScheduledTasks[0])
@@ -5891,12 +5927,17 @@ func TestGetPulseProjectionUsesProjectScopedCompactJSON(t *testing.T) {
 
 func TestGetPulseProjectionNormalizesEmptyArrays(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/pulse" {
+		switch r.URL.Path {
+		case "/api/chat/message":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"message_id":"exec-empty","status":"processing"}`)
+		case "/api/chat/message/exec-empty":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ChatStatus{MessageID: "exec-empty", Status: "completed", Response: `{"ok":true,"project_id":"p1","lookahead_days":7,"task_summary":{"status":{"blocked":0}}}`})
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"ok":true,"project_id":"p1","lookahead_days":7,"task_summary":{"status":{"blocked":0}}}`)
 	}))
 	defer srv.Close()
 	c, err := New(srv.URL)
@@ -5916,5 +5957,31 @@ func TestGetPulseProjectionNormalizesEmptyArrays(t *testing.T) {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("encoded pulse missing %s: %s", want, encoded)
 		}
+	}
+}
+
+func TestGetPulseProjectionSurfacesRuntimeToolFailures(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat/message":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"message_id":"exec-failed","status":"processing"}`)
+		case "/api/chat/message/exec-failed":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(ChatStatus{MessageID: "exec-failed", Status: "failed", Error: "runtime actions unavailable"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = c.GetPulseProjection(context.Background(), "p1")
+	if err == nil || !strings.Contains(err.Error(), "runtime actions unavailable") {
+		t.Fatalf("GetPulseProjection error = %v, want runtime failure", err)
 	}
 }

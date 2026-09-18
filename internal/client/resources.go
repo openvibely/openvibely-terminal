@@ -3911,12 +3911,110 @@ type PulseTaskSummary struct {
 
 // GetPulseProjection returns the structured upcoming-work projection for scripts.
 func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*PulseProjection, error) {
-	var out PulseProjection
-	if err := c.getJSON(ctx, "/api/pulse"+query("project_id", projectID), &out); err != nil {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("project ID is required for pulse projection")
+	}
+	accepted, err := c.SendChatMessage(ctx, projectID, pulseProjectionToolPrompt)
+	if err != nil {
 		return nil, err
 	}
-	out.normalize()
+	if accepted == nil || strings.TrimSpace(accepted.MessageID) == "" {
+		return nil, fmt.Errorf("pulse projection request failed: empty acknowledgement")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		status, err := c.GetChatStatus(ctx, accepted.MessageID)
+		if err != nil {
+			return nil, err
+		}
+		if status != nil {
+			switch status.Status {
+			case "completed":
+				out, err := decodePulseProjectionToolOutput(status.Response)
+				if err != nil {
+					return nil, err
+				}
+				out.normalize()
+				return out, nil
+			case "failed", "cancelled":
+				detail := strings.TrimSpace(status.Error)
+				if detail == "" {
+					detail = strings.TrimSpace(status.Response)
+				}
+				if detail != "" {
+					return nil, fmt.Errorf("pulse projection %s: %s", status.Status, detail)
+				}
+				return nil, fmt.Errorf("pulse projection %s", status.Status)
+			}
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+const pulseProjectionToolPrompt = "Call the view_pulse runtime tool with {} for the current project. Return only the tool's raw JSON object, with no Markdown, prose, or extra text."
+
+func decodePulseProjectionToolOutput(output string) (*PulseProjection, error) {
+	jsonText, err := extractFirstJSONObject(output)
+	if err != nil {
+		return nil, fmt.Errorf("decoding pulse projection: %w", err)
+	}
+	var out PulseProjection
+	if err := json.Unmarshal([]byte(jsonText), &out); err != nil {
+		return nil, fmt.Errorf("decoding pulse projection: %w", err)
+	}
 	return &out, nil
+}
+
+func extractFirstJSONObject(s string) (string, error) {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return "", fmt.Errorf("missing JSON object")
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unterminated JSON object")
 }
 
 func (p *PulseProjection) normalize() {

@@ -1101,7 +1101,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
-| Pulse | `GET /api/pulse?project_id=…` for the compact upcoming-work projection used by `--json pulse` |
+| Pulse | `--json pulse` submits a scoped `view_pulse` runtime-tool request through `POST /api/chat/message` and polls `GET /api/chat/message/:id` for the compact upcoming-work projection |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |
