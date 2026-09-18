@@ -1990,7 +1990,15 @@ func scheduleCardNextRun(node *html.Node) *time.Time {
 
 // GetSchedule scrapes the Schedule screen for a project.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
-	root, err := c.getHTML(ctx, "/schedule"+query("project_id", projectID))
+	return c.getScheduleWeek(ctx, projectID, 0)
+}
+
+func (c *Client) getScheduleWeek(ctx context.Context, projectID string, weekOffset int) ([]ScheduleEntry, string, error) {
+	path := "/schedule" + query("project_id", projectID)
+	if weekOffset != 0 {
+		path = "/schedule" + query("project_id", projectID, "week", strconv.Itoa(weekOffset))
+	}
+	root, err := c.getHTML(ctx, path)
 	if err != nil {
 		return nil, "", err
 	}
@@ -3958,6 +3966,11 @@ func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*Pul
 	if err != nil {
 		return nil, err
 	}
+	nextWeek, _, err := c.getScheduleWeek(ctx, projectID, 1)
+	if err != nil {
+		return nil, err
+	}
+	schedules = append(schedules, nextWeek...)
 	out := buildPulseProjectionFromCatalog(projectID, tasks, schedules, time.Now().UTC())
 	out.normalize()
 	return out, nil
@@ -3994,9 +4007,10 @@ func buildPulseProjectionFromCatalog(projectID string, tasks []Task, schedules [
 		accumulatePulseSummary(&out.TaskSummary, task)
 	}
 	out.WaitingCount = len(out.PendingTasks) + len(out.QueuedTasks)
+	lookaheadEnd := generatedAt.AddDate(0, 0, out.LookaheadDays)
 	seenSchedules := map[string]bool{}
 	for _, schedule := range schedules {
-		if strings.TrimSpace(schedule.ScheduleID) == "" || seenSchedules[schedule.ScheduleID] {
+		if strings.TrimSpace(schedule.ScheduleID) == "" || seenSchedules[schedule.ScheduleID] || pulseScheduleBeyondLookahead(schedule.NextRun, lookaheadEnd) {
 			continue
 		}
 		seenSchedules[schedule.ScheduleID] = true
@@ -4078,6 +4092,10 @@ func accumulatePulseSummary(summary *PulseTaskSummary, task Task) {
 			summary.Priority.Low++
 		}
 	}
+}
+
+func pulseScheduleBeyondLookahead(nextRun *time.Time, lookaheadEnd time.Time) bool {
+	return nextRun != nil && nextRun.After(lookaheadEnd)
 }
 
 func accumulatePulseScheduleSummary(summary *PulseTaskSummary, nextRun *time.Time, now time.Time) {
