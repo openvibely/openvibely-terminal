@@ -10864,6 +10864,51 @@ func TestCLIWebhooksJSONAndForceGates(t *testing.T) {
 	})
 }
 
+func cliPulseJSONServer(t *testing.T, pulseJSON string) (*client.Client, *recorder) {
+	t.Helper()
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/api/chat/message":
+			if r.Method != http.MethodPost {
+				t.Errorf("chat method = %s", r.Method)
+				http.Error(w, "bad method", http.StatusMethodNotAllowed)
+				return
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Error(err)
+				http.Error(w, "bad form", http.StatusBadRequest)
+				return
+			}
+			rec.mu.Lock()
+			rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
+			rec.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"message_id":"exec-pulse","status":"processing"}`)
+		case "/api/chat/message/exec-pulse":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(client.ChatStatus{MessageID: "exec-pulse", Status: "completed", Response: pulseJSON})
+		case "/api/pulse":
+			t.Errorf("unexpected request to nonexistent /api/pulse route")
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected pulse JSON request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, rec
+}
+
 func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 	const longPrompt = "this full prompt must not leak into pulse JSON output"
 	pulseJSON := `{
@@ -10879,17 +10924,17 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 		"scheduled_tasks": [{"task_id":"sched-1","title":"Scheduled today","status":"pending","category":"scheduled","priority":1,"schedule_id":"schedule-1","next_run":"2026-09-18T20:00:00Z","repeat_type":"daily","repeat_interval":1,"repeat_label":"daily","created_at":"2026-09-18T10:00:00Z","updated_at":"2026-09-18T11:00:00Z"}],
 		"task_summary": {"total_pending":5,"priority":{"urgent":1,"high":2,"normal":1,"low":1},"status":{"pending":3,"queued":1,"running":1,"completed":0,"failed":0,"blocked":1},"category":{"active":4,"backlog":0,"scheduled":1},"scheduled":{"overdue":0,"due_today":1,"due_this_week":1}}
 	}`
-	c, rec := cliServer(t, map[string]string{
-		"/api/projects": cliProjects,
-		"/api/pulse":    strings.ReplaceAll(pulseJSON, longPrompt, "bounded preview"),
-	})
+	c, rec := cliPulseJSONServer(t, strings.ReplaceAll(pulseJSON, longPrompt, "bounded preview"))
 
 	var out bytes.Buffer
 	if err := RunCLI(c, &out, "demo", []string{"pulse"}, false, true); err != nil {
 		t.Fatalf("RunCLI pulse --json: %v", err)
 	}
-	if !rec.sawQuery("GET /api/pulse?project_id=p1") {
-		t.Fatalf("pulse JSON did not request scoped projection: %v", rec.urlsSnapshot())
+	if !rec.sawForm("project_id=p1") || !rec.sawForm("view_pulse") {
+		t.Fatalf("pulse JSON did not request scoped view_pulse tool: forms=%v urls=%v", rec.forms, rec.urlsSnapshot())
+	}
+	if rec.saw("GET", "/api/pulse") || rec.saw("POST", "/api/pulse") {
+		t.Fatalf("pulse JSON requested nonexistent /api/pulse route")
 	}
 	if rec.saw("GET", "/upcoming") {
 		t.Fatalf("pulse JSON fetched HTML briefing")
@@ -10911,17 +10956,14 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 }
 
 func TestCLIPulseJSONEmptyProjectUsesEmptyArrays(t *testing.T) {
-	c, _ := cliServer(t, map[string]string{
-		"/api/projects": cliProjects,
-		"/api/pulse": `{
-			"ok": true,
-			"project_id": "p1",
-			"generated_at": "2026-09-18T12:00:00Z",
-			"lookahead_days": 7,
-			"waiting_count": 0,
-			"task_summary": {"total_pending":0,"priority":{"urgent":0,"high":0,"normal":0,"low":0},"status":{"pending":0,"queued":0,"running":0,"completed":0,"failed":0,"blocked":0},"category":{"active":0,"backlog":0,"scheduled":0},"scheduled":{"overdue":0,"due_today":0,"due_this_week":0}}
-		}`,
-	})
+	c, _ := cliPulseJSONServer(t, `{
+		"ok": true,
+		"project_id": "p1",
+		"generated_at": "2026-09-18T12:00:00Z",
+		"lookahead_days": 7,
+		"waiting_count": 0,
+		"task_summary": {"total_pending":0,"priority":{"urgent":0,"high":0,"normal":0,"low":0},"status":{"pending":0,"queued":0,"running":0,"completed":0,"failed":0,"blocked":0},"category":{"active":0,"backlog":0,"scheduled":0},"scheduled":{"overdue":0,"due_today":0,"due_this_week":0}}
+	}`)
 
 	var out bytes.Buffer
 	if err := RunCLI(c, &out, "demo", []string{"pulse", "show"}, false, true); err != nil {
@@ -10938,7 +10980,6 @@ func TestCLIPulseJSONEmptyProjectUsesEmptyArrays(t *testing.T) {
 func TestCLIPulsePlainAndSummaryUseHumanBriefingFlow(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":     cliProjects,
-		"/api/pulse":        `{"ok":true,"project_id":"p1"}`,
 		"/upcoming":         `<main><section id="upcoming-container"><p>Human upcoming briefing</p></section></main>`,
 		"/upcoming/summary": `<div>Generated summary</div>`,
 	})
@@ -10950,8 +10991,8 @@ func TestCLIPulsePlainAndSummaryUseHumanBriefingFlow(t *testing.T) {
 	if !strings.Contains(plain.String(), "Human upcoming briefing") {
 		t.Fatalf("plain pulse did not render briefing: %s", plain.String())
 	}
-	if rec.saw("GET", "/api/pulse") {
-		t.Fatalf("plain pulse requested JSON projection")
+	if rec.saw("POST", "/api/chat/message") {
+		t.Fatalf("plain pulse requested structured JSON projection")
 	}
 
 	var summary bytes.Buffer
@@ -10961,7 +11002,7 @@ func TestCLIPulsePlainAndSummaryUseHumanBriefingFlow(t *testing.T) {
 	if !rec.sawQuery("POST /upcoming/summary?project_id=p1") || !rec.sawQuery("GET /upcoming?project_id=p1") {
 		t.Fatalf("pulse summary did not post then fetch briefing: %v", rec.urlsSnapshot())
 	}
-	if rec.sawQuery("GET /api/pulse?project_id=p1") {
+	if rec.saw("POST", "/api/chat/message") {
 		t.Fatalf("pulse summary should preserve briefing fetch behavior, got %v", rec.urlsSnapshot())
 	}
 	if !strings.Contains(summary.String(), "Human upcoming briefing") {
