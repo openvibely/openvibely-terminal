@@ -184,6 +184,85 @@ func TestAgentsEditDeletePickersShareRowsAndActionBoundaries(t *testing.T) {
 	}
 }
 
+func TestModelsPickersShareSelectorRows(t *testing.T) {
+	type row struct {
+		ref, label, detail string
+	}
+	rowsFromItems := func(items []selectorItem) []row {
+		rows := make([]row, 0, len(items))
+		for _, item := range items {
+			rows = append(rows, row{ref: item.ref, label: item.label, detail: item.detail})
+		}
+		return rows
+	}
+
+	catalogs := []struct {
+		name   string
+		models []client.LLMModel
+		want   []row
+	}{
+		{name: "empty", want: []row{}},
+		{
+			name:   "single",
+			models: []client.LLMModel{{ID: "model-single", Name: "Single", Provider: "openai", Model: "gpt-4o"}},
+			want:   []row{{ref: "model-single", label: "Single", detail: "openai gpt-4o"}},
+		},
+		{
+			name: "multi",
+			models: []client.LLMModel{
+				{ID: "model-named", Name: "Named Model", Provider: "openai", Model: "gpt-4o"},
+				{ID: "model-fallback", Provider: "anthropic", Model: "claude-sonnet"},
+				{ID: "1234567890abcdef", Provider: "ollama"},
+			},
+			want: []row{
+				{ref: "model-named", label: "Named Model", detail: "openai gpt-4o"},
+				{ref: "model-fallback", label: "claude-sonnet", detail: "anthropic claude-sonnet"},
+				{ref: "1234567890abcdef", label: "12345678", detail: "ollama"},
+			},
+		},
+	}
+	for _, catalog := range catalogs {
+		catalog := catalog
+		t.Run(catalog.name, func(t *testing.T) {
+			if got := rowsFromItems(modelSelectorRows(catalog.models)); !reflect.DeepEqual(got, catalog.want) {
+				t.Fatalf("model selector rows = %#v, want %#v", got, catalog.want)
+			}
+		})
+	}
+
+	const modelsHTML = `<div>
+		<div data-model-id="model-named" data-model-name="Named Model" data-model-provider="openai" data-model-model="gpt-4o"></div>
+		<div data-model-id="model-second" data-model-name="Second Model" data-model-provider="anthropic" data-model-model="claude-sonnet"></div>
+		<div data-model-id="model-third" data-model-name="Third Model" data-model-provider="ollama" data-model-model="llama3"></div>
+	</div>`
+	wantPickerRows := []row{
+		{ref: "model-named", label: "Named Model", detail: "openai gpt-4o"},
+		{ref: "model-second", label: "Second Model", detail: "anthropic claude-sonnet"},
+		{ref: "model-third", label: "Third Model", detail: "ollama llama3"},
+	}
+	var baseline []row
+	for _, command := range []string{"/models edit", "/models default", "/models delete"} {
+		command := command
+		t.Run(command, func(t *testing.T) {
+			m, _ := dispatchModel(t, map[string]string{"/models": modelsHTML})
+			m = runLine(t, m, command)
+			if !m.selectorActive {
+				t.Fatalf("%s did not open selector:\n%s", command, transcript(m))
+			}
+			got := rowsFromItems(m.selectorItems)
+			if baseline == nil {
+				baseline = got
+			}
+			if !reflect.DeepEqual(got, baseline) {
+				t.Fatalf("%s rows = %#v, want %#v", command, got, baseline)
+			}
+			if !reflect.DeepEqual(got, wantPickerRows) {
+				t.Fatalf("%s rows = %#v, want %#v", command, got, wantPickerRows)
+			}
+		})
+	}
+}
+
 func TestTasksLifecycleTaskSelectorSelectionRendersOneItemPageWithoutImplicitEvents(t *testing.T) {
 	const tasks = `<div>
 		<div data-task-id="t-1" data-task-status="completed" data-task-category="completed"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>
