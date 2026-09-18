@@ -5803,3 +5803,118 @@ func TestXAuthorizedUsersPreserveAuthTransportAndMalformedDiagnostics(t *testing
 		t.Fatalf("malformed X list error = %v", err)
 	}
 }
+
+func TestGetPulseProjectionUsesProjectScopedCompactJSON(t *testing.T) {
+	var gotPath, gotQuery, gotAccept string
+	now := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
+	nextRun := now.Add(2 * time.Hour)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAccept = r.Header.Get("Accept")
+		if r.URL.Path != "/api/pulse" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(PulseProjection{
+			OK:            true,
+			ProjectID:     "p1",
+			GeneratedAt:   now,
+			LookaheadDays: 7,
+			RunningTasks: []PulseTaskEntry{{
+				TaskID:        "run-1",
+				Title:         "Running work",
+				Status:        "running",
+				Category:      "active",
+				Priority:      4,
+				AgentName:     "Builder",
+				PromptPreview: strings.Repeat("x", 200),
+				CreatedAt:     now,
+				UpdatedAt:     now,
+			}},
+			QueuedTasks: []PulseTaskEntry{{
+				TaskID:    "queued-1",
+				Title:     "Queued work",
+				Status:    "queued",
+				Category:  "active",
+				Priority:  3,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}},
+			BlockedTasks: []PulseTaskEntry{{
+				TaskID:    "blocked-1",
+				Title:     "Blocked work",
+				Status:    "blocked",
+				Category:  "active",
+				Priority:  2,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}},
+			ScheduledTasks: []PulseTaskEntry{{
+				TaskID:         "sched-1",
+				Title:          "Scheduled work",
+				Status:         "pending",
+				Category:       "scheduled",
+				Priority:       1,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+				ScheduleID:     "schedule-1",
+				NextRun:        &nextRun,
+				RepeatType:     "daily",
+				RepeatInterval: 1,
+				RepeatLabel:    "daily",
+			}},
+			TaskSummary: PulseTaskSummary{TotalPending: 4},
+		})
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.GetPulseProjection(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetPulseProjection: %v", err)
+	}
+	if gotPath != "/api/pulse" || gotQuery != "project_id=p1" || gotAccept != "application/json" {
+		t.Fatalf("request = path %q query %q accept %q", gotPath, gotQuery, gotAccept)
+	}
+	if got.ProjectID != "p1" || len(got.RunningTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 1 {
+		t.Fatalf("pulse projection = %+v", got)
+	}
+	if got.ScheduledTasks[0].ScheduleID != "schedule-1" || got.ScheduledTasks[0].NextRun == nil {
+		t.Fatalf("scheduled task not decoded: %+v", got.ScheduledTasks[0])
+	}
+}
+
+func TestGetPulseProjectionNormalizesEmptyArrays(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/pulse" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true,"project_id":"p1","lookahead_days":7,"task_summary":{"status":{"blocked":0}}}`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.GetPulseProjection(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetPulseProjection: %v", err)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"running_tasks":[]`, `"pending_tasks":[]`, `"queued_tasks":[]`, `"blocked_tasks":[]`, `"scheduled_tasks":[]`, `"blocked":0`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("encoded pulse missing %s: %s", want, encoded)
+		}
+	}
+}

@@ -279,7 +279,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/workers` | | `show`, `watch`, `limit <n>`, `project <n>` |
 | `/channels` | `integrations`; deprecated: `webhooks`, `inbound-webhooks` | `list`, `show`, `add`, `connect`, `edit`, `test`, `remove`, `disconnect`; `access <telegram\|slack\|discord\|x\|email\|github> list\|add\|remove`; `webhooks list|show|create|edit|test|rotate|delete|delete-bulk` |
 | `/personality` | | `list`, `show <key|name>`, `add`, `edit`, `set <key|name>`, `delete <key|name>`, `delete-bulk <key|name>...` |
-| `/pulse` | `upcoming` | `show`, `summary` |
+| `/pulse` | `upcoming` | `show`, `summary`; one-shot `openvibely-terminal -project <project> --json pulse` returns structured upcoming-work JSON for scripts |
 | `/reflection` | `history` | `show`, `summary` |
 | `/grades` | | `show`, `run` |
 | `/insights` | `suggestions` | `show`, `analyze` |
@@ -1101,6 +1101,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `/api/capacity/global`, `/projects`, `/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
+| Pulse | `GET /api/pulse?project_id=…` for the compact upcoming-work projection used by `--json pulse` |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
 | Schedules | `POST /api/schedules/:id/toggle` |
@@ -1109,10 +1110,12 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Events | `GET /events/live` (SSE) |
 
 **HTML/HTMX** — the task board, alerts, skills, models, agents, schedule,
-workers, channels, personality list, pulse, reflection, grades, insights and
+workers, channels, personality list, reflection, grades, insights and
 automations screens are served as templ-rendered fragments with no JSON list
-equivalent. Personality custom detail and CRUD mutations use the JSON routes
-listed above. For the HTML screens the client:
+equivalent. Pulse still uses the HTML briefing for plain output and `summary`,
+while `--json pulse` uses the compact JSON projection listed above. Personality
+custom detail and CRUD mutations use the JSON routes listed above. For the HTML
+screens the client:
 
 - sends `HX-Request: true`, so the server returns a fragment and a 2xx status
   instead of a browser redirect;

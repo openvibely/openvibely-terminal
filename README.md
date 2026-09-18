@@ -102,6 +102,7 @@ Common commands include:
 | `/channels` | Manage integrations, inbound webhooks, saved outbound targets, and project-scoped Telegram, Slack, Discord, X, Email, and GitHub authorized access with `channels access <provider> list\|add\|remove` and `channels targets list\|show\|add\|edit\|test\|remove\|policy` |
 | `/projects`, `/project` | Manage or select projects |
 | `/analytics` | View usage and execution statistics |
+| `/pulse` | View the upcoming-work briefing; `openvibely-terminal -project <project> --json pulse` emits structured running, queued, blocked, scheduled, and summary fields for scripts |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/help <command>` | Show complete command syntax |
 
