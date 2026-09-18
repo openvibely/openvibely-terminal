@@ -64,6 +64,16 @@ func TestGetProjectSettingsRejectsForeignOrIncompleteAuthoritativeForm(t *testin
 			html: strings.Replace(projectSettingsHTML, `<input name="max_workers" value="4">`, ``, 1),
 			want: "max_workers",
 		},
+		{
+			name: "repo source select without selected option",
+			html: strings.Replace(projectSettingsHTML, `<option value="github" selected>GitHub</option>`, `<option value="github">GitHub</option>`, 1),
+			want: "repo_source",
+		},
+		{
+			name: "default agent select without selected option",
+			html: strings.Replace(projectSettingsHTML, `<option value="agent-1" selected>Builder (openai/gpt)</option>`, `<option value="agent-1">Builder (openai/gpt)</option>`, 1),
+			want: "default_agent_config_id",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +81,45 @@ func TestGetProjectSettingsRejectsForeignOrIncompleteAuthoritativeForm(t *testin
 			}))
 			if _, err := c.GetProjectSettings(context.Background(), "p1"); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetProjectSettingsDoesNotGuessUnselectedProjectSelects(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		html  string
+		field string
+		check func(*ProjectSettings) bool
+	}{
+		{
+			name:  "repo source",
+			html:  strings.Replace(projectSettingsHTML, `<option value="github" selected>GitHub</option>`, `<option value="github">GitHub</option>`, 1),
+			field: "repo_source",
+			check: func(settings *ProjectSettings) bool {
+				return settings != nil && settings.RepositorySource == "local"
+			},
+		},
+		{
+			name:  "default agent",
+			html:  strings.Replace(projectSettingsHTML, `<option value="agent-1" selected>Builder (openai/gpt)</option>`, `<option value="agent-1">Builder (openai/gpt)</option>`, 1),
+			field: "default_agent_config_id",
+			check: func(settings *ProjectSettings) bool {
+				return settings != nil && settings.DefaultAgentID == "" && settings.DefaultAgentName == ""
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.html))
+			}))
+			got, err := c.GetProjectSettings(context.Background(), "p1")
+			if err == nil || !strings.Contains(err.Error(), tc.field) {
+				t.Fatalf("error = %v, want %s", err, tc.field)
+			}
+			if tc.check(got) {
+				t.Fatalf("settings guessed malformed %s select: %#v", tc.field, got)
 			}
 		})
 	}
