@@ -62,6 +62,62 @@ type rawSSEFrame struct {
 	dataLines []string
 }
 
+type sseStreamConfig struct {
+	endpoint           string
+	authPath           string
+	connectErrorPrefix string
+	statusErrorPrefix  string
+}
+
+type sseStreamBody struct {
+	io.ReadCloser
+	transport *http.Transport
+}
+
+func (b *sseStreamBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.transport.CloseIdleConnections()
+	return err
+}
+
+func (c *Client) openSSEStream(ctx context.Context, cfg sseStreamConfig) (*http.Response, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, cfg.endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	transport := &http.Transport{ResponseHeaderTimeout: 15 * time.Second}
+	streamClient := &http.Client{
+		Jar:       c.http.Jar,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		transport.CloseIdleConnections()
+		if ctx.Err() != nil {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%s: %w", cfg.connectErrorPrefix, err)
+	}
+	if isReadAuthResponse(resp) {
+		resp.Body.Close()
+		transport.CloseIdleConnections()
+		return nil, newAuthRequiredError(http.MethodGet, cfg.authPath, resp)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		transport.CloseIdleConnections()
+		return nil, fmt.Errorf("%s %d", cfg.statusErrorPrefix, resp.StatusCode)
+	}
+	resp.Body = &sseStreamBody{ReadCloser: resp.Body, transport: transport}
+	return resp, nil
+}
+
 func scanSSEFrames(r io.Reader, handle func(rawSSEFrame) bool) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -110,38 +166,20 @@ func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int
 	go func() {
 		defer close(events)
 		defer close(errCh)
-		req, err := c.newRequest(ctx, http.MethodGet, "/events/chat/"+url.PathEscape(execID)+"?offset="+fmt.Sprint(offset), nil)
+		resp, err := c.openSSEStream(ctx, sseStreamConfig{
+			endpoint:           "/events/chat/" + url.PathEscape(execID) + "?offset=" + fmt.Sprint(offset),
+			authPath:           "/events/chat/:exec_id",
+			connectErrorPrefix: "connecting to chat output stream",
+			statusErrorPrefix:  "chat output stream returned status",
+		})
 		if err != nil {
 			errCh <- err
 			return
 		}
-		req.Header.Set("Accept", "text/event-stream")
-		req.Header.Set("Cache-Control", "no-cache")
-		transport := &http.Transport{ResponseHeaderTimeout: 15 * time.Second}
-		defer transport.CloseIdleConnections()
-		streamClient := &http.Client{
-			Jar:       c.http.Jar,
-			Transport: transport,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		resp, err := streamClient.Do(req)
-		if err != nil {
-			if ctx.Err() == nil {
-				errCh <- fmt.Errorf("connecting to chat output stream: %w", err)
-			}
+		if resp == nil {
 			return
 		}
 		defer resp.Body.Close()
-		if isReadAuthResponse(resp) {
-			errCh <- newAuthRequiredError(http.MethodGet, "/events/chat/:exec_id", resp)
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			errCh <- fmt.Errorf("chat output stream returned status %d", resp.StatusCode)
-			return
-		}
 
 		err = scanSSEFrames(resp.Body, func(frame rawSSEFrame) bool {
 			dataLines := make([]string, len(frame.dataLines))
@@ -248,43 +286,21 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 		if projectID != "" {
 			endpoint += "?project_id=" + url.QueryEscape(projectID)
 		}
-		req, err := c.newRequest(ctx, http.MethodGet, endpoint, nil)
+		resp, err := c.openSSEStream(ctx, sseStreamConfig{
+			endpoint:           endpoint,
+			authPath:           "/events/live",
+			connectErrorPrefix: "connecting to event stream",
+			statusErrorPrefix:  "event stream returned status",
+		})
 		if err != nil {
 			sendErr(err)
 			return
 		}
-		req.Header.Set("Accept", "text/event-stream")
-		req.Header.Set("Cache-Control", "no-cache")
-
-		// SSE is long-lived: use a dedicated client without the default timeout
-		// but reuse the cookie jar for authenticated sessions.
-		sseClient := &http.Client{
-			Jar: c.http.Jar,
-			Transport: &http.Transport{
-				ResponseHeaderTimeout: 15 * time.Second,
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
-		resp, err := sseClient.Do(req)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			sendErr(fmt.Errorf("connecting to event stream: %w", err))
+		if resp == nil {
 			return
 		}
 		defer resp.Body.Close()
 
-		if isReadAuthResponse(resp) {
-			sendErr(newAuthRequiredError(http.MethodGet, "/events/live", resp))
-			return
-		}
-		if resp.StatusCode != http.StatusOK {
-			sendErr(fmt.Errorf("event stream returned status %d", resp.StatusCode))
-			return
-		}
 		err = scanSSEFrames(resp.Body, func(frame rawSSEFrame) bool {
 			dataLines := make([]string, len(frame.dataLines))
 			for i, line := range frame.dataLines {
