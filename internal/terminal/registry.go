@@ -692,7 +692,7 @@ func tasksCommand() command {
 			switch action {
 			case "", "list":
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					tasks, err := c.ListTasks(ctx, pid)
+					tasks, err := c.ListTaskReferences(ctx, pid)
 					if err != nil {
 						return "", err
 					}

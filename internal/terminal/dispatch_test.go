@@ -1064,16 +1064,19 @@ const taskBoardHTML = `<div>
   </div>
 </div>`
 
-func TestTasksCommandListsRealBoard(t *testing.T) {
+func TestTasksCommandListsCompactTaskCatalog(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
 	m = runLine(t, m, "/tasks")
 
-	if !rec.saw("GET", "/tasks") {
-		t.Fatalf("expected a board fetch, calls:\n%s", rec.all())
+	if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
+		t.Fatalf("compact task catalog requests = %d, want 1; calls:\n%s", got, rec.all())
+	}
+	if rec.saw("GET", "/tasks") {
+		t.Fatalf("task list fetched rendered board instead of compact catalog, calls:\n%s", rec.all())
 	}
 	out := transcript(m)
 	if !strings.Contains(out, "Refactor the API") {
-		t.Errorf("board content missing:\n%s", out)
+		t.Errorf("task list content missing:\n%s", out)
 	}
 	if strings.Contains(out, "error:") {
 		t.Errorf("/tasks should not error:\n%s", out)
