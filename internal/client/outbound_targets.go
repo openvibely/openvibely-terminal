@@ -60,21 +60,49 @@ func (c *Client) ListOutboundTargets(ctx context.Context, projectID string) ([]O
 	return page.Targets, nil
 }
 
-// GetOutboundTargetPolicy reads the selected project's explicit-target policy.
+// GetOutboundTargetPolicy reads only the selected project's explicit-target
+// policy form. It deliberately avoids the saved-destination table so policy
+// display stays independent from target row count and row parsing.
 func (c *Client) GetOutboundTargetPolicy(ctx context.Context, projectID string) (bool, error) {
-	page, err := c.GetOutboundTargets(ctx, projectID)
-	return page.ExplicitUnsavedTargetsAllowed, err
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return false, errors.New("project ID is required for outbound target policy")
+	}
+	root, err := c.getHTML(ctx, "/channels/send-message-explicit-targets"+query("project_id", projectID))
+	if err != nil {
+		return false, err
+	}
+	return parseOutboundTargetPolicy(root, projectID)
 }
 
-// SetOutboundTargetPolicy updates the policy while preserving the selected
-// project's saved destinations. The backend's replacement form remains the
-// source of normalization and duplicate validation.
+// SetOutboundTargetPolicy updates only the selected project's explicit-target
+// policy. Saved destinations are not loaded or reposted.
 func (c *Client) SetOutboundTargetPolicy(ctx context.Context, projectID string, allowed bool) error {
-	page, err := c.GetOutboundTargets(ctx, projectID)
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return errors.New("project ID is required for outbound target policy")
+	}
+	form := url.Values{}
+	form.Set("project_id", projectID)
+	if allowed {
+		form.Set("enabled", "true")
+	}
+	resp, err := c.doFormResponse(ctx, http.MethodPost, "/channels/send-message-explicit-targets", form)
 	if err != nil {
 		return err
 	}
-	return c.SaveOutboundTargets(ctx, projectID, page.Targets, allowed)
+	defer drainAndClose(resp.Body)
+	root, parseErr := html.Parse(resp.Body)
+	if parseErr != nil {
+		return fmt.Errorf("decoding outbound target policy response: %w", parseErr)
+	}
+	if strings.Contains(resp.Header.Get("HX-Trigger"), "outbound-targets-save-error") {
+		if message := outboundTargetSaveMessage(root); message != "" {
+			return errors.New(message)
+		}
+		return errors.New("failed to save outbound target policy")
+	}
+	return nil
 }
 
 // SaveOutboundTargets submits the same replacement form used by the web UI.
@@ -167,6 +195,30 @@ func outboundTargetDestination(target OutboundTarget) string {
 		return strings.TrimSpace(target.Destination)
 	}
 	return strings.TrimSpace(target.TargetID)
+}
+
+func parseOutboundTargetPolicy(root *html.Node, projectID string) (bool, error) {
+	projectID = strings.TrimSpace(projectID)
+	section := findByID(root, "outbound-targets-section")
+	if section != nil && strings.TrimSpace(attr(section, "data-project-id")) != projectID {
+		return false, errors.New("outbound target policy response does not belong to selected project")
+	}
+	policyForm := findByID(root, "outbound-targets-policy-form")
+	if policyForm == nil {
+		return false, errors.New("outbound target policy response is malformed")
+	}
+	projectInputs := findAll(policyForm, func(node *html.Node) bool {
+		return node.Data == "input" && attr(node, "name") == "project_id"
+	})
+	if len(projectInputs) != 1 || strings.TrimSpace(attr(projectInputs[0], "value")) != projectID {
+		return false, errors.New("outbound target policy response has invalid project scope")
+	}
+	if enabled := findNode(policyForm, func(node *html.Node) bool {
+		return node.Data == "input" && attr(node, "name") == "enabled" && attr(node, "type") == "checkbox"
+	}); enabled != nil {
+		return hasHTMLAttr(enabled, "checked"), nil
+	}
+	return false, nil
 }
 
 func parseOutboundTargetsPage(root *html.Node, projectID string) (OutboundTargetsPage, error) {
