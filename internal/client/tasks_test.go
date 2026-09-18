@@ -793,6 +793,66 @@ func TestCreateTaskPostsForm(t *testing.T) {
 	}
 }
 
+func TestCreateSwarmTaskPostsFormAndParsesParent(t *testing.T) {
+	var form url.Values
+	var rawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tasks" {
+			t.Errorf("path = %s, want /tasks", r.URL.Path)
+		}
+		rawQuery = r.URL.RawQuery
+		_ = r.ParseForm()
+		form = r.PostForm
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<div data-task-id="swarm-parent" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-parent" title="Swarm Ship">Swarm Ship</a></div>`))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	parent, err := c.CreateSwarmTask(context.Background(), "p1", SwarmTaskForm{
+		Title: "Swarm Ship", Prompt: "split the work", Goal: "done safely", Category: "backlog", Priority: 3,
+		AgentID: "model-1", AgentDefinitionID: "agent-def-1", Tag: "feature", MaxWorkers: 5, WorkerIsolation: "worktree",
+		ReviewerEnabled: true, MergerEnabled: false, AutoMerge: true, AutoMergeOnGoalAchieved: true, MergeTargetBranch: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawQuery != "project_id=p1" {
+		t.Fatalf("query = %q, want project_id=p1", rawQuery)
+	}
+	for k, want := range map[string]string{
+		"swarm_mode": "true", "title": "Swarm Ship", "prompt": "split the work", "goal": "done safely",
+		"category": "backlog", "priority": "3", "agent_id": "model-1", "agent_definition_id": "agent-def-1",
+		"tag": "feature", "swarm_max_workers": "5", "swarm_worker_isolation": "worktree",
+		"swarm_reviewer_enabled": "true", "swarm_merger_enabled": "false", "auto_merge": "true",
+		"auto_merge_on_goal_achieved": "true", "merge_target_branch": "main",
+	} {
+		if got := form.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if parent.ID != "swarm-parent" || parent.ProjectID != "p1" || parent.Title != "Swarm Ship" {
+		t.Fatalf("parent = %#v", parent)
+	}
+}
+
+func TestCreateSwarmTaskRequiresProjectBeforeRequest(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	_, err := c.CreateSwarmTask(context.Background(), " ", SwarmTaskForm{Title: "Swarm", Prompt: "work"})
+	if err == nil || !strings.Contains(err.Error(), "project ID") {
+		t.Fatalf("err = %v, want project ID required", err)
+	}
+	if requests != 0 {
+		t.Fatalf("empty project ID sent %d requests", requests)
+	}
+}
+
 func TestMutationSurfacesServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

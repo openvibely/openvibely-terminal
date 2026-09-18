@@ -586,7 +586,7 @@ func taskDetailCompletionValues() []string {
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "inputs", "pending", "pending-inputs", "cancel-input", "steer-queued", "new", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear"}
+	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "inputs", "pending", "pending-inputs", "cancel-input", "steer-queued", "new", "swarm", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear"}
 	return command{
 		name:    "tasks",
 		aliases: []string{"task", "t", "board"},
@@ -632,6 +632,9 @@ func tasksCommand() command {
 			"tasks lifecycle <task> [execution]         list executions or show ordered events",
 			"tasks logs <task> [execution]              alias for lifecycle event logs",
 			"tasks new <title> [| <prompt>]             create a task",
+			"tasks swarm [options] <title> | <prompt>   create an autonomous swarm parent",
+			"swarm options: --category active|backlog, --priority 1-4, --goal, --tag bug|feature, --max-workers 1-8, --worker-isolation worktree|read_only|shared",
+			"swarm options: --agent-id, --agent-definition-id, --no-reviewer, --no-merger, --auto-merge, --auto-merge-on-goal-achieved, --merge-target-branch",
 			"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
 			"tasks run|stop|delete <task>               run, cancel or delete",
 			"tasks move <task> <backlog|active|completed>",
@@ -659,10 +662,12 @@ func tasksCommand() command {
 			{action: "attachments add", args: "<task> <file>...", description: "upload local files"},
 			{action: "attachments delete", args: "<task> <attachment>", description: "delete by ID or filename"},
 			{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
+			{action: "swarm", args: "[options] <title> | <prompt>", description: "create an autonomous swarm parent"},
 			{action: "edit", args: "<task> | <title> [| <prompt>]", description: "edit title/prompt"},
 		},
 		examples: []string{
 			`tasks new Fix login bug | Investigate and resolve the OAuth redirect failure`,
+			`tasks swarm --category active --max-workers 4 --worker-isolation worktree --goal "release safely" Coordinate release | Split release validation across workers`,
 			`tasks move "Fix login bug" active`,
 			`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
 			`tasks goal "Fix login bug" | pause`,
@@ -679,6 +684,14 @@ func tasksCommand() command {
 			`tasks inputs steer "Fix login bug" input-id`,
 			`tasks reply "Fix login bug" | PR is up — please review`,
 			`tasks steer "Fix login bug" | Stop and use the new interface`,
+		},
+		validateArgs: func(args []string) error {
+			action, rest := splitAction(actions, args)
+			if action != "swarm" {
+				return nil
+			}
+			_, err := parseTaskSwarmArgs(rest)
+			return err
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			mm, cmd, ok := m.needProject()
@@ -887,6 +900,19 @@ func tasksCommand() command {
 					return refreshAndRender("created "+title,
 						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
 						renderBoard)
+				})
+
+			case "swarm":
+				spec, err := parseTaskSwarmArgs(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+					parent, err := c.CreateSwarmTask(ctx, pid, spec.Form)
+					if err != nil {
+						return "", err
+					}
+					return renderTaskSwarmCreateResult(pid, parent, spec), nil
 				})
 
 			case "edit":
@@ -1442,6 +1468,228 @@ func (m Model) reviewTaskCandidates(ctx context.Context, c *client.Client, proje
 		return []client.Task{*m.reviewPrefillTask}, nil
 	}
 	return c.ListTaskReferences(ctx, projectID)
+}
+
+type taskSwarmSpec struct {
+	Form client.SwarmTaskForm
+}
+
+type taskSwarmCreateOutput struct {
+	Status                  string `json:"status"`
+	TaskID                  string `json:"task_id"`
+	ProjectID               string `json:"project_id"`
+	Category                string `json:"category"`
+	Title                   string `json:"title"`
+	Planner                 string `json:"planner"`
+	Priority                int    `json:"priority"`
+	Tag                     string `json:"tag,omitempty"`
+	MaxWorkers              int    `json:"max_workers,omitempty"`
+	WorkerIsolation         string `json:"worker_isolation,omitempty"`
+	ReviewerEnabled         bool   `json:"reviewer_enabled"`
+	MergerEnabled           bool   `json:"merger_enabled"`
+	AgentID                 string `json:"agent_id,omitempty"`
+	AgentDefinitionID       string `json:"agent_definition_id,omitempty"`
+	AutoMerge               bool   `json:"auto_merge"`
+	AutoMergeOnGoalAchieved bool   `json:"auto_merge_on_goal_achieved"`
+	MergeTargetBranch       string `json:"merge_target_branch,omitempty"`
+}
+
+func parseTaskSwarmArgs(args []string) (taskSwarmSpec, error) {
+	spec := taskSwarmSpec{Form: client.SwarmTaskForm{Category: "backlog", Priority: 2, ReviewerEnabled: true, MergerEnabled: true}}
+	categorySet := false
+	seen := map[string]bool{}
+	nextValue := func(i *int, option string) (string, error) {
+		if *i+1 >= len(args) || strings.HasPrefix(args[*i+1], "--") {
+			return "", fmt.Errorf("%s requires a value", option)
+		}
+		*i++
+		return strings.TrimSpace(args[*i]), nil
+	}
+
+	i := 0
+	for i < len(args) && strings.HasPrefix(args[i], "--") {
+		option := strings.ToLower(strings.TrimSpace(args[i]))
+		if seen[option] {
+			return taskSwarmSpec{}, fmt.Errorf("%s may only be provided once", option)
+		}
+		seen[option] = true
+		switch option {
+		case "--category":
+			if categorySet {
+				return taskSwarmSpec{}, errors.New("swarm category may only be provided once")
+			}
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			category, err := normalizeTaskSwarmCategory(value)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			spec.Form.Category = category
+			categorySet = true
+		case "--active", "--backlog":
+			if categorySet {
+				return taskSwarmSpec{}, errors.New("swarm category may only be provided once")
+			}
+			spec.Form.Category = strings.TrimPrefix(option, "--")
+			categorySet = true
+		case "--priority":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			priority, err := strconv.Atoi(value)
+			if err != nil || priority < 1 || priority > 4 {
+				return taskSwarmSpec{}, errors.New("swarm priority must be between 1 and 4")
+			}
+			spec.Form.Priority = priority
+		case "--goal":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			spec.Form.Goal = value
+		case "--tag":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			tag, err := normalizeTaskSwarmTag(value)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			spec.Form.Tag = tag
+		case "--max-workers":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			maxWorkers, err := strconv.Atoi(value)
+			if err != nil || maxWorkers < 1 || maxWorkers > 8 {
+				return taskSwarmSpec{}, errors.New("swarm max workers must be between 1 and 8")
+			}
+			spec.Form.MaxWorkers = maxWorkers
+		case "--worker-isolation":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			isolation, err := normalizeTaskSwarmWorkerIsolation(value)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			spec.Form.WorkerIsolation = isolation
+		case "--agent-id":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			spec.Form.AgentID = value
+		case "--agent-definition-id":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			spec.Form.AgentDefinitionID = value
+		case "--reviewer":
+			spec.Form.ReviewerEnabled = true
+		case "--no-reviewer":
+			spec.Form.ReviewerEnabled = false
+		case "--merger":
+			spec.Form.MergerEnabled = true
+		case "--no-merger":
+			spec.Form.MergerEnabled = false
+		case "--auto-merge":
+			spec.Form.AutoMerge = true
+		case "--auto-merge-on-goal-achieved":
+			spec.Form.AutoMergeOnGoalAchieved = true
+		case "--merge-target-branch":
+			value, err := nextValue(&i, option)
+			if err != nil {
+				return taskSwarmSpec{}, err
+			}
+			spec.Form.MergeTargetBranch = value
+		default:
+			return taskSwarmSpec{}, fmt.Errorf("unsupported tasks swarm option %s", option)
+		}
+		i++
+	}
+
+	title, prompt := splitPipe(strings.Join(args[i:], " "))
+	if title == "" || prompt == "" {
+		return taskSwarmSpec{}, errors.New(commandUsage("tasks", "swarm"))
+	}
+	spec.Form.Title = title
+	spec.Form.Prompt = prompt
+	return spec, nil
+}
+
+func normalizeTaskSwarmCategory(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "active", "backlog":
+		return strings.ToLower(strings.TrimSpace(value)), nil
+	default:
+		return "", errors.New("swarm category must be active or backlog")
+	}
+}
+
+func normalizeTaskSwarmTag(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "none":
+		return "", nil
+	case "bug", "feature":
+		return strings.ToLower(strings.TrimSpace(value)), nil
+	default:
+		return "", errors.New("swarm tag must be bug or feature")
+	}
+}
+
+func normalizeTaskSwarmWorkerIsolation(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "worktree", "read_only", "shared":
+		return strings.ToLower(strings.TrimSpace(value)), nil
+	default:
+		return "", errors.New("swarm worker isolation must be worktree, read_only, or shared")
+	}
+}
+
+func renderTaskSwarmCreateResult(projectID string, parent client.Task, spec taskSwarmSpec) string {
+	category := firstNonEmpty(parent.Category, spec.Form.Category)
+	planner := "deferred"
+	plannerMessage := "Planner starts when this swarm parent becomes Active."
+	if category == "active" {
+		planner = "started"
+		plannerMessage = "Planner starts immediately because the swarm parent is Active."
+	}
+	out := taskSwarmCreateOutput{
+		Status:                  "created",
+		TaskID:                  parent.ID,
+		ProjectID:               projectID,
+		Category:                category,
+		Title:                   firstNonEmpty(parent.Title, spec.Form.Title),
+		Planner:                 planner,
+		Priority:                spec.Form.Priority,
+		Tag:                     spec.Form.Tag,
+		MaxWorkers:              spec.Form.MaxWorkers,
+		WorkerIsolation:         spec.Form.WorkerIsolation,
+		ReviewerEnabled:         spec.Form.ReviewerEnabled,
+		MergerEnabled:           spec.Form.MergerEnabled,
+		AgentID:                 spec.Form.AgentID,
+		AgentDefinitionID:       spec.Form.AgentDefinitionID,
+		AutoMerge:               spec.Form.AutoMerge,
+		AutoMergeOnGoalAchieved: spec.Form.AutoMergeOnGoalAchieved,
+		MergeTargetBranch:       spec.Form.MergeTargetBranch,
+	}
+	if jsonMode {
+		text, _ := marshalJSON(out)
+		return text
+	}
+	label := sanitizeAutomationDetailText(out.Title)
+	if out.TaskID != "" {
+		return fmt.Sprintf("created swarm task %q (%s) [TASK_ID:%s]\n%s", label, category, out.TaskID, plannerMessage)
+	}
+	return fmt.Sprintf("created swarm task %q (%s)\n%s", label, category, plannerMessage)
 }
 
 func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
