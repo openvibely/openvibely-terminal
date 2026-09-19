@@ -210,6 +210,14 @@ Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
 prefix or by a substring of their name/title** — `/tasks run refactor` works.
 Ambiguous references report the candidates instead of guessing.
 
+`/analytics` renders the project-scoped analytics sections in a compact terminal
+format. `/analytics failures` requests the selected `project_id` and the
+backend-ranked top 12 failed-task patterns; the all-section `/analytics` report
+uses the same bounded failure-pattern path. This keeps the default report quick
+and readable for large histories. Full failure-pattern history is not rendered by
+the default terminal analytics report; use an explicit backend export or
+integration path when you need archival history.
+
 Project deletion is deliberately destructive: `/projects delete <project>` resolves
 an exact ID/name or unique prefix/substring, then asks `Type 'yes' to confirm or
 Esc to cancel`. One-shot CLI deletion requires `--force` or `-f`. The backend

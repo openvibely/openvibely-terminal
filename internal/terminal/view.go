@@ -4183,9 +4183,9 @@ var analyticsSections = []analyticsSection{
 	},
 	{
 		name:             "failures",
-		usageDescription: "failed-task patterns",
+		usageDescription: "backend-ranked top 12 failed-task patterns",
 		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
-			f, err := c.GetFailedTaskPatterns(ctx, projectID)
+			f, err := c.GetFailedTaskPatternsWithLimit(ctx, projectID, maxFailureRows)
 			if err != nil {
 				return "", err
 			}
@@ -4193,8 +4193,7 @@ var analyticsSections = []analyticsSection{
 		},
 	},
 	{
-		name:             "skills",
-		usageDescription: "skill usage and follow-through",
+		name: "skills", usageDescription: "skill usage and follow-through",
 		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
 			s, err := c.GetSkillAnalytics(ctx, projectID)
 			if err != nil {
@@ -4350,6 +4349,9 @@ const (
 	maxExecTimeRows = 12
 	// maxFrequentRows is the backend-ranked presentation bound for the terminal.
 	maxFrequentRows = 12
+	// maxFailureRows is the backend-ranked failure-pattern presentation bound for
+	// the default terminal analytics report.
+	maxFailureRows = 12
 )
 
 type execTimeCandidate struct {
@@ -4445,13 +4447,20 @@ func renderFailures(patterns []client.FailedTaskPattern) string {
 	if len(patterns) == 0 {
 		return sectionStyle.Render("Failure patterns") + "\n  " + statusOKStyle.Render("no failing tasks")
 	}
+	shown := len(patterns)
+	if shown > maxFailureRows {
+		shown = maxFailureRows
+	}
 	var b strings.Builder
 	b.WriteString(sectionStyle.Render("Failure patterns") + "\n")
-	for _, p := range patterns {
+	for _, p := range patterns[:shown] {
 		fmt.Fprintf(&b, "  %s %s\n", statusErrStyle.Render(fmt.Sprintf("%dx", p.FailureCount)), truncate(p.TaskTitle, 50))
 		if p.LastError != "" {
 			fmt.Fprintf(&b, "      %s\n", dimStyle.Render(truncate(p.LastError, 70)))
 		}
+	}
+	if omitted := len(patterns) - shown; omitted > 0 {
+		fmt.Fprintf(&b, "  %s\n", dimStyle.Render(fmt.Sprintf("… %d more failure patterns not shown", omitted)))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -246,8 +246,8 @@ func TestLoadAnalyticsRendersIndependentAgentAndTaskExecutionTimes(t *testing.T)
 			}
 			_ = json.NewEncoder(w).Encode([]client.TaskFrequency{})
 		case "/api/analytics/failed-task-patterns":
-			if got := r.URL.Query().Get("limit"); got != "" {
-				t.Errorf("failures limit = %q, want omitted", got)
+			if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxFailureRows) {
+				t.Errorf("failures limit = %q, want %d", got, maxFailureRows)
 			}
 			_ = json.NewEncoder(w).Encode([]client.FailedTaskPattern{})
 		case "/api/analytics/skills":
@@ -330,6 +330,7 @@ func TestLoadAnalyticsPreservesExecutionTimeSectionErrorSemantics(t *testing.T) 
 		{section: "agents", path: "/api/analytics/avg-execution-time-by-agent", title: "Avg execution time by agent"},
 		{section: "trends", path: "/api/analytics/avg-execution-time-by-task", title: "Avg execution time by task"},
 		{section: "frequent", path: "/api/analytics/most-frequent-tasks", title: "Most frequent tasks"},
+		{section: "failures", path: "/api/analytics/failed-task-patterns", title: "Failure patterns"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.section, func(t *testing.T) {
@@ -348,6 +349,233 @@ func TestLoadAnalyticsPreservesExecutionTimeSectionErrorSemantics(t *testing.T) 
 			}
 		})
 	}
+}
+
+func rankedFailurePatterns(history []client.FailedTaskPattern) []client.FailedTaskPattern {
+	if len(history) == 0 {
+		return make([]client.FailedTaskPattern, 0)
+	}
+	ranked := append([]client.FailedTaskPattern(nil), history...)
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].FailureCount != ranked[j].FailureCount {
+			return ranked[i].FailureCount > ranked[j].FailureCount
+		}
+		return ranked[i].TaskID < ranked[j].TaskID
+	})
+	if len(ranked) > maxFailureRows {
+		ranked = ranked[:maxFailureRows]
+	}
+	return ranked
+}
+
+func failurePatternRows(count int) []client.FailedTaskPattern {
+	records := make([]client.FailedTaskPattern, count)
+	for i := range records {
+		records[i] = client.FailedTaskPattern{
+			TaskID:       fmt.Sprintf("failure-%02d", i),
+			TaskTitle:    fmt.Sprintf("failure task %02d", i),
+			FailureCount: count - i,
+			LastError:    fmt.Sprintf("last error %02d", i),
+			LastFailedAt: "2026-09-13T12:34:56Z",
+		}
+	}
+	return records
+}
+
+func TestLoadAnalyticsFailureBoundPreservesVisibleOutput(t *testing.T) {
+	cases := []struct {
+		name    string
+		records []client.FailedTaskPattern
+	}{
+		{name: "empty", records: []client.FailedTaskPattern{}},
+		{name: "one without last error", records: []client.FailedTaskPattern{{TaskID: "one", TaskTitle: "one failure", FailureCount: 4}}},
+		{name: "one with last error", records: []client.FailedTaskPattern{{TaskID: "one", TaskTitle: "one failure", FailureCount: 4, LastError: "timeout"}}},
+		{name: "exactly at limit", records: failurePatternRows(maxFailureRows)},
+		{name: "limit plus one and stable tied cutoff", records: func() []client.FailedTaskPattern {
+			records := make([]client.FailedTaskPattern, 0, maxFailureRows+1)
+			for i := 0; i < maxFailureRows-1; i++ {
+				records = append(records, client.FailedTaskPattern{
+					TaskID:       fmt.Sprintf("rank-%02d", i),
+					TaskTitle:    fmt.Sprintf("ranked failure %02d", i),
+					FailureCount: 100 - i,
+					LastError:    fmt.Sprintf("ranked error %02d", i),
+				})
+			}
+			records = append(records,
+				client.FailedTaskPattern{TaskID: "tie-a", TaskTitle: "tie early", FailureCount: 50, LastError: "kept tie"},
+				client.FailedTaskPattern{TaskID: "tie-z", TaskTitle: "tie late", FailureCount: 50, LastError: "omitted tie"},
+			)
+			return records
+		}()},
+		{name: "long title and error", records: []client.FailedTaskPattern{{TaskID: "long", TaskTitle: strings.Repeat("title ", 20), FailureCount: 2, LastError: strings.Repeat("error ", 25)}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ranked := rankedFailurePatterns(tc.records)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "analytics-project" {
+					t.Errorf("project_id = %q, want analytics-project", got)
+				}
+				if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxFailureRows) {
+					t.Errorf("limit = %q, want %d", got, maxFailureRows)
+				}
+				if err := json.NewEncoder(w).Encode(ranked); err != nil {
+					t.Errorf("encode ranked failures: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatalf("client.New: %v", err)
+			}
+
+			got, err := loadAnalytics(context.Background(), c, "analytics-project", "failures")
+			if err != nil {
+				t.Fatalf("loadAnalytics failures: %v", err)
+			}
+			want := renderFailures(ranked)
+			if got != want {
+				t.Fatalf("failure output changed for %s\n got: %q\nwant: %q", tc.name, got, want)
+			}
+			plain := stripANSI(got)
+			if tc.name == "empty" {
+				if got != sectionStyle.Render("Failure patterns")+"\n  "+statusOKStyle.Render("no failing tasks") {
+					t.Fatalf("empty failure output changed: %q", got)
+				}
+			}
+			if tc.name == "limit plus one and stable tied cutoff" {
+				if !strings.Contains(plain, "tie early") || strings.Contains(plain, "tie late") || strings.Contains(plain, "more failure patterns") {
+					t.Fatalf("ranked stable cutoff or continuation hint changed:\n%s", plain)
+				}
+			}
+			if tc.name == "long title and error" {
+				if strings.Contains(plain, strings.Repeat("title ", 20)) || strings.Contains(plain, strings.Repeat("error ", 25)) {
+					t.Fatalf("long failure fields were not truncated:\n%s", plain)
+				}
+			}
+			if strings.HasSuffix(got, "\n") {
+				t.Fatalf("failure output has trailing newline: %q", got)
+			}
+		})
+	}
+}
+
+func TestRenderFailuresDefensivelyCapsOverLimitResponses(t *testing.T) {
+	patterns := failurePatternRows(maxFailureRows + 1)
+	out := stripANSI(renderFailures(patterns))
+	if got := strings.Count(out, "failure task"); got != maxFailureRows {
+		t.Fatalf("rendered failure rows = %d, want %d\n%s", got, maxFailureRows, out)
+	}
+	if !strings.Contains(out, "1 more failure patterns not shown") {
+		t.Fatalf("over-limit output missing continuation hint:\n%s", out)
+	}
+}
+
+func TestLoadAnalyticsFailureBoundInAllSections(t *testing.T) {
+	failures := []client.FailedTaskPattern{{TaskID: "fail-1", TaskTitle: "bounded failure", FailureCount: 9, LastError: "boom"}}
+	var mu sync.Mutex
+	failureRequests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "all-project" {
+			t.Errorf("%s project_id = %q, want all-project", r.URL.Path, got)
+		}
+		switch r.URL.Path {
+		case "/api/analytics/usage":
+			_ = json.NewEncoder(w).Encode(client.UsageAnalytics{})
+		case "/api/analytics/success-failure-rates":
+			_ = json.NewEncoder(w).Encode([]client.SuccessFailureRate{})
+		case "/api/analytics/avg-execution-time-by-agent":
+			_ = json.NewEncoder(w).Encode([]client.AvgExecutionTime{})
+		case "/api/analytics/avg-execution-time-by-task":
+			_ = json.NewEncoder(w).Encode([]client.AvgExecutionTime{})
+		case "/api/analytics/most-frequent-tasks":
+			_ = json.NewEncoder(w).Encode([]client.TaskFrequency{})
+		case "/api/analytics/failed-task-patterns":
+			mu.Lock()
+			failureRequests++
+			mu.Unlock()
+			if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxFailureRows) {
+				t.Errorf("failures limit = %q, want %d", got, maxFailureRows)
+			}
+			_ = json.NewEncoder(w).Encode(failures)
+		case "/api/analytics/skills":
+			_ = json.NewEncoder(w).Encode(client.SkillAnalytics{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	single, err := loadAnalytics(context.Background(), c, "all-project", "failures")
+	if err != nil {
+		t.Fatalf("single failure analytics: %v", err)
+	}
+	if single != renderFailures(failures) {
+		t.Fatalf("single failure output changed:\n%s", single)
+	}
+	all, err := loadAnalytics(context.Background(), c, "all-project", "")
+	if err != nil {
+		t.Fatalf("all analytics: %v", err)
+	}
+	if !strings.Contains(all, single) || !strings.Contains(all, "Usage & cost") {
+		t.Fatalf("all analytics did not include bounded failures and independent sections:\n%s", all)
+	}
+	mu.Lock()
+	gotFailureRequests := failureRequests
+	mu.Unlock()
+	if gotFailureRequests != 2 {
+		t.Fatalf("failure request count = %d, want 2", gotFailureRequests)
+	}
+}
+
+func TestLoadAnalyticsFailureAuthAndMalformedJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		h    http.HandlerFunc
+	}{
+		{
+			name: "auth required",
+			h: func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/login", http.StatusFound)
+			},
+		},
+		{
+			name: "malformed json",
+			h: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("[{"))
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newAnalyticsFailureOnlyClient(t, tc.h)
+			if _, err := loadAnalytics(context.Background(), c, "failure-project", "failures"); err == nil {
+				t.Fatalf("single failure section should surface %s error", tc.name)
+			}
+		})
+	}
+}
+
+func newAnalyticsFailureOnlyClient(t *testing.T, failureHandler http.HandlerFunc) *client.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/analytics/failed-task-patterns" {
+			failureHandler(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	return c
 }
 
 func rankedFrequentTasks(history []client.TaskFrequency) []client.TaskFrequency {

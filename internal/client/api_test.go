@@ -1026,6 +1026,9 @@ func TestGetFailedTaskPatterns(t *testing.T) {
 		if got := r.URL.Query().Get("project_id"); got != "p3" {
 			t.Errorf("project_id = %q", got)
 		}
+		if got := r.URL.Query().Get("limit"); got != "0" {
+			t.Errorf("full-history request limit = %q, want 0", got)
+		}
 		json.NewEncoder(w).Encode([]FailedTaskPattern{
 			{TaskID: "t2", TaskTitle: "Deploy", FailureCount: 3, LastError: "timeout"},
 		})
@@ -1038,6 +1041,141 @@ func TestGetFailedTaskPatterns(t *testing.T) {
 	if len(items) != 1 || items[0].TaskTitle != "Deploy" || items[0].LastError != "timeout" {
 		t.Errorf("unexpected items: %+v", items)
 	}
+}
+
+func TestGetFailedTaskPatternsWithLimit(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/failed-task-patterns" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("project_id"); got != "selected/p3" {
+			t.Errorf("project_id = %q, want selected/p3", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "12" {
+			t.Errorf("limit = %q, want 12", got)
+		}
+		json.NewEncoder(w).Encode([]FailedTaskPattern{
+			{TaskID: "t2", TaskTitle: "Deploy", FailureCount: 3, LastError: "timeout"},
+		})
+	}))
+
+	items, err := c.GetFailedTaskPatternsWithLimit(context.Background(), "selected/p3", 12)
+	if err != nil {
+		t.Fatalf("GetFailedTaskPatternsWithLimit: %v", err)
+	}
+	if len(items) != 1 || items[0].TaskTitle != "Deploy" || items[0].LastError != "timeout" {
+		t.Errorf("unexpected items: %+v", items)
+	}
+}
+
+func TestGetFailedTaskPatternsWithLimitPreservesEmptyAndErrorBehavior(t *testing.T) {
+	tests := []struct {
+		name  string
+		h     http.HandlerFunc
+		check func(t *testing.T, items []FailedTaskPattern, err error)
+	}{
+		{
+			name: "empty response",
+			h: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("[]"))
+			},
+			check: func(t *testing.T, items []FailedTaskPattern, err error) {
+				if err != nil {
+					t.Fatalf("empty response error: %v", err)
+				}
+				if items == nil || len(items) != 0 {
+					t.Fatalf("empty response items = %#v, want non-nil empty slice", items)
+				}
+			},
+		},
+		{
+			name: "malformed JSON",
+			h: func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("[{"))
+			},
+			check: func(t *testing.T, items []FailedTaskPattern, err error) {
+				if err == nil || items != nil {
+					t.Fatalf("malformed JSON returned items=%#v err=%v", items, err)
+				}
+			},
+		},
+		{
+			name: "backend error",
+			h: func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "backend failure", http.StatusBadGateway)
+			},
+			check: func(t *testing.T, items []FailedTaskPattern, err error) {
+				var statusErr *HTTPStatusError
+				if err == nil || items != nil || !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusBadGateway {
+					t.Fatalf("backend error returned items=%#v err=%v", items, err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, tc.h)
+			items, err := c.GetFailedTaskPatternsWithLimit(context.Background(), "p3", 12)
+			tc.check(t, items, err)
+		})
+	}
+}
+
+func TestGetFailedTaskPatternsWithLimitUnauthorized(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+
+	_, err := c.GetFailedTaskPatternsWithLimit(context.Background(), "", 12)
+	if err == nil {
+		t.Fatal("expected error for unauthorized response")
+	}
+	if !IsAuthRequired(err) {
+		t.Fatalf("error = %v, want authentication-required error", err)
+	}
+}
+
+func TestGetFailedTaskPatternsWithLimitTimeoutAndCancellation(t *testing.T) {
+	t.Run("timeout", func(t *testing.T) {
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		_, err := c.GetFailedTaskPatternsWithLimit(ctx, "p3", 12)
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("timeout error = %v, want context deadline exceeded", err)
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		started := make(chan struct{})
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(started)
+			<-r.Context().Done()
+		}))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			_, err := c.GetFailedTaskPatternsWithLimit(ctx, "p3", 12)
+			result <- err
+		}()
+		select {
+		case <-started:
+			cancel()
+		case <-time.After(time.Second):
+			t.Fatal("server did not receive analytics request")
+		}
+		select {
+		case err := <-result:
+			if err == nil || !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation error = %v, want context canceled", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("canceled analytics request did not return")
+		}
+	})
 }
 
 func TestGetFailedTaskPatternsUnauthorized(t *testing.T) {

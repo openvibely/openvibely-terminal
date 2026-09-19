@@ -151,6 +151,180 @@ func TestFrequentAnalyticsHistoricalComparisonEvidence(t *testing.T) {
 	}
 }
 
+func TestFailureAnalyticsControlledBenchmarkEvidence(t *testing.T) {
+	if os.Getenv("OPENVIBELY_FAILURE_ANALYTICS_BENCHMARK") != "1" {
+		t.Skip("set OPENVIBELY_FAILURE_ANALYTICS_BENCHMARK=1 to run the failure analytics benchmark evidence harness")
+	}
+	const runs = 20
+	for _, size := range []int{100, 1000, 5000} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			history := evidenceFailureAnalyticsFixture(size)
+			fullBody, err := json.Marshal(history)
+			if err != nil {
+				t.Fatalf("marshal full fixture: %v", err)
+			}
+			bounded := rankedFailurePatterns(history)
+			boundedBody, err := json.Marshal(bounded)
+			if err != nil {
+				t.Fatalf("marshal bounded fixture: %v", err)
+			}
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "failure-benchmark-project" {
+					t.Errorf("project_id = %q, want failure-benchmark-project", got)
+					return
+				}
+				var body []byte
+				switch r.URL.Query().Get("limit") {
+				case "0":
+					body = fullBody
+				case strconv.Itoa(maxFailureRows):
+					body = boundedBody
+				default:
+					t.Errorf("unexpected limit %q", r.URL.Query().Get("limit"))
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(body)
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatalf("client.New: %v", err)
+			}
+
+			type sample struct {
+				elapsed       time.Duration
+				decodedRows   int
+				renderedLines int
+			}
+			run := func(boundedRun bool) (sample, error) {
+				started := time.Now()
+				var items []client.FailedTaskPattern
+				var err error
+				if boundedRun {
+					items, err = c.GetFailedTaskPatternsWithLimit(context.Background(), "failure-benchmark-project", maxFailureRows)
+				} else {
+					items, err = c.GetFailedTaskPatterns(context.Background(), "failure-benchmark-project")
+				}
+				if err != nil {
+					return sample{}, err
+				}
+				out := ""
+				if boundedRun {
+					out = renderFailures(items)
+				} else {
+					out = renderFailuresUnboundedForBenchmark(items)
+				}
+				return sample{elapsed: time.Since(started), decodedRows: len(items), renderedLines: renderedLineCount(out)}, nil
+			}
+
+			for _, boundedRun := range []bool{true, false} {
+				if _, err := run(boundedRun); err != nil {
+					t.Fatalf("warm-up bounded=%t: %v", boundedRun, err)
+				}
+			}
+
+			boundedDurations := make([]time.Duration, 0, runs)
+			fullDurations := make([]time.Duration, 0, runs)
+			var boundedSample, fullSample sample
+			for i := 0; i < runs; i++ {
+				var err error
+				boundedSample, err = run(true)
+				if err != nil {
+					t.Fatalf("bounded run %d: %v", i+1, err)
+				}
+				fullSample, err = run(false)
+				if err != nil {
+					t.Fatalf("full run %d: %v", i+1, err)
+				}
+				boundedDurations = append(boundedDurations, boundedSample.elapsed)
+				fullDurations = append(fullDurations, fullSample.elapsed)
+			}
+
+			boundedAllocs := testing.AllocsPerRun(runs, func() {
+				if _, err := run(true); err != nil {
+					panic(err)
+				}
+			})
+			fullAllocs := testing.AllocsPerRun(runs, func() {
+				if _, err := run(false); err != nil {
+					panic(err)
+				}
+			})
+			boundedAllocatedBytes, boundedMallocs := measureHistoricalAnalyticsAllocations(runs, func() {
+				if _, err := run(true); err != nil {
+					panic(err)
+				}
+			})
+			fullAllocatedBytes, fullMallocs := measureHistoricalAnalyticsAllocations(runs, func() {
+				if _, err := run(false); err != nil {
+					panic(err)
+				}
+			})
+			boundedP50, boundedP95 := historicalAnalyticsPercentiles(boundedDurations)
+			fullP50, fullP95 := historicalAnalyticsPercentiles(fullDurations)
+
+			t.Logf("failure_analytics_benchmark fixture=%d limit=%d runs=%d full_response_bytes=%d bounded_response_bytes=%d full_decoded_rows=%d bounded_decoded_rows=%d full_rendered_lines=%d bounded_rendered_lines=%d full_p50=%s full_p95=%s bounded_p50=%s bounded_p95=%s full_allocated_bytes_per_op=%.0f bounded_allocated_bytes_per_op=%.0f full_allocs_per_op=%.1f bounded_allocs_per_op=%.1f full_mallocs_per_op=%.1f bounded_mallocs_per_op=%.1f full_durations=%v bounded_durations=%v", size, maxFailureRows, runs, len(fullBody), len(boundedBody), fullSample.decodedRows, boundedSample.decodedRows, fullSample.renderedLines, boundedSample.renderedLines, fullP50, fullP95, boundedP50, boundedP95, fullAllocatedBytes, boundedAllocatedBytes, fullAllocs, boundedAllocs, fullMallocs, boundedMallocs, fullDurations, boundedDurations)
+
+			if boundedSample.decodedRows != minInt(size, maxFailureRows) || boundedSample.renderedLines > 1+2*maxFailureRows {
+				t.Fatalf("bounded output was not capped: rows=%d lines=%d", boundedSample.decodedRows, boundedSample.renderedLines)
+			}
+			if size == 5000 {
+				if boundedP50*2 >= fullP50 {
+					t.Fatalf("bounded p50 = %s, want at least 50%% below full p50 %s", boundedP50, fullP50)
+				}
+				if boundedAllocatedBytes*2 >= fullAllocatedBytes || boundedMallocs*2 >= fullMallocs {
+					t.Fatalf("bounded allocations were not materially reduced: bytes/op %.0f vs %.0f, mallocs/op %.1f vs %.1f", boundedAllocatedBytes, fullAllocatedBytes, boundedMallocs, fullMallocs)
+				}
+			}
+		})
+	}
+}
+
+func evidenceFailureAnalyticsFixture(count int) []client.FailedTaskPattern {
+	items := make([]client.FailedTaskPattern, count)
+	for i := range items {
+		items[i] = client.FailedTaskPattern{
+			TaskID:       fmt.Sprintf("failure-task-%05d", i),
+			TaskTitle:    fmt.Sprintf("failure task title %05d", i),
+			FailureCount: count - i,
+			LastError:    fmt.Sprintf("representative failure error detail %05d", i),
+			LastFailedAt: "2026-09-13T12:34:56Z",
+		}
+	}
+	return items
+}
+
+func renderFailuresUnboundedForBenchmark(patterns []client.FailedTaskPattern) string {
+	if len(patterns) == 0 {
+		return sectionStyle.Render("Failure patterns") + "\n  " + statusOKStyle.Render("no failing tasks")
+	}
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("Failure patterns") + "\n")
+	for _, p := range patterns {
+		fmt.Fprintf(&b, "  %s %s\n", statusErrStyle.Render(fmt.Sprintf("%dx", p.FailureCount)), truncate(p.TaskTitle, 50))
+		if p.LastError != "" {
+			fmt.Fprintf(&b, "      %s\n", dimStyle.Render(truncate(p.LastError, 70)))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderedLineCount(out string) int {
+	if out == "" {
+		return 0
+	}
+	return strings.Count(out, "\n") + 1
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func measureHistoricalAnalyticsAllocations(runs int, operation func()) (bytesPerOp, mallocsPerOp float64) {
 	runtime.GC()
 	var before, after runtime.MemStats
