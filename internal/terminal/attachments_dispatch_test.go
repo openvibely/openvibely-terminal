@@ -65,6 +65,52 @@ func TestTasksAttachmentsAddDispatchesAndRendersRefreshedFiles(t *testing.T) {
 	}
 }
 
+func TestTaskAttachmentCommandsDoNotLoadLazyTaskDetailFragments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request.txt")
+	if err := os.WriteFile(path, []byte("request"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name         string
+		line         string
+		wantSelector bool
+		wantPost     bool
+	}{
+		{name: "list", line: "/tasks attachments list Refactor"},
+		{name: "add preflight", line: "/tasks attachments add Refactor " + path, wantPost: true},
+		{name: "typed delete lookup", line: "/tasks attachments delete Refactor att-1"},
+		{name: "picker loading", line: "/tasks attachments delete Refactor", wantSelector: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":                      attachmentTaskBoardHTML,
+				"GET /tasks/t-1":              attachmentRowsHTML,
+				"POST /tasks/t-1/attachments": attachmentRowsHTML,
+				"/attachments/att-1":          refreshedAttachmentRowsHTML,
+			})
+
+			m = runLine(t, m, tc.line)
+			if tc.wantSelector && !m.selectorActive {
+				t.Fatal("attachment command did not open selector")
+			}
+			if tc.wantPost && !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
+				t.Fatalf("upload was not sent with selected project scope:\n%s", rec.all())
+			}
+			if got := rec.count("GET", "/tasks/t-1"); got != 1 {
+				t.Fatalf("attachment command task-page reads = %d, want one; calls:\n%s", got, rec.all())
+			}
+			for _, disallowed := range []string{"/tasks/t-1/thread", "/tasks/t-1/changes", "/api/tasks/t-1/lifecycle-executions"} {
+				if rec.saw("GET", disallowed) {
+					t.Fatalf("attachment command requested unrelated lazy detail endpoint %s; calls:\n%s", disallowed, rec.all())
+				}
+			}
+		})
+	}
+}
+
 func TestTasksAttachmentsDeleteRequiresTUIConfirmationAndRefreshes(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/tasks":             attachmentTaskBoardHTML,
