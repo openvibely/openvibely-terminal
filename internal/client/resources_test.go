@@ -1497,6 +1497,51 @@ func renderCatalogFixturePage(kind catalogFixtureKind, start, end, total int, ha
 	return b.String()
 }
 
+type boundedResourceListCase struct {
+	name string
+	path string
+	page func(start, end, total int) string
+	call func(*Client, int) (int, bool, bool, error)
+}
+
+func boundedResourceListCases() []boundedResourceListCase {
+	return []boundedResourceListCase{
+		{
+			name: "models",
+			path: "/models",
+			page: func(start, end, total int) string {
+				return renderCatalogFixturePage(catalogFixtureModels, start, end, total, end < total)
+			},
+			call: func(c *Client, limit int) (int, bool, bool, error) {
+				result, err := c.ListModelsBounded(context.Background(), "", "", limit)
+				return len(result.Models), result.MoreAvailable, result.Complete, err
+			},
+		},
+		{
+			name: "agents",
+			path: "/agents",
+			page: func(start, end, total int) string {
+				return renderCatalogFixturePage(catalogFixtureAgents, start, end, total, end < total)
+			},
+			call: func(c *Client, limit int) (int, bool, bool, error) {
+				result, err := c.ListAgentsBounded(context.Background(), "", "", limit)
+				return len(result.Agents), result.MoreAvailable, result.Complete, err
+			},
+		},
+		{
+			name: "automations",
+			path: "/automations",
+			page: func(start, end, total int) string {
+				return automationPaginatedPage(start, end, total)
+			},
+			call: func(c *Client, limit int) (int, bool, bool, error) {
+				result, err := c.ListAutomationsBounded(context.Background(), "", limit)
+				return len(result.Automations), result.MoreAvailable, result.Complete, err
+			},
+		},
+	}
+}
+
 func TestBoundedModelAndAgentListsReducePagedCatalogWork(t *testing.T) {
 	for _, kind := range []catalogFixtureKind{catalogFixtureModels, catalogFixtureAgents} {
 		for _, total := range []int{1000, 5000} {
@@ -1617,9 +1662,13 @@ func TestBoundedModelAndAgentFiltersTraverseOnlyAsNeeded(t *testing.T) {
 }
 
 func TestBoundedCatalogPaginationErrorsMatchFullTraversal(t *testing.T) {
-	for _, kind := range []catalogFixtureKind{catalogFixtureModels, catalogFixtureAgents} {
-		t.Run(string(kind), func(t *testing.T) {
+	for _, family := range boundedResourceListCases() {
+		t.Run(family.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != family.path {
+					http.NotFound(w, r)
+					return
+				}
 				w.Header().Set("Content-Type", "text/html")
 				w.Header().Set(cardPageMoreHeader, "true")
 				_, _ = io.WriteString(w, `<section data-card-pagination-root data-card-pagination-card-selector="bad" data-card-pagination-key=""></section>`)
@@ -1629,13 +1678,43 @@ func TestBoundedCatalogPaginationErrorsMatchFullTraversal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if kind == catalogFixtureModels {
-				_, err = c.ListModelsBounded(context.Background(), "", "", DefaultModelListLimit)
-			} else {
-				_, err = c.ListAgentsBounded(context.Background(), "", "", DefaultAgentListLimit)
-			}
+			_, _, _, err = family.call(c, 1)
 			if err == nil || !strings.Contains(err.Error(), "invalid pagination metadata") {
 				t.Fatalf("err = %v, want invalid pagination metadata", err)
+			}
+		})
+	}
+}
+
+func TestBoundedCatalogMoreCompleteStateSharedAcrossResources(t *testing.T) {
+	for _, family := range boundedResourceListCases() {
+		t.Run(family.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != family.path {
+					http.NotFound(w, r)
+					return
+				}
+				requests++
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Set(cardPageMoreHeader, "true")
+				w.Header().Set(cardPageTotalHeader, "2")
+				_, _ = io.WriteString(w, family.page(0, 1, 2))
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count, more, complete, err := family.call(c, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count != 1 || !more || complete {
+				t.Fatalf("bounded state count=%d more=%t complete=%t, want one incomplete page with more", count, more, complete)
+			}
+			if requests != 1 {
+				t.Fatalf("requests = %d, want 1", requests)
 			}
 		})
 	}
