@@ -1660,6 +1660,25 @@ func TestProjectScopedAsyncResultsAreIgnoredAfterProjectSwitch(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "status counts",
+			msg: func(projectGeneration uint64) tea.Msg {
+				return statusCountsMsg{
+					sessionGeneration: 1,
+					projectGeneration: projectGeneration,
+					pendingAlerts:     5,
+					activeTasks:       4,
+					queuedTasks:       3,
+					alertsUnavailable: true,
+					tasksUnavailable:  true,
+				}
+			},
+			check: func(t *testing.T, m Model, before string) {
+				if m.pendingAlertCount != 0 || m.activeTaskCount != 0 || m.queuedTaskCount != 0 || m.alertsCountUnavailable || m.tasksCountUnavailable || transcript(m) != before {
+					t.Fatalf("stale status counts changed state: alerts=%d active=%d queued=%d alertsUnavailable=%t tasksUnavailable=%t transcript=%q", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount, m.alertsCountUnavailable, m.tasksCountUnavailable, transcript(m))
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -3073,6 +3092,140 @@ func TestStatusCountsPreserveSuccessfulSideOnOrdinaryPartialFailure(t *testing.T
 	}
 	if msg.pendingAlerts != 4 || msg.activeTasks != 0 || msg.queuedTasks != 0 {
 		t.Fatalf("partial counts = alerts=%d active=%d queued=%d, want 4/0/0", msg.pendingAlerts, msg.activeTasks, msg.queuedTasks)
+	}
+}
+
+func TestStatusCountsRenderTaskCountUnavailableOnPartialFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "project-1" {
+			t.Fatalf("project_id = %q, want project-1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/alerts/pending-count":
+			_, _ = io.WriteString(w, `{"count":4}`)
+		case "/api/tasks/status-counts":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"task count unavailable"}`)
+		default:
+			t.Fatalf("unexpected status-count path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "project-1"
+	m.connected = true
+	m.connChecked = true
+	m.activeTaskCount = 9
+	m.queuedTaskCount = 8
+
+	msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+	if !ok {
+		t.Fatalf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+	}
+	next, cmd := m.Update(msg)
+	if cmd != nil {
+		t.Fatalf("status count update returned unexpected command %T", cmd)
+	}
+	m = next.(Model)
+
+	status := strings.ToLower(stripANSI(m.renderStatus()))
+	for _, want := range []string{"alerts", "4 pending approvals", "tasks", "unavailable", "partial failure"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status missing %q:\n%s", want, status)
+		}
+	}
+	if strings.Contains(status, "none active") {
+		t.Fatalf("status rendered false task empty state after task-count failure:\n%s", status)
+	}
+	if m.pendingAlertCount != 4 || m.activeTaskCount != 9 || m.queuedTaskCount != 8 {
+		t.Fatalf("partial count update = alerts=%d active=%d queued=%d, want alerts updated and cached task counts preserved", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount)
+	}
+}
+
+func TestStatusCountsRenderAlertCountUnavailableOnPartialFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "project-1" {
+			t.Fatalf("project_id = %q, want project-1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/alerts/pending-count":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"alert count unavailable"}`)
+		case "/api/tasks/status-counts":
+			_, _ = io.WriteString(w, `{"active_tasks":3,"queued_tasks":2}`)
+		default:
+			t.Fatalf("unexpected status-count path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.selectedID = "project-1"
+	m.connected = true
+	m.connChecked = true
+	m.pendingAlertCount = 7
+
+	msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+	if !ok {
+		t.Fatalf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+	}
+	next, cmd := m.Update(msg)
+	if cmd != nil {
+		t.Fatalf("status count update returned unexpected command %T", cmd)
+	}
+	m = next.(Model)
+
+	status := strings.ToLower(stripANSI(m.renderStatus()))
+	for _, want := range []string{"alerts", "unavailable", "partial failure", "tasks", "3 active", "2 queued"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status missing %q:\n%s", want, status)
+		}
+	}
+	if strings.Contains(status, "none pending") {
+		t.Fatalf("status rendered false alert empty state after alert-count failure:\n%s", status)
+	}
+	if m.pendingAlertCount != 7 || m.activeTaskCount != 3 || m.queuedTaskCount != 2 {
+		t.Fatalf("partial count update = alerts=%d active=%d queued=%d, want cached alerts preserved and tasks updated", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount)
+	}
+}
+
+func TestStatusCountsRenderEmptyRowsWhenCompactCountsAreZero(t *testing.T) {
+	m := newTestModel(t)
+	m.selectedID = "project-1"
+	m.connected = true
+	m.connChecked = true
+
+	next, cmd := m.Update(statusCountsMsg{
+		sessionGeneration: m.sessionGeneration,
+		projectGeneration: m.projectGeneration,
+		pendingAlerts:     0,
+		activeTasks:       0,
+		queuedTasks:       0,
+	})
+	if cmd != nil {
+		t.Fatalf("status count update returned unexpected command %T", cmd)
+	}
+	m = next.(Model)
+
+	status := strings.ToLower(stripANSI(m.renderStatus()))
+	for _, want := range []string{"alerts", "none pending", "tasks", "none active"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("zero counts did not render %q:\n%s", want, status)
+		}
+	}
+	if strings.Contains(status, "unavailable") || strings.Contains(status, "partial failure") {
+		t.Fatalf("zero counts rendered partial failure:\n%s", status)
 	}
 }
 
