@@ -465,6 +465,79 @@ func TestWorksAliasCompletesCanonicalCommandAtDepth(t *testing.T) {
 	}
 }
 
+func TestTaskThreadInputCommandVocabularyParity(t *testing.T) {
+	cmd := lookupCommand("tasks")
+	if cmd == nil {
+		t.Fatal("tasks command missing")
+	}
+
+	for _, action := range taskThreadInputTopLevelActions() {
+		if !containsString(cmd.actions, action) {
+			t.Errorf("tasks actions missing pending-input action %q: %v", action, cmd.actions)
+		}
+		gotAction, _ := splitAction(cmd.actions, []string{action, "Refactor"})
+		if gotAction != action {
+			t.Errorf("splitAction(%q) = %q, want parser-recognized action", action, gotAction)
+		}
+	}
+
+	for _, root := range taskThreadInputRootActions {
+		if !cmd.offersSelector([]string{root}) {
+			t.Errorf("selector paths missing root %q", root)
+		}
+		if got, want := registryCompletionValues("tasks", root), taskThreadInputCompletionActions(); !slices.Equal(got, want) {
+			t.Errorf("completion values for %q = %v, want %v", root, got, want)
+		}
+		for _, advertised := range taskThreadInputCompletionActions() {
+			if _, ok := taskThreadInputSubAction(advertised); !ok {
+				t.Errorf("advertised pending-input action %q is not parser-classified", advertised)
+			}
+			if !cmd.offersSelector([]string{root, advertised}) {
+				t.Errorf("selector paths missing advertised path %q %q", root, advertised)
+			}
+		}
+	}
+
+	for _, vocab := range taskThreadInputActionVocabularies {
+		for _, alias := range vocab.aliases {
+			got, ok := taskThreadInputSubAction(alias)
+			if !ok || got != vocab.canonical {
+				t.Errorf("pending-input alias %q classified as (%q, %t), want %q", alias, got, ok, vocab.canonical)
+			}
+		}
+	}
+	for _, shorthand := range taskThreadInputShorthandActions {
+		got, ok := taskThreadInputShorthandAction(shorthand.command)
+		if !ok || got != shorthand.canonical {
+			t.Errorf("shorthand %q classified as (%q, %t), want %q", shorthand.command, got, ok, shorthand.canonical)
+		}
+		if !cmd.offersSelector([]string{shorthand.command}) {
+			t.Errorf("selector paths missing shorthand %q", shorthand.command)
+		}
+	}
+
+	help := renderCommandHelp(*cmd)
+	for _, line := range taskThreadInputUsageLines() {
+		if !strings.Contains(help, cmdPrefix+line) {
+			t.Errorf("help missing pending-input usage line %q\n%s", cmdPrefix+line, help)
+		}
+	}
+	for _, usage := range taskThreadInputActionUsages() {
+		want := "usage: " + cmdPrefix + usage.syntax("tasks")
+		if got := commandUsage("tasks", usage.action); got != want {
+			t.Errorf("commandUsage(%q) = %q, want %q", usage.action, got, want)
+		}
+		if !strings.Contains(help, cmdPrefix+usage.syntax("tasks")) {
+			t.Errorf("help missing action usage %q\n%s", usage.syntax("tasks"), help)
+		}
+	}
+	for _, example := range taskThreadInputExamples() {
+		if !strings.Contains(help, cmdPrefix+example) {
+			t.Errorf("help missing pending-input example %q\n%s", cmdPrefix+example, help)
+		}
+	}
+}
+
 func TestProjectEditOptionMetadataMatchesParserCompletionAndHelp(t *testing.T) {
 	cmd := lookupCommand("projects")
 	if cmd == nil {

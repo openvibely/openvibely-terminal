@@ -23,7 +23,7 @@ func pendingCLIClient(t *testing.T, pending string, active bool, posts *int) *cl
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
 		case "/api/tasks/reference-catalog":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor","status":"running","category":"active"}]}`)
+			_, _ = fmt.Fprint(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor","status":"running","category":"active"},{"id":"t-2","project_id":"p1","title":"Review docs","status":"pending","category":"backlog"}]}`)
 		case "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = fmt.Fprint(w, pendingTaskBoard)
@@ -70,6 +70,42 @@ func TestTaskThreadInputListSeparatesModesAndOmitsControls(t *testing.T) {
 	}
 	if strings.Contains(out, "secret") || strings.Contains(out, "Cancel") || strings.Contains(out, "<button") {
 		t.Fatalf("pending input controls leaked: %q", out)
+	}
+}
+
+func TestTaskThreadInputMissingTaskSelectorsUseVocabularyPrefixes(t *testing.T) {
+	pending := `<div id="pending-thread-inputs" data-task-id="t-1"></div>`
+	var posts int
+	c := pendingCLIClient(t, pending, true, &posts)
+	cases := []struct {
+		line string
+		want string
+	}{
+		{line: "/tasks inputs ", want: "tasks inputs"},
+		{line: "/tasks pending ", want: "tasks pending"},
+		{line: "/tasks pending-inputs ", want: "tasks pending-inputs"},
+		{line: "/tasks inputs cancel ", want: "tasks inputs cancel"},
+		{line: "/tasks inputs delete ", want: "tasks inputs cancel"},
+		{line: "/tasks inputs remove ", want: "tasks inputs cancel"},
+		{line: "/tasks cancel-input ", want: "tasks inputs cancel"},
+		{line: "/tasks inputs steer ", want: "tasks inputs steer"},
+		{line: "/tasks inputs redirect ", want: "tasks inputs steer"},
+		{line: "/tasks steer-queued ", want: "tasks inputs steer"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
+			m := New(c)
+			m.selectedID, m.selectedName = "p1", "demo"
+			m, cmd := typeLine(t, m, tc.line)
+			if cmd == nil {
+				t.Fatalf("missing selector command for %q", tc.line)
+			}
+			next, _ := m.Update(cmd())
+			m = next.(Model)
+			if !m.selectorActive || m.pendingCommand != tc.want || m.selectorPrefillSuffix != " " {
+				t.Fatalf("selector state for %q = active:%t pending:%q suffix:%q", tc.line, m.selectorActive, m.pendingCommand, m.selectorPrefillSuffix)
+			}
+		})
 	}
 }
 

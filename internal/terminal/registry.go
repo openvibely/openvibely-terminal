@@ -585,106 +585,215 @@ func taskDetailCompletionValues() []string {
 	return values
 }
 
+type taskThreadInputActionVocabulary struct {
+	canonical string
+	aliases   []string
+	advertise []string
+}
+
+var taskThreadInputRootActions = []string{"inputs", "pending", "pending-inputs"}
+
+var taskThreadInputActionVocabularies = []taskThreadInputActionVocabulary{
+	{canonical: "list", aliases: []string{"list", "show", "inspect"}, advertise: []string{"list", "show", "inspect"}},
+	{canonical: "cancel", aliases: []string{"cancel", "delete", "remove"}, advertise: []string{"cancel"}},
+	{canonical: "steer", aliases: []string{"steer", "redirect"}, advertise: []string{"steer", "redirect"}},
+}
+
+var taskThreadInputShorthandActions = []struct {
+	command   string
+	canonical string
+}{
+	{command: "cancel-input", canonical: "cancel"},
+	{command: "steer-queued", canonical: "steer"},
+}
+
+func taskThreadInputTopLevelActions() []string {
+	actions := append([]string(nil), taskThreadInputRootActions...)
+	for _, shorthand := range taskThreadInputShorthandActions {
+		actions = append(actions, shorthand.command)
+	}
+	return actions
+}
+
+func taskThreadInputCompletionActions() []string {
+	var actions []string
+	for _, vocab := range taskThreadInputActionVocabularies {
+		actions = append(actions, vocab.advertise...)
+	}
+	return actions
+}
+
+func taskThreadInputCompletions() []commandCompletion {
+	values := taskThreadInputCompletionActions()
+	completions := make([]commandCompletion, 0, len(taskThreadInputRootActions))
+	for _, root := range taskThreadInputRootActions {
+		completions = append(completions, commandCompletion{after: []string{root}, values: values})
+	}
+	return completions
+}
+
+func taskThreadInputSelectorPaths() [][]string {
+	selectors := make([][]string, 0, len(taskThreadInputRootActions)*(1+len(taskThreadInputCompletionActions()))+len(taskThreadInputShorthandActions))
+	for _, root := range taskThreadInputRootActions {
+		selectors = append(selectors, []string{root})
+		for _, action := range taskThreadInputCompletionActions() {
+			selectors = append(selectors, []string{root, action})
+		}
+	}
+	for _, shorthand := range taskThreadInputShorthandActions {
+		selectors = append(selectors, []string{shorthand.command})
+	}
+	return selectors
+}
+
+func taskThreadInputUsageLines() []string {
+	return []string{
+		"tasks inputs [list] <task>                 inspect queued follow-ups and pending steering",
+		"tasks inputs cancel <task> <input>         cancel one pending input (confirm)",
+		"tasks inputs steer <task> <input>          redirect a queued follow-up to steering",
+		"tasks pending|pending-inputs <task>        aliases for tasks inputs",
+		"tasks cancel-input <task> <input>         shorthand for inputs cancel",
+		"tasks steer-queued <task> <input>         shorthand for inputs steer",
+	}
+}
+
+func taskThreadInputActionUsages() []commandActionUsage {
+	return []commandActionUsage{
+		{action: "inputs", args: "[list] <task>", description: "inspect queued and steering inputs"},
+		{action: "inputs cancel", args: "<task> <input>", description: "cancel a pending input"},
+		{action: "inputs steer", args: "<task> <input>", description: "redirect a queued follow-up to steering"},
+	}
+}
+
+func taskThreadInputExamples() []string {
+	return []string{
+		`tasks inputs "Fix login bug"`,
+		`tasks inputs cancel "Fix login bug" input-id`,
+		`tasks inputs steer "Fix login bug" input-id`,
+	}
+}
+
+func isTaskThreadInputRootAction(action string) bool {
+	for _, root := range taskThreadInputRootActions {
+		if action == root {
+			return true
+		}
+	}
+	return false
+}
+
+func taskThreadInputSubAction(alias string) (string, bool) {
+	for _, vocab := range taskThreadInputActionVocabularies {
+		for _, candidate := range vocab.aliases {
+			if alias == candidate {
+				return vocab.canonical, true
+			}
+		}
+	}
+	return "", false
+}
+
+func taskThreadInputShorthandAction(action string) (string, bool) {
+	for _, shorthand := range taskThreadInputShorthandActions {
+		if action == shorthand.command {
+			return shorthand.canonical, true
+		}
+	}
+	return "", false
+}
+
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment", "inputs", "pending", "pending-inputs", "cancel-input", "steer-queued", "new", "swarm", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear"}
+	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment"}
+	actions = append(actions, taskThreadInputTopLevelActions()...)
+	actions = append(actions, "new", "swarm", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear")
+	completions := append(taskThreadInputCompletions(), []commandCompletion{
+		{after: []string{"goal"}, values: []string{"pause", "resume"}},
+		{after: []string{"reviews"}, values: []string{"list", "add"}},
+		{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
+		{after: []string{"attach"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
+		{after: []string{"attachment"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
+		{after: []string{"move", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"backlog", "active", "completed"}},
+		{after: []string{"clear"}, values: []string{"backlog", "completed"}},
+		{after: []string{"show", "**"}, partialAfter: completionAfterQuotedOperand, values: taskDetailCompletionValues()},
+	}...)
+	selectorPaths := append([][]string{
+		{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
+		{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
+		{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
+	}, append(taskThreadInputSelectorPaths(), [][]string{
+		{"attachments"}, {"attachments", "add"}, {"attachments", "upload"},
+		{"attachments", "list"}, {"attachments", "show"}, {"attachments", "delete"},
+		{"attachments", "remove"},
+		{"attach"}, {"attach", "add"}, {"attach", "upload"}, {"attach", "list"}, {"attach", "show"}, {"attach", "delete"}, {"attach", "remove"},
+		{"attachment"}, {"attachment", "add"}, {"attachment", "upload"}, {"attachment", "list"}, {"attachment", "show"}, {"attachment", "delete"}, {"attachment", "remove"},
+	}...)...)
+	usage := append([]string{
+		"tasks [filter]                             list the board, optionally filtered",
+		"tasks open <task>                          enter the task's thread",
+		"omit <task> on task-reference actions, including goal, goal pause, and goal resume → interactive selector",
+		"tasks show <task> [tab]                    " + detailTabUsageList(),
+		"tasks reviews [list] <task>                list inline review comments",
+		"tasks reviews add <task> <file>:<line> <comment>",
+		"tasks attachments add <task> <file>...      upload local files",
+		"tasks attachments delete <task> <attachment> delete by ID or filename",
+		"tasks attach ...                            alias for attachments",
+		"tasks lifecycle <task> [execution]         list executions or show ordered events",
+		"tasks logs <task> [execution]              alias for lifecycle event logs",
+		"tasks new <title> [| <prompt>]             create a task",
+		"tasks swarm [options] <title> | <prompt>   create an autonomous swarm parent",
+		"swarm options: --category active|backlog, --priority 1-4, --goal, --tag bug|feature, --max-workers 1-8, --worker-isolation worktree|read_only|shared",
+		"swarm options: --agent-id, --agent-definition-id, --no-reviewer, --no-merger, --auto-merge, --auto-merge-on-goal-achieved, --merge-target-branch",
+		"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
+		"tasks run|stop|delete <task>               run, cancel or delete",
+		"tasks move <task> <backlog|active|completed>",
+		"tasks order <task> <position>              reorder within its column",
+	}, append(taskThreadInputUsageLines(), []string{
+		"tasks reply <task> | <message>             post to the task thread",
+		"tasks activate                             activate the whole backlog",
+		"tasks sweep                                sweep finished tasks",
+		"tasks clear <backlog|completed>            clear a column",
+	}...)...)
+	actionUsages := append(taskThreadInputActionUsages(), []commandActionUsage{
+		{action: "goal", args: "<task> | <objective>", description: "set a goal (\"clear\" removes it)"},
+		{action: "steer", args: "<task> | <message>", description: "steer the active response"},
+		{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
+		{action: "goal resume", args: "<task>", description: "resume a paused goal"},
+		{action: "reviews add", args: "<task> <file>:<line> <comment>"},
+		{action: "attachments add", args: "<task> <file>...", description: "upload local files"},
+		{action: "attachments delete", args: "<task> <attachment>", description: "delete by ID or filename"},
+		{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
+		{action: "swarm", args: "[options] <title> | <prompt>", description: "create an autonomous swarm parent"},
+		{action: "edit", args: "<task> | <title> [| <prompt>]", description: "edit title/prompt"},
+	}...)
+	examples := append([]string{
+		`tasks new Fix login bug | Investigate and resolve the OAuth redirect failure`,
+		`tasks swarm --category active --max-workers 4 --worker-isolation worktree --goal "release safely" Coordinate release | Split release validation across workers`,
+		`tasks move "Fix login bug" active`,
+		`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
+		`tasks goal "Fix login bug" | pause`,
+		`tasks goal pause "Fix login bug"`,
+		`tasks goal resume "Fix login bug"`,
+		`tasks show "Fix login bug" review`,
+		`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
+		`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
+		`tasks attachments delete "Fix login bug" request.txt`,
+		`tasks lifecycle "Fix login bug"`,
+		`tasks logs "Fix login bug" execution-id`,
+	}, append(taskThreadInputExamples(), []string{
+		`tasks reply "Fix login bug" | PR is up — please review`,
+		`tasks steer "Fix login bug" | Stop and use the new interface`,
+	}...)...)
 	return command{
-		name:    "tasks",
-		aliases: []string{"task", "t", "board"},
-		args:    "[filter|id]",
-		actions: actions,
-		completions: []commandCompletion{
-			{after: []string{"inputs"}, values: []string{"list", "show", "inspect", "cancel", "steer", "redirect"}},
-			{after: []string{"pending"}, values: []string{"list", "show", "inspect", "cancel", "steer", "redirect"}},
-			{after: []string{"pending-inputs"}, values: []string{"list", "show", "inspect", "cancel", "steer", "redirect"}},
-			{after: []string{"goal"}, values: []string{"pause", "resume"}},
-			{after: []string{"reviews"}, values: []string{"list", "add"}},
-			{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
-			{after: []string{"attach"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
-			{after: []string{"attachment"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
-			{after: []string{"move", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"backlog", "active", "completed"}},
-			{after: []string{"clear"}, values: []string{"backlog", "completed"}},
-			{after: []string{"show", "**"}, partialAfter: completionAfterQuotedOperand, values: taskDetailCompletionValues()},
-		},
-		selectorPaths: [][]string{
-			{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
-			{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
-			{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
-			{"inputs"}, {"inputs", "list"}, {"inputs", "show"}, {"inputs", "inspect"}, {"inputs", "cancel"}, {"inputs", "steer"}, {"inputs", "redirect"},
-			{"pending"}, {"pending", "list"}, {"pending", "show"}, {"pending", "inspect"}, {"pending", "cancel"}, {"pending", "steer"}, {"pending", "redirect"},
-			{"pending-inputs"}, {"pending-inputs", "list"}, {"pending-inputs", "show"}, {"pending-inputs", "inspect"}, {"pending-inputs", "cancel"}, {"pending-inputs", "steer"}, {"pending-inputs", "redirect"},
-			{"cancel-input"}, {"steer-queued"}, {"attachments"}, {"attachments", "add"}, {"attachments", "upload"},
-			{"attachments", "list"}, {"attachments", "show"}, {"attachments", "delete"},
-			{"attachments", "remove"},
-			{"attach"}, {"attach", "add"}, {"attach", "upload"}, {"attach", "list"}, {"attach", "show"}, {"attach", "delete"}, {"attach", "remove"},
-			{"attachment"}, {"attachment", "add"}, {"attachment", "upload"}, {"attachment", "list"}, {"attachment", "show"}, {"attachment", "delete"}, {"attachment", "remove"},
-		},
-		desc: "the task board and task threads",
-		usage: []string{
-			"tasks [filter]                             list the board, optionally filtered",
-			"tasks open <task>                          enter the task's thread",
-			"omit <task> on task-reference actions, including goal, goal pause, and goal resume → interactive selector",
-			"tasks show <task> [tab]                    " + detailTabUsageList(),
-			"tasks reviews [list] <task>                list inline review comments",
-			"tasks reviews add <task> <file>:<line> <comment>",
-			"tasks attachments add <task> <file>...      upload local files",
-			"tasks attachments delete <task> <attachment> delete by ID or filename",
-			"tasks attach ...                            alias for attachments",
-			"tasks lifecycle <task> [execution]         list executions or show ordered events",
-			"tasks logs <task> [execution]              alias for lifecycle event logs",
-			"tasks new <title> [| <prompt>]             create a task",
-			"tasks swarm [options] <title> | <prompt>   create an autonomous swarm parent",
-			"swarm options: --category active|backlog, --priority 1-4, --goal, --tag bug|feature, --max-workers 1-8, --worker-isolation worktree|read_only|shared",
-			"swarm options: --agent-id, --agent-definition-id, --no-reviewer, --no-merger, --auto-merge, --auto-merge-on-goal-achieved, --merge-target-branch",
-			"tasks edit <task> | <title> [| <prompt>]   edit title/prompt",
-			"tasks run|stop|delete <task>               run, cancel or delete",
-			"tasks move <task> <backlog|active|completed>",
-			"tasks order <task> <position>              reorder within its column",
-			"tasks inputs [list] <task>                 inspect queued follow-ups and pending steering",
-			"tasks inputs cancel <task> <input>         cancel one pending input (confirm)",
-			"tasks inputs steer <task> <input>          redirect a queued follow-up to steering",
-			"tasks pending|pending-inputs <task>        aliases for tasks inputs",
-			"tasks cancel-input <task> <input>         shorthand for inputs cancel",
-			"tasks steer-queued <task> <input>         shorthand for inputs steer",
-			"tasks reply <task> | <message>             post to the task thread",
-			"tasks activate                             activate the whole backlog",
-			"tasks sweep                                sweep finished tasks",
-			"tasks clear <backlog|completed>            clear a column",
-		},
-		actionUsages: []commandActionUsage{
-			{action: "inputs", args: "[list] <task>", description: "inspect queued and steering inputs"},
-			{action: "inputs cancel", args: "<task> <input>", description: "cancel a pending input"},
-			{action: "inputs steer", args: "<task> <input>", description: "redirect a queued follow-up to steering"},
-			{action: "goal", args: "<task> | <objective>", description: "set a goal (\"clear\" removes it)"},
-			{action: "steer", args: "<task> | <message>", description: "steer the active response"},
-			{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
-			{action: "goal resume", args: "<task>", description: "resume a paused goal"},
-			{action: "reviews add", args: "<task> <file>:<line> <comment>"},
-			{action: "attachments add", args: "<task> <file>...", description: "upload local files"},
-			{action: "attachments delete", args: "<task> <attachment>", description: "delete by ID or filename"},
-			{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
-			{action: "swarm", args: "[options] <title> | <prompt>", description: "create an autonomous swarm parent"},
-			{action: "edit", args: "<task> | <title> [| <prompt>]", description: "edit title/prompt"},
-		},
-		examples: []string{
-			`tasks new Fix login bug | Investigate and resolve the OAuth redirect failure`,
-			`tasks swarm --category active --max-workers 4 --worker-isolation worktree --goal "release safely" Coordinate release | Split release validation across workers`,
-			`tasks move "Fix login bug" active`,
-			`tasks goal "Fix login bug" | Reproduce on staging then patch the token refresh`,
-			`tasks goal "Fix login bug" | pause`,
-			`tasks goal pause "Fix login bug"`,
-			`tasks goal resume "Fix login bug"`,
-			`tasks show "Fix login bug" review`,
-			`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
-			`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
-			`tasks attachments delete "Fix login bug" request.txt`,
-			`tasks lifecycle "Fix login bug"`,
-			`tasks logs "Fix login bug" execution-id`,
-			`tasks inputs "Fix login bug"`,
-			`tasks inputs cancel "Fix login bug" input-id`,
-			`tasks inputs steer "Fix login bug" input-id`,
-			`tasks reply "Fix login bug" | PR is up — please review`,
-			`tasks steer "Fix login bug" | Stop and use the new interface`,
-		},
+		name:          "tasks",
+		aliases:       []string{"task", "t", "board"},
+		args:          "[filter|id]",
+		actions:       actions,
+		completions:   completions,
+		selectorPaths: selectorPaths,
+		desc:          "the task board and task threads",
+		usage:         usage,
+		actionUsages:  actionUsages,
+		examples:      examples,
 		validateArgs: func(args []string) error {
 			action, rest := splitAction(actions, args)
 			if action != "swarm" {
@@ -701,6 +810,12 @@ func tasksCommand() command {
 			action, rest := splitAction(actions, args)
 			c, pid := m.client, m.selectedID
 			ref := strings.Join(rest, " ")
+			if isTaskThreadInputRootAction(action) {
+				return taskThreadInputsCommand(m, c, pid, action, rest)
+			}
+			if inputAction, ok := taskThreadInputShorthandAction(action); ok {
+				return taskThreadInputActionCommand(m, c, pid, inputAction, rest)
+			}
 
 			switch action {
 			case "", "list":
@@ -1097,15 +1212,6 @@ func tasksCommand() command {
 					return goalAction + "d goal on " + t.Title, nil
 				})
 
-			case "inputs", "pending", "pending-inputs":
-				return taskThreadInputsCommand(m, c, pid, action, rest)
-
-			case "cancel-input":
-				return taskThreadInputActionCommand(m, c, pid, "cancel", rest)
-
-			case "steer-queued":
-				return taskThreadInputActionCommand(m, c, pid, "steer", rest)
-
 			case "reply":
 				if len(rest) < 1 {
 					return taskSelector(m, "usage: /tasks reply <task> | <message>", "tasks reply", true)
@@ -1195,13 +1301,13 @@ func tasksCommand() command {
 func taskThreadInputsCommand(m Model, c *client.Client, projectID, rootAction string, args []string) (Model, tea.Cmd) {
 	rest := append([]string(nil), args...)
 	if len(rest) > 0 {
-		switch strings.ToLower(rest[0]) {
-		case "list", "show", "inspect":
-			rest = rest[1:]
-		case "cancel", "delete", "remove":
-			return taskThreadInputActionCommand(m, c, projectID, "cancel", rest[1:])
-		case "steer", "redirect":
-			return taskThreadInputActionCommand(m, c, projectID, "steer", rest[1:])
+		if subAction, ok := taskThreadInputSubAction(strings.ToLower(rest[0])); ok {
+			switch subAction {
+			case "list":
+				rest = rest[1:]
+			case "cancel", "steer":
+				return taskThreadInputActionCommand(m, c, projectID, subAction, rest[1:])
+			}
 		}
 	}
 	if len(rest) == 0 {
