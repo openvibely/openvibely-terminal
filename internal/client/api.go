@@ -194,9 +194,19 @@ func (c *Client) GetMostFrequentTasksWithLimit(ctx context.Context, projectID st
 	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID, limit)
 }
 
-// GetFailedTaskPatterns fetches recurring task failure patterns.
+// GetFailedTaskPatterns fetches the complete recurring task failure-pattern history.
+// It uses the backend's explicit limit=0 full-history contract. Callers that
+// render a bounded report should use GetFailedTaskPatternsWithLimit.
 func (c *Client) GetFailedTaskPatterns(ctx context.Context, projectID string) ([]FailedTaskPattern, error) {
-	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID, 0)
+	var out []FailedTaskPattern
+	err := c.getJSON(ctx, "/api/analytics/failed-task-patterns"+query("project_id", projectID, "limit", "0"), &out)
+	return out, err
+}
+
+// GetFailedTaskPatternsWithLimit fetches the backend-ranked failed-task patterns
+// up to limit records.
+func (c *Client) GetFailedTaskPatternsWithLimit(ctx context.Context, projectID string, limit int) ([]FailedTaskPattern, error) {
+	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID, limit)
 }
 
 // --- Skill analytics (/api/analytics/skills) ---
