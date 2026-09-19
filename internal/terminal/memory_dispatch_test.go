@@ -83,8 +83,8 @@ func TestMemoryCommandDispatchesListShowAndSearchForSelectedProject(t *testing.T
 			t.Fatalf("memory output missing %q:\n%s", want, out)
 		}
 	}
-	if got := atomic.LoadInt32(requests); got != 0 {
-		t.Fatalf("memory inspection made %d backend requests; canonical files should be read locally", got)
+	if got := atomic.LoadInt32(requests); got != 4 {
+		t.Fatalf("memory inspection made %d backend requests; unsupported backend should be probed before local fallback", got)
 	}
 }
 
@@ -119,14 +119,14 @@ func TestMemoryCommandReportsSafeSelectedProjectPathError(t *testing.T) {
 
 	m = runLine(t, m, "/memory list")
 	out := stripANSI(transcript(m))
-	if !strings.Contains(out, "repository path is invalid") {
-		t.Fatalf("safe path error missing:\n%s", out)
+	if !strings.Contains(out, "terminal cannot access a local checkout") {
+		t.Fatalf("safe no-local-checkout error missing:\n%s", out)
 	}
 	if strings.Contains(out, "backend-password") {
 		t.Fatalf("selected path leaked into memory error:\n%s", out)
 	}
-	if got := atomic.LoadInt32(requests); got != 0 {
-		t.Fatalf("memory path error made %d backend requests", got)
+	if got := atomic.LoadInt32(requests); got != 1 {
+		t.Fatalf("memory path error made %d backend requests, want one unsupported backend probe", got)
 	}
 }
 
@@ -142,7 +142,7 @@ func TestMemoryAliasCompletionHelpAndJSONEmptyState(t *testing.T) {
 		t.Fatalf("memory completion suggestions = %+v", got)
 	}
 	help := renderCommandHelp(*command)
-	for _, want := range []string{"memory list", "memory show <file|title>", "memory search <query>", "aliases: memories"} {
+	for _, want := range []string{"backend-indexed", "memory list", "memory show <file|title>", "memory search <query>", "aliases: memories"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("memory help missing %q:\n%s", want, help)
 		}
@@ -348,13 +348,20 @@ func TestMemoryCLIUsesSelectedProjectAndEmitsStableJSON(t *testing.T) {
 	repo := t.TempDir()
 	writeTUIProjectMemory(t, repo, "# Memory Index\n- [Notes](notes.md) - terminal notes\n", map[string]string{"notes.md": "# Notes\n\nUse the terminal.\n"})
 	var projectRequests int32
+	var memoryRequests int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/projects" {
-			t.Errorf("unexpected CLI request %s", r.URL.Path)
-		}
-		atomic.AddInt32(&projectRequests, 1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"Demo","path":"` + repo + `"}]}`))
+		switch r.URL.Path {
+		case "/api/projects":
+			atomic.AddInt32(&projectRequests, 1)
+			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"Demo","path":"` + repo + `"}]}`))
+		case "/api/memory":
+			atomic.AddInt32(&memoryRequests, 1)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			t.Errorf("unexpected CLI request %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer srv.Close()
 	c, err := client.New(srv.URL)
@@ -374,5 +381,8 @@ func TestMemoryCLIUsesSelectedProjectAndEmitsStableJSON(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&projectRequests); got != 1 {
 		t.Fatalf("CLI made %d project requests, want one", got)
+	}
+	if got := atomic.LoadInt32(&memoryRequests); got != 1 {
+		t.Fatalf("CLI made %d memory requests, want one unsupported backend probe", got)
 	}
 }

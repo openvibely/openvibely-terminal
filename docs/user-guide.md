@@ -414,8 +414,9 @@ After a successful addition, choose it with `/models default <name>` as usual.
 
 ### Project memory
 
-Inspect the selected project's canonical, repository-local memory index and topic
-files without changing them:
+Inspect the selected project's backend-indexed durable memory without changing it.
+When the connected backend exposes memory inspection, the backend is the source of
+truth for indexed handles, file contents, project scope, and access control:
 
 ```
 /memory list
@@ -426,11 +427,20 @@ openvibely-terminal -project demo memory list
 openvibely-terminal --json -project demo memory search "provider architecture"
 ```
 
-`/memories` is a compatibility alias for `/memory`. The terminal reads only
-files indexed by `.openvibely/memories/MEMORIES.md`; malformed or missing topic
-files are shown as safe warnings. The public backend currently exposes no memory
-curation route, so edit/delete is intentionally unavailable here. Corrections
-and removals remain owned by the backend Memory Curator lifecycle tools.
+`/memories` is a compatibility alias for `/memory`. On current remote backends,
+`/memory list`, `/memory show <file|title>`, and `/memory search <query>` read
+backend-owned memory by selected `project_id`, so the terminal does not need a
+local copy of the project checkout.
+
+For older local-development backends that do not expose memory inspection yet,
+the terminal falls back to the selected project's local `.openvibely/memories/MEMORIES.md`
+index when the checkout is accessible. If neither backend memory nor a local
+checkout is available, the error says the backend memory API is unavailable and
+that the terminal cannot access a local checkout; an empty backend index remains a
+normal parseable result with `memories: []` and optional `warnings: []`.
+Malformed or missing topic files are shown as safe warnings in local fallback
+mode. Edit/delete is intentionally unavailable here; corrections and removals
+remain owned by backend Memory Curator lifecycle tools.
 
 The interactive TUI and one-shot CLI have different live-event lifecycles:
 
