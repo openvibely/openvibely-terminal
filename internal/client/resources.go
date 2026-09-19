@@ -125,6 +125,82 @@ func aggregateFirstSeenPages[T any](pages []htmlPage, parse func(*html.Node) []T
 	return out
 }
 
+type boundedCardPageTraversal struct {
+	Complete          bool
+	MoreAvailable     bool
+	Total             int
+	TotalKnown        bool
+	ParsedCards       int
+	ContinuationPages int
+}
+
+func (c *Client) traverseBoundedCardPages(ctx context.Context, path string, root *html.Node, meta htmlPageMeta, limit int, retained func() int, collect func(*html.Node) (int, bool)) (boundedCardPageTraversal, error) {
+	result := boundedCardPageTraversal{Total: meta.total, TotalKnown: meta.totalKnown}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	if paginationRoot == nil {
+		if meta.hasMore {
+			return boundedCardPageTraversal{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
+		}
+		parsed, stopped := collect(root)
+		result.ParsedCards += parsed
+		result.MoreAvailable = stopped
+		result.Complete = !stopped
+		return result, nil
+	}
+	selector := attr(paginationRoot, "data-card-pagination-card-selector")
+	keyAttr := attr(paginationRoot, "data-card-pagination-key")
+	if meta.hasMore {
+		marker, _ := paginationSelector(selector)
+		if marker == "" || strings.TrimSpace(keyAttr) == "" {
+			return boundedCardPageTraversal{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
+		}
+	}
+	offset := countPaginationCards(root, selector, keyAttr)
+	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+		return boundedCardPageTraversal{}, err
+	}
+	parsed, stopped := collect(root)
+	result.ParsedCards += parsed
+	if stopped || (retained() >= limit && meta.hasMore) {
+		result.MoreAvailable = true
+		return result, nil
+	}
+	for page := 1; meta.hasMore; page++ {
+		continuation, err := cardContinuationPath(path, page, offset)
+		if err != nil {
+			return boundedCardPageTraversal{}, err
+		}
+		next, nextMeta, err := c.getHTMLPageMeta(ctx, continuation)
+		if err != nil {
+			return boundedCardPageTraversal{}, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
+		}
+		count := countPaginationCards(next, selector, keyAttr)
+		if count == 0 && nextMeta.hasMore {
+			return boundedCardPageTraversal{}, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
+		}
+		if offset+count > maxPaginatedCards {
+			return boundedCardPageTraversal{}, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
+		}
+		if nextMeta.totalKnown {
+			result.Total, result.TotalKnown = nextMeta.total, true
+		}
+		offset += count
+		meta.hasMore = nextMeta.hasMore
+		if err := validateCardContinuation(page+1, offset, meta.hasMore); err != nil {
+			return boundedCardPageTraversal{}, err
+		}
+		parsed, stopped = collect(next)
+		result.ParsedCards += parsed
+		result.ContinuationPages++
+		if stopped || (retained() >= limit && meta.hasMore) {
+			result.MoreAvailable = true
+			return result, nil
+		}
+	}
+	result.Complete = true
+	return result, nil
+}
+
 // ListAlerts scrapes every alert card for a project without workflow predicates.
 func (c *Client) ListAlerts(ctx context.Context, projectID string) ([]Alert, error) {
 	return c.ListAlertsWithFilter(ctx, projectID, AlertListFilter{})
@@ -1537,72 +1613,26 @@ func aggregateModelPages(pages []htmlPage) []LLMModel {
 }
 
 func (c *Client) listModelsBoundedFromInitial(ctx context.Context, path string, root *html.Node, meta htmlPageMeta, filter string, limit int) (ModelListResult, error) {
-	result := ModelListResult{Limit: limit, Total: meta.total, TotalKnown: meta.totalKnown}
-	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
-	if paginationRoot == nil {
-		if meta.hasMore {
-			return ModelListResult{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
-		}
-		seen := make(map[string]struct{})
-		var stopped bool
-		result.Models, result.ParsedCards, stopped = collectBoundedModels(root, result.Models, seen, filter, limit)
-		result.MoreAvailable = stopped
-		result.Complete = !stopped
-		return result, nil
-	}
-	selector := attr(paginationRoot, "data-card-pagination-card-selector")
-	keyAttr := attr(paginationRoot, "data-card-pagination-key")
-	if meta.hasMore {
-		marker, _ := paginationSelector(selector)
-		if marker == "" || strings.TrimSpace(keyAttr) == "" {
-			return ModelListResult{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
-		}
-	}
+	result := ModelListResult{Limit: limit}
 	seen := make(map[string]struct{})
-	offset := countPaginationCards(root, selector, keyAttr)
-	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+	traversal, err := c.traverseBoundedCardPages(ctx, path, root, meta, limit,
+		func() int { return len(result.Models) },
+		func(pageRoot *html.Node) (int, bool) {
+			var parsed int
+			var stopped bool
+			result.Models, parsed, stopped = collectBoundedModels(pageRoot, result.Models, seen, filter, limit)
+			return parsed, stopped
+		},
+	)
+	if err != nil {
 		return ModelListResult{}, err
 	}
-	var stopped bool
-	result.Models, result.ParsedCards, stopped = collectBoundedModels(root, result.Models, seen, filter, limit)
-	if stopped || (len(result.Models) >= limit && meta.hasMore) {
-		result.MoreAvailable = true
-		return result, nil
-	}
-	for page := 1; meta.hasMore; page++ {
-		continuation, err := cardContinuationPath(path, page, offset)
-		if err != nil {
-			return ModelListResult{}, err
-		}
-		next, nextMeta, err := c.getHTMLPageMeta(ctx, continuation)
-		if err != nil {
-			return ModelListResult{}, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
-		}
-		count := countPaginationCards(next, selector, keyAttr)
-		if count == 0 && nextMeta.hasMore {
-			return ModelListResult{}, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
-		}
-		if offset+count > maxPaginatedCards {
-			return ModelListResult{}, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
-		}
-		if nextMeta.totalKnown {
-			result.Total, result.TotalKnown = nextMeta.total, true
-		}
-		offset += count
-		meta.hasMore = nextMeta.hasMore
-		if err := validateCardContinuation(page+1, offset, meta.hasMore); err != nil {
-			return ModelListResult{}, err
-		}
-		var parsed int
-		result.Models, parsed, stopped = collectBoundedModels(next, result.Models, seen, filter, limit)
-		result.ParsedCards += parsed
-		result.RetainedPages++
-		if stopped || (len(result.Models) >= limit && meta.hasMore) {
-			result.MoreAvailable = true
-			return result, nil
-		}
-	}
-	result.Complete = true
+	result.Complete = traversal.Complete
+	result.MoreAvailable = traversal.MoreAvailable
+	result.Total = traversal.Total
+	result.TotalKnown = traversal.TotalKnown
+	result.ParsedCards = traversal.ParsedCards
+	result.RetainedPages = traversal.ContinuationPages
 	return result, nil
 }
 
@@ -1817,72 +1847,26 @@ func aggregateAgentPages(pages []htmlPage) []AgentDef {
 }
 
 func (c *Client) listAgentsBoundedFromInitial(ctx context.Context, path string, root *html.Node, meta htmlPageMeta, filter string, limit int) (AgentListResult, error) {
-	result := AgentListResult{Limit: limit, Total: meta.total, TotalKnown: meta.totalKnown}
-	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
-	if paginationRoot == nil {
-		if meta.hasMore {
-			return AgentListResult{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
-		}
-		seen := make(map[string]struct{})
-		var stopped bool
-		result.Agents, result.ParsedCards, stopped = collectBoundedAgents(root, result.Agents, seen, filter, limit)
-		result.MoreAvailable = stopped
-		result.Complete = !stopped
-		return result, nil
-	}
-	selector := attr(paginationRoot, "data-card-pagination-card-selector")
-	keyAttr := attr(paginationRoot, "data-card-pagination-key")
-	if meta.hasMore {
-		marker, _ := paginationSelector(selector)
-		if marker == "" || strings.TrimSpace(keyAttr) == "" {
-			return AgentListResult{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
-		}
-	}
+	result := AgentListResult{Limit: limit}
 	seen := make(map[string]struct{})
-	offset := countPaginationCards(root, selector, keyAttr)
-	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+	traversal, err := c.traverseBoundedCardPages(ctx, path, root, meta, limit,
+		func() int { return len(result.Agents) },
+		func(pageRoot *html.Node) (int, bool) {
+			var parsed int
+			var stopped bool
+			result.Agents, parsed, stopped = collectBoundedAgents(pageRoot, result.Agents, seen, filter, limit)
+			return parsed, stopped
+		},
+	)
+	if err != nil {
 		return AgentListResult{}, err
 	}
-	var stopped bool
-	result.Agents, result.ParsedCards, stopped = collectBoundedAgents(root, result.Agents, seen, filter, limit)
-	if stopped || (len(result.Agents) >= limit && meta.hasMore) {
-		result.MoreAvailable = true
-		return result, nil
-	}
-	for page := 1; meta.hasMore; page++ {
-		continuation, err := cardContinuationPath(path, page, offset)
-		if err != nil {
-			return AgentListResult{}, err
-		}
-		next, nextMeta, err := c.getHTMLPageMeta(ctx, continuation)
-		if err != nil {
-			return AgentListResult{}, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
-		}
-		count := countPaginationCards(next, selector, keyAttr)
-		if count == 0 && nextMeta.hasMore {
-			return AgentListResult{}, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
-		}
-		if offset+count > maxPaginatedCards {
-			return AgentListResult{}, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
-		}
-		if nextMeta.totalKnown {
-			result.Total, result.TotalKnown = nextMeta.total, true
-		}
-		offset += count
-		meta.hasMore = nextMeta.hasMore
-		if err := validateCardContinuation(page+1, offset, meta.hasMore); err != nil {
-			return AgentListResult{}, err
-		}
-		var parsed int
-		result.Agents, parsed, stopped = collectBoundedAgents(next, result.Agents, seen, filter, limit)
-		result.ParsedCards += parsed
-		result.RetainedPages++
-		if stopped || (len(result.Agents) >= limit && meta.hasMore) {
-			result.MoreAvailable = true
-			return result, nil
-		}
-	}
-	result.Complete = true
+	result.Complete = traversal.Complete
+	result.MoreAvailable = traversal.MoreAvailable
+	result.Total = traversal.Total
+	result.TotalKnown = traversal.TotalKnown
+	result.ParsedCards = traversal.ParsedCards
+	result.RetainedPages = traversal.ContinuationPages
 	return result, nil
 }
 
@@ -4775,71 +4759,25 @@ func (c *Client) ListAutomationsBounded(ctx context.Context, projectID string, l
 }
 
 func (c *Client) listAutomationsBoundedFromInitial(ctx context.Context, path string, root *html.Node, meta htmlPageMeta, limit int) (AutomationListResult, error) {
-	result := AutomationListResult{Limit: limit, Total: meta.total, TotalKnown: meta.totalKnown}
-	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
-	if paginationRoot == nil {
-		if meta.hasMore {
-			return AutomationListResult{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
-		}
-		seen := make(map[string]struct{})
-		var stopped bool
-		result.Automations, result.ParsedCards, stopped = collectBoundedAutomations(root, result.Automations, seen, limit)
-		result.MoreAvailable = stopped
-		result.Complete = !stopped
-		return result, nil
-	}
-	selector := attr(paginationRoot, "data-card-pagination-card-selector")
-	keyAttr := attr(paginationRoot, "data-card-pagination-key")
-	if meta.hasMore {
-		marker, _ := paginationSelector(selector)
-		if marker == "" || strings.TrimSpace(keyAttr) == "" {
-			return AutomationListResult{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
-		}
-	}
+	result := AutomationListResult{Limit: limit}
 	seen := make(map[string]struct{})
-	offset := countPaginationCards(root, selector, keyAttr)
-	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+	traversal, err := c.traverseBoundedCardPages(ctx, path, root, meta, limit,
+		func() int { return len(result.Automations) },
+		func(pageRoot *html.Node) (int, bool) {
+			var parsed int
+			var stopped bool
+			result.Automations, parsed, stopped = collectBoundedAutomations(pageRoot, result.Automations, seen, limit)
+			return parsed, stopped
+		},
+	)
+	if err != nil {
 		return AutomationListResult{}, err
 	}
-	var stopped bool
-	result.Automations, result.ParsedCards, stopped = collectBoundedAutomations(root, result.Automations, seen, limit)
-	if stopped || (len(result.Automations) >= limit && meta.hasMore) {
-		result.MoreAvailable = true
-		return result, nil
-	}
-	for page := 1; meta.hasMore; page++ {
-		continuation, err := cardContinuationPath(path, page, offset)
-		if err != nil {
-			return AutomationListResult{}, err
-		}
-		next, nextMeta, err := c.getHTMLPageMeta(ctx, continuation)
-		if err != nil {
-			return AutomationListResult{}, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
-		}
-		count := countPaginationCards(next, selector, keyAttr)
-		if count == 0 && nextMeta.hasMore {
-			return AutomationListResult{}, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
-		}
-		if offset+count > maxPaginatedCards {
-			return AutomationListResult{}, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
-		}
-		if nextMeta.totalKnown {
-			result.Total, result.TotalKnown = nextMeta.total, true
-		}
-		offset += count
-		meta.hasMore = nextMeta.hasMore
-		if err := validateCardContinuation(page+1, offset, meta.hasMore); err != nil {
-			return AutomationListResult{}, err
-		}
-		var parsed int
-		result.Automations, parsed, stopped = collectBoundedAutomations(next, result.Automations, seen, limit)
-		result.ParsedCards += parsed
-		if stopped || (len(result.Automations) >= limit && meta.hasMore) {
-			result.MoreAvailable = true
-			return result, nil
-		}
-	}
-	result.Complete = true
+	result.Complete = traversal.Complete
+	result.MoreAvailable = traversal.MoreAvailable
+	result.Total = traversal.Total
+	result.TotalKnown = traversal.TotalKnown
+	result.ParsedCards = traversal.ParsedCards
 	return result, nil
 }
 
