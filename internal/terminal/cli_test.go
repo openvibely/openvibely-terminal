@@ -6434,6 +6434,115 @@ func TestCLIChannelAccessMutationFailureAndRefreshFailureRemainSafe(t *testing.T
 	})
 }
 
+func TestCLIChannelMutationsEmitJSON(t *testing.T) {
+	type mutationOutput struct {
+		Status       string            `json:"status"`
+		Channels     *[]client.Channel `json:"channels,omitempty"`
+		RefreshError string            `json:"refresh_error,omitempty"`
+	}
+	decode := func(t *testing.T, out string) mutationOutput {
+		t.Helper()
+		var got mutationOutput
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+			t.Fatalf("channel mutation JSON is invalid: %v\n%s", err, out)
+		}
+		return got
+	}
+
+	secret := "secret-json-channel-token"
+	tests := []struct {
+		name       string
+		args       []string
+		force      bool
+		wantStatus string
+		wantPath   string
+	}{
+		{name: "add", args: []string{"channels", "add", "telegram", "--token", secret}, wantStatus: "added Telegram Bot", wantPath: "/channels/telegram"},
+		{name: "edit leading slash wrapper", args: []string{"/channels", "edit", "x", "--poll-interval", "45"}, wantStatus: "edited X (formerly Twitter)", wantPath: "/channels/x/configure"},
+		{name: "test", args: []string{"channels", "test", "email"}, wantStatus: "test: Email", wantPath: "/channels/email/test"},
+		{name: "remove slack maps to disconnect", args: []string{"channels", "remove", "slack"}, force: true, wantStatus: "remove: Slack", wantPath: "/channels/slack/disconnect"},
+		{name: "disconnect github", args: []string{"channels", "disconnect", "github"}, force: true, wantStatus: "disconnect: GitHub", wantPath: "/channels/github/disconnect"},
+		{name: "disconnect slack", args: []string{"channels", "disconnect", "slack"}, force: true, wantStatus: "disconnect: Slack", wantPath: "/channels/slack/disconnect"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": structuredChannelsPage})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tt.args, tt.force, true); err != nil {
+				t.Fatalf("channel mutation JSON failed: %v\n%s", err, rec.all())
+			}
+			got := decode(t, out.String())
+			if got.Status != tt.wantStatus {
+				t.Fatalf("status = %q, want %q", got.Status, tt.wantStatus)
+			}
+			if got.Channels == nil || len(*got.Channels) == 0 {
+				t.Fatalf("refreshed channels missing from JSON: %+v", got)
+			}
+			if got.RefreshError != "" {
+				t.Fatalf("unexpected refresh error: %+v", got)
+			}
+			if !rec.saw("POST", tt.wantPath) || !rec.sawQuery("project_id=p1") {
+				t.Fatalf("mutation lost backend route or explicit -project scope:\n%s", rec.all())
+			}
+			if tt.name == "remove slack maps to disconnect" && rec.saw("POST", "/channels/slack/remove") {
+				t.Fatalf("forced Slack remove used unsafe remove route:\n%s", rec.all())
+			}
+			if strings.Contains(out.String(), secret) {
+				t.Fatalf("secret appeared in mutation JSON: %s", out.String())
+			}
+		})
+	}
+
+	t.Run("refresh failure remains parseable status JSON", func(t *testing.T) {
+		const refreshSecret = "channel-refresh-secret"
+		rec := &recorder{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodPost && r.URL.Path == "/channels/telegram":
+				w.WriteHeader(http.StatusNoContent)
+			case r.Method == http.MethodGet && r.URL.Path == "/channels":
+				http.Error(w, refreshSecret, http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"channels", "add", "telegram", "--token", "secret-refresh-token"}, false, true); err != nil {
+			t.Fatalf("channel add with refresh failure failed: %v\n%s", err, rec.all())
+		}
+		got := decode(t, out.String())
+		if got.Status != "added Telegram Bot" || got.RefreshError == "" {
+			t.Fatalf("refresh-failure JSON = %+v", got)
+		}
+		if got.Channels != nil {
+			t.Fatalf("refresh-failure JSON must not include stale channels: %s", out.String())
+		}
+		if strings.Contains(out.String(), refreshSecret) || strings.Contains(out.String(), "secret-refresh-token") {
+			t.Fatalf("refresh failure JSON leaked secret material: %s", out.String())
+		}
+	})
+
+	t.Run("GitHub test remains rejected before requests", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": structuredChannelsPage})
+		err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "test", "github"}, false, true)
+		if err == nil || !strings.Contains(err.Error(), "GitHub does not expose a connection test") {
+			t.Fatalf("GitHub test error = %v", err)
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("GitHub test rejection made backend requests:\n%s", calls)
+		}
+	})
+}
+
 func TestCLIChannelsConfigureEverySupportedTypeWithoutEchoingSecrets(t *testing.T) {
 	tests := []struct {
 		name string

@@ -6284,14 +6284,30 @@ func validateChannelsArgs(args []string) error {
 	return errors.New(commandUsage("channels", ""))
 }
 
+type channelMutationJSONOutput struct {
+	Status       string            `json:"status"`
+	Channels     *[]client.Channel `json:"channels,omitempty"`
+	RefreshError string            `json:"refresh_error,omitempty"`
+}
+
 func completeChannelMutation(ctx context.Context, c *client.Client, projectID, status string) (string, error) {
-	return refreshAndRender(status,
-		func() ([]client.Channel, error) {
-			return c.ListChannels(ctx, projectID)
-		},
-		func(channels []client.Channel, _ string) string {
-			return renderChannels(channels)
-		})
+	channels, err := c.ListChannels(ctx, projectID)
+	if jsonMode {
+		out := channelMutationJSONOutput{Status: status}
+		if err != nil {
+			out.RefreshError = "channel refresh failed after mutation"
+			return marshalJSON(out)
+		}
+		if channels == nil {
+			channels = []client.Channel{}
+		}
+		out.Channels = &channels
+		return marshalJSON(out)
+	}
+	if err != nil {
+		return status, nil
+	}
+	return status + "\n\n" + renderChannels(channels), nil
 }
 
 func renderChannels(channels []client.Channel) string {
