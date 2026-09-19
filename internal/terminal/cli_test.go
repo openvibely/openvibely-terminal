@@ -4262,7 +4262,9 @@ func TestCLIBriefingCommandsRequireProjectWhenProjectListIsEmpty(t *testing.T) {
 		{name: "pulse summary", args: []string{"pulse", "summary"}, fetchPath: "/upcoming", triggerPath: "/upcoming/summary"},
 		{name: "reflection", args: []string{"reflection"}, fetchPath: "/history"},
 		{name: "reflection show", args: []string{"reflection", "show"}, fetchPath: "/history"},
+		{name: "reflection range", args: []string{"reflection", "--range", "week"}, fetchPath: "/history"},
 		{name: "reflection summary", args: []string{"reflection", "summary"}, fetchPath: "/history", triggerPath: "/history/summary"},
+		{name: "history summary range", args: []string{"history", "summary", "--range", "week"}, fetchPath: "/history", triggerPath: "/history/summary"},
 		{name: "grades", args: []string{"grades"}, fetchPath: "/insights"},
 		{name: "grades show", args: []string{"grades", "show"}, fetchPath: "/insights"},
 		{name: "grades run", args: []string{"grades", "run"}, fetchPath: "/insights", triggerPath: "/history/grade-ideas"},
@@ -4368,6 +4370,92 @@ func TestCLIBriefingCommandsPreserveSupportedActions(t *testing.T) {
 	}
 }
 
+func TestCLIReflectionRangeOption(t *testing.T) {
+	cases := []struct {
+		name       string
+		args       []string
+		wantFetch  string
+		wantPost   string
+		forbidPost bool
+	}{
+		{name: "hour", args: []string{"reflection", "--range", "hour"}, wantFetch: "GET /history?project_id=p1&range=hour", forbidPost: true},
+		{name: "day", args: []string{"reflection", "--range", "day"}, wantFetch: "GET /history?project_id=p1&range=day", forbidPost: true},
+		{name: "week", args: []string{"reflection", "--range", "week"}, wantFetch: "GET /history?project_id=p1&range=week", forbidPost: true},
+		{name: "summary week", args: []string{"reflection", "summary", "--range", "week"}, wantFetch: "GET /history?project_id=p1&range=week", wantPost: "POST /history/summary?project_id=p1&range=week"},
+		{name: "history alias summary week", args: []string{"history", "summary", "--range", "week"}, wantFetch: "GET /history?project_id=p1&range=week", wantPost: "POST /history/summary?project_id=p1&range=week"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":    cliProjects,
+				"/history":         `<div id="history-container">history debrief</div>`,
+				"/history/summary": "ok",
+			})
+
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false); err != nil {
+				t.Fatalf("RunCLI(%v): %v", tc.args, err)
+			}
+			requests := strings.Join(rec.urlsSnapshot(), "\n")
+			if !strings.Contains(requests, tc.wantFetch) {
+				t.Fatalf("RunCLI(%v) requests missing fetch %q:\n%s", tc.args, tc.wantFetch, requests)
+			}
+			if tc.wantPost != "" && !strings.Contains(requests, tc.wantPost) {
+				t.Fatalf("RunCLI(%v) requests missing summary POST %q:\n%s", tc.args, tc.wantPost, requests)
+			}
+			if tc.forbidPost && strings.Contains(requests, "POST ") {
+				t.Fatalf("RunCLI(%v) unexpectedly made a POST request:\n%s", tc.args, requests)
+			}
+		})
+	}
+}
+
+func TestCLIReflectionOmittedRangeUsesBackendDefault(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/history":      `<div id="history-container">history debrief</div>`,
+	})
+
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"reflection"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	requests := strings.Join(rec.urlsSnapshot(), "\n")
+	if !strings.Contains(requests, "GET /history?project_id=p1") {
+		t.Fatalf("reflection did not preserve project-scoped default fetch:\n%s", requests)
+	}
+	if strings.Contains(requests, "range=") {
+		t.Fatalf("reflection without --range should let the backend choose its default:\n%s", requests)
+	}
+}
+
+func TestCLIReflectionRejectsInvalidRangeBeforeRequests(t *testing.T) {
+	c, rec := cliServer(t, nil)
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"reflection", "--range", "month"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "invalid reflection range") || !strings.Contains(err.Error(), "hour, day, week") {
+		t.Fatalf("err = %v, want invalid range guidance", err)
+	}
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("invalid range made backend requests:\n%s", calls)
+	}
+}
+
+func TestCLIHelpReflectionDocumentsRanges(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"help", "reflection"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{"--range hour|day|week", "reflection --range hour", "reflection --range day", "reflection summary --range week", "history summary --range week"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("help reflection missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestCLIGradesShowReadsInsightsGradeCardNotReflection(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,
@@ -4463,8 +4551,8 @@ func TestCLIBriefingCommandsRejectInvalidOperands(t *testing.T) {
 	}{
 		{name: "pulse unknown action", args: []string{"pulse", "sumary"}, usage: "usage: pulse [show|summary]"},
 		{name: "pulse surplus operand", args: []string{"pulse", "summary", "now"}, usage: "usage: pulse [show|summary]"},
-		{name: "reflection unknown action", args: []string{"reflection", "refresh"}, usage: "usage: reflection [show|summary]"},
-		{name: "reflection surplus operand", args: []string{"reflection", "show", "extra"}, usage: "usage: reflection [show|summary]"},
+		{name: "reflection unknown action", args: []string{"reflection", "refresh"}, usage: "usage: reflection [show|summary] [--range hour|day|week]"},
+		{name: "reflection surplus operand", args: []string{"reflection", "show", "extra"}, usage: "usage: reflection [show|summary] [--range hour|day|week]"},
 		{name: "grades unknown action", args: []string{"grades", "rerun"}, usage: "usage: grades [show|run]"},
 		{name: "grades surplus operand", args: []string{"grades", "run", "again"}, usage: "usage: grades [show|run]"},
 		{name: "insights unknown action", args: []string{"insights", "analyse"}, usage: "usage: insights [show|analyze]"},

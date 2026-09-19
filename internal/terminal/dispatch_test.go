@@ -12073,6 +12073,51 @@ func TestBriefingCommandLifecycleTable(t *testing.T) {
 	}
 }
 
+func TestReflectionRangeOptionDispatch(t *testing.T) {
+	cases := []struct {
+		name      string
+		line      string
+		wantFetch string
+		wantPost  string
+	}{
+		{name: "reflection week", line: "/reflection --range week", wantFetch: "GET /history?project_id=p1&range=week"},
+		{name: "history alias summary week", line: "/history summary --range week", wantFetch: "GET /history?project_id=p1&range=week", wantPost: "POST /history/summary?project_id=p1&range=week"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/history":         `<div id="history-container">history debrief</div>`,
+				"/history/summary": "ok",
+			})
+
+			m = runLine(t, m, tc.line)
+			requests := strings.Join(rec.urlsSnapshot(), "\n")
+			if !strings.Contains(requests, tc.wantFetch) {
+				t.Fatalf("%s requests missing fetch %q:\n%s", tc.line, tc.wantFetch, requests)
+			}
+			if tc.wantPost != "" && !strings.Contains(requests, tc.wantPost) {
+				t.Fatalf("%s requests missing summary POST %q:\n%s", tc.line, tc.wantPost, requests)
+			}
+			if strings.Contains(transcript(m), "error:") {
+				t.Fatalf("%s returned an error:\n%s", tc.line, transcript(m))
+			}
+		})
+	}
+}
+
+func TestReflectionRejectsInvalidRangeBeforeDispatchRequests(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	m = runLine(t, m, "/reflection --range month")
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("invalid range made backend requests:\n%s", calls)
+	}
+	out := transcript(m)
+	if !strings.Contains(out, "invalid reflection range") || !strings.Contains(out, "hour, day, week") {
+		t.Fatalf("invalid range output missing guidance:\n%s", out)
+	}
+}
+
 func countCall(calls []string, want string) int {
 	count := 0
 	for _, call := range calls {
@@ -12215,8 +12260,8 @@ func TestBriefingCommandsRejectInvalidOperands(t *testing.T) {
 	}{
 		{name: "pulse unknown action", line: "/pulse sumary", usage: "usage: /pulse [show|summary]"},
 		{name: "pulse surplus operand", line: "/pulse summary now", usage: "usage: /pulse [show|summary]"},
-		{name: "reflection unknown action", line: "/reflection refresh", usage: "usage: /reflection [show|summary]"},
-		{name: "reflection surplus operand", line: "/reflection show extra", usage: "usage: /reflection [show|summary]"},
+		{name: "reflection unknown action", line: "/reflection refresh", usage: "usage: /reflection [show|summary] [--range hour|day|week]"},
+		{name: "reflection surplus operand", line: "/reflection show extra", usage: "usage: /reflection [show|summary] [--range hour|day|week]"},
 		{name: "grades unknown action", line: "/grades rerun", usage: "usage: /grades [show|run]"},
 		{name: "grades surplus operand", line: "/grades run again", usage: "usage: /grades [show|run]"},
 		{name: "insights unknown action", line: "/insights analyse", usage: "usage: /insights [show|analyze]"},
@@ -12253,7 +12298,9 @@ func TestProjectScopedBriefingCommandsRequireSelectionAndPreserveScope(t *testin
 		{name: "pulse summary", line: "/pulse summary", fetchPath: "/upcoming", fetchOutput: "pulse output", triggerPath: "/upcoming/summary"},
 		{name: "reflection", line: "/reflection", fetchPath: "/history", fetchOutput: "reflection output"},
 		{name: "reflection show", line: "/reflection show", fetchPath: "/history", fetchOutput: "reflection output"},
+		{name: "reflection range", line: "/reflection --range week", fetchPath: "/history", fetchOutput: "reflection output"},
 		{name: "reflection summary", line: "/reflection summary", fetchPath: "/history", fetchOutput: "reflection output", triggerPath: "/history/summary"},
+		{name: "history summary range", line: "/history summary --range week", fetchPath: "/history", fetchOutput: "reflection output", triggerPath: "/history/summary"},
 		{name: "grades", line: "/grades", fetchPath: "/insights", fetchOutput: "grades output"},
 		{name: "grades show", line: "/grades show", fetchPath: "/insights", fetchOutput: "grades output"},
 		{name: "grades run", line: "/grades run", fetchPath: "/insights", fetchOutput: "grades output", triggerPath: "/history/grade-ideas"},
