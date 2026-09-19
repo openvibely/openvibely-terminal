@@ -721,10 +721,28 @@ type cliEventPayload struct {
 	Queued          bool   `json:"queued"`
 }
 
+type cliEventPayloadField uint8
+
+const (
+	cliEventPayloadFieldUnknown cliEventPayloadField = iota
+	cliEventPayloadFieldType
+	cliEventPayloadFieldProjectID
+	cliEventPayloadFieldTaskID
+	cliEventPayloadFieldTaskName
+	cliEventPayloadFieldStatus
+	cliEventPayloadFieldCategory
+	cliEventPayloadFieldMessage
+	cliEventPayloadFieldExecID
+	cliEventPayloadFieldSource
+	cliEventPayloadFieldAgentName
+	cliEventPayloadFieldCompletedOutput
+	cliEventPayloadFieldQueued
+)
+
 // scanCLIEventPayload validates one JSON value and extracts only the fields
 // needed by the CLI envelope. Unknown values are skipped without decoding them;
 // malformed input is handled by the compatibility fallback in formatCLIEventBytes.
-func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool) {
+func scanCLIEventPayload(raw []byte, fastPlainHiddenStrings bool) (cliEventPayload, cliEventRawPayload, bool) {
 	var payload cliEventPayload
 	var rawPayload cliEventRawPayload
 	pos := skipCLIJSONSpace(raw, 0)
@@ -747,20 +765,21 @@ func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool)
 		if !ok {
 			return payload, rawPayload, false
 		}
-		var key string
-		if err := json.Unmarshal(raw[keyStart:keyEnd], &key); err != nil {
-			return payload, rawPayload, false
-		}
+		key := cliEventPayloadFieldForKey(raw[keyStart:keyEnd])
 		pos = skipCLIJSONSpace(raw, keyEnd)
 		if pos >= len(raw) || raw[pos] != ':' {
 			return payload, rawPayload, false
 		}
 		valueStart := skipCLIJSONSpace(raw, pos+1)
 		var valueEnd int
-		knownRawString := (strings.EqualFold(key, "message") || strings.EqualFold(key, "completed_output")) &&
+		knownRawString := (key == cliEventPayloadFieldMessage || key == cliEventPayloadFieldCompletedOutput) &&
+			valueStart < len(raw) && raw[valueStart] == '"'
+		fastHiddenString := fastPlainHiddenStrings && key == cliEventPayloadFieldUnknown &&
 			valueStart < len(raw) && raw[valueStart] == '"'
 		if knownRawString {
 			valueEnd, ok = scanCLIJSONCanonicalString(raw, valueStart)
+		} else if fastHiddenString {
+			valueEnd, ok = scanCLIJSONPlainHiddenString(raw, valueStart)
 		} else {
 			valueEnd, ok = scanCLIJSONValue(raw, valueStart, 0)
 		}
@@ -768,39 +787,39 @@ func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool)
 			return payload, rawPayload, false
 		}
 		value := raw[valueStart:valueEnd]
-		switch {
-		case strings.EqualFold(key, "type"):
-			_ = json.Unmarshal(value, &payload.Type)
-		case strings.EqualFold(key, "project_id"):
-			_ = json.Unmarshal(value, &payload.ProjectID)
-		case strings.EqualFold(key, "task_id"):
-			_ = json.Unmarshal(value, &payload.TaskID)
-		case strings.EqualFold(key, "task_name"):
-			_ = json.Unmarshal(value, &payload.TaskName)
-		case strings.EqualFold(key, "status"):
-			_ = json.Unmarshal(value, &payload.Status)
-		case strings.EqualFold(key, "category"):
-			_ = json.Unmarshal(value, &payload.Category)
-		case strings.EqualFold(key, "message"):
+		switch key {
+		case cliEventPayloadFieldType:
+			payload.Type = decodeCLIJSONStringField(value, payload.Type)
+		case cliEventPayloadFieldProjectID:
+			payload.ProjectID = decodeCLIJSONStringField(value, payload.ProjectID)
+		case cliEventPayloadFieldTaskID:
+			payload.TaskID = decodeCLIJSONStringField(value, payload.TaskID)
+		case cliEventPayloadFieldTaskName:
+			payload.TaskName = decodeCLIJSONStringField(value, payload.TaskName)
+		case cliEventPayloadFieldStatus:
+			payload.Status = decodeCLIJSONStringField(value, payload.Status)
+		case cliEventPayloadFieldCategory:
+			payload.Category = decodeCLIJSONStringField(value, payload.Category)
+		case cliEventPayloadFieldMessage:
 			if knownRawString {
 				rawPayload.Message = value
 			} else {
-				_ = json.Unmarshal(value, &payload.Message)
+				payload.Message = decodeCLIJSONStringField(value, payload.Message)
 			}
-		case strings.EqualFold(key, "exec_id"):
-			_ = json.Unmarshal(value, &payload.ExecID)
-		case strings.EqualFold(key, "source"):
-			_ = json.Unmarshal(value, &payload.Source)
-		case strings.EqualFold(key, "agent_name"):
-			_ = json.Unmarshal(value, &payload.AgentName)
-		case strings.EqualFold(key, "completed_output"):
+		case cliEventPayloadFieldExecID:
+			payload.ExecID = decodeCLIJSONStringField(value, payload.ExecID)
+		case cliEventPayloadFieldSource:
+			payload.Source = decodeCLIJSONStringField(value, payload.Source)
+		case cliEventPayloadFieldAgentName:
+			payload.AgentName = decodeCLIJSONStringField(value, payload.AgentName)
+		case cliEventPayloadFieldCompletedOutput:
 			if knownRawString {
 				rawPayload.CompletedOutput = value
 			} else {
-				_ = json.Unmarshal(value, &payload.CompletedOutput)
+				payload.CompletedOutput = decodeCLIJSONStringField(value, payload.CompletedOutput)
 			}
-		case strings.EqualFold(key, "queued"):
-			_ = json.Unmarshal(value, &payload.Queued)
+		case cliEventPayloadFieldQueued:
+			payload.Queued = decodeCLIBoolField(value, payload.Queued)
 		}
 		pos = skipCLIJSONSpace(raw, valueEnd)
 		if pos >= len(raw) {
@@ -815,6 +834,123 @@ func scanCLIEventPayload(raw []byte) (cliEventPayload, cliEventRawPayload, bool)
 			return payload, rawPayload, false
 		}
 	}
+}
+
+func cliEventPayloadFieldForKey(raw []byte) cliEventPayloadField {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return cliEventPayloadFieldUnknown
+	}
+	key := raw[1 : len(raw)-1]
+	if bytes.IndexByte(key, '\\') >= 0 {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return cliEventPayloadFieldUnknown
+		}
+		switch {
+		case strings.EqualFold(decoded, "type"):
+			return cliEventPayloadFieldType
+		case strings.EqualFold(decoded, "project_id"):
+			return cliEventPayloadFieldProjectID
+		case strings.EqualFold(decoded, "task_id"):
+			return cliEventPayloadFieldTaskID
+		case strings.EqualFold(decoded, "task_name"):
+			return cliEventPayloadFieldTaskName
+		case strings.EqualFold(decoded, "status"):
+			return cliEventPayloadFieldStatus
+		case strings.EqualFold(decoded, "category"):
+			return cliEventPayloadFieldCategory
+		case strings.EqualFold(decoded, "message"):
+			return cliEventPayloadFieldMessage
+		case strings.EqualFold(decoded, "exec_id"):
+			return cliEventPayloadFieldExecID
+		case strings.EqualFold(decoded, "source"):
+			return cliEventPayloadFieldSource
+		case strings.EqualFold(decoded, "agent_name"):
+			return cliEventPayloadFieldAgentName
+		case strings.EqualFold(decoded, "completed_output"):
+			return cliEventPayloadFieldCompletedOutput
+		case strings.EqualFold(decoded, "queued"):
+			return cliEventPayloadFieldQueued
+		default:
+			return cliEventPayloadFieldUnknown
+		}
+	}
+	switch {
+	case cliASCIIEqualFold(key, "type"):
+		return cliEventPayloadFieldType
+	case cliASCIIEqualFold(key, "project_id"):
+		return cliEventPayloadFieldProjectID
+	case cliASCIIEqualFold(key, "task_id"):
+		return cliEventPayloadFieldTaskID
+	case cliASCIIEqualFold(key, "task_name"):
+		return cliEventPayloadFieldTaskName
+	case cliASCIIEqualFold(key, "status"):
+		return cliEventPayloadFieldStatus
+	case cliASCIIEqualFold(key, "category"):
+		return cliEventPayloadFieldCategory
+	case cliASCIIEqualFold(key, "message"):
+		return cliEventPayloadFieldMessage
+	case cliASCIIEqualFold(key, "exec_id"):
+		return cliEventPayloadFieldExecID
+	case cliASCIIEqualFold(key, "source"):
+		return cliEventPayloadFieldSource
+	case cliASCIIEqualFold(key, "agent_name"):
+		return cliEventPayloadFieldAgentName
+	case cliASCIIEqualFold(key, "completed_output"):
+		return cliEventPayloadFieldCompletedOutput
+	case cliASCIIEqualFold(key, "queued"):
+		return cliEventPayloadFieldQueued
+	default:
+		return cliEventPayloadFieldUnknown
+	}
+}
+
+func cliASCIIEqualFold(raw []byte, want string) bool {
+	if len(raw) != len(want) {
+		return false
+	}
+	for i, c := range raw {
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func decodeCLIJSONStringField(raw []byte, previous string) string {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		var decoded string
+		if err := json.Unmarshal(raw, &decoded); err == nil {
+			return decoded
+		}
+		return previous
+	}
+	content := raw[1 : len(raw)-1]
+	if bytes.IndexByte(content, '\\') < 0 && utf8.Valid(content) {
+		return string(content)
+	}
+	var decoded string
+	if err := json.Unmarshal(raw, &decoded); err == nil {
+		return decoded
+	}
+	return previous
+}
+
+func decodeCLIBoolField(raw []byte, previous bool) bool {
+	switch string(raw) {
+	case "true":
+		return true
+	case "false":
+		return false
+	}
+	var decoded bool
+	if err := json.Unmarshal(raw, &decoded); err == nil {
+		return decoded
+	}
+	return previous
 }
 
 func skipCLIJSONSpace(raw []byte, pos int) int {
@@ -832,6 +968,15 @@ func skipCLIJSONSpace(raw []byte, pos int) int {
 func scanCLIJSONString(raw []byte, pos int) (int, bool) {
 	if pos >= len(raw) || raw[pos] != '"' {
 		return pos, false
+	}
+	content := raw[pos+1:]
+	quoteOffset := bytes.IndexByte(content, '"')
+	if quoteOffset < 0 {
+		return len(raw), false
+	}
+	candidate := content[:quoteOffset]
+	if bytes.IndexAny(candidate, "\\\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f") < 0 {
+		return pos + quoteOffset + 2, true
 	}
 	for pos++; pos < len(raw); pos++ {
 		switch raw[pos] {
@@ -860,6 +1005,22 @@ func scanCLIJSONString(raw []byte, pos int) (int, bool) {
 		}
 	}
 	return pos, false
+}
+
+func scanCLIJSONPlainHiddenString(raw []byte, pos int) (int, bool) {
+	if pos >= len(raw) || raw[pos] != '"' {
+		return pos, false
+	}
+	content := raw[pos+1:]
+	quoteOffset := bytes.IndexByte(content, '"')
+	if quoteOffset < 0 {
+		return len(raw), false
+	}
+	candidate := content[:quoteOffset]
+	if bytes.IndexByte(candidate, '\\') >= 0 {
+		return scanCLIJSONString(raw, pos)
+	}
+	return pos + quoteOffset + 2, true
 }
 
 func scanCLIJSONCanonicalString(raw []byte, pos int) (int, bool) {
@@ -1200,19 +1361,36 @@ func formatCLIEvent(ev client.Event, projectID string, jsonOutput bool) (string,
 	return string(encoded), include, nil
 }
 
+func isRecognizedCLIPlainEvent(name string) bool {
+	switch strings.TrimSpace(name) {
+	case "task_status_changed", "chat_new_message":
+		return true
+	default:
+		return false
+	}
+}
+
 func formatCLIEventBytes(ev client.Event, projectID string, jsonOutput bool) ([]byte, bool, error) {
 	var payload cliEventPayload
 	var rawPayload cliEventRawPayload
 	var payloadErr error
 	fastPayload := false
-	if jsonOutput && len(ev.Data) > 4096 {
+	fastPlainEvent := !jsonOutput && isRecognizedCLIPlainEvent(ev.Name)
+	if len(ev.Data) > 4096 || fastPlainEvent {
 		var parsed bool
-		payload, rawPayload, parsed = scanCLIEventPayload(ev.Data)
+		payload, rawPayload, parsed = scanCLIEventPayload(ev.Data, fastPlainEvent)
 		fastPayload = parsed
 		if !parsed {
 			payload = cliEventPayload{}
 			rawPayload = cliEventRawPayload{}
 			payloadErr = json.Unmarshal(ev.Data, &payload)
+		} else if !jsonOutput {
+			if len(rawPayload.Message) > 0 {
+				_ = json.Unmarshal(rawPayload.Message, &payload.Message)
+			}
+			if len(rawPayload.CompletedOutput) > 0 {
+				_ = json.Unmarshal(rawPayload.CompletedOutput, &payload.CompletedOutput)
+			}
 		}
 	} else {
 		payloadErr = json.Unmarshal(ev.Data, &payload)
@@ -1299,12 +1477,23 @@ func formatCLIEventBytes(ev client.Event, projectID string, jsonOutput bool) ([]
 		return encoded, true, nil
 	}
 
-	parts := []string{"event=" + strconv.Quote(record.Event)}
+	encoded := make([]byte, 0, 192)
+	fieldCount := 0
+	appendQuoted := func(key, value string) {
+		if fieldCount > 0 {
+			encoded = append(encoded, ' ')
+		}
+		encoded = append(encoded, key...)
+		encoded = append(encoded, '=')
+		encoded = strconv.AppendQuote(encoded, value)
+		fieldCount++
+	}
 	add := func(key, value string) {
 		if value != "" {
-			parts = append(parts, key+"="+strconv.Quote(value))
+			appendQuoted(key, value)
 		}
 	}
+	appendQuoted("event", record.Event)
 	add("type", record.Type)
 	add("project_id", record.ProjectID)
 	add("task_id", record.TaskID)
@@ -1316,17 +1505,21 @@ func formatCLIEventBytes(ev client.Event, projectID string, jsonOutput bool) ([]
 	add("source", record.Source)
 	add("agent_name", record.AgentName)
 	if record.Queued {
-		parts = append(parts, "queued=true")
+		if fieldCount > 0 {
+			encoded = append(encoded, ' ')
+		}
+		encoded = append(encoded, "queued=true"...)
+		fieldCount++
 	}
 	add("completed_output", record.CompletedOutput)
-	if len(parts) == 1 || (len(parts) == 2 && record.Type == record.Event) {
+	if fieldCount == 1 || (fieldCount == 2 && record.Type == record.Event) {
 		if compact := compactJSON(ev.Data); compact != nil {
-			parts = append(parts, "data="+strconv.Quote(string(compact)))
+			add("data", string(compact))
 		} else if payloadErr != nil && strings.TrimSpace(string(ev.Data)) != "" {
-			parts = append(parts, "data="+strconv.Quote(string(ev.Data)))
+			add("data", string(ev.Data))
 		}
 	}
-	return []byte(strings.Join(parts, " ")), true, nil
+	return encoded, true, nil
 }
 
 func formatCLIEventJSONRecord(record cliEventJSONRecord, raw []byte) ([]byte, error) {

@@ -9892,6 +9892,92 @@ func TestFormatCLIEventPreservesOutputAndFiltering(t *testing.T) {
 	}
 }
 
+func TestFormatCLIEventRecognizedPlainLargeHiddenFieldsPreservesOutput(t *testing.T) {
+	largeHidden := strings.Repeat("x", 64<<10)
+	tests := []struct {
+		name  string
+		event client.Event
+		want  string
+	}{
+		{
+			name: "task fields",
+			event: client.Event{
+				Name: "task_status_changed",
+				Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"task-1","task_name":"Deploy API","status":"completed","category":"active","message":"visible task message","queued":true,"completed_output":"visible task output","details":"` + largeHidden + `"}`),
+			},
+			want: `event="task_status_changed" type="task_status_changed" project_id="p1" task_id="task-1" task_name="Deploy API" status="completed" category="active" message="visible task message" queued=true completed_output="visible task output"`,
+		},
+		{
+			name: "chat fields",
+			event: client.Event{
+				Name: "chat_new_message",
+				Data: json.RawMessage(`{"type":"chat_new_message","project_id":"p1","exec_id":"exec-1","source":"agent","agent_name":"Planner","message":"visible chat message","completed_output":"visible chat output","metadata":{"hidden":"` + largeHidden + `"}}`),
+			},
+			want: `event="chat_new_message" type="chat_new_message" project_id="p1" message="visible chat message" exec_id="exec-1" source="agent" agent_name="Planner" completed_output="visible chat output"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, include, err := formatCLIEvent(tc.event, "p1", false)
+			if err != nil || !include {
+				t.Fatalf("formatCLIEvent() include=%t error=%v", include, err)
+			}
+			if got != tc.want {
+				t.Fatalf("formatCLIEvent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatCLIEventRecognizedPlainLargeHiddenFieldsPreservesFiltering(t *testing.T) {
+	largeHidden := strings.Repeat("x", 64<<10)
+	tests := []struct {
+		name    string
+		event   client.Event
+		wantOK  bool
+		wantHas string
+	}{
+		{
+			name:    "matching project task",
+			event:   client.Event{Name: "task_status_changed", Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"task-1","status":"running","hidden":"` + largeHidden + `"}`)},
+			wantOK:  true,
+			wantHas: `task_id="task-1"`,
+		},
+		{
+			name:   "foreign explicit project task",
+			event:  client.Event{Name: "task_status_changed", Data: json.RawMessage(`{"type":"task_status_changed","project_id":"p2","task_id":"foreign-task","status":"running","hidden":"` + largeHidden + `"}`)},
+			wantOK: false,
+		},
+		{
+			name:   "missing task project",
+			event:  client.Event{Name: "task_status_changed", Data: json.RawMessage(`{"type":"task_status_changed","task_id":"unscoped-task","status":"running","hidden":"` + largeHidden + `"}`)},
+			wantOK: false,
+		},
+		{
+			name:    "taskless chat allowed",
+			event:   client.Event{Name: "chat_new_message", Data: json.RawMessage(`{"type":"chat_new_message","message":"hello","hidden":"` + largeHidden + `"}`)},
+			wantOK:  true,
+			wantHas: `project_id="p1" message="hello"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, include, err := formatCLIEvent(tc.event, "p1", false)
+			if err != nil {
+				t.Fatalf("formatCLIEvent() error = %v", err)
+			}
+			if include != tc.wantOK {
+				t.Fatalf("formatCLIEvent() include = %t, want %t; output %q", include, tc.wantOK, got)
+			}
+			if tc.wantHas != "" && !strings.Contains(got, tc.wantHas) {
+				t.Fatalf("formatCLIEvent() = %q, missing %q", got, tc.wantHas)
+			}
+		})
+	}
+}
+
 func TestFormatCLIEventJSONNormalizesWhitespaceEscapesAndOmitsMalformedData(t *testing.T) {
 	validInputs := []json.RawMessage{
 		json.RawMessage(`{"type":"chat_new_message","project_id":"","message":"<>&  ","extra":"<>&  "}`),
