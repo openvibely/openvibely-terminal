@@ -286,6 +286,93 @@ func TestSetupBootstrapInstallUsesOptInInstallerAndWaitsForHealth(t *testing.T) 
 	}
 }
 
+func TestSetupBootstrapInstallCanProvideMissingStartCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	withFastSetupHealth(t)
+	withoutSetupStartScript(t)
+
+	var installed atomic.Bool
+	tmp := t.TempDir()
+	backendPath := filepath.Join(tmp, "openvibely")
+	installMarker := filepath.Join(tmp, "installed")
+	startMarker := filepath.Join(tmp, "started")
+
+	oldLookPath := setupLookPath
+	setupLookPath = func(name string) (string, error) {
+		switch name {
+		case "curl", "bash":
+			return filepath.Join(tmp, name), nil
+		case "openvibely":
+			if installed.Load() {
+				return backendPath, nil
+			}
+			return "", errors.New("openvibely not installed yet")
+		default:
+			return oldLookPath(name)
+		}
+	}
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+
+	oldInstaller := setupRunInstaller
+	setupRunInstaller = func(_ context.Context, _ string, steps []setupCommandSpec) error {
+		if len(steps) != 2 || !steps[0].Found || !steps[1].Found {
+			return fmt.Errorf("installer prerequisites were not resolved: %+v", steps)
+		}
+		installed.Store(true)
+		return os.WriteFile(installMarker, []byte("installed"), 0644)
+	}
+	t.Cleanup(func() { setupRunInstaller = oldInstaller })
+
+	oldStart := setupStartProcess
+	setupStartProcess = func(_ context.Context, spec setupCommandSpec) error {
+		if spec.Name != backendPath {
+			return fmt.Errorf("unexpected start command %q", spec.Name)
+		}
+		return os.WriteFile(startMarker, []byte("started"), 0644)
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/capacity/global" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"max_workers":1,"available_slots":1,"has_capacity":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(c)
+	next, cmd := m.runCommand("/setup bootstrap --install")
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("interactive install bootstrap did not wait for confirmation: cmd=%v pending=%v", cmd, m.pendingConfirmation != nil)
+	}
+	if !strings.Contains(m.pendingConfirmation.message, "may create or replace backend files") {
+		t.Fatalf("install confirmation did not disclose filesystem effects:\n%s", m.pendingConfirmation.message)
+	}
+	assertFileMissing(t, installMarker)
+	assertFileMissing(t, startMarker)
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "bootstrap", "--install"}, true, false); err != nil {
+		t.Fatalf("setup bootstrap --install failed on fresh machine: %v\n%s", err, out.String())
+	}
+	assertFileContains(t, installMarker, "installed")
+	assertFileContains(t, startMarker, "started")
+	for _, want := range []string{"Installer completed", "Starting local backend with: openvibely", "Backend health check succeeded"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("fresh bootstrap output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestSetupBootstrapReportsHealthFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses Unix executable fixture")
