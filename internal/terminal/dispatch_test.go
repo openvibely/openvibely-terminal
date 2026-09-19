@@ -6173,14 +6173,14 @@ func TestPersonalityDeleteBulkConfirmsAllResolvedTargetsAndUsesOneRequest(t *tes
 	m := New(c)
 	m.selectedID, m.selectedName = "p2", "other"
 	command := `/personality delete-bulk old_one "Old Two"`
+	const prompt = `Delete 2 selected personalities: "Old One" (old_one), "Old Two" (old_two)? Type 'yes' to confirm or Esc to cancel.`
 	m = runLine(t, m, command)
-	if m.pendingConfirmation == nil || deletes != 0 {
-		t.Fatalf("bulk deletion before confirmation: pending=%v deletes=%d", m.pendingConfirmation != nil, deletes)
-	}
-	for _, target := range []string{"Old One", "old_one", "Old Two", "old_two"} {
-		if !strings.Contains(m.pendingConfirmation.message, target) {
-			t.Fatalf("confirmation omitted target %q: %s", target, m.pendingConfirmation.message)
+	if m.pendingConfirmation == nil || m.pendingConfirmation.message != prompt || deletes != 0 {
+		got := ""
+		if m.pendingConfirmation != nil {
+			got = m.pendingConfirmation.message
 		}
+		t.Fatalf("bulk deletion confirmation = %q, want %q; deletes=%d", got, prompt, deletes)
 	}
 
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -14078,9 +14078,14 @@ func TestWebhookDeleteBulkConfirmsCapturesIDsAndRefreshes(t *testing.T) {
 	m := New(c)
 	m.selectedID, m.selectedName = "p1", "demo"
 
+	const prompt = `Delete 2 selected webhooks: "First Hook" (w-one), "Second Hook" (w-two)? Type 'yes' to confirm or Esc to cancel.`
 	m = runLine(t, m, `/channels webhooks delete-bulk "First Hook" "Second Hook"`)
-	if m.pendingConfirmation == nil || !strings.Contains(m.pendingConfirmation.message, "Delete 2 selected webhooks") || !strings.Contains(m.pendingConfirmation.message, `"First Hook"`) || deletes != 0 {
-		t.Fatalf("bulk confirmation = %#v, deletes = %d", m.pendingConfirmation, deletes)
+	if m.pendingConfirmation == nil || m.pendingConfirmation.message != prompt || deletes != 0 {
+		got := ""
+		if m.pendingConfirmation != nil {
+			got = m.pendingConfirmation.message
+		}
+		t.Fatalf("bulk confirmation = %q, want %q; deletes = %d", got, prompt, deletes)
 	}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = next.(Model)

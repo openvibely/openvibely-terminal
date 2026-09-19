@@ -1082,6 +1082,86 @@ func TestPersonalityBulkDeleteHelpAndCompletion(t *testing.T) {
 	}
 }
 
+func TestBulkDeleteConfirmationPromptFormatsCountNounTargetsAndSuffix(t *testing.T) {
+	tests := []struct {
+		name         string
+		count        int
+		singularNoun string
+		pluralNoun   string
+		targets      []string
+		want         string
+	}{
+		{
+			name:         "singular",
+			count:        1,
+			singularNoun: "alert",
+			pluralNoun:   "alerts",
+			targets:      []string{`"Deploy" (a-one)`},
+			want:         `Delete 1 selected alert: "Deploy" (a-one)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name:         "plural comma joined",
+			count:        2,
+			singularNoun: "webhook",
+			pluralNoun:   "webhooks",
+			targets:      []string{`"Build Hook" (w-one)`, "w-two"},
+			want:         `Delete 2 selected webhooks: "Build Hook" (w-one), w-two? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name:         "zero uses plural",
+			count:        0,
+			singularNoun: "personality",
+			pluralNoun:   "personalities",
+			targets:      []string{"(unknown personality)"},
+			want:         `Delete 0 selected personalities: (unknown personality)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bulkDeleteConfirmationPrompt(tt.count, tt.singularNoun, tt.pluralNoun, tt.targets)
+			if got != tt.want {
+				t.Fatalf("bulkDeleteConfirmationPrompt() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBulkDeleteConfirmationResourceTargetFormatting(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "alert title and id",
+			got:  alertBulkDeleteConfirmation([]client.Alert{{Title: "Deploy", ID: "a-one"}}),
+			want: `Delete 1 selected alert: "Deploy" (a-one)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "webhook id fallback",
+			got:  webhookBulkDeleteConfirmation([]client.Webhook{{ID: "w-one"}}),
+			want: `Delete 1 selected webhook: w-one? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "personality singular normalized with display identity",
+			got:  personalityBulkDeleteConfirmation([]client.Personality{{Name: "Review", Key: "reviewer", ID: "p-one"}}),
+			want: `Delete 1 selected personality: "Review" (reviewer)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "personality unknown fallback",
+			got:  personalityBulkDeleteConfirmation([]client.Personality{{}}),
+			want: `Delete 1 selected personality: "(unknown personality)"? Type 'yes' to confirm or Esc to cancel.`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("confirmation = %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseAlertListArgs(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -2667,6 +2667,16 @@ func alertActionDisplayName(alert client.Alert) string {
 	return "(unknown alert)"
 }
 
+const destructiveBulkDeleteConfirmationSuffix = "Type 'yes' to confirm or Esc to cancel."
+
+func bulkDeleteConfirmationPrompt(count int, singularNoun, pluralNoun string, targets []string) string {
+	noun := pluralNoun
+	if count == 1 {
+		noun = singularNoun
+	}
+	return fmt.Sprintf("Delete %d selected %s: %s? %s", count, noun, strings.Join(targets, ", "), destructiveBulkDeleteConfirmationSuffix)
+}
+
 // alertBulkDeleteConfirmation names every resolved target so an interactive
 // confirmation describes the canonical alerts captured for deletion.
 func alertBulkDeleteConfirmation(alerts []client.Alert) string {
@@ -2685,11 +2695,7 @@ func alertBulkDeleteConfirmation(alerts []client.Alert) string {
 			targets = append(targets, "(unknown alert)")
 		}
 	}
-	noun := "alerts"
-	if len(alerts) == 1 {
-		noun = "alert"
-	}
-	return fmt.Sprintf("Delete %d selected %s: %s? Type 'yes' to confirm or Esc to cancel.", len(alerts), noun, strings.Join(targets, ", "))
+	return bulkDeleteConfirmationPrompt(len(alerts), "alert", "alerts", targets)
 }
 
 func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error) {
@@ -7496,11 +7502,7 @@ func webhookBulkDeleteConfirmation(webhooks []client.Webhook) string {
 			targets = append(targets, "(unknown webhook)")
 		}
 	}
-	noun := "webhooks"
-	if len(webhooks) == 1 {
-		noun = "webhook"
-	}
-	return fmt.Sprintf("Delete %d selected %s: %s? Type 'yes' to confirm or Esc to cancel.", len(webhooks), noun, strings.Join(targets, ", "))
+	return bulkDeleteConfirmationPrompt(len(webhooks), "webhook", "webhooks", targets)
 }
 
 func webhookBulkActionOutput(ctx context.Context, c *client.Client, projectID string, webhooks []client.Webhook) (string, error) {
@@ -7821,7 +7823,7 @@ func personalityBulkDeleteConfirmation(personalities []client.Personality) strin
 			targets = append(targets, fmt.Sprintf("%q", display))
 		}
 	}
-	return fmt.Sprintf("Delete %d selected personalities: %s? Type 'yes' to confirm or Esc to cancel.", len(personalities), strings.Join(targets, ", "))
+	return bulkDeleteConfirmationPrompt(len(personalities), "personality", "personalities", targets)
 }
 
 func personalityBulkCanonicalID(personality client.Personality) string {
