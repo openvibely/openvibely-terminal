@@ -47,6 +47,7 @@ Interactive input is either a chat message or a slash command:
 summarize the current project
 /tasks
 /tasks show refactor
+/tasks swarm --category active Coordinate release | Split validation across workers
 /tasks goal refactor | all tests pass
 /tasks goal pause refactor
 /tasks goal resume refactor
@@ -66,6 +67,7 @@ For one-shot CLI use, omit the leading slash:
 ```bash
 openvibely-terminal tasks
 openvibely-terminal -project demo tasks show refactor
+openvibely-terminal -project demo tasks swarm --category active "Coordinate release" '|' "Split validation across workers"
 openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
 openvibely-terminal -project demo chat "summarize the current project"
@@ -75,7 +77,10 @@ openvibely-terminal --json -project demo automations list
 ```
 
 Project-scoped commands automatically use the backend's only project. When the
-backend has multiple projects, select one with `-project <name|id>`.
+backend has multiple projects, select one with `-project <name|id>`. Use
+`tasks swarm [options] <title> | <prompt>` to create an autonomous swarm parent;
+`--category active` starts the planner immediately, while backlog swarm parents
+start planning after they become Active.
 
 `projects delete <project>` requires the standard interactive confirmation (`Type 'yes' to confirm or Esc to cancel`). One-shot CLI deletion requires `--force` (or `-f`), and the backend remains authoritative for refusing deletion of the default project. Deletion removes the project and its backend-owned project data; after success, the terminal refreshes the catalog and selects the backend-selected remaining/default project when available.
 

@@ -269,7 +269,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 
 | Command | Aliases | Actions |
 |---|---|---|
-| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `inputs` (`list`, `show`, `inspect`, `cancel`, `steer`), `pending`, `pending-inputs`, `cancel-input`, `steer-queued`, `new`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `steer`, `activate`, `sweep`, `clear` |
+| `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `inputs` (`list`, `show`, `inspect`, `cancel`, `steer`), `pending`, `pending-inputs`, `cancel-input`, `steer-queued`, `new`, `swarm`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `steer`, `activate`, `sweep`, `clear` |
 | `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `show`, `read`, `read-bulk`, `approve`, `reject`, `dismiss`, `delete`, `delete-bulk`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always`, `load` |
@@ -1031,6 +1031,7 @@ $ openvibely-terminal help tasks
   tasks attachments add <task> <file>...      upload local files
   tasks attachments delete <task> <attachment> delete by ID or filename
   tasks new <title> [| <prompt>]             create a task
+  tasks swarm [options] <title> | <prompt>   create an autonomous swarm parent
   tasks edit <task> | <title> [| <prompt>]   edit title/prompt
   tasks run|stop|delete <task>               run, cancel or delete
   tasks move <task> <backlog|active|completed>
@@ -1070,7 +1071,10 @@ $ openvibely-terminal help channels
 ```
 
 Help is written in the form you invoke it: `/tasks` inside the chat window,
-bare `tasks` on the command line.
+bare `tasks` on the command line. For swarm task creation details, run
+`help tasks`; the generated help lists every swarm option and the runtime output
+explains whether the planner starts immediately for an Active swarm parent or
+waits until a backlog swarm parent becomes Active.
 
 Notes:
 
