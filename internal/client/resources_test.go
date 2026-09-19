@@ -1720,6 +1720,41 @@ func TestBoundedCatalogMoreCompleteStateSharedAcrossResources(t *testing.T) {
 	}
 }
 
+func TestBoundedCatalogZeroCardContinuationWithHasMoreSharedAcrossResources(t *testing.T) {
+	for _, family := range boundedResourceListCases() {
+		t.Run(family.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != family.path {
+					http.NotFound(w, r)
+					return
+				}
+				requests++
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Set(cardPageMoreHeader, "true")
+				w.Header().Set(cardPageTotalHeader, "2")
+				if requests == 1 {
+					_, _ = io.WriteString(w, family.page(0, 1, 2))
+					return
+				}
+				_, _ = io.WriteString(w, family.page(1, 1, 2))
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, _, err = family.call(c, 2)
+			if err == nil || !strings.Contains(err.Error(), "backend reported more cards but returned none") {
+				t.Fatalf("err = %v, want zero-card continuation error", err)
+			}
+			if requests != 2 {
+				t.Fatalf("requests = %d, want 2", requests)
+			}
+		})
+	}
+}
+
 func BenchmarkBoundedModelAndAgentCatalogLists(b *testing.B) {
 	for _, kind := range []catalogFixtureKind{catalogFixtureModels, catalogFixtureAgents} {
 		for _, total := range []int{1000, 5000} {
