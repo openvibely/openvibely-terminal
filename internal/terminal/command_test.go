@@ -1827,6 +1827,27 @@ func TestRuntimeUsageMatchesCanonicalHelpSyntax(t *testing.T) {
 	if help := renderCommandHelp(*c); !strings.Contains(help, "tasks swarm [options] <title> | <prompt>") || !strings.Contains(help, "--worker-isolation") {
 		t.Fatalf("tasks swarm help missing syntax/options:\n%s", help)
 	}
+
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed while locating task documentation")
+	}
+	root := filepath.Join(filepath.Dir(source), "..", "..")
+	for _, path := range []string{"README.md", filepath.Join("docs", "user-guide.md")} {
+		body, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, want := range []string{
+			"tasks swarm [options] <title> | <prompt>",
+			"planner",
+			"backlog swarm parent",
+		} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("%s missing %q", path, want)
+			}
+		}
+	}
 }
 
 func TestChannelsWebhooksHelpCompletionAndDeprecatedAliases(t *testing.T) {
