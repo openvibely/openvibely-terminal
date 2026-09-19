@@ -4612,12 +4612,22 @@ func (c *Client) GeneratePulseSummary(ctx context.Context, projectID string) err
 
 // GetReflection returns the history (Reflection) screen as text.
 func (c *Client) GetReflection(ctx context.Context, projectID string) (string, error) {
-	return c.pageText(ctx, "/history"+query("project_id", projectID), "history-container")
+	return c.GetReflectionWithRange(ctx, projectID, "")
+}
+
+// GetReflectionWithRange returns the history (Reflection) screen as text for an optional time range.
+func (c *Client) GetReflectionWithRange(ctx context.Context, projectID, reflectionRange string) (string, error) {
+	return c.pageText(ctx, "/history"+query("project_id", projectID, "range", reflectionRange), "history-container")
 }
 
 // GenerateReflectionSummary asks the backend for a fresh reflection summary.
 func (c *Client) GenerateReflectionSummary(ctx context.Context, projectID string) error {
-	return c.doForm(ctx, http.MethodPost, "/history/summary"+query("project_id", projectID), nil)
+	return c.GenerateReflectionSummaryWithRange(ctx, projectID, "")
+}
+
+// GenerateReflectionSummaryWithRange asks the backend for a fresh reflection summary for an optional time range.
+func (c *Client) GenerateReflectionSummaryWithRange(ctx context.Context, projectID, reflectionRange string) error {
+	return c.doForm(ctx, http.MethodPost, "/history/summary"+query("project_id", projectID, "range", reflectionRange), nil)
 }
 
 // GetGrades returns the current idea grades without triggering a new grading run.

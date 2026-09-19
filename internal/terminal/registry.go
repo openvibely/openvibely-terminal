@@ -8255,30 +8255,99 @@ func pulseCommand() command {
 	}
 }
 
+var validReflectionRanges = map[string]struct{}{
+	"hour": {},
+	"day":  {},
+	"week": {},
+}
+
+func parseReflectionArgs(args []string) (action, reflectionRange string, err error) {
+	usage := fmt.Errorf("usage: %sreflection [show|summary] [--range hour|day|week]", cmdPrefix)
+	if len(args) > 0 {
+		switch args[0] {
+		case "show", "summary":
+			action = args[0]
+			args = args[1:]
+		case "--range":
+		case "":
+			return "", "", usage
+		default:
+			if !strings.HasPrefix(args[0], "--range=") {
+				return "", "", usage
+			}
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		var value string
+		switch {
+		case arg == "--range":
+			if reflectionRange != "" {
+				return "", "", fmt.Errorf("range specified more than once")
+			}
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--range requires a value: hour, day, or week")
+			}
+			i++
+			value = args[i]
+		case strings.HasPrefix(arg, "--range="):
+			if reflectionRange != "" {
+				return "", "", fmt.Errorf("range specified more than once")
+			}
+			value = strings.TrimPrefix(arg, "--range=")
+			if value == "" {
+				return "", "", fmt.Errorf("--range requires a value: hour, day, or week")
+			}
+		default:
+			return "", "", usage
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		if _, ok := validReflectionRanges[value]; !ok {
+			return "", "", fmt.Errorf("invalid reflection range %q; valid values: hour, day, week", value)
+		}
+		reflectionRange = value
+	}
+	return action, reflectionRange, nil
+}
+
 func reflectionCommand() command {
 	actions := []string{"show", "summary"}
 	return command{
 		name:         "reflection",
 		aliases:      []string{"history"},
 		actions:      actions,
-		validateArgs: func(args []string) error { return validateBriefingArgs("reflection", actions, args) },
+		validateArgs: func(args []string) error { _, _, err := parseReflectionArgs(args); return err },
 		desc:         "debrief on completed work",
 		usage: []string{
-			"reflection                                 show the completed-work debrief",
-			"reflection summary                         regenerate the debrief",
+			"reflection [--range hour|day|week]          show the completed-work debrief",
+			"reflection show [--range hour|day|week]     show the completed-work debrief",
+			"reflection summary [--range hour|day|week]  regenerate the debrief",
+			"history accepts the same options as reflection",
 		},
 		examples: []string{
-			`reflection`,
-			`reflection summary`,
+			`reflection --range hour`,
+			`reflection --range day`,
+			`reflection summary --range week`,
+			`history summary --range week`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
-			return runBriefingCommand(m, args, "reflection", actions, "summary", "Reflection",
-				func(ctx context.Context, c *client.Client, pid string) (string, error) {
-					return "", c.GenerateReflectionSummary(ctx, pid)
-				},
-				func(ctx context.Context, c *client.Client, pid string) (string, error) {
-					return c.GetReflection(ctx, pid)
-				})
+			action, reflectionRange, err := parseReflectionArgs(args)
+			if err != nil {
+				return m, errCmd(err.Error())
+			}
+			mm, cmd, ok := m.needProject()
+			if !ok {
+				return mm, cmd
+			}
+			c, pid := m.client, m.selectedID
+			return m, run("Reflection", cmdTimeout, func(ctx context.Context) (string, error) {
+				if action == "summary" {
+					if err := c.GenerateReflectionSummaryWithRange(ctx, pid, reflectionRange); err != nil {
+						return "", err
+					}
+				}
+				return c.GetReflectionWithRange(ctx, pid, reflectionRange)
+			})
 		},
 	}
 }
