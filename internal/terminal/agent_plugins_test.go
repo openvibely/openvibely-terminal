@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -27,22 +28,127 @@ func TestAgentsPluginsHelpDocumentsActions(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("agents command missing")
 	}
-	help := renderCommandHelp(*cmd)
-	for _, want := range []string{
-		"agents plugins [list]",
-		"agents plugins marketplaces add <source>",
-		"agents plugins marketplaces sync <marketplace>",
-		"agents plugins marketplaces remove <marketplace>",
-		"agents plugins install <plugin-id> [agent]",
-		"agents plugins uninstall <plugin-id>",
-		"agents plugins enable <agent> <plugin-id>",
-		"agents plugins disable <agent> <plugin-id>",
-		"agents plugins install stagehand@official reviewer",
-		"agents plugins enable reviewer playwright@official",
-	} {
-		if !strings.Contains(help, want) {
-			t.Fatalf("help missing %q:\n%s", want, help)
+	help := stripANSI(renderCommandHelp(*cmd))
+	var gotUsage []string
+	for _, line := range cmd.usage {
+		if strings.HasPrefix(line, "agents plugins") {
+			gotUsage = append(gotUsage, line)
 		}
+	}
+	if want := agentPluginUsageLines(); !reflect.DeepEqual(gotUsage, want) {
+		t.Fatalf("plugin usage lines do not match definitions\ngot:  %#v\nwant: %#v", gotUsage, want)
+	}
+	for _, def := range append(append([]agentPluginActionDefinition{}, agentPluginActions...), agentPluginMarketplaceActions...) {
+		for _, name := range def.names {
+			if name.help && name.syntax != "" && !strings.Contains(help, name.syntax) {
+				t.Fatalf("help missing syntax %q:\n%s", name.syntax, help)
+			}
+		}
+	}
+	for _, example := range agentPluginExamples() {
+		if !strings.Contains(help, example) {
+			t.Fatalf("help missing example %q:\n%s", example, help)
+		}
+	}
+}
+
+func TestAgentsPluginUnknownActionsUseDefinitionSummaries(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+	})
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"agents", "plugins", "wat"}, false, false)
+	want := "usage: agents plugins " + agentPluginActionSummary(agentPluginActions)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("top-level unknown usage = %v, want %q output=%s", err, want, out.String())
+	}
+
+	out.Reset()
+	err = RunCLI(c, &out, "demo", []string{"agents", "plugins", "marketplaces", "wat"}, false, false)
+	want = "usage: agents plugins marketplaces " + agentPluginActionSummary(agentPluginMarketplaceActions)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("marketplace unknown usage = %v, want %q output=%s", err, want, out.String())
+	}
+}
+
+func TestAgentsPluginParserAcceptsDocumentedActionWords(t *testing.T) {
+	for _, action := range []string{"list", "state", "status"} {
+		t.Run("state/"+action, func(t *testing.T) {
+			c, _ := cliServer(t, map[string]string{
+				"/api/projects":         cliProjects,
+				"/agents/plugins/state": agentPluginStateJSON,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"agents", "plugins", action}, false, false); err != nil {
+				t.Fatalf("%s: %v\n%s", action, err, out.String())
+			}
+		})
+	}
+
+	marketplaceCommands := []struct {
+		action string
+		force  bool
+		route  string
+	}{
+		{action: "add", route: "POST /agents/plugins/marketplaces"},
+		{action: "sync", route: "POST /agents/plugins/marketplaces/official/update"},
+		{action: "update", route: "POST /agents/plugins/marketplaces/official/update"},
+		{action: "remove", force: true, route: "DELETE /agents/plugins/marketplaces/official"},
+		{action: "delete", force: true, route: "DELETE /agents/plugins/marketplaces/official"},
+		{action: "reset", force: true, route: "POST /agents/plugins/marketplaces/reset-defaults"},
+		{action: "reset-defaults", force: true, route: "POST /agents/plugins/marketplaces/reset-defaults"},
+	}
+	for _, command := range marketplaceCommands {
+		t.Run("marketplaces/"+command.action, func(t *testing.T) {
+			srv, rec := agentPluginCommandServer(t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON, nil)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"agents", "plugins", "marketplaces", command.action}
+			if command.action == "add" {
+				args = append(args, "github.com/example/plugins")
+			} else if command.action != "reset" && command.action != "reset-defaults" {
+				args = append(args, "official")
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", args, command.force, false); err != nil {
+				t.Fatalf("%v: %v\n%s", args, err, out.String())
+			}
+			if !rec.sawCall(command.route) {
+				t.Fatalf("%v did not call %s: %v", args, command.route, rec.calls)
+			}
+		})
+	}
+
+	pluginCommands := []struct {
+		action string
+		args   []string
+		force  bool
+		route  string
+	}{
+		{action: "install", args: []string{"stagehand@official"}, route: "POST /agents/plugins/install"},
+		{action: "uninstall", args: []string{"playwright@official"}, force: true, route: "POST /agents/plugins/uninstall"},
+		{action: "remove", args: []string{"playwright@official"}, force: true, route: "POST /agents/plugins/uninstall"},
+		{action: "enable", args: []string{"reviewer", "playwright@official"}, route: "PUT /agents/ag-1"},
+		{action: "disable", args: []string{"reviewer", "playwright@official"}, route: "PUT /agents/ag-1"},
+	}
+	for _, command := range pluginCommands {
+		t.Run("plugins/"+command.action, func(t *testing.T) {
+			srv, rec := agentPluginCommandServer(t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON, nil)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			args := append([]string{"agents", "plugins", command.action}, command.args...)
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", args, command.force, false); err != nil {
+				t.Fatalf("%v: %v\n%s", args, err, out.String())
+			}
+			if !rec.sawCall(command.route) {
+				t.Fatalf("%v did not call %s: %v", args, command.route, rec.calls)
+			}
+		})
 	}
 }
 
