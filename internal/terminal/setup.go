@@ -227,8 +227,8 @@ func setupCommand() command {
 			if check.Remote {
 				return m, errCmd(check.RemoteMessage)
 			}
-			if len(check.Missing) > 0 {
-				return m, errCmd("setup " + opts.action + " cannot continue:\n" + strings.Join(prefixLines(check.Missing, "  - "), "\n") + "\nRun setup check for details.")
+			if missing := setupBlockingMissing(check, opts); len(missing) > 0 {
+				return m, errCmd("setup " + opts.action + " cannot continue:\n" + strings.Join(prefixLines(missing, "  - "), "\n") + "\nRun setup check for details.")
 			}
 
 			cmd := m.run("Setup", setupHealthWaitTimeout+30*time.Second, func(ctx context.Context) (string, error) {
@@ -267,6 +267,19 @@ func setupInstallSuffix(opts setupOptions) string {
 		return " --install"
 	}
 	return ""
+}
+
+func setupBlockingMissing(check setupCheckResult, opts setupOptions) []string {
+	if opts.action == "bootstrap" && opts.install {
+		var missing []string
+		for _, step := range check.InstallSteps {
+			if !step.Found {
+				missing = append(missing, step.Description)
+			}
+		}
+		return missing
+	}
+	return check.Missing
 }
 
 func inspectLocalBackendSetup(platform, baseURL string, install bool) setupCheckResult {
@@ -416,7 +429,7 @@ func setupConfirmationMessage(check setupCheckResult, opts setupOptions) string 
 	fmt.Fprintf(&b, "Run setup %s%s for local backend %s? ", opts.action, setupInstallSuffix(opts), serverURLDisplay(check.BaseURL))
 	b.WriteString("Effects: ")
 	if opts.install {
-		b.WriteString("download and run the documented installer; ")
+		b.WriteString("download and run the documented installer, which may create or replace backend files; ")
 	}
 	b.WriteString("start process `")
 	b.WriteString(sanitizeAutomationDetailText(check.Start.Display))
@@ -437,6 +450,10 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 			return b.String(), err
 		}
 		b.WriteString("Installer completed.\n")
+		check.Start = findLocalBackendStartCommand(check.Platform)
+		if !check.Start.Found {
+			return b.String(), fmt.Errorf("setup bootstrap could not find a local backend start command after installer completed: %s", check.Start.Description)
+		}
 	}
 	fmt.Fprintf(&b, "\nStarting local backend with: %s\n", sanitizeAutomationDetailText(check.Start.Display))
 	if err := setupStartProcess(ctx, check.Start); err != nil {
