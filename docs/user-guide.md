@@ -61,7 +61,7 @@ make build          # → bin/openvibely-terminal
 make run
 ```
 
-Requires Go 1.27.1+ and a running OpenVibely server (default `http://localhost:3001`). The TUI does not install or start the backend for you. If startup reports that the backend is unreachable, use `/setup` in the TUI or `openvibely-terminal setup` in a shell for explicit, read-only recovery instructions. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
+Requires Go 1.27.1+ and a running OpenVibely server (default `http://localhost:3001`). Bare `/setup` in the TUI and `openvibely-terminal setup` in a shell remain explicit, read-only recovery instructions. To let the terminal check or bootstrap a local backend, opt in with `/setup check`, `/setup start`, or `/setup bootstrap --install`; start/bootstrap disclose effects and require confirmation in the TUI or `--force` in CLI mode. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
 
 ### Backend setup and recovery
 
@@ -72,6 +72,26 @@ exists, and show the same platform-specific commands below for you to choose and
 run yourself. The backend's [installation guide](https://docs.openvibely.ai/installation)
 is authoritative for installation locations, versions, replacement behavior, and
 installed-binary launch details.
+
+Opt-in local lifecycle actions are separate from the read-only guide:
+
+```text
+/setup check                    # prerequisites only; no backend requests or machine-state changes
+/setup start                    # confirm, start a local backend, then wait for health
+/setup bootstrap --install      # confirm, install if needed, start, then wait for health
+openvibely-terminal setup check
+openvibely-terminal --force setup bootstrap [--install]
+```
+
+`setup start` and `setup bootstrap` only run allowlisted platform commands shown in
+the confirmation prompt. The TUI prompt discloses process, filesystem, credential,
+and network effects before execution and can be canceled with `Esc`; one-shot CLI
+mode requires `--force`. `setup bootstrap` waits for backend health and then points
+you to `/login` when authentication is required, or `/projects` and
+`/projects create <name> <path>` when the backend is healthy. Remote server URLs
+fail closed: correct `-server` or `OPENVIBELY_SERVER_URL` before local bootstrap,
+because the terminal will not start local processes for a configured remote
+backend.
 
 **macOS and Linux**
 
