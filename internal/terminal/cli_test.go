@@ -5268,6 +5268,10 @@ func TestCLIAutomationActionJSONMutations(t *testing.T) {
 	const deleteRefreshHTML = `<div>` +
 		`<div class="card" data-automation-url="/automations/au-2?project_id=p1"><div class="card-body relative"><span class="badge badge-outline badge-sm">active</span><button type="button" data-automation-card-delete="au-2" data-automation-name="Weekly report"></button></div></div>` +
 		`</div>`
+	const singleAutomationHTML = `<div>` +
+		`<div class="card" data-automation-url="/automations/au-1?project_id=p1"><div class="card-body relative"><span class="badge badge-outline badge-sm">active</span><button type="button" data-automation-card-delete="au-1" data-automation-name="Nightly sweep"></button></div></div>` +
+		`</div>`
+	const emptyAutomationsHTML = `<div></div>`
 
 	type mutationOutput struct {
 		Status      string              `json:"status"`
@@ -5281,7 +5285,7 @@ func TestCLIAutomationActionJSONMutations(t *testing.T) {
 		}
 		return got
 	}
-	newServer := func(t *testing.T, refreshHTML string, failRefresh bool) (*client.Client, *recorder) {
+	newServer := func(t *testing.T, initialHTML, refreshHTML string, failRefresh bool) (*client.Client, *recorder) {
 		t.Helper()
 		rec := &recorder{}
 		var automationGETs int
@@ -5304,7 +5308,7 @@ func TestCLIAutomationActionJSONMutations(t *testing.T) {
 					_, _ = io.WriteString(w, refreshHTML)
 					return
 				}
-				_, _ = io.WriteString(w, initialAutomationsHTML)
+				_, _ = io.WriteString(w, initialHTML)
 			case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/automations/au-1/"):
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, `{}`)
@@ -5337,7 +5341,7 @@ func TestCLIAutomationActionJSONMutations(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name+" JSON includes status and refreshed automations", func(t *testing.T) {
-			c, rec := newServer(t, tc.refresh, false)
+			c, rec := newServer(t, initialAutomationsHTML, tc.refresh, false)
 			var out bytes.Buffer
 			if err := RunCLI(c, &out, "demo", []string{"automations", tc.action, "Nightly sweep"}, tc.force, true); err != nil {
 				t.Fatalf("automations %s JSON failed: %v\n%s", tc.action, err, rec.all())
@@ -5361,8 +5365,38 @@ func TestCLIAutomationActionJSONMutations(t *testing.T) {
 		})
 	}
 
+	t.Run("successful empty refresh JSON includes empty automations list", func(t *testing.T) {
+		c, rec := newServer(t, singleAutomationHTML, emptyAutomationsHTML, false)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"automations", "delete", "Nightly sweep"}, true, true); err != nil {
+			t.Fatalf("automations delete JSON with empty refresh failed: %v\n%s", err, rec.all())
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &payload); err != nil {
+			t.Fatalf("empty-refresh output is not parseable JSON: %v\n%s", err, out.String())
+		}
+		var status string
+		if err := json.Unmarshal(payload["status"], &status); err != nil || status != "delete: Nightly sweep" {
+			t.Fatalf("status = %q err=%v payload=%s", status, err, out.String())
+		}
+		automationsRaw, ok := payload["automations"]
+		if !ok {
+			t.Fatalf("successful empty refresh must include automations list: %s", out.String())
+		}
+		var automations []client.Automation
+		if err := json.Unmarshal(automationsRaw, &automations); err != nil {
+			t.Fatalf("automations is not a JSON array: %v payload=%s", err, out.String())
+		}
+		if len(automations) != 0 {
+			t.Fatalf("automations length = %d, want 0: %+v", len(automations), automations)
+		}
+		if !rec.sawQuery("POST /automations/au-1/delete?project_id=p1") {
+			t.Fatalf("delete mutation lost backend route or project scope:\n%s", rec.all())
+		}
+	})
+
 	t.Run("refresh failure JSON remains status only", func(t *testing.T) {
-		c, rec := newServer(t, refreshedAutomationsHTML, true)
+		c, rec := newServer(t, initialAutomationsHTML, refreshedAutomationsHTML, true)
 		var out bytes.Buffer
 		if err := RunCLI(c, &out, "demo", []string{"automations", "pause", "Nightly sweep"}, false, true); err != nil {
 			t.Fatalf("automations pause JSON with refresh failure failed: %v\n%s", err, rec.all())
