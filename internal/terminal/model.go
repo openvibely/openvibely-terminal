@@ -215,9 +215,11 @@ type Model struct {
 	busy                       bool
 
 	// operational counts cached by /status
-	pendingAlertCount int
-	activeTaskCount   int
-	queuedTaskCount   int
+	pendingAlertCount      int
+	activeTaskCount        int
+	queuedTaskCount        int
+	alertsCountUnavailable bool
+	tasksCountUnavailable  bool
 
 	// live workers view
 	workersLiveActive    bool
@@ -229,7 +231,6 @@ type Model struct {
 	// pendingConfirmation holds a destructive command awaiting explicit
 	// confirmation ("yes" + Enter executes it; Esc or anything else cancels).
 	pendingConfirmation *pendingCmd
-
 	// inline ref selector (opened when a command needing a <ref> is run
 	// without one): key input is routed to the picker while active.
 	selectorActive           bool
@@ -471,8 +472,13 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 		// longer usable and must enter sign-in recovery instead of being hidden.
 		if client.IsAuthRequired(alertsErr) {
 			counts.err = alertsErr
-		} else if client.IsAuthRequired(tasksErr) {
+		} else if alertsErr != nil {
+			counts.alertsUnavailable = true
+		}
+		if client.IsAuthRequired(tasksErr) {
 			counts.err = tasksErr
+		} else if tasksErr != nil {
+			counts.tasksUnavailable = true
 		}
 		return counts
 	}
@@ -785,6 +791,11 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		*m = (*m).clearReviewPrefill()
 		m.threadID, m.threadTitle, m.threadStatus = "", "", ""
 		m.threadReplyPendingRequestID = 0
+		m.pendingAlertCount = 0
+		m.activeTaskCount = 0
+		m.queuedTaskCount = 0
+		m.alertsCountUnavailable = false
+		m.tasksCountUnavailable = false
 		m.input.Placeholder = defaultPlaceholder
 		m.invalidateSSE()
 	}
@@ -1576,11 +1587,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markAuthRequired()
 			return m, nil
 		}
-		m.pendingAlertCount = msg.pendingAlerts
-		m.activeTaskCount = msg.activeTasks
-		m.queuedTaskCount = msg.queuedTasks
+		m.alertsCountUnavailable = msg.alertsUnavailable
+		m.tasksCountUnavailable = msg.tasksUnavailable
+		if !msg.alertsUnavailable {
+			m.pendingAlertCount = msg.pendingAlerts
+		}
+		if !msg.tasksUnavailable {
+			m.activeTaskCount = msg.activeTasks
+			m.queuedTaskCount = msg.queuedTasks
+		}
 		return m, nil
-
 	case projectsLoadedMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale project response from an older session or project

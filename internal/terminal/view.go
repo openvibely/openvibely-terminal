@@ -339,12 +339,16 @@ func (m Model) renderStatus() string {
 		row("workers", globalWorkerCapacityText(c))
 	}
 	if m.selectedID != "" {
-		if m.pendingAlertCount > 0 {
+		if m.alertsCountUnavailable {
+			row("alerts", statusErrStyle.Render("unavailable")+dimStyle.Render(" (partial failure)"))
+		} else if m.pendingAlertCount > 0 {
 			row("alerts", noticeStyle.Render(fmt.Sprintf("%d pending approvals", m.pendingAlertCount)))
 		} else {
 			row("alerts", dimStyle.Render("none pending"))
 		}
-		if m.activeTaskCount > 0 || m.queuedTaskCount > 0 {
+		if m.tasksCountUnavailable {
+			row("tasks", statusErrStyle.Render("unavailable")+dimStyle.Render(" (partial failure)"))
+		} else if m.activeTaskCount > 0 || m.queuedTaskCount > 0 {
 			var taskParts []string
 			if m.activeTaskCount > 0 {
 				taskParts = append(taskParts, fmt.Sprintf("%d active", m.activeTaskCount))
