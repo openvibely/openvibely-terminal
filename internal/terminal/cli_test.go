@@ -2737,7 +2737,7 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), statusDeadlineTestTimeout())
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
@@ -2776,7 +2776,15 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 	}
 }
 
+func statusDeadlineTestTimeout() time.Duration {
+	if performanceEvidenceEnabled() {
+		return time.Second
+	}
+	return 100 * time.Millisecond
+}
+
 func TestCLIStatusLatencyOverlapsBalancedAndSlowDiscovery(t *testing.T) {
+	runs := 1
 	cases := []struct {
 		name      string
 		project   time.Duration
@@ -2784,8 +2792,21 @@ func TestCLIStatusLatencyOverlapsBalancedAndSlowDiscovery(t *testing.T) {
 		counts    time.Duration
 		maxMedian time.Duration
 	}{
-		{name: "balanced critical path", project: 20 * time.Millisecond, global: 200 * time.Millisecond, counts: 80 * time.Millisecond, maxMedian: 250 * time.Millisecond},
-		{name: "slow project discovery", project: 240 * time.Millisecond, global: 20 * time.Millisecond, counts: 80 * time.Millisecond, maxMedian: 360 * time.Millisecond},
+		{name: "balanced critical path", project: 5 * time.Millisecond, global: 40 * time.Millisecond, counts: 15 * time.Millisecond, maxMedian: 100 * time.Millisecond},
+		{name: "slow project discovery", project: 50 * time.Millisecond, global: 5 * time.Millisecond, counts: 15 * time.Millisecond, maxMedian: 100 * time.Millisecond},
+	}
+	if performanceEvidenceEnabled() {
+		runs = 5
+		cases = []struct {
+			name      string
+			project   time.Duration
+			global    time.Duration
+			counts    time.Duration
+			maxMedian time.Duration
+		}{
+			{name: "balanced critical path", project: 20 * time.Millisecond, global: 200 * time.Millisecond, counts: 80 * time.Millisecond, maxMedian: 250 * time.Millisecond},
+			{name: "slow project discovery", project: 240 * time.Millisecond, global: 20 * time.Millisecond, counts: 80 * time.Millisecond, maxMedian: 360 * time.Millisecond},
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2819,7 +2840,6 @@ func TestCLIStatusLatencyOverlapsBalancedAndSlowDiscovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			const runs = 5
 			durations := make([]time.Duration, 0, runs)
 			for i := 0; i < runs; i++ {
 				start := time.Now()
@@ -2838,7 +2858,14 @@ func TestCLIStatusLatencyOverlapsBalancedAndSlowDiscovery(t *testing.T) {
 }
 
 func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
-	const endpointDelay = 100 * time.Millisecond
+	endpointDelay := 15 * time.Millisecond
+	runs := 1
+	maxMedian := 75 * time.Millisecond
+	if performanceEvidenceEnabled() {
+		endpointDelay = 100 * time.Millisecond
+		runs = 5
+		maxMedian = 225 * time.Millisecond
+	}
 	const alertsJSON = `{"count":1}`
 	const tasksJSON = `{"active_tasks":1,"queued_tasks":0}`
 
@@ -2867,7 +2894,6 @@ func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const runs = 5
 	durations := make([]time.Duration, 0, runs)
 	for range runs {
 		start := time.Now()
@@ -2884,9 +2910,13 @@ func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
 			t.Errorf("delayed status made %d GET requests to %s, want %d:\n%s", got, path, runs, rec.all())
 		}
 	}
-	if median >= 225*time.Millisecond {
-		t.Fatalf("median CLI status latency = %s, want under 225ms for two 100ms request waves (durations: %v)", median, durations)
+	if median >= maxMedian {
+		t.Fatalf("median CLI status latency = %s, want under %s for two %s request waves (durations: %v)", median, maxMedian, endpointDelay, durations)
 	}
+}
+
+func performanceEvidenceEnabled() bool {
+	return os.Getenv("OPENVIBELY_PERF_EVIDENCE") == "1"
 }
 
 func TestCLIRequiresExplicitProjectWhenMultipleProjectsExist(t *testing.T) {

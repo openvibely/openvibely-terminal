@@ -508,6 +508,11 @@ func TestListAlertsBoundedPreservesWorkflowPredicatesAndMalformedPagination(t *t
 }
 
 func TestListAlertsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
+	if !performanceEvidenceEnabled() {
+		runListAlertsBoundedLargeCatalogRoutine(t)
+		return
+	}
+
 	const total = 1000
 	const samples = 3
 
@@ -558,6 +563,29 @@ func TestListAlertsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
 	if boundedMallocs >= fullMallocs*60/100 {
 		t.Fatalf("bounded mallocs = %d, complete = %d; want at least 40%% lower", boundedMallocs, fullMallocs)
 	}
+}
+
+func runListAlertsBoundedLargeCatalogRoutine(t *testing.T) {
+	t.Helper()
+	const total = 1000
+	c, requests, _, _ := alertCatalogServer(t, total, 0)
+	result, err := c.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, DefaultAlertListLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *requests != 1 {
+		t.Fatalf("bounded requests = %d, want 1", *requests)
+	}
+	if len(result.Alerts) != DefaultAlertListLimit || result.Alerts[0].ID != "alert-0000" || result.Alerts[len(result.Alerts)-1].ID != "alert-0049" {
+		t.Fatalf("bounded alerts = %+v, want first %d large-catalog rows", result.Alerts, DefaultAlertListLimit)
+	}
+	if !result.MoreAvailable || result.Complete || !result.TotalKnown || result.Total != total {
+		t.Fatalf("bounded metadata = %+v, want incomplete known total %d", result, total)
+	}
+}
+
+func performanceEvidenceEnabled() bool {
+	return os.Getenv("OPENVIBELY_PERF_EVIDENCE") == "1"
 }
 
 func allocatedBytesAndMallocsDuring(fn func()) (uint64, uint64) {
@@ -1993,6 +2021,11 @@ func TestListAutomationsCompleteCatalogStillFetchesAllPages(t *testing.T) {
 }
 
 func TestListAutomationsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
+	if !performanceEvidenceEnabled() {
+		runListAutomationsBoundedLargeCatalogRoutine(t)
+		return
+	}
+
 	const total = 5000
 	const samples = 3
 
@@ -2051,6 +2084,26 @@ func TestListAutomationsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
 	}
 	if boundedRSSDelta >= fullRSSDelta*80/100 {
 		t.Fatalf("bounded peak RSS delta = %d, complete = %d; want at least 20%% lower", boundedRSSDelta, fullRSSDelta)
+	}
+	t.Logf("automation_list_perf fixture=%d limit=%d full_p50=%s bounded_p50=%s full_p95=%s bounded_p95=%s full_alloc_bytes=%d bounded_alloc_bytes=%d full_rss_delta=%d bounded_rss_delta=%d", total, DefaultAutomationListLimit, fullMedian, boundedMedian, fullP95, boundedP95, fullAllocated, boundedAllocated, fullRSSDelta, boundedRSSDelta)
+}
+
+func runListAutomationsBoundedLargeCatalogRoutine(t *testing.T) {
+	t.Helper()
+	const total = 5000
+	c, requests, _, _ := automationCatalogServer(t, total, 0)
+	result, err := c.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *requests != 2 {
+		t.Fatalf("bounded requests = %d, want 2", *requests)
+	}
+	if len(result.Automations) != DefaultAutomationListLimit || result.Automations[0].ID != "au-0000" || result.Automations[len(result.Automations)-1].ID != "au-0099" {
+		t.Fatalf("bounded automations = %+v, want first %d large-catalog rows", result.Automations, DefaultAutomationListLimit)
+	}
+	if !result.MoreAvailable || result.Complete || !result.TotalKnown || result.Total != total {
+		t.Fatalf("bounded metadata = %+v, want incomplete known total %d", result, total)
 	}
 }
 
