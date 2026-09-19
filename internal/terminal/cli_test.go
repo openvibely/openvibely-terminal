@@ -5256,6 +5256,131 @@ func TestCLIRunsAutomationsRunAndCompatibilityAlias(t *testing.T) {
 	}
 }
 
+func TestCLIAutomationActionJSONMutations(t *testing.T) {
+	const initialAutomationsHTML = `<div>` +
+		`<div class="card" data-automation-url="/automations/au-1?project_id=p1"><div class="card-body relative"><span class="badge badge-outline badge-sm">active</span><button type="button" data-automation-card-delete="au-1" data-automation-name="Nightly sweep"></button></div></div>` +
+		`<div class="card" data-automation-url="/automations/au-2?project_id=p1"><div class="card-body relative"><span class="badge badge-outline badge-sm">paused</span><button type="button" data-automation-card-delete="au-2" data-automation-name="Weekly report"></button></div></div>` +
+		`</div>`
+	const refreshedAutomationsHTML = `<div>` +
+		`<div class="card" data-automation-url="/automations/au-1?project_id=p1"><div class="card-body relative"><span class="badge badge-outline badge-sm">paused</span><button type="button" data-automation-card-delete="au-1" data-automation-name="Nightly sweep"></button></div></div>` +
+		`<div class="card" data-automation-url="/automations/au-2?project_id=p1"><div class="card-body relative"><span class="badge badge-outline badge-sm">active</span><button type="button" data-automation-card-delete="au-2" data-automation-name="Weekly report"></button></div></div>` +
+		`</div>`
+	const deleteRefreshHTML = `<div>` +
+		`<div class="card" data-automation-url="/automations/au-2?project_id=p1"><div class="card-body relative"><span class="badge badge-outline badge-sm">active</span><button type="button" data-automation-card-delete="au-2" data-automation-name="Weekly report"></button></div></div>` +
+		`</div>`
+
+	type mutationOutput struct {
+		Status      string              `json:"status"`
+		Automations []client.Automation `json:"automations,omitempty"`
+	}
+	decode := func(t *testing.T, out string) mutationOutput {
+		t.Helper()
+		var got mutationOutput
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+			t.Fatalf("automation mutation JSON is invalid: %v\n%s", err, out)
+		}
+		return got
+	}
+	newServer := func(t *testing.T, refreshHTML string, failRefresh bool) (*client.Client, *recorder) {
+		t.Helper()
+		rec := &recorder{}
+		var automationGETs int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/automations":
+				automationGETs++
+				if automationGETs > 1 && failRefresh {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"error":"refresh failed"}`)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				if automationGETs > 1 {
+					_, _ = io.WriteString(w, refreshHTML)
+					return
+				}
+				_, _ = io.WriteString(w, initialAutomationsHTML)
+			case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/automations/au-1/"):
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{}`)
+			default:
+				t.Errorf("unexpected automation mutation request %s %s", r.Method, r.URL.RequestURI())
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, rec
+	}
+
+	cases := []struct {
+		name       string
+		action     string
+		force      bool
+		wantStatus string
+		wantPath   string
+		refresh    string
+	}{
+		{name: "run", action: "run", wantStatus: "run: Nightly sweep", wantPath: "/automations/au-1/run-now", refresh: refreshedAutomationsHTML},
+		{name: "run now alias", action: "run-now", wantStatus: "run: Nightly sweep", wantPath: "/automations/au-1/run-now", refresh: refreshedAutomationsHTML},
+		{name: "pause", action: "pause", wantStatus: "pause: Nightly sweep", wantPath: "/automations/au-1/pause", refresh: refreshedAutomationsHTML},
+		{name: "resume", action: "resume", wantStatus: "resume: Nightly sweep", wantPath: "/automations/au-1/resume", refresh: refreshedAutomationsHTML},
+		{name: "delete", action: "delete", force: true, wantStatus: "delete: Nightly sweep", wantPath: "/automations/au-1/delete", refresh: deleteRefreshHTML},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+" JSON includes status and refreshed automations", func(t *testing.T) {
+			c, rec := newServer(t, tc.refresh, false)
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"automations", tc.action, "Nightly sweep"}, tc.force, true); err != nil {
+				t.Fatalf("automations %s JSON failed: %v\n%s", tc.action, err, rec.all())
+			}
+			got := decode(t, out.String())
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if len(got.Automations) == 0 || got.Automations[0].ID == "" {
+				t.Fatalf("refreshed automations missing from JSON: %+v", got.Automations)
+			}
+			if tc.action == "delete" && got.Automations[0].ID != "au-2" {
+				t.Fatalf("delete refresh did not use refreshed automation list: %+v", got.Automations)
+			}
+			if tc.action != "delete" && (len(got.Automations) != 2 || got.Automations[0].State != "paused") {
+				t.Fatalf("refreshed automations = %+v", got.Automations)
+			}
+			if !rec.sawQuery("POST " + tc.wantPath + "?project_id=p1") {
+				t.Fatalf("%s mutation lost backend route or project scope:\n%s", tc.action, rec.all())
+			}
+		})
+	}
+
+	t.Run("refresh failure JSON remains status only", func(t *testing.T) {
+		c, rec := newServer(t, refreshedAutomationsHTML, true)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"automations", "pause", "Nightly sweep"}, false, true); err != nil {
+			t.Fatalf("automations pause JSON with refresh failure failed: %v\n%s", err, rec.all())
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &payload); err != nil {
+			t.Fatalf("status-only output is not parseable JSON: %v\n%s", err, out.String())
+		}
+		var status string
+		if err := json.Unmarshal(payload["status"], &status); err != nil || status != "pause: Nightly sweep" {
+			t.Fatalf("status = %q err=%v payload=%s", status, err, out.String())
+		}
+		if _, ok := payload["automations"]; ok {
+			t.Fatalf("refresh-failure JSON must not pretend to have a refreshed automation list: %s", out.String())
+		}
+	})
+}
+
 // One-shot CLI mode works headlessly for automation detail and JSON output.
 func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p2">
