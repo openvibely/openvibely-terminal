@@ -8126,8 +8126,8 @@ func insightsCommand() command {
 }
 
 type automationMutationOutput struct {
-	Status      string              `json:"status"`
-	Automations []client.Automation `json:"automations,omitempty"`
+	Status      string               `json:"status"`
+	Automations *[]client.Automation `json:"automations,omitempty"`
 }
 
 func automationMutationResult(status string, automations []client.Automation, refreshErr error) (string, error) {
@@ -8135,7 +8135,10 @@ func automationMutationResult(status string, automations []client.Automation, re
 		if refreshErr != nil {
 			return marshalJSON(automationMutationOutput{Status: status})
 		}
-		return marshalJSON(automationMutationOutput{Status: status, Automations: automations})
+		if automations == nil {
+			automations = []client.Automation{}
+		}
+		return marshalJSON(automationMutationOutput{Status: status, Automations: &automations})
 	}
 	if refreshErr != nil {
 		return status, nil
