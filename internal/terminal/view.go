@@ -3470,8 +3470,20 @@ func filterAgents(agents []client.AgentDef, filter string) []client.AgentDef {
 }
 
 func renderAgents(agents []client.AgentDef, filter string) string {
+	return renderAgentRows(filterAgents(agents, filter))
+}
+
+func renderAgentListResult(result client.AgentListResult, filter string) string {
+	out := renderAgentRows(result.Agents)
+	if result.MoreAvailable {
+		out += "\n\n" + dimStyle.Render(agentContinuationMessage(result, filter))
+	}
+	return out
+}
+
+func renderAgentRows(agents []client.AgentDef) string {
 	var rows [][]string
-	for _, a := range filterAgents(agents, filter) {
+	for _, a := range agents {
 		rows = append(rows, []string{
 			truncate(sanitizeAutomationDetailText(a.Name), 24),
 			truncate(sanitizeAutomationDetailText(a.Scope), 16),
@@ -3484,6 +3496,19 @@ func renderAgents(agents []client.AgentDef, filter string) string {
 	}
 	return table(append([][]string{{"NAME", "SCOPE", "MODEL", "DESCRIPTION"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/agents metrics · /agents plugins · /agents generate <description> · /agents edit <name> <field> <value> · /agents delete <name>")
+}
+
+func agentContinuationMessage(result client.AgentListResult, filter string) string {
+	if strings.TrimSpace(filter) == "" {
+		if result.TotalKnown {
+			return fmt.Sprintf("showing first %d of %d agent definitions; use a filter or --json for the complete list", len(result.Agents), result.Total)
+		}
+		return fmt.Sprintf("showing first %d agent definitions; more are available", len(result.Agents))
+	}
+	if result.TotalKnown {
+		return fmt.Sprintf("showing first %d matching agent definitions; more matches may be available (%d total agent definitions)", len(result.Agents), result.Total)
+	}
+	return fmt.Sprintf("showing first %d matching agent definitions; more matches may be available", len(result.Agents))
 }
 
 func renderAgentPlugins(state client.AgentPluginState) string {
@@ -3659,19 +3684,49 @@ func filterModels(list []client.LLMModel, filter string) []client.LLMModel {
 }
 
 func renderModels(list []client.LLMModel, filter string) string {
-	var rows [][]string
-	for _, mo := range filterModels(list, filter) {
-		rows = append(rows, []string{truncate(mo.Name, 26), mo.Provider, truncate(mo.Model, 30)})
-	}
-	if len(rows) == 0 {
-		if len(list) == 0 {
-			return dimStyle.Render("no models configured — run /models add to configure a provider")
-		}
+	filtered := filterModels(list, filter)
+	if len(filtered) == 0 && len(list) > 0 && filter != "" {
 		safeFilter := truncate(compactProviderText(sanitizeMemoryText(filter)), 80)
 		return dimStyle.Render(fmt.Sprintf("no models match %q", safeFilter))
 	}
+	return renderModelRows(filtered)
+}
+
+func renderModelListResult(result client.ModelListResult, filter string) string {
+	if len(result.Models) == 0 && strings.TrimSpace(filter) != "" && result.Complete {
+		safeFilter := truncate(compactProviderText(sanitizeMemoryText(filter)), 80)
+		return dimStyle.Render(fmt.Sprintf("no models match %q", safeFilter))
+	}
+	out := renderModelRows(result.Models)
+	if result.MoreAvailable {
+		out += "\n\n" + dimStyle.Render(modelContinuationMessage(result, filter))
+	}
+	return out
+}
+
+func renderModelRows(list []client.LLMModel) string {
+	var rows [][]string
+	for _, mo := range list {
+		rows = append(rows, []string{truncate(mo.Name, 26), mo.Provider, truncate(mo.Model, 30)})
+	}
+	if len(rows) == 0 {
+		return dimStyle.Render("no models configured — run /models add to configure a provider")
+	}
 	return table(append([][]string{{"NAME", "PROVIDER", "MODEL"}}, rows...)) + "\n\n" +
 		dimStyle.Render("/models add · /models edit <name> · /models default <name> · /models delete <name> · /models capacity")
+}
+
+func modelContinuationMessage(result client.ModelListResult, filter string) string {
+	if strings.TrimSpace(filter) == "" {
+		if result.TotalKnown {
+			return fmt.Sprintf("showing first %d of %d models; use a filter or --json for the complete list", len(result.Models), result.Total)
+		}
+		return fmt.Sprintf("showing first %d models; more are available", len(result.Models))
+	}
+	if result.TotalKnown {
+		return fmt.Sprintf("showing first %d matching models; more matches may be available (%d total models)", len(result.Models), result.Total)
+	}
+	return fmt.Sprintf("showing first %d matching models; more matches may be available", len(result.Models))
 }
 
 func renderModelCapacity(caps []client.ModelCapacity) string {

@@ -3285,6 +3285,62 @@ func TestRenderModelsDistinguishesEmptyFromNoFilterMatches(t *testing.T) {
 	}
 }
 
+func TestRenderBoundedModelAndAgentListsPreserveSmallOutput(t *testing.T) {
+	models := []client.LLMModel{
+		{ID: "m-1", Name: "Sonnet", Provider: "Anthropic", Model: "claude-sonnet-4"},
+		{ID: "m-2", Name: "GPT", Provider: "OpenAI", Model: "gpt-4o"},
+	}
+	agents := []client.AgentDef{
+		{ID: "a-1", Name: "Reviewer", Key: "reviewer", Scope: "project", Model: "sonnet", Description: "reviews code"},
+		{ID: "a-2", Name: "Planner", Key: "planner", Scope: "global", Model: "gpt", Description: "plans work"},
+	}
+
+	for _, filter := range []string{"", "sonnet", "missing"} {
+		modelResult := client.ModelListResult{Models: filterModels(models, filter), Limit: client.DefaultModelListLimit, Complete: true}
+		if filter == "missing" {
+			modelResult.Models = nil
+		}
+		got := stripANSI(renderModelListResult(modelResult, filter))
+		want := stripANSI(renderModels(models, filter))
+		if got != want {
+			t.Fatalf("bounded model output for filter %q changed small-list output:\n--- got ---\n%s\n--- want ---\n%s", filter, got, want)
+		}
+
+		agentResult := client.AgentListResult{Agents: filterAgents(agents, filter), Limit: client.DefaultAgentListLimit, Complete: true}
+		got = stripANSI(renderAgentListResult(agentResult, filter))
+		want = stripANSI(renderAgents(agents, filter))
+		if got != want {
+			t.Fatalf("bounded agent output for filter %q changed small-list output:\n--- got ---\n%s\n--- want ---\n%s", filter, got, want)
+		}
+	}
+}
+
+func TestRenderBoundedModelAndAgentListsShowContinuation(t *testing.T) {
+	modelOut := stripANSI(renderModelListResult(client.ModelListResult{
+		Models: []client.LLMModel{{ID: "m-1", Name: "Sonnet", Provider: "Anthropic", Model: "claude-sonnet-4"}},
+		Limit:  1, MoreAvailable: true, TotalKnown: true, Total: 5000,
+	}, ""))
+	if !strings.Contains(modelOut, "showing first 1 of 5000 models") || !strings.Contains(modelOut, "--json for the complete list") {
+		t.Fatalf("model continuation indicator missing:\n%s", modelOut)
+	}
+
+	filteredModelOut := stripANSI(renderModelListResult(client.ModelListResult{
+		Models: []client.LLMModel{{ID: "m-1", Name: "Sonnet", Provider: "Anthropic", Model: "claude-sonnet-4"}},
+		Limit:  1, MoreAvailable: true, TotalKnown: true, Total: 5000,
+	}, "sonnet"))
+	if !strings.Contains(filteredModelOut, "showing first 1 matching models") || !strings.Contains(filteredModelOut, "5000 total models") {
+		t.Fatalf("filtered model continuation indicator missing:\n%s", filteredModelOut)
+	}
+
+	agentOut := stripANSI(renderAgentListResult(client.AgentListResult{
+		Agents: []client.AgentDef{{ID: "a-1", Name: "Reviewer", Scope: "project", Model: "sonnet", Description: "reviews code"}},
+		Limit:  1, MoreAvailable: true, TotalKnown: true, Total: 5000,
+	}, ""))
+	if !strings.Contains(agentOut, "showing first 1 of 5000 agent definitions") || !strings.Contains(agentOut, "--json for the complete list") {
+		t.Fatalf("agent continuation indicator missing:\n%s", agentOut)
+	}
+}
+
 func TestEmptyStateHints(t *testing.T) {
 	cases := []struct {
 		name string

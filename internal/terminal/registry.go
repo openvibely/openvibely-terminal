@@ -3834,9 +3834,8 @@ func agentsCommand() command {
 		selectorPaths: [][]string{{"edit"}, {"delete"}},
 		desc:          "agent definitions, workflow metrics and vote audits",
 		usage: []string{
-			"agents [filter]                                      list agent definitions",
-			"agents generate <description>                        create an agent from a description",
-			"agents delete <agent>                                remove an agent definition (omit <agent> → interactive selector)",
+			fmt.Sprintf("agents [filter]                                      list agent definitions (plain output shows first %d matches)", client.DefaultAgentListLimit),
+			"agents generate <description>                        create an agent from a description", "agents delete <agent>                                remove an agent definition (omit <agent> → interactive selector)",
 			"agents metrics                                       per-agent workflow metrics",
 			"agents plugins [list]                                list marketplaces, plugins, and runtime status",
 			"agents plugins marketplaces add <source>             add a plugin marketplace",
@@ -3877,14 +3876,18 @@ func agentsCommand() command {
 			switch action {
 			case "", "list":
 				return m, run("Agents", cmdTimeout, func(ctx context.Context) (string, error) {
-					agents, err := c.ListAgents(ctx, pid)
+					if jsonMode {
+						agents, err := c.ListAgents(ctx, pid)
+						if err != nil {
+							return "", err
+						}
+						return marshalJSON(filterAgents(agents, ref))
+					}
+					result, err := c.ListAgentsBounded(ctx, pid, ref, client.DefaultAgentListLimit)
 					if err != nil {
 						return "", err
 					}
-					if jsonMode {
-						return marshalJSON(filterAgents(agents, ref))
-					}
-					return renderAgents(agents, ref), nil
+					return renderAgentListResult(result, ref), nil
 				})
 			case "metrics":
 				return m, run("Agent metrics", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -4829,7 +4832,7 @@ func (m Model) handleModelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func modelsCommand() command {
 	actions := []string{"list", "add", "edit", "default", "delete", "capacity"}
 	usage := append([]string{
-		"models [filter]                            list configured models",
+		fmt.Sprintf("models [filter]                            list configured models (plain output shows first %d matches)", client.DefaultModelListLimit),
 		"models add                                  guided provider setup with masked API-key input",
 		"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
 		"  providers: anthropic, openai, ollama; API keys require piped --api-key-stdin", "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>",
@@ -4884,17 +4887,20 @@ func modelsCommand() command {
 
 			if action == "" || action == "list" {
 				return m, run("Models", cmdTimeout, func(ctx context.Context) (string, error) {
-					list, err := c.ListModels(ctx, "")
+					if jsonMode {
+						list, err := c.ListModels(ctx, "")
+						if err != nil {
+							return "", err
+						}
+						return marshalJSON(filterModels(list, ref))
+					}
+					result, err := c.ListModelsBounded(ctx, "", ref, client.DefaultModelListLimit)
 					if err != nil {
 						return "", err
 					}
-					if jsonMode {
-						return marshalJSON(filterModels(list, ref))
-					}
-					return renderModels(list, ref), nil
+					return renderModelListResult(result, ref), nil
 				})
 			}
-
 			if action == "add" {
 				if len(rest) == 0 && !cliMode {
 					return m.beginModelWizard()

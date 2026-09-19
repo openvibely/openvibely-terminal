@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -3102,6 +3103,176 @@ func TestCLIGlobalModelsListWorksAcrossProjectStates(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCLIModelAndAgentHumanListsUseBoundedCatalogButJSONIsComplete(t *testing.T) {
+	t.Run("models", func(t *testing.T) {
+		c, requests := cliPagedCatalogServer(t, "models", 120, "")
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "", []string{"models"}, false, false); err != nil {
+			t.Fatalf("plain models failed: %v", err)
+		}
+		if got := countRequestPath(requests(), "/models"); got != 1 {
+			t.Fatalf("plain model list requests = %d, want 1; all requests: %v", got, requests())
+		}
+		plain := stripANSI(out.String())
+		if !strings.Contains(plain, "Model 0049") || strings.Contains(plain, "Model 0050") || !strings.Contains(plain, "showing first 50 of 120 models") {
+			t.Fatalf("plain model output was not bounded with continuation:\n%s", plain)
+		}
+
+		c, requests = cliPagedCatalogServer(t, "models", 120, "")
+		out.Reset()
+		if err := RunCLI(c, &out, "", []string{"models"}, false, true); err != nil {
+			t.Fatalf("JSON models failed: %v", err)
+		}
+		if got := countRequestPath(requests(), "/models"); got != 3 {
+			t.Fatalf("JSON model list requests = %d, want 3; all requests: %v", got, requests())
+		}
+		var models []client.LLMModel
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &models); err != nil {
+			t.Fatalf("model JSON did not decode: %v\n%s", err, out.String())
+		}
+		if len(models) != 120 || models[119].ID != "model-0119" {
+			t.Fatalf("models len/last = %d/%+v", len(models), models[len(models)-1])
+		}
+	})
+
+	t.Run("agents", func(t *testing.T) {
+		c, requests := cliPagedCatalogServer(t, "agents", 120, "p1")
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "", []string{"agents"}, false, false); err != nil {
+			t.Fatalf("plain agents failed: %v", err)
+		}
+		if got := countRequestPath(requests(), "/agents"); got != 1 {
+			t.Fatalf("plain agent list requests = %d, want 1; all requests: %v", got, requests())
+		}
+		plain := stripANSI(out.String())
+		if !strings.Contains(plain, "Agent 0049") || strings.Contains(plain, "Agent 0050") || !strings.Contains(plain, "showing first 50 of 120 agent definitions") {
+			t.Fatalf("plain agent output was not bounded with continuation:\n%s", plain)
+		}
+
+		c, requests = cliPagedCatalogServer(t, "agents", 120, "p1")
+		out.Reset()
+		if err := RunCLI(c, &out, "", []string{"agents"}, false, true); err != nil {
+			t.Fatalf("JSON agents failed: %v", err)
+		}
+		if got := countRequestPath(requests(), "/agents"); got != 3 {
+			t.Fatalf("JSON agent list requests = %d, want 3; all requests: %v", got, requests())
+		}
+		var wrapped struct {
+			ProjectID   string            `json:"project_id"`
+			ProjectName string            `json:"project_name"`
+			Data        []client.AgentDef `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &wrapped); err != nil {
+			t.Fatalf("agent JSON did not decode: %v\n%s", err, out.String())
+		}
+		if wrapped.ProjectID != "p1" || len(wrapped.Data) != 120 || wrapped.Data[119].ID != "agent-0119" {
+			t.Fatalf("agent JSON = %+v", wrapped)
+		}
+		for _, req := range requests() {
+			if strings.HasPrefix(req, "GET /agents") && !strings.Contains(req, "project_id=p1") {
+				t.Fatalf("agent request lost project scope: %v", requests())
+			}
+		}
+	})
+}
+
+func cliPagedCatalogServer(t *testing.T, resource string, total int, projectID string) (*client.Client, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			if projectID == "" {
+				_, _ = io.WriteString(w, `{"projects":[]}`)
+			} else {
+				_, _ = fmt.Fprintf(w, `{"projects":[{"id":%q,"name":"demo"}]}`, projectID)
+			}
+		case "/" + resource:
+			if projectID != "" && r.URL.Query().Get("project_id") != projectID {
+				http.Error(w, "wrong project", http.StatusForbidden)
+				return
+			}
+			offset := 0
+			if raw := r.URL.Query().Get("offset"); raw != "" {
+				parsed, err := strconv.Atoi(raw)
+				if err != nil {
+					http.Error(w, "bad offset", http.StatusBadRequest)
+					return
+				}
+				offset = parsed
+			}
+			pageSize := client.DefaultModelListLimit
+			if resource == "agents" {
+				pageSize = client.DefaultAgentListLimit
+			}
+			if raw := r.URL.Query().Get("page_size"); raw != "" {
+				parsed, err := strconv.Atoi(raw)
+				if err != nil || parsed <= 0 {
+					http.Error(w, "bad page_size", http.StatusBadRequest)
+					return
+				}
+				pageSize = parsed
+			}
+			end := offset + pageSize
+			if end > total {
+				end = total
+			}
+			hasMore := end < total
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-OpenVibely-Card-Page-Total", strconv.Itoa(total))
+			w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(hasMore))
+			_, _ = io.WriteString(w, cliCatalogPage(resource, offset, end, total, hasMore))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), requests...)
+	}
+}
+
+func cliCatalogPage(resource string, start, end, total int, hasMore bool) string {
+	selector := "data-model-id"
+	key := "data-model-id"
+	if resource == "agents" {
+		selector = "data-agent-id"
+		key = "data-agent-id"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `<section data-card-pagination-root data-card-pagination-card-selector="[%s]" data-card-pagination-key="%s" data-card-pagination-total="%d" data-card-pagination-has-more="%t">`, selector, key, total, hasMore)
+	for i := start; i < end; i++ {
+		if resource == "models" {
+			fmt.Fprintf(&b, `<div data-model-id="model-%04d" data-model-name="Model %04d" data-model-provider="provider" data-model-model="fixture-%04d">details</div>`, i, i, i)
+		} else {
+			fmt.Fprintf(&b, `<div data-agent-id="agent-%04d" data-agent-key="agent-key-%04d" data-agent-name="Agent %04d" data-agent-description="does work" data-agent-model="fixture-%04d" data-agent-scope="project"></div>`, i, i, i, i)
+		}
+	}
+	b.WriteString(`</section>`)
+	return b.String()
+}
+
+func countRequestPath(requests []string, path string) int {
+	count := 0
+	for _, req := range requests {
+		if strings.HasPrefix(req, "GET "+path) {
+			count++
+		}
+	}
+	return count
 }
 
 func TestCLIModelsHelpDocumentsSafeAddWorkflow(t *testing.T) {

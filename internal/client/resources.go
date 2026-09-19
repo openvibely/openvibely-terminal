@@ -1491,27 +1491,149 @@ type LLMModel struct {
 	Text     string `json:"text"`
 }
 
+const DefaultModelListLimit = cardPageSize
+
+// ModelListResult is the bounded human-list view of model cards.
+type ModelListResult struct {
+	Models        []LLMModel
+	Limit         int
+	Complete      bool
+	MoreAvailable bool
+	Total         int
+	TotalKnown    bool
+	ParsedCards   int
+	RetainedPages int
+}
+
 // ListModels scrapes the models screen.
 func (c *Client) ListModels(ctx context.Context, projectID string) ([]LLMModel, error) {
 	pages, err := c.getCardPages(ctx, "/models"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	cards := aggregateFirstSeenPages(pages,
-		func(root *html.Node) []Card {
-			cards := dedupedCards(root, "data-model-id")
-			out := make([]Card, 0, len(cards))
-			for _, card := range cards {
-				if card.Get("model-name") != "" {
-					out = append(out, card)
-				}
-			}
-			return out
-		},
-		func(card Card) string { return card.Get("model-id") },
+	return aggregateModelPages(pages), nil
+}
+
+// ListModelsBounded scrapes only enough model cards for ordinary human output.
+// Filtering is local and case-insensitive across name, configured model, and
+// provider. JSON output and selectors should continue to use ListModels.
+func (c *Client) ListModelsBounded(ctx context.Context, projectID, filter string, limit int) (ModelListResult, error) {
+	if limit <= 0 {
+		limit = DefaultModelListLimit
+	}
+	path := "/models" + query("project_id", projectID)
+	root, meta, err := c.getHTMLPageMeta(ctx, path)
+	if err != nil {
+		return ModelListResult{}, err
+	}
+	return c.listModelsBoundedFromInitial(ctx, path, root, meta, filter, limit)
+}
+
+func aggregateModelPages(pages []htmlPage) []LLMModel {
+	return aggregateFirstSeenPages(pages,
+		func(root *html.Node) []LLMModel { return parseModels(root) },
+		func(model LLMModel) string { return model.ID },
 	)
+}
+
+func (c *Client) listModelsBoundedFromInitial(ctx context.Context, path string, root *html.Node, meta htmlPageMeta, filter string, limit int) (ModelListResult, error) {
+	result := ModelListResult{Limit: limit, Total: meta.total, TotalKnown: meta.totalKnown}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	if paginationRoot == nil {
+		if meta.hasMore {
+			return ModelListResult{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
+		}
+		seen := make(map[string]struct{})
+		var stopped bool
+		result.Models, result.ParsedCards, stopped = collectBoundedModels(root, result.Models, seen, filter, limit)
+		result.MoreAvailable = stopped
+		result.Complete = !stopped
+		return result, nil
+	}
+	selector := attr(paginationRoot, "data-card-pagination-card-selector")
+	keyAttr := attr(paginationRoot, "data-card-pagination-key")
+	if meta.hasMore {
+		marker, _ := paginationSelector(selector)
+		if marker == "" || strings.TrimSpace(keyAttr) == "" {
+			return ModelListResult{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
+		}
+	}
+	seen := make(map[string]struct{})
+	offset := countPaginationCards(root, selector, keyAttr)
+	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+		return ModelListResult{}, err
+	}
+	var stopped bool
+	result.Models, result.ParsedCards, stopped = collectBoundedModels(root, result.Models, seen, filter, limit)
+	if stopped || (len(result.Models) >= limit && meta.hasMore) {
+		result.MoreAvailable = true
+		return result, nil
+	}
+	for page := 1; meta.hasMore; page++ {
+		continuation, err := cardContinuationPath(path, page, offset)
+		if err != nil {
+			return ModelListResult{}, err
+		}
+		next, nextMeta, err := c.getHTMLPageMeta(ctx, continuation)
+		if err != nil {
+			return ModelListResult{}, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
+		}
+		count := countPaginationCards(next, selector, keyAttr)
+		if count == 0 && nextMeta.hasMore {
+			return ModelListResult{}, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
+		}
+		if offset+count > maxPaginatedCards {
+			return ModelListResult{}, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
+		}
+		if nextMeta.totalKnown {
+			result.Total, result.TotalKnown = nextMeta.total, true
+		}
+		offset += count
+		meta.hasMore = nextMeta.hasMore
+		if err := validateCardContinuation(page+1, offset, meta.hasMore); err != nil {
+			return ModelListResult{}, err
+		}
+		var parsed int
+		result.Models, parsed, stopped = collectBoundedModels(next, result.Models, seen, filter, limit)
+		result.ParsedCards += parsed
+		result.RetainedPages++
+		if stopped || (len(result.Models) >= limit && meta.hasMore) {
+			result.MoreAvailable = true
+			return result, nil
+		}
+	}
+	result.Complete = true
+	return result, nil
+}
+
+func collectBoundedModels(root *html.Node, out []LLMModel, seen map[string]struct{}, filter string, limit int) ([]LLMModel, int, bool) {
+	parsed := 0
+	stopped := false
+	for _, model := range parseModels(root) {
+		parsed++
+		if _, ok := seen[model.ID]; ok {
+			continue
+		}
+		seen[model.ID] = struct{}{}
+		if !matchModelFilter(model, filter) {
+			continue
+		}
+		if len(out) >= limit {
+			stopped = true
+			break
+		}
+		out = append(out, model)
+	}
+	return out, parsed, stopped
+}
+
+func parseModels(root *html.Node) []LLMModel {
+	cards := dedupedCards(root, "data-model-id")
 	out := make([]LLMModel, 0, len(cards))
 	for _, card := range cards {
+		if card.Get("model-name") == "" {
+			continue
+		}
 		out = append(out, LLMModel{
 			ID:       card.Get("model-id"),
 			Name:     card.Get("model-name"),
@@ -1520,7 +1642,11 @@ func (c *Client) ListModels(ctx context.Context, projectID string) ([]LLMModel, 
 			Text:     card.Text,
 		})
 	}
-	return out, nil
+	return out
+}
+
+func matchModelFilter(model LLMModel, filter string) bool {
+	return localFilterMatch(filter, model.Name, model.Model, model.Provider)
 }
 
 // SetDefaultModel marks a model as the default within a project.
@@ -1645,27 +1771,149 @@ type AgentLifecycleHook struct {
 	PayloadJSON     string `json:"payload_json,omitempty"`
 }
 
+const DefaultAgentListLimit = cardPageSize
+
+// AgentListResult is the bounded human-list view of agent cards.
+type AgentListResult struct {
+	Agents        []AgentDef
+	Limit         int
+	Complete      bool
+	MoreAvailable bool
+	Total         int
+	TotalKnown    bool
+	ParsedCards   int
+	RetainedPages int
+}
+
 // ListAgents scrapes the agents screen.
 func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, error) {
 	pages, err := c.getCardPages(ctx, "/agents"+query("project_id", projectID))
 	if err != nil {
 		return nil, err
 	}
-	cards := aggregateFirstSeenPages(pages,
-		func(root *html.Node) []Card {
-			cards := dedupedCardsWithoutText(root, "data-agent-id")
-			out := make([]Card, 0, len(cards))
-			for _, card := range cards {
-				if card.Get("agent-name") != "" {
-					out = append(out, card)
-				}
-			}
-			return out
-		},
-		func(card Card) string { return card.Get("agent-id") },
+	return aggregateAgentPages(pages), nil
+}
+
+// ListAgentsBounded scrapes only enough agent cards for ordinary human output.
+// Filtering is local and case-insensitive across name, key, and description. JSON
+// output, selectors, and mutations should continue to use ListAgents.
+func (c *Client) ListAgentsBounded(ctx context.Context, projectID, filter string, limit int) (AgentListResult, error) {
+	if limit <= 0 {
+		limit = DefaultAgentListLimit
+	}
+	path := "/agents" + query("project_id", projectID)
+	root, meta, err := c.getHTMLPageMeta(ctx, path)
+	if err != nil {
+		return AgentListResult{}, err
+	}
+	return c.listAgentsBoundedFromInitial(ctx, path, root, meta, filter, limit)
+}
+
+func aggregateAgentPages(pages []htmlPage) []AgentDef {
+	return aggregateFirstSeenPages(pages,
+		func(root *html.Node) []AgentDef { return parseAgents(root) },
+		func(agent AgentDef) string { return agent.ID },
 	)
+}
+
+func (c *Client) listAgentsBoundedFromInitial(ctx context.Context, path string, root *html.Node, meta htmlPageMeta, filter string, limit int) (AgentListResult, error) {
+	result := AgentListResult{Limit: limit, Total: meta.total, TotalKnown: meta.totalKnown}
+	paginationRoot := findNode(root, func(n *html.Node) bool { return hasHTMLAttr(n, "data-card-pagination-root") })
+	if paginationRoot == nil {
+		if meta.hasMore {
+			return AgentListResult{}, fmt.Errorf("card pagination reported more cards without pagination metadata")
+		}
+		seen := make(map[string]struct{})
+		var stopped bool
+		result.Agents, result.ParsedCards, stopped = collectBoundedAgents(root, result.Agents, seen, filter, limit)
+		result.MoreAvailable = stopped
+		result.Complete = !stopped
+		return result, nil
+	}
+	selector := attr(paginationRoot, "data-card-pagination-card-selector")
+	keyAttr := attr(paginationRoot, "data-card-pagination-key")
+	if meta.hasMore {
+		marker, _ := paginationSelector(selector)
+		if marker == "" || strings.TrimSpace(keyAttr) == "" {
+			return AgentListResult{}, fmt.Errorf("card pagination reported more cards with invalid pagination metadata")
+		}
+	}
+	seen := make(map[string]struct{})
+	offset := countPaginationCards(root, selector, keyAttr)
+	if err := validateCardContinuation(1, offset, meta.hasMore); err != nil {
+		return AgentListResult{}, err
+	}
+	var stopped bool
+	result.Agents, result.ParsedCards, stopped = collectBoundedAgents(root, result.Agents, seen, filter, limit)
+	if stopped || (len(result.Agents) >= limit && meta.hasMore) {
+		result.MoreAvailable = true
+		return result, nil
+	}
+	for page := 1; meta.hasMore; page++ {
+		continuation, err := cardContinuationPath(path, page, offset)
+		if err != nil {
+			return AgentListResult{}, err
+		}
+		next, nextMeta, err := c.getHTMLPageMeta(ctx, continuation)
+		if err != nil {
+			return AgentListResult{}, fmt.Errorf("loading card page %d after %d cards: %w", page+1, offset, err)
+		}
+		count := countPaginationCards(next, selector, keyAttr)
+		if count == 0 && nextMeta.hasMore {
+			return AgentListResult{}, fmt.Errorf("loading card page %d: backend reported more cards but returned none", page+1)
+		}
+		if offset+count > maxPaginatedCards {
+			return AgentListResult{}, fmt.Errorf("card pagination exceeded safety limit after %d cards", offset)
+		}
+		if nextMeta.totalKnown {
+			result.Total, result.TotalKnown = nextMeta.total, true
+		}
+		offset += count
+		meta.hasMore = nextMeta.hasMore
+		if err := validateCardContinuation(page+1, offset, meta.hasMore); err != nil {
+			return AgentListResult{}, err
+		}
+		var parsed int
+		result.Agents, parsed, stopped = collectBoundedAgents(next, result.Agents, seen, filter, limit)
+		result.ParsedCards += parsed
+		result.RetainedPages++
+		if stopped || (len(result.Agents) >= limit && meta.hasMore) {
+			result.MoreAvailable = true
+			return result, nil
+		}
+	}
+	result.Complete = true
+	return result, nil
+}
+
+func collectBoundedAgents(root *html.Node, out []AgentDef, seen map[string]struct{}, filter string, limit int) ([]AgentDef, int, bool) {
+	parsed := 0
+	stopped := false
+	for _, agent := range parseAgents(root) {
+		parsed++
+		if _, ok := seen[agent.ID]; ok {
+			continue
+		}
+		seen[agent.ID] = struct{}{}
+		if !matchAgentFilter(agent, filter) {
+			continue
+		}
+		if len(out) >= limit {
+			stopped = true
+			break
+		}
+		out = append(out, agent)
+	}
+	return out, parsed, stopped
+}
+
+func parseAgents(root *html.Node) []AgentDef {
+	cards := dedupedCardsWithoutText(root, "data-agent-id")
 	out := make([]AgentDef, 0, len(cards))
 	for _, card := range cards {
+		if card.Get("agent-name") == "" {
+			continue
+		}
 		out = append(out, AgentDef{
 			ID:          card.Get("agent-id"),
 			Key:         card.Get("agent-key"),
@@ -1675,7 +1923,24 @@ func (c *Client) ListAgents(ctx context.Context, projectID string) ([]AgentDef, 
 			Scope:       card.Get("agent-scope"),
 		})
 	}
-	return out, nil
+	return out
+}
+
+func matchAgentFilter(agent AgentDef, filter string) bool {
+	return localFilterMatch(filter, agent.Name, agent.Key, agent.Description)
+}
+
+func localFilterMatch(filter string, fields ...string) bool {
+	if filter == "" {
+		return true
+	}
+	f := strings.ToLower(filter)
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), f) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetAgent loads the authoritative definition and lifecycle associations for an

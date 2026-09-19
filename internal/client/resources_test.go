@@ -1304,6 +1304,353 @@ func TestListModelsAndAgents(t *testing.T) {
 	})
 }
 
+type catalogFixtureKind string
+
+const (
+	catalogFixtureModels catalogFixtureKind = "models"
+	catalogFixtureAgents catalogFixtureKind = "agents"
+)
+
+type pagedCatalogFixture struct {
+	client      *Client
+	requestURIs func() []string
+	bytesServed func() int
+}
+
+func newPagedCatalogFixture(t *testing.T, kind catalogFixtureKind, total int, projectID string) pagedCatalogFixture {
+	t.Helper()
+	var mu sync.Mutex
+	var uris []string
+	bytesServed := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/"+string(kind) {
+			http.NotFound(w, r)
+			return
+		}
+		if projectID != "" && r.URL.Query().Get("project_id") != projectID {
+			http.Error(w, "wrong project", http.StatusForbidden)
+			return
+		}
+		offset := 0
+		if raw := r.URL.Query().Get("offset"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil {
+				http.Error(w, "bad offset", http.StatusBadRequest)
+				return
+			}
+			offset = parsed
+		}
+		pageSize := cardPageSize
+		if raw := r.URL.Query().Get("page_size"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed <= 0 {
+				http.Error(w, "bad page_size", http.StatusBadRequest)
+				return
+			}
+			pageSize = parsed
+		}
+		end := offset + pageSize
+		if end > total {
+			end = total
+		}
+		hasMore := end < total
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set(cardPageTotalHeader, strconv.Itoa(total))
+		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(hasMore))
+		body := renderCatalogFixturePage(kind, offset, end, total, hasMore)
+		mu.Lock()
+		uris = append(uris, r.URL.RequestURI())
+		bytesServed += len(body)
+		mu.Unlock()
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pagedCatalogFixture{
+		client: c,
+		requestURIs: func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]string(nil), uris...)
+		},
+		bytesServed: func() int {
+			mu.Lock()
+			defer mu.Unlock()
+			return bytesServed
+		},
+	}
+}
+
+func renderCatalogFixturePage(kind catalogFixtureKind, start, end, total int, hasMore bool) string {
+	selector := "data-model-id"
+	key := "data-model-id"
+	if kind == catalogFixtureAgents {
+		selector = "data-agent-id"
+		key = "data-agent-id"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `<section data-card-pagination-root data-card-pagination-card-selector="[%s]" data-card-pagination-key="%s" data-card-pagination-total="%d" data-card-pagination-has-more="%t">`, selector, key, total, hasMore)
+	for i := start; i < end; i++ {
+		if kind == catalogFixtureModels {
+			fmt.Fprintf(&b, `<div data-model-id="model-%04d" data-model-name="Model %04d" data-model-provider="provider-%02d" data-model-model="fixture-model-%04d">details %04d</div>`, i, i, i%7, i, i)
+		} else {
+			fmt.Fprintf(&b, `<div data-agent-id="agent-%04d" data-agent-key="agent-key-%04d" data-agent-name="Agent %04d" data-agent-description="handles bucket %04d" data-agent-model="fixture-model-%04d" data-agent-scope="project"></div>`, i, i, i, i, i)
+		}
+	}
+	b.WriteString(`</section>`)
+	return b.String()
+}
+
+func TestBoundedModelAndAgentListsReducePagedCatalogWork(t *testing.T) {
+	for _, kind := range []catalogFixtureKind{catalogFixtureModels, catalogFixtureAgents} {
+		for _, total := range []int{1000, 5000} {
+			t.Run(fmt.Sprintf("%s-%d", kind, total), func(t *testing.T) {
+				boundedFixture := newPagedCatalogFixture(t, kind, total, "p1")
+				if kind == catalogFixtureModels {
+					result, err := boundedFixture.client.ListModelsBounded(context.Background(), "p1", "", DefaultModelListLimit)
+					if err != nil {
+						t.Fatalf("ListModelsBounded: %v", err)
+					}
+					if len(result.Models) != DefaultModelListLimit || !result.MoreAvailable || !result.TotalKnown || result.Total != total {
+						t.Fatalf("bounded result = %+v", result)
+					}
+				} else {
+					result, err := boundedFixture.client.ListAgentsBounded(context.Background(), "p1", "", DefaultAgentListLimit)
+					if err != nil {
+						t.Fatalf("ListAgentsBounded: %v", err)
+					}
+					if len(result.Agents) != DefaultAgentListLimit || !result.MoreAvailable || !result.TotalKnown || result.Total != total {
+						t.Fatalf("bounded result = %+v", result)
+					}
+				}
+				boundedRequests := len(boundedFixture.requestURIs())
+				boundedBytes := boundedFixture.bytesServed()
+				if boundedRequests != 1 {
+					t.Fatalf("bounded requests = %d, want 1", boundedRequests)
+				}
+
+				fullFixture := newPagedCatalogFixture(t, kind, total, "p1")
+				if kind == catalogFixtureModels {
+					models, err := fullFixture.client.ListModels(context.Background(), "p1")
+					if err != nil {
+						t.Fatalf("ListModels: %v", err)
+					}
+					if len(models) != total {
+						t.Fatalf("full models = %d, want %d", len(models), total)
+					}
+				} else {
+					agents, err := fullFixture.client.ListAgents(context.Background(), "p1")
+					if err != nil {
+						t.Fatalf("ListAgents: %v", err)
+					}
+					if len(agents) != total {
+						t.Fatalf("full agents = %d, want %d", len(agents), total)
+					}
+				}
+				fullRequests := len(fullFixture.requestURIs())
+				fullBytes := fullFixture.bytesServed()
+				if !(boundedRequests*2 < fullRequests) {
+					t.Fatalf("request reduction too small: bounded=%d full=%d", boundedRequests, fullRequests)
+				}
+				if !(boundedBytes*2 < fullBytes) {
+					t.Fatalf("response-byte reduction too small: bounded=%d full=%d", boundedBytes, fullBytes)
+				}
+			})
+		}
+	}
+}
+
+func TestBoundedModelAndAgentFiltersTraverseOnlyAsNeeded(t *testing.T) {
+	t.Run("models high match stops on first page", func(t *testing.T) {
+		fixture := newPagedCatalogFixture(t, catalogFixtureModels, 5000, "")
+		result, err := fixture.client.ListModelsBounded(context.Background(), "", "provider", DefaultModelListLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Models) != DefaultModelListLimit || !result.MoreAvailable || len(fixture.requestURIs()) != 1 {
+			t.Fatalf("result=%+v requests=%v", result, fixture.requestURIs())
+		}
+	})
+
+	t.Run("models low match completes full traversal", func(t *testing.T) {
+		fixture := newPagedCatalogFixture(t, catalogFixtureModels, 500, "")
+		result, err := fixture.client.ListModelsBounded(context.Background(), "", "fixture-model-0100", DefaultModelListLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Models) != 1 || result.Models[0].ID != "model-0100" || result.MoreAvailable || !result.Complete {
+			t.Fatalf("result=%+v", result)
+		}
+		if got, want := len(fixture.requestURIs()), 10; got != want {
+			t.Fatalf("requests = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("agents no match completes full traversal", func(t *testing.T) {
+		fixture := newPagedCatalogFixture(t, catalogFixtureAgents, 150, "p2")
+		result, err := fixture.client.ListAgentsBounded(context.Background(), "p2", "missing", DefaultAgentListLimit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Agents) != 0 || result.MoreAvailable || !result.Complete {
+			t.Fatalf("result=%+v", result)
+		}
+		if got, want := len(fixture.requestURIs()), 3; got != want {
+			t.Fatalf("requests = %d, want %d", got, want)
+		}
+		for _, uri := range fixture.requestURIs() {
+			if !strings.Contains(uri, "project_id=p2") {
+				t.Fatalf("continuation request lost project scope: %v", fixture.requestURIs())
+			}
+		}
+	})
+
+	t.Run("agents match after first page stops once the display limit is filled", func(t *testing.T) {
+		fixture := newPagedCatalogFixture(t, catalogFixtureAgents, 500, "p2")
+		result, err := fixture.client.ListAgentsBounded(context.Background(), "p2", "bucket 0075", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Agents) != 1 || result.Agents[0].ID != "agent-0075" || !result.MoreAvailable || result.Complete {
+			t.Fatalf("result=%+v", result)
+		}
+		if got, want := len(fixture.requestURIs()), 2; got != want {
+			t.Fatalf("requests = %d, want %d", got, want)
+		}
+	})
+}
+
+func TestBoundedCatalogPaginationErrorsMatchFullTraversal(t *testing.T) {
+	for _, kind := range []catalogFixtureKind{catalogFixtureModels, catalogFixtureAgents} {
+		t.Run(string(kind), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Set(cardPageMoreHeader, "true")
+				_, _ = io.WriteString(w, `<section data-card-pagination-root data-card-pagination-card-selector="bad" data-card-pagination-key=""></section>`)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == catalogFixtureModels {
+				_, err = c.ListModelsBounded(context.Background(), "", "", DefaultModelListLimit)
+			} else {
+				_, err = c.ListAgentsBounded(context.Background(), "", "", DefaultAgentListLimit)
+			}
+			if err == nil || !strings.Contains(err.Error(), "invalid pagination metadata") {
+				t.Fatalf("err = %v, want invalid pagination metadata", err)
+			}
+		})
+	}
+}
+
+func BenchmarkBoundedModelAndAgentCatalogLists(b *testing.B) {
+	for _, kind := range []catalogFixtureKind{catalogFixtureModels, catalogFixtureAgents} {
+		for _, total := range []int{1000, 5000} {
+			b.Run(fmt.Sprintf("%s/%d/full", kind, total), func(b *testing.B) {
+				c, closeServer := benchmarkPagedCatalogClient(b, kind, total)
+				defer closeServer()
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if kind == catalogFixtureModels {
+						models, err := c.ListModels(context.Background(), "p1")
+						if err != nil {
+							b.Fatal(err)
+						}
+						if len(models) != total {
+							b.Fatalf("models = %d, want %d", len(models), total)
+						}
+					} else {
+						agents, err := c.ListAgents(context.Background(), "p1")
+						if err != nil {
+							b.Fatal(err)
+						}
+						if len(agents) != total {
+							b.Fatalf("agents = %d, want %d", len(agents), total)
+						}
+					}
+				}
+			})
+			b.Run(fmt.Sprintf("%s/%d/bounded", kind, total), func(b *testing.B) {
+				c, closeServer := benchmarkPagedCatalogClient(b, kind, total)
+				defer closeServer()
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if kind == catalogFixtureModels {
+						result, err := c.ListModelsBounded(context.Background(), "p1", "", DefaultModelListLimit)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if len(result.Models) != DefaultModelListLimit || !result.MoreAvailable {
+							b.Fatalf("result = %+v", result)
+						}
+					} else {
+						result, err := c.ListAgentsBounded(context.Background(), "p1", "", DefaultAgentListLimit)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if len(result.Agents) != DefaultAgentListLimit || !result.MoreAvailable {
+							b.Fatalf("result = %+v", result)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func benchmarkPagedCatalogClient(b *testing.B, kind catalogFixtureKind, total int) (*Client, func()) {
+	b.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/"+string(kind) {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("project_id") != "p1" {
+			http.Error(w, "wrong project", http.StatusForbidden)
+			return
+		}
+		offset := 0
+		if raw := r.URL.Query().Get("offset"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil {
+				http.Error(w, "bad offset", http.StatusBadRequest)
+				return
+			}
+			offset = parsed
+		}
+		pageSize := cardPageSize
+		if raw := r.URL.Query().Get("page_size"); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed <= 0 {
+				http.Error(w, "bad page_size", http.StatusBadRequest)
+				return
+			}
+			pageSize = parsed
+		}
+		end := offset + pageSize
+		if end > total {
+			end = total
+		}
+		hasMore := end < total
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set(cardPageTotalHeader, strconv.Itoa(total))
+		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(hasMore))
+		_, _ = io.WriteString(w, renderCatalogFixturePage(kind, offset, end, total, hasMore))
+	}))
+	c, err := New(srv.URL)
+	if err != nil {
+		b.Fatal(err)
+	}
+	return c, srv.Close
+}
+
 func TestDeleteAgentUsesProjectScope(t *testing.T) {
 	var requests []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
