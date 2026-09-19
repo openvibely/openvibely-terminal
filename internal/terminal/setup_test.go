@@ -200,8 +200,17 @@ func TestSetupStartRequiresConfirmationOrForce(t *testing.T) {
 	if cmd != nil || m.pendingConfirmation == nil {
 		t.Fatalf("interactive setup start did not wait for confirmation: cmd=%v pending=%v", cmd, m.pendingConfirmation != nil)
 	}
-	if !strings.Contains(m.pendingConfirmation.message, "start process `openvibely`") || !strings.Contains(m.pendingConfirmation.message, "Type 'yes' to confirm") {
-		t.Fatalf("setup confirmation did not disclose effects:\n%s", m.pendingConfirmation.message)
+	for _, want := range []string{
+		"setup does not create files before starting",
+		"backend process may read or write its own data after launch",
+		"start process `openvibely`",
+		"poll local backend health",
+		"no credentials sent",
+		"Type 'yes' to confirm",
+	} {
+		if !strings.Contains(m.pendingConfirmation.message, want) {
+			t.Fatalf("setup confirmation did not disclose %q:\n%s", want, m.pendingConfirmation.message)
+		}
 	}
 	assertFileMissing(t, startMarker)
 
