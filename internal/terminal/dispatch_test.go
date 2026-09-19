@@ -12167,6 +12167,28 @@ func TestGradesRunDisplaysGeneratedGradePartial(t *testing.T) {
 	}
 }
 
+func TestGradesRunReportsRenderedBackendFailure(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"POST /history/grade-ideas": `<main><div role="alert" class="alert alert-error">Grading failed: provider unavailable</div></main>`,
+		"/insights":                 `<section id="idea-grade-content"><p>Older grade: A</p></section>`,
+	})
+
+	m = runLine(t, m, "/grades run")
+	out := transcript(m)
+	if !strings.Contains(out, "error:") || !strings.Contains(out, "Grading failed: provider unavailable") {
+		t.Fatalf("transcript = %q, want rendered grading failure", out)
+	}
+	if strings.Contains(out, "Older grade") {
+		t.Fatalf("transcript leaked stale grade content: %q", out)
+	}
+	if got := rec.count("POST", "/history/grade-ideas"); got != 1 {
+		t.Fatalf("grades run made %d grading POST requests, want 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/insights"); got != 0 {
+		t.Fatalf("grades run fetched stale /insights after grading failure (%d requests):\n%s", got, rec.all())
+	}
+}
+
 func TestGradesShowReportsMissingGradeSection(t *testing.T) {
 	m, rec := dispatchModel(t, map[string]string{
 		"/insights": `<main><div id="history-container">Reflection fallback text</div></main>`,

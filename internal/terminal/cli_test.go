@@ -4418,6 +4418,28 @@ func TestCLIGradesRunDisplaysGeneratedGradePartial(t *testing.T) {
 	}
 }
 
+func TestCLIGradesRunReportsRenderedBackendFailure(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        cliProjects,
+		"/history/grade-ideas": `<main><div role="alert" class="alert alert-error">Grading failed: provider unavailable</div></main>`,
+		"/insights":            `<section id="idea-grade-content"><p>Older grade: A</p></section>`,
+	})
+
+	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"grades", "run"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "Grading failed: provider unavailable") {
+		t.Fatalf("err = %v, want rendered grading failure", err)
+	}
+	if strings.Contains(err.Error(), "Older grade") {
+		t.Fatalf("err = %v, want no stale grade content", err)
+	}
+	if got := rec.count("POST", "/history/grade-ideas"); got != 1 {
+		t.Fatalf("grades run made %d grading POST requests, want 1:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/insights"); got != 0 {
+		t.Fatalf("grades run fetched stale /insights after grading failure (%d requests):\n%s", got, rec.all())
+	}
+}
+
 func TestCLIGradesShowReportsMissingGradeSection(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,
