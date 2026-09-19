@@ -103,6 +103,71 @@ func TestGradeIdeasReturnsGeneratedPartialWhenPresent(t *testing.T) {
 	}
 }
 
+func TestGradeIdeasReportsBackendFailureWithoutStaleFallback(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/history/grade-ideas":
+			_, _ = w.Write([]byte(`<main><div role="alert" class="alert alert-error">Grading failed: model returned no ideas</div></main>`))
+		case "/insights":
+			_, _ = w.Write([]byte(`<section id="idea-grade-content"><p>Older grade: A</p></section>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := c.GradeIdeas(context.Background(), "p1")
+	if err == nil || !strings.Contains(err.Error(), "Grading failed: model returned no ideas") {
+		t.Fatalf("err = %v, want backend grading failure", err)
+	}
+	if text != "" {
+		t.Fatalf("text = %q, want empty text on grading failure", text)
+	}
+	if len(requests) != 1 || requests[0] != "POST /history/grade-ideas?project_id=p1" {
+		t.Fatalf("requests = %v, want no stale /insights fallback", requests)
+	}
+}
+
+func TestGradeIdeasFallsBackToInsightsWhenNoGeneratedPartialOrFailure(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/history/grade-ideas":
+			_, _ = w.Write([]byte(`<main><p>Grading requested.</p></main>`))
+		case "/insights":
+			_, _ = w.Write([]byte(`<section id="idea-grade-content"><p>Refreshed legacy grade: B</p></section>`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text, err := c.GradeIdeas(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "Refreshed legacy grade: B") {
+		t.Fatalf("grade text = %q, want legacy /insights fallback", text)
+	}
+	want := []string{"POST /history/grade-ideas?project_id=p1", "GET /insights?project_id=p1"}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("requests = %v, want %v", requests, want)
+	}
+}
+
 func TestGetGradesReportsMissingIdeaGradeContent(t *testing.T) {
 	c := htmlServer(t, `<main><div id="history-container">Reflection fallback text</div></main>`)
 

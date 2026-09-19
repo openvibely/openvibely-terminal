@@ -4643,6 +4643,9 @@ func (c *Client) GradeIdeas(ctx context.Context, projectID string) (string, erro
 	if text, ok := ideaGradeText(root); ok {
 		return text, nil
 	}
+	if text, ok := ideaGradeFailureText(root); ok {
+		return "", errors.New(text)
+	}
 	return c.GetGrades(ctx, projectID)
 }
 
@@ -4651,6 +4654,43 @@ func ideaGradeText(root *html.Node) (string, bool) {
 		return NodeText(n), true
 	}
 	return "", false
+}
+
+const ideaGradeFailurePrefix = "Grading failed:"
+
+func ideaGradeFailureText(root *html.Node) (string, bool) {
+	for _, n := range findAll(root, func(n *html.Node) bool {
+		return attr(n, "role") == "alert"
+	}) {
+		if text, ok := extractIdeaGradeFailure(NodeText(n)); ok {
+			return text, true
+		}
+	}
+	for _, n := range findAll(root, func(n *html.Node) bool {
+		return hasAlertClass(n)
+	}) {
+		if text, ok := extractIdeaGradeFailure(NodeText(n)); ok {
+			return text, true
+		}
+	}
+	return extractIdeaGradeFailure(NodeText(root))
+}
+
+func hasAlertClass(n *html.Node) bool {
+	for _, class := range strings.Fields(attr(n, "class")) {
+		if class == "alert" || class == "alert-error" {
+			return true
+		}
+	}
+	return false
+}
+
+func extractIdeaGradeFailure(text string) (string, bool) {
+	idx := strings.Index(text, ideaGradeFailurePrefix)
+	if idx < 0 {
+		return "", false
+	}
+	return strings.TrimSpace(text[idx:]), true
 }
 
 func missingIdeaGradeError(path string) error {
