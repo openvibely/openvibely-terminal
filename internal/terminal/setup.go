@@ -430,6 +430,8 @@ func setupConfirmationMessage(check setupCheckResult, opts setupOptions) string 
 	b.WriteString("Effects: ")
 	if opts.install {
 		b.WriteString("download and run the documented installer, which may create or replace backend files; ")
+	} else {
+		b.WriteString("setup does not create files before starting; the backend process may read or write its own data after launch; ")
 	}
 	b.WriteString("start process `")
 	b.WriteString(sanitizeAutomationDetailText(check.Start.Display))
