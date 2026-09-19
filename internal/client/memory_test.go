@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -111,6 +113,206 @@ func TestMemoryListShowAndSearchUseCanonicalProjectFiles(t *testing.T) {
 	}
 	if search.Memories == nil || search.Warnings == nil {
 		t.Fatal("search collections must be non-nil")
+	}
+}
+
+func TestMemoryUsesBackendMemoryWhenNoLocalCheckout(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.RequestURI())
+		if got := r.URL.Query().Get("project_id"); got != "remote-project" {
+			t.Fatalf("project_id = %q, want remote-project", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/memory":
+			_, _ = w.Write([]byte(`{"project_id":"remote-project","memories":[{"file":"remote.md","title":"Remote","summary":"server index"}],"warnings":[]}`))
+		case "/api/memory/remote.md":
+			_, _ = w.Write([]byte(`{"project_id":"remote-project","file":"remote.md","title":"Remote","summary":"server index","body":"backend-owned body","available":true,"warnings":[]}`))
+		case "/api/memory/search":
+			if got := r.URL.Query().Get("q"); got != "backend" {
+				t.Fatalf("search q = %q, want backend", got)
+			}
+			_, _ = w.Write([]byte(`{"project_id":"remote-project","query":"backend","results":[{"file":"remote.md","title":"Remote","summary":"server index","snippet":"backend-owned body"}],"warnings":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: "remote-project", Name: "Remote", Path: ""}
+
+	list, err := c.ListMemories(context.Background(), project)
+	if err != nil {
+		t.Fatalf("ListMemories remote: %v", err)
+	}
+	if len(list.Memories) != 1 || list.Memories[0].File != "remote.md" || list.Memories == nil || list.Warnings == nil {
+		t.Fatalf("remote list = %#v", list)
+	}
+	document, err := c.ShowMemory(context.Background(), project, "Remote")
+	if err != nil {
+		t.Fatalf("ShowMemory remote: %v", err)
+	}
+	if document.File != "remote.md" || document.Body != "backend-owned body" || !document.Available || document.Warnings == nil {
+		t.Fatalf("remote document = %#v", document)
+	}
+	search, err := c.SearchMemories(context.Background(), project, "backend")
+	if err != nil {
+		t.Fatalf("SearchMemories remote: %v", err)
+	}
+	if len(search.Memories) != 1 || search.Memories[0].Snippet != "backend-owned body" || search.Memories == nil || search.Warnings == nil {
+		t.Fatalf("remote search = %#v", search)
+	}
+	if strings.Join(paths, "\n") != "/api/memory?project_id=remote-project\n/api/memory?project_id=remote-project\n/api/memory/remote.md?project_id=remote-project\n/api/memory/search?project_id=remote-project&q=backend" {
+		t.Fatalf("unexpected backend memory paths: %#v", paths)
+	}
+}
+
+func TestBackendMemoryEmptyResultsStayParseable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/memory" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"project_id":"p1","memories":[],"warnings":["backend has no indexed memory"]}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := c.ListMemories(context.Background(), Project{ID: "p1"})
+	if err != nil {
+		t.Fatalf("ListMemories empty remote: %v", err)
+	}
+	encoded, err := json.Marshal(list)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	for _, want := range []string{`"memories":[]`, `"warnings":["backend has no indexed memory"]`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("empty backend JSON missing %s: %s", want, encoded)
+		}
+	}
+}
+
+func TestMemoryBackendUnsupportedWithoutLocalCheckoutHasDistinctError(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := c.ListMemories(context.Background(), Project{ID: "p1", Path: filepath.Join(t.TempDir(), "missing")})
+	if err == nil || !strings.Contains(err.Error(), "backend memory API is unavailable") || !strings.Contains(err.Error(), "terminal cannot access a local checkout") {
+		t.Fatalf("unsupported backend/no-local error = %v", err)
+	}
+	if list.Memories == nil || list.Warnings == nil {
+		t.Fatalf("unsupported backend/no-local result must remain JSON-safe: %#v", list)
+	}
+}
+
+func TestMemoryBackendProjectScopeRejectionDoesNotFallBackToLocal(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Local](local.md)\n", map[string]string{"local.md": "local fallback must not be used"})
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/memory" {
+			t.Fatalf("unexpected fallback/detail request %s", r.URL.Path)
+		}
+		http.Error(w, `{"error":"foreign project"}`, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := c.ListMemories(context.Background(), Project{ID: "foreign", Path: repo})
+	if err == nil || !strings.Contains(err.Error(), "server error (403)") {
+		t.Fatalf("foreign project error = %v", err)
+	}
+	if len(list.Memories) != 0 || list.Memories == nil || list.Warnings == nil {
+		t.Fatalf("foreign project result = %#v", list)
+	}
+	if requests != 1 {
+		t.Fatalf("backend requests = %d, want one and no local fallback", requests)
+	}
+}
+
+func TestMemoryBackendListAuthorityPreventsLocalFallbackWhenDetailOrSearchUnavailable(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Local](remote.md) - local\n", map[string]string{"remote.md": "local-only body needle"})
+	var searchRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/memory":
+			_, _ = w.Write([]byte(`{"project_id":"p1","memories":[{"file":"remote.md","title":"Remote","summary":"server index"}],"warnings":[]}`))
+		case "/api/memory/remote.md":
+			http.NotFound(w, r)
+		case "/api/memory/search":
+			searchRequests++
+			http.NotFound(w, r)
+		default:
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	document, err := c.ShowMemory(context.Background(), Project{ID: "p1", Path: repo}, "remote.md")
+	if err == nil || !strings.Contains(err.Error(), "backend memory document is unavailable") {
+		t.Fatalf("ShowMemory error = %v, document = %#v", err, document)
+	}
+	if strings.Contains(document.Body, "local-only") {
+		t.Fatalf("show fell back to local body despite backend index authority: %#v", document)
+	}
+	search, err := c.SearchMemories(context.Background(), Project{ID: "p1", Path: repo}, "needle")
+	if err == nil || !strings.Contains(err.Error(), "backend memory search is unavailable") {
+		t.Fatalf("SearchMemories error = %v, search = %#v", err, search)
+	}
+	if len(search.Memories) != 0 || search.Memories == nil || search.Warnings == nil {
+		t.Fatalf("search fallback result should be empty and JSON-safe: %#v", search)
+	}
+	if searchRequests != 1 {
+		t.Fatalf("search requests = %d, want one", searchRequests)
+	}
+}
+
+func TestMemoryBackendUnsupportedFallsBackToLocalCheckout(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Local](local.md) - fallback\n", map[string]string{"local.md": "local body"})
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/memory" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list, err := c.ListMemories(context.Background(), Project{ID: "p1", Path: repo})
+	if err != nil {
+		t.Fatalf("ListMemories fallback: %v", err)
+	}
+	if len(list.Memories) != 1 || list.Memories[0].File != "local.md" {
+		t.Fatalf("fallback list = %#v", list)
+	}
+	if requests != 1 {
+		t.Fatalf("backend requests = %d, want one unsupported probe", requests)
 	}
 }
 

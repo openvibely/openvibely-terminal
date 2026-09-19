@@ -3303,9 +3303,9 @@ func memoryCommand() command {
 		args:          "[file|query]",
 		actions:       actions,
 		selectorPaths: [][]string{{"show"}},
-		desc:          "read-only durable memory for the selected project",
+		desc:          "read-only backend-indexed durable memory for the selected project",
 		usage: []string{
-			"memory [filter]                            list indexed memory files",
+			"memory [filter]                            list backend-indexed memory files",
 			"memory is read-only; curation remains owned by the backend lifecycle tools",
 		},
 		actionUsages: []commandActionUsage{

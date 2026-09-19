@@ -3,9 +3,12 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,11 +30,13 @@ const (
 )
 
 var (
-	errMemoryFileTooLarge     = errors.New("memory file exceeds the read limit")
-	errMemoryFileNotRegular   = errors.New("memory path is not a regular file")
-	errMemoryPathUnsafe       = errors.New("memory path is unsafe")
-	errMemoryFileChanged      = errors.New("memory path changed during read")
-	errMemoryIndexUnavailable = errors.New("memory: unable to read project memory index")
+	errMemoryFileTooLarge          = errors.New("memory file exceeds the read limit")
+	errMemoryFileNotRegular        = errors.New("memory path is not a regular file")
+	errMemoryPathUnsafe            = errors.New("memory path is unsafe")
+	errMemoryFileChanged           = errors.New("memory path changed during read")
+	errMemoryIndexUnavailable      = errors.New("memory: unable to read project memory index")
+	errMemoryBackendUnsupported    = errors.New("memory: backend memory API is unavailable")
+	errMemoryLocalCheckoutRequired = errors.New("memory: terminal cannot access a local checkout for the selected project")
 )
 
 // Memory is a stable, read-only representation of one indexed project memory
@@ -71,14 +76,92 @@ type MemoryDocument struct {
 	Warnings  []string `json:"warnings"`
 }
 
-// ListMemories reads the selected project's canonical MEMORIES.md index. It
-// intentionally does not enumerate unindexed files: the backend's index is the
-// authority for which durable memories are inspectable.
+// ListMemories reads the selected project's indexed durable memory. When a
+// backend-capable client is configured, the backend is tried first so its index,
+// project scope, and access controls remain authoritative. Older local
+// development setups fall back to the repository-local memory checkout only when
+// the backend does not expose memory inspection.
 func (c *Client) ListMemories(ctx context.Context, project Project) (MemoryList, error) {
-	_ = c
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if c.memoryBackendEnabled(project) {
+		list, err := c.listBackendMemories(ctx, project.ID)
+		if err == nil {
+			return normalizeMemoryList(list), nil
+		}
+		if !errors.Is(err, errMemoryBackendUnsupported) {
+			return normalizeMemoryList(list), err
+		}
+		if fallbackErr := memoryLocalFallbackAllowed(project); fallbackErr != nil {
+			return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, fmt.Errorf("%w; %v", err, fallbackErr)
+		}
+	}
+	return listLocalMemories(ctx, project)
+}
+
+// ShowMemory reads one indexed memory file. A reference may be its indexed
+// file handle or an unambiguous title/name reference. MEMORIES.md itself and
+// paths outside the project memory directory are never accepted by the local
+// compatibility reader; backend-backed reads rely on the backend's index and
+// scope checks before fetching content.
+func (c *Client) ShowMemory(ctx context.Context, project Project, reference string) (MemoryDocument, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if c.memoryBackendEnabled(project) {
+		document, err := c.showBackendMemory(ctx, project.ID, reference)
+		if err == nil {
+			return normalizeMemoryDocument(document), nil
+		}
+		if !errors.Is(err, errMemoryBackendUnsupported) {
+			return normalizeMemoryDocument(document), err
+		}
+		if fallbackErr := memoryLocalFallbackAllowed(project); fallbackErr != nil {
+			return MemoryDocument{Warnings: make([]string, 0)}, fmt.Errorf("%w; %v", err, fallbackErr)
+		}
+	}
+	return showLocalMemory(ctx, project, reference)
+}
+
+// SearchMemories searches indexed file metadata and bodies. Backend-backed
+// searches keep backend-owned memory authoritative; local fallback preserves the
+// previous read-only development behavior for checkouts with .openvibely memory
+// files.
+func (c *Client) SearchMemories(ctx context.Context, project Project, query string) (MemorySearch, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	query = strings.TrimSpace(query)
+	result := MemorySearch{
+		Query:    query,
+		Memories: make([]Memory, 0),
+		Warnings: make([]string, 0),
+	}
+	if query == "" {
+		return result, errors.New("memory search query is required")
+	}
+	if c.memoryBackendEnabled(project) {
+		search, err := c.searchBackendMemories(ctx, project.ID, query)
+		if err == nil {
+			return normalizeMemorySearch(search), nil
+		}
+		if !errors.Is(err, errMemoryBackendUnsupported) {
+			return normalizeMemorySearch(search), err
+		}
+		if list, listErr := c.listBackendMemories(ctx, project.ID); listErr == nil {
+			return MemorySearch{Query: query, Memories: make([]Memory, 0), Warnings: append(make([]string, 0, len(list.Warnings)), list.Warnings...)}, errors.New("memory: backend memory search is unavailable")
+		} else if !errors.Is(listErr, errMemoryBackendUnsupported) {
+			return result, listErr
+		}
+		if fallbackErr := memoryLocalFallbackAllowed(project); fallbackErr != nil {
+			return result, fmt.Errorf("%w; %v", err, fallbackErr)
+		}
+	}
+	return searchLocalMemories(ctx, project, query)
+}
+
+func listLocalMemories(ctx context.Context, project Project) (MemoryList, error) {
 	root, entries, warnings, err := loadMemoryIndex(ctx, project)
 	result := MemoryList{
 		Memories: make([]Memory, 0, len(entries)),
@@ -104,14 +187,7 @@ func (c *Client) ListMemories(ctx context.Context, project Project) (MemoryList,
 	return result, nil
 }
 
-// ShowMemory reads one indexed memory file. A reference may be its indexed
-// file handle or an unambiguous title/name reference. MEMORIES.md itself and
-// paths outside the project memory directory are never accepted.
-func (c *Client) ShowMemory(ctx context.Context, project Project, reference string) (MemoryDocument, error) {
-	_ = c
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func showLocalMemory(ctx context.Context, project Project, reference string) (MemoryDocument, error) {
 	root, entries, warnings, err := loadMemoryIndex(ctx, project)
 	document := MemoryDocument{
 		Warnings: make([]string, 0, len(warnings)),
@@ -134,14 +210,7 @@ func (c *Client) ShowMemory(ctx context.Context, project Project, reference stri
 	return document, nil
 }
 
-// SearchMemories searches indexed file metadata and the readable body of each
-// indexed file. Unreadable files remain represented by their index metadata and
-// add a safe warning rather than exposing an operating-system path or error.
-func (c *Client) SearchMemories(ctx context.Context, project Project, query string) (MemorySearch, error) {
-	_ = c
-	if ctx == nil {
-		ctx = context.Background()
-	}
+func searchLocalMemories(ctx context.Context, project Project, query string) (MemorySearch, error) {
 	query = strings.TrimSpace(query)
 	result := MemorySearch{
 		Query:    query,
@@ -192,6 +261,272 @@ type memoryIndexEntry struct {
 	File    string
 	Title   string
 	Summary string
+}
+
+type backendMemoryListEnvelope struct {
+	ProjectID string   `json:"project_id"`
+	Memories  []Memory `json:"memories"`
+	Items     []Memory `json:"items"`
+	Files     []Memory `json:"files"`
+	Warnings  []string `json:"warnings"`
+}
+
+type backendMemorySearchEnvelope struct {
+	ProjectID string   `json:"project_id"`
+	Query     string   `json:"query"`
+	Memories  []Memory `json:"memories"`
+	Items     []Memory `json:"items"`
+	Results   []Memory `json:"results"`
+	Warnings  []string `json:"warnings"`
+}
+
+type backendMemoryDocumentEnvelope struct {
+	ProjectID string   `json:"project_id"`
+	File      string   `json:"file"`
+	Title     string   `json:"title"`
+	Summary   string   `json:"summary"`
+	Snippet   string   `json:"snippet"`
+	Body      string   `json:"body"`
+	Content   string   `json:"content"`
+	Available bool     `json:"available"`
+	Warnings  []string `json:"warnings"`
+	Memory    *Memory  `json:"memory"`
+}
+
+func (c *Client) memoryBackendEnabled(project Project) bool {
+	return c != nil && strings.TrimSpace(c.baseURL) != "" && strings.TrimSpace(project.ID) != ""
+}
+
+func (c *Client) listBackendMemories(ctx context.Context, projectID string) (MemoryList, error) {
+	raw, err := c.getBackendMemoryJSON(ctx, "/api/memory"+query("project_id", projectID))
+	if err != nil {
+		return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, err
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, fmt.Errorf("decoding memory list response: %w", err)
+	}
+	if _, ok := probe["memories"]; !ok {
+		if _, ok := probe["items"]; !ok {
+			if _, ok := probe["files"]; !ok {
+				return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, errMemoryBackendUnsupported
+			}
+		}
+	}
+	var envelope backendMemoryListEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, fmt.Errorf("decoding memory list response: %w", err)
+	}
+	if err := validateBackendMemoryProject(envelope.ProjectID, projectID); err != nil {
+		return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, err
+	}
+	memories := envelope.Memories
+	if memories == nil {
+		memories = envelope.Items
+	}
+	if memories == nil {
+		memories = envelope.Files
+	}
+	return normalizeMemoryList(MemoryList{Memories: memories, Warnings: envelope.Warnings}), nil
+}
+
+func (c *Client) showBackendMemory(ctx context.Context, projectID, reference string) (MemoryDocument, error) {
+	list, err := c.listBackendMemories(ctx, projectID)
+	if err != nil {
+		return MemoryDocument{Warnings: make([]string, 0)}, err
+	}
+	entries := make([]memoryIndexEntry, 0, len(list.Memories))
+	for _, memory := range list.Memories {
+		entries = append(entries, memoryIndexEntry{File: memory.File, Title: memory.Title, Summary: memory.Summary})
+	}
+	entry, err := resolveMemoryEntry(entries, reference)
+	if err != nil {
+		return MemoryDocument{Warnings: append(make([]string, 0, len(list.Warnings)), list.Warnings...)}, err
+	}
+	document, err := c.getBackendMemoryDocument(ctx, projectID, entry)
+	document.Warnings = append(list.Warnings, document.Warnings...)
+	if errors.Is(err, errMemoryBackendUnsupported) {
+		return normalizeMemoryDocument(document), errors.New("memory: backend memory document is unavailable")
+	}
+	return normalizeMemoryDocument(document), err
+}
+
+func (c *Client) getBackendMemoryDocument(ctx context.Context, projectID string, entry memoryIndexEntry) (MemoryDocument, error) {
+	document := MemoryDocument{Warnings: make([]string, 0)}
+	raw, err := c.getBackendMemoryJSON(ctx, "/api/memory/"+url.PathEscape(entry.File)+query("project_id", projectID))
+	if err != nil {
+		return document, err
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return document, fmt.Errorf("decoding memory document response: %w", err)
+	}
+	if _, ok := probe["memory"]; !ok {
+		if _, ok := probe["file"]; !ok {
+			if _, ok := probe["body"]; !ok {
+				if _, ok := probe["content"]; !ok {
+					return document, errMemoryBackendUnsupported
+				}
+			}
+		}
+	}
+	var envelope backendMemoryDocumentEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return document, fmt.Errorf("decoding memory document response: %w", err)
+	}
+	if err := validateBackendMemoryProject(envelope.ProjectID, projectID); err != nil {
+		return document, err
+	}
+	available := true
+	if _, ok := probe["available"]; ok {
+		available = envelope.Available
+	}
+	if envelope.Memory != nil {
+		document = memoryDocument(*envelope.Memory, envelope.Warnings, available)
+	} else {
+		body := envelope.Body
+		if body == "" {
+			body = envelope.Content
+		}
+		document = MemoryDocument{
+			File:      envelope.File,
+			Title:     envelope.Title,
+			Summary:   envelope.Summary,
+			Snippet:   envelope.Snippet,
+			Body:      body,
+			Available: available,
+			Warnings:  append(make([]string, 0, len(envelope.Warnings)), envelope.Warnings...),
+		}
+	}
+	if document.File == "" {
+		document.File = entry.File
+	}
+	if document.Title == "" {
+		document.Title = entry.Title
+	}
+	if document.Summary == "" {
+		document.Summary = entry.Summary
+	}
+	return normalizeMemoryDocument(document), nil
+}
+
+func (c *Client) searchBackendMemories(ctx context.Context, projectID, searchQuery string) (MemorySearch, error) {
+	result := MemorySearch{Query: searchQuery, Memories: make([]Memory, 0), Warnings: make([]string, 0)}
+	raw, err := c.getBackendMemoryJSON(ctx, "/api/memory/search"+query("project_id", projectID, "q", searchQuery))
+	if err != nil {
+		return result, err
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return result, fmt.Errorf("decoding memory search response: %w", err)
+	}
+	if _, ok := probe["memories"]; !ok {
+		if _, ok := probe["items"]; !ok {
+			if _, ok := probe["results"]; !ok {
+				return result, errMemoryBackendUnsupported
+			}
+		}
+	}
+	var envelope backendMemorySearchEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return result, fmt.Errorf("decoding memory search response: %w", err)
+	}
+	if err := validateBackendMemoryProject(envelope.ProjectID, projectID); err != nil {
+		return result, err
+	}
+	memories := envelope.Memories
+	if memories == nil {
+		memories = envelope.Items
+	}
+	if memories == nil {
+		memories = envelope.Results
+	}
+	if strings.TrimSpace(envelope.Query) == "" {
+		envelope.Query = searchQuery
+	}
+	return normalizeMemorySearch(MemorySearch{Query: envelope.Query, Memories: memories, Warnings: envelope.Warnings}), nil
+}
+
+func (c *Client) getBackendMemoryJSON(ctx context.Context, path string) ([]byte, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer drainAndClose(resp.Body)
+	if isReadAuthResponse(resp) {
+		return nil, newAuthRequiredError(http.MethodGet, path, resp)
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		return nil, errMemoryBackendUnsupported
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, apiError(resp)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxMemoryFileBytes+maxMemoryIndexBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s response: %w", path, err)
+	}
+	if int64(len(body)) > maxMemoryFileBytes+maxMemoryIndexBytes {
+		return nil, errMemoryFileTooLarge
+	}
+	return body, nil
+}
+
+func validateBackendMemoryProject(responseProjectID, selectedProjectID string) error {
+	responseProjectID = strings.TrimSpace(responseProjectID)
+	selectedProjectID = strings.TrimSpace(selectedProjectID)
+	if responseProjectID != "" && selectedProjectID != "" && responseProjectID != selectedProjectID {
+		return errors.New("memory: backend returned memory for a different project")
+	}
+	return nil
+}
+
+func normalizeMemoryList(list MemoryList) MemoryList {
+	if list.Memories == nil {
+		list.Memories = make([]Memory, 0)
+	}
+	if list.Warnings == nil {
+		list.Warnings = make([]string, 0)
+	}
+	return list
+}
+
+func normalizeMemorySearch(search MemorySearch) MemorySearch {
+	if search.Memories == nil {
+		search.Memories = make([]Memory, 0)
+	}
+	if search.Warnings == nil {
+		search.Warnings = make([]string, 0)
+	}
+	return search
+}
+
+func normalizeMemoryDocument(document MemoryDocument) MemoryDocument {
+	if document.Warnings == nil {
+		document.Warnings = make([]string, 0)
+	}
+	return document
+}
+
+func memoryLocalFallbackAllowed(project Project) error {
+	repoPath := strings.TrimSpace(project.Path)
+	if repoPath == "" || strings.ContainsRune(repoPath, '\x00') {
+		return errMemoryLocalCheckoutRequired
+	}
+	abs, err := filepath.Abs(filepath.Clean(repoPath))
+	if err != nil {
+		return errMemoryLocalCheckoutRequired
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return errMemoryLocalCheckoutRequired
+	}
+	return nil
 }
 
 func loadMemoryIndex(ctx context.Context, project Project) (string, []memoryIndexEntry, []string, error) {
