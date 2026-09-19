@@ -2860,7 +2860,7 @@ func TestRenderScheduleBoundsLargeHumanListsAndKeepsFullMode(t *testing.T) {
 
 func TestScheduleMutationOutputUsesBoundedHumanRefresh(t *testing.T) {
 	entries := scheduleEntriesForRenderTest(defaultScheduleDisplayLimit+2, "Refresh row")
-	out, err := scheduleMutationOutput("updated schedule schedule-001", func() ([]client.ScheduleEntry, string, error) {
+	out, err := scheduleMutationOutput("updated schedule schedule-001", nil, func() ([]client.ScheduleEntry, string, error) {
 		return entries, "", nil
 	})
 	if err != nil {
