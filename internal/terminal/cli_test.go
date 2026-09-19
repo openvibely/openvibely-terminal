@@ -5547,6 +5547,150 @@ func TestCLIScheduleListBoundsPlainOutputAndPreservesFullModes(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleMutationJSONOutput(t *testing.T) {
+	const taskCatalog = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Nightly report","category":"active","status":"pending"}]}`
+	const initialScheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1"><div class="font-semibold">Nightly report</div><span>Runs daily</span></div></div>`
+	const addRefreshHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-new"><div class="font-semibold">Nightly report</div><span>Runs daily</span></div></div>`
+	const toggleRefreshHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1" data-schedule-enabled="false"><div class="font-semibold">Nightly report</div><span>Disabled</span></div></div>`
+	const deleteRefreshHTML = `<div id="schedule-content"><div data-task-id="t-2" data-schedule-id="s-2"><div class="font-semibold">Weekly report</div></div></div>`
+
+	type mutationResult struct {
+		Status    string                  `json:"status"`
+		Schedule  *client.Schedule        `json:"schedule,omitempty"`
+		Schedules *[]client.ScheduleEntry `json:"schedules,omitempty"`
+	}
+	decode := func(t *testing.T, out string) mutationResult {
+		t.Helper()
+		var got mutationResult
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &got); err != nil {
+			t.Fatalf("schedule mutation JSON is invalid: %v\n%s", err, out)
+		}
+		return got
+	}
+	newServer := func(t *testing.T, initialHTML, refreshHTML string, failRefresh bool) (*client.Client, *recorder) {
+		t.Helper()
+		rec := &recorder{}
+		mutated := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			_ = r.ParseForm()
+			rec.mu.Lock()
+			rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
+			rec.mu.Unlock()
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+				if r.URL.Query().Get("project_id") != "p1" {
+					http.Error(w, "unscoped task catalog", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, taskCatalog)
+			case r.Method == http.MethodGet && r.URL.Path == "/schedule":
+				if r.URL.Query().Get("project_id") != "p1" {
+					http.Error(w, "unscoped schedule", http.StatusInternalServerError)
+					return
+				}
+				if mutated && failRefresh {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = io.WriteString(w, `{"error":"refresh failed"}`)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				if mutated || initialHTML == "" {
+					_, _ = io.WriteString(w, refreshHTML)
+					return
+				}
+				_, _ = io.WriteString(w, initialHTML)
+			case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/schedule":
+				mutated = true
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `ok`)
+			case r.Method == http.MethodPost && r.URL.Path == "/api/schedules/s-1/toggle":
+				mutated = true
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"s-1","task_id":"t-1","enabled":false,"repeat_type":"daily","run_at":"2026-01-20T09:00:00Z","next_run":"2026-01-20T09:00:00Z"}`)
+			case r.Method == http.MethodDelete && r.URL.Path == "/schedules/s-1":
+				mutated = true
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `ok`)
+			default:
+				t.Errorf("unexpected schedule mutation request %s %s", r.Method, r.URL.RequestURI())
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, rec
+	}
+
+	cases := []struct {
+		name          string
+		args          []string
+		force         bool
+		initialHTML   string
+		refreshHTML   string
+		wantStatus    string
+		wantMutation  string
+		wantSchedule  string
+		wantToggleOff bool
+	}{
+		{name: "add", args: []string{"schedule", "add", "Nightly report", "2026-01-20T09:00", "daily"}, refreshHTML: addRefreshHTML, wantStatus: "scheduled Nightly report for 2026-01-20T09:00 (daily)", wantMutation: "POST /tasks/t-1/schedule?project_id=p1", wantSchedule: "s-new"},
+		{name: "toggle", args: []string{"schedule", "toggle", "Nightly report"}, initialHTML: initialScheduleHTML, refreshHTML: toggleRefreshHTML, wantStatus: "toggled schedule", wantMutation: "POST /api/schedules/s-1/toggle?project_id=p1", wantSchedule: "s-1", wantToggleOff: true},
+		{name: "delete", args: []string{"schedule", "delete", "Nightly report"}, force: true, initialHTML: initialScheduleHTML, refreshHTML: deleteRefreshHTML, wantStatus: "deleted schedule", wantMutation: "DELETE /schedules/s-1?project_id=p1", wantSchedule: "s-2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+" JSON includes status and refreshed schedules", func(t *testing.T) {
+			c, rec := newServer(t, tc.initialHTML, tc.refreshHTML, false)
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, tc.force, true); err != nil {
+				t.Fatalf("schedule %s JSON failed: %v\n%s", tc.name, err, rec.all())
+			}
+			got := decode(t, out.String())
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if got.Schedules == nil || len(*got.Schedules) != 1 || (*got.Schedules)[0].ScheduleID != tc.wantSchedule {
+				t.Fatalf("refreshed schedules = %+v, want one %s", got.Schedules, tc.wantSchedule)
+			}
+			if tc.wantToggleOff && (got.Schedule == nil || got.Schedule.ID != "s-1" || got.Schedule.Enabled) {
+				t.Fatalf("toggle response was not represented: %+v", got.Schedule)
+			}
+			if !rec.sawQuery(tc.wantMutation) {
+				t.Fatalf("%s mutation lost backend route or project scope:\n%s", tc.name, strings.Join(rec.urlsSnapshot(), "\n"))
+			}
+		})
+	}
+
+	t.Run("refresh failure JSON remains status only", func(t *testing.T) {
+		c, rec := newServer(t, "", addRefreshHTML, true)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"schedule", "add", "Nightly report", "2026-01-20T09:00", "daily"}, false, true); err != nil {
+			t.Fatalf("schedule add JSON with refresh failure failed: %v\n%s", err, rec.all())
+		}
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &payload); err != nil {
+			t.Fatalf("status-only output is not parseable JSON: %v\n%s", err, out.String())
+		}
+		var status string
+		if err := json.Unmarshal(payload["status"], &status); err != nil || status != "scheduled Nightly report for 2026-01-20T09:00 (daily)" {
+			t.Fatalf("status = %q err=%v payload=%s", status, err, out.String())
+		}
+		if _, ok := payload["schedules"]; ok {
+			t.Fatalf("refresh-failure JSON must not pretend to have a refreshed schedule list: %s", out.String())
+		}
+		if !rec.sawQuery("POST /tasks/t-1/schedule?project_id=p1") {
+			t.Fatalf("add mutation lost backend route or project scope:\n%s", strings.Join(rec.urlsSnapshot(), "\n"))
+		}
+	})
+}
+
 func TestCLIScheduleShowAliasScopingAndMissingReference(t *testing.T) {
 	const scheduleHTML = `<div id="schedule-content"><div data-task-id="t-2" data-schedule-id="schedule-full-id">Weekly report</div></div>`
 	const taskHTML = `<div data-task-id="t-2" data-project-id="p1"><h2 class="font-bold">Ship the docs</h2><div data-task-status="running"></div></div>`

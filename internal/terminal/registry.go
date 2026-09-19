@@ -143,12 +143,28 @@ func actAndReloadText(status string, act func() error, reload func() (string, er
 	return status + "\n\n" + text, nil
 }
 
+type scheduleMutationJSONOutput struct {
+	Status    string                  `json:"status"`
+	Schedule  *client.Schedule        `json:"schedule,omitempty"`
+	Schedules *[]client.ScheduleEntry `json:"schedules,omitempty"`
+}
+
 // scheduleMutationOutput returns the confirmed schedule mutation status and,
 // when available, the refreshed schedule page. A failed refresh is not an
 // action failure: the mutation already succeeded, so return only its status
 // instead of rendering nil entries as an authoritative empty schedule.
-func scheduleMutationOutput(status string, reload func() ([]client.ScheduleEntry, string, error)) (string, error) {
+func scheduleMutationOutput(status string, schedule *client.Schedule, reload func() ([]client.ScheduleEntry, string, error)) (string, error) {
 	entries, summary, err := reload()
+	if jsonMode {
+		out := scheduleMutationJSONOutput{Status: status, Schedule: schedule}
+		if err == nil {
+			if entries == nil {
+				entries = []client.ScheduleEntry{}
+			}
+			out.Schedules = &entries
+		}
+		return marshalJSON(out)
+	}
 	if err != nil {
 		return status, nil
 	}
@@ -158,10 +174,11 @@ func scheduleMutationOutput(status string, reload func() ([]client.ScheduleEntry
 // scheduleToggleOutput performs a resolved schedule toggle and returns the
 // mutation status with the best-effort refreshed schedule page.
 func scheduleToggleOutput(ctx context.Context, c *client.Client, projectID, scheduleID string) (string, error) {
-	if _, err := c.ToggleSchedule(ctx, projectID, scheduleID); err != nil {
+	schedule, err := c.ToggleSchedule(ctx, projectID, scheduleID)
+	if err != nil {
 		return "", err
 	}
-	return scheduleMutationOutput("toggled schedule",
+	return scheduleMutationOutput("toggled schedule", schedule,
 		func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, projectID) })
 }
 
@@ -196,7 +213,7 @@ func confirmScheduleDeletion(m Model, projectID string, schedule client.Schedule
 		if err := c.DeleteSchedule(ctx, projectID, scheduleID); err != nil {
 			return "", err
 		}
-		return scheduleMutationOutput("deleted schedule",
+		return scheduleMutationOutput("deleted schedule", nil,
 			func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, projectID) })
 	})
 	return confirmOr(m,
@@ -2435,7 +2452,7 @@ func scheduleCommand() command {
 					if err := c.CreateSchedule(ctx, pid, t.ID, when, repeat, interval); err != nil {
 						return "", err
 					}
-					return scheduleMutationOutput("scheduled "+t.Title+" for "+when+" ("+repeat+")",
+					return scheduleMutationOutput("scheduled "+t.Title+" for "+when+" ("+repeat+")", nil,
 						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
 				})
 			case "edit":
@@ -2485,7 +2502,7 @@ func scheduleCommand() command {
 						_, _, _ = c.GetSchedule(ctx, pid)
 						return marshalJSON(updated)
 					}
-					return scheduleMutationOutput("updated schedule "+entry.ScheduleID,
+					return scheduleMutationOutput("updated schedule "+entry.ScheduleID, nil,
 						func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, pid) })
 				})
 			case "delete", "toggle":
