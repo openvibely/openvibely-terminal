@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -10,10 +11,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
@@ -142,6 +146,160 @@ func TestSetupGuidanceUsesAuthoritativePlatformInstructions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSetupCheckOnlyReportsMissingPiecesWithoutStateChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix PATH/script assumptions")
+	}
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutSetupStartScript(t)
+	t.Setenv("PATH", t.TempDir())
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "check"}, false, false); err != nil {
+		t.Fatalf("setup check failed: %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("setup check made %d backend requests, want none", got)
+	}
+	text := out.String()
+	for _, want := range []string{"Setup check is read-only", "missing executable ./start.sh", "does not install", "modify files"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("setup check missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestSetupStartRequiresConfirmationOrForce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	withFastSetupHealth(t)
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+
+	var unforced bytes.Buffer
+	if err := RunCLI(c, &unforced, "", []string{"setup", "start"}, false, false); err == nil || !strings.Contains(err.Error(), "use --force to confirm setup start") {
+		t.Fatalf("unforced setup start error = %v, output:\n%s", err, unforced.String())
+	}
+	assertFileMissing(t, startMarker)
+
+	m := New(c)
+	next, cmd := m.runCommand("/setup start")
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("interactive setup start did not wait for confirmation: cmd=%v pending=%v", cmd, m.pendingConfirmation != nil)
+	}
+	if !strings.Contains(m.pendingConfirmation.message, "start process `openvibely`") || !strings.Contains(m.pendingConfirmation.message, "Type 'yes' to confirm") {
+		t.Fatalf("setup confirmation did not disclose effects:\n%s", m.pendingConfirmation.message)
+	}
+	assertFileMissing(t, startMarker)
+
+	var forced bytes.Buffer
+	if err := RunCLI(c, &forced, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("forced setup start failed: %v\n%s", err, forced.String())
+	}
+	assertFileEventuallyContains(t, startMarker, "started")
+	for _, want := range []string{"Start command launched", "Backend health check succeeded", "Next: run /projects"} {
+		if !strings.Contains(forced.String(), want) {
+			t.Errorf("forced setup output missing %q:\n%s", want, forced.String())
+		}
+	}
+}
+
+func TestSetupStartCancellationDoesNotRunProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+	m := New(c)
+	next, cmd := m.runCommand("/setup start")
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("setup start did not open confirmation: cmd=%v pending=%v", cmd, m.pendingConfirmation != nil)
+	}
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation != nil {
+		t.Fatalf("Esc did not cancel setup confirmation: cmd=%v pending=%v", cmd, m.pendingConfirmation != nil)
+	}
+	assertFileMissing(t, startMarker)
+	if !strings.Contains(transcript(m), "cancelled") {
+		t.Fatalf("cancellation was not rendered:\n%s", transcript(m))
+	}
+}
+
+func TestSetupRemoteServerFailsClosedWithoutStartingLocalProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker := setupFakeBackendCommand(t)
+	c, err := client.New("https://ops.example:3001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"setup", "bootstrap"}, true, false)
+	if err == nil || !strings.Contains(err.Error(), "Configured backend is remote") {
+		t.Fatalf("remote setup bootstrap error = %v, output:\n%s", err, out.String())
+	}
+	assertFileMissing(t, startMarker)
+}
+
+func TestSetupBootstrapInstallUsesOptInInstallerAndWaitsForHealth(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	withFastSetupHealth(t)
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+	installMarker := filepath.Join(t.TempDir(), "installed")
+	fakeSetupToolPaths(t, map[string]string{"curl": filepath.Join(t.TempDir(), "curl"), "bash": filepath.Join(t.TempDir(), "bash")})
+	oldInstaller := setupRunInstaller
+	setupRunInstaller = func(_ context.Context, _ string, steps []setupCommandSpec) error {
+		if len(steps) != 2 || !steps[0].Found || !steps[1].Found {
+			return fmt.Errorf("installer prerequisites were not resolved: %+v", steps)
+		}
+		return os.WriteFile(installMarker, []byte("installed"), 0644)
+	}
+	t.Cleanup(func() { setupRunInstaller = oldInstaller })
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "bootstrap", "--install"}, true, false); err != nil {
+		t.Fatalf("setup bootstrap --install failed: %v\n%s", err, out.String())
+	}
+	assertFileContains(t, installMarker, "installed")
+	assertFileEventuallyContains(t, startMarker, "started")
+	for _, want := range []string{"Installing local backend", "Installer completed", "Backend health check succeeded"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("bootstrap install output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestSetupBootstrapReportsHealthFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	withFastSetupHealth(t)
+	startMarker, c := setupStartFixture(t, http.StatusServiceUnavailable)
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "", []string{"setup", "bootstrap"}, true, false)
+	if err == nil || !strings.Contains(err.Error(), "backend did not become healthy") {
+		t.Fatalf("setup bootstrap health error = %v, output:\n%s", err, out.String())
+	}
+	assertFileEventuallyContains(t, startMarker, "started")
+	if !strings.Contains(out.String(), "Waiting for backend health") {
+		t.Fatalf("health wait was not disclosed in output:\n%s", out.String())
 	}
 }
 
@@ -401,6 +559,11 @@ func TestSetupUserGuideParity(t *testing.T) {
 		"`/setup`",
 		"`openvibely-terminal setup`",
 		"do **not** install",
+		"`/setup check`",
+		"`/setup start`",
+		"`/setup bootstrap --install`",
+		"openvibely-terminal --force setup bootstrap [--install]",
+		"Remote server URLs\nfail closed",
 		"curl -fsSL https://openvibely.ai/install.sh | bash -s -- --variant binary",
 		"& ([scriptblock]::Create((irm https://openvibely.ai/install.ps1))) -Variant binary",
 		"./start.sh",
@@ -413,6 +576,119 @@ func TestSetupUserGuideParity(t *testing.T) {
 			t.Errorf("user guide setup guidance missing %q", want)
 		}
 	}
+}
+
+func withoutSetupStartScript(t *testing.T) {
+	t.Helper()
+	oldStat := setupStat
+	setupStat = func(name string) (os.FileInfo, error) {
+		if name == "./start.sh" {
+			return nil, os.ErrNotExist
+		}
+		return oldStat(name)
+	}
+	t.Cleanup(func() { setupStat = oldStat })
+}
+
+func withFastSetupHealth(t *testing.T) {
+	t.Helper()
+	oldTimeout := setupHealthWaitTimeout
+	oldPoll := setupHealthPoll
+	setupHealthWaitTimeout = 80 * time.Millisecond
+	setupHealthPoll = 10 * time.Millisecond
+	t.Cleanup(func() {
+		setupHealthWaitTimeout = oldTimeout
+		setupHealthPoll = oldPoll
+	})
+}
+
+func setupStartFixture(t *testing.T, healthStatus int) (string, *client.Client) {
+	t.Helper()
+	startMarker := setupFakeBackendCommand(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/capacity/global" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(healthStatus)
+		if healthStatus >= 200 && healthStatus < 300 {
+			_, _ = w.Write([]byte(`{"max_workers":1,"available_slots":1,"has_capacity":true}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startMarker, c
+}
+
+func setupFakeBackendCommand(t *testing.T) string {
+	t.Helper()
+	withoutSetupStartScript(t)
+	binDir := t.TempDir()
+	marker := filepath.Join(binDir, "started")
+	backendPath := filepath.Join(binDir, "openvibely")
+	fakeSetupToolPaths(t, map[string]string{"openvibely": backendPath})
+	oldStart := setupStartProcess
+	setupStartProcess = func(_ context.Context, spec setupCommandSpec) error {
+		if spec.Name != backendPath {
+			return fmt.Errorf("unexpected start command %q", spec.Name)
+		}
+		return os.WriteFile(marker, []byte("started"), 0644)
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+	return marker
+}
+
+func fakeSetupToolPaths(t *testing.T, tools map[string]string) {
+	t.Helper()
+	oldLookPath := setupLookPath
+	setupLookPath = func(name string) (string, error) {
+		if path, ok := tools[name]; ok {
+			return path, nil
+		}
+		return oldLookPath(name)
+	}
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+}
+
+func assertFileMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("%s exists; expected no setup side effect", path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("checking %s: %v", path, err)
+	}
+}
+
+func assertFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("%s = %q, want %q", path, data, want)
+	}
+}
+
+func assertFileEventuallyContains(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), want) {
+			return
+		}
+		lastErr = err
+		time.Sleep(10 * time.Millisecond)
+	}
+	if lastErr != nil {
+		t.Fatalf("reading %s: %v", path, lastErr)
+	}
+	assertFileContains(t, path, want)
 }
 
 func TestConnectionDiagnosticsAreTerminalSafeAndBounded(t *testing.T) {

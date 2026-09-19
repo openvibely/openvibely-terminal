@@ -35,9 +35,7 @@ make build
 make run
 ```
 
-The TUI does not install or start the backend. If it cannot connect, run `/setup`
-in the TUI or `openvibely-terminal setup` in a shell for read-only recovery guidance.
-Use `/login` when the backend requires authentication.
+Bare `/setup` and `openvibely-terminal setup` are read-only recovery guides. If you want the terminal to inspect or start a local backend, opt in explicitly with `/setup check`, `/setup start`, or `/setup bootstrap --install`; start/bootstrap disclose effects and require confirmation in the TUI or `--force` in CLI mode. Use `/login` when the backend requires authentication.
 
 ## Usage
 
