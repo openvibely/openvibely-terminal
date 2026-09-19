@@ -7860,6 +7860,158 @@ func TestCLIJSONAlertsDeleteUsesForceAndRefreshedResponse(t *testing.T) {
 	}
 }
 
+func TestCLIAlertActionJSONMutationsIncludeStatusAndRefresh(t *testing.T) {
+	const initialAlerts = `<div data-alert-id="a-deploy" data-alert-scroll-anchor="a-deploy" data-search-text="deploy"><p class="font-semibold">Deploy notice</p></div>`
+	const refreshedAlerts = `<div data-alert-id="a-after" data-alert-scroll-anchor="a-after" data-search-text="after"><p class="font-semibold">After notice</p></div>`
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantPath   string
+		wantStatus string
+		wantLists  int
+	}{
+		{name: "read", args: []string{"alerts", "read", "Deploy notice"}, wantPath: "/alerts/a-deploy/read", wantStatus: "read: Deploy notice", wantLists: 2},
+		{name: "approve", args: []string{"alerts", "approve", "Deploy notice"}, wantPath: "/alerts/a-deploy/approve", wantStatus: "approve: Deploy notice", wantLists: 2},
+		{name: "reject", args: []string{"alerts", "reject", "Deploy notice"}, wantPath: "/alerts/a-deploy/reject", wantStatus: "reject: Deploy notice", wantLists: 2},
+		{name: "dismiss", args: []string{"alerts", "dismiss", "Deploy notice"}, wantPath: "/alerts/a-deploy/dismiss", wantStatus: "dismiss: Deploy notice", wantLists: 2},
+		{name: "read-all", args: []string{"alerts", "read-all"}, wantPath: "/alerts/read-all", wantStatus: "marked all read", wantLists: 1},
+	}
+	scopes := []struct {
+		name       string
+		projectRef string
+		projects   string
+	}{
+		{name: "explicit project", projectRef: "demo", projects: cliProjects},
+		{name: "implicit single project", projectRef: "", projects: `{"projects":[{"id":"p1","name":"demo"}]}`},
+	}
+
+	decodeMutationJSON := func(t *testing.T, data []byte) (string, []client.Alert) {
+		t.Helper()
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(bytes.TrimSpace(data), &raw); err != nil {
+			t.Fatalf("alert mutation JSON is invalid: %v\n%s", err, string(data))
+		}
+		if payload, ok := raw["data"]; ok {
+			if err := json.Unmarshal(payload, &raw); err != nil {
+				t.Fatalf("wrapped alert mutation JSON has invalid data: %v\n%s", err, string(data))
+			}
+		}
+		var status string
+		if err := json.Unmarshal(raw["status"], &status); err != nil {
+			t.Fatalf("alert mutation JSON status is invalid: %v\n%s", err, string(data))
+		}
+		var alerts []client.Alert
+		if err := json.Unmarshal(raw["alerts"], &alerts); err != nil {
+			t.Fatalf("alert mutation JSON alerts are invalid: %v\n%s", err, string(data))
+		}
+		return status, alerts
+	}
+
+	for _, scope := range scopes {
+		for _, tt := range tests {
+			t.Run(scope.name+" "+tt.name, func(t *testing.T) {
+				var lists, mutations int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = io.WriteString(w, scope.projects)
+					case strings.HasPrefix(r.URL.Path, "/alerts") && r.URL.Query().Get("project_id") != "p1":
+						t.Errorf("alert request lost project scope: %s", r.URL.RequestURI())
+						http.Error(w, "missing project", http.StatusBadRequest)
+					case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+						lists++
+						w.Header().Set("Content-Type", "text/html")
+						if lists == 1 && tt.name != "read-all" {
+							_, _ = io.WriteString(w, initialAlerts)
+							return
+						}
+						_, _ = io.WriteString(w, refreshedAlerts)
+					case r.Method == http.MethodPost && r.URL.Path == tt.wantPath:
+						mutations++
+						w.WriteHeader(http.StatusNoContent)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer srv.Close()
+				c, err := client.New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var out bytes.Buffer
+				if err := RunCLI(c, &out, scope.projectRef, tt.args, false, true); err != nil {
+					t.Fatalf("RunCLI: %v\n%s", err, out.String())
+				}
+				status, alerts := decodeMutationJSON(t, out.Bytes())
+				if status != tt.wantStatus {
+					t.Fatalf("status = %q, want %q; JSON: %s", status, tt.wantStatus, out.String())
+				}
+				if len(alerts) != 1 || alerts[0].ID != "a-after" || alerts[0].Title != "After notice" {
+					t.Fatalf("alerts = %#v, want refreshed alert", alerts)
+				}
+				if lists != tt.wantLists || mutations != 1 {
+					t.Fatalf("requests: lists=%d mutations=%d, want %d/1", lists, mutations, tt.wantLists)
+				}
+			})
+		}
+	}
+}
+
+func TestCLIAlertActionJSONRefreshFailureReturnsStatusOnly(t *testing.T) {
+	const initialAlerts = `<div data-alert-id="a-deploy" data-alert-scroll-anchor="a-deploy" data-search-text="deploy"><p class="font-semibold">Deploy notice</p></div>`
+	var lists, mutations int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case strings.HasPrefix(r.URL.Path, "/alerts") && r.URL.Query().Get("project_id") != "p1":
+			t.Errorf("alert request lost project scope: %s", r.URL.RequestURI())
+			http.Error(w, "missing project", http.StatusBadRequest)
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			lists++
+			if lists == 1 {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, initialAlerts)
+				return
+			}
+			http.Error(w, "temporary refresh failure", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && r.URL.Path == "/alerts/a-deploy/read":
+			mutations++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"alerts", "read", "Deploy notice"}, false, true); err != nil {
+		t.Fatalf("RunCLI: %v\n%s", err, out.String())
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &got); err != nil {
+		t.Fatalf("status-only alert mutation JSON is invalid: %v\n%s", err, out.String())
+	}
+	var status string
+	if err := json.Unmarshal(got["status"], &status); err != nil || status != "read: Deploy notice" {
+		t.Fatalf("status = %q err=%v JSON=%s", status, err, out.String())
+	}
+	if _, ok := got["alerts"]; ok {
+		t.Fatalf("refresh failure JSON included alerts and could imply an empty refresh: %s", out.String())
+	}
+	if lists != 2 || mutations != 1 {
+		t.Fatalf("requests: lists=%d mutations=%d, want 2/1", lists, mutations)
+	}
+}
+
 func TestCLIAlertBulkCommandsForceJSONAndResolution(t *testing.T) {
 	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>
 		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two"><p class="font-semibold">Two alert</p></div>`

@@ -2611,6 +2611,33 @@ func alertDeleteOutput(status string, alerts []client.Alert) (string, error) {
 	return status + "\n\n" + renderAlerts(alerts, ""), nil
 }
 
+type alertMutationJSONOutput struct {
+	Status string          `json:"status"`
+	Alerts *[]client.Alert `json:"alerts,omitempty"`
+}
+
+// alertMutationOutput returns the confirmed alert mutation status and, when the
+// best-effort refresh succeeds, the refreshed alert list. A refresh failure does
+// not make the completed mutation fail and JSON omits alerts rather than
+// claiming the refreshed list is empty.
+func alertMutationOutput(status string, reload func() ([]client.Alert, error)) (string, error) {
+	alerts, err := reload()
+	if jsonMode {
+		out := alertMutationJSONOutput{Status: status}
+		if err == nil {
+			if alerts == nil {
+				alerts = []client.Alert{}
+			}
+			out.Alerts = &alerts
+		}
+		return marshalJSON(out)
+	}
+	if err != nil {
+		return status, nil
+	}
+	return status + "\n\n" + renderAlerts(alerts, ""), nil
+}
+
 // resolvedAlertActionOutput performs a single-alert action only after the
 // caller has resolved and captured its canonical alert target. Deletes render
 // the refreshed list returned by their DELETE response; other actions retain
@@ -2627,9 +2654,8 @@ func resolvedAlertActionOutput(ctx context.Context, c *client.Client, projectID,
 	if err := c.AlertAction(ctx, alert.ID, action, projectID); err != nil {
 		return "", err
 	}
-	return refreshAndRender(status,
-		func() ([]client.Alert, error) { return c.ListAlerts(ctx, projectID) },
-		renderAlerts)
+	return alertMutationOutput(status,
+		func() ([]client.Alert, error) { return c.ListAlerts(ctx, projectID) })
 }
 
 func alertActionDisplayName(alert client.Alert) string {
@@ -2967,9 +2993,8 @@ func alertsCommand() command {
 					if err := c.MarkAllAlertsRead(ctx, pid); err != nil {
 						return "", err
 					}
-					return refreshAndRender("marked all read",
-						func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) },
-						renderAlerts)
+					return alertMutationOutput("marked all read",
+						func() ([]client.Alert, error) { return c.ListAlerts(ctx, pid) })
 				})
 			case "clear":
 				cmd := run("Alerts", cmdTimeout, func(ctx context.Context) (string, error) {
