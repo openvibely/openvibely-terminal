@@ -8,9 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func attachmentListMarkup(projectID string, rows string) string {
@@ -207,6 +210,146 @@ func TestListTaskAttachmentsParsesRefreshedRowsAndScopesProject(t *testing.T) {
 	}
 }
 
+func TestListTaskAttachmentsUsesSingleTaskPageWithoutLazyDetailRequests(t *testing.T) {
+	cases := []struct {
+		name string
+		rows string
+		want int
+	}{
+		{name: "zero", rows: "", want: 0},
+		{name: "one", rows: attachmentRowMarkup("att-1", "p1", "report.pdf", "1.5 KB"), want: 1},
+		{name: "many", rows: attachmentRowMarkup("att-1", "p1", "report.pdf", "1.5 KB") + attachmentRowMarkup("att-2", "p1", "image.png", "2.0 MB"), want: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var taskPageReads atomic.Int64
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/tasks/t-1":
+					if r.Method != http.MethodGet {
+						t.Errorf("method = %s, want GET", r.Method)
+					}
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
+					}
+					taskPageReads.Add(1)
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(`<div data-project-id="p1"><div id="tab-chat" hx-get="/tasks/t-1/thread"></div><div id="tab-changes" hx-get="/tasks/t-1/changes"></div>` + attachmentListMarkup("p1", tc.rows) + `</div>`))
+				case "/tasks/t-1/thread", "/tasks/t-1/changes", "/api/tasks/t-1/lifecycle-executions":
+					t.Fatalf("ListTaskAttachments requested unrelated lazy task detail endpoint %s", r.URL.Path)
+				default:
+					t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+				}
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attachments, err := c.ListTaskAttachments(context.Background(), "t-1", "p1")
+			if err != nil {
+				t.Fatalf("ListTaskAttachments: %v", err)
+			}
+			if len(attachments) != tc.want {
+				t.Fatalf("attachments = %+v, want %d row(s)", attachments, tc.want)
+			}
+			if got := taskPageReads.Load(); got != 1 {
+				t.Fatalf("task page reads = %d, want exactly one", got)
+			}
+		})
+	}
+}
+
+func TestListTaskAttachmentsLargeUnrelatedFragmentsAvoidsFullDetailCost(t *testing.T) {
+	const lazyDelay = 25 * time.Millisecond
+	largeThread := `<div>` + strings.Repeat("thread noise ", 200000) + `</div>`
+	largeChanges := `<div>` + strings.Repeat("changes noise ", 200000) + `</div>`
+	taskPage := `<div data-project-id="p1" data-task-status="active"><h2 class="font-bold">Task</h2><div id="tab-chat" hx-get="/tasks/t-1/thread"></div><div id="tab-changes" hx-get="/tasks/t-1/changes"></div>` + attachmentListMarkup("p1", attachmentRowMarkup("att-1", "p1", "report.pdf", "1 KB")) + `</div>`
+	var responseBytes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		write := func(body string) {
+			responseBytes.Add(int64(len(body)))
+			_, _ = w.Write([]byte(body))
+		}
+		switch r.URL.Path {
+		case "/tasks/t-1":
+			write(taskPage)
+		case "/tasks/t-1/thread":
+			time.Sleep(lazyDelay)
+			write(largeThread)
+		case "/tasks/t-1/changes":
+			time.Sleep(lazyDelay)
+			write(largeChanges)
+		case "/api/tasks/t-1/lifecycle-executions":
+			time.Sleep(lazyDelay)
+			w.Header().Set("Content-Type", "application/json")
+			write(`[]`)
+		default:
+			t.Fatalf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	optimizedDuration, optimizedBytes, optimizedAlloc := measureAttachmentReadCost(t, &responseBytes, func() error {
+		attachments, err := c.ListTaskAttachments(context.Background(), "t-1", "p1")
+		if err != nil {
+			return err
+		}
+		if len(attachments) != 1 || attachments[0].ID != "att-1" {
+			return errors.New("optimized attachment read returned unexpected rows")
+		}
+		return nil
+	})
+	fullDuration, fullBytes, fullAlloc := measureAttachmentReadCost(t, &responseBytes, func() error {
+		detail, err := c.GetTaskForProject(context.Background(), "t-1", "p1")
+		if err != nil {
+			return err
+		}
+		if len(detail.Attachments) != 1 || detail.Attachments[0].ID != "att-1" || detail.Thread == "" || detail.Changes == "" {
+			return errors.New("full task detail read did not load expected content")
+		}
+		return nil
+	})
+
+	if optimizedBytes*10 > fullBytes*3 {
+		t.Fatalf("optimized response bytes = %d, full-detail bytes = %d, want at least 70%% reduction", optimizedBytes, fullBytes)
+	}
+	if optimizedDuration*5 > fullDuration*3 {
+		t.Fatalf("optimized duration = %s, full-detail duration = %s, want at least 40%% reduction", optimizedDuration, fullDuration)
+	}
+	if optimizedAlloc*2 > fullAlloc {
+		t.Fatalf("optimized allocated bytes = %d, full-detail allocated bytes = %d, want at least 50%% reduction", optimizedAlloc, fullAlloc)
+	}
+}
+
+func measureAttachmentReadCost(t *testing.T, responseBytes *atomic.Int64, fn func() error) (time.Duration, int64, uint64) {
+	t.Helper()
+	durations := make([]time.Duration, 0, 3)
+	var bytesTotal int64
+	var allocTotal uint64
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+		responseBytes.Store(0)
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		start := time.Now()
+		if err := fn(); err != nil {
+			t.Fatal(err)
+		}
+		durations = append(durations, time.Since(start))
+		runtime.ReadMemStats(&after)
+		bytesTotal += responseBytes.Load()
+		allocTotal += after.TotalAlloc - before.TotalAlloc
+	}
+	return medianDuration(durations), bytesTotal / int64(len(durations)), allocTotal / uint64(len(durations))
+}
+
 func TestDeleteTaskAttachmentUsesStableIDProjectScopeAndParsesRefresh(t *testing.T) {
 	var gotProject string
 	var gotID string
@@ -372,6 +515,74 @@ func TestGetTaskKeepsLegacyAttachmentTextWithoutStructuredScope(t *testing.T) {
 	}
 	if len(detail.Attachments) != 0 {
 		t.Fatalf("legacy detail exposed structured attachments: %+v", detail.Attachments)
+	}
+}
+
+func BenchmarkListTaskAttachmentsOptimizedVsFullDetail(b *testing.B) {
+	for _, tc := range []struct {
+		name    string
+		thread  string
+		changes string
+	}{
+		{name: "small", thread: `<div>thread</div>`, changes: `<div>changes</div>`},
+		{name: "large-unrelated", thread: `<div>` + strings.Repeat("thread noise ", 200000) + `</div>`, changes: `<div>` + strings.Repeat("changes noise ", 200000) + `</div>`},
+	} {
+		taskPage := `<div data-project-id="p1" data-task-status="active"><h2 class="font-bold">Task</h2><div id="tab-chat" hx-get="/tasks/t-1/thread"></div><div id="tab-changes" hx-get="/tasks/t-1/changes"></div>` + attachmentListMarkup("p1", attachmentRowMarkup("att-1", "p1", "report.pdf", "1 KB")) + `</div>`
+		for _, read := range []struct {
+			name string
+			fn   func(*Client) error
+		}{
+			{name: "optimized-attachments", fn: func(c *Client) error {
+				_, err := c.ListTaskAttachments(context.Background(), "t-1", "p1")
+				return err
+			}},
+			{name: "full-detail-baseline", fn: func(c *Client) error {
+				_, err := c.GetTaskForProject(context.Background(), "t-1", "p1")
+				return err
+			}},
+		} {
+			b.Run(tc.name+"/"+read.name, func(b *testing.B) {
+				var responseBytes atomic.Int64
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					write := func(contentType, body string) {
+						w.Header().Set("Content-Type", contentType)
+						responseBytes.Add(int64(len(body)))
+						_, _ = w.Write([]byte(body))
+					}
+					switch r.URL.Path {
+					case "/tasks/t-1":
+						write("text/html", taskPage)
+					case "/tasks/t-1/thread":
+						write("text/html", tc.thread)
+					case "/tasks/t-1/changes":
+						write("text/html", tc.changes)
+					case "/api/tasks/t-1/lifecycle-executions":
+						write("application/json", `[]`)
+					default:
+						http.NotFound(w, r)
+					}
+				}))
+				defer srv.Close()
+				c, err := New(srv.URL)
+				if err != nil {
+					b.Fatal(err)
+				}
+				b.ReportAllocs()
+				var totalResponseBytes int64
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					before := responseBytes.Load()
+					if err := read.fn(c); err != nil {
+						b.Fatal(err)
+					}
+					totalResponseBytes += responseBytes.Load() - before
+				}
+				b.StopTimer()
+				if b.N > 0 {
+					b.ReportMetric(float64(totalResponseBytes)/float64(b.N), "response-bytes/op")
+				}
+			})
+		}
 	}
 }
 

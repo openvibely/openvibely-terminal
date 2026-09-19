@@ -63,18 +63,26 @@ func formatUploadedAttachments(attachments []Attachment) string {
 	return strings.Join(parts, ", ")
 }
 
-// ListTaskAttachments reads the attachment list embedded in a task detail
-// page. The selected project is required because the task page is also the
-// backend's attachment read contract.
+// ListTaskAttachments reads only the attachment list embedded in the initial
+// task detail page. It intentionally avoids GetTask/GetTaskForProject because
+// those full-detail loaders also request lazy thread, changes, and lifecycle
+// fragments that attachment-only commands do not need.
 func (c *Client) ListTaskAttachments(ctx context.Context, taskID, projectID string) ([]Attachment, error) {
-	if strings.TrimSpace(projectID) == "" {
-		return nil, fmt.Errorf("project ID is required for task attachments")
-	}
-	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID))
+	root, err := c.getTaskAttachmentPage(ctx, taskID, projectID)
 	if err != nil {
 		return nil, err
 	}
 	return parseTaskAttachmentsForProject(root, taskID, projectID)
+}
+
+func (c *Client) getTaskAttachmentPage(ctx context.Context, taskID, projectID string) (*html.Node, error) {
+	if strings.TrimSpace(taskID) == "" {
+		return nil, fmt.Errorf("task ID is required for task attachments")
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task attachments")
+	}
+	return c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID))
 }
 
 // GetTaskAttachments is an alias for ListTaskAttachments retained as a
