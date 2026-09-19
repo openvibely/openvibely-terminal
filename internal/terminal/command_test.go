@@ -12,6 +12,49 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
+func TestResolveChannelAccessUserOrderedTiers(t *testing.T) {
+	nonXUsers := []client.ChannelAuthorizedUser{
+		{ID: "row-alpha", Provider: "slack", ProjectID: "p1", Identity: "U100"},
+		{ID: "row-beta", Provider: "slack", ProjectID: "p1", Identity: "row-alpha"},
+		{ID: "team-one", Provider: "slack", ProjectID: "p1", Identity: "U200"},
+		{ID: "team-two", Provider: "slack", ProjectID: "p1", Identity: "U201"},
+	}
+
+	user, err := resolveChannelAccessUser(nonXUsers, "row-alpha")
+	if err != nil || user.ID != "row-alpha" {
+		t.Fatalf("exact ID tier did not outrank exact identity: user=%#v err=%v", user, err)
+	}
+
+	user, err = resolveChannelAccessUser(nonXUsers, "u100")
+	if err != nil || user.ID != "row-alpha" {
+		t.Fatalf("exact identity tier did not resolve one user: user=%#v err=%v", user, err)
+	}
+
+	if _, err = resolveChannelAccessUser(nonXUsers, "team"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("prefix ambiguity error = %v, want ambiguous", err)
+	}
+
+	if _, err = resolveChannelAccessUser(nonXUsers, "missing"); !isMatchRefNotFound(err) {
+		t.Fatalf("missing ref error = %v, want matchRefNotFoundError", err)
+	}
+
+	xUsers := []client.ChannelAuthorizedUser{
+		{ID: "x-row-1", Provider: "x", ProjectID: "p1", Identity: "123"},
+		{ID: "x-row-2", Provider: "x", ProjectID: "p1", Identity: "456"},
+	}
+
+	user, err = resolveChannelAccessUser(xUsers, "00123")
+	if err != nil || user.ID != "x-row-1" {
+		t.Fatalf("X numeric identity alias did not resolve: user=%#v err=%v", user, err)
+	}
+
+	for _, ref := range []string{"x-row", "row-1"} {
+		if _, err = resolveChannelAccessUser(xUsers, ref); !isMatchRefNotFound(err) {
+			t.Fatalf("X ref %q error = %v, want not found without prefix/substring matching", ref, err)
+		}
+	}
+}
+
 func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 	cases := []struct {
 		name string

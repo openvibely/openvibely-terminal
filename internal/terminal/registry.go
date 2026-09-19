@@ -6313,35 +6313,18 @@ func xChannelAccessUserMatchesIdentity(user client.ChannelAuthorizedUser, ref st
 	return err == nil && strings.EqualFold(user.Identity, normalized)
 }
 
-// resolveChannelAccessUser preserves the command registry's ID → exact identity →
-// prefix → substring ranking while treating a Telegram username and numeric ID
-// as aliases for one captured authorization row. Display names are rendered only:
-// they are arbitrary metadata and must not select a destructive access mutation.
-func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) (client.ChannelAuthorizedUser, error) {
-	var zero client.ChannelAuthorizedUser
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return zero, errors.New("missing authorized access user ID or identity")
+type channelAccessUserMatchTier func(client.ChannelAuthorizedUser) bool
+
+func xChannelAccessUserMatchTiers(ref string) []channelAccessUserMatchTier {
+	return []channelAccessUserMatchTier{
+		func(user client.ChannelAuthorizedUser) bool { return strings.EqualFold(user.ID, ref) },
+		func(user client.ChannelAuthorizedUser) bool { return xChannelAccessUserMatchesIdentity(user, ref) },
 	}
+}
+
+func nonXChannelAccessUserMatchTiers(ref string) []channelAccessUserMatchTier {
 	lower := strings.ToLower(ref)
-	if len(users) > 0 && users[0].Provider == "x" {
-		for _, tier := range []func(client.ChannelAuthorizedUser) bool{
-			func(user client.ChannelAuthorizedUser) bool { return strings.EqualFold(user.ID, ref) },
-			func(user client.ChannelAuthorizedUser) bool { return xChannelAccessUserMatchesIdentity(user, ref) },
-		} {
-			matches := channelAccessUserMatches(users, tier)
-			switch len(matches) {
-			case 0:
-				continue
-			case 1:
-				return matches[0], nil
-			default:
-				return zero, channelAccessAmbiguousRef(ref, matches)
-			}
-		}
-		return zero, matchRefNotFoundError{ref: sanitizeAutomationDetailText(ref)}
-	}
-	for _, tier := range []func(client.ChannelAuthorizedUser) bool{
+	return []channelAccessUserMatchTier{
 		func(user client.ChannelAuthorizedUser) bool { return strings.EqualFold(user.ID, ref) },
 		func(user client.ChannelAuthorizedUser) bool {
 			return strings.EqualFold(user.Identity, ref) || user.MatchesIdentity(ref)
@@ -6352,7 +6335,12 @@ func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) 
 		func(user client.ChannelAuthorizedUser) bool {
 			return strings.Contains(strings.ToLower(user.ID), lower) || strings.Contains(strings.ToLower(user.Identity), lower)
 		},
-	} {
+	}
+}
+
+func resolveChannelAccessUserByTiers(users []client.ChannelAuthorizedUser, ref string, tiers []channelAccessUserMatchTier) (client.ChannelAuthorizedUser, error) {
+	var zero client.ChannelAuthorizedUser
+	for _, tier := range tiers {
 		matches := channelAccessUserMatches(users, tier)
 		switch len(matches) {
 		case 0:
@@ -6364,6 +6352,24 @@ func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) 
 		}
 	}
 	return zero, matchRefNotFoundError{ref: sanitizeAutomationDetailText(ref)}
+}
+
+// resolveChannelAccessUser preserves the command registry's ID → exact identity →
+// prefix → substring ranking for non-X providers while treating a Telegram
+// username and numeric ID as aliases for one captured authorization row. X keeps
+// its narrower row-ID and identity-alias resolution. Display names are rendered
+// only: they are arbitrary metadata and must not select a destructive access
+// mutation.
+func resolveChannelAccessUser(users []client.ChannelAuthorizedUser, ref string) (client.ChannelAuthorizedUser, error) {
+	var zero client.ChannelAuthorizedUser
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return zero, errors.New("missing authorized access user ID or identity")
+	}
+	if len(users) > 0 && users[0].Provider == "x" {
+		return resolveChannelAccessUserByTiers(users, ref, xChannelAccessUserMatchTiers(ref))
+	}
+	return resolveChannelAccessUserByTiers(users, ref, nonXChannelAccessUserMatchTiers(ref))
 }
 
 func resolveChannelAccessRemoval(users []client.ChannelAuthorizedUser, refs []string) (client.ChannelAuthorizedUser, error) {
