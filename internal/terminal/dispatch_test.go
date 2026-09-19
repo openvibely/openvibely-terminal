@@ -14549,6 +14549,11 @@ func webhookCatalogPageHTML(total, offset int) string {
 }
 
 func TestWebhooksCanonicalIDCatalogPerformanceEvidence(t *testing.T) {
+	if !performanceEvidenceEnabled() {
+		runWebhooksCanonicalIDCatalogRoutine(t)
+		return
+	}
+
 	const pageDelay = 5 * time.Millisecond
 	for _, cards := range []int{10, 100, 1000} {
 		t.Run(fmt.Sprintf("%d cards", cards), func(t *testing.T) {
@@ -14614,6 +14619,60 @@ func TestWebhooksCanonicalIDCatalogPerformanceEvidence(t *testing.T) {
 			}
 			t.Logf("%d-card webhook catalog evidence: requests %d -> %d; bytes %d -> %d; latency %v -> %v; allocations %.0f -> %.0f", cards, nameRequests, directRequests, nameBytes, directBytes, catalogLatency, directLatency, catalogAllocs, directAllocs)
 		})
+	}
+}
+
+func runWebhooksCanonicalIDCatalogRoutine(t *testing.T) {
+	t.Helper()
+	const cards = 1000
+	var catalogRequests atomic.Int64
+	var catalogBytes atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/channels":
+			catalogRequests.Add(1)
+			offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+			if err != nil && r.URL.Query().Get("offset") != "" {
+				t.Errorf("invalid catalog offset: %v", err)
+			}
+			body := webhookCatalogPageHTML(cards, offset)
+			catalogBytes.Add(int64(len(body)))
+			w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(offset+50 < cards))
+			_, _ = io.WriteString(w, body)
+		case "/channels/webhooks/" + canonicalWebhookID:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, canonicalWebhookDetailJSON(canonicalWebhookID, "p1", "Target Catalog Hook"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runShow := func(ref string) {
+		m := New(c)
+		m.selectedID, m.selectedName = "p1", "demo"
+		m = runLine(t, m, "/webhooks show "+ref)
+		if out := strings.ToLower(transcript(m)); strings.Contains(out, "error:") {
+			t.Fatalf("show %q failed:\n%s", ref, transcript(m))
+		}
+	}
+	measure := func(ref string) (int64, int64) {
+		beforeRequests, beforeBytes := catalogRequests.Load(), catalogBytes.Load()
+		runShow(ref)
+		return catalogRequests.Load() - beforeRequests, catalogBytes.Load() - beforeBytes
+	}
+
+	directRequests, directBytes := measure(canonicalWebhookID)
+	nameRequests, nameBytes := measure("Target Catalog Hook")
+	wantPages := int64((cards + 49) / 50)
+	if directRequests != 0 || directBytes != 0 {
+		t.Fatalf("known canonical ID catalog requests/bytes = %d/%d, want 0/0", directRequests, directBytes)
+	}
+	if nameRequests != wantPages || nameBytes <= 0 {
+		t.Fatalf("name catalog requests/bytes = %d/%d, want %d/>0", nameRequests, nameBytes, wantPages)
 	}
 }
 

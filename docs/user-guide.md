@@ -1256,6 +1256,20 @@ chat update loop (history, menus, chat polling, SSE backoff), the renderers,
 and an end-to-end dispatch suite asserting that each slash command issues the
 expected HTTP method and path.
 
+Routine local validation from a clean checkout runs the default hermetic suite:
+
+```bash
+go test ./...
+go test ./internal/client ./internal/terminal -count=1
+```
+
+Measurement-heavy bounded-list and status-latency evidence is explicit because it
+uses artificial sleeps, repeated samples, allocation checks, and RSS probes:
+
+```bash
+OPENVIBELY_PERF_EVIDENCE=1 go test ./internal/client ./internal/terminal -run 'TestList(Alerts|Automations)BoundedLargeCatalogLatencyAndAllocations|TestCLIStatus(LatencyOverlapsBalancedAndSlowDiscovery|UsesTwoDelayedRequestWaves|DeadlineAfterProjectSelectionCancelsEveryStartedRequest)|TestWebhooksCanonicalIDCatalogPerformanceEvidence|TestRenderLifecycleEventsBackendShapedMeasurements' -count=1 -v
+```
+
 HTML fixtures mirror the real templ markup (including the kebab menu that
 precedes a card's title), because simplified fixtures hide scraping bugs.
 

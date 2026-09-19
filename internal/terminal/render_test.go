@@ -572,6 +572,11 @@ func measureLifecycleRender(events []client.LifecycleEvent) lifecycleRenderMeasu
 }
 
 func TestRenderLifecycleEventsBackendShapedMeasurements(t *testing.T) {
+	if !performanceEvidenceEnabled() {
+		runLifecycleEventsBackendShapedRoutine(t)
+		return
+	}
+
 	const payloadSize = 64 << 10
 	for _, eventCount := range []int{1, 100} {
 		events, payloadBytes, err := lifecycleDecodedBackendEvents(payloadSize, eventCount)
@@ -586,6 +591,22 @@ func TestRenderLifecycleEventsBackendShapedMeasurements(t *testing.T) {
 			t.Fatal("backend-shaped lifecycle render returned an empty result")
 		}
 		t.Logf("fixture=wide_struct_map events=%d payload_bytes=%d payload_bytes_per_event=%d wall=%s allocations=%d peak_live_heap_bytes=%d", eventCount, payloadBytes, payloadBytes/eventCount, measurement.wall, measurement.allocations, measurement.peakLiveHeapByte)
+	}
+}
+
+func runLifecycleEventsBackendShapedRoutine(t *testing.T) {
+	t.Helper()
+	const payloadSize = 4 << 10
+	const eventCount = 2
+	events, _, err := lifecycleDecodedBackendEvents(payloadSize, eventCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reflect.ValueOf(events[0].Payload).Pointer() == reflect.ValueOf(events[1].Payload).Pointer() {
+		t.Fatal("decoded backend payload maps unexpectedly share identity")
+	}
+	if rendered := renderLifecycleEvents(client.Task{ID: "task-1"}, client.LifecycleExecution{ID: "execution-1"}, events); rendered == "" {
+		t.Fatal("backend-shaped lifecycle render returned an empty result")
 	}
 }
 

@@ -318,5 +318,21 @@ make vet
 make build
 ```
 
+Routine local validation from a clean checkout should use the default hermetic test
+suite:
+
+```bash
+go test ./...
+go test ./internal/client ./internal/terminal -count=1
+```
+
+Measurement-heavy evidence tests are opt-in so normal runs do not spend seconds in
+artificial sleeps or repeated samples. Run them explicitly when updating the
+bounded-list or status-latency performance contracts:
+
+```bash
+OPENVIBELY_PERF_EVIDENCE=1 go test ./internal/client ./internal/terminal -run 'TestList(Alerts|Automations)BoundedLargeCatalogLatencyAndAllocations|TestCLIStatus(LatencyOverlapsBalancedAndSlowDiscovery|UsesTwoDelayedRequestWaves|DeadlineAfterProjectSelectionCancelsEveryStartedRequest)|TestWebhooksCanonicalIDCatalogPerformanceEvidence|TestRenderLifecycleEventsBackendShapedMeasurements' -count=1 -v
+```
+
 See the [development section](docs/user-guide.md#development) for coverage and
 live-backend test instructions.
