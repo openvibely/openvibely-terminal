@@ -8125,6 +8125,24 @@ func insightsCommand() command {
 	}
 }
 
+type automationMutationOutput struct {
+	Status      string              `json:"status"`
+	Automations []client.Automation `json:"automations,omitempty"`
+}
+
+func automationMutationResult(status string, automations []client.Automation, refreshErr error) (string, error) {
+	if jsonMode {
+		if refreshErr != nil {
+			return marshalJSON(automationMutationOutput{Status: status})
+		}
+		return marshalJSON(automationMutationOutput{Status: status, Automations: automations})
+	}
+	if refreshErr != nil {
+		return status, nil
+	}
+	return status + "\n\n" + renderAutomations(automations, ""), nil
+}
+
 func automationsCommand() command {
 	actions := []string{"list", "show", "open", "edit", "run", "pause", "resume", "delete"}
 	return command{
@@ -8189,9 +8207,8 @@ func automationsCommand() command {
 				if err := c.AutomationAction(ctx, a.ID, backendAction, pid); err != nil {
 					return "", err
 				}
-				return refreshAndRender(status,
-					func() ([]client.Automation, error) { return c.ListAutomations(ctx, pid) },
-					renderAutomations)
+				automations, refreshErr := c.ListAutomations(ctx, pid)
+				return automationMutationResult(status, automations, refreshErr)
 			}
 
 			switch action {
