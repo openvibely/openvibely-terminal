@@ -8452,6 +8452,12 @@ type automationMutationOutput struct {
 	Automations *[]client.Automation `json:"automations,omitempty"`
 }
 
+type automationCreateOutput struct {
+	Status          string `json:"status"`
+	AutomationID    string `json:"automation_id"`
+	SelectedProject string `json:"selected_project"`
+}
+
 func automationMutationResult(status string, automations []client.Automation, refreshErr error) (string, error) {
 	if jsonMode {
 		if refreshErr != nil {
@@ -8469,13 +8475,16 @@ func automationMutationResult(status string, automations []client.Automation, re
 }
 
 func automationsCommand() command {
-	actions := []string{"list", "show", "open", "edit", "run", "pause", "resume", "delete"}
+	actions := []string{"list", "show", "open", "create", "edit", "run", "pause", "resume", "delete"}
 	return command{
-		name:          "automations",
-		aliases:       []string{"automation"},
-		args:          "[filter]",
-		actions:       actions,
-		completions:   []commandCompletion{{after: []string{"edit", "**"}, values: []string{"--export", "--file"}}},
+		name:    "automations",
+		aliases: []string{"automation"},
+		args:    "[filter]",
+		actions: actions,
+		completions: []commandCompletion{
+			{after: []string{"create"}, values: []string{"--file"}},
+			{after: []string{"edit", "**"}, values: []string{"--export", "--file"}},
+		},
 		selectorPaths: [][]string{{"show"}, {"open"}, {"edit"}, {"run"}, {"run-now"}, {"pause"}, {"resume"}, {"delete"}},
 		desc:          "recurring automations and workflow rules",
 		usage: []string{
@@ -8483,6 +8492,7 @@ func automationsCommand() command {
 			"automations list --all                     list the complete automation catalog",
 			"automations show <automation>              show live graph, runtime and resources",
 			"automations open <automation>              compatibility alias for show",
+			"automations create --file <yaml>           create a new automation from a complete builder definition",
 			"automations edit <automation>               open the complete definition in the terminal editor",
 			"automations edit <automation> --export <yaml> export the complete current definition without mutation",
 			"automations edit <automation> --file <yaml> validate and replace the complete graph definition",
@@ -8496,6 +8506,7 @@ func automationsCommand() command {
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<automation>", description: "show live graph, runtime and resources"},
 			{action: "open", args: "<automation>", description: "compatibility alias for show"},
+			{action: "create", args: "--file <yaml>", description: "create a new automation from a complete builder definition"},
 			{action: "edit", args: "<automation>", description: "open the complete definition in the terminal editor; Ctrl+S saves and Esc cancels"},
 			{action: "edit", args: "<automation> --export <yaml>", description: "export the complete definition without mutation; edit it, then apply with --file"},
 			{action: "edit", args: "<automation> --file <yaml>", description: "validate and replace the complete graph definition"},
@@ -8505,6 +8516,7 @@ func automationsCommand() command {
 			`automations list --all`,
 			`automations show "Nightly sweep"`,
 			`automations open automation-id`,
+			`automations create --file automation.yaml`,
 			`automations edit "Nightly sweep" --export automation.yaml`,
 			`automations edit "Nightly sweep" --file automation.yaml`,
 			`automations run "Nightly sweep"`,
@@ -8560,6 +8572,23 @@ func automationsCommand() command {
 						return marshalJSON(automations)
 					}
 					return renderAutomations(automations, ref), nil
+				})
+
+			case "create":
+				filePath, err := parseAutomationCreateArgs(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				definitionYAML, err := readAutomationDefinitionFile(filePath)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
+					created, err := c.CreateAutomationFromDefinition(ctx, pid, definitionYAML)
+					if err != nil {
+						return "", err
+					}
+					return automationCreateResult(created)
 				})
 
 			case "edit":
@@ -8799,6 +8828,24 @@ func beginAutomationInteractiveEditResolver(m Model, c *client.Client, projectID
 		definition, err := c.LoadAutomationDefinition(ctx, projectID, automation.ID)
 		return automationEditLoadedMsg{projectID: projectID, requestID: requestID, automation: automation, definition: definition, err: err}
 	}
+}
+
+func automationCreateResult(created *client.AutomationDefinition) (string, error) {
+	if created == nil || strings.TrimSpace(created.AutomationID) == "" || strings.TrimSpace(created.ProjectID) == "" {
+		return "", fmt.Errorf("automation builder: created automation identity unavailable")
+	}
+	id := sanitizeAutomationDetailText(created.AutomationID)
+	if jsonMode {
+		return marshalJSON(automationCreateOutput{Status: "created", AutomationID: created.AutomationID, SelectedProject: created.ProjectID})
+	}
+	return "created automation " + id + "\nnext: automations show " + id + "\nedit: automations edit " + id, nil
+}
+
+func parseAutomationCreateArgs(args []string) (string, error) {
+	if len(args) != 2 || args[0] != "--file" || strings.TrimSpace(args[1]) == "" {
+		return "", fmt.Errorf("usage: %sautomations create --file <yaml>", cmdPrefix)
+	}
+	return strings.TrimSpace(args[1]), nil
 }
 
 func parseAutomationEditArgs(args []string) (string, string, string, error) {

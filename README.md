@@ -51,6 +51,7 @@ summarize the current project
 /tasks goal resume refactor
 /tasks steer refactor | stop and use the new interface
 /automations show "Nightly sweep"
+/automations create --file automation.yaml
 /personality delete-bulk old_one "Old Two"
 /projects delete demo
 /status
@@ -69,6 +70,7 @@ openvibely-terminal -project demo tasks swarm --category active "Coordinate rele
 openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
 openvibely-terminal -project demo chat "summarize the current project"
+openvibely-terminal -project demo automations create --file automation.yaml
 openvibely-terminal --force projects delete demo
 openvibely-terminal -project demo --force personality delete-bulk old_one "Old Two"
 openvibely-terminal --json -project demo automations list

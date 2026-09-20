@@ -21,6 +21,31 @@ type AutomationDefinition struct {
 	YAML         string `json:"-"`
 }
 
+// CreateAutomationFromDefinition creates a project-scoped automation by posting
+// the complete builder YAML to the same backend builder route used by the web UI.
+func (c *Client) CreateAutomationFromDefinition(ctx context.Context, projectID, definitionYAML string) (*AutomationDefinition, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("project ID is required")
+	}
+	if strings.TrimSpace(definitionYAML) == "" {
+		return nil, fmt.Errorf("automation definition is empty")
+	}
+	if len(definitionYAML) > maxAutomationDefinitionBytes {
+		return nil, fmt.Errorf("automation definition exceeds %d bytes", maxAutomationDefinitionBytes)
+	}
+	path := "/automations/builder" + query("project_id", projectID)
+	form := url.Values{"project_id": {projectID}, "automation_yaml": {definitionYAML}, "save_changes": {"true"}}
+	root, err := c.doFormHTML(ctx, http.MethodPost, path, form)
+	if err != nil {
+		return nil, err
+	}
+	if err := automationBuilderError(root); err != nil {
+		return nil, err
+	}
+	return parseCreatedAutomationDefinition(root, projectID)
+}
+
 // LoadAutomationDefinition loads the authoritative, complete builder YAML.
 func (c *Client) LoadAutomationDefinition(ctx context.Context, projectID, automationID string) (*AutomationDefinition, error) {
 	projectID, automationID = strings.TrimSpace(projectID), strings.TrimSpace(automationID)
@@ -60,19 +85,66 @@ func parseAutomationDefinition(root *html.Node, projectID, automationID string) 
 	if builder == nil {
 		return nil, fmt.Errorf("automation builder: malformed response")
 	}
-	textarea := findNode(builder, func(n *html.Node) bool {
-		return n.Type == html.ElementNode && n.Data == "textarea" && attr(n, "name") == "automation_yaml"
-	})
-	if textarea == nil {
-		return nil, fmt.Errorf("automation builder: definition unavailable")
-	}
-	yaml := rawNodeText(textarea)
-	if len(yaml) > maxAutomationDefinitionBytes {
-		return nil, fmt.Errorf("automation definition exceeds %d bytes", maxAutomationDefinitionBytes)
+	yaml, err := automationBuilderYAML(builder)
+	if err != nil {
+		return nil, err
 	}
 	// The web builder's design-form action is the authoritative identity and
 	// project-scope evidence. Never substitute caller-supplied IDs when it is
 	// absent: a stale or malformed fragment must fail closed before export/save.
+	action, err := automationBuilderAction(builder)
+	if err != nil {
+		return nil, err
+	}
+	wantPath := "/automations/" + url.PathEscape(automationID) + "/builder"
+	if action.Path != wantPath || action.Query().Get("project_id") != projectID {
+		return nil, fmt.Errorf("automation builder: response scope does not match selected automation")
+	}
+	return &AutomationDefinition{AutomationID: automationID, ProjectID: projectID, YAML: yaml}, nil
+}
+
+func parseCreatedAutomationDefinition(root *html.Node, projectID string) (*AutomationDefinition, error) {
+	builder := findByID(root, "automation-builder")
+	if builder == nil {
+		return nil, fmt.Errorf("automation builder: malformed response")
+	}
+	yaml, err := automationBuilderYAML(builder)
+	if err != nil {
+		return nil, err
+	}
+	action, err := automationBuilderAction(builder)
+	if err != nil {
+		return nil, err
+	}
+	if action.Query().Get("project_id") != projectID {
+		return nil, fmt.Errorf("automation builder: response scope does not match selected project")
+	}
+	prefix, suffix := "/automations/", "/builder"
+	if !strings.HasPrefix(action.Path, prefix) || !strings.HasSuffix(action.Path, suffix) {
+		return nil, fmt.Errorf("automation builder: created automation identity unavailable")
+	}
+	automationID, err := url.PathUnescape(strings.TrimSuffix(strings.TrimPrefix(action.Path, prefix), suffix))
+	if err != nil || strings.TrimSpace(automationID) == "" || automationID == "builder" {
+		return nil, fmt.Errorf("automation builder: created automation identity unavailable")
+	}
+	return &AutomationDefinition{AutomationID: automationID, ProjectID: projectID, YAML: yaml}, nil
+}
+
+func automationBuilderYAML(builder *html.Node) (string, error) {
+	textarea := findNode(builder, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && n.Data == "textarea" && attr(n, "name") == "automation_yaml"
+	})
+	if textarea == nil {
+		return "", fmt.Errorf("automation builder: definition unavailable")
+	}
+	yaml := rawNodeText(textarea)
+	if len(yaml) > maxAutomationDefinitionBytes {
+		return "", fmt.Errorf("automation definition exceeds %d bytes", maxAutomationDefinitionBytes)
+	}
+	return yaml, nil
+}
+
+func automationBuilderAction(builder *html.Node) (*url.URL, error) {
 	form := findNode(builder, func(n *html.Node) bool {
 		return n.Type == html.ElementNode && n.Data == "form" && attr(n, "id") == "automation-design-form"
 	})
@@ -83,11 +155,7 @@ func parseAutomationDefinition(root *html.Node, projectID, automationID string) 
 	if err != nil {
 		return nil, fmt.Errorf("automation builder: invalid target")
 	}
-	wantPath := "/automations/" + url.PathEscape(automationID) + "/builder"
-	if action.Path != wantPath || action.Query().Get("project_id") != projectID {
-		return nil, fmt.Errorf("automation builder: response scope does not match selected automation")
-	}
-	return &AutomationDefinition{AutomationID: automationID, ProjectID: projectID, YAML: yaml}, nil
+	return action, nil
 }
 
 // UpdateAutomationDefinition previews the full definition and persists it only

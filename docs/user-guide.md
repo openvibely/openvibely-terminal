@@ -311,7 +311,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/reflection` | `history` | `show`, `summary` |
 | `/grades` | | `show`, `run` |
 | `/insights` | `suggestions` | `show`, `analyze` |
-| `/automations` | `automation` | `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, `delete` |
+| `/automations` | `automation` | `list`, `show`, `open`, `create`, `edit`, `run`, `pause`, `resume`, `delete` |
 | `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
 | `/projects` | | `list`, `show <project>`, `create <name> <path>`, `edit <project> [options]`, `delete <project>` |
 | `/project <name>` | | select the active project |
@@ -855,15 +855,16 @@ confirmation behavior.
 ### Automations
 
 `/automations` (also `/automation`) exposes the selected project's recurring
-automation inspection, graph editing, and lifecycle controls. The supported actions are
-`list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, and `delete`; `show` is
+automation inspection, creation, graph editing, and lifecycle controls. The supported actions are
+`list`, `show`, `open`, `create`, `edit`, `run`, `pause`, `resume`, and `delete`; `show` is
 the canonical detail action and `open` is a compatibility alias with identical
 selection and output. `run-now` remains accepted as a compatibility alias for `run`.
 Plain human `list` output is bounded for large catalogs; use `list --all` when you need the complete catalog. `show` renders the saved graph topology, node and transition status/config summaries,
 runtime totals, resources, external state, and explicit unavailable or empty sections.
-`edit` consumes the backend builder's complete YAML definition, previews it through
-the backend validator, and saves only a valid changed definition. Automation creation
-is not exposed by this command and remains handled elsewhere.
+`create --file <yaml>` posts a complete builder YAML definition to the backend builder
+route and creates only when backend parsing and validation succeeds. `edit` consumes
+the backend builder's complete YAML definition, previews it through the backend
+validator, and saves only a valid changed definition.
 
 In the interactive TUI:
 
@@ -872,6 +873,7 @@ In the interactive TUI:
 /automations list --all
 /automations show "Nightly sweep"
 /automations open automation-id
+/automations create --file automation.yaml
 /automations edit "Nightly sweep"        # opens the multiline terminal editor; Ctrl+S saves, Esc cancels
 /automations edit "Nightly sweep" --export automation.yaml
 /automations edit "Nightly sweep" --file automation.yaml
@@ -889,6 +891,7 @@ openvibely-terminal -project demo automations list
 openvibely-terminal -project demo automations list --all
 openvibely-terminal -project demo automations show "Nightly sweep"
 openvibely-terminal -project demo automations open automation-id
+openvibely-terminal -project demo automations create --file automation.yaml
 openvibely-terminal -project demo automations edit "Nightly sweep" --export automation.yaml
 openvibely-terminal -project demo automations edit "Nightly sweep" --file automation.yaml
 openvibely-terminal -project demo automations run "Nightly sweep"

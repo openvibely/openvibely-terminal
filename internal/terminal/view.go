@@ -30,7 +30,7 @@ const (
 	attachmentEmptyStateHint = "no attachments yet — /tasks attachments add <task> <file> uploads one"
 	scheduleEmptyStateHint   = "nothing scheduled — /schedule add <task> <2006-01-02T15:04> daily"
 	skillEmptyStateHint      = "no skills yet — /skills add <name> creates one"
-	automationEmptyStateHint = "no automations yet — create one via the web UI"
+	automationEmptyStateHint = "no automations yet — create one with automations create --file <yaml> or via the web UI"
 )
 
 // View renders header, transcript, command menu and input.

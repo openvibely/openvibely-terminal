@@ -56,6 +56,67 @@ func TestLoadAutomationDefinitionFailsClosedWithoutMatchingFormIdentity(t *testi
 	}
 }
 
+func TestCreateAutomationFromDefinitionUsesBuilderContract(t *testing.T) {
+	var gotForm url.Values
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/automations/builder" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		gotForm = r.PostForm
+		_, _ = w.Write([]byte(`<div id="automation-builder"><form id="automation-design-form" action="/automations/au-new/builder?project_id=p1"></form><textarea name="automation_yaml">schema_version: 1
+name: Created
+</textarea></div>`))
+	}))
+	defer s.Close()
+	c, _ := New(s.URL)
+	created, err := c.CreateAutomationFromDefinition(context.Background(), "p1", "schema_version: 1\nname: Created\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotForm.Get("project_id") != "p1" || gotForm.Get("automation_yaml") != "schema_version: 1\nname: Created\n" {
+		t.Fatalf("form = %#v", gotForm)
+	}
+	if gotForm.Get("save_changes") != "true" {
+		t.Fatalf("save_changes = %q, want true", gotForm.Get("save_changes"))
+	}
+	if created.AutomationID != "au-new" || created.ProjectID != "p1" || created.YAML != "schema_version: 1\nname: Created\n" {
+		t.Fatalf("created = %+v", created)
+	}
+}
+
+func TestCreateAutomationFromDefinitionValidationFailureDoesNotRetry(t *testing.T) {
+	requests := 0
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`<div id="automation-builder"><form id="automation-design-form" action="/automations/builder?project_id=p1"></form><div data-automation-validation-summary><ul><li>unsupported trigger type</li></ul></div><textarea name="automation_yaml">invalid</textarea></div>`))
+	}))
+	defer s.Close()
+	c, _ := New(s.URL)
+	_, err := c.CreateAutomationFromDefinition(context.Background(), "p1", "invalid")
+	if err == nil || !strings.Contains(err.Error(), "unsupported trigger type") {
+		t.Fatalf("error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want one create attempt", requests)
+	}
+}
+
+func TestCreateAutomationFromDefinitionRejectsEmptyBeforeRequest(t *testing.T) {
+	requests := 0
+	s := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests++ }))
+	defer s.Close()
+	c, _ := New(s.URL)
+	if _, err := c.CreateAutomationFromDefinition(context.Background(), "p1", " \n\t"); err == nil {
+		t.Fatal("expected empty definition error")
+	}
+	if requests != 0 {
+		t.Fatalf("requests = %d", requests)
+	}
+}
+
 func TestUpdateAutomationDefinitionPreviewsBeforeSaving(t *testing.T) {
 	var forms []url.Values
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
