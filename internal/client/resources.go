@@ -4279,23 +4279,40 @@ func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*Pul
 	return out, nil
 }
 
+// pulseScheduleDetailConcurrencyLimit caps fallback task schedule detail reads used
+// only when schedule pages lack exact data-schedule-next-run timestamps.
+const pulseScheduleDetailConcurrencyLimit = 8
+
 func (c *Client) enrichPulseScheduleNextRuns(ctx context.Context, projectID string, schedules []ScheduleEntry) error {
-	byTask := map[string]map[string]time.Time{}
+	taskSeen := map[string]bool{}
+	taskIDs := make([]string, 0)
 	for i := range schedules {
 		schedule := schedules[i]
 		if schedule.Disabled || schedule.NextRunPrecise || strings.TrimSpace(schedule.TaskID) == "" || strings.TrimSpace(schedule.ScheduleID) == "" {
 			continue
 		}
-		nextRuns, ok := byTask[schedule.TaskID]
-		if !ok {
-			var err error
-			nextRuns, err = c.getTaskScheduleNextRuns(ctx, projectID, schedule.TaskID)
-			if err != nil {
-				return err
-			}
-			byTask[schedule.TaskID] = nextRuns
+		if !taskSeen[schedule.TaskID] {
+			taskSeen[schedule.TaskID] = true
+			taskIDs = append(taskIDs, schedule.TaskID)
 		}
-		nextRun, ok := nextRuns[schedule.ScheduleID]
+	}
+	if len(taskIDs) == 0 {
+		return nil
+	}
+	byTask, err := c.getPulseTaskScheduleNextRunResults(ctx, projectID, taskIDs)
+	if err != nil {
+		return err
+	}
+	for i := range schedules {
+		schedule := schedules[i]
+		if schedule.Disabled || schedule.NextRunPrecise || strings.TrimSpace(schedule.TaskID) == "" || strings.TrimSpace(schedule.ScheduleID) == "" {
+			continue
+		}
+		result := byTask[schedule.TaskID]
+		if result.err != nil {
+			return result.err
+		}
+		nextRun, ok := result.nextRuns[schedule.ScheduleID]
 		if !ok {
 			return fmt.Errorf("schedule %q next run was not found in task %q", schedule.ScheduleID, schedule.TaskID)
 		}
@@ -4303,6 +4320,54 @@ func (c *Client) enrichPulseScheduleNextRuns(ctx context.Context, projectID stri
 		schedules[i].NextRunPrecise = true
 	}
 	return nil
+}
+
+type pulseTaskScheduleNextRunResult struct {
+	nextRuns map[string]time.Time
+	err      error
+}
+
+func (c *Client) getPulseTaskScheduleNextRunResults(ctx context.Context, projectID string, taskIDs []string) (map[string]pulseTaskScheduleNextRunResult, error) {
+	workerCount := len(taskIDs)
+	if workerCount > pulseScheduleDetailConcurrencyLimit {
+		workerCount = pulseScheduleDetailConcurrencyLimit
+	}
+	jobs := make(chan int)
+	results := make([]pulseTaskScheduleNextRunResult, len(taskIDs))
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if err := ctx.Err(); err != nil {
+					results[idx].err = err
+					continue
+				}
+				nextRuns, err := c.getTaskScheduleNextRuns(ctx, projectID, taskIDs[idx])
+				results[idx] = pulseTaskScheduleNextRunResult{nextRuns: nextRuns, err: err}
+			}
+		}()
+	}
+	for i := range taskIDs {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return nil, ctx.Err()
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make(map[string]pulseTaskScheduleNextRunResult, len(taskIDs))
+	for i, result := range results {
+		out[taskIDs[i]] = result
+	}
+	return out, nil
 }
 
 func (c *Client) getTaskScheduleNextRuns(ctx context.Context, projectID, taskID string) (map[string]time.Time, error) {
