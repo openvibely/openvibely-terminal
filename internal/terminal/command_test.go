@@ -1638,6 +1638,49 @@ func TestChannelsCompletionPreservesQuotedReferencesAndPartialOptions(t *testing
 	}
 }
 
+func TestOutboundTargetOptionsStayInSyncAcrossParserCompletionAndHelp(t *testing.T) {
+	cmd := lookupCommand("channels")
+	if cmd == nil {
+		t.Fatal("channels command missing")
+	}
+	want := []string{
+		"--platform",
+		"--kind", "--target-kind", "--type",
+		"--target-id", "--target", "--destination",
+		"--name",
+		"--thread-id", "--thread", "--topic", "--topic-id",
+		"--home", "--is-home", "--no-home",
+		"--default-subject", "--subject",
+	}
+	for _, after := range [][]string{
+		{"targets", "add", "**"},
+		{"targets", "edit", "ops", "**"},
+		{"targets", "test", "draft", "**"},
+	} {
+		if got := registryCompletionValues("channels", after...); !slices.Equal(got, want) {
+			t.Fatalf("completion after %v = %#v, want %#v", after, got, want)
+		}
+	}
+	help := renderCommandHelp(*cmd)
+	for _, option := range want {
+		if !strings.Contains(help, option) {
+			t.Errorf("channels help missing outbound target option %q:\n%s", option, help)
+		}
+		args := []string{option, "value"}
+		if option == "--home" || option == "--is-home" {
+			args[1] = "true"
+		} else if option == "--no-home" {
+			args = []string{option}
+		}
+		if _, _, _, err := parseOutboundTargetOptions(args); err != nil {
+			t.Errorf("completion/help option %q is not accepted by parser: %v", option, err)
+		}
+	}
+	if _, values, _, err := parseOutboundTargetOptions([]string{"--no-home"}); err != nil || values["home"] != "false" {
+		t.Fatalf("--no-home parse values = %#v err=%v, want home=false", values, err)
+	}
+}
+
 func TestChannelsCompletionDocumentsManagementOptions(t *testing.T) {
 	for _, tc := range []struct {
 		after []string

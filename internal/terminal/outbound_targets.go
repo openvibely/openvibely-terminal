@@ -12,30 +12,59 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
-var outboundTargetOptionNames = map[string]string{
-	"--platform":        "platform",
-	"--kind":            "target_kind",
-	"--target-kind":     "target_kind",
-	"--type":            "target_kind",
-	"--name":            "name",
-	"--target":          "destination",
-	"--target-id":       "destination",
-	"--destination":     "destination",
-	"--thread":          "thread_id",
-	"--thread-id":       "thread_id",
-	"--topic":           "thread_id",
-	"--topic-id":        "thread_id",
-	"--home":            "home",
-	"--is-home":         "home",
-	"--subject":         "default_subject",
-	"--default-subject": "default_subject",
+type outboundTargetOptionDefinition struct {
+	canonical     string
+	names         []string
+	negativeNames []string
+}
+
+type outboundTargetOptionSpec struct {
+	canonical string
+	negative  bool
+}
+
+var outboundTargetOptionDefinitions = []outboundTargetOptionDefinition{
+	{canonical: "platform", names: []string{"--platform"}},
+	{canonical: "target_kind", names: []string{"--kind", "--target-kind", "--type"}},
+	{canonical: "destination", names: []string{"--target-id", "--target", "--destination"}},
+	{canonical: "name", names: []string{"--name"}},
+	{canonical: "thread_id", names: []string{"--thread-id", "--thread", "--topic", "--topic-id"}},
+	{canonical: "home", names: []string{"--home", "--is-home"}, negativeNames: []string{"--no-home"}},
+	{canonical: "default_subject", names: []string{"--default-subject", "--subject"}},
 }
 
 var outboundTargetPlatforms = []string{"slack", "telegram", "email", "discord", "x"}
 var outboundTargetActions = []string{"list", "show", "add", "edit", "test", "remove", "policy"}
 
+func outboundTargetOptionNameLookup() map[string]outboundTargetOptionSpec {
+	lookup := make(map[string]outboundTargetOptionSpec)
+	for _, definition := range outboundTargetOptionDefinitions {
+		for _, name := range definition.names {
+			lookup[name] = outboundTargetOptionSpec{canonical: definition.canonical}
+		}
+		for _, name := range definition.negativeNames {
+			lookup[name] = outboundTargetOptionSpec{canonical: definition.canonical, negative: true}
+		}
+	}
+	return lookup
+}
+
 func outboundTargetOptionCompletionValues() []string {
-	return []string{"--platform", "--kind", "--target-id", "--name", "--thread-id", "--home", "--default-subject"}
+	values := make([]string, 0)
+	for _, definition := range outboundTargetOptionDefinitions {
+		values = append(values, definition.names...)
+		values = append(values, definition.negativeNames...)
+	}
+	return values
+}
+
+func outboundTargetOptionHelpText() string {
+	groups := make([]string, 0, len(outboundTargetOptionDefinitions))
+	for _, definition := range outboundTargetOptionDefinitions {
+		names := append(append([]string(nil), definition.names...), definition.negativeNames...)
+		groups = append(groups, strings.Join(names, "|"))
+	}
+	return "Outbound target options: " + strings.Join(groups, "; ")
 }
 
 func isOutboundTargetsAction(value string) bool {
@@ -96,6 +125,7 @@ func parseOutboundTargetOptions(args []string) ([]string, map[string]string, map
 	positional := make([]string, 0)
 	values := make(map[string]string)
 	provided := make(map[string]bool)
+	optionNames := outboundTargetOptionNameLookup()
 	for i := 0; i < len(args); i++ {
 		arg := strings.TrimSpace(args[i])
 		if arg == "" {
@@ -109,13 +139,13 @@ func parseOutboundTargetOptions(args []string) ([]string, map[string]string, map
 		if equals := strings.IndexByte(arg, '='); equals >= 0 {
 			name, value, hasValue = arg[:equals], arg[equals+1:], true
 		}
-		canonical, ok := outboundTargetOptionNames[strings.ToLower(name)]
-		if !ok {
-			if strings.EqualFold(name, "--no-home") && !hasValue {
-				canonical, value, hasValue = "home", "false", true
-			} else {
-				return nil, nil, nil, fmt.Errorf("unknown outbound target option %q", sanitizeAutomationDetailText(name))
-			}
+		spec, ok := optionNames[strings.ToLower(name)]
+		if !ok || (spec.negative && hasValue) {
+			return nil, nil, nil, fmt.Errorf("unknown outbound target option %q", sanitizeAutomationDetailText(name))
+		}
+		canonical := spec.canonical
+		if spec.negative {
+			value, hasValue = "false", true
 		}
 		if provided[canonical] {
 			return nil, nil, nil, fmt.Errorf("outbound target option %s was supplied more than once", name)

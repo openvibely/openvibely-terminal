@@ -66,6 +66,32 @@ func TestOutboundTargetAddAcceptsNegativeTelegramChatIDs(t *testing.T) {
 	}
 }
 
+func TestOutboundTargetParserAcceptsDocumentedAliases(t *testing.T) {
+	target, err := parseOutboundTargetAdd([]string{
+		"--platform", "email",
+		"--destination", "person@example.com",
+		"--target-kind", "email",
+		"--name", "client",
+		"--topic-id", "42",
+		"--subject", "Hello",
+		"--is-home",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Platform != "email" || target.Destination != "person@example.com" || target.TargetKind != "email" || target.Name != "client" || target.ThreadID != "42" || target.DefaultSubject != "Hello" || !target.Home {
+		t.Fatalf("target = %#v", target)
+	}
+
+	_, values, err := parseOutboundTargetEdit([]string{"client", "--no-home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := values["home"]; !ok || got != "false" {
+		t.Fatalf("--no-home values = %#v, want home=false", values)
+	}
+}
+
 func TestOutboundTargetsCLIAddJSONUsesCanonicalRefreshedTarget(t *testing.T) {
 	canonical := client.OutboundTarget{
 		ID: "target-email-1", ProjectID: "p1", Platform: "email", TargetKind: "email",

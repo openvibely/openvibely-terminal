@@ -6965,7 +6965,7 @@ func channelsCommand() command {
 			"Webhook options: --name, --enabled, --priority, --system-instructions, --title-template, --prompt-template, --agents.",
 			"Bulk webhook deletion resolves every selected reference within the project before one request; use yes in the TUI or --force in CLI mode.",
 			"Access providers: Telegram accepts a numeric ID or username; Slack requires a Slack user ID; Discord requires a numeric ID; X requires a numeric ID and accepts an optional username; Email is normalized before it is authorized; GitHub accepts a normalized login and optional display name.",
-			"Outbound targets: targets add <platform> <destination> [--kind channel|user] [--name name] [--thread-id id] [--home] [--default-subject subject].",
+			"Outbound targets: targets add <platform> <destination> [options]. " + outboundTargetOptionHelpText() + ".",
 			"Outbound target references resolve only within the selected project; removal captures the canonical ID, then requires yes or --force.",
 			"Explicit unsaved target policy: channels targets policy show|on|off.",
 			"X access: channels access x list|add|remove [numeric ID] [@username]; username is optional and @ is normalized.",
