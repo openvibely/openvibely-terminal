@@ -149,6 +149,44 @@ func TestSetupGuidanceUsesAuthoritativePlatformInstructions(t *testing.T) {
 	}
 }
 
+func TestSetupLifecycleGuidanceCoversStopReconnectAndUpdate(t *testing.T) {
+	guidance := setupGuidance("linux", "http://localhost:3001")
+	for _, want := range []string{
+		"Stop:",
+		"Reconnect:",
+		"Update:",
+		"lsof -nP -iTCP:3001 -sTCP:LISTEN",
+		"openvibely-terminal -server http://localhost:3001 status",
+		"run the documented installer again",
+	} {
+		if !strings.Contains(guidance, want) {
+			t.Errorf("setup lifecycle guidance missing %q:\n%s", want, guidance)
+		}
+	}
+}
+
+func TestReadmeDocumentsSetupLifecycleGuidance(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme, err := os.ReadFile(filepath.Join(wd, "..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(readme)
+	for _, want := range []string{
+		"Stop a setup-started local backend",
+		"Reconnect to a running backend",
+		"Update a local backend",
+		"openvibely-terminal -server http://localhost:3001 status",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("README setup lifecycle guidance missing %q", want)
+		}
+	}
+}
+
 func TestSetupCheckOnlyReportsMissingPiecesWithoutStateChanges(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses Unix PATH/script assumptions")
@@ -219,7 +257,15 @@ func TestSetupStartRequiresConfirmationOrForce(t *testing.T) {
 		t.Fatalf("forced setup start failed: %v\n%s", err, forced.String())
 	}
 	assertFileEventuallyContains(t, startMarker, "started")
-	for _, want := range []string{"Start command launched", "Backend health check succeeded", "Next: run /projects"} {
+	for _, want := range []string{
+		"Start command launched",
+		"Backend health check succeeded",
+		"Stop:",
+		"Reconnect:",
+		"Update:",
+		"openvibely-terminal -server",
+		"Next: run /projects",
+	} {
 		if !strings.Contains(forced.String(), want) {
 			t.Errorf("forced setup output missing %q:\n%s", want, forced.String())
 		}
@@ -245,6 +291,20 @@ func TestSetupStartCancellationDoesNotRunProcess(t *testing.T) {
 	assertFileMissing(t, startMarker)
 	if !strings.Contains(transcript(m), "cancelled") {
 		t.Fatalf("cancellation was not rendered:\n%s", transcript(m))
+	}
+}
+
+func TestSetupGuidanceForRemoteServerDoesNotRenderLocalLifecycleActions(t *testing.T) {
+	guidance := setupGuidance("linux", "https://ops.example:3001")
+	for _, unwanted := range []string{"Stop:", "lsof -nP", "kill <pid>", "taskkill /PID", "openvibely-terminal -server https://ops.example:3001 status"} {
+		if strings.Contains(guidance, unwanted) {
+			t.Errorf("remote setup guidance contains local lifecycle action %q:\n%s", unwanted, guidance)
+		}
+	}
+	for _, want := range []string{"The configured server is remote", "setup start/bootstrap refuse remote server URLs"} {
+		if !strings.Contains(guidance, want) {
+			t.Errorf("remote setup guidance missing %q:\n%s", want, guidance)
+		}
 	}
 }
 
@@ -288,7 +348,7 @@ func TestSetupBootstrapInstallUsesOptInInstallerAndWaitsForHealth(t *testing.T) 
 	}
 	assertFileContains(t, installMarker, "installed")
 	assertFileEventuallyContains(t, startMarker, "started")
-	for _, want := range []string{"Installing local backend", "Installer completed", "Backend health check succeeded"} {
+	for _, want := range []string{"Installing local backend", "Installer completed", "Backend health check succeeded", "Stop:", "Reconnect:", "Update:"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("bootstrap install output missing %q:\n%s", want, out.String())
 		}
@@ -467,7 +527,7 @@ func TestSetupIsDiscoverableAndBypassesProjectPreflight(t *testing.T) {
 		t.Fatalf("interactive generated help omits setup:\n%s", interactiveHelp)
 	}
 	interactiveDetail := renderCommandHelp(*cmd)
-	for _, want := range []string{"/setup", "read-only backend setup and recovery steps"} {
+	for _, want := range []string{"/setup", "read-only backend setup and recovery steps", "stop/reconnect/update guidance", "lsof -nP -iTCP:3001 -sTCP:LISTEN", "openvibely-terminal --force setup bootstrap --install"} {
 		if !strings.Contains(interactiveDetail, want) {
 			t.Errorf("interactive setup help missing %q:\n%s", want, interactiveDetail)
 		}
@@ -481,7 +541,7 @@ func TestSetupIsDiscoverableAndBypassesProjectPreflight(t *testing.T) {
 	if err := RunCLI(c, &cliHelp, "", []string{"help", "setup"}, false, false); err != nil {
 		t.Fatalf("CLI setup help should be backend independent: %v", err)
 	}
-	for _, want := range []string{"setup", "read-only backend setup and recovery steps"} {
+	for _, want := range []string{"setup", "read-only backend setup and recovery steps", "stop/reconnect/update guidance", "lsof -nP -iTCP:3001 -sTCP:LISTEN", "openvibely-terminal --force setup bootstrap --install"} {
 		if !strings.Contains(cliHelp.String(), want) {
 			t.Errorf("CLI generated setup help missing %q:\n%s", want, cliHelp.String())
 		}
@@ -666,6 +726,9 @@ func TestSetupUserGuideParity(t *testing.T) {
 		"`openvibely-terminal status`",
 		"`-server <url>`",
 		"`OPENVIBELY_SERVER_URL`",
+		"Stop a setup-started local backend",
+		"Reconnect to a running backend",
+		"Update a local backend",
 		backendInstallationGuideURL,
 	} {
 		if !strings.Contains(text, want) {

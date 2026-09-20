@@ -117,6 +117,16 @@ After the server starts, verify its health with `/status` in the TUI or
 `openvibely-terminal status` in a shell. A local server normally listens at
 `http://localhost:3001`.
 
+Stop a setup-started local backend manually: the terminal does not track a backend
+PID, so stop only the OpenVibely process you recognize. On macOS/Linux, identify
+the local listener with `lsof -nP -iTCP:3001 -sTCP:LISTEN`, then stop that PID
+with `kill <pid>`; on Windows, use Task Manager or `netstat -ano | findstr :3001`
+followed by `taskkill /PID <pid>`. Reconnect to a running backend with `/status`
+or `openvibely-terminal -server http://localhost:3001 status`. Update a local backend
+by stopping it first, then running the documented installer again or
+`openvibely-terminal --force setup bootstrap --install`, which downloads over
+HTTPS, allows installer file changes, starts again, and waits for health.
+
 For a remote backend, check its URL before starting a local server, then pass it
 explicitly with `-server <url>` or set `OPENVIBELY_SERVER_URL`. The TUI only uses
 that setting to connect; it never changes the setting or starts the remote server.
