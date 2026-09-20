@@ -2827,7 +2827,7 @@ func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
 	if got := stripANSI(renderAutomations(automations, "missing")); !strings.Contains(got, "no automations match missing") {
 		t.Errorf("filtered empty state = %q", got)
 	}
-	if got := stripANSI(renderAutomations(nil, "")); !strings.Contains(got, "create one via the web UI") {
+	if got := stripANSI(renderAutomations(nil, "")); !strings.Contains(got, "automations create --file <yaml>") {
 		t.Errorf("empty state = %q", got)
 	}
 }

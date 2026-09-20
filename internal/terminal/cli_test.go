@@ -5348,6 +5348,115 @@ func TestCLIAutomationEditIsDeterministicAndSecretSafe(t *testing.T) {
 
 // One-shot CLI mode works headlessly for the new automations actions,
 // exiting cleanly on success and nonzero on a backend failure.
+func TestCLIAutomationsCreateFromFilePlainAndJSON(t *testing.T) {
+	const createdBuilder = `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-created/builder?project_id=p1"></form><textarea name="automation_yaml">schema_version: 1
+name: Created sweep
+</textarea></div>`
+	newServer := func(t *testing.T) (*client.Client, *recorder) {
+		t.Helper()
+		rec := &recorder{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			_ = r.ParseForm()
+			rec.mu.Lock()
+			rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
+			rec.mu.Unlock()
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodPost && r.URL.Path == "/automations/builder":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, createdBuilder)
+			default:
+				t.Errorf("unexpected automations create request %s %s", r.Method, r.URL.RequestURI())
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, rec
+	}
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	if err := os.WriteFile(path, []byte("schema_version: 1\nname: Created sweep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("plain", func(t *testing.T) {
+		c, rec := newServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"automations", "create", "--file", path}, false, false); err != nil {
+			t.Fatalf("create failed: %v\n%s", err, rec.all())
+		}
+		plain := stripANSI(out.String())
+		for _, want := range []string{"created automation au-created", "automations show au-created", "automations edit au-created"} {
+			if !strings.Contains(plain, want) {
+				t.Fatalf("plain output missing %q:\n%s", want, out.String())
+			}
+		}
+		if !rec.sawQuery("POST /automations/builder?project_id=p1") || !rec.sawForm("automation_yaml=schema_version%3A+1%0Aname%3A+Created+sweep%0A") || !rec.sawForm("save_changes=true") {
+			t.Fatalf("create lost backend route, YAML, or save intent:\n%s\nforms=%v", rec.all(), rec.forms)
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		c, rec := newServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"automations", "create", "--file", path}, false, true); err != nil {
+			t.Fatalf("create JSON failed: %v\n%s", err, rec.all())
+		}
+		var got struct {
+			Status          string `json:"status"`
+			AutomationID    string `json:"automation_id"`
+			SelectedProject string `json:"selected_project"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
+			t.Fatalf("create JSON invalid: %v\n%s", err, out.String())
+		}
+		if got.Status != "created" || got.AutomationID != "au-created" || got.SelectedProject != "p1" {
+			t.Fatalf("create JSON = %+v", got)
+		}
+	})
+}
+
+func TestCLIAutomationsCreateValidationFailureDoesNotPersistAgain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	if err := os.WriteFile(path, []byte("not: supported\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodPost && r.URL.Path == "/automations/builder":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div id="automation-builder"><form id="automation-design-form" action="/automations/builder?project_id=p1"></form><div data-automation-validation-summary><ul><li>unsupported YAML node</li></ul></div><textarea name="automation_yaml">not: supported</textarea></div>`)
+		default:
+			t.Errorf("unexpected automations create request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"automations", "create", "--file", path}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "unsupported YAML node") {
+		t.Fatalf("error = %v output=%s", err, out.String())
+	}
+	if got := rec.count("POST", "/automations/builder"); got != 1 {
+		t.Fatalf("builder posts = %d, want one; calls:\n%s", got, rec.all())
+	}
+}
+
 func TestCLIRunsAutomationsPause(t *testing.T) {
 	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p1">
 		<div class="card-body relative">

@@ -1713,7 +1713,7 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("automations command missing")
 	}
-	wantActions := []string{"list", "show", "open", "edit", "run", "pause", "resume", "delete"}
+	wantActions := []string{"list", "show", "open", "create", "edit", "run", "pause", "resume", "delete"}
 	if !reflect.DeepEqual(cmd.actions, wantActions) {
 		t.Fatalf("automations actions = %#v, want %#v", cmd.actions, wantActions)
 	}
@@ -1734,6 +1734,9 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 			t.Errorf("automations help missing deletion safety %q:\n%s", want, help)
 		}
 	}
+	if got := completeSlashInput(`/automations create --f`, *cmd); got != `/automations create --file ` {
+		t.Errorf("automation create option completion = %q", got)
+	}
 	if got := completeSlashInput(`/automations edit "Nightly sweep" --f`, *cmd); got != `/automations edit "Nightly sweep" --file ` {
 		t.Errorf("automation edit option completion = %q", got)
 	}
@@ -1747,7 +1750,7 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 		t.Fatalf("read docs/user-guide.md: %v", err)
 	}
 	guideText := string(guide)
-	row := "| `/automations` | `automation` | `list`, `show`, `open`, `edit`, `run`, `pause`, `resume`, `delete` |"
+	row := "| `/automations` | `automation` | `list`, `show`, `open`, `create`, `edit`, `run`, `pause`, `resume`, `delete` |"
 	if !strings.Contains(guideText, row) {
 		t.Fatalf("user guide automation command row is missing or out of sync:\n%s", row)
 	}
