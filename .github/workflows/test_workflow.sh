@@ -3,6 +3,8 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 workflow="$repo_root/.github/workflows/test.yml"
+shared_script="$repo_root/.github/workflows/vet-test-coverage.sh"
+bench_helper="$repo_root/.github/bench/ci-vet-workflow.sh"
 real_go=$(command -v go)
 
 fail() {
@@ -10,18 +12,43 @@ fail() {
   exit 1
 }
 
+[[ -x "$shared_script" ]] || fail "shared vet/test script is not executable"
+
 verification_run=$(awk '
   /^      - name: Run vet and all tests with coverage$/ { found=1; next }
-  found && /^        run: \|$/ { in_run=1; next }
-  found && in_run && /^      - name:/ { exit }
-  found && in_run {
-    if ($0 == "") { print ""; next }
-    if ($0 !~ /^          /) { exit }
-    sub(/^          /, "")
+  found && /^        run: / {
+    sub(/^        run: /, "")
     print
+    exit
   }
+  found && /^      - name:/ { exit }
 ' "$workflow")
-[[ -n "$verification_run" ]] || fail "could not extract the verification step"
+[[ "$verification_run" == ".github/workflows/vet-test-coverage.sh" ]] ||
+  fail "verification step does not call the shared script: $verification_run"
+
+mode_env=$(awk '
+  /^      - name: Run vet and all tests with coverage$/ { found=1; next }
+  found && /^          VTC_MODE: / {
+    sub(/^          VTC_MODE: /, "")
+    print
+    exit
+  }
+  found && /^      - name:/ { exit }
+' "$workflow")
+[[ "$mode_env" == "\${{ inputs.uncached && 'uncached' || 'routine' }}" ]] ||
+  fail "workflow no longer maps uncached input to shared script mode: $mode_env"
+
+annotation_env=$(awk '
+  /^      - name: Run vet and all tests with coverage$/ { found=1; next }
+  found && /^          VTC_GITHUB_ANNOTATIONS: / {
+    sub(/^          VTC_GITHUB_ANNOTATIONS: /, "")
+    print
+    exit
+  }
+  found && /^      - name:/ { exit }
+' "$workflow")
+[[ "$annotation_env" == '"true"' ]] ||
+  fail "workflow no longer enables GitHub error annotations"
 
 summary_run=$(awk '
   /^      - name: Show coverage summary$/ { found=1; next }
@@ -53,26 +80,18 @@ if (( run_line >= summary_line )); then
   fail "coverage summary is not after verification"
 fi
 
-for required in \
-  'GOMAXPROCS=1 setsid go vet ./... &' \
-  'vet_pid=$!' \
-  'setsid go test ./... -count=1 -timeout 120s -coverpkg=./... -coverprofile=coverage.txt &' \
-  'test_pid=$!' \
-  'wait "$test_pid" || test_status=$?' \
-  'wait "$vet_pid" || vet_status=$?' \
-  'trap on_exit EXIT' \
-  'trap '\''on_signal 130'\'' INT' \
-  'trap '\''on_signal 143'\'' TERM' \
-  'if (( vet_status != 0 || test_status != 0 )); then' \
-  'exit 1'; do
-  if ! grep -Fq -- "$required" <<<"$verification_run"; then
-    fail "verification step is missing: $required"
-  fi
-done
-
-if grep -Fq 'always()' <<<"$summary_if"; then
-  fail "coverage summary must not run after a failed verification"
+if grep -Eq 'go (vet|test) ./\.\.\.' "$workflow"; then
+  fail "workflow duplicates vet/test command bodies instead of calling the shared script"
 fi
+[[ "$(grep -cF '.github/workflows/vet-test-coverage.sh' "$bench_helper")" -eq 1 ]] ||
+  fail "benchmark helper does not call the shared script exactly once"
+if grep -Eq 'go (vet|test) ./\.\.\.' "$bench_helper"; then
+  fail "benchmark helper duplicates vet/test command bodies instead of calling the shared script"
+fi
+for required_export in VTC_MODE VTC_COVERPROFILE VTC_METRICS_DIR VTC_LOG_DIR VTC_TIME_DIR VTC_VET_GOMAXPROCS; do
+  grep -Fq "export $required_export=" "$bench_helper" ||
+    fail "benchmark helper does not configure $required_export"
+done
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/openvibely-workflow-test.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT
@@ -106,8 +125,13 @@ case "${1-}" in
       echo "unexpected vet arguments" >&2
       exit 97
     fi
-    if [[ "${GOMAXPROCS-}" != "1" ]]; then
-      echo "vet must use GOMAXPROCS=1 while overlapping" >&2
+    if [[ "${FAKE_EXPECT_VET_GOMAXPROCS:-1}" == default ]]; then
+      if [[ -n "${GOMAXPROCS-}" ]]; then
+        echo "vet must not override GOMAXPROCS in default cap mode" >&2
+        exit 98
+      fi
+    elif [[ "${GOMAXPROCS-}" != "${FAKE_EXPECT_VET_GOMAXPROCS:-1}" ]]; then
+      echo "vet must use GOMAXPROCS=${FAKE_EXPECT_VET_GOMAXPROCS:-1} while overlapping" >&2
       exit 98
     fi
     printf 'vet-start-%s\n' "$run_id" >>"$log"
@@ -129,10 +153,15 @@ case "${1-}" in
     timeout=0
     coverpkg=0
     profile=
-    for arg in "$@"; do
+    for ((i = 1; i <= $#; i++)); do
+      arg=${!i}
       case "$arg" in
         -count=1) count=1 ;;
-        -timeout) timeout=1 ;;
+        -timeout)
+          next_index=$((i + 1))
+          [[ "${!next_index-}" == "120s" ]] || exit 99
+          timeout=1
+          ;;
         -coverpkg=./...) coverpkg=1 ;;
         -coverprofile=*) profile=${arg#-coverprofile=} ;;
       esac
@@ -153,7 +182,11 @@ case "${1-}" in
     printf '%s\n' "$child_pid" >"$log.test-child-pid"
     wait "$child_pid"
     child_pid=
-    printf 'mode: set\n%s:3.1,3.17 1 1\n' "${FAKE_SOURCE:?}" >"$profile"
+    if [[ "${FAKE_EMPTY_COVERAGE:-false}" == true ]]; then
+      : >"$profile"
+    else
+      printf 'mode: set\n%s:3.1,3.17 1 1\n' "${FAKE_SOURCE:?}" >"$profile"
+    fi
     printf 'test-done-%s\n' "$run_id" >>"$log"
     exit "${FAKE_TEST_STATUS:-0}"
     ;;
@@ -192,18 +225,19 @@ line_for() {
   awk -v event="$event" '$0 == event { print NR; exit }' "$log"
 }
 
-run_workflow() {
+run_shared() {
   local case_dir=$1
   local run_id=$2
   local vet_status=$3
   local test_status=$4
   local uncached=${5:-true}
+  local vet_cap=${6:-1}
+  local empty_coverage=${7:-false}
   local status=0
   local log="$case_dir/events.log"
   local workflow_log="$case_dir/workflow-$run_id.log"
-  local rendered_run
-
-  rendered_run=${verification_run//\$\{\{ inputs.uncached \}\}/$uncached}
+  local mode=routine
+  [[ "$uncached" == true ]] && mode=uncached
 
   if (
     cd "$case_dir"
@@ -213,10 +247,15 @@ run_workflow() {
     FAKE_VET_STATUS="$vet_status" \
     FAKE_TEST_STATUS="$test_status" \
     FAKE_UNCACHED="$uncached" \
+    FAKE_EXPECT_VET_GOMAXPROCS="$vet_cap" \
+    FAKE_EMPTY_COVERAGE="$empty_coverage" \
     FAKE_VET_DELAY=0.25 \
     FAKE_TEST_DELAY=0.01 \
+    VTC_MODE="$mode" \
+    VTC_VET_GOMAXPROCS="$vet_cap" \
+    VTC_GITHUB_ANNOTATIONS=true \
     PATH="$fake_bin:$original_path" \
-      bash -euo pipefail -c "$rendered_run" >"$workflow_log" 2>&1
+      "$shared_script" >"$workflow_log" 2>&1
   ); then
     status=0
   else
@@ -231,6 +270,10 @@ run_workflow() {
   if (( test_status != 0 )) &&
     ! grep -Fq "::error::go test ./... failed with exit code $test_status" "$workflow_log"; then
     fail "$run_id did not report the test failure"
+  fi
+  if [[ "$empty_coverage" == true ]] &&
+    ! grep -Fq "::error::go test did not produce a non-empty coverage profile" "$workflow_log"; then
+    fail "$run_id did not report an empty coverage profile"
   fi
 
   local vet_done test_done returned
@@ -265,28 +308,28 @@ run_case() {
   local test_status=$3
   local expected=$4
   local uncached=${5:-true}
+  local vet_cap=${6:-1}
+  local empty_coverage=${7:-false}
   local case_dir="$test_root/$name"
   make_fixture "$case_dir"
-  run_workflow "$case_dir" "$name" "$vet_status" "$test_status" "$uncached"
+  run_shared "$case_dir" "$name" "$vet_status" "$test_status" "$uncached" "$vet_cap" "$empty_coverage"
   if [[ "$RUN_STATUS" -ne "$expected" ]]; then
     fail "$name returned $RUN_STATUS, expected $expected"
   fi
 }
 
-run_interrupted_workflow() {
+run_interrupted_shared() {
   local name=$1
   local signal=$2
   local expected=$3
   local case_dir="$test_root/$name"
   local log="$case_dir/events.log"
   local workflow_log="$case_dir/workflow.log"
-  local rendered_run
   local workflow_pid
   local status=0
   local vet_pid test_pid vet_child_pid test_child_pid
 
   make_fixture "$case_dir"
-  rendered_run=${verification_run//\$\{\{ inputs.uncached \}\}/true}
   (
     cd "$case_dir"
     FAKE_LOG="$log" \
@@ -295,10 +338,12 @@ run_interrupted_workflow() {
     FAKE_VET_STATUS=0 \
     FAKE_TEST_STATUS=0 \
     FAKE_UNCACHED=true \
+    FAKE_EXPECT_VET_GOMAXPROCS=1 \
     FAKE_VET_DELAY=5 \
     FAKE_TEST_DELAY=5 \
+    VTC_MODE=uncached \
     PATH="$fake_bin:$original_path" \
-      exec setsid bash -euo pipefail -c "$rendered_run" >"$workflow_log" 2>&1
+      exec setsid "$shared_script" >"$workflow_log" 2>&1
   ) &
   workflow_pid=$!
 
@@ -340,24 +385,68 @@ run_interrupted_workflow() {
   assert_stopped "$test_child_pid"
 }
 
+run_benchmark_helper_case() {
+  local case_dir="$test_root/benchmark-helper"
+  local metrics="$case_dir/metrics"
+  local cache="$case_dir/cache"
+  local modcache="$case_dir/modcache"
+  make_fixture "$case_dir"
+  if ! (
+    cd "$case_dir"
+    FAKE_LOG="$case_dir/events.log" \
+    FAKE_RUN_ID=benchmark-helper \
+    FAKE_SOURCE="$case_dir/fixture.go" \
+    FAKE_VET_STATUS=0 \
+    FAKE_TEST_STATUS=0 \
+    FAKE_UNCACHED=false \
+    FAKE_EXPECT_VET_GOMAXPROCS=default \
+    BENCH_REPO="$repo_root" \
+    BENCH_METRICS="$metrics" \
+    BENCH_GOCACHE="$cache" \
+    GOMODCACHE="$modcache" \
+    BENCH_PROFILE="$case_dir/bench-coverage.txt" \
+    BENCH_MODE=routine \
+    BENCH_CAP=default \
+    PATH="$fake_bin:$original_path" \
+      "$bench_helper" >"$case_dir/bench.stdout" 2>"$case_dir/bench.stderr"
+  ); then
+    fail "benchmark helper did not succeed"
+  fi
+  for metric in start_ns vet_start_ns vet_done_ns test_start_ns test_done_ns end_ns vet_status test_status vet.time test.time; do
+    [[ -s "$metrics/$metric" ]] || fail "benchmark helper did not record $metric"
+  done
+  for log_file in vet.log test.log; do
+    [[ -e "$metrics/$log_file" ]] || fail "benchmark helper did not create $log_file"
+  done
+  [[ "$(<"$metrics/vet_status")" == 0 ]] || fail "benchmark helper recorded nonzero vet status"
+  [[ "$(<"$metrics/test_status")" == 0 ]] || fail "benchmark helper recorded nonzero test status"
+  [[ -s "$case_dir/bench-coverage.txt" ]] || fail "benchmark helper coverage profile is empty"
+  "$real_go" tool cover -func="$case_dir/bench-coverage.txt" >/dev/null ||
+    fail "benchmark helper coverage profile is not readable"
+}
+
 run_case clean-success 0 0 0
 run_case vet-only-failure 7 0 1
 run_case test-only-failure 0 9 1
 run_case dual-failure 7 9 1
 run_case routine-cacheable-flags 0 0 0 false
-run_interrupted_workflow cancellation TERM 143
-run_interrupted_workflow interrupt INT 130
-run_interrupted_workflow timeout TERM 143
+run_case uncached-flags 0 0 0 true
+run_case default-vet-cap 0 0 0 true default
+run_case empty-coverage 0 0 1 true 1 true
+run_interrupted_shared cancellation TERM 143
+run_interrupted_shared interrupt INT 130
+run_interrupted_shared timeout TERM 143
+run_benchmark_helper_case
 
 repeated_dir="$test_root/repeated-coverage"
 make_fixture "$repeated_dir"
-run_workflow "$repeated_dir" repeated-1 0 0
+run_shared "$repeated_dir" repeated-1 0 0
 [[ "$RUN_STATUS" -eq 0 ]] || fail "first repeated coverage run failed"
 [[ -s "$repeated_dir/coverage.txt" ]] || fail "first coverage profile is empty"
 "$real_go" tool cover -func="$repeated_dir/coverage.txt" >"$repeated_dir/summary-1"
 cp "$repeated_dir/coverage.txt" "$repeated_dir/coverage-first.txt"
 
-run_workflow "$repeated_dir" repeated-2 0 0
+run_shared "$repeated_dir" repeated-2 0 0
 [[ "$RUN_STATUS" -eq 0 ]] || fail "second repeated coverage run failed"
 [[ -s "$repeated_dir/coverage.txt" ]] || fail "second coverage profile is empty"
 cmp -s "$repeated_dir/coverage-first.txt" "$repeated_dir/coverage.txt" ||
