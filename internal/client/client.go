@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -167,6 +168,9 @@ func isReadAuthResponse(resp *http.Response) bool {
 type Client struct {
 	baseURL string
 	http    *http.Client
+
+	memoryMu                 sync.RWMutex
+	memoryBackendUnsupported bool
 }
 
 // New creates a Client for the given base URL (e.g. "http://localhost:3001").

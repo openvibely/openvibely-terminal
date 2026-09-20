@@ -83,8 +83,8 @@ func TestMemoryCommandDispatchesListShowAndSearchForSelectedProject(t *testing.T
 			t.Fatalf("memory output missing %q:\n%s", want, out)
 		}
 	}
-	if got := atomic.LoadInt32(requests); got != 4 {
-		t.Fatalf("memory inspection made %d backend requests; unsupported backend should be probed before local fallback", got)
+	if got := atomic.LoadInt32(requests); got != 1 {
+		t.Fatalf("memory inspection made %d backend requests; unsupported backend should be cached after the first local fallback", got)
 	}
 }
 
