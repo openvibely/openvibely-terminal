@@ -91,6 +91,11 @@ func setupGuidance(platform, baseURL string) string {
 	b.WriteString("  openvibely-terminal status            in a shell\n")
 	b.WriteString("A healthy local server normally listens at http://localhost:3001.\n\n")
 
+	if !isRemoteServerURL(baseURL) {
+		b.WriteString(localBackendLifecycleGuidance(platform, baseURL))
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString("Remote backend\n")
 	if isRemoteServerURL(baseURL) {
 		fmt.Fprintf(&b, "The configured server is remote: %s. Check or correct that URL before starting a local server.\n", serverURLDisplay(baseURL))
@@ -121,6 +126,39 @@ func ServerURLDisplay(baseURL string) string {
 
 func serverURLDisplay(baseURL string) string {
 	return ServerURLDisplay(baseURL)
+}
+
+func localBackendLifecycleGuidance(platform, baseURL string) string {
+	port := localBackendPort(baseURL)
+	endpoint := serverURLDisplay(baseURL)
+	var b strings.Builder
+	b.WriteString("Local backend lifecycle\n")
+	b.WriteString("Stop: this terminal does not track a backend PID. Stop only the OpenVibely backend process you started.\n")
+	if platform == "windows" {
+		fmt.Fprintf(&b, "  netstat -ano | findstr :%s\n", port)
+		b.WriteString("  taskkill /PID <pid>\n")
+	} else {
+		fmt.Fprintf(&b, "  lsof -nP -iTCP:%s -sTCP:LISTEN\n", port)
+		b.WriteString("  kill <pid>\n")
+	}
+	b.WriteString("If the process or port is unclear, do not kill anything; use your OS process manager or backend checkout terminal to stop the process you recognize.\n")
+	fmt.Fprintf(&b, "Reconnect: leave the backend running and run /status, or run:\n  openvibely-terminal -server %s status\n", endpoint)
+	b.WriteString("Update: stop the local backend first, then run the documented installer again or `openvibely-terminal --force setup bootstrap --install` to download over HTTPS, allow installer file changes, start again, and wait for health.")
+	return b.String()
+}
+
+func localBackendPort(baseURL string) string {
+	u, err := url.Parse(sanitizeAutomationDetailText(strings.TrimSpace(baseURL)))
+	if err != nil {
+		return "3001"
+	}
+	if port := u.Port(); port != "" {
+		return sanitizeAutomationDetailText(port)
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "3001"
 }
 
 // safeConnectionDiagnostic returns one bounded terminal-safe line from a
@@ -192,9 +230,9 @@ func setupCommand() command {
 	return command{
 		name:    "setup",
 		actions: []string{"check", "start", "bootstrap"},
-		desc:    "read-only guidance plus explicit opt-in local backend check/start/bootstrap",
+		desc:    "read-only guidance plus explicit opt-in local backend check/start/bootstrap with stop/reconnect/update guidance\nStop local backend manually: lsof -nP -iTCP:3001 -sTCP:LISTEN, then kill <pid> for the process you recognize.\nReconnect: openvibely-terminal -server http://localhost:3001 status.\nUpdate: stop first, then run openvibely-terminal --force setup bootstrap --install or the documented installer again.",
 		usage: []string{
-			"setup                                      show read-only backend setup and recovery steps",
+			"setup                                      show read-only backend setup and recovery steps, including stop/reconnect/update guidance",
 			"setup check [--install]                    check local backend prerequisites without changes",
 			"setup start                                confirm, start a local backend, then wait for health",
 			"setup bootstrap [--install]                confirm, optionally install, start, then wait for health",
@@ -555,10 +593,10 @@ func waitForSetupHealth(ctx context.Context, c *client.Client, timeout, interval
 		_, err := c.GetGlobalCapacity(probeCtx)
 		cancel()
 		if err == nil {
-			return "Next: run /projects to select an existing project, or /projects create <name> <path> to create one.", nil
+			return localBackendLifecycleGuidance(runtime.GOOS, c.BaseURL()) + "\n\nNext: run /projects to select an existing project, or /projects create <name> <path> to create one.", nil
 		}
 		if client.IsAuthRequired(err) {
-			return "Next: run /login to authenticate, then /projects to select or create a project.", nil
+			return localBackendLifecycleGuidance(runtime.GOOS, c.BaseURL()) + "\n\nNext: run /login to authenticate, then /projects to select or create a project.", nil
 		}
 		lastErr = err
 		if !time.Now().Before(deadline) {

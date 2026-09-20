@@ -37,6 +37,8 @@ make run
 
 Bare `/setup` and `openvibely-terminal setup` are read-only recovery guides. If you want the terminal to inspect or start a local backend, opt in explicitly with `/setup check`, `/setup start`, or `/setup bootstrap --install`; start/bootstrap disclose effects and require confirmation in the TUI or `--force` in CLI mode. Use `/login` when the backend requires authentication.
 
+Stop a setup-started local backend manually: the terminal does not track a backend PID, so stop only the OpenVibely process you recognize. On macOS/Linux, identify the local listener with `lsof -nP -iTCP:3001 -sTCP:LISTEN`, then stop that PID with `kill <pid>`; on Windows, use Task Manager or `netstat -ano | findstr :3001` followed by `taskkill /PID <pid>`. Reconnect to a running backend with `/status` or `openvibely-terminal -server http://localhost:3001 status`. Update a local backend by stopping it first, then running the documented installer again or `openvibely-terminal --force setup bootstrap --install`, which downloads over HTTPS, allows installer file changes, starts again, and waits for health.
+
 ## Usage
 
 Interactive input is either a chat message or a slash command:
