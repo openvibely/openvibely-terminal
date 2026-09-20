@@ -3148,6 +3148,30 @@ func resolveSkillForShow(ctx context.Context, c *client.Client, projectID, ref s
 	return c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
 }
 
+func listSkillsWithFilteredContent(ctx context.Context, c *client.Client, projectID, filter string) ([]client.Skill, error) {
+	if filter == "" {
+		return c.ListSkillsWithContent(ctx, projectID)
+	}
+	skills, err := c.ListSkills(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]client.Skill, 0, len(skills))
+	for _, skill := range skills {
+		if filterMatch(filter, skill.Handle, skill.Name, skill.Description) {
+			filtered = append(filtered, skill)
+		}
+	}
+	for i, skill := range filtered {
+		detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
+		if err != nil {
+			return nil, err
+		}
+		filtered[i] = detail
+	}
+	return filtered, nil
+}
+
 func skillsCommand() command {
 	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always", "load"}
 	return command{
@@ -3187,7 +3211,7 @@ func skillsCommand() command {
 			case "", "list":
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
 					if jsonMode {
-						skills, err := c.ListSkillsWithContent(ctx, pid)
+						skills, err := listSkillsWithFilteredContent(ctx, c, pid, ref)
 						if err != nil {
 							return "", err
 						}
