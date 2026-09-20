@@ -120,6 +120,86 @@ func cliSkillsServer(t *testing.T) (*client.Client, *recorder) {
 	return c, rec
 }
 
+func cliFilteredSkillsServer(t *testing.T) (*client.Client, *recorder) {
+	t.Helper()
+	summaries := []client.Skill{
+		{Handle: "deploy-runbook", Name: "Runbook", Description: "Ship safely", Scope: "project", Source: "project", Enabled: true},
+		{Handle: "release-plan", Name: "Deploy Planner", Description: "Prepare release notes", Scope: "project", Source: "project", Enabled: true},
+		{Handle: "safety-checks", Name: "Safety Checks", Description: "Validate deploy readiness", Scope: "global", Source: "global", AlwaysUse: true},
+		{Handle: "rollback-only", Name: "Rollback", Description: "Undo a release", Scope: "project", Source: "project", Enabled: true},
+	}
+	details := make(map[string]client.Skill, len(summaries))
+	for _, skill := range summaries {
+		skill.Content = skill.Handle + " instructions"
+		details[skill.Handle] = skill
+	}
+	details["rollback-only"] = client.Skill{
+		Handle: "rollback-only", Name: "Rollback", Description: "Undo a release", Scope: "project", Source: "project", Content: "rollback instructions", Enabled: true,
+	}
+
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch {
+		case r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/skills":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("skills list request lost project scope: %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			var page strings.Builder
+			page.WriteString("<div>")
+			for _, skill := range summaries {
+				page.WriteString(fmt.Sprintf(`<div data-skill-handle=%q data-skill-name=%q data-skill-description=%q data-skill-scope=%q data-skill-source=%q data-skill-enabled=%q data-skill-always-use=%q></div>`,
+					skill.Handle, skill.Name, skill.Description, skill.Scope, skill.Source, strconv.FormatBool(skill.Enabled), strconv.FormatBool(skill.AlwaysUse)))
+			}
+			page.WriteString("</div>")
+			_, _ = io.WriteString(w, page.String())
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/skills/") && strings.HasSuffix(r.URL.Path, "/details"):
+			handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
+			skill, ok := details[handle]
+			if !ok {
+				t.Errorf("unexpected skill detail request %s", r.URL.RequestURI())
+				http.NotFound(w, r)
+				return
+			}
+			if r.URL.Query().Get("project_id") != "p1" || r.URL.Query().Get("scope") != skill.Scope {
+				t.Errorf("detail request lost scope: %s", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(skill)
+		default:
+			t.Errorf("unexpected skills request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, rec
+}
+
+func decodeSkillsJSON(t *testing.T, output string) []client.Skill {
+	t.Helper()
+	var skills []client.Skill
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &skills); err != nil {
+		t.Fatalf("JSON output = %q: %v", output, err)
+	}
+	return skills
+}
+
+func skillHandles(skills []client.Skill) []string {
+	handles := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		handles = append(handles, skill.Handle)
+	}
+	return handles
+}
+
 func TestCLISkillsSummaryJSONAndShowRequestContracts(t *testing.T) {
 	t.Run("plain summary does not fetch bodies", func(t *testing.T) {
 		c, rec := cliSkillsServer(t)
@@ -170,6 +250,73 @@ func TestCLISkillsSummaryJSONAndShowRequestContracts(t *testing.T) {
 		}
 		if got := rec.count("GET", "/skills/deploy/details"); got != 1 {
 			t.Fatalf("show detail requests = %d, want one", got)
+		}
+	})
+}
+
+func TestCLISkillsJSONFilterMatchesPlainSummaryFields(t *testing.T) {
+	t.Run("deploy filter matches handle name and description only", func(t *testing.T) {
+		c, rec := cliFilteredSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills", "deploy"}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		skills := decodeSkillsJSON(t, out.String())
+		gotHandles := skillHandles(skills)
+		wantHandles := []string{"deploy-runbook", "release-plan", "safety-checks"}
+		if !slices.Equal(gotHandles, wantHandles) {
+			t.Fatalf("filtered handles = %#v, want %#v; output %s", gotHandles, wantHandles, out.String())
+		}
+		for _, skill := range skills {
+			if skill.Content == "" {
+				t.Fatalf("filtered skill %q lost full-content schema: %+v", skill.Handle, skill)
+			}
+		}
+		if strings.Contains(out.String(), "rollback instructions") || strings.Contains(out.String(), "rollback-only") {
+			t.Fatalf("filtered JSON included nonmatching skill body or handle: %s", out.String())
+		}
+		for _, handle := range wantHandles {
+			if got := rec.count("GET", "/skills/"+handle+"/details"); got != 1 {
+				t.Fatalf("detail requests for %s = %d, want one; calls:\n%s", handle, got, rec.all())
+			}
+		}
+		if got := rec.count("GET", "/skills/rollback-only/details"); got != 0 {
+			t.Fatalf("nonmatching detail requests = %d, want zero; calls:\n%s", got, rec.all())
+		}
+	})
+
+	for _, args := range [][]string{{"skills"}, {"skills", "list"}} {
+		name := strings.Join(args, " ")
+		t.Run("unfiltered "+name+" returns complete ordered list", func(t *testing.T) {
+			c, rec := cliFilteredSkillsServer(t)
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", args, false, true); err != nil {
+				t.Fatal(err)
+			}
+			gotHandles := skillHandles(decodeSkillsJSON(t, out.String()))
+			wantHandles := []string{"deploy-runbook", "release-plan", "safety-checks", "rollback-only"}
+			if !slices.Equal(gotHandles, wantHandles) {
+				t.Fatalf("handles = %#v, want %#v", gotHandles, wantHandles)
+			}
+			for _, handle := range wantHandles {
+				if got := rec.count("GET", "/skills/"+handle+"/details"); got != 1 {
+					t.Fatalf("detail requests for %s = %d, want one; calls:\n%s", handle, got, rec.all())
+				}
+			}
+		})
+	}
+
+	t.Run("filtered no match returns empty JSON array", func(t *testing.T) {
+		c, rec := cliFilteredSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills", "missing"}, false, true); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(out.String()); got != "[]" {
+			t.Fatalf("no-match JSON = %q, want []", got)
+		}
+		if got := rec.count("GET", "/skills/deploy-runbook/details") + rec.count("GET", "/skills/release-plan/details") + rec.count("GET", "/skills/safety-checks/details") + rec.count("GET", "/skills/rollback-only/details"); got != 0 {
+			t.Fatalf("no-match filter fetched %d detail bodies; calls:\n%s", got, rec.all())
 		}
 	})
 }
