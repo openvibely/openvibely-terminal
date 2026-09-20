@@ -2597,7 +2597,7 @@ func requireChannelAccessProject(projectID string) (string, error) {
 // client must not accept arbitrary page text as an actor identity.
 func normalizeGitHubChannelAccessLogin(value string) (string, error) {
 	value = strings.TrimPrefix(strings.TrimSpace(value), "@")
-	if value == "" || len(value) > 39 {
+	if value == "" || len(value) > 39 || strings.HasPrefix(value, "-") || strings.HasSuffix(value, "-") || strings.Contains(value, "--") {
 		return "", errors.New("GitHub login is invalid")
 	}
 	for _, r := range value {

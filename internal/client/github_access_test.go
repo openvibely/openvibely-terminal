@@ -102,6 +102,34 @@ func TestGitHubAuthorizedActorClientContractUsesScopedRoutesAndSafeStructuredOut
 	}
 }
 
+func TestNormalizeGitHubChannelAccessLogin(t *testing.T) {
+	valid39 := strings.Repeat("a", 39)
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: "alice", want: "alice"},
+		{input: "@Alice", want: "alice"},
+		{input: "alice-bot", want: "alice-bot"},
+		{input: valid39, want: valid39},
+	} {
+		t.Run("valid "+tc.input, func(t *testing.T) {
+			got, err := normalizeGitHubChannelAccessLogin(tc.input)
+			if err != nil || got != tc.want {
+				t.Fatalf("normalizeGitHubChannelAccessLogin(%q) = %q, %v; want %q, nil", tc.input, got, err, tc.want)
+			}
+		})
+	}
+
+	for _, input := range []string{"@-alice", "alice-", "a--b", "", "@", strings.Repeat("a", 40)} {
+		t.Run("invalid "+input, func(t *testing.T) {
+			if got, err := normalizeGitHubChannelAccessLogin(input); err == nil {
+				t.Fatalf("normalizeGitHubChannelAccessLogin(%q) = %q, nil; want error", input, got)
+			}
+		})
+	}
+}
+
 func TestGitHubAuthorizedActorClientRejectsMissingScopeAndMalformedFragments(t *testing.T) {
 	c := htmlServer(t, githubAuthorizedActorsFragment)
 	err := c.AddGitHubAuthorizedActor(context.Background(), "", "@Alice", "")
@@ -116,6 +144,9 @@ func TestGitHubAuthorizedActorClientRejectsMissingScopeAndMalformedFragments(t *
 		{name: "missing container", body: `<div id="other"></div>`},
 		{name: "missing login", body: `<div id="github-runtime-settings"><div><span class="text-sm font-medium">Alice</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div></div>`},
 		{name: "malformed login", body: `<div id="github-runtime-settings"><div><span class="text-sm font-medium">Alice</span><span class="text-xs opacity-50">@bad!</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div></div>`},
+		{name: "leading hyphen login", body: `<div id="github-runtime-settings"><div><span class="text-sm font-medium">Alice</span><span class="text-xs opacity-50">@-alice</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div></div>`},
+		{name: "trailing hyphen login", body: `<div id="github-runtime-settings"><div><span class="text-sm font-medium">Alice</span><span class="text-xs opacity-50">alice-</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div></div>`},
+		{name: "consecutive hyphen login", body: `<div id="github-runtime-settings"><div><span class="text-sm font-medium">Alice</span><span class="text-xs opacity-50">a--b</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div></div>`},
 		{name: "foreign page scope", body: `<div id="github-runtime-settings"><div><span class="text-sm font-medium">Alice</span><span class="text-xs opacity-50">@alice</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p2"></button></div></div>`},
 		{name: "duplicate row ID", body: `<div id="github-runtime-settings"><div><span class="text-sm font-medium">Alice</span><span class="text-xs opacity-50">@alice</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div><div><span class="text-sm font-medium">Bob</span><span class="text-xs opacity-50">@bob</span><button hx-delete="/channels/github/authorized-actors/actor-1?project_id=p1"></button></div></div>`},
 	}

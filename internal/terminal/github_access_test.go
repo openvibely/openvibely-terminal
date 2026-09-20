@@ -85,6 +85,9 @@ func TestGitHubChannelAccessCLIValidationDuplicateForceAndSafeJSON(t *testing.T)
 	}{
 		{name: "missing add login", args: []string{"channels", "access", "github", "add"}},
 		{name: "malformed login", args: []string{"channels", "access", "github", "add", "@bad!"}},
+		{name: "leading hyphen login", args: []string{"channels", "access", "github", "add", "@-alice"}},
+		{name: "trailing hyphen login", args: []string{"channels", "access", "github", "add", "alice-"}},
+		{name: "consecutive hyphen login", args: []string{"channels", "access", "github", "add", "a--b"}},
 		{name: "empty display name", args: []string{"channels", "access", "github", "add", "alice", " "}},
 		{name: "surplus add operands", args: []string{"channels", "access", "github", "add", "alice", "Display", "extra"}},
 		{name: "surplus remove operands", args: []string{"channels", "access", "github", "remove", "alice", "extra"}},
@@ -123,6 +126,34 @@ func TestGitHubChannelAccessCLIValidationDuplicateForceAndSafeJSON(t *testing.T)
 			t.Fatalf("GitHub removal JSON = %q, err=%v", out.String(), err)
 		}
 	})
+}
+
+func TestGitHubChannelAccessIdentityNormalization(t *testing.T) {
+	valid39 := strings.Repeat("a", 39)
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: "alice", want: "alice"},
+		{input: "@Alice", want: "alice"},
+		{input: "alice-bot", want: "alice-bot"},
+		{input: valid39, want: valid39},
+	} {
+		t.Run("valid "+tc.input, func(t *testing.T) {
+			got, err := normalizeChannelAccessIdentity("github", tc.input)
+			if err != nil || got != tc.want {
+				t.Fatalf("normalizeChannelAccessIdentity(github, %q) = %q, %v; want %q, nil", tc.input, got, err, tc.want)
+			}
+		})
+	}
+
+	for _, input := range []string{"@-alice", "alice-", "a--b", "", "@", strings.Repeat("a", 40)} {
+		t.Run("invalid "+input, func(t *testing.T) {
+			if got, err := normalizeChannelAccessIdentity("github", input); err == nil {
+				t.Fatalf("normalizeChannelAccessIdentity(github, %q) = %q, nil; want error", input, got)
+			}
+		})
+	}
 }
 
 func TestGitHubChannelAccessTUIStaleTargetDoesNotDelete(t *testing.T) {
