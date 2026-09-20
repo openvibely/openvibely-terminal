@@ -86,15 +86,18 @@ func (c *Client) ListMemories(ctx context.Context, project Project) (MemoryList,
 		ctx = context.Background()
 	}
 	if c.memoryBackendEnabled(project) {
-		list, err := c.listBackendMemories(ctx, project.ID)
-		if err == nil {
-			return normalizeMemoryList(list), nil
-		}
-		if !errors.Is(err, errMemoryBackendUnsupported) {
-			return normalizeMemoryList(list), err
+		if !c.memoryBackendKnownUnsupported() {
+			list, err := c.listBackendMemories(ctx, project.ID)
+			if err == nil {
+				return normalizeMemoryList(list), nil
+			}
+			if !errors.Is(err, errMemoryBackendUnsupported) {
+				return normalizeMemoryList(list), err
+			}
+			c.rememberMemoryBackendUnsupported()
 		}
 		if fallbackErr := memoryLocalFallbackAllowed(project); fallbackErr != nil {
-			return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, fmt.Errorf("%w; %v", err, fallbackErr)
+			return MemoryList{Memories: make([]Memory, 0), Warnings: make([]string, 0)}, fmt.Errorf("%w; %v", errMemoryBackendUnsupported, fallbackErr)
 		}
 	}
 	return listLocalMemories(ctx, project)
@@ -110,15 +113,18 @@ func (c *Client) ShowMemory(ctx context.Context, project Project, reference stri
 		ctx = context.Background()
 	}
 	if c.memoryBackendEnabled(project) {
-		document, err := c.showBackendMemory(ctx, project.ID, reference)
-		if err == nil {
-			return normalizeMemoryDocument(document), nil
-		}
-		if !errors.Is(err, errMemoryBackendUnsupported) {
-			return normalizeMemoryDocument(document), err
+		if !c.memoryBackendKnownUnsupported() {
+			document, err := c.showBackendMemory(ctx, project.ID, reference)
+			if err == nil {
+				return normalizeMemoryDocument(document), nil
+			}
+			if !errors.Is(err, errMemoryBackendUnsupported) {
+				return normalizeMemoryDocument(document), err
+			}
+			c.rememberMemoryBackendUnsupported()
 		}
 		if fallbackErr := memoryLocalFallbackAllowed(project); fallbackErr != nil {
-			return MemoryDocument{Warnings: make([]string, 0)}, fmt.Errorf("%w; %v", err, fallbackErr)
+			return MemoryDocument{Warnings: make([]string, 0)}, fmt.Errorf("%w; %v", errMemoryBackendUnsupported, fallbackErr)
 		}
 	}
 	return showLocalMemory(ctx, project, reference)
@@ -142,20 +148,23 @@ func (c *Client) SearchMemories(ctx context.Context, project Project, query stri
 		return result, errors.New("memory search query is required")
 	}
 	if c.memoryBackendEnabled(project) {
-		search, err := c.searchBackendMemories(ctx, project.ID, query)
-		if err == nil {
-			return normalizeMemorySearch(search), nil
-		}
-		if !errors.Is(err, errMemoryBackendUnsupported) {
-			return normalizeMemorySearch(search), err
-		}
-		if list, listErr := c.listBackendMemories(ctx, project.ID); listErr == nil {
-			return MemorySearch{Query: query, Memories: make([]Memory, 0), Warnings: append(make([]string, 0, len(list.Warnings)), list.Warnings...)}, errors.New("memory: backend memory search is unavailable")
-		} else if !errors.Is(listErr, errMemoryBackendUnsupported) {
-			return result, listErr
+		if !c.memoryBackendKnownUnsupported() {
+			search, err := c.searchBackendMemories(ctx, project.ID, query)
+			if err == nil {
+				return normalizeMemorySearch(search), nil
+			}
+			if !errors.Is(err, errMemoryBackendUnsupported) {
+				return normalizeMemorySearch(search), err
+			}
+			if list, listErr := c.listBackendMemories(ctx, project.ID); listErr == nil {
+				return MemorySearch{Query: query, Memories: make([]Memory, 0), Warnings: append(make([]string, 0, len(list.Warnings)), list.Warnings...)}, errors.New("memory: backend memory search is unavailable")
+			} else if !errors.Is(listErr, errMemoryBackendUnsupported) {
+				return result, listErr
+			}
+			c.rememberMemoryBackendUnsupported()
 		}
 		if fallbackErr := memoryLocalFallbackAllowed(project); fallbackErr != nil {
-			return result, fmt.Errorf("%w; %v", err, fallbackErr)
+			return result, fmt.Errorf("%w; %v", errMemoryBackendUnsupported, fallbackErr)
 		}
 	}
 	return searchLocalMemories(ctx, project, query)
@@ -295,6 +304,24 @@ type backendMemoryDocumentEnvelope struct {
 
 func (c *Client) memoryBackendEnabled(project Project) bool {
 	return c != nil && strings.TrimSpace(c.baseURL) != "" && strings.TrimSpace(project.ID) != ""
+}
+
+func (c *Client) memoryBackendKnownUnsupported() bool {
+	if c == nil {
+		return false
+	}
+	c.memoryMu.RLock()
+	defer c.memoryMu.RUnlock()
+	return c.memoryBackendUnsupported
+}
+
+func (c *Client) rememberMemoryBackendUnsupported() {
+	if c == nil {
+		return
+	}
+	c.memoryMu.Lock()
+	defer c.memoryMu.Unlock()
+	c.memoryBackendUnsupported = true
 }
 
 func (c *Client) listBackendMemories(ctx context.Context, projectID string) (MemoryList, error) {

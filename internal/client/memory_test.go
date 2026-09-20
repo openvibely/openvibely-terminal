@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode"
 )
 
@@ -313,6 +314,215 @@ func TestMemoryBackendUnsupportedFallsBackToLocalCheckout(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("backend requests = %d, want one unsupported probe", requests)
+	}
+}
+
+func TestMemoryBackendUnsupportedCapabilityIsCachedForFallbackSequence(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Local](local.md) - fallback\n", map[string]string{"local.md": "local body needle"})
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/memory" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: "p1", Path: repo}
+
+	list, err := c.ListMemories(context.Background(), project)
+	if err != nil {
+		t.Fatalf("ListMemories fallback: %v", err)
+	}
+	if len(list.Memories) != 1 || list.Memories[0].File != "local.md" {
+		t.Fatalf("fallback list = %#v", list)
+	}
+	document, err := c.ShowMemory(context.Background(), project, "local.md")
+	if err != nil {
+		t.Fatalf("ShowMemory fallback: %v", err)
+	}
+	if document.Body != "local body needle" {
+		t.Fatalf("fallback document = %#v", document)
+	}
+	search, err := c.SearchMemories(context.Background(), project, "needle")
+	if err != nil {
+		t.Fatalf("SearchMemories fallback: %v", err)
+	}
+	if len(search.Memories) != 1 || search.Memories[0].File != "local.md" {
+		t.Fatalf("fallback search = %#v", search)
+	}
+	if requests != 1 {
+		t.Fatalf("backend requests = %d, want one cached unsupported capability probe", requests)
+	}
+}
+
+func TestMemoryBackendUnsupportedCapabilityCacheAvoidsRepeatedDelayedProbes(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Local](local.md) - fallback\n", map[string]string{"local.md": "local body needle"})
+	const backendDelay = 80 * time.Millisecond
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		time.Sleep(backendDelay)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := Project{ID: "p1", Path: repo}
+
+	started := time.Now()
+	if _, err := c.ListMemories(context.Background(), project); err != nil {
+		t.Fatalf("ListMemories fallback: %v", err)
+	}
+	if _, err := c.ShowMemory(context.Background(), project, "local.md"); err != nil {
+		t.Fatalf("ShowMemory fallback: %v", err)
+	}
+	if _, err := c.SearchMemories(context.Background(), project, "needle"); err != nil {
+		t.Fatalf("SearchMemories fallback: %v", err)
+	}
+	elapsed := time.Since(started)
+	if requests != 1 {
+		t.Fatalf("backend requests = %d, want one delayed unsupported probe", requests)
+	}
+	if elapsed >= 3*backendDelay {
+		t.Fatalf("cached fallback took %s, want less than three delayed probes (%s)", elapsed, 3*backendDelay)
+	}
+}
+
+func TestMemoryBackendFailuresDoNotCacheUnsupportedCapability(t *testing.T) {
+	tests := []struct {
+		name       string
+		first      func(w http.ResponseWriter, r *http.Request)
+		firstErr   string
+		customCall func(t *testing.T, c *Client, project Project) error
+	}{
+		{
+			name: "auth required",
+			first: func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "login required", http.StatusUnauthorized)
+			},
+			firstErr: "authentication required",
+		},
+		{
+			name: "transport cancellation",
+			first: func(w http.ResponseWriter, r *http.Request) {
+				<-r.Context().Done()
+			},
+			firstErr: "context deadline exceeded",
+			customCall: func(t *testing.T, c *Client, project Project) error {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+				defer cancel()
+				_, err := c.ListMemories(ctx, project)
+				return err
+			},
+		},
+		{
+			name: "malformed supported list response",
+			first: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"project_id":"p1","memories":"not-a-list"}`))
+			},
+			firstErr: "decoding memory list response",
+		},
+		{
+			name: "different project response",
+			first: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"project_id":"other","memories":[]}`))
+			},
+			firstErr: "different project",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != "/api/memory" {
+					t.Fatalf("unexpected backend path %s", r.URL.Path)
+				}
+				if requests == 1 {
+					tt.first(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"project_id":"p1","memories":[{"file":"remote.md","title":"Remote","summary":"server"}],"warnings":[]}`))
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project := Project{ID: "p1"}
+			firstCall := tt.customCall
+			if firstCall == nil {
+				firstCall = func(t *testing.T, c *Client, project Project) error {
+					t.Helper()
+					_, err := c.ListMemories(context.Background(), project)
+					return err
+				}
+			}
+
+			err = firstCall(t, c, project)
+			if err == nil || !strings.Contains(err.Error(), tt.firstErr) {
+				t.Fatalf("first ListMemories error = %v, want %q", err, tt.firstErr)
+			}
+			list, err := c.ListMemories(context.Background(), project)
+			if err != nil {
+				t.Fatalf("second ListMemories should use recovered backend: %v", err)
+			}
+			if len(list.Memories) != 1 || list.Memories[0].File != "remote.md" {
+				t.Fatalf("second backend list = %#v", list)
+			}
+			if requests != 2 {
+				t.Fatalf("backend requests = %d, want retry after non-cacheable failure", requests)
+			}
+		})
+	}
+}
+
+func TestMemoryBackendInvalidServerURLDoesNotCacheUnsupportedCapability(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/memory" {
+			t.Fatalf("unexpected backend path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"project_id":"p1","memories":[{"file":"remote.md","title":"Remote","summary":"server"}],"warnings":[]}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.baseURL = "http://[::1"
+	if _, err := c.ListMemories(context.Background(), Project{ID: "p1"}); err == nil || !strings.Contains(err.Error(), "invalid configured server URL") {
+		t.Fatalf("invalid URL ListMemories error = %v", err)
+	}
+
+	c.baseURL = srv.URL
+	list, err := c.ListMemories(context.Background(), Project{ID: "p1"})
+	if err != nil {
+		t.Fatalf("ListMemories after fixing URL: %v", err)
+	}
+	if len(list.Memories) != 1 || list.Memories[0].File != "remote.md" {
+		t.Fatalf("backend list after fixing URL = %#v", list)
+	}
+	if requests != 1 {
+		t.Fatalf("backend requests = %d, want retry after invalid URL", requests)
 	}
 }
 
