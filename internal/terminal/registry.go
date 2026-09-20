@@ -6377,7 +6377,7 @@ var (
 	slackAccessUserID      = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
 	numericAccessUserID    = regexp.MustCompile(`^[0-9]+$`)
 	xAccessUsername        = regexp.MustCompile(`^@?[A-Za-z0-9_]{1,15}$`)
-	githubAccessLogin      = regexp.MustCompile(`^@?[A-Za-z0-9-]{1,39}$`)
+	githubAccessLogin      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`)
 )
 
 var channelAccessProviders = []string{"telegram", "slack", "discord", "x", "email", "github"}
@@ -6429,10 +6429,11 @@ func normalizeChannelAccessIdentity(provider, value string) (string, error) {
 		}
 		return strconv.FormatUint(userID, 10), nil
 	case "github":
-		if !githubAccessLogin.MatchString(value) {
+		login := strings.TrimPrefix(value, "@")
+		if !githubAccessLogin.MatchString(login) || strings.HasSuffix(login, "-") || strings.Contains(login, "--") {
 			return "", errors.New("GitHub access requires a valid login")
 		}
-		return strings.ToLower(strings.TrimPrefix(value, "@")), nil
+		return strings.ToLower(login), nil
 	case "email":
 		address, err := mail.ParseAddress(value)
 		if err != nil || address == nil || !strings.Contains(address.Address, "@") {
