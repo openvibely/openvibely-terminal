@@ -45,9 +45,72 @@ func NodeText(n *html.Node) string {
 	if n == nil {
 		return ""
 	}
+	if text, ok := simpleNodeText(n); ok {
+		return text
+	}
 	var b strings.Builder
 	renderNodeText(&b, n)
 	return tidyText(b.String())
+}
+
+func simpleNodeText(n *html.Node) (string, bool) {
+	if n.Type == html.TextNode {
+		return tidyInlineText(n.Data), true
+	}
+	if n.Type != html.ElementNode || skippedTags[n.Data] {
+		return "", false
+	}
+	if n.FirstChild == nil {
+		return "", true
+	}
+	if n.FirstChild.NextSibling != nil || n.FirstChild.Type != html.TextNode {
+		return "", false
+	}
+	return tidyInlineText(n.FirstChild.Data), true
+}
+
+func tidyInlineText(s string) string {
+	start := 0
+	for start < len(s) && isASCIISpace(s[start]) {
+		start++
+	}
+	end := len(s)
+	for end > start && isASCIISpace(s[end-1]) {
+		end--
+	}
+	for i := start; i < end; i++ {
+		if isASCIISpace(s[i]) && i+1 < end && isASCIISpace(s[i+1]) {
+			return collapseInlineText(s[start:end])
+		}
+	}
+	return s[start:end]
+}
+
+func collapseInlineText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	space := false
+	for i := 0; i < len(s); i++ {
+		if isASCIISpace(s[i]) {
+			space = true
+			continue
+		}
+		if space && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		space = false
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func isASCIISpace(ch byte) bool {
+	switch ch {
+	case ' ', '\n', '\r', '\t', '\f':
+		return true
+	default:
+		return false
+	}
 }
 
 func renderNodeText(b *strings.Builder, n *html.Node) {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 // BenchmarkParseAutomationDetailSparseCorrelation exercises the complete HTML
@@ -24,6 +26,33 @@ func BenchmarkParseAutomationDetailSparseCorrelation(b *testing.B) {
 				}
 				if len(detail.Nodes) != records || len(detail.Edges) != records {
 					b.Fatalf("records=%d parsed nodes=%d edges=%d", records, len(detail.Nodes), len(detail.Edges))
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkAutomationDetailExtractionIndexSparseCorrelation(b *testing.B) {
+	for _, records := range []int{10, 100, 500} {
+		fixture := automationDetailSparseCorrelationFixture(records)
+		root, err := html.Parse(strings.NewReader(fixture))
+		if err != nil {
+			b.Fatal(err)
+		}
+		live := findNode(root, func(n *html.Node) bool {
+			return hasHTMLAttr(n, "data-automation-id") ||
+				(attr(n, "id") == "automation-live" && (hasHTMLAttr(n, "data-project-id") || hasHTMLAttr(n, "data-refresh-url")))
+		})
+		if live == nil {
+			b.Fatal("missing automation-live fixture root")
+		}
+		b.Run(fmt.Sprintf("records=%d", records), func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				extraction := newAutomationDetailExtraction(live)
+				if len(extraction.liveNodes) != records || len(extraction.nodeDetails) != records || len(extraction.graphEdges) != records || len(extraction.edgeDetails) != records {
+					b.Fatalf("records=%d extracted live_nodes=%d node_details=%d graph_edges=%d edge_details=%d", records, len(extraction.liveNodes), len(extraction.nodeDetails), len(extraction.graphEdges), len(extraction.edgeDetails))
 				}
 			}
 		})
