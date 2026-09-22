@@ -7,6 +7,7 @@ package client
 import (
 	"regexp"
 	"strings"
+	"unicode"
 
 	"golang.org/x/net/html"
 )
@@ -70,6 +71,9 @@ func simpleNodeText(n *html.Node) (string, bool) {
 }
 
 func tidyInlineText(s string) string {
+	if containsNonASCIIWhitespace(s) {
+		return strings.Join(strings.Fields(s), " ")
+	}
 	start := 0
 	for start < len(s) && isASCIISpace(s[start]) {
 		start++
@@ -84,6 +88,21 @@ func tidyInlineText(s string) string {
 		}
 	}
 	return s[start:end]
+}
+
+func containsNonASCIIWhitespace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x80 {
+			continue
+		}
+		for _, r := range s[i:] {
+			if unicode.IsSpace(r) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func collapseInlineText(s string) string {
@@ -106,7 +125,7 @@ func collapseInlineText(s string) string {
 
 func isASCIISpace(ch byte) bool {
 	switch ch {
-	case ' ', '\n', '\r', '\t', '\f':
+	case ' ', '\n', '\r', '\t', '\f', '\v':
 		return true
 	default:
 		return false

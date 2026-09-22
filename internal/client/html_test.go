@@ -902,6 +902,17 @@ func TestDedupedCardsWithoutTextSkipsNodeText(t *testing.T) {
 	}
 }
 
+func TestNodeTextSimpleElementNormalizesUnicodeWhitespace(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<p>&nbsp;Alpha&nbsp;&emsp;Beta&nbsp;</p>`))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+	paragraph := findNode(root, func(n *html.Node) bool { return n.Data == "p" })
+	if got, want := NodeText(paragraph), "Alpha Beta"; got != want {
+		t.Fatalf("NodeText = %q, want %q", got, want)
+	}
+}
+
 // BenchmarkBytesReader measures the zero-copy reader used by getHTML.
 func BenchmarkBytesReader(b *testing.B) {
 	const bodySize = 16 * 1024
