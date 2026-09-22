@@ -734,6 +734,42 @@ func TestProjectScopedTaskMutationsUseEncodedProjectQuery(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskForProjectOmitsPriorityAndTagMetadata(t *testing.T) {
+	var form url.Values
+	var rawQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawQuery = r.URL.RawQuery
+		if r.Method != http.MethodPut || r.URL.Path != "/tasks/t1" {
+			t.Fatalf("request = %s %s, want PUT /tasks/t1", r.Method, r.URL.Path)
+		}
+		_ = r.ParseForm()
+		form = r.PostForm
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	err := c.UpdateTaskForProject(context.Background(), "t1", "p1", TaskForm{
+		Title: "Rename", Prompt: "keep details", Category: "backlog", Priority: 3, Tag: "feature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawQuery != "project_id=p1" {
+		t.Fatalf("query = %q, want project_id=p1", rawQuery)
+	}
+	for k, want := range map[string]string{"title": "Rename", "prompt": "keep details", "category": "backlog"} {
+		if got := form.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	for _, k := range []string{"priority", "tag"} {
+		if _, ok := form[k]; ok {
+			t.Errorf("%s was submitted on update: %#v", k, form[k])
+		}
+	}
+}
+
 func TestProjectScopedTaskMutationsRejectEmptyProjectID(t *testing.T) {
 	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -790,6 +826,28 @@ func TestCreateTaskPostsForm(t *testing.T) {
 		if got := form.Get(k); got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
+	}
+}
+
+func TestCreateTaskPostsPriorityAndTagDefaults(t *testing.T) {
+	var form url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		form = r.PostForm
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	err := c.CreateTask(context.Background(), "p1", TaskForm{Title: "Ship it", Prompt: "do the thing", Category: "backlog"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := form.Get("priority"); got != "0" {
+		t.Errorf("priority = %q, want 0", got)
+	}
+	if values, ok := form["tag"]; !ok || len(values) != 1 || values[0] != "" {
+		t.Errorf("tag = %#v, want single empty value", values)
 	}
 }
 

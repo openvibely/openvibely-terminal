@@ -56,6 +56,12 @@ func (r *recorder) sawForm(substr string) bool {
 	return false
 }
 
+func (r *recorder) formsSnapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.forms...)
+}
+
 func (r *recorder) record(method, path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -3779,6 +3785,51 @@ func TestTaskEditAndOrder(t *testing.T) {
 			t.Errorf("calls:\n%s", rec.all())
 		}
 	})
+}
+
+func TestTaskEditPreservesPriorityAndTagMetadata(t *testing.T) {
+	const board = `<div>
+	  <div class="card" data-task-id="t-1" data-task-status="pending" data-task-category="backlog" data-display-order="0">
+	    <div class="card-body">
+	      <a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+	      <p class="line-clamp-2">split handlers</p>
+	      <span class="badge">P2</span>
+	      <span class="badge">feature</span>
+	    </div>
+	  </div>
+	</div>`
+
+	for _, tc := range []struct {
+		name     string
+		line     string
+		wantForm string
+	}{
+		{name: "title only", line: "/tasks edit Refactor | New Title", wantForm: "PUT /tasks/t-1?category=backlog&prompt=split+handlers&title=New+Title"},
+		{name: "prompt", line: "/tasks edit Refactor | Refactor the API | update prompt", wantForm: "PUT /tasks/t-1?category=backlog&prompt=update+prompt&title=Refactor+the+API"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": board})
+			m = runLine(t, m, tc.line)
+			forms := rec.formsSnapshot()
+			if !slices.Contains(forms, tc.wantForm) {
+				t.Fatalf("edit form = %#v, want %q", forms, tc.wantForm)
+			}
+			for _, form := range forms {
+				if !strings.HasPrefix(form, "PUT /tasks/t-1?") {
+					continue
+				}
+				if strings.Contains(form, "priority=0") || strings.Contains(form, "tag=") {
+					t.Fatalf("edit reset metadata in form %q", form)
+				}
+			}
+			if !rec.sawQuery("PUT /tasks/t-1?project_id=p1") {
+				t.Fatalf("edit was not project scoped: %#v", rec.urlsSnapshot())
+			}
+			if out := transcript(m); strings.Contains(out, "error:") {
+				t.Fatalf("unexpected edit error:\n%s", out)
+			}
+		})
+	}
 }
 
 func TestTaskGoalLifecycleUsesScopedRoutesAndKeepsPauseAsObjective(t *testing.T) {
