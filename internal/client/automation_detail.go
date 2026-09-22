@@ -338,6 +338,11 @@ type automationDetailExtraction struct {
 	edgeDetails   []*html.Node
 	resourceRows  []*html.Node
 	runtimeText   bool
+	runtimeActive bool
+	runtimeOpen   bool
+	runtimeInvoke bool
+	runtimeWork   bool
+	runtimeItem   bool
 	runtimeAttrs  bool
 	externalAttrs bool
 }
@@ -349,8 +354,8 @@ func newAutomationDetailExtraction(live *html.Node) *automationDetailExtraction 
 		if n.Type == html.ElementNode {
 			extraction.visitElement(n)
 		}
-		if n.Type == html.TextNode && !extraction.runtimeText && automationRuntimeCountTextCandidate(n.Data) {
-			extraction.runtimeText = true
+		if n.Type == html.TextNode && !extraction.runtimeText {
+			extraction.visitText(n.Data)
 		}
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			walk(child)
@@ -412,8 +417,21 @@ func (extraction *automationDetailExtraction) visitElement(n *html.Node) {
 	}
 }
 
-func automationRuntimeCountTextCandidate(text string) bool {
+func (extraction *automationDetailExtraction) visitText(text string) {
 	lower := strings.ToLower(text)
+	if automationRuntimeCountTextCandidate(lower) {
+		extraction.runtimeText = true
+		return
+	}
+	extraction.runtimeActive = extraction.runtimeActive || strings.Contains(lower, "active")
+	extraction.runtimeOpen = extraction.runtimeOpen || strings.Contains(lower, "open")
+	extraction.runtimeInvoke = extraction.runtimeInvoke || strings.Contains(lower, "invocation")
+	extraction.runtimeWork = extraction.runtimeWork || strings.Contains(lower, "work")
+	extraction.runtimeItem = extraction.runtimeItem || strings.Contains(lower, "item")
+	extraction.runtimeText = (extraction.runtimeActive && extraction.runtimeInvoke) || ((extraction.runtimeActive || extraction.runtimeOpen) && extraction.runtimeWork && extraction.runtimeItem)
+}
+
+func automationRuntimeCountTextCandidate(lower string) bool {
 	return strings.Contains(lower, "active invocation") || strings.Contains(lower, "active work item") || strings.Contains(lower, "open work item")
 }
 
