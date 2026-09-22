@@ -377,9 +377,11 @@ Discord, X, and Email; use `help channels` for provider-specific identity forms.
 ### Model providers
 
 `/models add` and `/models edit <model>` are shared terminal actions for model
-providers. `add` configures `anthropic`, `openai`, and `ollama`; run the bare
-add action in the interactive TUI to answer guided prompts. API-key prompts are
-masked and never enter the transcript or command history.
+providers. `add` configures `anthropic`, `openai`, `ollama`, and a focused
+`openai_compatible` Chat Completions path for OpenRouter, Groq, LM Studio, vLLM,
+or another compatible server. Run the bare add action in the interactive TUI to
+answer guided prompts. API-key prompts are masked and never enter the transcript
+or command history.
 
 `edit` reads the backend-authoritative existing configuration, then applies only
 the supplied options: `--name`, `--model`, `--default <true|false>`,
@@ -403,14 +405,19 @@ nonempty replacement is submitted.
 ```bash
 printf '%s' "$OPENAI_API_KEY" | openvibely-terminal models add openai "OpenAI" gpt-4o --api-key-stdin
 openvibely-terminal models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434
+openvibely-terminal models add openai_compatible "Local vLLM" llama-3.1 --endpoint http://127.0.0.1:8000/v1 --default-max-tokens 4096
+printf '%s' "$OPENROUTER_API_KEY" | openvibely-terminal models add openai_compatible "OpenRouter" openai/gpt-4o --endpoint https://openrouter.ai/api/v1 --default-max-tokens 4096 --api-key-stdin
 openvibely-terminal -project demo models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434
 printf '%s' "$OPENAI_API_KEY" | openvibely-terminal -project demo models edit OpenAI --api-key-stdin
 ```
 
-For `add`, `--endpoint` is only for Ollama. For `edit`, it additionally supports
-saved OpenAI-compatible configurations. It must be an absolute HTTP(S) URL
-without credentials, query parameters, or fragments. Omit it on add to use the
-backend's local Ollama default. `--oauth` is available for Anthropic and OpenAI.
+For `add`, `--endpoint` is optional for Ollama and required for
+`openai_compatible`; compatible adds also require `--default-max-tokens <n>` and
+default to the backend's Chat Completions transport with the `custom` preset.
+For `edit`, `--endpoint` supports saved Ollama and OpenAI-compatible
+configurations. It must be an absolute HTTP(S) URL without credentials, query
+parameters, or fragments. Omit it on Ollama add to use the backend's local
+Ollama default. `--oauth` is available for Anthropic and OpenAI.
 It saves an OAuth configuration, refreshes the model list, then reports the
 backend's authorization status and a browser handoff URL. OAuth is connected
 only when that backend status is `connected`; terminal setup alone does not claim

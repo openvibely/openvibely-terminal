@@ -4435,12 +4435,15 @@ func fetchModelCapacityWithProviderLimits(ctx context.Context, c *client.Client,
 }
 
 type modelAddSpec struct {
-	Provider string
-	Name     string
-	Model    string
-	APIKey   string
-	OAuth    bool
-	Endpoint string
+	Provider            string
+	Name                string
+	Model               string
+	APIKey              string
+	APIKeyFromStdin     bool
+	OAuth               bool
+	Endpoint            string
+	DefaultMaxTokens    int
+	DefaultMaxTokensSet bool
 }
 
 type modelAddOutput struct {
@@ -4450,13 +4453,17 @@ type modelAddOutput struct {
 	AuthorizationURL string            `json:"authorization_url,omitempty"`
 }
 
+func modelAddOptionNames() []string {
+	return []string{"--api-key-stdin", "--oauth", "--endpoint", "--default-max-tokens"}
+}
+
 func normalizeModelAddProvider(value string) (string, error) {
 	provider := strings.ToLower(strings.TrimSpace(value))
 	switch provider {
-	case "anthropic", "openai", "ollama":
+	case "anthropic", "openai", "ollama", "openai_compatible":
 		return provider, nil
 	default:
-		return "", errors.New("provider must be anthropic, openai, or ollama")
+		return "", errors.New("provider must be anthropic, openai, ollama, or openai_compatible")
 	}
 }
 
@@ -4465,6 +4472,11 @@ func validateOllamaEndpoint(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}
+	return validateModelAddHTTPBaseURL(value)
+}
+
+func validateModelAddHTTPBaseURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
 	u, err := url.Parse(value)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return "", errors.New("--endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment")
@@ -4487,15 +4499,14 @@ func parseModelAddArgs(args []string) (modelAddSpec, error) {
 	if spec.Name == "" || spec.Model == "" {
 		return modelAddSpec{}, errors.New("model name and model ID are required")
 	}
-	apiKeyStdin := false
 	endpointSet := false
 	for i := 3; i < len(args); i++ {
 		switch strings.ToLower(args[i]) {
 		case "--api-key-stdin":
-			if apiKeyStdin {
+			if spec.APIKeyFromStdin {
 				return modelAddSpec{}, errors.New("--api-key-stdin may only be provided once")
 			}
-			apiKeyStdin = true
+			spec.APIKeyFromStdin = true
 		case "--oauth":
 			if spec.OAuth {
 				return modelAddSpec{}, errors.New("--oauth may only be provided once")
@@ -4513,6 +4524,20 @@ func parseModelAddArgs(args []string) (modelAddSpec, error) {
 			if spec.Endpoint, err = validateOllamaEndpoint(args[i]); err != nil {
 				return modelAddSpec{}, err
 			}
+		case "--default-max-tokens":
+			if spec.DefaultMaxTokensSet {
+				return modelAddSpec{}, errors.New("--default-max-tokens may only be provided once")
+			}
+			spec.DefaultMaxTokensSet = true
+			if i+1 >= len(args) {
+				return modelAddSpec{}, errors.New("--default-max-tokens requires a value")
+			}
+			i++
+			parsed, parseErr := strconv.Atoi(strings.TrimSpace(args[i]))
+			if parseErr != nil || parsed <= 0 {
+				return modelAddSpec{}, errors.New("--default-max-tokens must be a positive integer")
+			}
+			spec.DefaultMaxTokens = parsed
 		default:
 			return modelAddSpec{}, errors.New("unsupported models add option")
 		}
@@ -4520,18 +4545,34 @@ func parseModelAddArgs(args []string) (modelAddSpec, error) {
 
 	switch spec.Provider {
 	case "ollama":
-		if spec.OAuth || apiKeyStdin {
+		if spec.OAuth || spec.APIKeyFromStdin {
 			return modelAddSpec{}, errors.New("ollama does not support --oauth or --api-key-stdin")
+		}
+		if spec.DefaultMaxTokensSet {
+			return modelAddSpec{}, errors.New("--default-max-tokens is supported only for openai_compatible")
 		}
 	case "anthropic", "openai":
 		if spec.Endpoint != "" {
-			return modelAddSpec{}, errors.New("--endpoint is supported only for ollama")
+			return modelAddSpec{}, errors.New("--endpoint is supported only for ollama or openai_compatible")
 		}
-		if spec.OAuth && apiKeyStdin {
+		if spec.DefaultMaxTokensSet {
+			return modelAddSpec{}, errors.New("--default-max-tokens is supported only for openai_compatible")
+		}
+		if spec.OAuth && spec.APIKeyFromStdin {
 			return modelAddSpec{}, errors.New("--oauth and --api-key-stdin cannot be used together")
 		}
-		if !spec.OAuth && !apiKeyStdin {
+		if !spec.OAuth && !spec.APIKeyFromStdin {
 			return modelAddSpec{}, errors.New("API-key providers require --api-key-stdin; do not pass secrets as command arguments")
+		}
+	case "openai_compatible":
+		if spec.OAuth {
+			return modelAddSpec{}, errors.New("openai_compatible does not support --oauth")
+		}
+		if spec.Endpoint == "" {
+			return modelAddSpec{}, errors.New("openai_compatible requires --endpoint <base-url>")
+		}
+		if !spec.DefaultMaxTokensSet {
+			return modelAddSpec{}, errors.New("openai_compatible requires --default-max-tokens <n>")
 		}
 	}
 	return spec, nil
@@ -4540,12 +4581,16 @@ func parseModelAddArgs(args []string) (modelAddSpec, error) {
 func modelAddResult(ctx context.Context, c *client.Client, projectID string, spec modelAddSpec) (string, error) {
 	defer func() { spec.APIKey = "" }()
 	if err := c.CreateModel(ctx, projectID, client.ModelCreateRequest{
-		Name:          spec.Name,
-		Provider:      spec.Provider,
-		Model:         spec.Model,
-		APIKey:        spec.APIKey,
-		OAuth:         spec.OAuth,
-		OllamaBaseURL: spec.Endpoint,
+		Name:             spec.Name,
+		Provider:         spec.Provider,
+		Model:            spec.Model,
+		APIKey:           spec.APIKey,
+		OAuth:            spec.OAuth,
+		OllamaBaseURL:    spec.Endpoint,
+		BaseURL:          spec.Endpoint,
+		Transport:        "chat_completions",
+		PresetSlug:       "custom",
+		DefaultMaxTokens: spec.DefaultMaxTokens,
 	}); err != nil {
 		return "", err
 	}
@@ -5054,22 +5099,31 @@ type modelWizardState struct {
 
 func modelWizardSteps(provider string) []modelWizardStep {
 	steps := []modelWizardStep{
-		{field: "provider", label: "Provider (anthropic/openai/ollama)", placeholder: "openai"},
+		{field: "provider", label: "Provider (anthropic/openai/ollama/openai_compatible)", placeholder: "openai"},
 		{field: "name", label: "Configuration name", placeholder: "My Model"},
 		{field: "model", label: "Model ID", placeholder: "gpt-4o"},
 	}
-	if provider == "anthropic" || provider == "openai" {
+	switch provider {
+	case "anthropic", "openai":
 		return append(steps,
 			modelWizardStep{field: "auth", label: "Authentication (api_key/oauth)", placeholder: "api_key"},
 			modelWizardStep{field: "api_key", label: "API key", secret: true, placeholder: "required for API-key authentication"},
 		)
+	case "openai_compatible":
+		return append(steps,
+			modelWizardStep{field: "endpoint", label: "OpenAI-compatible base URL", placeholder: "http://127.0.0.1:8000/v1"},
+			modelWizardStep{field: "default_max_tokens", label: "Default max tokens", placeholder: "4096"},
+			modelWizardStep{field: "auth", label: "Authentication (none/api_key)", placeholder: "none"},
+			modelWizardStep{field: "api_key", label: "API key", secret: true, placeholder: "required only when authentication is api_key"},
+		)
+	default:
+		return append(steps, modelWizardStep{field: "endpoint", label: "Ollama base URL", placeholder: "blank uses http://localhost:11434"})
 	}
-	return append(steps, modelWizardStep{field: "endpoint", label: "Ollama base URL", placeholder: "blank uses http://localhost:11434"})
 }
 
 func (m Model) beginModelWizard() (Model, tea.Cmd) {
 	m.modelWizard = &modelWizardState{
-		steps:              []modelWizardStep{{field: "provider", label: "Provider (anthropic/openai/ollama)", placeholder: "openai"}},
+		steps:              []modelWizardStep{{field: "provider", label: "Provider (anthropic/openai/ollama/openai_compatible)", placeholder: "openai"}},
 		restorePrompt:      m.input.Prompt,
 		restorePlaceholder: m.input.Placeholder,
 	}
@@ -5150,6 +5204,20 @@ func (m Model) handleModelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			wizard.spec.Model = value
 		case "auth":
 			value = strings.ToLower(value)
+			if wizard.spec.Provider == "openai_compatible" {
+				if value == "" {
+					value = "none"
+				}
+				if value != "none" && value != "api_key" {
+					m.append(entry{role: "error", text: "authentication must be none or api_key"})
+					m.setModelWizardPrompt()
+					return m, nil
+				}
+				if value == "none" {
+					wizard.steps = wizard.steps[:wizard.index+1]
+				}
+				break
+			}
 			if value != "api_key" && value != "oauth" {
 				m.append(entry{role: "error", text: "authentication must be api_key or oauth"})
 				m.setModelWizardPrompt()
@@ -5167,13 +5235,33 @@ func (m Model) handleModelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			wizard.spec.APIKey = value
 		case "endpoint":
-			endpoint, err := validateOllamaEndpoint(value)
+			var endpoint string
+			var err error
+			if wizard.spec.Provider == "openai_compatible" {
+				if value == "" {
+					m.append(entry{role: "error", text: "OpenAI-compatible base URL is required"})
+					m.setModelWizardPrompt()
+					return m, nil
+				}
+				endpoint, err = validateModelAddHTTPBaseURL(value)
+			} else {
+				endpoint, err = validateOllamaEndpoint(value)
+			}
 			if err != nil {
 				m.append(entry{role: "error", text: err.Error()})
 				m.setModelWizardPrompt()
 				return m, nil
 			}
 			wizard.spec.Endpoint = endpoint
+		case "default_max_tokens":
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed <= 0 {
+				m.append(entry{role: "error", text: "default max tokens must be a positive whole number"})
+				m.setModelWizardPrompt()
+				return m, nil
+			}
+			wizard.spec.DefaultMaxTokens = parsed
+			wizard.spec.DefaultMaxTokensSet = true
 		}
 		wizard.index++
 		if wizard.index < len(wizard.steps) {
@@ -5200,7 +5288,8 @@ func modelsCommand() command {
 		fmt.Sprintf("models [filter]                            list configured models (plain output shows first %d matches)", client.DefaultModelListLimit),
 		"models add                                  guided provider setup with masked API-key input",
 		"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
-		"  providers: anthropic, openai, ollama; API keys require piped --api-key-stdin", "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>",
+		"  providers: anthropic, openai, ollama, openai_compatible; API keys require piped --api-key-stdin",
+		"  options: --api-key-stdin | --oauth | --endpoint <http(s)://base-url> | --default-max-tokens <n>",
 		"models edit <model> [options]               safely update explicit fields of an existing model",
 	}, append(modelEditOptionsUsageLines(),
 		"models default <model>                     set the default model",
@@ -5211,7 +5300,7 @@ func modelsCommand() command {
 	actionUsages := []commandActionUsage{
 		{
 			action:      "add",
-			args:        "<provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>]",
+			args:        "<provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>|--default-max-tokens <n>]",
 			description: "add a provider (guided when interactive)",
 		},
 		{
@@ -5224,6 +5313,8 @@ func modelsCommand() command {
 		`models add`,
 		`printf '%s' "$OPENAI_API_KEY" | models add openai "OpenAI" gpt-4o --api-key-stdin`,
 		`models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434`,
+		`models add openai_compatible "Local vLLM" llama-3.1 --endpoint http://127.0.0.1:8000/v1 --default-max-tokens 4096`,
+		`printf '%s' "$OPENROUTER_API_KEY" | models add openai_compatible "OpenRouter" openai/gpt-4o --endpoint https://openrouter.ai/api/v1 --default-max-tokens 4096 --api-key-stdin`,
 		`models add anthropic "Claude OAuth" claude-sonnet-4-6 --oauth`,
 		`models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434`,
 		`printf '%s' "$OPENAI_API_KEY" | models edit OpenAI --api-key-stdin`,
@@ -5237,6 +5328,8 @@ func modelsCommand() command {
 		args:    "[name]",
 		actions: actions,
 		completions: []commandCompletion{
+			{after: []string{"add"}, values: []string{"anthropic", "openai", "ollama", "openai_compatible"}},
+			{after: []string{"add", "*", "*", "**"}, values: modelAddOptionNames()},
 			{after: []string{"edit", "**"}, partialAfter: completionAfterQuotedOperand, values: modelEditOptionNames()},
 		},
 		selectorPaths: [][]string{{"edit"}, {"default"}, {"delete"}},
@@ -5280,7 +5373,7 @@ func modelsCommand() command {
 				if err != nil {
 					return m, errCmd(err.Error())
 				}
-				if !spec.OAuth && (spec.Provider == "anthropic" || spec.Provider == "openai") {
+				if !spec.OAuth && (spec.Provider == "anthropic" || spec.Provider == "openai" || (spec.Provider == "openai_compatible" && spec.APIKeyFromStdin)) {
 					key, err := readModelAPIKey(m.cliSecretInput)
 					if err != nil {
 						return m, errCmd(err.Error())

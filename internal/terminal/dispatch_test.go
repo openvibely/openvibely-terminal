@@ -7157,6 +7157,72 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 		}
 	})
 
+	t.Run("openai compatible", func(t *testing.T) {
+		secret := "interactive-compatible-secret"
+		var postForm url.Values
+		var postCount int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method + " " + r.URL.Path {
+			case "POST /models":
+				postCount++
+				if err := r.ParseForm(); err != nil {
+					t.Fatal(err)
+				}
+				postForm = r.PostForm
+				w.WriteHeader(http.StatusOK)
+			case "GET /models":
+				_, _ = io.WriteString(w, `<div data-model-id="m-compatible" data-model-name="OpenRouter" data-model-provider="openai_compatible" data-model-model="openai/gpt-4o"></div>`)
+			default:
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		m = runLine(t, m, "/models add")
+		if !strings.Contains(m.input.Prompt, "Provider (anthropic/openai/ollama/openai_compatible)") {
+			t.Fatalf("provider prompt did not mention compatible providers: %q", m.input.Prompt)
+		}
+		m = runLine(t, m, "openai_compatible")
+		m = runLine(t, m, "OpenRouter")
+		m = runLine(t, m, "openai/gpt-4o")
+		if !strings.Contains(m.input.Prompt, "OpenAI-compatible base URL") {
+			t.Fatalf("compatible endpoint prompt = %q", m.input.Prompt)
+		}
+		m = runLine(t, m, "https://openrouter.ai/api/v1")
+		if !strings.Contains(m.input.Prompt, "Default max tokens") {
+			t.Fatalf("compatible max-token prompt = %q", m.input.Prompt)
+		}
+		m = runLine(t, m, "4096")
+		if !strings.Contains(m.input.Prompt, "Authentication (none/api_key)") {
+			t.Fatalf("compatible auth prompt = %q", m.input.Prompt)
+		}
+		m = runLine(t, m, "api_key")
+		m = runLine(t, m, secret)
+		if postCount != 1 || m.modelWizard != nil || m.input.EchoMode != textinput.EchoNormal {
+			t.Fatalf("compatible wizard did not complete cleanly: posts=%d wizard=%v echo=%v\n%s", postCount, m.modelWizard != nil, m.input.EchoMode, transcript(m))
+		}
+		for key, want := range map[string]string{
+			"provider": "openai_compatible", "base_url": "https://openrouter.ai/api/v1", "transport": "chat_completions", "preset_slug": "custom", "default_max_tokens": "4096",
+			"custom_auth_method": "api_key", "api_key": secret,
+		} {
+			if got := postForm.Get(key); got != want {
+				t.Errorf("form[%q] = %q, want %q", key, got, want)
+			}
+		}
+		if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
+			t.Fatalf("compatible wizard leaked API key:\n%s", transcript(m))
+		}
+		for _, item := range m.history {
+			if strings.Contains(item, secret) {
+				t.Fatalf("compatible API key appeared in command history: %q", item)
+			}
+		}
+	})
+
 	t.Run("backend validation", func(t *testing.T) {
 		secret := "interactive-backend-reflected-secret"
 		var postCount, listCount int

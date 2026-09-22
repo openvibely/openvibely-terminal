@@ -3527,6 +3527,90 @@ func TestCLIModelsAddUsesStdinAndRefreshesWithoutLeakingAPIKey(t *testing.T) {
 	}
 }
 
+func TestCLIModelsAddOpenAICompatibleSubmitsChatCompletionsForm(t *testing.T) {
+	var postForm url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			postForm = r.PostForm
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			_, _ = io.WriteString(w, `<div data-model-id="m-compatible" data-model-name="Local vLLM" data-model-provider="openai_compatible" data-model-model="llama-3.1"></div>`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLIWithInput(c, &out, nil, "", []string{"models", "add", "openai_compatible", "Local vLLM", "llama-3.1", "--endpoint", "http://127.0.0.1:8000/v1", "--default-max-tokens", "4096"}, false, true); err != nil {
+		t.Fatalf("compatible add failed: %v", err)
+	}
+	for key, want := range map[string]string{
+		"name": "Local vLLM", "provider": "openai_compatible", "model": "llama-3.1",
+		"base_url": "http://127.0.0.1:8000/v1", "transport": "chat_completions", "preset_slug": "custom",
+		"default_max_tokens": "4096", "custom_auth_method": "none",
+	} {
+		if got := postForm.Get(key); got != want {
+			t.Errorf("form[%q] = %q, want %q", key, got, want)
+		}
+	}
+	if got := postForm.Get("api_key"); got != "" {
+		t.Fatalf("compatible local form submitted an API key: %q", got)
+	}
+	var result modelAddOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &result); err != nil {
+		t.Fatalf("invalid compatible add JSON: %v\n%s", err, out.String())
+	}
+	if result.Status != "added Local vLLM" || len(result.Models) != 1 || result.Models[0].ID != "m-compatible" {
+		t.Fatalf("compatible add JSON = %+v", result)
+	}
+}
+
+func TestCLIModelsAddOpenAICompatibleUsesStdinAPIKeyWithoutLeak(t *testing.T) {
+	const secret = "compatible-api-key"
+	var postForm url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /models":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			postForm = r.PostForm
+			w.WriteHeader(http.StatusOK)
+		case "GET /models":
+			_, _ = io.WriteString(w, `<div data-model-id="m-openrouter" data-model-name="OpenRouter" data-model-provider="openai_compatible" data-model-model="openai/gpt-4o"></div>`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLIWithInput(c, &out, strings.NewReader(secret+"\n"), "", []string{"models", "add", "openai_compatible", "OpenRouter", "openai/gpt-4o", "--endpoint", "https://openrouter.ai/api/v1", "--default-max-tokens", "4096", "--api-key-stdin"}, false, true); err != nil {
+		t.Fatalf("compatible add with key failed: %v", err)
+	}
+	for key, want := range map[string]string{
+		"custom_auth_method": "api_key", "auth_method": "api_key", "auth_header_name": "Authorization", "auth_header_value_prefix": "Bearer ", "api_key": secret,
+	} {
+		if got := postForm.Get(key); got != want {
+			t.Errorf("form[%q] = %q, want %q", key, got, want)
+		}
+	}
+	if strings.Contains(out.String(), secret) {
+		t.Fatalf("compatible API key leaked in output: %s", out.String())
+	}
+}
+
 func TestCLIModelsAddNonOAuthRefreshFailurePreservesSuccess(t *testing.T) {
 	const secret = "non-oauth-refresh-secret"
 	var postCount, listCount int
