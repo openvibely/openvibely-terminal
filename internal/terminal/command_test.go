@@ -581,6 +581,99 @@ func TestTaskThreadInputCommandVocabularyParity(t *testing.T) {
 	}
 }
 
+func TestTaskAttachmentCommandVocabularyParity(t *testing.T) {
+	defer func() { cmdPrefix = "/" }()
+	cmdPrefix = "/"
+
+	cmd := lookupCommand("tasks")
+	if cmd == nil {
+		t.Fatal("tasks command missing")
+	}
+
+	for _, action := range taskAttachmentTopLevelActions() {
+		if !containsString(cmd.actions, action) {
+			t.Errorf("tasks actions missing attachment root %q: %v", action, cmd.actions)
+		}
+		gotAction, _ := splitAction(cmd.actions, []string{action, "list", "Refactor"})
+		if gotAction != action {
+			t.Errorf("splitAction(%q) = %q, want parser-recognized action", action, gotAction)
+		}
+		if !cmd.offersSelector([]string{action}) {
+			t.Errorf("selector paths missing attachment root %q", action)
+		}
+		if got, want := registryCompletionValues("tasks", action), taskAttachmentCompletionActions(); !slices.Equal(got, want) {
+			t.Errorf("completion values for %q = %v, want %v", action, got, want)
+		}
+		for _, advertised := range taskAttachmentCompletionActions() {
+			if _, ok := taskAttachmentSubAction(advertised); !ok {
+				t.Errorf("advertised attachment action %q is not parser-classified", advertised)
+			}
+			if !cmd.offersSelector([]string{action, advertised}) {
+				t.Errorf("selector paths missing attachment path %q %q", action, advertised)
+			}
+		}
+	}
+
+	help := renderCommandHelp(*cmd)
+	for _, line := range taskAttachmentUsageLines() {
+		if !strings.Contains(help, cmdPrefix+line) {
+			t.Errorf("help missing attachment usage line %q\n%s", cmdPrefix+line, help)
+		}
+	}
+	for _, usage := range taskAttachmentActionUsages() {
+		want := "usage: " + cmdPrefix + usage.syntax("tasks")
+		if got := commandUsage("tasks", usage.action); got != want {
+			t.Errorf("commandUsage(%q) = %q, want %q", usage.action, got, want)
+		}
+	}
+	for _, vocab := range taskAttachmentActionVocabularies {
+		for _, alias := range vocab.aliases {
+			got, ok := taskAttachmentSubAction(alias)
+			if !ok || got != vocab.canonical {
+				t.Errorf("attachment alias %q classified as (%q, %t), want %q", alias, got, ok, vocab.canonical)
+			}
+		}
+	}
+}
+
+func TestTaskAttachmentMissingOperandUsage(t *testing.T) {
+	defer func(oldCLI bool, oldPrefix string) { cliMode, cmdPrefix = oldCLI, oldPrefix }(cliMode, cmdPrefix)
+	cliMode = true
+	cmdPrefix = "/"
+
+	cmd := lookupCommand("tasks")
+	if cmd == nil {
+		t.Fatal("tasks command missing")
+	}
+	m := newTestModel(t)
+	m.selectedID = "p1"
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "add missing file", args: []string{"attachments", "add", "Refactor"}, want: "usage: /tasks attachments add <task> <file>..."},
+		{name: "delete missing attachment", args: []string{"attachments", "delete", "Refactor"}, want: "usage: /tasks attachments delete <task> <attachment>"},
+		{name: "list missing task", args: []string{"attachments", "list"}, want: "usage: /tasks attachments list <task>"},
+		{name: "show missing task", args: []string{"attachments", "show"}, want: "usage: /tasks attachments show <task>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, run := cmd.run(m, tc.args)
+			if run == nil {
+				t.Fatal("expected usage command")
+			}
+			msg, ok := run().(resultMsg)
+			if !ok || msg.err == nil {
+				t.Fatalf("expected usage result, got %#v", msg)
+			}
+			if got := msg.err.Error(); got != tc.want {
+				t.Fatalf("usage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProjectEditOptionMetadataMatchesParserCompletionAndHelp(t *testing.T) {
 	cmd := lookupCommand("projects")
 	if cmd == nil {

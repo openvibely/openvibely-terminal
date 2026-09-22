@@ -719,16 +719,100 @@ func taskThreadInputShorthandAction(action string) (string, bool) {
 	return "", false
 }
 
+type taskAttachmentActionVocabulary struct {
+	canonical   string
+	aliases     []string
+	args        string
+	description string
+}
+
+var taskAttachmentRootActions = []string{"attachments", "attach", "attachment"}
+
+var taskAttachmentActionVocabularies = []taskAttachmentActionVocabulary{
+	{canonical: "add", aliases: []string{"add", "upload"}, args: "<task> <file>...", description: "upload local files"},
+	{canonical: "list", aliases: []string{"list", "show"}, args: "<task>", description: "list attachments"},
+	{canonical: "delete", aliases: []string{"delete", "remove"}, args: "<task> <attachment>", description: "delete by ID or filename"},
+}
+
+func taskAttachmentTopLevelActions() []string {
+	return append([]string(nil), taskAttachmentRootActions...)
+}
+
+func taskAttachmentCompletionActions() []string {
+	var actions []string
+	for _, vocab := range taskAttachmentActionVocabularies {
+		actions = append(actions, vocab.aliases...)
+	}
+	return actions
+}
+
+func taskAttachmentCompletions() []commandCompletion {
+	values := taskAttachmentCompletionActions()
+	completions := make([]commandCompletion, 0, len(taskAttachmentRootActions))
+	for _, root := range taskAttachmentRootActions {
+		completions = append(completions, commandCompletion{after: []string{root}, values: values})
+	}
+	return completions
+}
+
+func taskAttachmentSelectorPaths() [][]string {
+	selectors := make([][]string, 0, len(taskAttachmentRootActions)*(1+len(taskAttachmentCompletionActions())))
+	for _, root := range taskAttachmentRootActions {
+		selectors = append(selectors, []string{root})
+		for _, action := range taskAttachmentCompletionActions() {
+			selectors = append(selectors, []string{root, action})
+		}
+	}
+	return selectors
+}
+
+func taskAttachmentUsageLines() []string {
+	lines := make([]string, 0, len(taskAttachmentActionVocabularies)+1)
+	for _, vocab := range taskAttachmentActionVocabularies {
+		lines = append(lines, commandActionUsage{action: "attachments " + vocab.canonical, args: vocab.args, description: vocab.description}.helpLine("tasks"))
+	}
+	lines = append(lines, "tasks attach ...                            alias for attachments")
+	return lines
+}
+
+func taskAttachmentActionUsages() []commandActionUsage {
+	var usages []commandActionUsage
+	for _, vocab := range taskAttachmentActionVocabularies {
+		for _, alias := range vocab.aliases {
+			usages = append(usages, commandActionUsage{action: "attachments " + alias, args: vocab.args, description: vocab.description})
+		}
+	}
+	return usages
+}
+
+func isTaskAttachmentRootAction(action string) bool {
+	for _, root := range taskAttachmentRootActions {
+		if action == root {
+			return true
+		}
+	}
+	return false
+}
+
+func taskAttachmentSubAction(alias string) (string, bool) {
+	for _, vocab := range taskAttachmentActionVocabularies {
+		for _, candidate := range vocab.aliases {
+			if alias == candidate {
+				return vocab.canonical, true
+			}
+		}
+	}
+	return "", false
+}
+
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs", "attachments", "attach", "attachment"}
+	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs"}
+	actions = append(actions, taskAttachmentTopLevelActions()...)
 	actions = append(actions, taskThreadInputTopLevelActions()...)
 	actions = append(actions, "new", "swarm", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear")
-	completions := append(taskThreadInputCompletions(), []commandCompletion{
+	completions := append(append(taskThreadInputCompletions(), taskAttachmentCompletions()...), []commandCompletion{
 		{after: []string{"goal"}, values: []string{"pause", "resume"}},
 		{after: []string{"reviews"}, values: []string{"list", "add"}},
-		{after: []string{"attachments"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
-		{after: []string{"attach"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
-		{after: []string{"attachment"}, values: []string{"add", "upload", "list", "show", "delete", "remove"}},
 		{after: []string{"move", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"backlog", "active", "completed"}},
 		{after: []string{"clear"}, values: []string{"backlog", "completed"}},
 		{after: []string{"show", "**"}, partialAfter: completionAfterQuotedOperand, values: taskDetailCompletionValues()},
@@ -737,23 +821,17 @@ func tasksCommand() command {
 		{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
 		{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
 		{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
-	}, append(taskThreadInputSelectorPaths(), [][]string{
-		{"attachments"}, {"attachments", "add"}, {"attachments", "upload"},
-		{"attachments", "list"}, {"attachments", "show"}, {"attachments", "delete"},
-		{"attachments", "remove"},
-		{"attach"}, {"attach", "add"}, {"attach", "upload"}, {"attach", "list"}, {"attach", "show"}, {"attach", "delete"}, {"attach", "remove"},
-		{"attachment"}, {"attachment", "add"}, {"attachment", "upload"}, {"attachment", "list"}, {"attachment", "show"}, {"attachment", "delete"}, {"attachment", "remove"},
-	}...)...)
-	usage := append([]string{
+	}, append(taskThreadInputSelectorPaths(), taskAttachmentSelectorPaths()...)...)
+	usage := []string{
 		"tasks [filter]                             list the board, optionally filtered",
 		"tasks open <task>                          enter the task's thread",
 		"omit <task> on task-reference actions, including goal, goal pause, and goal resume → interactive selector",
 		"tasks show <task> [tab]                    " + detailTabUsageList(),
 		"tasks reviews [list] <task>                list inline review comments",
 		"tasks reviews add <task> <file>:<line> <comment>",
-		"tasks attachments add <task> <file>...      upload local files",
-		"tasks attachments delete <task> <attachment> delete by ID or filename",
-		"tasks attach ...                            alias for attachments",
+	}
+	usage = append(usage, taskAttachmentUsageLines()...)
+	usage = append(usage, []string{
 		"tasks lifecycle <task> [execution]         list executions or show ordered events",
 		"tasks logs <task> [execution]              alias for lifecycle event logs",
 		"tasks new <title> [| <prompt>]             create a task",
@@ -764,20 +842,20 @@ func tasksCommand() command {
 		"tasks run|stop|delete <task>               run, cancel or delete",
 		"tasks move <task> <backlog|active|completed>",
 		"tasks order <task> <position>              reorder within its column",
-	}, append(taskThreadInputUsageLines(), []string{
+	}...)
+	usage = append(usage, taskThreadInputUsageLines()...)
+	usage = append(usage, []string{
 		"tasks reply <task> | <message>             post to the task thread",
 		"tasks activate                             activate the whole backlog",
 		"tasks sweep                                sweep finished tasks",
 		"tasks clear <backlog|completed>            clear a column",
-	}...)...)
-	actionUsages := append(taskThreadInputActionUsages(), []commandActionUsage{
+	}...)
+	actionUsages := append(append(taskThreadInputActionUsages(), taskAttachmentActionUsages()...), []commandActionUsage{
 		{action: "goal", args: "<task> | <objective>", description: "set a goal (\"clear\" removes it)"},
 		{action: "steer", args: "<task> | <message>", description: "steer the active response"},
 		{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
 		{action: "goal resume", args: "<task>", description: "resume a paused goal"},
 		{action: "reviews add", args: "<task> <file>:<line> <comment>"},
-		{action: "attachments add", args: "<task> <file>...", description: "upload local files"},
-		{action: "attachments delete", args: "<task> <attachment>", description: "delete by ID or filename"},
 		{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
 		{action: "swarm", args: "[options] <title> | <prompt>", description: "create an autonomous swarm parent"},
 		{action: "edit", args: "<task> | <title> [| <prompt>]", description: "edit title/prompt"},
@@ -832,6 +910,9 @@ func tasksCommand() command {
 			}
 			if inputAction, ok := taskThreadInputShorthandAction(action); ok {
 				return taskThreadInputActionCommand(m, c, pid, inputAction, rest)
+			}
+			if isTaskAttachmentRootAction(action) {
+				return taskAttachmentsCommand(m, c, pid, rest)
 			}
 
 			switch action {
@@ -1003,9 +1084,6 @@ func tasksCommand() command {
 						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", sanitizeAutomationDetailText(location.filePath), location.lineNumber, sanitizeAutomationDetailText(firstNonEmpty(t.Title, shortID(t.ID))), renderTaskReviews(t, reviews)), nil
 					})
 				}
-
-			case "attachments", "attach", "attachment":
-				return taskAttachmentsCommand(m, c, pid, rest)
 
 			case "lifecycle", "logs":
 				if len(rest) == 0 {
@@ -1817,25 +1895,28 @@ func renderTaskSwarmCreateResult(projectID string, parent client.Task, spec task
 
 func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
 	usageAdd := commandUsage("tasks", "attachments add")
-	usageDelete := commandUsage("tasks", "attachments delete")
 	if len(args) == 0 {
 		return taskSelectorWithSuffix(m, usageAdd, "tasks attachments add", " ")
 	}
 
 	action := strings.ToLower(args[0])
 	rest := args[1:]
-	switch action {
-	case "add", "upload":
-		return taskAttachmentsAddCommand(m, c, projectID, rest, usageAdd)
-	case "delete", "remove":
-		return taskAttachmentsDeleteCommand(m, c, projectID, rest, usageDelete)
-	case "list", "show":
-		return taskAttachmentsListCommand(m, c, projectID, rest)
-	default:
+	canonical, ok := taskAttachmentSubAction(action)
+	if !ok {
 		// Keep the short form useful for one-shot commands while documenting the
 		// explicit "attachments add" form: /tasks attachments <task> <file>...
 		return taskAttachmentsAddCommand(m, c, projectID, args, usageAdd)
 	}
+	usage := commandUsage("tasks", "attachments "+action)
+	switch canonical {
+	case "add":
+		return taskAttachmentsAddCommand(m, c, projectID, rest, usage)
+	case "delete":
+		return taskAttachmentsDeleteCommand(m, c, projectID, rest, usage)
+	case "list":
+		return taskAttachmentsListCommand(m, c, projectID, rest, usage, "tasks attachments "+action)
+	}
+	return m, nil
 }
 
 func taskAttachmentsAddCommand(m Model, c *client.Client, projectID string, args []string, usage string) (Model, tea.Cmd) {
@@ -1948,10 +2029,9 @@ func confirmTaskAttachmentDeletionWithLabels(m Model, attachmentLabel, taskLabel
 		cmd)
 }
 
-func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, args []string) (Model, tea.Cmd) {
+func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, args []string, usage, command string) (Model, tea.Cmd) {
 	if len(args) == 0 {
-		listUsage := commandUsage("tasks", "attachments list")
-		return taskSelectorWithSuffix(m, listUsage, "tasks attachments list", " ")
+		return taskSelectorWithSuffix(m, usage, command, " ")
 	}
 	return m, m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
 		task, err := resolveTaskForModel(m, ctx, c, projectID, strings.Join(args, " "))
