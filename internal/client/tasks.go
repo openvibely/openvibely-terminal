@@ -256,14 +256,19 @@ type ReviewCommentForm struct {
 }
 
 func (f TaskForm) values() url.Values {
+	v := f.updateValues()
+	v.Set("priority", strconv.Itoa(f.Priority))
+	v.Set("tag", f.Tag)
+	return v
+}
+
+func (f TaskForm) updateValues() url.Values {
 	v := url.Values{}
 	v.Set("title", f.Title)
 	v.Set("prompt", f.Prompt)
 	if f.Category != "" {
 		v.Set("category", f.Category)
 	}
-	v.Set("priority", strconv.Itoa(f.Priority))
-	v.Set("tag", f.Tag)
 	return v
 }
 
@@ -1056,7 +1061,7 @@ func (c *Client) CreateSwarmTask(ctx context.Context, projectID string, form Swa
 
 // UpdateTask updates a task's editable fields.
 func (c *Client) UpdateTask(ctx context.Context, taskID string, form TaskForm) error {
-	return c.doForm(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID), form.values())
+	return c.doForm(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID), form.updateValues())
 }
 
 // UpdateTaskForProject updates a task's editable fields in the selected project.
@@ -1064,7 +1069,7 @@ func (c *Client) UpdateTaskForProject(ctx context.Context, taskID, projectID str
 	if err := requireTaskMutationProjectID(projectID); err != nil {
 		return err
 	}
-	return c.doForm(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), form.values())
+	return c.doForm(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), form.updateValues())
 }
 
 // DeleteTask removes a task.
