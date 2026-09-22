@@ -116,6 +116,22 @@ func TestParseAutomationDetailKeepsEmptyGraphAndOptionalSectionsDistinct(t *test
 	}
 }
 
+func TestParseAutomationDetailRecoversSplitRuntimeTextCountsWithoutMetricsSection(t *testing.T) {
+	detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-runtime-split" data-project-id="p1" data-automation-lifecycle-state="active">
+		<div data-automation-graph-panel></div>
+		<div>3 active <span>invocations</span> · 4 active <span>work</span> items</div>
+	</div>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !detail.ActiveInvocationsAvailable || detail.ActiveInvocations != 3 || !detail.ActiveWorkItemsAvailable || detail.ActiveWorkItems != 4 {
+		t.Fatalf("split runtime counts = invocations %d/%t work %d/%t", detail.ActiveInvocations, detail.ActiveInvocationsAvailable, detail.ActiveWorkItems, detail.ActiveWorkItemsAvailable)
+	}
+	if !detail.CountsAvailable {
+		t.Fatalf("split runtime counts did not mark counts available: %+v", detail)
+	}
+}
+
 func TestParseAutomationDetailDraftHasNoLiveGraph(t *testing.T) {
 	root, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-draft" data-project-id="p1" data-automation-name="Draft" data-automation-lifecycle-state="draft" data-automation-version-state="draft"><div data-automation-graph-panel><g data-automation-live-node="n1"><strong>Draft node</strong></g></div></div>`)
 	if err != nil {
