@@ -1341,6 +1341,41 @@ func TestModelCreateFormAndOAuthStatus(t *testing.T) {
 	}
 }
 
+func TestCreateModelOpenAICompatibleChatCompletionsForm(t *testing.T) {
+	const secret = "compatible-create-secret"
+	var posted url.Values
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/models" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.String())
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		posted = r.PostForm
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateModel(context.Background(), "p1", ModelCreateRequest{
+		Name: "OpenRouter", Provider: "openai_compatible", Model: "openai/gpt-4o", APIKey: secret,
+		BaseURL: "https://openrouter.ai/api/v1", DefaultMaxTokens: 4096,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"name": "OpenRouter", "provider": "openai_compatible", "model": "openai/gpt-4o",
+		"base_url": "https://openrouter.ai/api/v1", "transport": "chat_completions", "preset_slug": "custom", "default_max_tokens": "4096",
+		"custom_auth_method": "api_key", "auth_method": "api_key", "auth_header_name": "Authorization", "auth_header_value_prefix": "Bearer ", "api_key": secret,
+	} {
+		if got := posted.Get(key); got != want {
+			t.Errorf("form[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestModelCreateRedactsReflectedAPIKeyErrors(t *testing.T) {
 	secret := "reflected-model-api-key"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

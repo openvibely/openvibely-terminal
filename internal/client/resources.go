@@ -984,12 +984,16 @@ func (c *Client) SetSkillAlwaysUse(ctx context.Context, projectID, handle, scope
 // browser model-create form. APIKey is deliberately excluded from every JSON
 // representation and is only sent in the form body.
 type ModelCreateRequest struct {
-	Name          string
-	Provider      string
-	Model         string
-	APIKey        string
-	OAuth         bool
-	OllamaBaseURL string
+	Name             string
+	Provider         string
+	Model            string
+	APIKey           string
+	OAuth            bool
+	OllamaBaseURL    string
+	BaseURL          string
+	Transport        string
+	PresetSlug       string
+	DefaultMaxTokens int
 }
 
 // ModelOAuthStatus is the backend-confirmed authorization state for an
@@ -1494,6 +1498,22 @@ func (c *Client) CreateModel(ctx context.Context, projectID string, request Mode
 	case "ollama":
 		if request.OllamaBaseURL != "" {
 			form.Set("ollama_base_url", request.OllamaBaseURL)
+		}
+	case "openai_compatible":
+		form.Set("base_url", request.BaseURL)
+		form.Set("transport", firstNonEmptyString(request.Transport, "chat_completions"))
+		form.Set("preset_slug", firstNonEmptyString(request.PresetSlug, "custom"))
+		if request.DefaultMaxTokens > 0 {
+			form.Set("default_max_tokens", strconv.Itoa(request.DefaultMaxTokens))
+		}
+		if request.APIKey != "" {
+			form.Set("custom_auth_method", "api_key")
+			form.Set("auth_method", "api_key")
+			form.Set("auth_header_name", "Authorization")
+			form.Set("auth_header_value_prefix", "Bearer ")
+			form.Set("api_key", request.APIKey)
+		} else {
+			form.Set("custom_auth_method", "none")
 		}
 	}
 	err := c.doForm(ctx, http.MethodPost, "/models"+query("project_id", projectID), form)

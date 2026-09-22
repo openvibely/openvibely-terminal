@@ -260,9 +260,11 @@ openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release appro
 ## Model providers
 
 Use shared `models add` and `models edit <model>` actions in the TUI or CLI.
-`/models add` collects new configuration details and masks API-key input. Edits
-first read the backend-authoritative configuration, apply only named options,
-and retain credentials and provider-specific settings that were not changed.
+`/models add` collects new configuration details for Anthropic, OpenAI, Ollama,
+and focused OpenAI-compatible Chat Completions configs while masking API-key
+input. Edits first read the backend-authoritative configuration, apply only named
+options, and retain credentials and provider-specific settings that were not
+changed.
 
 In one-shot mode, API keys are accepted only from piped or redirected standard
 input with `--api-key-stdin`; never place a key in an argument, shell history,
@@ -275,6 +277,10 @@ printf '%s' "$OPENAI_API_KEY" | openvibely-terminal models add openai "OpenAI" g
 
 # Local Ollama: the endpoint is optional and defaults to localhost in the backend.
 openvibely-terminal models add ollama "Local Ollama" llama3.1:8b --endpoint http://localhost:11434
+
+# OpenAI-compatible Chat Completions: endpoint and default token limit are required.
+openvibely-terminal models add openai_compatible "Local vLLM" llama-3.1 --endpoint http://127.0.0.1:8000/v1 --default-max-tokens 4096
+printf '%s' "$OPENROUTER_API_KEY" | openvibely-terminal models add openai_compatible "OpenRouter" openai/gpt-4o --endpoint https://openrouter.ai/api/v1 --default-max-tokens 4096 --api-key-stdin
 
 # Existing model: only supplied options change; unchanged credentials are retained.
 openvibely-terminal -project demo models edit "Local Ollama" --model llama3.2 --max-workers 2 --endpoint http://localhost:11434

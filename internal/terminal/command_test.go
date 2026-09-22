@@ -2063,7 +2063,7 @@ func TestModelsHelpDocumentsProviderLimitHealth(t *testing.T) {
 	help := renderCommandHelp(*cmd)
 	for _, want := range []string{
 		"provider/account-limit health", "analytics usage", "models add", "models edit",
-		"--api-key", "--api-key-stdin", "--oauth", "ollama", "masked API-key input",
+		"--api-key", "--api-key-stdin", "--oauth", "ollama", "openai_compatible", "masked API-key input",
 	} {
 		if !strings.Contains(help, want) {
 			t.Errorf("models help missing %q:\n%s", want, help)
@@ -2083,7 +2083,7 @@ func TestModelsCompletionAndHelpDocumentAdd(t *testing.T) {
 		t.Fatalf("models edit completion = %q", got)
 	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"models add", "models edit", "--api-key", "--api-key-stdin", "models add ollama", "models edit \"Local Ollama\""} {
+	for _, want := range []string{"models add", "models edit", "--api-key", "--api-key-stdin", "--default-max-tokens", "models add ollama", "models add openai_compatible", "models edit \"Local Ollama\""} {
 		if !strings.Contains(help, want) {
 			t.Errorf("models help missing %q:\n%s", want, help)
 		}
@@ -2114,15 +2114,66 @@ func TestModelsEditOptionGuidanceMatchesParserOptions(t *testing.T) {
 			t.Errorf("models help missing API-key mode guidance %q:\n%s", wantText, help)
 		}
 	}
-	const addSyntax = "models add <provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>]"
+	const addSyntax = "models add <provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>|--default-max-tokens <n>]"
 	if got := cmd.actionSyntax("add"); got != addSyntax {
 		t.Fatalf("models add syntax = %q, want %q", got, addSyntax)
 	}
 	if strings.Contains(cmd.actionSyntax("add"), "--max-workers") || strings.Contains(cmd.actionSyntax("add"), "--worker-timeout") {
 		t.Fatalf("models add syntax picked up edit-only options: %s", cmd.actionSyntax("add"))
 	}
-	if !strings.Contains(help, "  options: --api-key-stdin | --oauth | --endpoint <http(s)://ollama-host>") {
+	if got := registryCompletionValues("models", "add"); !slices.Contains(got, "openai_compatible") {
+		t.Fatalf("models add provider completions = %v", got)
+	}
+	if got := registryCompletionValues("models", "add", "openai_compatible", "Local", "llama-3.1"); !slices.Equal(got, modelAddOptionNames()) {
+		t.Fatalf("models add option completions = %v, want %v", got, modelAddOptionNames())
+	}
+	if !strings.Contains(help, "  options: --api-key-stdin | --oauth | --endpoint <http(s)://base-url> | --default-max-tokens <n>") {
 		t.Fatalf("models add guidance changed unexpectedly:\n%s", help)
+	}
+}
+
+func TestParseModelAddOpenAICompatibleArgs(t *testing.T) {
+	spec, err := parseModelAddArgs([]string{"openai_compatible", "Local vLLM", "llama-3.1", "--endpoint", "http://127.0.0.1:8000/v1", "--default-max-tokens", "4096"})
+	if err != nil {
+		t.Fatalf("parse valid compatible args: %v", err)
+	}
+	if spec.Provider != "openai_compatible" || spec.Name != "Local vLLM" || spec.Model != "llama-3.1" || spec.Endpoint != "http://127.0.0.1:8000/v1" || spec.DefaultMaxTokens != 4096 || spec.APIKeyFromStdin || spec.OAuth {
+		t.Fatalf("compatible spec = %#v", spec)
+	}
+
+	secretSpec, err := parseModelAddArgs([]string{"openai_compatible", "OpenRouter", "openai/gpt-4o", "--endpoint", "https://openrouter.ai/api/v1", "--default-max-tokens", "4096", "--api-key-stdin"})
+	if err != nil {
+		t.Fatalf("parse compatible stdin args: %v", err)
+	}
+	if !secretSpec.APIKeyFromStdin {
+		t.Fatalf("--api-key-stdin not captured: %#v", secretSpec)
+	}
+}
+
+func TestParseModelAddOpenAICompatibleRejectsIncompleteOrUnsafeArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing endpoint", args: []string{"openai_compatible", "Local", "llama", "--default-max-tokens", "4096"}, want: "requires --endpoint"},
+		{name: "invalid URL", args: []string{"openai_compatible", "Local", "llama", "--endpoint", "http:/missing-host", "--default-max-tokens", "4096"}, want: "absolute HTTP(S) URL"},
+		{name: "duplicate endpoint", args: []string{"openai_compatible", "Local", "llama", "--endpoint", "http://localhost:8000/v1", "--endpoint", "http://localhost:9000/v1", "--default-max-tokens", "4096"}, want: "--endpoint may only be provided once"},
+		{name: "duplicate max tokens", args: []string{"openai_compatible", "Local", "llama", "--endpoint", "http://localhost:8000/v1", "--default-max-tokens", "4096", "--default-max-tokens", "8192"}, want: "--default-max-tokens may only be provided once"},
+		{name: "missing max tokens", args: []string{"openai_compatible", "Local", "llama", "--endpoint", "http://localhost:8000/v1"}, want: "requires --default-max-tokens"},
+		{name: "inline secret", args: []string{"openai_compatible", "Local", "llama", "--endpoint", "http://localhost:8000/v1", "--default-max-tokens", "4096", "--api-key", "secret"}, want: "unsupported models add option"},
+		{name: "oauth unsupported", args: []string{"openai_compatible", "Local", "llama", "--endpoint", "http://localhost:8000/v1", "--default-max-tokens", "4096", "--oauth"}, want: "does not support --oauth"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseModelAddArgs(tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("parse error = %v, want %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Fatalf("parse error exposed inline secret: %v", err)
+			}
+		})
 	}
 }
 
