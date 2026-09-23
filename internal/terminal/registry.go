@@ -5109,7 +5109,8 @@ func (m Model) handleModelEditWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 	}
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	input, cmd := m.input.Update(msg)
+	*m.input = input
 	return m, cmd
 }
 
@@ -5358,7 +5359,8 @@ func (m Model) handleModelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 	}
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	input, cmd := m.input.Update(msg)
+	*m.input = input
 	return m, cmd
 }
 
@@ -6318,7 +6320,8 @@ func (m Model) handleChannelWizardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		})
 	}
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	input, cmd := m.input.Update(msg)
+	*m.input = input
 	return m, cmd
 }
 
