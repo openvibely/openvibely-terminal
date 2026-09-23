@@ -269,6 +269,30 @@ const cliEventsOffMessage = "events off cannot disable a foreground stream owned
 
 const cliStreamReconnectLimit = 8
 
+const (
+	cliQueuedPromotionInitialPoll = 25 * time.Millisecond
+	// Queue promotion polling starts at 25 ms for fast one-second starts and caps
+	// at 275 ms, bounding promotion detection to under 300 ms after status changes
+	// while reducing a 60-second queued wait from ~2,400 status calls to ~220.
+	cliQueuedPromotionMaxPoll = 275 * time.Millisecond
+)
+
+type cliQueuedPromotionBackoff struct {
+	attempt int
+}
+
+func (b *cliQueuedPromotionBackoff) nextDelay() time.Duration {
+	b.attempt++
+	delay := cliQueuedPromotionInitialPoll
+	for i := 1; i < b.attempt; i++ {
+		delay *= 2
+		if delay >= cliQueuedPromotionMaxPoll {
+			return cliQueuedPromotionMaxPoll
+		}
+	}
+	return delay
+}
+
 // cliExecutionRecord is emitted as NDJSON for streaming commands. One record is
 // written per incremental delta and one terminal record closes the stream.
 type cliExecutionRecord struct {
@@ -374,6 +398,7 @@ func runCLIStreamingCommand(ctx context.Context, c *client.Client, out io.Writer
 }
 
 func waitForCLIChatExecution(ctx context.Context, status func() (*client.ChatStatus, error), originalID string) (string, error) {
+	var backoff cliQueuedPromotionBackoff
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", cliContextResult(ctx)
@@ -393,7 +418,7 @@ func waitForCLIChatExecution(ctx context.Context, status func() (*client.ChatSta
 				return id, nil
 			}
 		}
-		if !waitCLIStreamRetry(ctx, 1) {
+		if !waitCLIQueuedPromotionRetry(ctx, &backoff) {
 			return "", cliContextResult(ctx)
 		}
 	}
@@ -618,6 +643,18 @@ func cliContextResult(ctx context.Context) error {
 
 func waitCLIStreamRetry(ctx context.Context, attempt int) bool {
 	delay := time.Duration(attempt) * 25 * time.Millisecond
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func waitCLIQueuedPromotionRetry(ctx context.Context, backoff *cliQueuedPromotionBackoff) bool {
+	delay := backoff.nextDelay()
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
