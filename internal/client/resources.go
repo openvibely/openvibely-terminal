@@ -2186,13 +2186,14 @@ func (c *Client) UninstallAgentPlugin(ctx context.Context, pluginID string) erro
 
 // ScheduleEntry is one scheduled task occurrence.
 type ScheduleEntry struct {
-	TaskID         string     `json:"task_id"`
-	ScheduleID     string     `json:"schedule_id"`
-	Name           string     `json:"-"`
-	Text           string     `json:"text"`
-	NextRun        *time.Time `json:"next_run,omitempty"`
-	Disabled       bool       `json:"-"`
-	NextRunPrecise bool       `json:"-"`
+	TaskID             string     `json:"task_id"`
+	ScheduleID         string     `json:"schedule_id"`
+	Name               string     `json:"-"`
+	Text               string     `json:"text"`
+	NextRun            *time.Time `json:"next_run,omitempty"`
+	Disabled           bool       `json:"-"`
+	NextRunPrecise     bool       `json:"-"`
+	NextRunExactSource bool       `json:"-"`
 }
 
 // ScheduleConfig is the editable state of one existing schedule.
@@ -2232,9 +2233,9 @@ func scheduleCardName(node *html.Node) string {
 	return strings.TrimSpace(NodeText(title))
 }
 
-func scheduleCardNextRun(node *html.Node) (*time.Time, bool) {
+func scheduleCardNextRun(node *html.Node) (*time.Time, bool, bool) {
 	if nextRun, ok := parseExactScheduleNextRun(attr(node, "data-schedule-next-run")); ok {
-		return cloneTime(nextRun), true
+		return cloneTime(nextRun), true, true
 	}
 	var date string
 	var hourText string
@@ -2250,15 +2251,15 @@ func scheduleCardNextRun(node *html.Node) (*time.Time, bool) {
 		}
 	}
 	if date == "" || hourText == "" {
-		return nil, false
+		return nil, false, false
 	}
 	day, err := time.ParseInLocation("2006-01-02", date, time.Local)
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	hour, err := strconv.Atoi(hourText)
 	if err != nil || hour < 0 || hour > 23 {
-		return nil, false
+		return nil, false, false
 	}
 	minute := 0
 	precise := false
@@ -2267,7 +2268,7 @@ func scheduleCardNextRun(node *html.Node) (*time.Time, bool) {
 		precise = true
 	}
 	next := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, time.Local)
-	return &next, precise
+	return &next, precise, false
 }
 
 func scheduleCardRenderedClock(node *html.Node) (int, int, bool) {
@@ -2327,15 +2328,16 @@ func (c *Client) getScheduleWeekEntries(ctx context.Context, projectID string, w
 		if name == "" {
 			name = text
 		}
-		nextRun, nextRunPrecise := scheduleCardNextRun(card.node)
+		nextRun, nextRunPrecise, nextRunExactSource := scheduleCardNextRun(card.node)
 		out = append(out, ScheduleEntry{
-			TaskID:         card.attrs["data-task-id"],
-			ScheduleID:     card.attrs["data-schedule-id"],
-			Name:           name,
-			Text:           text,
-			NextRun:        nextRun,
-			Disabled:       strings.EqualFold(strings.TrimSpace(card.attrs["data-schedule-enabled"]), "false"),
-			NextRunPrecise: nextRunPrecise,
+			TaskID:             card.attrs["data-task-id"],
+			ScheduleID:         card.attrs["data-schedule-id"],
+			Name:               name,
+			Text:               text,
+			NextRun:            nextRun,
+			Disabled:           strings.EqualFold(strings.TrimSpace(card.attrs["data-schedule-enabled"]), "false"),
+			NextRunPrecise:     nextRunPrecise,
+			NextRunExactSource: nextRunExactSource,
 		})
 	}
 	summary := ""
@@ -4338,6 +4340,7 @@ func (c *Client) enrichPulseScheduleNextRuns(ctx context.Context, projectID stri
 		}
 		schedules[i].NextRun = cloneTime(nextRun)
 		schedules[i].NextRunPrecise = true
+		schedules[i].NextRunExactSource = true
 	}
 	return nil
 }
@@ -4619,6 +4622,9 @@ func pulseScheduleOccurrencePreferred(candidate, current ScheduleEntry, generate
 	}
 	if current.NextRun == nil {
 		return true
+	}
+	if candidate.NextRunExactSource != current.NextRunExactSource {
+		return candidate.NextRunExactSource
 	}
 	candidateUpcoming := !candidate.NextRun.Before(generatedAt)
 	currentUpcoming := !current.NextRun.Before(generatedAt)
