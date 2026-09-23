@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,6 +28,8 @@ const (
 	maxMemoryAmbiguityCandidates     = 8
 	maxMemoryAmbiguityCandidateRunes = 64
 	memorySearchChunkBytes           = 64 << 10
+	memorySearchFoldBufferBytes      = 4 << 10
+	memorySearchLineBufferBytes      = 4 << 10
 )
 
 var (
@@ -869,9 +872,7 @@ func readIndexedMemory(ctx context.Context, root string, entry memoryIndexEntry)
 
 func readIndexedMemoryForSearch(ctx context.Context, root string, entry memoryIndexEntry, lowerQuery []byte, metadataMatch bool) (Memory, bool, []string, error) {
 	base := Memory{File: entry.File, Title: entry.Title, Summary: entry.Summary, Snippet: "", Body: ""}
-	// readMemoryTarget validates the target before opening it and revalidates it
-	// after statting it, so search does not need a separate stale path check.
-	data, err := readMemoryTarget(ctx, root, entry.File, maxMemoryFileBytes)
+	file, info, err := openMemoryTargetForRead(ctx, root, entry.File)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return base, false, nil, err
@@ -881,8 +882,603 @@ func readIndexedMemoryForSearch(ctx context.Context, root string, entry memoryIn
 		}
 		return base, false, []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
 	}
-	memory, bodyMatch, warnings := parseMemorySearchDocument(entry, data, lowerQuery, metadataMatch)
+	defer file.Close()
+
+	memory, bodyMatch, warnings, err := scanMemorySearchDocument(ctx, file, info, maxMemoryFileBytes, entry, lowerQuery, metadataMatch)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return base, false, nil, err
+		}
+		return base, false, []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
+	}
 	return memory, bodyMatch, warnings, nil
+}
+
+func scanMemorySearchDocument(ctx context.Context, file *os.File, info os.FileInfo, maxBytes int64, entry memoryIndexEntry, lowerQuery []byte, metadataMatch bool) (Memory, bool, []string, error) {
+	if info.Size() > maxBytes {
+		return Memory{}, false, nil, errMemoryFileTooLarge
+	}
+	scanner := newMemorySearchDocumentScanner(entry, lowerQuery, metadataMatch)
+	reader := bufio.NewReaderSize(file, memorySearchChunkBytes)
+	var readBytes int64
+	for {
+		if err := contextErr(ctx); err != nil {
+			return Memory{}, false, nil, err
+		}
+		chunk, err := reader.ReadSlice('\n')
+		if len(chunk) > 0 {
+			readBytes += int64(len(chunk))
+			if readBytes > maxBytes {
+				return Memory{}, false, nil, errMemoryFileTooLarge
+			}
+			hasNewline := chunk[len(chunk)-1] == '\n'
+			line := chunk
+			if hasNewline {
+				line = line[:len(line)-1]
+				if len(line) > 0 && line[len(line)-1] == '\r' {
+					line = line[:len(line)-1]
+				}
+			}
+			scanner.feed(line)
+			if hasNewline {
+				scanner.endLine()
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		return Memory{}, false, nil, err
+	}
+	return scanner.finish()
+}
+
+type memorySearchDocumentScanner struct {
+	entry         memoryIndexEntry
+	lowerQuery    []byte
+	metadataMatch bool
+	mode          memorySearchDocumentMode
+	metadata      map[string]string
+	warnings      []string
+	frontWarnings []string
+	frontLine     memorySearchFrontMatterLine
+	frontLineNo   int
+	body          memoryBodySearchScanner
+	provisional   memoryBodySearchScanner
+}
+
+type memorySearchDocumentMode int
+
+const (
+	memorySearchDocumentUndecided memorySearchDocumentMode = iota
+	memorySearchDocumentFrontMatter
+	memorySearchDocumentBody
+)
+
+func newMemorySearchDocumentScanner(entry memoryIndexEntry, lowerQuery []byte, metadataMatch bool) memorySearchDocumentScanner {
+	return memorySearchDocumentScanner{
+		entry:         entry,
+		lowerQuery:    lowerQuery,
+		metadataMatch: metadataMatch,
+		metadata:      map[string]string{},
+		warnings:      make([]string, 0),
+		frontWarnings: make([]string, 0),
+		frontLineNo:   1,
+		body:          newMemoryBodySearchScanner(lowerQuery),
+		provisional:   newMemoryBodySearchScanner(lowerQuery),
+	}
+}
+
+func (scanner *memorySearchDocumentScanner) feed(line []byte) {
+	switch scanner.mode {
+	case memorySearchDocumentBody:
+		scanner.body.feed(line)
+	default:
+		scanner.provisional.feed(line)
+		scanner.frontLine.feed(line)
+	}
+}
+
+func (scanner *memorySearchDocumentScanner) endLine() {
+	switch scanner.mode {
+	case memorySearchDocumentUndecided:
+		scanner.provisional.endLine()
+		if scanner.frontLine.delimiter(true) {
+			scanner.mode = memorySearchDocumentFrontMatter
+			scanner.frontLineNo = 2
+		} else {
+			scanner.mode = memorySearchDocumentBody
+			scanner.body = scanner.provisional
+		}
+		scanner.frontLine.reset()
+	case memorySearchDocumentFrontMatter:
+		scanner.provisional.endLine()
+		if scanner.frontLine.delimiter(false) {
+			scanner.mode = memorySearchDocumentBody
+			scanner.body = newMemoryBodySearchScanner(scanner.lowerQuery)
+			scanner.warnings = append(scanner.warnings, scanner.frontWarnings...)
+		} else {
+			scanner.parseFrontMatterLine()
+			scanner.frontLineNo++
+		}
+		scanner.frontLine.reset()
+	case memorySearchDocumentBody:
+		scanner.body.endLine()
+	}
+}
+
+func (scanner *memorySearchDocumentScanner) finish() (Memory, bool, []string, error) {
+	if scanner.frontLine.active || scanner.body.lineActive() {
+		scanner.endLine()
+	}
+	if scanner.mode == memorySearchDocumentFrontMatter {
+		appendMemoryWarning(&scanner.warnings, "memory file front matter is unterminated")
+		scanner.metadata = map[string]string{}
+		scanner.body = scanner.provisional
+	} else if scanner.mode == memorySearchDocumentUndecided {
+		scanner.mode = memorySearchDocumentBody
+		scanner.body = scanner.provisional
+	}
+
+	memory := Memory{
+		File:    scanner.entry.File,
+		Title:   strings.TrimSpace(scanner.entry.Title),
+		Summary: strings.TrimSpace(scanner.entry.Summary),
+		Snippet: "",
+		Body:    "",
+	}
+	if value := strings.TrimSpace(scanner.metadata["title"]); value != "" {
+		memory.Title = value
+	}
+	if memory.Title == "" {
+		memory.Title = strings.TrimSpace(scanner.metadata["name"])
+	}
+	if memory.Title == "" {
+		memory.Title = scanner.body.firstHeading
+	}
+	if memory.Title == "" {
+		memory.Title = memoryTitleFromFile(scanner.entry.File)
+	}
+	if value := strings.TrimSpace(scanner.metadata["summary"]); value != "" {
+		memory.Summary = value
+	} else if value := strings.TrimSpace(scanner.metadata["description"]); value != "" {
+		memory.Summary = value
+	}
+	if memory.Summary == "" {
+		memory.Summary = scanner.body.firstParagraph.string()
+	}
+	bodyMatch := scanner.body.bodyMatch
+	if scanner.metadataMatch || bodyMatch {
+		memory.Snippet = scanner.body.snippet
+		if memory.Snippet == "" {
+			memory.Snippet = scanner.body.firstParagraph.string()
+		}
+	}
+	if scanner.metadataMatch {
+		bodyMatch = false
+	}
+	return memory, bodyMatch, scanner.warnings, nil
+}
+
+func (scanner *memorySearchDocumentScanner) parseFrontMatterLine() {
+	if scanner.frontLine.tooLong {
+		appendMemoryWarning(&scanner.frontWarnings, fmt.Sprintf("memory file front matter line %d is malformed", scanner.frontLineNo))
+		return
+	}
+	trimmed := memoryTrimSpaceBytes(scanner.frontLine.data)
+	if len(trimmed) == 0 || trimmed[0] == '#' {
+		return
+	}
+	colon := bytes.IndexByte(trimmed, ':')
+	if colon <= 0 {
+		appendMemoryWarning(&scanner.frontWarnings, fmt.Sprintf("memory file front matter line %d is malformed", scanner.frontLineNo))
+		return
+	}
+	if key := memoryFrontMatterKey(memoryTrimSpaceBytes(trimmed[:colon])); key != "" {
+		value := strings.TrimSpace(memoryNormalizedString(memoryTrimSpaceBytes(trimmed[colon+1:])))
+		scanner.metadata[key] = strings.Trim(value, "\"'")
+	}
+}
+
+type memorySearchFrontMatterLine struct {
+	data    []byte
+	tooLong bool
+	active  bool
+}
+
+func (line *memorySearchFrontMatterLine) feed(value []byte) {
+	line.active = true
+	if line.tooLong {
+		return
+	}
+	if len(line.data)+len(value) > memorySearchLineBufferBytes {
+		line.tooLong = true
+		line.data = line.data[:0]
+		return
+	}
+	line.data = append(line.data, value...)
+}
+
+func (line memorySearchFrontMatterLine) delimiter(first bool) bool {
+	return !line.tooLong && memoryFrontMatterDelimiter(line.data, first)
+}
+
+func (line *memorySearchFrontMatterLine) reset() {
+	line.data = line.data[:0]
+	line.tooLong = false
+	line.active = false
+}
+
+type memoryBodySearchScanner struct {
+	lowerQuery     []byte
+	bodyFold       memorySearchFoldStream
+	line           memorySearchLineScanner
+	firstHeading   string
+	heading        memorySearchHeadingScanner
+	firstParagraph memoryStreamingParagraph
+	snippet        string
+	bodyMatch      bool
+	activeLine     bool
+}
+
+func newMemoryBodySearchScanner(lowerQuery []byte) memoryBodySearchScanner {
+	return memoryBodySearchScanner{
+		lowerQuery:     lowerQuery,
+		bodyFold:       newMemorySearchFoldStream(lowerQuery),
+		line:           newMemorySearchLineScanner(lowerQuery),
+		firstParagraph: memoryStreamingParagraph{truncated: memoryTextTruncator{max: 220}},
+	}
+}
+
+func (scanner *memoryBodySearchScanner) feed(value []byte) {
+	scanner.activeLine = true
+	scanner.bodyFold.feed(value)
+	if scanner.bodyFold.found() {
+		scanner.bodyMatch = true
+	}
+	if scanner.snippet == "" {
+		scanner.line.feed(value)
+	}
+	if scanner.firstHeading == "" {
+		scanner.heading.feed(value)
+	}
+	scanner.firstParagraph.feed(value)
+}
+
+func (scanner *memoryBodySearchScanner) endLine() {
+	if scanner.activeLine {
+		scanner.bodyFold.endLine()
+		if scanner.bodyFold.found() {
+			scanner.bodyMatch = true
+		}
+	}
+	if scanner.snippet == "" {
+		if snippet := scanner.line.endLine(); snippet != "" {
+			scanner.snippet = snippet
+		}
+	}
+	if scanner.firstHeading == "" {
+		scanner.firstHeading = scanner.heading.endLine()
+	}
+	scanner.firstParagraph.endLine()
+	scanner.activeLine = false
+}
+
+func (scanner memoryBodySearchScanner) lineActive() bool {
+	return scanner.activeLine
+}
+
+type memorySearchLineScanner struct {
+	fold        memorySearchFoldStream
+	truncated   memoryTextTruncator
+	nonSpace    bool
+	activeBytes bool
+}
+
+func newMemorySearchLineScanner(lowerQuery []byte) memorySearchLineScanner {
+	return memorySearchLineScanner{fold: newMemorySearchFoldStream(lowerQuery), truncated: memoryTextTruncator{max: 220}}
+}
+
+func (scanner *memorySearchLineScanner) feed(value []byte) {
+	scanner.activeBytes = true
+	if !scanner.nonSpace && memoryLineHasNonSpace(value) {
+		scanner.nonSpace = true
+	}
+	scanner.fold.feed(value)
+	scanner.truncated.appendBytes(value)
+}
+
+func (scanner *memorySearchLineScanner) endLine() string {
+	scanner.fold.finishPending()
+	snippet := ""
+	if scanner.nonSpace && scanner.fold.found() {
+		snippet = scanner.truncated.string()
+	}
+	*scanner = newMemorySearchLineScanner(scanner.fold.matcher.query)
+	return snippet
+}
+
+type memorySearchHeadingScanner struct {
+	data    []byte
+	tooLong bool
+}
+
+func (scanner *memorySearchHeadingScanner) feed(value []byte) {
+	if scanner.tooLong {
+		return
+	}
+	if len(scanner.data)+len(value) > memorySearchLineBufferBytes {
+		scanner.tooLong = true
+		scanner.data = scanner.data[:0]
+		return
+	}
+	scanner.data = append(scanner.data, value...)
+}
+
+func (scanner *memorySearchHeadingScanner) endLine() string {
+	defer func() {
+		scanner.data = scanner.data[:0]
+		scanner.tooLong = false
+	}()
+	if scanner.tooLong {
+		return ""
+	}
+	trimmed := bytes.TrimSpace(scanner.data)
+	if !bytes.HasPrefix(trimmed, []byte("#")) {
+		return ""
+	}
+	lineText := memoryNormalizedString(trimmed)
+	heading := strings.TrimSpace(strings.TrimLeft(lineText, "#"))
+	heading = strings.TrimSpace(strings.TrimRight(heading, "#"))
+	return heading
+}
+
+type memoryStreamingParagraph struct {
+	truncated          memoryTextTruncator
+	started            bool
+	done               bool
+	lineNonSpace       bool
+	lineClassified     bool
+	lineSkipped        bool
+	lineAppended       bool
+	linePrefix         []byte
+	linePendingContent []byte
+}
+
+func (paragraph *memoryStreamingParagraph) feed(value []byte) {
+	if paragraph.done {
+		return
+	}
+	for len(value) > 0 {
+		if !paragraph.lineClassified {
+			r, size := utf8.DecodeRune(value)
+			if r == utf8.RuneError && size == 1 {
+				r = utf8.RuneError
+			}
+			if unicode.IsSpace(r) {
+				value = value[size:]
+				continue
+			}
+			paragraph.lineNonSpace = true
+			paragraph.linePrefix = append(paragraph.linePrefix, value[:size]...)
+			paragraph.linePendingContent = append(paragraph.linePendingContent, value[:size]...)
+			value = value[size:]
+			if paragraph.classifyLinePrefix(false) {
+				continue
+			}
+			continue
+		}
+		if paragraph.lineSkipped {
+			return
+		}
+		paragraph.appendLineContent(value)
+		return
+	}
+}
+
+func (paragraph *memoryStreamingParagraph) endLine() {
+	if paragraph.done {
+		paragraph.resetLine()
+		return
+	}
+	if !paragraph.lineNonSpace {
+		if paragraph.started {
+			paragraph.done = true
+		}
+		paragraph.resetLine()
+		return
+	}
+	if !paragraph.lineClassified {
+		paragraph.classifyLinePrefix(true)
+	}
+	paragraph.truncated.pendingSpace = false
+	paragraph.resetLine()
+}
+
+func (paragraph *memoryStreamingParagraph) classifyLinePrefix(end bool) bool {
+	if len(paragraph.linePrefix) == 0 {
+		return false
+	}
+	if paragraph.linePrefix[0] == '#' {
+		paragraph.lineClassified = true
+		paragraph.lineSkipped = true
+		paragraph.linePendingContent = paragraph.linePendingContent[:0]
+		return true
+	}
+	if paragraph.linePrefix[0] == '`' && len(paragraph.linePrefix) < 3 && !end {
+		return true
+	}
+	if len(paragraph.linePrefix) >= 3 && bytes.Equal(paragraph.linePrefix[:3], []byte("```")) {
+		paragraph.lineClassified = true
+		paragraph.lineSkipped = true
+		paragraph.linePendingContent = paragraph.linePendingContent[:0]
+		return true
+	}
+	paragraph.lineClassified = true
+	paragraph.appendLineContent(paragraph.linePendingContent)
+	paragraph.linePendingContent = paragraph.linePendingContent[:0]
+	return false
+}
+
+func (paragraph *memoryStreamingParagraph) appendLineContent(value []byte) {
+	if len(value) == 0 {
+		return
+	}
+	if !paragraph.lineAppended {
+		if paragraph.started {
+			paragraph.truncated.appendRune(' ')
+		} else {
+			paragraph.started = true
+		}
+		paragraph.lineAppended = true
+	}
+	paragraph.truncated.appendBytes(value)
+}
+
+func (paragraph memoryStreamingParagraph) string() string {
+	return paragraph.truncated.string()
+}
+
+func (paragraph *memoryStreamingParagraph) resetLine() {
+	paragraph.lineNonSpace = false
+	paragraph.lineClassified = false
+	paragraph.lineSkipped = false
+	paragraph.lineAppended = false
+	paragraph.linePrefix = paragraph.linePrefix[:0]
+	paragraph.linePendingContent = paragraph.linePendingContent[:0]
+}
+
+type memorySearchFoldStream struct {
+	matcher    memorySearchMatcher
+	pending    []byte
+	invalidRun bool
+	normalized []byte
+}
+
+func newMemorySearchFoldStream(lowerQuery []byte) memorySearchFoldStream {
+	return memorySearchFoldStream{matcher: memorySearchMatcher{query: lowerQuery}}
+}
+
+func (stream *memorySearchFoldStream) feed(value []byte) {
+	if len(value) == 0 || stream.matcher.found {
+		return
+	}
+	if len(stream.pending) > 0 {
+		combined := make([]byte, 0, len(stream.pending)+len(value))
+		combined = append(combined, stream.pending...)
+		combined = append(combined, value...)
+		stream.pending = stream.pending[:0]
+		value = combined
+	}
+	for len(value) > 0 && !stream.matcher.found {
+		if value[0] < utf8.RuneSelf {
+			run := 1
+			upper := 'A' <= value[0] && value[0] <= 'Z'
+			for run < len(value) && value[run] < utf8.RuneSelf {
+				if 'A' <= value[run] && value[run] <= 'Z' {
+					upper = true
+				}
+				run++
+			}
+			stream.invalidRun = false
+			stream.feedASCII(value[:run], upper)
+			value = value[run:]
+			continue
+		}
+		if !utf8.FullRune(value) {
+			stream.pending = append(stream.pending[:0], value...)
+			break
+		}
+		r, size := utf8.DecodeRune(value)
+		if r == utf8.RuneError && size == 1 {
+			if !stream.invalidRun {
+				stream.appendRune(utf8.RuneError)
+				stream.invalidRun = true
+			}
+			value = value[1:]
+			continue
+		}
+		stream.invalidRun = false
+		stream.appendRune(unicode.ToLower(r))
+		value = value[size:]
+	}
+	stream.flush()
+}
+
+func (stream *memorySearchFoldStream) feedASCII(value []byte, upper bool) {
+	if len(value) == 0 || stream.matcher.found {
+		return
+	}
+	if !upper {
+		stream.flush()
+		stream.matcher.feed(value)
+		return
+	}
+	for len(value) > 0 && !stream.matcher.found {
+		if len(stream.normalized) >= memorySearchFoldBufferBytes {
+			stream.flush()
+		}
+		available := memorySearchFoldBufferBytes - len(stream.normalized)
+		if available <= 0 {
+			continue
+		}
+		chunk := value[:min(len(value), available)]
+		for _, b := range chunk {
+			if 'A' <= b && b <= 'Z' {
+				b += 'a' - 'A'
+			}
+			stream.normalized = append(stream.normalized, b)
+		}
+		value = value[len(chunk):]
+	}
+}
+
+func (stream *memorySearchFoldStream) endLine() {
+	stream.finishPending()
+	if !stream.matcher.found {
+		stream.matcher.feed([]byte("\n"))
+	}
+	stream.invalidRun = false
+}
+
+func (stream *memorySearchFoldStream) finishPending() {
+	if len(stream.pending) > 0 && !stream.matcher.found {
+		if !stream.invalidRun {
+			stream.appendRune(utf8.RuneError)
+		}
+		stream.pending = stream.pending[:0]
+		stream.flush()
+	}
+	stream.invalidRun = false
+}
+
+func (stream *memorySearchFoldStream) appendRune(r rune) {
+	if stream.matcher.found {
+		return
+	}
+	var encoded [utf8.UTFMax]byte
+	n := utf8.EncodeRune(encoded[:], r)
+	if len(stream.normalized)+n > memorySearchFoldBufferBytes {
+		stream.flush()
+	}
+	stream.normalized = append(stream.normalized, encoded[:n]...)
+}
+
+func (stream *memorySearchFoldStream) flush() {
+	if len(stream.normalized) == 0 || stream.matcher.found {
+		return
+	}
+	stream.matcher.feed(stream.normalized)
+	stream.normalized = stream.normalized[:0]
+}
+
+func (stream memorySearchFoldStream) found() bool {
+	return stream.matcher.found
 }
 
 // parseMemorySearchDocument extracts only the metadata and bounded text that a
@@ -1396,7 +1992,7 @@ type memoryTextTruncator struct {
 }
 
 func (truncated *memoryTextTruncator) appendBytes(value []byte) {
-	for len(value) > 0 {
+	for len(value) > 0 && !truncated.overflow {
 		r, size := utf8.DecodeRune(value)
 		if r == utf8.RuneError && size == 1 {
 			truncated.appendTextRune(utf8.RuneError)
@@ -1660,6 +2256,50 @@ func evalMemoryPathLenient(value string) (string, error) {
 		resolved = filepath.Join(resolved, suffix[i])
 	}
 	return filepath.Clean(resolved), nil
+}
+
+func openMemoryTargetForRead(ctx context.Context, root, handle string) (*os.File, os.FileInfo, error) {
+	if err := contextErr(ctx); err != nil {
+		return nil, nil, err
+	}
+	filePath, err := safeMemoryTarget(root, handle)
+	if err != nil {
+		return nil, nil, errMemoryPathUnsafe
+	}
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, errMemoryFileNotRegular
+	}
+	// Re-check the trust boundary after the path stat. If the memory directory
+	// was replaced while it was being inspected, do not open the replacement.
+	checkedPath, err := safeMemoryTarget(root, handle)
+	if err != nil {
+		return nil, nil, errMemoryPathUnsafe
+	}
+	if checkedPath != filePath {
+		return nil, nil, errMemoryFileChanged
+	}
+	file, err := openMemoryFile(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+	if !openedInfo.Mode().IsRegular() {
+		file.Close()
+		return nil, nil, errMemoryFileNotRegular
+	}
+	if !os.SameFile(info, openedInfo) {
+		file.Close()
+		return nil, nil, errMemoryFileChanged
+	}
+	return file, openedInfo, nil
 }
 
 func readMemoryTarget(ctx context.Context, root, handle string, maxBytes int64) ([]byte, error) {
