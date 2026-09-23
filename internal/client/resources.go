@@ -2671,29 +2671,38 @@ func githubChannelAccessIdentity(row *html.Node) (displayName, login string, ref
 	return displayName, login, references, nil
 }
 
-func githubChannelAccessDeleteTarget(raw, projectID string) (string, error) {
+func scopedChannelAccessDeleteTarget(raw, route, projectID string, targetErr, scopeErr error) (string, error) {
 	location, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || location == nil || location.Scheme != "" || location.Host != "" || location.Fragment != "" {
-		return "", errors.New("invalid GitHub authorization delete target")
+		return "", targetErr
 	}
-	const route = "/channels/github/authorized-actors"
 	prefix := route + "/"
 	if !strings.HasPrefix(location.Path, prefix) {
-		return "", errors.New("invalid GitHub authorization delete target")
+		return "", targetErr
 	}
 	query, err := url.ParseQuery(location.RawQuery)
 	if err != nil {
-		return "", errors.New("invalid GitHub authorization delete scope")
+		return "", scopeErr
 	}
 	projectValues, ok := query["project_id"]
 	if !ok || len(projectValues) != 1 || projectValues[0] != projectID || len(query) != 1 {
-		return "", errors.New("invalid GitHub authorization delete scope")
+		return "", scopeErr
 	}
 	id := strings.TrimPrefix(location.Path, prefix)
 	if id == "" || id == "." || id == ".." || strings.Contains(id, "/") {
-		return "", errors.New("invalid GitHub authorization delete target")
+		return "", targetErr
 	}
 	return id, nil
+}
+
+func githubChannelAccessDeleteTarget(raw, projectID string) (string, error) {
+	return scopedChannelAccessDeleteTarget(
+		raw,
+		"/channels/github/authorized-actors",
+		projectID,
+		errors.New("invalid GitHub authorization delete target"),
+		errors.New("invalid GitHub authorization delete scope"),
+	)
 }
 
 // listGitHubChannelAccessUsers parses the stable GitHub runtime-settings
@@ -2879,7 +2888,7 @@ func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser,
 	seenIDs := make(map[string]struct{})
 	seenUserIDs := make(map[string]struct{})
 	for _, button := range findAll(container, func(n *html.Node) bool {
-		return n.Data == "button" && strings.HasPrefix(attr(n, "hx-delete"), route+"/")
+		return n.Data == "button" && hasHTMLAttr(n, "hx-delete")
 	}) {
 		id, err := xAuthorizationDeleteTarget(attr(button, "hx-delete"), route, projectID)
 		if err != nil {
@@ -2925,26 +2934,13 @@ func listXAuthorizedUsers(root *html.Node, projectID string) ([]XAuthorizedUser,
 }
 
 func xAuthorizationDeleteTarget(raw, route, projectID string) (string, error) {
-	location, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || location == nil || location.Scheme != "" || location.Host != "" || location.Fragment != "" {
-		return "", errors.New("invalid X authorization delete target")
-	}
-	if !strings.HasPrefix(location.Path, route+"/") {
-		return "", errors.New("invalid X authorization delete target")
-	}
-	query, err := url.ParseQuery(location.RawQuery)
-	if err != nil {
-		return "", errors.New("invalid X authorization delete scope")
-	}
-	projectValues, ok := query["project_id"]
-	if !ok || len(projectValues) != 1 || projectValues[0] != projectID || len(query) != 1 {
-		return "", errors.New("invalid X authorization delete scope")
-	}
-	id := strings.TrimPrefix(location.Path, route+"/")
-	if id == "" || id == "." || id == ".." || strings.Contains(id, "/") {
-		return "", errors.New("invalid X authorization delete target")
-	}
-	return id, nil
+	return scopedChannelAccessDeleteTarget(
+		raw,
+		route,
+		projectID,
+		errors.New("invalid X authorization delete target"),
+		errors.New("invalid X authorization delete scope"),
+	)
 }
 
 func xAuthorizationMarker(row *html.Node, name string, aliases ...string) (string, bool, error) {

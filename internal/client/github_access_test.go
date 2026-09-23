@@ -102,6 +102,68 @@ func TestGitHubAuthorizedActorClientContractUsesScopedRoutesAndSafeStructuredOut
 	}
 }
 
+func TestScopedChannelAccessDeleteTargetsValidateLinks(t *testing.T) {
+	const projectID = "project/two"
+	providers := []struct {
+		name       string
+		route      string
+		parse      func(string, string) (string, error)
+		targetErr  string
+		scopeErr   string
+		validRowID string
+	}{
+		{
+			name:       "github",
+			route:      "/channels/github/authorized-actors",
+			parse:      githubChannelAccessDeleteTarget,
+			targetErr:  "invalid GitHub authorization delete target",
+			scopeErr:   "invalid GitHub authorization delete scope",
+			validRowID: "actor-1",
+		},
+		{
+			name:  "x",
+			route: "/channels/x/authorized-users",
+			parse: func(raw, projectID string) (string, error) {
+				return xAuthorizationDeleteTarget(raw, "/channels/x/authorized-users", projectID)
+			},
+			targetErr:  "invalid X authorization delete target",
+			scopeErr:   "invalid X authorization delete scope",
+			validRowID: "row-1",
+		},
+	}
+	for _, provider := range providers {
+		t.Run(provider.name+" valid", func(t *testing.T) {
+			id, err := provider.parse(provider.route+"/"+provider.validRowID+"?project_id=project%2Ftwo", projectID)
+			if err != nil || id != provider.validRowID {
+				t.Fatalf("delete target = %q, %v; want %q, nil", id, err, provider.validRowID)
+			}
+		})
+		for _, tc := range []struct {
+			name    string
+			raw     string
+			wantErr string
+		}{
+			{name: "absolute URL", raw: "https://example.test" + provider.route + "/" + provider.validRowID + "?project_id=project%2Ftwo", wantErr: provider.targetErr},
+			{name: "fragment", raw: provider.route + "/" + provider.validRowID + "?project_id=project%2Ftwo#remove", wantErr: provider.targetErr},
+			{name: "wrong route", raw: "/channels/other/authorized-users/" + provider.validRowID + "?project_id=project%2Ftwo", wantErr: provider.targetErr},
+			{name: "missing project scope", raw: provider.route + "/" + provider.validRowID, wantErr: provider.scopeErr},
+			{name: "wrong project scope", raw: provider.route + "/" + provider.validRowID + "?project_id=other", wantErr: provider.scopeErr},
+			{name: "extra query parameter", raw: provider.route + "/" + provider.validRowID + "?project_id=project%2Ftwo&extra=1", wantErr: provider.scopeErr},
+			{name: "duplicate project scope", raw: provider.route + "/" + provider.validRowID + "?project_id=project%2Ftwo&project_id=project%2Ftwo", wantErr: provider.scopeErr},
+			{name: "empty ID", raw: provider.route + "/?project_id=project%2Ftwo", wantErr: provider.targetErr},
+			{name: "dot ID", raw: provider.route + "/.?project_id=project%2Ftwo", wantErr: provider.targetErr},
+			{name: "dot dot ID", raw: provider.route + "/..?project_id=project%2Ftwo", wantErr: provider.targetErr},
+			{name: "slash ID", raw: provider.route + "/" + provider.validRowID + "/child?project_id=project%2Ftwo", wantErr: provider.targetErr},
+		} {
+			t.Run(provider.name+" "+tc.name, func(t *testing.T) {
+				if id, err := provider.parse(tc.raw, projectID); err == nil || err.Error() != tc.wantErr || id != "" {
+					t.Fatalf("delete target = %q, %v; want empty ID and %q", id, err, tc.wantErr)
+				}
+			})
+		}
+	}
+}
+
 func TestNormalizeGitHubChannelAccessLogin(t *testing.T) {
 	valid39 := strings.Repeat("a", 39)
 	for _, tc := range []struct {
