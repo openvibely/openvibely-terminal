@@ -703,6 +703,31 @@ func TestProjectEditOptionMetadataMatchesParserCompletionAndHelp(t *testing.T) {
 	}
 }
 
+func TestProjectHelpDocumentsSelectionDiscovery(t *testing.T) {
+	defer func() { cmdPrefix = "/" }()
+	cmdPrefix = "/"
+
+	cmd := lookupCommand("project")
+	if cmd == nil {
+		t.Fatal("project command missing")
+	}
+
+	help := renderCommandHelp(*cmd)
+	for _, want := range []string{
+		"/project                                    list projects; in interactive mode with multiple loaded projects, open the selector",
+		"/project <name|id>                          select by project name or ID",
+		"references accept exact ID/name, unique ID/name prefix, or unique name substring",
+		"examples:",
+		"/project demo",
+		"/project p1a2b3c4",
+		`/project "My Project"`,
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("project help missing %q:\n%s", want, help)
+		}
+	}
+}
+
 func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 	cmd := lookupCommand("projects")
 	if cmd == nil {
