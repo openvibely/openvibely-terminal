@@ -208,6 +208,8 @@ Commands take a resource, an optional action, and arguments:
 /skills add notes | writes release notes
 /skills load notes
 /tasks move Refactor active   move a task between columns
+/tasks show Refactor review     inspect inline review comments
+/tasks reviews add Refactor internal/auth.go:42 Handle token refresh errors
 /tasks goal Refactor | all checks pass
 /tasks goal pause Refactor
 /tasks goal resume Refactor
@@ -584,9 +586,31 @@ one:
 /tasks show refactor changes
 ```
 
-Tabs: `details`, `thread`, `changes`, `schedules`, `chaining`, `attachments`,
-`lifecycle`. Lazy thread, changes, and lifecycle failures are shown as explicit
+Tabs: `details`, `thread`, `changes`, `review`, `schedules`, `chaining`,
+`attachments`, `lifecycle`. Lazy thread, changes, and lifecycle failures are shown as explicit
 errors rather than empty tabs; successfully loaded sections remain visible.
+
+### Task review comments
+
+Review comments are inline notes attached to a task's code review view by file
+and line. Use them when feedback belongs on a specific changed line; use
+`/tasks reply <task> | <message>` or an open task thread for general follow-up,
+status updates, or instructions that are not tied to a file location.
+
+```text
+/tasks show refactor review
+/tasks reviews refactor
+/tasks reviews list refactor
+/tasks reviews add refactor internal/auth.go:42 Handle token refresh errors
+
+openvibely-terminal -project demo tasks show refactor review
+openvibely-terminal -project demo tasks reviews refactor
+openvibely-terminal -project demo tasks reviews add refactor internal/auth.go:42 "Handle token refresh errors"
+```
+
+`tasks reviews [list] <task>` lists the same inline comments as the `review`
+detail tab. `tasks reviews add <task> <file>:<line> <comment>` creates a new
+inline review comment, then prints the refreshed review list.
 
 ### Task goal lifecycle
 
@@ -1021,6 +1045,8 @@ openvibely-terminal -project demo --force alerts delete-bulk a1b2 "Release appro
 openvibely-terminal -project demo personality delete-bulk old_one "Old Two" # requires --force
 openvibely-terminal -project demo --force personality delete-bulk old_one "Old Two"
 openvibely-terminal -project demo analytics usage      # one analytics section
+openvibely-terminal -project demo tasks show refactor review # inspect task review comments
+openvibely-terminal -project demo tasks reviews add refactor internal/auth.go:42 "Handle token refresh errors"
 openvibely-terminal -project demo chat "ship the docs" # ask the agent, print the reply
 openvibely-terminal projects create demo /Users/me/src/demo # local checkout; output includes backend ID
 openvibely-terminal projects github-create "GitHub Project" https://github.com/acme/demo # backend-managed GitHub clone
@@ -1083,7 +1109,9 @@ $ openvibely-terminal help projects
 $ openvibely-terminal help tasks
   tasks [filter]                             list the board, optionally filtered
   tasks open <task>                          enter the task's thread
-  tasks show <task> [tab]                    details, thread, changes, schedules, …
+  tasks show <task> [tab]                    details, thread, changes, review, schedules, …
+  tasks reviews [list] <task>                list inline review comments
+  tasks reviews add <task> <file>:<line> <comment>
   tasks lifecycle <task> [execution]         list executions or show ordered events
   tasks logs <task> [execution]              alias for lifecycle event logs
   tasks attachments add <task> <file>...      upload local files

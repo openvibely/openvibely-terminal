@@ -47,6 +47,8 @@ Interactive input is either a chat message or a slash command:
 summarize the current project
 /tasks
 /tasks show refactor
+/tasks show refactor review
+/tasks reviews add refactor internal/auth.go:42 Handle token refresh errors
 /tasks swarm --category active Coordinate release | Split validation across workers
 /tasks goal refactor | all tests pass
 /tasks goal pause refactor
@@ -67,7 +69,8 @@ For one-shot CLI use, omit the leading slash:
 
 ```bash
 openvibely-terminal tasks
-openvibely-terminal -project demo tasks show refactor
+openvibely-terminal -project demo tasks show refactor review
+openvibely-terminal -project demo tasks reviews refactor
 openvibely-terminal -project demo tasks swarm --category active "Coordinate release" '|' "Split validation across workers"
 openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
@@ -99,7 +102,7 @@ Common commands include:
 
 | Command | Purpose |
 |---|---|
-| `/tasks` | Inspect and manage tasks, threads, and completion goals. See the task-goal lifecycle examples below. |
+| `/tasks` | Inspect and manage tasks, threads, inline review comments, and completion goals. See the task-goal lifecycle examples below. |
 | `/alerts` | Review alerts, including selected bulk read/delete actions |
 | `/skills` | Manage reusable skills; `skills always <skill>` and `skills load <skill>` are equivalent names for automatic loading |
 | `/automations` | Inspect, edit, and control automations |
