@@ -5158,6 +5158,75 @@ func TestCLIQueuedPromotionDeadlineIsNotSuccess(t *testing.T) {
 	}
 }
 
+func TestCLIQueuedPromotionBackoffBoundsPollingLoad(t *testing.T) {
+	var backoff cliQueuedPromotionBackoff
+	elapsed := time.Duration(0)
+	calls := 1 // waitForCLIChatExecution polls once immediately before sleeping.
+	maxGap := time.Duration(0)
+	for elapsed < time.Minute {
+		delay := backoff.nextDelay()
+		if delay > maxGap {
+			maxGap = delay
+		}
+		elapsed += delay
+		calls++
+	}
+	if calls > 240 {
+		t.Fatalf("60-second queued wait made %d status calls, want at most 240", calls)
+	}
+	if maxGap > cliQueuedPromotionMaxPoll || maxGap > 500*time.Millisecond {
+		t.Fatalf("max promotion detection gap = %s, want <= %s and <= 500ms", maxGap, cliQueuedPromotionMaxPoll)
+	}
+
+	backoff = cliQueuedPromotionBackoff{}
+	elapsed = 0
+	for elapsed < time.Second {
+		elapsed += backoff.nextDelay()
+	}
+	if regression := elapsed - time.Second; regression > 250*time.Millisecond {
+		t.Fatalf("1-second queued wait detection regression = %s, want <= 250ms", regression)
+	}
+}
+
+func TestCLIQueuedPromotionRetryCancellationDoesNotWaitForBackoff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	backoff := &cliQueuedPromotionBackoff{attempt: 10}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	if waitCLIQueuedPromotionRetry(ctx, backoff) {
+		t.Fatal("retry returned true after cancellation")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("cancelled retry returned after %s, want prompt cancellation", elapsed)
+	}
+}
+
+func TestCLIQueuedPromotionTerminalStatusesAndCompletedID(t *testing.T) {
+	t.Run("completed returns authoritative message ID", func(t *testing.T) {
+		got, err := waitForCLIChatExecution(context.Background(), func() (*client.ChatStatus, error) {
+			return &client.ChatStatus{MessageID: "exec-2", Status: "completed"}, nil
+		}, "input-1")
+		if err != nil || got != "exec-2" {
+			t.Fatalf("result = %q, err=%v; want exec-2 nil", got, err)
+		}
+	})
+
+	for _, status := range []string{"failed", "cancelled"} {
+		t.Run(status, func(t *testing.T) {
+			_, err := waitForCLIChatExecution(context.Background(), func() (*client.ChatStatus, error) {
+				return &client.ChatStatus{MessageID: "input-1", Status: status, Error: "backend detail"}, nil
+			}, "input-1")
+			if err == nil || !strings.Contains(err.Error(), status) || !strings.Contains(err.Error(), "backend detail") {
+				t.Fatalf("error = %v, want terminal %s detail", err, status)
+			}
+		})
+	}
+}
+
 func TestCLIExecutionDisconnectExhaustionIsNotSuccess(t *testing.T) {
 	var streams int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -5361,83 +5430,145 @@ func TestCLITaskReplyStreamsScopedExecution(t *testing.T) {
 }
 
 func TestCLIChatQueuedPromotionStreamsPromotedExecution(t *testing.T) {
-	var statusCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/projects":
-			fmt.Fprint(w, cliProjects)
-		case "/api/chat/message":
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			fmt.Fprint(w, `{"message_id":"input-1","status":"queued","queued":true}`)
-		case "/api/chat/message/input-1":
-			statusCalls++
-			w.Header().Set("Content-Type", "application/json")
-			if statusCalls == 1 {
-				fmt.Fprint(w, `{"message_id":"input-1","status":"queued"}`)
-			} else if statusCalls == 2 {
-				fmt.Fprint(w, `{"message_id":"exec-2","status":"processing"}`)
-			} else {
-				fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"promoted"}`)
-			}
-		case "/events/chat/exec-2":
-			fmt.Fprint(w, "data: promoted\n\nevent: done\ndata: completed\n\n")
-		default:
-			t.Fatalf("unexpected request %s", r.URL.String())
+	for _, jsonOutput := range []bool{false, true} {
+		name := "plain"
+		if jsonOutput {
+			name = "json"
 		}
-	}))
-	defer srv.Close()
-	c, _ := client.New(srv.URL)
-	var out bytes.Buffer
-	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, false); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "promoted\n" || statusCalls != 3 {
-		t.Fatalf("output=%q status calls=%d", out.String(), statusCalls)
+		t.Run(name, func(t *testing.T) {
+			var statusCalls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					fmt.Fprint(w, cliProjects)
+				case "/api/chat/message":
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{"message_id":"input-1","status":"queued","queued":true}`)
+				case "/api/chat/message/input-1":
+					statusCalls++
+					w.Header().Set("Content-Type", "application/json")
+					if statusCalls == 1 {
+						fmt.Fprint(w, `{"message_id":"input-1","status":"queued"}`)
+					} else if statusCalls == 2 {
+						fmt.Fprint(w, `{"message_id":"exec-2","status":"processing"}`)
+					} else {
+						fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"promoted"}`)
+					}
+				case "/events/chat/exec-2":
+					fmt.Fprint(w, "data: promoted\n\nevent: done\ndata: completed\n\n")
+				default:
+					t.Fatalf("unexpected request %s", r.URL.String())
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			var out bytes.Buffer
+			if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if statusCalls != 3 {
+				t.Fatalf("status calls=%d, want 3; output=%q", statusCalls, out.String())
+			}
+			if !jsonOutput {
+				if out.String() != "promoted\n" {
+					t.Fatalf("output=%q", out.String())
+				}
+				return
+			}
+			lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("JSON lines = %q", lines)
+			}
+			var delta, done cliExecutionRecord
+			if err := json.Unmarshal([]byte(lines[0]), &delta); err != nil {
+				t.Fatalf("delta JSON = %q: %v", lines[0], err)
+			}
+			if err := json.Unmarshal([]byte(lines[1]), &done); err != nil {
+				t.Fatalf("done JSON = %q: %v", lines[1], err)
+			}
+			if delta.Type != client.ExecutionDelta || delta.ProjectID != "p1" || delta.ExecID != "exec-2" || !strings.Contains(delta.Delta, "promoted") {
+				t.Fatalf("delta record = %#v", delta)
+			}
+			if done.Type != client.ExecutionDone || done.ProjectID != "p1" || done.ExecID != "exec-2" || done.Status != "completed" {
+				t.Fatalf("done record = %#v", done)
+			}
+		})
 	}
 }
 
 func TestCLITaskReplyQueuedPromotionUsesAuthoritativeStatus(t *testing.T) {
 	const board = `<div data-task-id="task-1" data-task-status="running" data-task-category="active"><a href="/tasks/task-1">Fix stream</a></div>`
-	var statusCalls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/api/projects":
-			fmt.Fprint(w, cliProjects)
-		case "/api/tasks/reference-catalog":
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, compactTaskCatalogForTest(board))
-		case "/tasks":
-			fmt.Fprint(w, board)
-		case "/tasks/task-1/thread":
-			if r.URL.Query().Get("project_id") != "p1" {
-				t.Fatalf("thread project = %q", r.URL.Query().Get("project_id"))
-			}
-			fmt.Fprint(w, `<div data-thread-input-id="input-1" data-task-id="task-1" data-input-mode="queued"></div>`)
-		case "/api/chat/message/input-1":
-			statusCalls++
-			w.Header().Set("Content-Type", "application/json")
-			if statusCalls == 1 {
-				fmt.Fprint(w, `{"message_id":"input-1","status":"queued"}`)
-			} else if statusCalls == 2 {
-				fmt.Fprint(w, `{"message_id":"exec-2","status":"processing"}`)
-			} else {
-				fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"queued output"}`)
-			}
-		case "/events/chat/exec-2":
-			fmt.Fprint(w, "data: queued output\n\nevent: done\ndata: completed\n\n")
-		default:
-			t.Fatalf("unexpected request %s", r.URL.String())
+	for _, jsonOutput := range []bool{false, true} {
+		name := "plain"
+		if jsonOutput {
+			name = "json"
 		}
-	}))
-	defer srv.Close()
-	c, _ := client.New(srv.URL)
-	var out bytes.Buffer
-	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, false); err != nil {
-		t.Fatal(err)
-	}
-	if out.String() != "queued output\n" || statusCalls != 3 {
-		t.Fatalf("output=%q status calls=%d", out.String(), statusCalls)
+		t.Run(name, func(t *testing.T) {
+			var statusCalls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					fmt.Fprint(w, cliProjects)
+				case "/api/tasks/reference-catalog":
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprint(w, compactTaskCatalogForTest(board))
+				case "/tasks":
+					fmt.Fprint(w, board)
+				case "/tasks/task-1/thread":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Fatalf("thread project = %q", r.URL.Query().Get("project_id"))
+					}
+					fmt.Fprint(w, `<div data-thread-input-id="input-1" data-task-id="task-1" data-input-mode="queued"></div>`)
+				case "/api/chat/message/input-1":
+					statusCalls++
+					w.Header().Set("Content-Type", "application/json")
+					if statusCalls == 1 {
+						fmt.Fprint(w, `{"message_id":"input-1","status":"queued"}`)
+					} else if statusCalls == 2 {
+						fmt.Fprint(w, `{"message_id":"exec-2","status":"processing"}`)
+					} else {
+						fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"queued output"}`)
+					}
+				case "/events/chat/exec-2":
+					fmt.Fprint(w, "data: queued output\n\nevent: done\ndata: completed\n\n")
+				default:
+					t.Fatalf("unexpected request %s", r.URL.String())
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			var out bytes.Buffer
+			if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, jsonOutput); err != nil {
+				t.Fatal(err)
+			}
+			if statusCalls != 3 {
+				t.Fatalf("status calls=%d, want 3; output=%q", statusCalls, out.String())
+			}
+			if !jsonOutput {
+				if out.String() != "queued output\n" {
+					t.Fatalf("output=%q", out.String())
+				}
+				return
+			}
+			lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("JSON lines = %q", lines)
+			}
+			var delta, done cliExecutionRecord
+			if err := json.Unmarshal([]byte(lines[0]), &delta); err != nil {
+				t.Fatalf("delta JSON = %q: %v", lines[0], err)
+			}
+			if err := json.Unmarshal([]byte(lines[1]), &done); err != nil {
+				t.Fatalf("done JSON = %q: %v", lines[1], err)
+			}
+			if delta.Type != client.ExecutionDelta || delta.ProjectID != "p1" || delta.TaskID != "task-1" || delta.ExecID != "exec-2" || !strings.Contains(delta.Delta, "queued output") {
+				t.Fatalf("delta record = %#v", delta)
+			}
+			if done.Type != client.ExecutionDone || done.ProjectID != "p1" || done.TaskID != "task-1" || done.ExecID != "exec-2" || done.Status != "completed" {
+				t.Fatalf("done record = %#v", done)
+			}
+		})
 	}
 }
 
