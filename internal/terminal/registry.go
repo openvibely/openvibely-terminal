@@ -9163,9 +9163,19 @@ func analyticsCommandForSections(sections []analyticsSection) command {
 func projectCommand() command {
 	return command{
 		name:          "project",
-		args:          "<name>",
+		args:          "<name|id>",
 		selectorPaths: [][]string{{}},
 		desc:          "select the active project",
+		usage: []string{
+			"project                                    list projects; in interactive mode with multiple loaded projects, open the selector",
+			"project <name|id>                          select by project name or ID",
+			"  references accept exact ID/name, unique ID/name prefix, or unique name substring",
+		},
+		examples: []string{
+			`project demo`,
+			`project p1a2b3c4`,
+			`project "My Project"`,
+		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			m.busy = false
 			if len(args) == 0 {
