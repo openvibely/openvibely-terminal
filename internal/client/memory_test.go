@@ -741,6 +741,37 @@ func TestMemorySearchKeepsMetadataAndBodyMatchModesDistinct(t *testing.T) {
 	}
 }
 
+func TestMemorySearchStreamsLongLineMatchesAcrossReadBuffer(t *testing.T) {
+	repo := t.TempDir()
+	marker := "MiXeD ÜNICODE Needle"
+	line := strings.Repeat("x", memorySearchChunkBytes-4) + marker
+	content := line + "\n"
+	writeProjectMemory(t, repo, "- [Long Line](long.md) - indexed summary\n", map[string]string{
+		"long.md": content,
+	})
+
+	client := &Client{}
+	project := Project{Path: repo}
+	result, err := client.SearchMemories(context.Background(), project, "mixed ünicode needle")
+	if err != nil {
+		t.Fatalf("SearchMemories: %v", err)
+	}
+	if len(result.Memories) != 1 {
+		t.Fatalf("matches = %#v, want one long-line result", result.Memories)
+	}
+	if memory := result.Memories[0]; memory.File != "long.md" || memory.Snippet != truncateMemoryText(line, 220) || memory.Body != "" {
+		t.Fatalf("long-line search result = %#v", memory)
+	}
+
+	document, err := client.ShowMemory(context.Background(), project, "long.md")
+	if err != nil {
+		t.Fatalf("ShowMemory: %v", err)
+	}
+	if document.Body != content {
+		t.Fatalf("ShowMemory body length = %d, want full body length %d", len(document.Body), len(content))
+	}
+}
+
 func TestMemorySearchPreservesEightMiBReadBound(t *testing.T) {
 	repo := t.TempDir()
 	const needle = "BOUNDARY NEEDLE"
