@@ -92,6 +92,13 @@ func TestOutboundTargetParserAcceptsDocumentedAliases(t *testing.T) {
 	}
 }
 
+func TestOutboundTargetEditRejectsUnsupportedPlatform(t *testing.T) {
+	_, _, err := parseOutboundTargetEdit([]string{"client", "--platform", "mastodon"})
+	if err == nil || !strings.Contains(err.Error(), outboundTargetPlatformError) {
+		t.Fatalf("parseOutboundTargetEdit error = %v, want %q", err, outboundTargetPlatformError)
+	}
+}
+
 func TestOutboundTargetsCLIAddJSONUsesCanonicalRefreshedTarget(t *testing.T) {
 	canonical := client.OutboundTarget{
 		ID: "target-email-1", ProjectID: "p1", Platform: "email", TargetKind: "email",
@@ -512,6 +519,88 @@ func TestOutboundTargetsTUIAddEditPolicyAndDraftTest(t *testing.T) {
 	}
 	if strings.Contains(stripANSI(transcript(m)), "<span") {
 		t.Fatal("draft test exposed raw HTML")
+	}
+}
+
+func TestOutboundTargetsTUIEditRejectsUnsupportedPlatformBeforeSave(t *testing.T) {
+	target := client.OutboundTarget{ID: "target-a", ProjectID: "p1", Platform: "email", TargetKind: "email", Name: "client", Destination: "person@example.com"}
+	postCalls := 0
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/channels/outbound-targets" && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{target}, false))
+			return
+		}
+		if r.URL.Path == "/channels/send-message-explicit-targets" && r.Method == http.MethodPost {
+			postCalls++
+			http.Error(w, "unexpected save", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
+	})
+
+	m = runLine(t, m, "/channels targets edit client --platform mastodon")
+	if postCalls != 0 {
+		t.Fatalf("unsupported platform edit posted save request %d times", postCalls)
+	}
+	if !strings.Contains(stripANSI(transcript(m)), outboundTargetPlatformError) {
+		t.Fatalf("validation error missing from transcript:\n%s", transcript(m))
+	}
+}
+
+func TestOutboundTargetsCLIEditPlatformCanonicalizesAndPreservesFields(t *testing.T) {
+	existing := client.OutboundTarget{
+		ID: "target-a", ProjectID: "p1", Platform: "email", TargetKind: "email", Name: "client",
+		Destination: "person@example.com", ThreadID: "thread-1", Home: true, DefaultSubject: "Hello",
+	}
+	postForm := make(map[string]string)
+	postCalls := 0
+	refreshCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			refreshCalls++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{existing}, false))
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			postCalls++
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse edit form: %v", err)
+			}
+			for _, key := range []string{"target_row_id", "target_platform", "target_kind", "target_name", "target_target_id", "target_thread_id", "target_is_home", "target_default_subject"} {
+				postForm[key] = r.PostForm.Get(key)
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div>saved</div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "edit", "client", "--platform", "Email"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if postCalls != 1 || refreshCalls != 2 {
+		t.Fatalf("post/refresh calls = %d/%d, want 1/2", postCalls, refreshCalls)
+	}
+	want := map[string]string{
+		"target_row_id": "target-a", "target_platform": "email", "target_kind": "email", "target_name": "client",
+		"target_target_id": "person@example.com", "target_thread_id": "thread-1", "target_is_home": "true", "target_default_subject": "Hello",
+	}
+	for key, value := range want {
+		if postForm[key] != value {
+			t.Fatalf("posted %s = %q, want %q; form=%#v", key, postForm[key], value, postForm)
+		}
 	}
 }
 
