@@ -36,6 +36,8 @@ var outboundTargetOptionDefinitions = []outboundTargetOptionDefinition{
 var outboundTargetPlatforms = []string{"slack", "telegram", "email", "discord", "x"}
 var outboundTargetActions = []string{"list", "show", "add", "edit", "test", "remove", "policy"}
 
+const outboundTargetPlatformError = "outbound target platform must be slack, telegram, email, discord, or x"
+
 func outboundTargetOptionNameLookup() map[string]outboundTargetOptionSpec {
 	lookup := make(map[string]outboundTargetOptionSpec)
 	for _, definition := range outboundTargetOptionDefinitions {
@@ -214,7 +216,7 @@ func parseOutboundTargetAdd(args []string) (client.OutboundTarget, error) {
 	}
 	platform = strings.ToLower(strings.TrimSpace(platform))
 	if !isOutboundTargetPlatform(platform) {
-		return client.OutboundTarget{}, errors.New("outbound target platform must be slack, telegram, email, discord, or x")
+		return client.OutboundTarget{}, errors.New(outboundTargetPlatformError)
 	}
 	if strings.TrimSpace(destination) == "" {
 		return client.OutboundTarget{}, errors.New("outbound target destination is required")
@@ -241,6 +243,13 @@ func parseOutboundTargetEdit(args []string) (string, map[string]string, error) {
 	}
 	if len(provided) == 0 {
 		return "", nil, errors.New("outbound target edit requires at least one option")
+	}
+	if platform, ok := values["platform"]; ok {
+		platform = strings.ToLower(strings.TrimSpace(platform))
+		if !isOutboundTargetPlatform(platform) {
+			return "", nil, errors.New(outboundTargetPlatformError)
+		}
+		values["platform"] = platform
 	}
 	return strings.TrimSpace(args[0]), values, nil
 }
