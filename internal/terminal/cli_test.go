@@ -1622,6 +1622,77 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 	}
 }
 
+func TestCLICommandScopePolicyPreservesPreflightBehavior(t *testing.T) {
+	tests := []struct {
+		name             string
+		commandName      string
+		actionArgs       []string
+		wantBackend      bool
+		wantProjectLoad  bool
+		wantProjectScope bool
+	}{
+		{name: "help", commandName: "help"},
+		{name: "quit", commandName: "quit"},
+		{name: "clear", commandName: "clear"},
+		{name: "login", commandName: "login"},
+		{name: "setup", commandName: "setup"},
+		{name: "project", commandName: "project", wantBackend: true, wantProjectLoad: true},
+		{name: "projects list", commandName: "projects", actionArgs: []string{"list"}, wantBackend: true, wantProjectLoad: true},
+		{name: "projects create", commandName: "projects", actionArgs: []string{"create", "demo", "/tmp/demo"}, wantBackend: true},
+		{name: "projects github-create", commandName: "projects", actionArgs: []string{"github-create", "demo", "https://github.com/acme/demo"}, wantBackend: true},
+		{name: "projects show", commandName: "projects", actionArgs: []string{"show", "demo"}, wantBackend: true, wantProjectLoad: true},
+		{name: "projects edit", commandName: "projects", actionArgs: []string{"edit", "demo"}, wantBackend: true, wantProjectLoad: true},
+		{name: "projects delete", commandName: "projects", actionArgs: []string{"delete", "demo"}, wantBackend: true, wantProjectLoad: true},
+		{name: "status", commandName: "status", wantBackend: true, wantProjectLoad: true},
+		{name: "chat bare", commandName: "chat", wantBackend: true, wantProjectLoad: true},
+		{name: "chat message", commandName: "chat", actionArgs: []string{"hello"}, wantBackend: true, wantProjectLoad: true, wantProjectScope: true},
+		{name: "agents list", commandName: "agents", wantBackend: true, wantProjectLoad: true, wantProjectScope: true},
+		{name: "agents metrics", commandName: "agents", actionArgs: []string{"metrics"}, wantBackend: true, wantProjectLoad: true},
+		{name: "models list", commandName: "models", wantBackend: true},
+		{name: "models add", commandName: "models", actionArgs: []string{"add"}, wantBackend: true},
+		{name: "models edit", commandName: "models", actionArgs: []string{"edit", "OpenAI"}, wantBackend: true, wantProjectLoad: true, wantProjectScope: true},
+		{name: "models default", commandName: "models", actionArgs: []string{"default", "OpenAI"}, wantBackend: true, wantProjectLoad: true, wantProjectScope: true},
+		{name: "models delete", commandName: "models", actionArgs: []string{"delete", "OpenAI"}, wantBackend: true, wantProjectLoad: true, wantProjectScope: true},
+		{name: "models capacity", commandName: "models", actionArgs: []string{"capacity"}, wantBackend: true, wantProjectLoad: true, wantProjectScope: true},
+		{name: "workers bare", commandName: "workers", wantBackend: true},
+		{name: "workers show", commandName: "workers", actionArgs: []string{"show"}, wantBackend: true},
+		{name: "workers limit", commandName: "workers", actionArgs: []string{"limit", "4"}, wantBackend: true},
+		{name: "workers watch", commandName: "workers", actionArgs: []string{"watch"}, wantBackend: true, wantProjectLoad: true},
+		{name: "workers project", commandName: "workers", actionArgs: []string{"project", "2"}, wantBackend: true, wantProjectLoad: true, wantProjectScope: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := lookupCommand(tc.commandName)
+			if cmd == nil {
+				t.Fatalf("command %q is not registered", tc.commandName)
+			}
+			fullArgs := append([]string{tc.commandName}, tc.actionArgs...)
+			if got := cmd.needsBackend(); got != tc.wantBackend {
+				t.Errorf("needsBackend() = %t, want %t", got, tc.wantBackend)
+			}
+			if got := cmd.needsProjectLoad(fullArgs); got != tc.wantProjectLoad {
+				t.Errorf("needsProjectLoad(%v) = %t, want %t", fullArgs, got, tc.wantProjectLoad)
+			}
+			if got := cmd.cliProjectScoped(tc.actionArgs); got != tc.wantProjectScope {
+				t.Errorf("cliProjectScoped(%v) = %t, want %t", tc.actionArgs, got, tc.wantProjectScope)
+			}
+		})
+	}
+}
+
+func TestCLIProjectSelectionHintUsesScopePolicy(t *testing.T) {
+	hint := CLIProjectSelectionHint()
+	for _, want := range []string{"-project <name|id>", cliGlobalCommandExamples(), "Project deletion requires --force"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("project-selection hint missing %q:\n%s", want, hint)
+		}
+	}
+	if !strings.Contains(stripANSI(renderHelp()), hint) {
+		t.Fatalf("interactive help did not render policy hint:\n%s", renderHelp())
+	}
+}
+
 func TestCLIBackendRequiredFailureIncludesRecoveryGuidance(t *testing.T) {
 	c, err := client.New("http://127.0.0.1:1") // nothing listening
 	if err != nil {

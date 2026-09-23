@@ -1669,29 +1669,109 @@ func CommandSummary() string {
 	return b.String()
 }
 
-// CLIProjectSelectionHint is the static help text for headless project scope.
-func CLIProjectSelectionHint() string { return cliProjectSelectionHint }
+// CLIProjectSelectionHint is the help text for headless project scope.
+func CLIProjectSelectionHint() string { return cliProjectSelectionHint() }
 
-const cliProjectSelectionHint = "Project-scoped CLI commands use the only backend project automatically; when multiple projects exist, pass -project <name|id>. Global commands such as projects list/create/show/edit/delete and help do not require a separate -project reference. Project deletion requires --force and removes backend-owned project data."
+func cliProjectSelectionHint() string {
+	return "Project-scoped CLI commands use the only backend project automatically; when multiple projects exist, pass -project <name|id>. Global commands such as " + cliGlobalCommandExamples() + " do not require a separate -project reference. Project deletion requires --force and removes backend-owned project data."
+}
+
+func cliGlobalCommandExamples() string {
+	examples := make([]string, 0, 2)
+	if projects := lookupCommand("projects"); projects != nil {
+		if actions := projects.cliPolicy().helpGlobalActions; len(actions) > 0 {
+			examples = append(examples, projects.name+" "+strings.Join(actions, "/"))
+		}
+	}
+	if help := lookupCommand("help"); help != nil && !help.cliPolicy().backendRequired {
+		examples = append(examples, help.name)
+	}
+	return strings.Join(examples, " and ")
+}
+
+type cliProjectScopeMode uint8
+
+const (
+	cliProjectScopeAlways cliProjectScopeMode = iota
+	cliProjectScopeNever
+	cliProjectScopeWhenArgs
+	cliProjectScopeExceptActions
+	cliProjectScopeOnlyActions
+)
+
+type cliCommandPolicy struct {
+	backendRequired        bool
+	projectScopeMode       cliProjectScopeMode
+	projectScopeActions    map[string]bool
+	skipProjectLoadActions map[string]bool
+	loadProjectWhenScoped  bool
+	helpGlobalActions      []string
+}
+
+var cliCommandPolicies = map[string]cliCommandPolicy{
+	"help":     cliNoBackendPolicy(),
+	"quit":     cliNoBackendPolicy(),
+	"clear":    cliNoBackendPolicy(),
+	"login":    cliNoBackendPolicy(),
+	"setup":    cliNoBackendPolicy(),
+	"project":  {backendRequired: true, projectScopeMode: cliProjectScopeNever},
+	"projects": {backendRequired: true, projectScopeMode: cliProjectScopeNever, skipProjectLoadActions: cliActionSet("create", "github-create"), helpGlobalActions: []string{"list", "create", "show", "edit", "delete"}},
+	"status":   {backendRequired: true, projectScopeMode: cliProjectScopeNever},
+	"chat":     {backendRequired: true, projectScopeMode: cliProjectScopeWhenArgs},
+	"agents":   {backendRequired: true, projectScopeMode: cliProjectScopeExceptActions, projectScopeActions: cliActionSet("metrics")},
+	"models":   {backendRequired: true, projectScopeMode: cliProjectScopeOnlyActions, projectScopeActions: cliActionSet("capacity", "edit", "default", "delete"), loadProjectWhenScoped: true},
+	"workers":  {backendRequired: true, projectScopeMode: cliProjectScopeOnlyActions, projectScopeActions: cliActionSet("project"), skipProjectLoadActions: cliActionSet("", "show", "limit")},
+}
+
+func cliNoBackendPolicy() cliCommandPolicy {
+	return cliCommandPolicy{projectScopeMode: cliProjectScopeNever}
+}
+
+func cliActionSet(actions ...string) map[string]bool {
+	set := make(map[string]bool, len(actions))
+	for _, action := range actions {
+		set[action] = true
+	}
+	return set
+}
+
+func cliPolicyFor(name string) cliCommandPolicy {
+	if policy, ok := cliCommandPolicies[name]; ok {
+		return policy
+	}
+	return cliCommandPolicy{backendRequired: true, projectScopeMode: cliProjectScopeAlways}
+}
+
+func (c command) cliPolicy() cliCommandPolicy {
+	return cliPolicyFor(c.name)
+}
+
+func (c command) cliActionArgs(args []string) []string {
+	if len(args) > 0 && c.matches(strings.TrimPrefix(args[0], "/")) {
+		return args[1:]
+	}
+	return args
+}
+
+func (c command) cliAction(args []string) string {
+	action, _ := splitAction(c.actions, c.cliActionArgs(args))
+	return action
+}
 
 // cliProjectScoped reports whether this invocation can read or mutate a
 // project-scoped endpoint. Global actions remain usable without selecting a
 // project, even though some of their commands also load the project list.
 func (c command) cliProjectScoped(args []string) bool {
-	switch c.name {
-	case "help", "quit", "clear", "login", "setup", "project", "projects", "status":
+	policy := c.cliPolicy()
+	switch policy.projectScopeMode {
+	case cliProjectScopeNever:
 		return false
-	case "chat":
-		return len(args) > 0
-	case "agents":
-		action, _ := splitAction(c.actions, args)
-		return action != "metrics"
-	case "models":
-		action, _ := splitAction(c.actions, args)
-		return action == "capacity" || action == "edit" || action == "default" || action == "delete"
-	case "workers":
-		action, _ := splitAction(c.actions, args)
-		return action == "project"
+	case cliProjectScopeWhenArgs:
+		return len(c.cliActionArgs(args)) > 0
+	case cliProjectScopeExceptActions:
+		return !policy.projectScopeActions[c.cliAction(args)]
+	case cliProjectScopeOnlyActions:
+		return policy.projectScopeActions[c.cliAction(args)]
 	default:
 		return true
 	}
@@ -1729,13 +1809,11 @@ func cliImplicitProject(c command, args []string, projectRef string, m Model) (c
 	return project, true
 }
 
-// needsBackend reports whether the command requires a selected project.
+// needsBackend reports whether the command requires backend connectivity during
+// CLI preflight. Some commands that use the backend still remain global rather
+// than project-scoped.
 func (c command) needsBackend() bool {
-	switch c.name {
-	case "help", "quit", "clear", "login", "setup":
-		return false
-	}
-	return true
+	return c.cliPolicy().backendRequired
 }
 
 // needsProjectLoad reports whether CLI startup should resolve a selected
@@ -1743,19 +1821,17 @@ func (c command) needsBackend() bool {
 // independent of the existing project list so first-run creation works even
 // when the backend has no projects yet.
 func (c command) needsProjectLoad(args []string) bool {
-	if c.name == "projects" && len(args) > 1 && (strings.EqualFold(args[1], "create") || strings.EqualFold(args[1], "github-create")) {
+	policy := c.cliPolicy()
+	if !policy.backendRequired {
 		return false
 	}
-	if c.name == "models" && len(args) > 0 && !c.cliProjectScoped(args[1:]) {
+	if policy.loadProjectWhenScoped {
+		return c.cliProjectScoped(args)
+	}
+	if policy.skipProjectLoadActions[c.cliAction(args)] {
 		return false
 	}
-	if c.name == "workers" {
-		action, _ := splitAction(c.actions, args[1:])
-		if action == "" || action == "show" || action == "limit" {
-			return false
-		}
-	}
-	return c.needsBackend()
+	return true
 }
 
 // needsStatus reports whether the command renders connection state.
