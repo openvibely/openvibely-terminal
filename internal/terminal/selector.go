@@ -132,6 +132,7 @@ func optionSelectorWithFilter(m Model, title, command, usage string, values []st
 // handleSelector applies a selectorActiveMsg: error, empty hint, single-item
 // auto-select, or open the interactive picker.
 func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
+	m.ensureInteractiveModels()
 	if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 		return m, nil // stale selector response from an older session or project
 	}
@@ -222,6 +223,7 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 
 // clearSelector resets all selector state and restores the transcript height.
 func (m Model) clearSelector() Model {
+	m.ensureInteractiveModels()
 	m.selectorActive = false
 	m.selectorTitle = ""
 	m.selectorItems = nil
@@ -256,6 +258,7 @@ func (m Model) clearReviewPrefill() Model {
 }
 
 func (m Model) invalidateReviewPrefill() Model {
+	m.ensureInteractiveModels()
 	if m.reviewPrefillTask != nil && !strings.HasPrefix(m.input.Value(), m.reviewPrefillInputPrefix) {
 		return m.clearReviewPrefill()
 	}

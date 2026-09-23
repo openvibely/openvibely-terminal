@@ -20,11 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -83,13 +86,13 @@ type Model struct {
 	personalityBulkLookupCancel    context.CancelFunc
 	personalityBulkLookupRequestID uint64
 
-	transcript viewport.Model
-	input      textinput.Model
+	transcript *viewport.Model
+	input      *textinput.Model
 	spin       spinner.Model
 
 	// automationEditor holds the complete authoritative YAML only while an
 	// interactive edit session is active. It is never appended to the transcript.
-	automationEditor           textarea.Model
+	automationEditor           *textarea.Model
 	automationEditActive       bool
 	automationEditSaving       bool
 	automationEditCancel       context.CancelFunc
@@ -104,10 +107,15 @@ type Model struct {
 
 	log []entry
 
-	transcriptContent     string
-	transcriptBlocks      []string
-	transcriptRenderWidth int
-	transcriptReady       bool
+	transcriptContent         string
+	transcriptContentDirty    bool
+	transcriptBlocks          []string
+	transcriptBlockLineCounts []int
+	transcriptBlockMaxWidths  []int
+	transcriptLines           []string
+	transcriptMaxLineWidth    int
+	transcriptRenderWidth     int
+	transcriptReady           bool
 
 	// command menu (shown while the input starts with "/")
 	menu    []command
@@ -208,6 +216,9 @@ type Model struct {
 	chatStreamOffset           int
 	chatStreamOutput           string
 	chatStreamBuffer           []byte
+	chatStreamRenderedOutput   string
+	chatStreamRenderedBody     string
+	chatStreamRenderedWidth    int
 	chatStreamLogIndex         int
 	chatStreamRenderQueued     bool
 	chatStreamRenderGeneration uint64
@@ -291,13 +302,14 @@ func New(c *client.Client) Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(colorPrimary)
+	vp := viewport.New(0, 0)
 
 	m := Model{
 		client:             c,
-		input:              ti,
-		automationEditor:   editor,
+		input:              &ti,
+		automationEditor:   &editor,
 		spin:               sp,
-		transcript:         viewport.New(0, 0),
+		transcript:         &vp,
 		sseBackoff:         time.Second,
 		chatStreamLogIndex: -1,
 		histPos:            -1,
@@ -321,6 +333,27 @@ func New(c *client.Client) Model {
 
 // WithProject requests that a project be selected once the list loads. The
 // reference may be a name, ID or unique prefix.
+func (m *Model) ensureInteractiveModels() {
+	if m.transcript == nil {
+		vp := viewport.New(0, 0)
+		m.transcript = &vp
+	}
+	if m.input == nil {
+		input := textinput.New()
+		input.Placeholder = defaultPlaceholder
+		input.CharLimit = 8000
+		input.Prompt = "❯ "
+		m.input = &input
+	}
+	if m.automationEditor == nil {
+		editor := textarea.New()
+		editor.Placeholder = "Complete automation YAML"
+		editor.CharLimit = maxAutomationDefinitionEditorBytes
+		editor.ShowLineNumbers = true
+		m.automationEditor = &editor
+	}
+}
+
 func (m Model) WithProject(ref string) Model {
 	m.wantProject = ref
 	return m
@@ -924,6 +957,9 @@ func (m *Model) resetChatStreamOutput() {
 	m.chatStreamOffset = 0
 	m.chatStreamOutput = ""
 	m.chatStreamBuffer = nil
+	m.chatStreamRenderedOutput = ""
+	m.chatStreamRenderedBody = ""
+	m.chatStreamRenderedWidth = 0
 	m.chatStreamLogIndex = -1
 	m.chatStreamRenderQueued = false
 	m.chatStreamRedraws = 0
@@ -962,9 +998,6 @@ func (m *Model) updateChatStreamOutput(delta string) {
 	if delta == "" {
 		return
 	}
-	if len(m.chatStreamBuffer) == 0 && m.chatStreamOutput != "" {
-		m.chatStreamBuffer = append(m.chatStreamBuffer, m.chatStreamOutput...)
-	}
 	m.chatStreamBuffer = append(m.chatStreamBuffer, delta...)
 	m.chatStreamOffset += len(delta)
 }
@@ -973,7 +1006,7 @@ func (m *Model) currentChatStreamOutput() string {
 	if len(m.chatStreamBuffer) == 0 {
 		return m.chatStreamOutput
 	}
-	return string(m.chatStreamBuffer)
+	return m.chatStreamOutput + string(m.chatStreamBuffer)
 }
 
 func (m *Model) flushChatStreamOutput() {
@@ -990,13 +1023,19 @@ func (m *Model) flushChatStreamOutput() {
 	if output == m.chatStreamOutput && m.chatStreamLogIndex >= 0 {
 		return
 	}
+	previousOutput := m.chatStreamOutput
 	m.chatStreamOutput = output
+	m.chatStreamBuffer = m.chatStreamBuffer[:0]
 	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
 		m.log[m.chatStreamLogIndex].text = output
-		m.replaceTranscriptBlock(m.chatStreamLogIndex)
+		if !m.replaceChatStreamTranscriptBlock(m.chatStreamLogIndex, previousOutput, output) {
+			m.replaceTranscriptBlock(m.chatStreamLogIndex)
+			m.rememberChatStreamRenderedBlock(m.chatStreamLogIndex, output)
+		}
 	} else {
 		m.appendTranscriptEntry(entry{role: "agent", text: output})
 		m.chatStreamLogIndex = len(m.log) - 1
+		m.rememberChatStreamRenderedBlock(m.chatStreamLogIndex, output)
 	}
 	m.chatStreamRedraws++
 }
@@ -1038,6 +1077,7 @@ func (m *Model) updateChatStreamSnapshot(snapshot string) {
 		m.flushChatStreamOutput()
 		return
 	}
+	m.chatStreamOutput = ""
 	m.chatStreamBuffer = append(m.chatStreamBuffer[:0], snapshot...)
 	m.chatStreamOffset = len(snapshot)
 	m.flushChatStreamOutput()
@@ -1467,6 +1507,7 @@ func (m *Model) invalidateSSE() {
 
 // Update handles all incoming messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	m.ensureInteractiveModels()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -2253,7 +2294,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.event.Name {
 		case "":
 			m.updateChatStreamOutput(msg.event.Data)
-			return m, tea.Batch(m.waitForCurrentChatStream(msg.generation), m.scheduleChatStreamRender())
+			wait := m.waitForCurrentChatStream(msg.generation)
+			if render := m.scheduleChatStreamRender(); render != nil {
+				return m, tea.Batch(wait, render)
+			}
+			return m, wait
 		case "done", "error":
 			m.flushChatStreamOutput()
 			m.invalidateChatStream()
@@ -2646,7 +2691,8 @@ func (m Model) handleLoginKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	input, cmd := m.input.Update(msg)
+	*m.input = input
 	return m, cmd
 }
 
@@ -2697,7 +2743,8 @@ func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	var cmd tea.Cmd
-	m.automationEditor, cmd = m.automationEditor.Update(msg)
+	automationEditor, cmd := m.automationEditor.Update(msg)
+	*m.automationEditor = automationEditor
 	return m, cmd
 }
 
@@ -2862,7 +2909,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
+	input, cmd := m.input.Update(msg)
+	*m.input = input
 	m.refreshMenu()
 	m = m.invalidateReviewPrefill()
 	return m, cmd
@@ -3191,6 +3239,7 @@ func (m *Model) append(e entry) {
 }
 
 func (m *Model) appendTranscriptEntry(e entry) {
+	m.ensureTranscriptContent()
 	width := m.effectiveTranscriptWidth()
 	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log)
 	block := ""
@@ -3217,18 +3266,18 @@ func (m *Model) appendTranscriptEntry(e entry) {
 	}
 
 	if dropped > 0 {
-		cut := 0
-		for _, old := range m.transcriptBlocks[:dropped] {
-			cut += len(old)
-		}
-		if cut > len(m.transcriptContent) {
-			m.refreshTranscript()
-			return
-		}
-		m.transcriptContent = m.transcriptContent[cut:]
-		m.transcriptBlocks = m.transcriptBlocks[dropped:]
+		m.refreshTranscript()
+		return
 	}
 	m.transcriptBlocks = append(m.transcriptBlocks, block)
+	blockLines, blockMaxWidth := renderedLines(block)
+	beforeLines := len(m.transcriptLines)
+	m.transcriptLines = appendRenderedLines(m.transcriptLines, blockLines)
+	m.transcriptBlockLineCounts = append(m.transcriptBlockLineCounts, len(m.transcriptLines)-beforeLines)
+	m.transcriptBlockMaxWidths = append(m.transcriptBlockMaxWidths, blockMaxWidth)
+	if blockMaxWidth > m.transcriptMaxLineWidth {
+		m.transcriptMaxLineWidth = blockMaxWidth
+	}
 	m.transcriptContent += block
 	m.transcript.SetContent(m.transcriptContent)
 	m.transcript.GotoBottom()
@@ -3277,13 +3326,30 @@ func (m *Model) refreshTranscript() {
 
 	var b strings.Builder
 	blocks := make([]string, 0, len(m.log))
+	blockLineCounts := make([]int, 0, len(m.log))
+	blockMaxWidths := make([]int, 0, len(m.log))
+	var lines []string
+	maxLineWidth := 0
 	for _, e := range m.log {
 		block := renderTranscriptEntry(e, wrap)
 		b.WriteString(block)
 		blocks = append(blocks, block)
+		blockLines, blockMaxWidth := renderedLines(block)
+		beforeLines := len(lines)
+		lines = appendRenderedLines(lines, blockLines)
+		blockLineCounts = append(blockLineCounts, len(lines)-beforeLines)
+		blockMaxWidths = append(blockMaxWidths, blockMaxWidth)
+		if blockMaxWidth > maxLineWidth {
+			maxLineWidth = blockMaxWidth
+		}
 	}
 	m.transcriptContent = b.String()
+	m.transcriptContentDirty = false
 	m.transcriptBlocks = blocks
+	m.transcriptBlockLineCounts = blockLineCounts
+	m.transcriptBlockMaxWidths = blockMaxWidths
+	m.transcriptLines = lines
+	m.transcriptMaxLineWidth = maxLineWidth
 	m.transcriptRenderWidth = width
 	m.transcriptReady = true
 	m.transcript.SetContent(m.transcriptContent)
@@ -3294,6 +3360,7 @@ func (m *Model) refreshTranscript() {
 // still describes the current log and width. Any mismatch retains the existing
 // full-invalidation behavior.
 func (m *Model) replaceTranscriptBlock(index int) {
+	m.ensureTranscriptContent()
 	width := m.effectiveTranscriptWidth()
 	if !m.transcriptReady || m.transcriptRenderWidth != width || len(m.transcriptBlocks) != len(m.log) || index < 0 || index >= len(m.log) {
 		m.refreshTranscript()
@@ -3317,9 +3384,210 @@ func (m *Model) replaceTranscriptBlock(index int) {
 	b.WriteString(block)
 	b.WriteString(m.transcriptContent[end:])
 	m.transcriptContent = b.String()
+	m.transcriptContentDirty = false
 	m.transcriptBlocks[index] = block
+	if m.replaceTranscriptViewportBlock(index, block) {
+		return
+	}
 	m.transcript.SetContent(m.transcriptContent)
+	m.rebuildTranscriptLineCache()
 	m.transcript.GotoBottom()
+}
+
+func (m *Model) replaceChatStreamTranscriptBlock(index int, previousOutput, output string) bool {
+	width := m.effectiveTranscriptWidth()
+	wrapWidth := width - 2
+	if wrapWidth < 1 || index != len(m.transcriptBlocks)-1 || m.chatStreamRenderedWidth != width || m.chatStreamRenderedOutput != previousOutput || !strings.HasPrefix(output, previousOutput) {
+		return false
+	}
+	delta := strings.TrimPrefix(output, previousOutput)
+	if delta == "" || !isHardWrapOnlyDelta(delta) {
+		return false
+	}
+	body := appendHardWrappedText(m.chatStreamRenderedBody, delta, wrapWidth)
+	block := chatAgentStyle.Render("● agent") + "\n" + body + "\n\n"
+
+	m.transcriptBlocks[index] = block
+	if !m.replaceTranscriptViewportBlock(index, block) {
+		m.transcriptContentDirty = true
+		return false
+	}
+	m.transcriptContentDirty = true
+	m.chatStreamRenderedOutput = output
+	m.chatStreamRenderedBody = body
+	m.chatStreamRenderedWidth = width
+	return true
+}
+
+func (m *Model) rememberChatStreamRenderedBlock(index int, output string) {
+	if index < 0 || index >= len(m.transcriptBlocks) || index >= len(m.log) || m.log[index].role != "agent" {
+		m.chatStreamRenderedOutput = ""
+		m.chatStreamRenderedBody = ""
+		m.chatStreamRenderedWidth = 0
+		return
+	}
+	body, ok := renderedAgentBlockBody(m.transcriptBlocks[index])
+	if !ok {
+		m.chatStreamRenderedOutput = ""
+		m.chatStreamRenderedBody = ""
+		m.chatStreamRenderedWidth = 0
+		return
+	}
+	m.chatStreamRenderedOutput = output
+	m.chatStreamRenderedBody = body
+	m.chatStreamRenderedWidth = m.effectiveTranscriptWidth()
+}
+
+func renderedAgentBlockBody(block string) (string, bool) {
+	headerEnd := strings.IndexByte(block, '\n')
+	if headerEnd < 0 || !strings.HasSuffix(block, "\n\n") {
+		return "", false
+	}
+	return block[headerEnd+1 : len(block)-2], true
+}
+
+func isHardWrapOnlyDelta(delta string) bool {
+	for _, r := range delta {
+		if r == utf8.RuneError || r == '\x1b' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func appendHardWrappedText(rendered, delta string, limit int) string {
+	if delta == "" {
+		return rendered
+	}
+	column := 0
+	if lastNewline := strings.LastIndexByte(rendered, '\n'); lastNewline >= 0 {
+		column = ansi.StringWidth(rendered[lastNewline+1:])
+	} else {
+		column = ansi.StringWidth(rendered)
+	}
+	var b strings.Builder
+	b.Grow(len(rendered) + len(delta) + len(delta)/limit + 1)
+	b.WriteString(rendered)
+	for _, r := range delta {
+		w := 1
+		if r >= utf8.RuneSelf {
+			w = ansi.StringWidth(string(r))
+			if w <= 0 {
+				b.WriteRune(r)
+				continue
+			}
+		}
+		if column+w > limit {
+			b.WriteByte('\n')
+			column = 0
+		}
+		b.WriteRune(r)
+		column += w
+	}
+	return b.String()
+}
+
+func (m *Model) replaceTranscriptViewportBlock(index int, block string) bool {
+	if index != len(m.transcriptBlocks)-1 || index >= len(m.transcriptBlockLineCounts) || index >= len(m.transcriptBlockMaxWidths) {
+		return false
+	}
+	oldLineCount := m.transcriptBlockLineCounts[index]
+	prefixLineCount := len(m.transcriptLines) - oldLineCount
+	if oldLineCount < 0 || prefixLineCount < 0 {
+		return false
+	}
+
+	blockLines, blockMaxWidth := renderedLines(block)
+	lines := m.transcriptLines[:prefixLineCount]
+	beforeLines := len(lines)
+	lines = appendRenderedLines(lines, blockLines)
+	m.transcriptLines = lines
+	m.transcriptBlockLineCounts[index] = len(lines) - beforeLines
+
+	oldBlockMaxWidth := m.transcriptBlockMaxWidths[index]
+	m.transcriptBlockMaxWidths[index] = blockMaxWidth
+	if blockMaxWidth >= m.transcriptMaxLineWidth {
+		m.transcriptMaxLineWidth = blockMaxWidth
+	} else if oldBlockMaxWidth >= m.transcriptMaxLineWidth {
+		m.transcriptMaxLineWidth = maxInt(m.transcriptBlockMaxWidths)
+	}
+
+	setViewportCachedContent(m.transcript, m.transcriptLines, m.transcriptMaxLineWidth)
+	m.transcript.GotoBottom()
+	return true
+}
+
+func (m *Model) ensureTranscriptContent() {
+	if !m.transcriptContentDirty {
+		return
+	}
+	var b strings.Builder
+	for _, block := range m.transcriptBlocks {
+		b.WriteString(block)
+	}
+	m.transcriptContent = b.String()
+	m.transcriptContentDirty = false
+}
+
+func (m *Model) rebuildTranscriptLineCache() {
+	var lines []string
+	maxLineWidth := 0
+	m.transcriptBlockLineCounts = m.transcriptBlockLineCounts[:0]
+	m.transcriptBlockMaxWidths = m.transcriptBlockMaxWidths[:0]
+	for _, block := range m.transcriptBlocks {
+		blockLines, blockMaxWidth := renderedLines(block)
+		beforeLines := len(lines)
+		lines = appendRenderedLines(lines, blockLines)
+		m.transcriptBlockLineCounts = append(m.transcriptBlockLineCounts, len(lines)-beforeLines)
+		m.transcriptBlockMaxWidths = append(m.transcriptBlockMaxWidths, blockMaxWidth)
+		if blockMaxWidth > maxLineWidth {
+			maxLineWidth = blockMaxWidth
+		}
+	}
+	m.transcriptLines = lines
+	m.transcriptMaxLineWidth = maxLineWidth
+}
+
+func renderedLines(s string) ([]string, int) {
+	lines := strings.Split(s, "\n")
+	maxWidth := 0
+	for _, line := range lines {
+		if width := ansi.StringWidth(line); width > maxWidth {
+			maxWidth = width
+		}
+	}
+	return lines, maxWidth
+}
+
+func appendRenderedLines(lines, blockLines []string) []string {
+	if len(blockLines) == 0 {
+		return lines
+	}
+	if len(lines) == 0 {
+		return append(lines, blockLines...)
+	}
+	lines[len(lines)-1] += blockLines[0]
+	return append(lines, blockLines[1:]...)
+}
+
+func maxInt(values []int) int {
+	maxValue := 0
+	for _, value := range values {
+		if value > maxValue {
+			maxValue = value
+		}
+	}
+	return maxValue
+}
+
+func setViewportCachedContent(v *viewport.Model, lines []string, longestLineWidth int) {
+	viewportValue := reflect.ValueOf(v).Elem()
+	setUnexportedField(viewportValue.FieldByName("lines"), lines)
+	setUnexportedField(viewportValue.FieldByName("longestLineWidth"), longestLineWidth)
+}
+
+func setUnexportedField(field reflect.Value, value any) {
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(value))
 }
 
 func (m Model) effectiveTranscriptWidth() int {

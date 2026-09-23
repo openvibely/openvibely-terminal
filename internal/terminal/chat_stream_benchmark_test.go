@@ -7,6 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
@@ -88,7 +92,10 @@ func BenchmarkChatStreamUpdateLatencyP95(b *testing.B) {
 }
 
 func streamBenchmarkModel(entries int) Model {
-	m := Model{chatStreamLogIndex: -1}
+	vp := viewport.New(0, 0)
+	input := textinput.New()
+	editor := textarea.New()
+	m := Model{chatStreamLogIndex: -1, transcript: &vp, input: &input, automationEditor: &editor}
 	m.transcript.Width = 100
 	m.transcript.Height = 25
 	for i := 0; i < entries-1; i++ {
