@@ -930,36 +930,17 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 		defer leave()
 	}
 
-	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
-	var validationKeys []lifecyclePreviewMapKey
-	sourceOrder := 0
-	retainedKeyBytes := 0
+	selection := newLifecyclePreviewMapKeySelection(len(value), p.limit+1)
+	selection.validationOverflowErr = errLifecyclePreviewMapValidationBounds
 	for key, item := range value {
-		candidate := lifecyclePreviewNativeStringKeyWithBudget(key, max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes))
-		retainedKeyBytes += len(candidate.text)
-		candidate.sourceOrder = sourceOrder
-		sourceOrder++
+		candidate := lifecyclePreviewNativeStringKeyWithBudget(key, selection.retainedBudget())
 		candidate.nativeValue = item
-		for _, retained := range keys {
-			if lifecyclePreviewMapKeyOrderAmbiguous(retained, candidate) {
-				return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
-			}
-		}
-		keys = lifecycleInsertPreviewMapKey(keys, candidate, p.limit+1)
-		if lifecycleAnyMayMarshalError(item) {
-			for _, retained := range validationKeys {
-				if lifecyclePreviewMapKeyOrderAmbiguous(retained, candidate) {
-					return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
-				}
-			}
-			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
-				return fmt.Errorf("lifecycle payload map validation exceeds preview bounds")
-			}
-			validationKeys = append(validationKeys, candidate)
+		if err := selection.add(candidate, lifecycleAnyMayMarshalError(item)); err != nil {
+			return err
 		}
 	}
 	p.append("{")
-	for i, key := range keys {
+	for i, key := range selection.keys {
 		if !p.stopped {
 			if i > 0 {
 				p.append(",")
@@ -971,18 +952,9 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 			return err
 		}
 	}
-	if len(keys) > 0 && len(validationKeys) > 0 {
-		cursor := keys[len(keys)-1]
-		sort.Slice(validationKeys, func(i, j int) bool {
-			return lifecyclePreviewMapKeyLess(validationKeys[i], validationKeys[j])
-		})
-		for _, key := range validationKeys {
-			if !lifecyclePreviewMapKeyLess(cursor, key) {
-				continue
-			}
-			if err := p.appendValue(key.nativeValue, depth+1); err != nil {
-				return err
-			}
+	for _, key := range selection.validationKeysAfterSelected() {
+		if err := p.appendValue(key.nativeValue, depth+1); err != nil {
+			return err
 		}
 	}
 	p.append("}")
@@ -1527,33 +1499,17 @@ func (p *lifecycleJSONPreview) appendStringStringMap(value map[string]string, de
 		p.append("null")
 		return nil
 	}
-	keys := make([]lifecyclePreviewMapKey, 0, min(len(value), p.limit+1))
-	orderingUnavailable := false
-	retainedKeyBytes := 0
-	sourceOrder := 0
+	selection := newLifecyclePreviewMapKeySelection(len(value), p.limit+1)
 	for text := range value {
-		key := lifecyclePreviewNativeStringKeyWithBudget(text, max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes))
-		key.sourceOrder = sourceOrder
+		key := lifecyclePreviewNativeStringKeyWithBudget(text, selection.retainedBudget())
 		key.sourceString = text
-		sourceOrder++
-		for _, retained := range keys {
-			if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
-				orderingUnavailable = true
-				break
-			}
+		if err := selection.add(key, false); err != nil {
+			return err
 		}
-		if orderingUnavailable {
-			continue
-		}
-		retainedKeyBytes += len(key.text)
-		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
-	}
-	if orderingUnavailable {
-		return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
 	}
 
 	p.append("{")
-	for i, key := range keys {
+	for i, key := range selection.keys {
 		if !p.stopped {
 			if i > 0 {
 				p.append(",")
@@ -1586,68 +1542,29 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	if value.Type() == reflect.TypeFor[map[string]string]() && value.CanInterface() {
 		return p.appendStringStringMap(value.Interface().(map[string]string), depth)
 	}
-	keys := make([]lifecyclePreviewMapKey, 0, min(value.Len(), p.limit+1))
-	var validationKeys []lifecyclePreviewMapKey
-	orderingUnavailable := false
-	iterator := value.MapRange()
-	sourceOrder := 0
-	retainedKeyBytes := 0
-	keyRetentionBudget := lifecyclePreviewMaxRetainedKeyBytes / max(1, value.Len())
+	selection := newLifecyclePreviewMapKeySelection(value.Len(), p.limit+1)
+	selection.perKeyRetainedBudget = lifecyclePreviewMaxRetainedKeyBytes / max(1, value.Len())
 	elementMayError := lifecycleTypeMayMarshalErrorAddressable(value.Type().Elem(), false)
+	iterator := value.MapRange()
 	for iterator.Next() {
-		if orderingUnavailable {
-			// Continue the single key-method pass so key call cardinality and errors
-			// remain compatible, but retain nothing once fallback is certain.
-			if _, err := lifecyclePreviewKey(iterator.Key(), -1); err != nil {
-				return err
-			}
-			continue
-		}
-		key, err := lifecyclePreviewKey(iterator.Key(), min(keyRetentionBudget, max(0, lifecyclePreviewMaxRetainedKeyBytes-retainedKeyBytes)))
+		key, err := lifecyclePreviewKey(iterator.Key(), selection.retainedBudget())
 		if err != nil {
 			return err
 		}
-		retainedKeyBytes += len(key.text)
-		key.sourceOrder = sourceOrder
-		sourceOrder++
-		key.mapValue = iterator.Value()
-		mayError := elementMayError && lifecycleReflectValueMayMarshalError(key.mapValue)
-		for _, retained := range keys {
-			if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
-				// These keys may differ only beyond a discarded suffix, so their
-				// canonical output order cannot be determined within the bound.
-				orderingUnavailable = true
-				break
-			}
-		}
-		if orderingUnavailable {
-			// Do not insert the ambiguity-triggering key: its unrestricted source
-			// value must never reach the comparator after bounded ordering fails.
+		if selection.err != nil {
+			// Continue the single key-method pass so key call cardinality and errors
+			// remain compatible, but retain nothing once fallback is certain.
 			continue
 		}
-		keys = lifecycleInsertPreviewMapKey(keys, key, p.limit+1)
-		if mayError {
-			for _, retained := range validationKeys {
-				if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
-					// Error-capable values must be invoked in exact canonical key
-					// order. Distinct retained prefixes establish that order without
-					// requiring the discarded suffixes.
-					orderingUnavailable = true
-					break
-				}
-			}
-			if len(validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
-				orderingUnavailable = true
-				continue
-			}
-			validationKeys = append(validationKeys, key)
-		}
+		key.mapValue = iterator.Value()
+		mayError := elementMayError && lifecycleReflectValueMayMarshalError(key.mapValue)
+		_ = selection.add(key, mayError)
 	}
-	if orderingUnavailable {
-		return fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+	if selection.err != nil {
+		return selection.err
 	}
 	p.append("{")
-	for i, key := range keys {
+	for i, key := range selection.keys {
 		if !p.stopped {
 			if i > 0 {
 				p.append(",")
@@ -1659,22 +1576,91 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 			return err
 		}
 	}
-	if len(keys) > 0 && len(validationKeys) > 0 {
-		cursor := keys[len(keys)-1]
-		sort.Slice(validationKeys, func(i, j int) bool {
-			return lifecyclePreviewMapKeyLess(validationKeys[i], validationKeys[j])
-		})
-		for _, key := range validationKeys {
-			if !lifecyclePreviewMapKeyLess(cursor, key) {
-				continue
-			}
-			if err := p.appendReflectValue(key.mapValue, depth+1); err != nil {
-				return err
-			}
+	for _, key := range selection.validationKeysAfterSelected() {
+		if err := p.appendReflectValue(key.mapValue, depth+1); err != nil {
+			return err
 		}
 	}
 	p.append("}")
 	return nil
+}
+
+var (
+	errLifecyclePreviewMapKeyOrderingBounds = fmt.Errorf("lifecycle payload map key ordering exceeds preview bounds")
+	errLifecyclePreviewMapValidationBounds  = fmt.Errorf("lifecycle payload map validation exceeds preview bounds")
+)
+
+type lifecyclePreviewMapKeySelection struct {
+	keys                  []lifecyclePreviewMapKey
+	validationKeys        []lifecyclePreviewMapKey
+	limit                 int
+	perKeyRetainedBudget  int
+	retainedKeyBytes      int
+	sourceOrder           int
+	err                   error
+	validationOverflowErr error
+}
+
+func newLifecyclePreviewMapKeySelection(mapLen, limit int) lifecyclePreviewMapKeySelection {
+	return lifecyclePreviewMapKeySelection{
+		keys:                  make([]lifecyclePreviewMapKey, 0, min(mapLen, limit)),
+		limit:                 limit,
+		perKeyRetainedBudget:  -1,
+		validationOverflowErr: errLifecyclePreviewMapKeyOrderingBounds,
+	}
+}
+
+func (selection *lifecyclePreviewMapKeySelection) retainedBudget() int {
+	if selection.err != nil {
+		return -1
+	}
+	remaining := max(0, lifecyclePreviewMaxRetainedKeyBytes-selection.retainedKeyBytes)
+	if selection.perKeyRetainedBudget >= 0 {
+		return min(selection.perKeyRetainedBudget, remaining)
+	}
+	return remaining
+}
+
+func (selection *lifecyclePreviewMapKeySelection) add(key lifecyclePreviewMapKey, validate bool) error {
+	key.sourceOrder = selection.sourceOrder
+	selection.sourceOrder++
+	selection.retainedKeyBytes += len(key.text)
+	for _, retained := range selection.keys {
+		if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+			selection.err = errLifecyclePreviewMapKeyOrderingBounds
+			return selection.err
+		}
+	}
+	selection.keys = lifecycleInsertPreviewMapKey(selection.keys, key, selection.limit)
+	if !validate {
+		return nil
+	}
+	for _, retained := range selection.validationKeys {
+		if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+			selection.err = errLifecyclePreviewMapKeyOrderingBounds
+			return selection.err
+		}
+	}
+	if len(selection.validationKeys) >= lifecyclePreviewMaxValidationMapKeys {
+		selection.err = selection.validationOverflowErr
+		return selection.err
+	}
+	selection.validationKeys = append(selection.validationKeys, key)
+	return nil
+}
+
+func (selection *lifecyclePreviewMapKeySelection) validationKeysAfterSelected() []lifecyclePreviewMapKey {
+	if len(selection.keys) == 0 || len(selection.validationKeys) == 0 {
+		return nil
+	}
+	cursor := selection.keys[len(selection.keys)-1]
+	sort.Slice(selection.validationKeys, func(i, j int) bool {
+		return lifecyclePreviewMapKeyLess(selection.validationKeys[i], selection.validationKeys[j])
+	})
+	first := sort.Search(len(selection.validationKeys), func(i int) bool {
+		return lifecyclePreviewMapKeyLess(cursor, selection.validationKeys[i])
+	})
+	return selection.validationKeys[first:]
 }
 
 func lifecycleInsertPreviewMapKey(keys []lifecyclePreviewMapKey, key lifecyclePreviewMapKey, limit int) []lifecyclePreviewMapKey {

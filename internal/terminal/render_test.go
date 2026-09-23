@@ -1637,11 +1637,15 @@ func TestLifecyclePayloadSummaryPreservesDistinguishableOversizedNativeMapKeys(t
 		"a-" + strings.Repeat("k", 1<<20): 1,
 		"z-" + strings.Repeat("k", 1<<20): 2,
 	}
+	stringValues := map[string]string{
+		"a-" + strings.Repeat("k", 1<<20): "one",
+		"z-" + strings.Repeat("k", 1<<20): "two",
+	}
 	reflected := map[string]int{
 		"a-" + strings.Repeat("k", 1<<20): 1,
 		"z-" + strings.Repeat("k", 1<<20): 2,
 	}
-	for _, payload := range []map[string]any{concrete, {"values": reflected}} {
+	for _, payload := range []map[string]any{concrete, {"values": stringValues}, {"values": reflected}} {
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			t.Fatalf("marshal distinguishable oversized keys: %v", err)
@@ -1656,10 +1660,12 @@ func TestLifecyclePayloadSummaryBoundsNativeLongCommonPrefixMapKeys(t *testing.T
 	const keyCount = 32
 	prefix := strings.Repeat("k", 1<<20)
 	concrete := make(map[string]any, keyCount)
+	stringValues := make(map[string]string, keyCount)
 	reflected := make(map[string]int, keyCount)
 	for i := range keyCount {
 		key := fmt.Sprintf("%s-%03d", prefix, i)
 		concrete[key] = i
+		stringValues[key] = fmt.Sprintf("value-%03d", i)
 		reflected[key] = i
 	}
 
@@ -1668,6 +1674,7 @@ func TestLifecyclePayloadSummaryBoundsNativeLongCommonPrefixMapKeys(t *testing.T
 		payload map[string]any
 	}{
 		{name: "concrete", payload: concrete},
+		{name: "string_values", payload: map[string]any{"values": stringValues}},
 		{name: "reflected", payload: map[string]any{"values": reflected}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
