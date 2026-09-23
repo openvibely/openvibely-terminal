@@ -6835,6 +6835,71 @@ func TestBuildPulseProjectionPrefersMinutePreciseUpcomingRecurringOccurrence(t *
 	}
 }
 
+func TestSelectPulseScheduleOccurrencesDeduplicatesByAuthoritativeNextRun(t *testing.T) {
+	generatedAt := time.Date(2026, 9, 18, 10, 30, 0, 0, time.UTC)
+	lookaheadEnd := generatedAt.AddDate(0, 0, 7)
+	past := generatedAt.Add(-15 * time.Minute)
+	earlierUpcoming := generatedAt.Add(15 * time.Minute)
+	laterUpcoming := generatedAt.Add(45 * time.Minute)
+	latestUpcoming := generatedAt.Add(90 * time.Minute)
+
+	tests := []struct {
+		name    string
+		entries []ScheduleEntry
+		want    time.Time
+	}{
+		{
+			name: "exact source beats earlier derived rendered-clock occurrence",
+			entries: []ScheduleEntry{
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &earlierUpcoming, NextRunPrecise: true},
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &laterUpcoming, NextRunPrecise: true, NextRunExactSource: true},
+			},
+			want: laterUpcoming,
+		},
+		{
+			name: "exact source beats upcoming derived occurrence even when exact is overdue",
+			entries: []ScheduleEntry{
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &earlierUpcoming, NextRunPrecise: true},
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &past, NextRunPrecise: true, NextRunExactSource: true},
+			},
+			want: past,
+		},
+		{
+			name: "exact duplicates keep earliest upcoming exact occurrence",
+			entries: []ScheduleEntry{
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &laterUpcoming, NextRunPrecise: true, NextRunExactSource: true},
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &earlierUpcoming, NextRunPrecise: true, NextRunExactSource: true},
+			},
+			want: earlierUpcoming,
+		},
+		{
+			name: "derived-only duplicates keep earliest upcoming occurrence",
+			entries: []ScheduleEntry{
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &latestUpcoming, NextRunPrecise: true},
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &laterUpcoming, NextRunPrecise: true},
+			},
+			want: laterUpcoming,
+		},
+		{
+			name: "disabled duplicate exact occurrence is ignored",
+			entries: []ScheduleEntry{
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &laterUpcoming, NextRunPrecise: true},
+				{TaskID: "task-1", ScheduleID: "schedule-1", NextRun: &earlierUpcoming, Disabled: true, NextRunPrecise: true, NextRunExactSource: true},
+			},
+			want: laterUpcoming,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := selectPulseScheduleOccurrences(tc.entries, generatedAt, lookaheadEnd)
+			if len(got) != 1 || got[0].NextRun == nil || !got[0].NextRun.Equal(tc.want) {
+				t.Fatalf("selected occurrences = %+v, want one at %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildPulseProjectionSkipsDisabledSchedules(t *testing.T) {
 	generatedAt := time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC)
 	enabledRun := generatedAt.Add(2 * time.Hour)
