@@ -688,7 +688,7 @@ func renderTaskAttachments(attachments []client.Attachment) string {
 			attachmentSizeText(attachment.FileSize),
 		})
 	}
-	return table(rows) + "\n\n" + dimStyle.Render("/tasks attachments delete <task> <id|filename>")
+	return table(rows) + "\n\n" + dimStyle.Render("/tasks attachments download <task> <id|filename> [--output <path>] · /tasks attachments delete <task> <id|filename>")
 }
 
 func attachmentSizeText(size int64) string {

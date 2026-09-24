@@ -14,6 +14,7 @@ import (
 	"net/mail"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -731,6 +732,7 @@ var taskAttachmentRootActions = []string{"attachments", "attach", "attachment"}
 var taskAttachmentActionVocabularies = []taskAttachmentActionVocabulary{
 	{canonical: "add", aliases: []string{"add", "upload"}, args: "<task> <file>...", description: "upload local files"},
 	{canonical: "list", aliases: []string{"list", "show"}, args: "<task>", description: "list attachments"},
+	{canonical: "download", aliases: []string{"download", "save"}, args: "<task> <attachment> [--output <path>]", description: "download by ID or filename"},
 	{canonical: "delete", aliases: []string{"delete", "remove"}, args: "<task> <attachment>", description: "delete by ID or filename"},
 }
 
@@ -871,6 +873,7 @@ func tasksCommand() command {
 		`tasks show "Fix login bug" review`,
 		`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
 		`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
+		`tasks attachments download "Fix login bug" request.txt --output ./request.txt`,
 		`tasks attachments delete "Fix login bug" request.txt`,
 		`tasks lifecycle "Fix login bug"`,
 		`tasks logs "Fix login bug" execution-id`,
@@ -1911,6 +1914,8 @@ func taskAttachmentsCommand(m Model, c *client.Client, projectID string, args []
 	switch canonical {
 	case "add":
 		return taskAttachmentsAddCommand(m, c, projectID, rest, usage)
+	case "download":
+		return taskAttachmentsDownloadCommand(m, c, projectID, rest, usage)
 	case "delete":
 		return taskAttachmentsDeleteCommand(m, c, projectID, rest, usage)
 	case "list":
@@ -1945,6 +1950,171 @@ func taskAttachmentsAddCommand(m Model, c *client.Client, projectID string, args
 		}
 		return fmt.Sprintf("uploaded %d attachment(s) to %s\n\n%s", len(filePaths), firstNonEmpty(task.Title, task.ID), renderTaskAttachments(attachments)), nil
 	})
+}
+
+func taskAttachmentsDownloadCommand(m Model, c *client.Client, projectID string, args []string, usage string) (Model, tea.Cmd) {
+	operands, outputPath, err := parseAttachmentDownloadArgs(args)
+	if err != nil {
+		return m, errCmd(err.Error())
+	}
+	if len(operands) == 0 {
+		return taskSelectorWithSuffix(m, usage, "tasks attachments download", " ")
+	}
+	if len(operands) == 1 {
+		return taskAttachmentDownloadSelector(m, c, projectID, operands[0], outputPath, usage)
+	}
+	return m, m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+		task, attachment, err := lookupTaskAttachmentTargetForModel(m, ctx, c, projectID, operands)
+		if err != nil {
+			return "", err
+		}
+		return downloadTaskAttachmentResult(ctx, c, projectID, task, attachment, outputPath)
+	})
+}
+
+func parseAttachmentDownloadArgs(args []string) ([]string, string, error) {
+	operands := make([]string, 0, len(args))
+	var outputPath string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--output", "-o":
+			if outputPath != "" {
+				return nil, "", fmt.Errorf("--output may only be provided once")
+			}
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
+				return nil, "", fmt.Errorf("usage: /tasks attachments download <task> <attachment> [--output <path>]")
+			}
+			outputPath = args[i+1]
+			i++
+		default:
+			operands = append(operands, args[i])
+		}
+	}
+	return operands, outputPath, nil
+}
+
+func taskAttachmentDownloadSelector(m Model, c *client.Client, projectID, taskRef, outputPath, usage string) (Model, tea.Cmd) {
+	if cliMode {
+		return m, errCmd(usage)
+	}
+	command := "tasks attachments download " + taskRef
+	return m, selectorFor("Attachments", command, attachmentEmptyStateHint, false,
+		func(ctx context.Context) ([]selectorItem, error) {
+			task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
+			if err != nil {
+				return nil, err
+			}
+			attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+			if err != nil {
+				return nil, err
+			}
+			items := make([]selectorItem, 0, len(attachments))
+			for _, attachment := range attachments {
+				attachment := attachment
+				item := selectorItem{
+					ref:    attachment.ID,
+					label:  firstNonEmpty(attachment.FileName, attachment.ID),
+					detail: attachmentSizeText(attachment.FileSize),
+				}
+				item.dispatch = func(mm Model) (Model, tea.Cmd) {
+					return mm, mm.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+						return downloadTaskAttachmentResult(ctx, mm.client, projectID, task, attachment, outputPath)
+					})
+				}
+				items = append(items, item)
+			}
+			return items, nil
+		})
+}
+
+func downloadTaskAttachmentResult(ctx context.Context, c *client.Client, projectID string, task client.Task, attachment client.Attachment, outputPath string) (string, error) {
+	targetPath, err := attachmentDownloadPath(outputPath, attachment)
+	if err != nil {
+		return "", err
+	}
+	file, err := openAttachmentDownloadFile(targetPath, outputPath == "")
+	if err != nil {
+		return "", err
+	}
+	closeFile := true
+	defer func() {
+		if closeFile {
+			_ = file.Close()
+		}
+	}()
+	if err := c.DownloadTaskAttachment(ctx, attachment.ID, projectID, file); err != nil {
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("write attachment %q: %w", targetPath, err)
+	}
+	closeFile = false
+	if jsonMode {
+		return marshalJSON(struct {
+			TaskID       string `json:"task_id"`
+			AttachmentID string `json:"attachment_id"`
+			FileName     string `json:"file_name"`
+			Path         string `json:"path"`
+		}{TaskID: task.ID, AttachmentID: attachment.ID, FileName: attachment.FileName, Path: targetPath})
+	}
+	return fmt.Sprintf("downloaded attachment %q from %s to %s", firstNonEmpty(attachment.FileName, attachment.ID), firstNonEmpty(task.Title, task.ID), targetPath), nil
+}
+
+func attachmentDownloadPath(outputPath string, attachment client.Attachment) (string, error) {
+	if strings.TrimSpace(outputPath) != "" {
+		return outputPath, nil
+	}
+	name := safeAttachmentDownloadName(firstNonEmpty(attachment.FileName, attachment.ID, "attachment"))
+	path := name
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return path, nil
+		}
+		return "", fmt.Errorf("checking download path %q: %w", path, err)
+	}
+	ext := filepath.Ext(name)
+	base := strings.TrimSuffix(name, ext)
+	for i := 1; i < 10000; i++ {
+		candidate := fmt.Sprintf("%s (%d)%s", base, i, ext)
+		if _, err := os.Stat(candidate); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return candidate, nil
+			}
+			return "", fmt.Errorf("checking download path %q: %w", candidate, err)
+		}
+	}
+	return "", fmt.Errorf("could not choose an unused download filename for %q", name)
+}
+
+func safeAttachmentDownloadName(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case r == '/' || r == '\\' || r == os.PathSeparator || unicode.IsControl(r):
+			return '_'
+		default:
+			return r
+		}
+	}, name)
+	name = strings.Trim(name, " .")
+	if name == "" || name == "." || name == ".." {
+		return "attachment"
+	}
+	return name
+}
+
+func openAttachmentDownloadFile(path string, exclusive bool) (*os.File, error) {
+	flag := os.O_WRONLY | os.O_CREATE
+	if exclusive {
+		flag |= os.O_EXCL
+	} else {
+		flag |= os.O_TRUNC
+	}
+	file, err := os.OpenFile(path, flag, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open download path %q: %w", path, err)
+	}
+	return file, nil
 }
 
 func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, args []string, usage string) (Model, tea.Cmd) {

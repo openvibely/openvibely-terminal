@@ -320,6 +320,201 @@ func TestTasksAttachmentsDeleteInteractiveAndCLIResolveEquivalentRefs(t *testing
 	})
 }
 
+func TestTasksAttachmentsDownloadByIDFromCLIWritesExactBackendBytes(t *testing.T) {
+	payload := []byte("\x00remote-bytes\xff\n")
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "request.bin")
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":      cliProjects,
+		"/tasks":             attachmentTaskBoardHTML,
+		"/tasks/t-1":         attachmentRowsHTML,
+		"/attachments/att-1": string(payload),
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "download", "Refactor", "att-1", "--output", outPath}, false, false); err != nil {
+		t.Fatalf("CLI attachment download failed: %v", err)
+	}
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading downloaded file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("downloaded bytes = %q, want %q", got, payload)
+	}
+	if !rec.sawQuery("GET /attachments/att-1?project_id=p1") {
+		t.Fatalf("download was not scoped to selected project through HTTP route:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	if strings.Contains(out.String(), "file_path") {
+		t.Fatalf("download output exposed backend-local file path: %s", out.String())
+	}
+}
+
+func TestTasksAttachmentsDownloadByUniqueFilenameFromSlashCommand(t *testing.T) {
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "trace.json")
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             attachmentTaskBoardHTML,
+		"/tasks/t-1":         attachmentRowsHTML,
+		"/attachments/att-2": `{"ok":true}`,
+	})
+
+	m = runLine(t, m, `/tasks attachments download Refactor trace.json --output "`+outPath+`"`)
+	got, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading downloaded file: %v", err)
+	}
+	if string(got) != `{"ok":true}` {
+		t.Fatalf("downloaded file = %q", got)
+	}
+	if !rec.sawQuery("GET /attachments/att-2?project_id=p1") {
+		t.Fatalf("slash download was not project-scoped:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "downloaded attachment \"trace.json\"") || !strings.Contains(out, outPath) {
+		t.Fatalf("download result did not name attachment and output path:\n%s", out)
+	}
+}
+
+func TestTasksAttachmentsDownloadDuplicateFilenameIsAmbiguous(t *testing.T) {
+	rows := `<div id="attachment-list" data-project-id="p1">` +
+		`<div class="attachment-row"><p class="font-medium">request.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div>` +
+		`<div class="attachment-row"><p class="font-medium">request.txt</p><p class="text-xs">5 B</p><button hx-delete="/attachments/att-2?project_id=p1"></button></div>` +
+		`</div>`
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "request.txt")
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/tasks":        attachmentTaskBoardHTML,
+		"/tasks/t-1":    rows,
+	})
+	var out bytes.Buffer
+	err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "download", "Refactor", "request.txt", "--output", outPath}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("duplicate filename error = %v, want ambiguity", err)
+	}
+	if rec.saw("GET", "/attachments/att-1") || rec.saw("GET", "/attachments/att-2") {
+		t.Fatalf("ambiguous download guessed an attachment:\n%s", rec.all())
+	}
+	if _, statErr := os.Stat(outPath); !os.IsNotExist(statErr) {
+		t.Fatalf("ambiguous download created output path: %v", statErr)
+	}
+}
+
+func TestTasksAttachmentsDownloadFailuresAreClear(t *testing.T) {
+	t.Run("missing task", func(t *testing.T) {
+		c, _ := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/tasks":        attachmentTaskBoardHTML,
+		})
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "download", "Missing", "att-1", "--output", filepath.Join(t.TempDir(), "out.txt")}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "nothing matches") {
+			t.Fatalf("missing task error = %v", err)
+		}
+	})
+
+	t.Run("missing attachment", func(t *testing.T) {
+		c, _ := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/tasks":        attachmentTaskBoardHTML,
+			"/tasks/t-1":    attachmentRowsHTML,
+		})
+		var out bytes.Buffer
+		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "download", "Refactor", "missing.txt", "--output", filepath.Join(t.TempDir(), "out.txt")}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "nothing matches") {
+			t.Fatalf("missing attachment error = %v", err)
+		}
+	})
+
+	t.Run("backend rejected", func(t *testing.T) {
+		rec := &recorder{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rec.recordURL(r.Method, r.URL.RequestURI())
+			switch r.URL.Path {
+			case "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(cliProjects))
+			case "/api/tasks/reference-catalog":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
+			case "/tasks/t-1":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = w.Write([]byte(attachmentRowsHTML))
+			case "/attachments/att-1":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"attachment access denied"}`))
+			default:
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = w.Write([]byte(attachmentTaskBoardHTML))
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outPath := filepath.Join(t.TempDir(), "out.txt")
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "demo", []string{"tasks", "attachments", "download", "Refactor", "att-1", "--output", outPath}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "attachment access denied") {
+			t.Fatalf("backend rejection error = %v", err)
+		}
+		if !rec.sawQuery("GET /attachments/att-1?project_id=p1") {
+			t.Fatalf("backend rejection did not use scoped download route:\n%s", rec.all())
+		}
+	})
+
+	t.Run("output path cannot be written", func(t *testing.T) {
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects": cliProjects,
+			"/tasks":        attachmentTaskBoardHTML,
+			"/tasks/t-1":    attachmentRowsHTML,
+		})
+		var out bytes.Buffer
+		badPath := filepath.Join(t.TempDir(), "missing", "out.txt")
+		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "download", "Refactor", "att-1", "--output", badPath}, false, false)
+		if err == nil || !strings.Contains(err.Error(), "open download path") {
+			t.Fatalf("unwritable output error = %v", err)
+		}
+		if rec.saw("GET", "/attachments/att-1") {
+			t.Fatalf("download called backend before opening output path:\n%s", rec.all())
+		}
+	})
+}
+
+func TestTasksAttachmentsDownloadPickerDoesNotDumpBinaryToTerminal(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             attachmentTaskBoardHTML,
+		"/tasks/t-1":         `<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">raw.bin</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`,
+		"/attachments/att-1": "\x00\x01\x02\xff",
+	})
+
+	m = runLineWithFollowUp(t, m, "/tasks attachments download Refactor")
+	if !rec.sawQuery("GET /attachments/att-1?project_id=p1") {
+		t.Fatalf("picker download did not use scoped HTTP route:\n%s", rec.all())
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "raw.bin"))
+	if err != nil {
+		t.Fatalf("reading default download: %v", err)
+	}
+	if !bytes.Equal(got, []byte("\x00\x01\x02\xff")) {
+		t.Fatalf("default download bytes = %v", got)
+	}
+	if strings.Contains(stripANSI(transcript(m)), "\x00") || strings.Contains(stripANSI(transcript(m)), "\xff") {
+		t.Fatalf("binary bytes were dumped into terminal transcript:\n%s", transcript(m))
+	}
+}
+
 func TestTasksAttachmentsDeleteConfirmationUsesResolvedTarget(t *testing.T) {
 	rows := `<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><div><p class="text-sm font-medium">monthly report.pdf</p><p class="text-xs">7 B</p></div><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`
 	refreshed := `<div id="attachment-list" data-project-id="p1"></div>`

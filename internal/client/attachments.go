@@ -220,6 +220,47 @@ func (c *Client) DeleteAttachment(ctx context.Context, attachmentID, projectID s
 	return c.DeleteTaskAttachment(ctx, attachmentID, projectID)
 }
 
+// DownloadTaskAttachment streams one attachment's bytes from the backend-owned
+// attachment route into dst. It never reads or trusts backend-local file paths
+// from task markup, so it works for remote backends as well as local ones.
+func (c *Client) DownloadTaskAttachment(ctx context.Context, attachmentID, projectID string, dst io.Writer) error {
+	if strings.TrimSpace(attachmentID) == "" {
+		return fmt.Errorf("attachment ID is required")
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return fmt.Errorf("project ID is required for task attachments")
+	}
+	if dst == nil {
+		return fmt.Errorf("download destination is required")
+	}
+	path := "/attachments/" + url.PathEscape(attachmentID) + query("project_id", projectID)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/octet-stream, */*")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer drainAndClose(resp.Body)
+	if isReadAuthResponse(resp) {
+		return newAuthRequiredError(http.MethodGet, path, resp)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return apiError(resp)
+	}
+	if _, err := io.Copy(dst, resp.Body); err != nil {
+		return fmt.Errorf("download attachment %q: %w", attachmentID, err)
+	}
+	return nil
+}
+
+// DownloadAttachment is the route-oriented alias for DownloadTaskAttachment.
+func (c *Client) DownloadAttachment(ctx context.Context, attachmentID, projectID string, dst io.Writer) error {
+	return c.DownloadTaskAttachment(ctx, attachmentID, projectID, dst)
+}
+
 type attachmentFile interface {
 	io.Reader
 	io.Closer

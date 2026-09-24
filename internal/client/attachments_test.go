@@ -1,8 +1,10 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -381,6 +383,78 @@ func TestDeleteTaskAttachmentUsesStableIDProjectScopeAndParsesRefresh(t *testing
 	if len(remaining) != 1 || remaining[0].ID != "att-2" || remaining[0].FileName != "remaining.txt" || remaining[0].FileSize != 7 {
 		t.Errorf("remaining attachments = %+v", remaining)
 	}
+}
+
+func TestDownloadTaskAttachmentStreamsBackendBytesAndProjectScope(t *testing.T) {
+	payload := []byte(strings.Repeat("0123456789abcdef", 8192))
+	var gotMethod, gotPath, gotProject, gotAccept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotProject = r.URL.Query().Get("project_id")
+		gotAccept = r.Header.Get("Accept")
+		if r.URL.Path != "/attachments/att-1" {
+			t.Fatalf("request path = %q, want /attachments/att-1", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write(payload)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out chunkLimitedBuffer
+	out.maxChunk = 64 << 10
+	if err := c.DownloadTaskAttachment(context.Background(), "att-1", "p1", &out); err != nil {
+		t.Fatalf("DownloadTaskAttachment: %v", err)
+	}
+	if gotMethod != http.MethodGet || gotPath != "/attachments/att-1" || gotProject != "p1" {
+		t.Fatalf("request = %s %s?project_id=%s, want GET /attachments/att-1?project_id=p1", gotMethod, gotPath, gotProject)
+	}
+	if !strings.Contains(gotAccept, "application/octet-stream") {
+		t.Fatalf("Accept = %q, want octet-stream", gotAccept)
+	}
+	if !bytes.Equal(out.Bytes(), payload) {
+		t.Fatalf("downloaded bytes mismatch: got %d want %d", out.Len(), len(payload))
+	}
+}
+
+func TestDownloadTaskAttachmentReportsBackendRejection(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/attachments/att-1" || r.URL.Query().Get("project_id") != "p2" {
+			t.Fatalf("request = %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"attachment belongs to another project"}`))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = c.DownloadTaskAttachment(context.Background(), "att-1", "p2", &out)
+	if err == nil || !strings.Contains(err.Error(), "attachment belongs to another project") {
+		t.Fatalf("download error = %v, want backend rejection message", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("rejected download wrote %d bytes", out.Len())
+	}
+}
+
+type chunkLimitedBuffer struct {
+	bytes.Buffer
+	maxChunk int
+}
+
+func (b *chunkLimitedBuffer) Write(p []byte) (int, error) {
+	if b.maxChunk > 0 && len(p) > b.maxChunk {
+		return 0, fmt.Errorf("write chunk %d exceeds streaming limit %d", len(p), b.maxChunk)
+	}
+	return b.Buffer.Write(p)
 }
 
 func TestTaskAttachmentOperationsRejectCrossProjectResponsesAndErrors(t *testing.T) {
