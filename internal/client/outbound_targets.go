@@ -377,7 +377,7 @@ func supportedOutboundTargetPlatform(platform string) bool {
 
 func outboundTargetSaveMessage(root *html.Node) string {
 	for _, node := range findAll(root, func(node *html.Node) bool {
-		return node.Data == "div" && strings.Contains(" "+attr(node, "class")+" ", " alert-success ")
+		return node.Data == "div" && (hasClass(node, "alert-error") || hasClass(node, "alert-success"))
 	}) {
 		if message := safeOutboundTargetText(NodeText(node)); message != "" {
 			return message

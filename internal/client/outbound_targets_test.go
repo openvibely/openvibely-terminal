@@ -223,12 +223,16 @@ func TestSaveOutboundTargetsPreservesBackendFormAndSurfacesValidation(t *testing
 		}
 		got = r.PostForm
 		w.Header().Set("Content-Type", "text/html")
-		if calls == 1 {
+		switch calls {
+		case 1:
+			w.Header().Set("HX-Trigger", "outbound-targets-save-error")
+			_, _ = io.WriteString(w, `<div class="alert alert-error py-2 text-sm mt-3">Duplicate outbound target destination</div>`)
+		case 2:
 			w.Header().Set("HX-Trigger", "outbound-targets-save-error")
 			_, _ = io.WriteString(w, `<div class="alert alert-success py-2 text-sm mt-3">Duplicate outbound target destination</div>`)
-			return
+		default:
+			_, _ = io.WriteString(w, `<div>saved</div>`)
 		}
-		_, _ = io.WriteString(w, `<div>saved</div>`)
 	}))
 	defer srv.Close()
 	c, err := New(srv.URL)
@@ -238,16 +242,64 @@ func TestSaveOutboundTargetsPreservesBackendFormAndSurfacesValidation(t *testing
 	target := OutboundTarget{ID: "a", Platform: " Slack ", TargetKind: "channel", Name: "#Ops", Destination: " C123 ", ThreadID: "42", Home: true, DefaultSubject: " Deploy "}
 	err = c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, true)
 	if err == nil || !strings.Contains(err.Error(), "Duplicate outbound target destination") {
-		t.Fatalf("save error = %v", err)
+		t.Fatalf("alert-error save error = %v", err)
 	}
 	if got.Get("project_id") != "project-2" || got.Get("enabled") != "true" || got.Get("target_row_id") != "a" || got.Get("target_target_id") != "C123" {
 		t.Fatalf("submitted form = %v", got)
+	}
+	err = c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, true)
+	if err == nil || !strings.Contains(err.Error(), "Duplicate outbound target destination") {
+		t.Fatalf("alert-success save error = %v", err)
 	}
 	if err := c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, false); err != nil {
 		t.Fatal(err)
 	}
 	if got.Get("enabled") != "" {
 		t.Fatalf("disabled policy submitted enabled=%q", got.Get("enabled"))
+	}
+}
+
+func TestSetOutboundTargetPolicySurfacesValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "alert error",
+			body: `<div class="alert alert-error py-2 text-sm mt-3">Duplicate outbound target destination</div>`,
+			want: "Duplicate outbound target destination",
+		},
+		{
+			name: "alert success compatibility",
+			body: `<div class="alert alert-success py-2 text-sm mt-3">Duplicate outbound target destination</div>`,
+			want: "Duplicate outbound target destination",
+		},
+		{
+			name: "message-less fallback",
+			body: `<div class="alert alert-error py-2 text-sm mt-3"></div>`,
+			want: "failed to save outbound target policy",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/channels/send-message-explicit-targets" {
+					t.Fatalf("unexpected policy request %s %s", r.Method, r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Set("HX-Trigger", "outbound-targets-save-error")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = c.SetOutboundTargetPolicy(context.Background(), "project-2", true)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("policy error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
