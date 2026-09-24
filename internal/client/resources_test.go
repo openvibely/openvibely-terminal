@@ -5105,6 +5105,12 @@ func TestCreateWebhookReturnsSecretFreeScopedDetail(t *testing.T) {
 			if r.URL.Query().Get("project_id") != "p1" {
 				t.Errorf("create project = %q", r.URL.Query().Get("project_id"))
 			}
+			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-www-form-urlencoded") {
+				t.Errorf("create content type = %q, want form encoded", got)
+			}
+			if got := r.Header.Get("Accept"); got != "application/json" {
+				t.Errorf("create accept = %q, want application/json", got)
+			}
 			if err := r.ParseForm(); err != nil {
 				t.Fatal(err)
 			}
@@ -5236,10 +5242,22 @@ func TestWebhookDetailAndMutationContracts(t *testing.T) {
 			updateForm = r.PostForm
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(r.URL.Path, "/test"):
+			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-www-form-urlencoded") {
+				t.Errorf("test content type = %q, want form encoded", got)
+			}
+			if got := r.Header.Get("Accept"); got != "application/json" {
+				t.Errorf("test accept = %q, want application/json", got)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = io.WriteString(w, `{"task_id":"task-123"}`)
 		case strings.HasSuffix(r.URL.Path, "/rotate-secret"):
+			if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-www-form-urlencoded") {
+				t.Errorf("rotate content type = %q, want form encoded", got)
+			}
+			if got := r.Header.Get("Accept"); got != "application/json" {
+				t.Errorf("rotate accept = %q, want application/json", got)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"secret":"new-safe-secret"}`)
 		case r.Method == http.MethodDelete:
@@ -5284,6 +5302,92 @@ func TestWebhookDetailAndMutationContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = calls
+}
+
+func TestWebhookJSONFormAuthResponsesAreAuthentication(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		location string
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized},
+		{name: "login redirect", status: http.StatusFound, location: "/login?next=%2Fchannels%2Fwebhooks%2Fw1%2Ftest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/channels/webhooks/w1/test" {
+					t.Errorf("request = %s %s, want POST /channels/webhooks/w1/test", r.Method, r.URL.Path)
+				}
+				if tc.location != "" {
+					w.Header().Set("Location", tc.location)
+				}
+				w.WriteHeader(tc.status)
+			}))
+
+			result, err := c.TestWebhook(context.Background(), "p1", "w1")
+			if result != nil || err == nil || !IsAuthRequired(err) || !errors.Is(err, ErrAuthRequired) {
+				t.Fatalf("TestWebhook = (%#v, %v), want authentication-required", result, err)
+			}
+		})
+	}
+}
+
+func TestWebhookJSONFormAPIErrorClosesResponseBody(t *testing.T) {
+	body := &trackedResponseBody{Reader: strings.NewReader(`{"error":"webhook rejected"}`)}
+	c, err := New("http://example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.http = &http.Client{Transport: htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost || r.URL.Path != "/channels/webhooks/w1/test" {
+			t.Errorf("request = %s %s, want POST /channels/webhooks/w1/test", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/x-www-form-urlencoded") {
+			t.Errorf("content type = %q, want form encoded", got)
+		}
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("accept = %q, want application/json", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Status:     "400 Bad Request",
+			Header:     make(http.Header),
+			Body:       body,
+			Request:    r,
+		}, nil
+	})}
+
+	result, err := c.TestWebhook(context.Background(), "p1", "w1")
+	if result != nil {
+		t.Fatalf("result = %#v, want nil", result)
+	}
+	var statusErr *HTTPStatusError
+	if err == nil || !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusBadRequest || !strings.Contains(err.Error(), "webhook rejected") {
+		t.Fatalf("error = %v, want 400 api error containing backend message", err)
+	}
+	if !body.closed {
+		t.Fatal("non-2xx webhook JSON form response body was not closed")
+	}
+}
+
+func TestCreateWebhookRejectsMismatchedProjectBeforeDetailFetch(t *testing.T) {
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/channels/webhooks" {
+			t.Fatalf("unexpected detail request after mismatched create response: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"new-id","project_id":"other-project"}`)
+	}))
+
+	created, err := c.CreateWebhook(context.Background(), "p1", Webhook{Name: "Created", Enabled: true, DefaultPriority: 2})
+	if created != nil || err == nil || !strings.Contains(err.Error(), "created webhook does not belong to selected project") {
+		t.Fatalf("CreateWebhook = (%#v, %v), want project mismatch error", created, err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want only create request", requests)
+	}
 }
 
 func TestDeleteWebhooksBulkUsesScopedJSONRequestAndDeduplicatesIDs(t *testing.T) {
