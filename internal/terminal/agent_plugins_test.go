@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
@@ -116,7 +118,7 @@ func TestAgentsPluginParserAcceptsDocumentedActionWords(t *testing.T) {
 				t.Fatalf("%v: %v\n%s", args, err, out.String())
 			}
 			if !rec.sawCall(command.route) {
-				t.Fatalf("%v did not call %s: %v", args, command.route, rec.calls)
+				t.Fatalf("%v did not call %s: %v", args, command.route, rec.callsSnapshot())
 			}
 		})
 	}
@@ -146,7 +148,7 @@ func TestAgentsPluginParserAcceptsDocumentedActionWords(t *testing.T) {
 				t.Fatalf("%v: %v\n%s", args, err, out.String())
 			}
 			if !rec.sawCall(command.route) {
-				t.Fatalf("%v did not call %s: %v", args, command.route, rec.calls)
+				t.Fatalf("%v did not call %s: %v", args, command.route, rec.callsSnapshot())
 			}
 		})
 	}
@@ -209,13 +211,14 @@ func TestAgentsPluginMarketplaceCommandsUseExpectedRoutes(t *testing.T) {
 		"POST /agents/plugins/marketplaces/reset-defaults",
 	} {
 		if !rec.sawCall(want) {
-			t.Fatalf("missing %s in calls: %v", want, rec.calls)
+			t.Fatalf("missing %s in calls: %v", want, rec.callsSnapshot())
 		}
 	}
-	if got := rec.jsonBodies["POST /agents/plugins/marketplaces"]["source"]; got != "github.com/example/plugins" {
+	body := rec.jsonBody("POST /agents/plugins/marketplaces")
+	if got := body["source"]; got != "github.com/example/plugins" {
 		t.Fatalf("marketplace source = %q", got)
 	}
-	if got := rec.jsonBodies["POST /agents/plugins/marketplaces"]["scope"]; got != "user" {
+	if got := body["scope"]; got != "user" {
 		t.Fatalf("marketplace scope = %q", got)
 	}
 }
@@ -286,7 +289,7 @@ func TestAgentsPluginInstallCanIncludeAgent(t *testing.T) {
 	if err := RunCLI(c, &out, "demo", []string{"agents", "plugins", "install", "stagehand@official", "Code", "Reviewer"}, false, false); err != nil {
 		t.Fatalf("install: %v\n%s", err, out.String())
 	}
-	body := rec.jsonBodies["POST /agents/plugins/install"]
+	body := rec.jsonBody("POST /agents/plugins/install")
 	if body["plugin_id"] != "stagehand@official" || body["scope"] != "user" || body["agent_id"] != "ag-1" {
 		t.Fatalf("install body = %#v", body)
 	}
@@ -308,14 +311,15 @@ func TestAgentsPluginUninstallRequiresConfirmationOrForce(t *testing.T) {
 		t.Fatalf("unforced uninstall err = %v output=%s", err, out.String())
 	}
 	if rec.sawCall("POST /agents/plugins/uninstall") {
-		t.Fatalf("unforced uninstall mutated: %v", rec.calls)
+		t.Fatalf("unforced uninstall mutated: %v", rec.callsSnapshot())
 	}
 	out.Reset()
 	if err := RunCLI(c, &out, "demo", []string{"agents", "plugins", "uninstall", "playwright@official"}, true, false); err != nil {
 		t.Fatalf("forced uninstall: %v\n%s", err, out.String())
 	}
-	if !rec.sawCall("POST /agents/plugins/uninstall") || rec.jsonBodies["POST /agents/plugins/uninstall"]["plugin_id"] != "playwright@official" {
-		t.Fatalf("forced uninstall calls=%v bodies=%#v", rec.calls, rec.jsonBodies)
+	body := rec.jsonBody("POST /agents/plugins/uninstall")
+	if !rec.sawCall("POST /agents/plugins/uninstall") || body["plugin_id"] != "playwright@official" {
+		t.Fatalf("forced uninstall calls=%v body=%#v", rec.callsSnapshot(), body)
 	}
 }
 
@@ -366,6 +370,84 @@ func TestAgentsPluginEnableDisablePreservesAgentDefinition(t *testing.T) {
 	}
 }
 
+func TestAgentsPluginEnableDisableStartsInitialReadsConcurrently(t *testing.T) {
+	const routeDelay = 200 * time.Millisecond
+
+	var mu sync.Mutex
+	starts := map[string]time.Time{}
+	counts := map[string]int{}
+	record := func(path string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if starts[path].IsZero() {
+			starts[path] = time.Now()
+		}
+		counts[path]++
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("project_id") != "" && r.URL.Query().Get("project_id") != "p1" {
+			http.Error(w, "wrong project", http.StatusNotFound)
+			return
+		}
+		switch {
+		case r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/agents/plugins/state":
+			record(r.URL.Path)
+			time.Sleep(routeDelay)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, agentPluginStateJSON)
+		case r.Method == http.MethodGet && r.URL.Path == "/agents":
+			record(r.URL.Path)
+			time.Sleep(routeDelay)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, agentEditListHTML)
+		case r.Method == http.MethodGet && r.URL.Path == "/agents/ag-1/json":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, agentPluginRichJSON)
+		case r.Method == http.MethodGet && r.URL.Path == "/agents/ag-1/lifecycle-hooks":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[]`)
+		case r.Method == http.MethodPut && r.URL.Path == "/agents/ag-1":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	started := time.Now()
+	if err := RunCLI(c, &out, "demo", []string{"agents", "plugins", "disable", "reviewer", "playwright@official"}, false, false); err != nil {
+		t.Fatalf("disable: %v\n%s", err, out.String())
+	}
+	elapsed := time.Since(started)
+
+	mu.Lock()
+	stateStart := starts["/agents/plugins/state"]
+	agentsStart := starts["/agents"]
+	stateCount := counts["/agents/plugins/state"]
+	mu.Unlock()
+	if stateStart.IsZero() || agentsStart.IsZero() {
+		t.Fatalf("missing delayed route starts: %#v", starts)
+	}
+	if delta := stateStart.Sub(agentsStart); delta > 10*time.Millisecond || delta < -10*time.Millisecond {
+		t.Fatalf("initial state and agent-list reads started %s apart, want <= 10ms", delta)
+	}
+	if stateCount != 1 {
+		t.Fatalf("plain enable/disable should not refresh global plugin state after update; state calls = %d", stateCount)
+	}
+	if threshold := routeDelay*2 + routeDelay/4; elapsed >= threshold {
+		t.Fatalf("enable/disable latency = %s, want under %s with delayed initial reads and no final state refresh", elapsed, threshold)
+	}
+}
+
 func TestAgentsPluginsFailuresDoNotMutate(t *testing.T) {
 	tests := []struct {
 		name, state, agentDetail string
@@ -390,18 +472,30 @@ func TestAgentsPluginsFailuresDoNotMutate(t *testing.T) {
 				t.Fatalf("err = %v, want %q output=%s", err, tc.want, out.String())
 			}
 			if put != 0 || rec.sawCall("POST /agents/plugins/install") || rec.sawCall("POST /agents/plugins/uninstall") {
-				t.Fatalf("failure mutated: puts=%d calls=%v", put, rec.calls)
+				t.Fatalf("failure mutated: puts=%d calls=%v", put, rec.callsSnapshot())
 			}
 		})
 	}
 }
 
 type agentPluginRecorder struct {
+	mu         sync.Mutex
 	calls      []string
 	jsonBodies map[string]map[string]string
 }
 
+func (r *agentPluginRecorder) recordCall(call string, body map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, call)
+	if body != nil {
+		r.jsonBodies[call] = body
+	}
+}
+
 func (r *agentPluginRecorder) sawCall(call string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, got := range r.calls {
 		if got == call {
 			return true
@@ -410,20 +504,38 @@ func (r *agentPluginRecorder) sawCall(call string) bool {
 	return false
 }
 
+func (r *agentPluginRecorder) callsSnapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.calls...)
+}
+
+func (r *agentPluginRecorder) jsonBody(call string) map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	body := r.jsonBodies[call]
+	if body == nil {
+		return nil
+	}
+	out := make(map[string]string, len(body))
+	for key, value := range body {
+		out[key] = value
+	}
+	return out
+}
+
 func agentPluginCommandServer(t *testing.T, state, agentsHTML, agentJSON string, onPut func(*http.Request)) (*httptest.Server, *agentPluginRecorder) {
 	t.Helper()
 	rec := &agentPluginRecorder{jsonBodies: map[string]map[string]string{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec.calls = append(rec.calls, r.Method+" "+r.URL.EscapedPath())
+		call := r.Method + " " + r.URL.EscapedPath()
+		var body map[string]string
 		if r.Method == http.MethodPost || r.Method == http.MethodDelete || r.Method == http.MethodPut {
-			var body map[string]string
 			if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 				_ = json.NewDecoder(r.Body).Decode(&body)
-				if body != nil {
-					rec.jsonBodies[r.Method+" "+r.URL.EscapedPath()] = body
-				}
 			}
 		}
+		rec.recordCall(call, body)
 		agentPluginTestHandler(t, state, agentsHTML, agentJSON, onPut).ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
