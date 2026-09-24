@@ -4358,16 +4358,15 @@ func agentsPluginToggleCommand(m Model, c *client.Client, projectID string, enab
 		return m, errCmd(agentPluginCanonicalUsage(agentPluginActions, verb))
 	}
 	return m, run("Agent Plugins", cmdTimeout, func(ctx context.Context) (string, error) {
-		state, err := c.GetAgentPluginState(ctx)
-		if err != nil {
-			return "", err
+		state, agents, stateErr, agentsErr := loadAgentPluginToggleInputs(ctx, c, projectID, pluginID)
+		if stateErr != nil {
+			return "", stateErr
 		}
 		if !pluginInstalled(state, pluginID) {
 			return "", fmt.Errorf("plugin %q is not installed", sanitizeAutomationDetailText(pluginID))
 		}
-		agents, err := c.ListAgents(ctx, projectID)
-		if err != nil {
-			return "", err
+		if agentsErr != nil {
+			return "", agentsErr
 		}
 		matched, err := matchAgentRef(agents, agentRef)
 		if err != nil {
@@ -4389,12 +4388,62 @@ func agentsPluginToggleCommand(m Model, c *client.Client, projectID string, enab
 			}
 			return marshalJSON(persisted)
 		}
-		state, refreshErr := c.GetAgentPluginState(ctx)
-		if refreshErr != nil {
-			return status + " (saved; refresh failed)", nil
-		}
 		return status + "\n\n" + renderAgentPlugins(state), nil
 	})
+}
+
+func loadAgentPluginToggleInputs(ctx context.Context, c *client.Client, projectID, pluginID string) (client.AgentPluginState, []client.AgentDef, error, error) {
+	readCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type stateResult struct {
+		state client.AgentPluginState
+		err   error
+	}
+	type agentsResult struct {
+		agents []client.AgentDef
+		err    error
+	}
+
+	stateCh := make(chan stateResult, 1)
+	agentsCh := make(chan agentsResult, 1)
+	go func() {
+		state, err := c.GetAgentPluginState(readCtx)
+		stateCh <- stateResult{state: state, err: err}
+	}()
+	go func() {
+		agents, err := c.ListAgents(readCtx, projectID)
+		agentsCh <- agentsResult{agents: agents, err: err}
+	}()
+
+	var state client.AgentPluginState
+	var agents []client.AgentDef
+	var agentsErr error
+	for stateCh != nil || agentsCh != nil {
+		select {
+		case result := <-stateCh:
+			stateCh = nil
+			if result.err != nil {
+				cancel()
+				return client.AgentPluginState{}, nil, result.err, nil
+			}
+			state = result.state
+			if !pluginInstalled(state, pluginID) || agentsCh == nil {
+				cancel()
+				return state, agents, nil, agentsErr
+			}
+		case result := <-agentsCh:
+			agents, agentsErr = result.agents, result.err
+			agentsCh = nil
+			if stateCh == nil {
+				return state, agents, nil, agentsErr
+			}
+		case <-ctx.Done():
+			cancel()
+			return client.AgentPluginState{}, nil, ctx.Err(), ctx.Err()
+		}
+	}
+	return state, agents, nil, agentsErr
 }
 
 func pluginInstalled(state client.AgentPluginState, pluginID string) bool {
