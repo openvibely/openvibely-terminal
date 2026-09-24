@@ -583,14 +583,18 @@ func (c *Client) postJSON(ctx context.Context, path string, body, out any) error
 	}
 	req.Header.Set("Accept", "application/json")
 
+	return c.doJSONMutationRequest(http.MethodPost, path, req, out)
+}
+
+func (c *Client) doJSONMutationRequest(method, path string, req *http.Request, out any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("POST %s: %w", path, err)
+		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
 	defer drainAndClose(resp.Body)
 
 	if isAuthResponse(resp) {
-		return newAuthRequiredError(http.MethodPost, path, resp)
+		return newAuthRequiredError(method, path, resp)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return apiError(resp)

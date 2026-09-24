@@ -3800,24 +3800,7 @@ func (c *Client) doWebhookJSONForm(ctx context.Context, method, path string, for
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s %s: %w", method, path, err)
-	}
-	defer drainAndClose(resp.Body)
-	if isAuthResponse(resp) {
-		return newAuthRequiredError(method, path, resp)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apiError(resp)
-	}
-	if out == nil {
-		return nil
-	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decoding %s response: %w", path, err)
-	}
-	return nil
+	return c.doJSONMutationRequest(method, path, req, out)
 }
 
 // TestWebhook creates a synthetic task and returns its backend task ID.
