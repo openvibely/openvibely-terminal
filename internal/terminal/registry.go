@@ -7721,6 +7721,9 @@ func validateWebhooksArgs(args []string) error {
 		return nil
 	case "create", "edit":
 		boundary := webhookOptionBoundary(rest)
+		if action == "edit" && boundary < len(rest) && strings.TrimSpace(strings.Join(rest[:boundary], " ")) == "" {
+			return errors.New(webhookCommandUsage("edit"))
+		}
 		if _, err := parseWebhookOptions(rest[boundary:]); err != nil {
 			return err
 		}

@@ -15102,6 +15102,27 @@ func TestWebhooksRotateDeleteConfirmationAndSanitization(t *testing.T) {
 	}
 }
 
+func TestWebhooksEditOptionRequiresReferenceBeforeOpeningSelector(t *testing.T) {
+	for _, line := range []string{
+		"/channels webhooks edit --enabled false",
+		"/webhooks edit --enabled false",
+	} {
+		t.Run(line, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, line)
+			if m.selectorActive {
+				t.Fatalf("%q opened the webhook selector", line)
+			}
+			if got := rec.all(); got != "" {
+				t.Fatalf("%q made backend requests before usage: %s", line, got)
+			}
+			if got := stripANSI(transcript(m)); !strings.Contains(strings.ToLower(got), "usage:") {
+				t.Fatalf("%q output = %q, want usage", line, got)
+			}
+		})
+	}
+}
+
 func TestWebhooksInvalidOptionsFailBeforeRequests(t *testing.T) {
 	for _, line := range []string{"/webhooks create hook --enabled maybe", "/webhooks edit w1 --priority 5", "/webhooks edit w1 --name"} {
 		m, rec := dispatchModel(t, nil)
