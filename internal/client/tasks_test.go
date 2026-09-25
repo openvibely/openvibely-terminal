@@ -92,7 +92,7 @@ func TestListTasksScrapesBoard(t *testing.T) {
 }
 
 func TestListTaskReferencesDecodesCompactProjectCatalog(t *testing.T) {
-	const response = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Fix login bug","prompt":"Investigate the redirect","category":"active","status":"running","display_order":3,"badges":["Goal","Sonnet"]}]}`
+	const response = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Fix login bug","prompt":"Investigate the redirect","category":"active","status":"running","display_order":3,"badges":["Goal","Sonnet"],"attachments":[{"id":"att-1","task_id":"t-1","file_name":"notes.txt","file_size":12}]}]}`
 	var boardRequests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tasks" {
@@ -124,7 +124,7 @@ func TestListTaskReferencesDecodesCompactProjectCatalog(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("tasks = %#v, want one task", tasks)
 	}
-	want := Task{ID: "t-1", ProjectID: "p1", Title: "Fix login bug", Prompt: "Investigate the redirect", Category: "active", Status: "running", DisplayOrder: 3, Badges: []string{"Goal", "Sonnet"}}
+	want := Task{ID: "t-1", ProjectID: "p1", Title: "Fix login bug", Prompt: "Investigate the redirect", Category: "active", Status: "running", DisplayOrder: 3, Badges: []string{"Goal", "Sonnet"}, Attachments: []Attachment{{ID: "att-1", TaskID: "t-1", FileName: "notes.txt", FileSize: 12}}}
 	if !reflect.DeepEqual(tasks[0], want) {
 		t.Fatalf("task = %#v, want %#v", tasks[0], want)
 	}

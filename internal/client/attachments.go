@@ -180,10 +180,11 @@ func validTaskAttachmentSnapshot(taskID string, attachments []Attachment) bool {
 	if attachments == nil {
 		return false
 	}
+	wantTaskID := strings.TrimSpace(taskID)
 	seen := make(map[string]struct{}, len(attachments))
 	for _, attachment := range attachments {
 		id := strings.TrimSpace(attachment.ID)
-		if id == "" || id != attachment.ID || (attachment.TaskID != "" && strings.TrimSpace(attachment.TaskID) != strings.TrimSpace(taskID)) {
+		if id == "" || id != attachment.ID || attachment.TaskID != wantTaskID {
 			return false
 		}
 		if _, duplicate := seen[id]; duplicate {

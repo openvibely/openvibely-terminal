@@ -336,9 +336,9 @@ func (c *Client) ListTasks(ctx context.Context, projectID string) ([]Task, error
 }
 
 // ListTaskReferences fetches the complete compact task catalog for one project.
-// The reference-catalog route is a JSON-only projection of Task: it includes the
-// metadata needed by terminal selectors, matching, and downstream actions, but
-// does not render the full kanban board or its controls.
+// The reference-catalog route is a JSON-only projection of Task: in addition to
+// selector metadata, each task includes its complete attachment snapshot for
+// upload duplicate detection. It does not render the full kanban board or controls.
 //
 // The endpoint accepts either the documented {"tasks": [...]} envelope or a
 // bare task array so clients remain compatible with servers that expose the
