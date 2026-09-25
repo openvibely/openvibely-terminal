@@ -82,11 +82,13 @@ func TestTaskAttachmentCommandsDoNotLoadLazyTaskDetailFragments(t *testing.T) {
 		wantPost          bool
 		wantSnapshot      bool
 		wantLegacy        bool
+		wantMalformed     bool
 		wantTaskPageReads int
 	}{
 		{name: "list", line: "/tasks attachments list Refactor", wantTaskPageReads: 1},
 		{name: "add with resolution snapshot", line: "/tasks attachments add Refactor " + path, wantPost: true, wantSnapshot: true},
 		{name: "add legacy fallback", line: "/tasks attachments add Refactor " + path, wantPost: true, wantLegacy: true, wantTaskPageReads: 1},
+		{name: "add malformed snapshot fallback", line: "/tasks attachments add Refactor " + path, wantPost: true, wantMalformed: true, wantTaskPageReads: 1},
 		{name: "typed delete lookup", line: "/tasks attachments delete Refactor att-1", wantTaskPageReads: 1},
 		{name: "picker loading", line: "/tasks attachments delete Refactor", wantSelector: true, wantTaskPageReads: 1},
 	}
@@ -106,6 +108,8 @@ func TestTaskAttachmentCommandsDoNotLoadLazyTaskDetailFragments(t *testing.T) {
 				bodies["GET /api/tasks/reference-catalog"] = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending","attachments":[]}]}`
 			} else if tc.wantLegacy {
 				bodies["GET /api/tasks/reference-catalog"] = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending"}]}`
+			} else if tc.wantMalformed {
+				bodies["GET /api/tasks/reference-catalog"] = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending","attachments":"invalid"}]}`
 			}
 			m, rec := dispatchModel(t, bodies)
 

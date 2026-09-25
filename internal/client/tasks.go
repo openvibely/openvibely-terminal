@@ -379,11 +379,7 @@ func decodeTaskReferenceCatalog(raw json.RawMessage) ([]Task, error) {
 		return make([]Task, 0), nil
 	}
 	if trimmed[0] == '[' {
-		var tasks []Task
-		if err := json.Unmarshal(trimmed, &tasks); err != nil {
-			return nil, fmt.Errorf("decoding task reference catalog: %w", err)
-		}
-		return tasks, nil
+		return decodeTaskReferenceEntries(trimmed)
 	}
 	if trimmed[0] != '{' {
 		return nil, fmt.Errorf("decoding task reference catalog: expected JSON array or object")
@@ -400,9 +396,41 @@ func decodeTaskReferenceCatalog(raw json.RawMessage) ([]Task, error) {
 	if string(bytes.TrimSpace(envelope.Tasks)) == "null" {
 		return make([]Task, 0), nil
 	}
-	var tasks []Task
-	if err := json.Unmarshal(envelope.Tasks, &tasks); err != nil {
+	return decodeTaskReferenceEntries(envelope.Tasks)
+}
+
+type taskReferenceCatalogEntry struct {
+	ID           string          `json:"id"`
+	ProjectID    string          `json:"project_id"`
+	Title        string          `json:"title"`
+	Prompt       string          `json:"prompt"`
+	Category     string          `json:"category"`
+	Status       string          `json:"status"`
+	Priority     int             `json:"priority,omitempty"`
+	DisplayOrder int             `json:"display_order"`
+	Badges       []string        `json:"badges"`
+	Attachments  json.RawMessage `json:"attachments"`
+}
+
+func decodeTaskReferenceEntries(raw json.RawMessage) ([]Task, error) {
+	var entries []taskReferenceCatalogEntry
+	if err := json.Unmarshal(raw, &entries); err != nil {
 		return nil, fmt.Errorf("decoding task reference catalog: %w", err)
+	}
+	tasks := make([]Task, 0, len(entries))
+	for _, entry := range entries {
+		task := Task{
+			ID: entry.ID, ProjectID: entry.ProjectID, Title: entry.Title, Prompt: entry.Prompt,
+			Category: entry.Category, Status: entry.Status, Priority: entry.Priority,
+			DisplayOrder: entry.DisplayOrder, Badges: entry.Badges,
+		}
+		var attachments []Attachment
+		if len(entry.Attachments) > 0 && json.Unmarshal(entry.Attachments, &attachments) == nil && attachments != nil {
+			// A malformed or absent snapshot is deliberately left nil so upload
+			// callers use the authoritative pre-upload attachment read.
+			task.Attachments = attachments
+		}
+		tasks = append(tasks, task)
 	}
 	return tasks, nil
 }
