@@ -193,6 +193,74 @@ func TestAddTaskAttachmentsRejectsPartialRefresh(t *testing.T) {
 	}
 }
 
+func TestAddTaskAttachmentsFallsBackForMalformedReferenceSnapshots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duplicate.txt")
+	if err := os.WriteFile(path, []byte("duplicate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, malformedSnapshot := range []string{
+		`"invalid"`,
+		`[{"id":"att-old","task_id":"t-1","file_name":"duplicate.txt","file_size":"not-a-number"}]`,
+	} {
+		t.Run(malformedSnapshot, func(t *testing.T) {
+			catalog := `{"tasks":[{"id":"t-1","project_id":"p1","title":"Task","attachments":` + malformedSnapshot + `}]}`
+			var preflightCount, postCount atomic.Int32
+			const existing = `<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><div><p class="text-sm font-medium">duplicate.txt</p><p class="text-xs">9 B</p></div><button hx-delete="/attachments/att-old?project_id=p1"></button></div></div>`
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("catalog project_id = %q, want p1", r.URL.Query().Get("project_id"))
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(catalog))
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+					preflightCount.Add(1)
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("preflight project_id = %q, want p1", r.URL.Query().Get("project_id"))
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(existing))
+				case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/attachments":
+					postCount.Add(1)
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("upload project_id = %q, want p1", r.URL.Query().Get("project_id"))
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = w.Write([]byte(existing))
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.RequestURI())
+				}
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tasks, err := c.ListTaskReferences(context.Background(), "p1")
+			if err != nil {
+				t.Fatalf("ListTaskReferences with malformed attachment snapshot: %v", err)
+			}
+			if len(tasks) != 1 || tasks[0].Attachments != nil {
+				t.Fatalf("task references = %#v, want one task with unusable nil snapshot", tasks)
+			}
+			_, err = c.AddTaskAttachmentsForTask(context.Background(), tasks[0], "p1", []string{path})
+			var partialErr *PartialAttachmentUploadError
+			if !errors.As(err, &partialErr) || len(partialErr.Uploaded) != 0 || !sameStrings(partialErr.Missing, []string{"duplicate.txt"}) {
+				t.Fatalf("duplicate upload result = %v, want safe partial result from preflight", err)
+			}
+			if got := preflightCount.Load(); got != 1 {
+				t.Errorf("preflight count = %d, want 1", got)
+			}
+			if got := postCount.Load(); got != 1 {
+				t.Errorf("POST count = %d, want 1", got)
+			}
+		})
+	}
+}
+
 func TestAddTaskAttachmentsLegacyTaskReferenceUsesPreflightFallback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request.txt")
 	if err := os.WriteFile(path, []byte("request"), 0o600); err != nil {
