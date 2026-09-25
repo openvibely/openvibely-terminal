@@ -2402,14 +2402,16 @@ func (c *Client) GetTaskSchedule(ctx context.Context, projectID, taskID, schedul
 		return ScheduleConfig{}, fmt.Errorf("schedule update form identity does not match %q", scheduleID)
 	}
 	inputValue := func(name string) (string, bool) {
-		n := findNode(form, func(n *html.Node) bool { return attr(n, "name") == name && attr(n, "type") != "hidden" })
+		n := findNode(form, func(n *html.Node) bool {
+			return isNamedHTMLControl(n, name) && attr(n, "type") != "hidden"
+		})
 		if n == nil {
 			return "", false
 		}
-		return attr(n, "value"), true
+		return htmlFormControlValue(n, htmlFormValueOptions{}), true
 	}
 	selectValue := func(name string) (string, error) {
-		selectNode := findNode(form, func(n *html.Node) bool { return n.Data == "select" && attr(n, "name") == name })
+		selectNode := findNamedHTMLControl(form, name, "select")
 		if selectNode == nil {
 			return "", fmt.Errorf("schedule %s select is required", name)
 		}
@@ -2417,13 +2419,7 @@ func (c *Client) GetTaskSchedule(ctx context.Context, projectID, taskID, schedul
 		if len(options) == 0 {
 			return "", fmt.Errorf("schedule %s select has no options", name)
 		}
-		selected := findNode(selectNode, func(n *html.Node) bool { return n.Data == "option" && hasHTMLAttr(n, "selected") })
-		if selected == nil {
-			// HTML form controls use the first option when no option has an
-			// explicit selected marker. Keep that browser behavior deterministic.
-			selected = options[0]
-		}
-		return attr(selected, "value"), nil
+		return htmlFormControlValue(selectNode, htmlFormValueOptions{selectValueMode: htmlSelectFirstOptionFallback}), nil
 	}
 	runAt, ok := inputValue("run_at")
 	if !ok || strings.TrimSpace(runAt) == "" {
@@ -3267,24 +3263,8 @@ func knownChannel(channelType string) (Channel, bool) {
 }
 
 func channelFormValue(root *html.Node, name string) string {
-	n := findNode(root, func(n *html.Node) bool {
-		return n.Type == html.ElementNode && attr(n, "name") == name
-	})
-	if n == nil {
-		return ""
-	}
-	if n.Data == "select" {
-		selected := findNode(n, func(option *html.Node) bool {
-			return option.Type == html.ElementNode && option.Data == "option" && hasHTMLAttr(option, "selected")
-		})
-		if selected != nil {
-			return attr(selected, "value")
-		}
-	}
-	if n.Data == "textarea" {
-		return strings.TrimSpace(NodeText(n))
-	}
-	return strings.TrimSpace(attr(n, "value"))
+	n := findNamedHTMLControl(root, name)
+	return htmlFormControlValue(n, htmlFormValueOptions{selectValueMode: htmlSelectSelectedOption, trimInput: true, trimTextarea: true})
 }
 
 func channelFormChecked(root *html.Node, name string) (bool, bool) {

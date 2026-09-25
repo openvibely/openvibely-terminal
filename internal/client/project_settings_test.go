@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
 
 const projectSettingsHTML = `<dialog id="edit_project_modal" data-local-repo-path-enabled="true"><form hx-put="/projects/p1">
@@ -18,6 +20,22 @@ const projectSettingsHTML = `<dialog id="edit_project_modal" data-local-repo-pat
 <select name="default_agent_config_id"><option value="">Global</option><option value="agent-1" selected>Builder (openai/gpt)</option><option value="agent-2">Reviewer</option></select>
 <input name="max_workers" value="4">
 </form></dialog>`
+
+func TestProjectSettingsPreservesRawControlWhitespace(t *testing.T) {
+	markup := strings.Replace(projectSettingsHTML, `value="Old Project"`, `value="  Old Project  "`, 1)
+	markup = strings.Replace(markup, `<textarea name="description">old description</textarea>`, `<textarea name="description">  old description  </textarea>`, 1)
+	root, err := html.Parse(strings.NewReader(markup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, _, err := parseProjectSettings(root, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Name != "  Old Project  " || settings.Description != "  old description  " {
+		t.Fatalf("settings name=%q description=%q; want original whitespace", settings.Name, settings.Description)
+	}
+}
 
 func TestGetProjectSettingsParsesAuthoritativeEditForm(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

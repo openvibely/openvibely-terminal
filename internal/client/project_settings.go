@@ -164,14 +164,12 @@ func projectAgentOptionName(raw string) string {
 
 func countProjectFields(form *html.Node, name string) int {
 	return len(findAll(form, func(n *html.Node) bool {
-		return (n.Data == "input" || n.Data == "textarea" || n.Data == "select") && attr(n, "name") == name
+		return isNamedHTMLControl(n, name, "input", "textarea", "select")
 	}))
 }
 
 func findProjectField(form *html.Node, name string) *html.Node {
-	return findNode(form, func(n *html.Node) bool {
-		return (n.Data == "input" || n.Data == "textarea" || n.Data == "select") && attr(n, "name") == name
-	})
+	return findNamedHTMLControl(form, name, "input", "textarea", "select")
 }
 
 func projectSelectedFieldValue(form *html.Node, name string) (string, error) {
@@ -180,10 +178,8 @@ func projectSelectedFieldValue(form *html.Node, name string) (string, error) {
 		return projectFieldValue(form, name), nil
 	}
 	options := findAll(n, func(option *html.Node) bool { return option.Data == "option" })
-	for _, option := range options {
-		if hasHTMLAttr(option, "selected") {
-			return attr(option, "value"), nil
-		}
+	if selected := selectedHTMLFormOption(n, htmlSelectSelectedOption); selected != nil {
+		return attr(selected, "value"), nil
 	}
 	if len(options) > 0 {
 		return "", fmt.Errorf("project settings: backend response select %s has options but no selected option", name)
@@ -192,22 +188,7 @@ func projectSelectedFieldValue(form *html.Node, name string) (string, error) {
 }
 
 func projectFieldValue(form *html.Node, name string) string {
-	n := findProjectField(form, name)
-	if n == nil {
-		return ""
-	}
-	switch n.Data {
-	case "textarea":
-		return rawNodeText(n)
-	case "select":
-		options := findAll(n, func(option *html.Node) bool { return option.Data == "option" })
-		for _, option := range options {
-			if hasHTMLAttr(option, "selected") {
-				return attr(option, "value")
-			}
-		}
-	}
-	return attr(n, "value")
+	return htmlFormControlValue(findProjectField(form, name), htmlFormValueOptions{selectValueMode: htmlSelectSelectedOption})
 }
 
 // UpdateProjectSettings submits the complete authoritative form. Callers merge
