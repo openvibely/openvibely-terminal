@@ -310,7 +310,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | Command | Aliases | Actions |
 |---|---|---|
 | `/tasks` | `task`, `t`, `board` | `list`, `open`, `show`, `reviews`, `lifecycle`, `logs`, `attachments`, `attach`, `attachment`, `inputs` (`list`, `show`, `inspect`, `cancel`, `steer`), `pending`, `pending-inputs`, `cancel-input`, `steer-queued`, `new`, `swarm`, `edit`, `run`, `stop`, `delete`, `move`, `order`, `goal` (`set`, `clear`, `pause`, `resume`), `reply`, `steer`, `activate`, `sweep`, `clear` |
-| `/schedule` | `schedules` | `list`, `add`, `edit`, `delete`, `toggle` |
+| `/schedule` | `schedules` | `list`, `show`, `open` (compatibility alias for `show`), `add`, `edit`, `delete`, `toggle` |
 | `/alerts` | `alert` | `list`, `show`, `read`, `read-bulk`, `approve`, `reject`, `dismiss`, `delete`, `delete-bulk`, `read-all`, `clear` |
 | `/skills` | `skill` | `list`, `show`, `add`, `edit`, `delete`, `enable`, `disable`, `always`, `load` |
 | `/memory` | `memories` | `list`, `show`, `search` (read-only project memory) |
@@ -335,6 +335,14 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/help` | `?`, `commands` | `/help <command>` details one |
 | `/chat` | `back`, `leave` | return to project chat; `/chat <message>` also sends it |
 | `/quit` | `q`, `exit` | |
+
+Use `/schedule show <id|name>` to inspect a schedule and its bound task before
+editing it. `/schedule open <id|name>` is a compatibility alias for `show`.
+
+```text
+/schedule show "Daily standup report"
+/schedule open "Daily standup report"  # compatibility alias for show
+```
 
 `/status` and one-shot `status` use `Unlimited` for an unlimited global worker
 pool, matching the global row in `/workers`. In that mode the status summary
