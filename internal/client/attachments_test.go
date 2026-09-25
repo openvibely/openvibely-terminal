@@ -41,9 +41,10 @@ func TestAddTaskAttachmentsUsesRepeatedFilesAndProjectScope(t *testing.T) {
 	var gotContents = map[string]string{}
 	var gotProject string
 	var gotContentType string
+	var getCount, postCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tasks/t-1" && r.URL.Path != "/tasks/t-1/attachments" {
-			t.Errorf("request path = %q, want task detail or attachment upload", r.URL.Path)
+		if r.URL.Path != "/tasks/t-1/attachments" {
+			t.Errorf("request path = %q, want attachment upload", r.URL.Path)
 		}
 		if r.URL.Query().Get("project_id") != "p1" {
 			t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
@@ -51,8 +52,10 @@ func TestAddTaskAttachmentsUsesRepeatedFilesAndProjectScope(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		switch r.Method {
 		case http.MethodGet:
-			_, _ = w.Write([]byte(attachmentListMarkup("p1", "")))
+			getCount.Add(1)
+			t.Errorf("unexpected preflight GET %s", r.URL.Path)
 		case http.MethodPost:
+			postCount.Add(1)
 			gotProject = r.URL.Query().Get("project_id")
 			gotContentType = r.Header.Get("Content-Type")
 			if r.Header.Get("HX-Request") != "true" {
@@ -85,9 +88,17 @@ func TestAddTaskAttachmentsUsesRepeatedFilesAndProjectScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments, err := c.AddTaskAttachments(context.Background(), "t-1", "p1", []string{firstPath, secondPath})
+	attachments, err := c.AddTaskAttachmentsForTask(context.Background(), Task{
+		ID: "t-1", ProjectID: "p1", Attachments: []Attachment{},
+	}, "p1", []string{firstPath, secondPath})
 	if err != nil {
-		t.Fatalf("AddTaskAttachments: %v", err)
+		t.Fatalf("AddTaskAttachmentsForTask: %v", err)
+	}
+	if got := getCount.Load(); got != 0 {
+		t.Errorf("preflight GET count = %d, want 0", got)
+	}
+	if got := postCount.Load(); got != 1 {
+		t.Errorf("POST count = %d, want 1", got)
 	}
 
 	sort.Strings(gotNames)
@@ -122,9 +133,10 @@ func TestAddTaskAttachmentsRejectsPartialRefresh(t *testing.T) {
 	}
 
 	var gotPostNames []string
+	var getCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tasks/t-1" && r.URL.Path != "/tasks/t-1/attachments" {
-			t.Errorf("request path = %q, want task detail or attachment upload", r.URL.Path)
+		if r.URL.Path != "/tasks/t-1/attachments" {
+			t.Errorf("request path = %q, want attachment upload", r.URL.Path)
 		}
 		if r.URL.Query().Get("project_id") != "p1" {
 			t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
@@ -132,7 +144,8 @@ func TestAddTaskAttachmentsRejectsPartialRefresh(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		switch r.Method {
 		case http.MethodGet:
-			_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-existing", "p1", "skipped.txt", "7 B"))))
+			getCount.Add(1)
+			t.Errorf("unexpected preflight GET %s", r.URL.Path)
 		case http.MethodPost:
 			if err := r.ParseMultipartForm(4 << 20); err != nil {
 				t.Fatalf("ParseMultipartForm: %v", err)
@@ -151,7 +164,11 @@ func TestAddTaskAttachmentsRejectsPartialRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachments, err := c.AddTaskAttachments(context.Background(), "t-1", "p1", []string{goodPath, missingPath})
+	attachments, err := c.AddTaskAttachmentsForTask(context.Background(), Task{
+		ID: "t-1", ProjectID: "p1", Attachments: []Attachment{{
+			ID: "att-existing", TaskID: "t-1", FileName: "skipped.txt", FileSize: 7,
+		}},
+	}, "p1", []string{goodPath, missingPath})
 	var partialErr *PartialAttachmentUploadError
 	if err == nil || !errors.As(err, &partialErr) || !strings.Contains(err.Error(), "partial attachment upload") || !strings.Contains(err.Error(), "skipped.txt") {
 		t.Fatalf("partial upload error = %v, want explicit typed error with skipped filename", err)
@@ -170,6 +187,79 @@ func TestAddTaskAttachmentsRejectsPartialRefresh(t *testing.T) {
 	}
 	if !sameStrings(gotPostNames, []string{"kept.txt", "skipped.txt"}) {
 		t.Fatalf("uploaded filenames = %v, want both requested files", gotPostNames)
+	}
+	if got := getCount.Load(); got != 0 {
+		t.Fatalf("preflight GET count = %d, want 0 with known attachment snapshot", got)
+	}
+}
+
+func TestAddTaskAttachmentsLegacyTaskReferenceUsesPreflightFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request.txt")
+	if err := os.WriteFile(path, []byte("request"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "text/html")
+		switch r.Method {
+		case http.MethodGet:
+			if r.URL.Path != "/tasks/t-1" {
+				t.Errorf("GET path = %q, want task detail preflight", r.URL.Path)
+			}
+			_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-old", "p1", "old.txt", "3 B"))))
+		case http.MethodPost:
+			if r.URL.Path != "/tasks/t-1/attachments" {
+				t.Errorf("POST path = %q, want attachment upload", r.URL.Path)
+			}
+			_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-old", "p1", "old.txt", "3 B")+attachmentRowMarkup("att-new", "p1", "request.txt", "7 B"))))
+		default:
+			t.Errorf("method = %s, want GET or POST", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddTaskAttachmentsForTask(context.Background(), Task{ID: "t-1", ProjectID: "p1"}, "p1", []string{path}); err != nil {
+		t.Fatalf("AddTaskAttachmentsForTask without snapshot: %v", err)
+	}
+	if want := []string{"GET /tasks/t-1", "POST /tasks/t-1/attachments"}; !sameStrings(requests, want) {
+		t.Fatalf("request sequence = %v, want %v", requests, want)
+	}
+}
+
+func TestAddTaskAttachmentsRejectsInvalidSnapshotAndFallsBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request.txt")
+	if err := os.WriteFile(path, []byte("request"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var getCount atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.Method == http.MethodGet {
+			getCount.Add(1)
+			_, _ = w.Write([]byte(attachmentListMarkup("p1", "")))
+			return
+		}
+		_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-new", "p1", "request.txt", "7 B"))))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.AddTaskAttachmentsForTask(context.Background(), Task{
+		ID: "t-1", ProjectID: "p1", Attachments: []Attachment{{FileName: "old.txt"}},
+	}, "p1", []string{path})
+	if err != nil {
+		t.Fatalf("AddTaskAttachmentsForTask with invalid snapshot: %v", err)
+	}
+	if got := getCount.Load(); got != 1 {
+		t.Fatalf("preflight GET count = %d, want 1 for invalid snapshot", got)
 	}
 }
 

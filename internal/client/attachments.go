@@ -91,10 +91,24 @@ func (c *Client) GetTaskAttachments(ctx context.Context, taskID, projectID strin
 	return c.ListTaskAttachments(ctx, taskID, projectID)
 }
 
-// AddTaskAttachments uploads one or more local files using the same multipart
-// field and HTMX response contract as the web task detail form. The response
-// is the refreshed attachment-list fragment, not an optimistic local result.
+// AddTaskAttachments uploads files using a compatibility preflight because no
+// pre-upload attachment snapshot was supplied by the caller.
 func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID string, filePaths []string) ([]Attachment, error) {
+	return c.addTaskAttachments(ctx, taskID, projectID, filePaths, nil)
+}
+
+// AddTaskAttachmentsForTask uploads files using a complete attachment snapshot
+// from task resolution when available. Older task-reference responses omit that
+// snapshot, in which case the method safely falls back to ListTaskAttachments.
+func (c *Client) AddTaskAttachmentsForTask(ctx context.Context, task Task, projectID string, filePaths []string) ([]Attachment, error) {
+	before := task.Attachments
+	if strings.TrimSpace(task.ProjectID) != strings.TrimSpace(projectID) {
+		before = nil
+	}
+	return c.addTaskAttachments(ctx, task.ID, projectID, filePaths, before)
+}
+
+func (c *Client) addTaskAttachments(ctx context.Context, taskID, projectID string, filePaths []string, snapshot []Attachment) ([]Attachment, error) {
 	if strings.TrimSpace(taskID) == "" {
 		return nil, fmt.Errorf("task ID is required for task attachments")
 	}
@@ -115,10 +129,13 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 		requestedNames = append(requestedNames, filepath.Base(strings.TrimSpace(path)))
 	}
 
-	before, err := c.ListTaskAttachments(ctx, taskID, projectID)
-	if err != nil {
-		_ = body.Close()
-		return nil, fmt.Errorf("checking existing task attachments: %w", err)
+	before := snapshot
+	if !validTaskAttachmentSnapshot(taskID, before) {
+		before, err = c.ListTaskAttachments(ctx, taskID, projectID)
+		if err != nil {
+			_ = body.Close()
+			return nil, fmt.Errorf("checking existing task attachments: %w", err)
+		}
 	}
 
 	closeDone := make(chan struct{})
@@ -157,6 +174,24 @@ func (c *Client) AddTaskAttachments(ctx context.Context, taskID, projectID strin
 		}
 	}
 	return attachments, nil
+}
+
+func validTaskAttachmentSnapshot(taskID string, attachments []Attachment) bool {
+	if attachments == nil {
+		return false
+	}
+	seen := make(map[string]struct{}, len(attachments))
+	for _, attachment := range attachments {
+		id := strings.TrimSpace(attachment.ID)
+		if id == "" || id != attachment.ID || (attachment.TaskID != "" && strings.TrimSpace(attachment.TaskID) != strings.TrimSpace(taskID)) {
+			return false
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return false
+		}
+		seen[id] = struct{}{}
+	}
+	return true
 }
 
 func matchUploadedAttachments(before, after []Attachment, requestedNames []string) ([]Attachment, []string) {

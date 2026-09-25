@@ -1941,7 +1941,7 @@ func taskAttachmentsAddCommand(m Model, c *client.Client, projectID string, args
 		if err != nil {
 			return "", err
 		}
-		attachments, err := c.AddTaskAttachments(ctx, task.ID, projectID, filePaths)
+		attachments, err := c.AddTaskAttachmentsForTask(ctx, task, projectID, filePaths)
 		if err != nil {
 			return "", err
 		}
