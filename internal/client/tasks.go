@@ -958,19 +958,11 @@ func taskDetailControlText(node *html.Node) string {
 }
 
 func taskDetailNamedControl(root *html.Node, element, name string) *html.Node {
-	return findNode(root, func(e *html.Node) bool {
-		return e.Data == element && attr(e, "name") == name
-	})
+	return findNamedHTMLControl(root, name, element)
 }
 
 func taskDetailSelectedOption(root *html.Node, name string) *html.Node {
-	selectNode := taskDetailNamedControl(root, "select", name)
-	if selectNode == nil {
-		return nil
-	}
-	return findNode(selectNode, func(e *html.Node) bool {
-		return e.Data == "option" && nodeHasAttr(e, "selected")
-	})
+	return selectedHTMLFormOption(taskDetailNamedControl(root, "select", name), htmlSelectSelectedOption)
 }
 
 func nodeHasAttr(node *html.Node, name string) bool {

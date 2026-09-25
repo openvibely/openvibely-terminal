@@ -4461,6 +4461,32 @@ func TestChannelRequestsPreserveAuthenticationClassification(t *testing.T) {
 	}
 }
 
+func TestChannelFormValuePreservesControlSpecificExtraction(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<form>
+		<input name="input_value" value="  input  ">
+		<textarea name="textarea_value">  textarea  </textarea>
+		<select name="selected_value"><option value="first">First</option><option value="second" selected>Second</option></select>
+		<select name="unselected_value"><option value="first">First</option><option value="second">Second</option></select>
+		<select name="unselected_attribute_value" value="select-value"><option value="first">First</option></select>
+		<input name="slack_client_id" value="   ">
+		<select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual">Manual</option></select>
+	</form>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{
+		"input_value": "input", "textarea_value": "textarea", "selected_value": "second", "unselected_value": "", "unselected_attribute_value": "select-value",
+	} {
+		if got := channelFormValue(root, name); got != want {
+			t.Errorf("channelFormValue(%q) = %q, want %q", name, got, want)
+		}
+	}
+	values := channelConfiguration(root, "slack", Card{})
+	if values.Has("slack_client_id") || values.Has("slack_bot_token_mode") {
+		t.Fatalf("empty channel values were not skipped: %v", values)
+	}
+}
+
 func TestChannelEditableSettingsIncludesSlackModeButExcludesCredentials(t *testing.T) {
 	const secret = "stored-slack-secret"
 	c := htmlServer(t, `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form><input name="slack_client_id" value="client-id"><input name="slack_client_secret" value="`+secret+`"><input name="slack_app_token" value="stored-app-token"><select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual" selected>Manual</option></select><input name="slack_bot_token" value="stored-bot-token"><input type="checkbox" name="slack_send_responses" checked></form>`)
