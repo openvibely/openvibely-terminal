@@ -40,11 +40,11 @@ func TestTasksAttachmentsAddDispatchesAndRendersRefreshedFiles(t *testing.T) {
 	}
 
 	m, rec := dispatchModel(t, map[string]string{
-		"/tasks":                      attachmentTaskBoardHTML,
-		"GET /tasks/t-1":              `<div id="attachment-list" data-project-id="p1"></div>`,
-		"POST /tasks/t-1/attachments": attachmentRowsHTML,
-		"/attachments/att-1":          refreshedAttachmentRowsHTML,
-		"/attachments/att-2":          refreshedAttachmentRowsHTML,
+		"/tasks":                           attachmentTaskBoardHTML,
+		"GET /api/tasks/reference-catalog": `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending","attachments":[]}]}`,
+		"POST /tasks/t-1/attachments":      attachmentRowsHTML,
+		"/attachments/att-1":               refreshedAttachmentRowsHTML,
+		"/attachments/att-2":               refreshedAttachmentRowsHTML,
 	})
 	m = runLine(t, m, "/tasks attachments add Refactor "+firstPath+" "+secondPath)
 
@@ -53,6 +53,9 @@ func TestTasksAttachmentsAddDispatchesAndRendersRefreshedFiles(t *testing.T) {
 	}
 	if !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
 		t.Fatalf("upload was not scoped to selected project:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	if got := rec.count("GET", "/tasks/t-1"); got != 0 {
+		t.Fatalf("task attachment preflight reads = %d, want 0 with resolution snapshot; calls:\n%s", got, rec.all())
 	}
 	out := stripANSI(transcript(m))
 	for _, want := range []string{"uploaded 2 attachment(s)", "request.txt", "trace.json", "11 B", "2.0 KB"} {
@@ -73,24 +76,35 @@ func TestTaskAttachmentCommandsDoNotLoadLazyTaskDetailFragments(t *testing.T) {
 	}
 
 	cases := []struct {
-		name         string
-		line         string
-		wantSelector bool
-		wantPost     bool
+		name              string
+		line              string
+		wantSelector      bool
+		wantPost          bool
+		wantSnapshot      bool
+		wantTaskPageReads int
 	}{
-		{name: "list", line: "/tasks attachments list Refactor"},
-		{name: "add preflight", line: "/tasks attachments add Refactor " + path, wantPost: true},
-		{name: "typed delete lookup", line: "/tasks attachments delete Refactor att-1"},
-		{name: "picker loading", line: "/tasks attachments delete Refactor", wantSelector: true},
+		{name: "list", line: "/tasks attachments list Refactor", wantTaskPageReads: 1},
+		{name: "add with resolution snapshot", line: "/tasks attachments add Refactor " + path, wantPost: true, wantSnapshot: true},
+		{name: "add legacy fallback", line: "/tasks attachments add Refactor " + path, wantPost: true, wantTaskPageReads: 1},
+		{name: "typed delete lookup", line: "/tasks attachments delete Refactor att-1", wantTaskPageReads: 1},
+		{name: "picker loading", line: "/tasks attachments delete Refactor", wantSelector: true, wantTaskPageReads: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, rec := dispatchModel(t, map[string]string{
+			attachmentPage := attachmentRowsHTML
+			if tc.wantPost {
+				attachmentPage = `<div id="attachment-list" data-project-id="p1"></div>`
+			}
+			bodies := map[string]string{
 				"/tasks":                      attachmentTaskBoardHTML,
-				"GET /tasks/t-1":              attachmentRowsHTML,
+				"GET /tasks/t-1":              attachmentPage,
 				"POST /tasks/t-1/attachments": attachmentRowsHTML,
 				"/attachments/att-1":          refreshedAttachmentRowsHTML,
-			})
+			}
+			if tc.wantSnapshot {
+				bodies["GET /api/tasks/reference-catalog"] = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending","attachments":[]}]}`
+			}
+			m, rec := dispatchModel(t, bodies)
 
 			m = runLine(t, m, tc.line)
 			if tc.wantSelector && !m.selectorActive {
@@ -99,8 +113,8 @@ func TestTaskAttachmentCommandsDoNotLoadLazyTaskDetailFragments(t *testing.T) {
 			if tc.wantPost && !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
 				t.Fatalf("upload was not sent with selected project scope:\n%s", rec.all())
 			}
-			if got := rec.count("GET", "/tasks/t-1"); got != 1 {
-				t.Fatalf("attachment command task-page reads = %d, want one; calls:\n%s", got, rec.all())
+			if got := rec.count("GET", "/tasks/t-1"); got != tc.wantTaskPageReads {
+				t.Fatalf("attachment command task-page reads = %d, want %d; calls:\n%s", got, tc.wantTaskPageReads, rec.all())
 			}
 			for _, disallowed := range []string{"/tasks/t-1/thread", "/tasks/t-1/changes", "/api/tasks/t-1/lifecycle-executions"} {
 				if rec.saw("GET", disallowed) {

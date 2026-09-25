@@ -34,6 +34,9 @@ type Task struct {
 	Priority     int      `json:"priority,omitempty"`
 	DisplayOrder int      `json:"display_order"`
 	Badges       []string `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
+	// Attachments is a complete pre-upload snapshot when supplied by the task
+	// reference endpoint. Nil means the endpoint did not provide one.
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // TaskDetail is the task detail page split into its tabs.
