@@ -236,30 +236,48 @@ func TestAddTaskAttachmentsRejectsInvalidSnapshotAndFallsBack(t *testing.T) {
 	if err := os.WriteFile(path, []byte("request"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var getCount atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		if r.Method == http.MethodGet {
-			getCount.Add(1)
-			_, _ = w.Write([]byte(attachmentListMarkup("p1", "")))
-			return
-		}
-		_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-new", "p1", "request.txt", "7 B"))))
-	}))
-	defer srv.Close()
+	cases := []struct {
+		name string
+		task Task
+	}{
+		{name: "legacy absent snapshot", task: Task{ID: "t-1", ProjectID: "p1"}},
+		{name: "missing attachment ID", task: Task{ID: "t-1", ProjectID: "p1", Attachments: []Attachment{{FileName: "old.txt", TaskID: "t-1"}}}},
+		{name: "missing attachment task ID", task: Task{ID: "t-1", ProjectID: "p1", Attachments: []Attachment{{ID: "att-old", FileName: "old.txt"}}}},
+		{name: "foreign attachment task ID", task: Task{ID: "t-1", ProjectID: "p1", Attachments: []Attachment{{ID: "att-old", TaskID: "t-2", FileName: "old.txt"}}}},
+		{name: "duplicate attachment IDs", task: Task{ID: "t-1", ProjectID: "p1", Attachments: []Attachment{{ID: "att-old", TaskID: "t-1"}, {ID: "att-old", TaskID: "t-1"}}}},
+		{name: "foreign task project", task: Task{ID: "t-1", ProjectID: "p2", Attachments: []Attachment{}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var getCount atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				if r.Method == http.MethodGet {
+					getCount.Add(1)
+					if r.URL.Path != "/tasks/t-1" || r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("preflight request = %s %s?project_id=%s, want task-scoped GET", r.Method, r.URL.Path, r.URL.Query().Get("project_id"))
+					}
+					_, _ = w.Write([]byte(attachmentListMarkup("p1", "")))
+					return
+				}
+				if r.Method != http.MethodPost || r.URL.Path != "/tasks/t-1/attachments" || r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("upload request = %s %s?project_id=%s, want project-scoped attachment POST", r.Method, r.URL.Path, r.URL.Query().Get("project_id"))
+				}
+				_, _ = w.Write([]byte(attachmentListMarkup("p1", attachmentRowMarkup("att-new", "p1", "request.txt", "7 B"))))
+			}))
+			defer srv.Close()
 
-	c, err := New(srv.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = c.AddTaskAttachmentsForTask(context.Background(), Task{
-		ID: "t-1", ProjectID: "p1", Attachments: []Attachment{{FileName: "old.txt"}},
-	}, "p1", []string{path})
-	if err != nil {
-		t.Fatalf("AddTaskAttachmentsForTask with invalid snapshot: %v", err)
-	}
-	if got := getCount.Load(); got != 1 {
-		t.Fatalf("preflight GET count = %d, want 1 for invalid snapshot", got)
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := c.AddTaskAttachmentsForTask(context.Background(), tc.task, "p1", []string{path}); err != nil {
+				t.Fatalf("AddTaskAttachmentsForTask: %v", err)
+			}
+			if got := getCount.Load(); got != 1 {
+				t.Fatalf("preflight GET count = %d, want 1 for invalid/incomplete snapshot", got)
+			}
+		})
 	}
 }
 

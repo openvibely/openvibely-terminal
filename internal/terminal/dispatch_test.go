@@ -146,7 +146,7 @@ func compactTaskCatalogForProjectTest(board, projectID string) string {
 				seen[id] = true
 				task := client.Task{
 					ID: id, ProjectID: projectID, Title: id, Category: category, Status: testHTMLAttr(node, "data-task-status"),
-					DisplayOrder: atoiSafe(testHTMLAttr(node, "data-display-order")),
+					DisplayOrder: atoiSafe(testHTMLAttr(node, "data-display-order")), Attachments: []client.Attachment{},
 				}
 				var find func(*html.Node)
 				find = func(child *html.Node) {

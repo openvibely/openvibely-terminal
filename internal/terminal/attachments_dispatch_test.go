@@ -81,11 +81,12 @@ func TestTaskAttachmentCommandsDoNotLoadLazyTaskDetailFragments(t *testing.T) {
 		wantSelector      bool
 		wantPost          bool
 		wantSnapshot      bool
+		wantLegacy        bool
 		wantTaskPageReads int
 	}{
 		{name: "list", line: "/tasks attachments list Refactor", wantTaskPageReads: 1},
 		{name: "add with resolution snapshot", line: "/tasks attachments add Refactor " + path, wantPost: true, wantSnapshot: true},
-		{name: "add legacy fallback", line: "/tasks attachments add Refactor " + path, wantPost: true, wantTaskPageReads: 1},
+		{name: "add legacy fallback", line: "/tasks attachments add Refactor " + path, wantPost: true, wantLegacy: true, wantTaskPageReads: 1},
 		{name: "typed delete lookup", line: "/tasks attachments delete Refactor att-1", wantTaskPageReads: 1},
 		{name: "picker loading", line: "/tasks attachments delete Refactor", wantSelector: true, wantTaskPageReads: 1},
 	}
@@ -103,6 +104,8 @@ func TestTaskAttachmentCommandsDoNotLoadLazyTaskDetailFragments(t *testing.T) {
 			}
 			if tc.wantSnapshot {
 				bodies["GET /api/tasks/reference-catalog"] = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending","attachments":[]}]}`
+			} else if tc.wantLegacy {
+				bodies["GET /api/tasks/reference-catalog"] = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending"}]}`
 			}
 			m, rec := dispatchModel(t, bodies)
 
@@ -190,7 +193,7 @@ func TestTasksAttachmentsPartialUploadIsVisibleWithoutInflatedSuccess(t *testing
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
+			_, _ = w.Write([]byte(`{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending","attachments":[{"id":"att-existing","task_id":"t-1","file_name":"skipped.txt","file_size":7}]}]}`))
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
@@ -198,12 +201,13 @@ func TestTasksAttachmentsPartialUploadIsVisibleWithoutInflatedSuccess(t *testing
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			t.Errorf("unexpected attachment preflight GET %s", r.URL.Path)
 			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"></div>`))
 		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/attachments":
 			if r.URL.Query().Get("project_id") != "p1" {
 				t.Errorf("upload project_id = %q, want p1", r.URL.Query().Get("project_id"))
 			}
-			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">kept.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`))
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">skipped.txt</p><p class="text-xs">7 B</p><button hx-delete="/attachments/att-existing?project_id=p1"></button></div><div class="attachment-row"><p class="font-medium">kept.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`))
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
@@ -702,16 +706,17 @@ func TestCLITaskAttachmentsPartialUploadReturnsFailureWithoutInflatedSuccess(t *
 			_, _ = w.Write([]byte(cliProjects))
 		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
+			_, _ = w.Write([]byte(`{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor the API","category":"backlog","status":"pending","attachments":[{"id":"att-existing","task_id":"t-1","file_name":"skipped.txt","file_size":7}]}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+			t.Errorf("unexpected attachment preflight GET %s", r.URL.Path)
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"></div>`))
 		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/attachments":
 			w.Header().Set("Content-Type", "text/html")
-			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">kept.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`))
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"><div class="attachment-row"><p class="font-medium">skipped.txt</p><p class="text-xs">7 B</p><button hx-delete="/attachments/att-existing?project_id=p1"></button></div><div class="attachment-row"><p class="font-medium">kept.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div></div>`))
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
@@ -733,6 +738,9 @@ func TestCLITaskAttachmentsPartialUploadReturnsFailureWithoutInflatedSuccess(t *
 	}
 	if !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
 		t.Fatalf("partial CLI upload was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	if rec.saw("GET", "/tasks/t-1") {
+		t.Fatalf("complete attachment snapshot still triggered preflight:\n%s", rec.all())
 	}
 }
 func TestCLITaskAttachmentsUploadErrorReturnsFailureWithoutSuccess(t *testing.T) {
