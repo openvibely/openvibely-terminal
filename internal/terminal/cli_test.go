@@ -11860,6 +11860,64 @@ func TestCLIChannelsWebhooksPreservesOptionLikeExactName(t *testing.T) {
 	}
 }
 
+func TestCLIWebhookEditRequiresReferenceBeforeRequests(t *testing.T) {
+	for _, args := range [][]string{
+		{"channels", "webhooks", "edit", "--enabled", "false"},
+		{"webhooks", "edit", "--enabled", "false"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+			err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "usage:") {
+				t.Fatalf("error = %v, want clear usage", err)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("invalid edit made backend requests: %s", calls)
+			}
+		})
+	}
+}
+
+func TestCLIWebhookEditOptionsAndOptionLikeName(t *testing.T) {
+	const cards = `<div data-webhook-id="w1" data-webhook-name="pager" data-webhook-token="pager-token"></div><div data-webhook-id="w-opt" data-webhook-name="Hook --enabled maybe" data-webhook-token="opt-token"></div>`
+	const detail = `{"id":"w1","project_id":"p1","name":"pager","enabled":true,"path_token":"pager-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
+	const optionLikeDetail = `{"id":"w-opt","project_id":"p1","name":"Hook --enabled maybe","enabled":true,"path_token":"opt-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
+	for _, tc := range []struct {
+		name   string
+		ref    string
+		id     string
+		detail string
+	}{
+		{name: "reference and option", ref: "pager", id: "w1", detail: detail},
+		{name: "option-like name", ref: "Hook --enabled maybe", id: "w-opt", detail: optionLikeDetail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":               cliProjects,
+				"/channels":                   cards,
+				"/channels/webhooks/" + tc.id: tc.detail,
+			})
+			args := []string{"channels", "webhooks", "edit", tc.ref, "--enabled", "false"}
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err != nil {
+				t.Fatalf("edit failed: %v", err)
+			}
+			path := "/channels/webhooks/" + tc.id
+			if !rec.saw(http.MethodPut, path) {
+				t.Fatalf("edit did not update %s; calls: %s", path, rec.all())
+			}
+			foundOption := false
+			for _, form := range rec.formsSnapshot() {
+				if strings.HasPrefix(form, http.MethodPut+" "+path+"?") && strings.Contains(form, "enabled=false") {
+					foundOption = true
+				}
+			}
+			if !foundOption {
+				t.Fatalf("enabled option not applied to edit: %v", rec.formsSnapshot())
+			}
+		})
+	}
+}
+
 func TestCLIChannelsWebhooksValidatesBeforeAnyRequest(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
 	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "webhooks", "create", "Hook", "--enabled", "maybe"}, false, false)
