@@ -265,10 +265,6 @@ func setupCommand() command {
 			if check.Remote {
 				return m, errCmd(check.RemoteMessage)
 			}
-			if missing := setupBlockingMissing(check, opts); len(missing) > 0 {
-				return m, errCmd("setup " + opts.action + " cannot continue:\n" + strings.Join(prefixLines(missing, "  - "), "\n") + "\nRun setup check for details.")
-			}
-
 			cmd := m.run("Setup", setupHealthWaitTimeout+30*time.Second, func(ctx context.Context) (string, error) {
 				return runSetupBootstrap(ctx, m.client, check, opts)
 			})
@@ -486,6 +482,9 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 		b.WriteString("Backend health check succeeded.\n")
 		b.WriteString(next)
 		return strings.TrimRight(b.String(), "\n"), nil
+	}
+	if missing := setupBlockingMissing(check, opts); len(missing) > 0 {
+		return "", errors.New("setup " + opts.action + " cannot continue:\n" + strings.Join(prefixLines(missing, "  - "), "\n") + "\nRun setup check for details.")
 	}
 
 	b.WriteString("Local backend setup started after confirmation.\n")
