@@ -479,6 +479,15 @@ func setupConfirmationMessage(check setupCheckResult, opts setupOptions) string 
 
 func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckResult, opts setupOptions) (string, error) {
 	var b strings.Builder
+	if next, reachable, err := probeSetupHealth(ctx, c); err != nil {
+		return "", err
+	} else if reachable {
+		fmt.Fprintf(&b, "Local backend is already running at %s; skipping installer and start process.\n", serverURLDisplay(c.BaseURL()))
+		b.WriteString("Backend health check succeeded.\n")
+		b.WriteString(next)
+		return strings.TrimRight(b.String(), "\n"), nil
+	}
+
 	b.WriteString("Local backend setup started after confirmation.\n")
 	b.WriteString("Disclosed effects:\n")
 	for _, disclosure := range check.Disclosures {
@@ -576,6 +585,30 @@ func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) error 
 	return nil
 }
 
+func probeSetupHealth(ctx context.Context, c *client.Client) (string, bool, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := c.GetGlobalCapacity(probeCtx)
+	if err == nil {
+		return setupHealthNextSteps(c, false), true, nil
+	}
+	if client.IsAuthRequired(err) {
+		return setupHealthNextSteps(c, true), true, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", false, ctxErr
+	}
+	return "", false, nil
+}
+
+func setupHealthNextSteps(c *client.Client, authRequired bool) string {
+	next := localBackendLifecycleGuidance(runtime.GOOS, c.BaseURL())
+	if authRequired {
+		return next + "\n\nNext: run /login to authenticate, then /projects to select or create a project."
+	}
+	return next + "\n\nNext: run /projects to select an existing project, or /projects create <name> <path> to create one."
+}
+
 func waitForSetupHealth(ctx context.Context, c *client.Client, timeout, interval time.Duration) (string, error) {
 	if timeout <= 0 {
 		timeout = setupHealthWaitTimeout
@@ -593,10 +626,10 @@ func waitForSetupHealth(ctx context.Context, c *client.Client, timeout, interval
 		_, err := c.GetGlobalCapacity(probeCtx)
 		cancel()
 		if err == nil {
-			return localBackendLifecycleGuidance(runtime.GOOS, c.BaseURL()) + "\n\nNext: run /projects to select an existing project, or /projects create <name> <path> to create one.", nil
+			return setupHealthNextSteps(c, false), nil
 		}
 		if client.IsAuthRequired(err) {
-			return localBackendLifecycleGuidance(runtime.GOOS, c.BaseURL()) + "\n\nNext: run /login to authenticate, then /projects to select or create a project.", nil
+			return setupHealthNextSteps(c, true), nil
 		}
 		lastErr = err
 		if !time.Now().Before(deadline) {
