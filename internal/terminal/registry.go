@@ -2088,8 +2088,8 @@ func downloadTaskAttachmentResult(ctx context.Context, c *client.Client, project
 	fileClosed = true
 
 	if strings.TrimSpace(outputPath) == "" {
-		if err := os.Link(tempPath, targetPath); err != nil {
-			return "", fmt.Errorf("create download path %q: %w", targetPath, err)
+		if err := publishDefaultAttachment(tempPath, targetPath, os.Link); err != nil {
+			return "", err
 		}
 	} else if err := os.Rename(tempPath, targetPath); err != nil {
 		return "", fmt.Errorf("replace download path %q: %w", targetPath, err)
@@ -2103,6 +2103,49 @@ func downloadTaskAttachmentResult(ctx context.Context, c *client.Client, project
 		}{TaskID: task.ID, AttachmentID: attachment.ID, FileName: attachment.FileName, Path: targetPath})
 	}
 	return fmt.Sprintf("downloaded attachment %q from %s to %s", firstNonEmpty(attachment.FileName, attachment.ID), firstNonEmpty(task.Title, task.ID), targetPath), nil
+}
+
+func publishDefaultAttachment(tempPath, targetPath string, link func(string, string) error) error {
+	if err := link(tempPath, targetPath); err == nil {
+		return nil
+	} else if errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("download path %q already exists (collision): %w", targetPath, err)
+	}
+
+	source, err := os.Open(tempPath)
+	if err != nil {
+		return fmt.Errorf("read download for %q: %w", targetPath, err)
+	}
+	defer func() { _ = source.Close() }()
+
+	destination, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("download path %q already exists (collision): %w", targetPath, err)
+		}
+		return fmt.Errorf("create download path %q: %w", targetPath, err)
+	}
+
+	destinationClosed := false
+	published := false
+	defer func() {
+		if !destinationClosed {
+			_ = destination.Close()
+		}
+		if !published {
+			_ = os.Remove(targetPath)
+		}
+	}()
+	if _, err := io.Copy(destination, source); err != nil {
+		return fmt.Errorf("write download path %q: %w", targetPath, err)
+	}
+	if err := destination.Close(); err != nil {
+		destinationClosed = true
+		return fmt.Errorf("close download path %q: %w", targetPath, err)
+	}
+	destinationClosed = true
+	published = true
+	return nil
 }
 
 func attachmentDownloadPath(outputPath string, attachment client.Attachment) (string, error) {

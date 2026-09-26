@@ -218,6 +218,60 @@ func TestAggregateAlertPagesPreservesFirstSeenAndEmptyShape(t *testing.T) {
 	}
 }
 
+func TestAlertRowDiscoverySharedAcrossListBoundedAndLookup(t *testing.T) {
+	const page = `<div>
+		<button data-alert-id="anchorless">Action without a row anchor</button>
+		<div data-alert-id="a1" data-alert-scroll-anchor="a1"><p class="font-semibold">First</p><button data-alert-id="a1">Delete</button></div>
+		<div data-alert-id="a1" data-alert-scroll-anchor="a1"><p class="font-semibold">Duplicate</p></div>
+		<div data-alert-id="a2" data-alert-scroll-anchor="a2"><p class="font-semibold">Second</p></div>
+	</div>`
+	c := htmlServer(t, page)
+
+	alerts, err := c.ListAlerts(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("ListAlerts: %v", err)
+	}
+	if len(alerts) != 2 {
+		t.Fatalf("full alerts = %+v, want two unique rows", alerts)
+	}
+	if got, want := []string{alerts[0].ID, alerts[1].ID}, []string{"a1", "a2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("full alert order = %v, want %v", got, want)
+	}
+	if alerts[0].Title != "First" {
+		t.Fatalf("duplicate alert replaced first row: %+v", alerts[0])
+	}
+
+	bounded, err := c.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, 1)
+	if err != nil {
+		t.Fatalf("ListAlertsBounded: %v", err)
+	}
+	if len(bounded.Alerts) != 1 || bounded.Alerts[0].ID != "a1" || bounded.ParsedAlerts != 1 {
+		t.Fatalf("bounded alerts = %+v, want first unique row only", bounded)
+	}
+	if !bounded.MoreAvailable || bounded.Complete {
+		t.Fatalf("bounded continuation = more:%t complete:%t, want more available", bounded.MoreAvailable, bounded.Complete)
+	}
+
+	alert, collected, found, err := c.FindAlertByID(context.Background(), "anchorless", "p1")
+	if err != nil {
+		t.Fatalf("FindAlertByID anchorless: %v", err)
+	}
+	if found || alert.ID != "" {
+		t.Fatalf("anchorless lookup = %+v, found %t; want miss", alert, found)
+	}
+	if len(collected) != 2 {
+		t.Fatalf("lookup collection = %+v, want two unique rows", collected)
+	}
+	if got, want := []string{collected[0].ID, collected[1].ID}, []string{"a1", "a2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("lookup collection = %v, want %v", got, want)
+	}
+
+	alert, _, found, err = c.FindAlertByID(context.Background(), "a2", "p1")
+	if err != nil || !found || alert.ID != "a2" {
+		t.Fatalf("FindAlertByID standard row = %+v, found %t, error %v", alert, found, err)
+	}
+}
+
 func TestListAlertsScrapesCards(t *testing.T) {
 	// Mirrors the real alertRow markup.
 	const page = `<div>

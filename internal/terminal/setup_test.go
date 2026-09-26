@@ -224,7 +224,7 @@ func TestSetupStartRequiresConfirmationOrForce(t *testing.T) {
 		t.Skip("uses Unix executable fixture")
 	}
 	withFastSetupHealth(t)
-	startMarker, c := setupStartFixture(t, http.StatusOK)
+	startMarker, c := setupStartFixtureBecomesHealthyAfterStart(t)
 
 	var unforced bytes.Buffer
 	if err := RunCLI(c, &unforced, "", []string{"setup", "start"}, false, false); err == nil || !strings.Contains(err.Error(), "use --force to confirm setup start") {
@@ -269,6 +269,124 @@ func TestSetupStartRequiresConfirmationOrForce(t *testing.T) {
 		if !strings.Contains(forced.String(), want) {
 			t.Errorf("forced setup output missing %q:\n%s", want, forced.String())
 		}
+	}
+}
+
+func TestSetupStartReportsHealthyBackendWithoutStartingProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("setup start against healthy backend failed: %v\n%s", err, out.String())
+	}
+	assertFileMissing(t, startMarker)
+	for _, want := range []string{"already running", "Backend health check succeeded", "Next: run /projects"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("healthy setup start output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestSetupStartReportsHealthyBackendWithoutStartPrerequisite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+	withoutSetupStartScript(t)
+	oldLookPath := setupLookPath
+	setupLookPath = func(name string) (string, error) {
+		if name == "openvibely" {
+			return "", errors.New("openvibely is not installed")
+		}
+		return oldLookPath(name)
+	}
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("setup start against healthy backend without start prerequisite failed: %v\n%s", err, out.String())
+	}
+	assertFileMissing(t, startMarker)
+	for _, want := range []string{"already running", "Backend health check succeeded"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("healthy setup start output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestSetupStartTreatsAuthRequiredAsReachable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker, c := setupStartFixture(t, http.StatusUnauthorized)
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("setup start against auth-required backend failed: %v\n%s", err, out.String())
+	}
+	assertFileMissing(t, startMarker)
+	for _, want := range []string{"already running", "authenticate", "/login", "/projects"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("auth-required setup output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestSetupBootstrapInstallSkipsInstallerAndStartWhenHealthy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+	installMarker := filepath.Join(t.TempDir(), "installed")
+	fakeSetupToolPaths(t, map[string]string{"curl": filepath.Join(t.TempDir(), "curl"), "bash": filepath.Join(t.TempDir(), "bash")})
+	oldInstaller := setupRunInstaller
+	setupRunInstaller = func(context.Context, string, []setupCommandSpec) error {
+		return os.WriteFile(installMarker, []byte("installed"), 0644)
+	}
+	t.Cleanup(func() { setupRunInstaller = oldInstaller })
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "bootstrap", "--install"}, true, false); err != nil {
+		t.Fatalf("setup bootstrap --install against healthy backend failed: %v\n%s", err, out.String())
+	}
+	assertFileMissing(t, installMarker)
+	assertFileMissing(t, startMarker)
+	if !strings.Contains(out.String(), "already running") {
+		t.Fatalf("healthy bootstrap did not report already running:\n%s", out.String())
+	}
+}
+
+func TestSetupBootstrapInstallSkipsMissingInstallerPrerequisitesWhenHealthy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+	installMarker := filepath.Join(t.TempDir(), "installed")
+	oldLookPath := setupLookPath
+	setupLookPath = func(name string) (string, error) {
+		if name == "curl" || name == "bash" {
+			return "", errors.New(name + " is not installed")
+		}
+		return oldLookPath(name)
+	}
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+	oldInstaller := setupRunInstaller
+	setupRunInstaller = func(context.Context, string, []setupCommandSpec) error {
+		return os.WriteFile(installMarker, []byte("installed"), 0644)
+	}
+	t.Cleanup(func() { setupRunInstaller = oldInstaller })
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "bootstrap", "--install"}, true, false); err != nil {
+		t.Fatalf("setup bootstrap --install against healthy backend without installer prerequisites failed: %v\n%s", err, out.String())
+	}
+	assertFileMissing(t, installMarker)
+	assertFileMissing(t, startMarker)
+	if !strings.Contains(out.String(), "already running") {
+		t.Fatalf("healthy bootstrap did not report already running:\n%s", out.String())
 	}
 }
 
@@ -330,7 +448,7 @@ func TestSetupBootstrapInstallUsesOptInInstallerAndWaitsForHealth(t *testing.T) 
 		t.Skip("uses Unix executable fixture")
 	}
 	withFastSetupHealth(t)
-	startMarker, c := setupStartFixture(t, http.StatusOK)
+	startMarker, c := setupStartFixtureBecomesHealthyAfterStart(t)
 	installMarker := filepath.Join(t.TempDir(), "installed")
 	fakeSetupToolPaths(t, map[string]string{"curl": filepath.Join(t.TempDir(), "curl"), "bash": filepath.Join(t.TempDir(), "bash")})
 	oldInstaller := setupRunInstaller
@@ -406,6 +524,10 @@ func TestSetupBootstrapInstallCanProvideMissingStartCommand(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/capacity/global" {
 			http.NotFound(w, r)
+			return
+		}
+		if _, err := os.Stat(startMarker); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -759,6 +881,29 @@ func withFastSetupHealth(t *testing.T) {
 		setupHealthWaitTimeout = oldTimeout
 		setupHealthPoll = oldPoll
 	})
+}
+
+func setupStartFixtureBecomesHealthyAfterStart(t *testing.T) (string, *client.Client) {
+	t.Helper()
+	startMarker := setupFakeBackendCommand(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/capacity/global" {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := os.Stat(startMarker); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"max_workers":1,"available_slots":1,"has_capacity":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startMarker, c
 }
 
 func setupStartFixture(t *testing.T, healthStatus int) (string, *client.Client) {
