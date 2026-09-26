@@ -346,6 +346,9 @@ func TestTasksAttachmentsDownloadByIDFromCLIWritesExactBackendBytes(t *testing.T
 	payload := []byte("\x00remote-bytes\xff\n")
 	dir := t.TempDir()
 	outPath := filepath.Join(dir, "request.bin")
+	if err := os.WriteFile(outPath, []byte("old destination contents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":      cliProjects,
 		"/tasks":             attachmentTaskBoardHTML,
@@ -368,6 +371,111 @@ func TestTasksAttachmentsDownloadByIDFromCLIWritesExactBackendBytes(t *testing.T
 	}
 	if strings.Contains(out.String(), "file_path") {
 		t.Fatalf("download output exposed backend-local file path: %s", out.String())
+	}
+}
+
+func TestTasksAttachmentsDownloadFailuresPreserveExplicitOutput(t *testing.T) {
+	for _, failure := range []string{"server error", "mid-stream transport failure"} {
+		for _, existing := range []bool{true, false} {
+			t.Run(failure+map[bool]string{true: " with existing output", false: " with new output"}[existing], func(t *testing.T) {
+				dir := t.TempDir()
+				outPath := filepath.Join(dir, "out.bin")
+				original := []byte("original destination contents")
+				if existing {
+					if err := os.WriteFile(outPath, original, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/api/projects":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(cliProjects))
+					case "/api/tasks/reference-catalog":
+						w.Header().Set("Content-Type", "application/json")
+						_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
+					case "/tasks/t-1":
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = w.Write([]byte(attachmentRowsHTML))
+					case "/attachments/att-1":
+						if failure == "server error" {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusForbidden)
+							_, _ = w.Write([]byte(`{"error":"attachment access denied"}`))
+							return
+						}
+						w.Header().Set("Content-Length", "1000")
+						_, _ = w.Write([]byte("partial transfer"))
+					default:
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = w.Write([]byte(attachmentTaskBoardHTML))
+					}
+				}))
+				defer srv.Close()
+				c, err := client.New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var out bytes.Buffer
+				err = RunCLI(c, &out, "demo", []string{"tasks", "attachments", "download", "Refactor", "att-1", "--output", outPath}, false, false)
+				if err == nil {
+					t.Fatal("failed download returned no error")
+				}
+
+				got, readErr := os.ReadFile(outPath)
+				if existing {
+					if readErr != nil {
+						t.Fatalf("reading preserved output: %v", readErr)
+					}
+					if !bytes.Equal(got, original) {
+						t.Fatalf("failed download changed existing output to %q, want %q", got, original)
+					}
+				} else if !os.IsNotExist(readErr) {
+					t.Fatalf("failed download left destination contents %q (read error %v)", got, readErr)
+				}
+			})
+		}
+	}
+}
+
+func TestTasksAttachmentsDownloadDefaultNameCollisionDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+
+	competitor := []byte("created by another process")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/attachments/att-1" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := os.WriteFile("race.bin", competitor, 0o600); err != nil {
+			t.Errorf("creating competing default destination: %v", err)
+		}
+		_, _ = w.Write([]byte("download payload"))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = downloadTaskAttachmentResult(t.Context(), c, "p1", client.Task{ID: "t-1", Title: "task"}, client.Attachment{ID: "att-1", FileName: "race.bin"}, "")
+	if err == nil {
+		t.Fatal("default-name collision unexpectedly succeeded")
+	}
+	got, err := os.ReadFile("race.bin")
+	if err != nil {
+		t.Fatalf("reading competing destination: %v", err)
+	}
+	if !bytes.Equal(got, competitor) {
+		t.Fatalf("default-name collision overwrote competing file with %q", got)
 	}
 }
 
