@@ -143,11 +143,11 @@ func (c *Client) GetUsageProviderLimits(ctx context.Context, projectID string) (
 // analyticsSlice is the shared fetch/decode helper for analytics endpoints that
 // return a JSON array. segment is the URL path segment after /api/analytics/.
 // A positive limit opts into the endpoint's bounded-result contract; zero omits
-// the parameter and lets the backend apply its endpoint default.
-func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID string, limit int) ([]T, error) {
+// the parameter unless includeZeroLimit is true for full-history endpoints.
+func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID string, limit int, includeZeroLimit bool) ([]T, error) {
 	var out []T
 	limitValue := ""
-	if limit > 0 {
+	if limit > 0 || includeZeroLimit {
 		limitValue = strconv.Itoa(limit)
 	}
 	err := c.getJSON(ctx, "/api/analytics/"+segment+query("project_id", projectID, "limit", limitValue), &out)
@@ -156,57 +156,53 @@ func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID st
 
 // GetSuccessFailureRates fetches execution success/failure rates.
 func (c *Client) GetSuccessFailureRates(ctx context.Context, projectID string) ([]SuccessFailureRate, error) {
-	return analyticsSlice[SuccessFailureRate](ctx, c, "success-failure-rates", projectID, 0)
+	return analyticsSlice[SuccessFailureRate](ctx, c, "success-failure-rates", projectID, 0, false)
 }
 
 // GetAvgExecutionTimeByTask fetches the complete per-task average execution-time history.
 func (c *Client) GetAvgExecutionTimeByTask(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID, 0)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID, 0, false)
 }
 
 // GetAvgExecutionTimeByTaskWithLimit fetches a bounded per-task average execution-time result.
 func (c *Client) GetAvgExecutionTimeByTaskWithLimit(ctx context.Context, projectID string, limit int) ([]AvgExecutionTime, error) {
-	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID, limit)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-task", projectID, limit, false)
 }
 
 // GetAvgExecutionTimeByAgent fetches the complete per-agent average execution-time history.
 func (c *Client) GetAvgExecutionTimeByAgent(ctx context.Context, projectID string) ([]AvgExecutionTime, error) {
-	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID, 0)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID, 0, false)
 }
 
 // GetAvgExecutionTimeByAgentWithLimit fetches a bounded per-agent average execution-time result.
 func (c *Client) GetAvgExecutionTimeByAgentWithLimit(ctx context.Context, projectID string, limit int) ([]AvgExecutionTime, error) {
-	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID, limit)
+	return analyticsSlice[AvgExecutionTime](ctx, c, "avg-execution-time-by-agent", projectID, limit, false)
 }
 
 // GetMostFrequentTasks fetches the complete most-frequently-executed task history.
 // It uses the backend's explicit limit=0 full-history contract. Callers that
 // render a bounded report should use GetMostFrequentTasksWithLimit.
 func (c *Client) GetMostFrequentTasks(ctx context.Context, projectID string) ([]TaskFrequency, error) {
-	var out []TaskFrequency
-	err := c.getJSON(ctx, "/api/analytics/most-frequent-tasks"+query("project_id", projectID, "limit", "0"), &out)
-	return out, err
+	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID, 0, true)
 }
 
 // GetMostFrequentTasksWithLimit fetches the backend-ranked most-frequently-
 // executed tasks up to limit records.
 func (c *Client) GetMostFrequentTasksWithLimit(ctx context.Context, projectID string, limit int) ([]TaskFrequency, error) {
-	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID, limit)
+	return analyticsSlice[TaskFrequency](ctx, c, "most-frequent-tasks", projectID, limit, false)
 }
 
 // GetFailedTaskPatterns fetches the complete recurring task failure-pattern history.
 // It uses the backend's explicit limit=0 full-history contract. Callers that
 // render a bounded report should use GetFailedTaskPatternsWithLimit.
 func (c *Client) GetFailedTaskPatterns(ctx context.Context, projectID string) ([]FailedTaskPattern, error) {
-	var out []FailedTaskPattern
-	err := c.getJSON(ctx, "/api/analytics/failed-task-patterns"+query("project_id", projectID, "limit", "0"), &out)
-	return out, err
+	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID, 0, true)
 }
 
 // GetFailedTaskPatternsWithLimit fetches the backend-ranked failed-task patterns
 // up to limit records.
 func (c *Client) GetFailedTaskPatternsWithLimit(ctx context.Context, projectID string, limit int) ([]FailedTaskPattern, error) {
-	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID, limit)
+	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID, limit, false)
 }
 
 // --- Skill analytics (/api/analytics/skills) ---
