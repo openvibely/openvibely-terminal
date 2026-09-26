@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,9 +17,370 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
+
+type startupFrameCapture struct {
+	startedAt time.Time
+	first     chan time.Duration
+	mu        sync.Mutex
+	output    strings.Builder
+	rendered  bool
+}
+
+func (w *startupFrameCapture) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	if !w.rendered {
+		_, _ = w.output.Write(p)
+		if strings.Contains(ansi.Strip(w.output.String()), "Signing in with configured credentials") {
+			w.rendered = true
+			elapsed := time.Since(w.startedAt)
+			w.mu.Unlock()
+			w.first <- elapsed
+			return len(p), nil
+		}
+	}
+	w.mu.Unlock()
+	return len(p), nil
+}
+
+func (w *startupFrameCapture) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return ansi.Strip(w.output.String())
+}
+
+func TestConfiguredLoginStartupIsResponsiveAndGatesProjectRequests(t *testing.T) {
+	const runs = 20
+	type projectRequest struct {
+		username string
+		started  time.Time
+	}
+	type programRun struct {
+		username  string
+		startedAt time.Time
+		cancel    context.CancelFunc
+		result    chan Model
+		runError  chan error
+		capture   *startupFrameCapture
+		done      bool
+	}
+
+	loginStarted := make(chan string, runs+1)
+	projectStarted := make(chan projectRequest, runs+1)
+	selectedReady := make(chan projectRequest, runs+1)
+	releaseLogin := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLogin) }) }
+	defer release()
+	var prematureRequests atomic.Int32
+	var loginFinished sync.Map
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+			}
+			username := r.FormValue("username")
+			if username == "baseline-user" {
+				if r.FormValue("password") != "baseline-password" {
+					t.Errorf("baseline login received unexpected password")
+				}
+			} else if r.FormValue("password") != "configured-password" {
+				t.Errorf("configured credential password was not sent to /login")
+			}
+			loginStarted <- username
+			if username != "baseline-user" {
+				select {
+				case <-releaseLogin:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			http.SetCookie(w, &http.Cookie{Name: "ov_session", Value: username + "-session"})
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+			loginFinished.Store(username, time.Now())
+			return
+		}
+
+		cookie, cookieErr := r.Cookie("ov_session")
+		username := ""
+		if cookieErr == nil && strings.HasSuffix(cookie.Value, "-session") {
+			username = strings.TrimSuffix(cookie.Value, "-session")
+		}
+		if username == "" {
+			prematureRequests.Add(1)
+			http.Error(w, "missing login cookie", http.StatusUnauthorized)
+			return
+		}
+		if _, ok := loginFinished.Load(username); !ok {
+			prematureRequests.Add(1)
+			http.Error(w, "login has not completed", http.StatusUnauthorized)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/api/projects":
+			projectStarted <- projectRequest{username: username, started: time.Now()}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/auth/me":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"authenticated":true,"username":%q}`, username)
+		case "/api/capacity/global":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		case "/events/live":
+			selectedReady <- projectRequest{username: username, started: time.Now()}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+
+	programs := make([]*programRun, 0, runs)
+	defer func() {
+		release()
+		for _, app := range programs {
+			app.cancel()
+			if !app.done {
+				select {
+				case m := <-app.result:
+					m.Cleanup()
+				case <-time.After(2 * time.Second):
+				}
+			}
+		}
+	}()
+
+	for i := 0; i < runs; i++ {
+		username := fmt.Sprintf("configured-user-%02d", i)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		startedAt := time.Now()
+		capture := &startupFrameCapture{startedAt: startedAt, first: make(chan time.Duration, 1)}
+		app := &programRun{
+			username:  username,
+			startedAt: startedAt,
+			cancel:    cancel,
+			result:    make(chan Model, 1),
+			runError:  make(chan error, 1),
+			capture:   capture,
+		}
+		programs = append(programs, app)
+		program := tea.NewProgram(
+			New(c).WithConfiguredCredentials(username, "configured-password"),
+			tea.WithContext(ctx),
+			tea.WithInput(nil),
+			tea.WithOutput(capture),
+			tea.WithoutSignalHandler(),
+		)
+		go func() {
+			final, err := program.Run()
+			app.runError <- err
+			if m, ok := final.(Model); ok {
+				app.result <- m
+			} else {
+				app.result <- Model{}
+			}
+		}()
+	}
+
+	firstFrames := make([]time.Duration, 0, runs)
+	for range programs {
+		select {
+		case <-loginStarted:
+		case <-time.After(time.Second):
+			t.Fatal("configured login requests did not start promptly")
+		}
+	}
+	for _, app := range programs {
+		select {
+		case firstFrame := <-app.capture.first:
+			firstFrames = append(firstFrames, firstFrame)
+		case <-time.After(time.Second):
+			select {
+			case err := <-app.runError:
+				t.Fatalf("%s terminal program exited before rendering a sign-in frame (error %v); output=%q", app.username, err, app.capture.String())
+			default:
+				t.Fatalf("%s did not render a sign-in frame; output=%q", app.username, app.capture.String())
+			}
+		}
+		if strings.Contains(app.capture.String(), "configured-password") {
+			t.Fatalf("%s startup frame exposed configured password", app.username)
+		}
+	}
+	if got := prematureRequests.Load(); got != 0 {
+		t.Fatalf("startup made %d non-login requests before authentication succeeded", got)
+	}
+	time.Sleep(2 * time.Second)
+	if got := prematureRequests.Load(); got != 0 {
+		t.Fatalf("startup made %d non-login requests while /login was delayed", got)
+	}
+	release()
+
+	projectRequests := make(map[string]time.Time, runs)
+	for range programs {
+		select {
+		case request := <-projectStarted:
+			projectRequests[request.username] = request.started
+		case <-time.After(5 * time.Second):
+			t.Fatal("project requests did not start after successful configured login")
+		}
+	}
+	if got := prematureRequests.Load(); got != 0 {
+		t.Fatalf("startup made %d project requests without a successful cookie session", got)
+	}
+
+	selectedTimes := make(map[string]time.Time, runs)
+	for range programs {
+		select {
+		case ready := <-selectedReady:
+			selectedTimes[ready.username] = ready.started
+		case <-time.After(5 * time.Second):
+			t.Fatal("selected project did not become ready after configured login")
+		}
+	}
+
+	loginDurations := make([]time.Duration, 0, runs)
+	readiness := make([]time.Duration, 0, runs)
+	for _, app := range programs {
+		finishedValue, ok := loginFinished.Load(app.username)
+		if !ok {
+			t.Fatalf("missing login completion time for %s", app.username)
+		}
+		finished := finishedValue.(time.Time)
+		loginDurations = append(loginDurations, finished.Sub(app.startedAt))
+		readyAt, ok := selectedTimes[app.username]
+		if !ok {
+			t.Fatalf("missing selected-project readiness for %s", app.username)
+		}
+		readiness = append(readiness, readyAt.Sub(finished))
+	}
+
+	slices.Sort(firstFrames)
+	firstFrameP95 := firstFrames[(len(firstFrames)*95+99)/100-1]
+	if firstFrameP95 > 250*time.Millisecond {
+		t.Fatalf("p95 launch-to-first-frame = %v, want <= 250ms", firstFrameP95)
+	}
+	slices.Sort(loginDurations)
+	loginP95 := loginDurations[(len(loginDurations)*95+99)/100-1]
+	if loginP95 < 2*time.Second {
+		t.Fatalf("p95 launch-to-login-completion = %v, want to include the 2s endpoint delay", loginP95)
+	}
+	slices.Sort(readiness)
+	readinessP95 := readiness[(len(readiness)*95+99)/100-1]
+
+	baselineClient, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := baselineClient.Login(context.Background(), "baseline-user", "baseline-password"); err != nil {
+		t.Fatalf("synchronous baseline login: %v", err)
+	}
+	baselineStartedAt := time.Now()
+	baselineCtx, baselineCancel := context.WithCancel(context.Background())
+	baselineApp := &programRun{
+		username:  "baseline-user",
+		startedAt: baselineStartedAt,
+		cancel:    baselineCancel,
+		result:    make(chan Model, 1),
+		runError:  make(chan error, 1),
+	}
+	programs = append(programs, baselineApp)
+	baselineProgram := tea.NewProgram(
+		New(baselineClient),
+		tea.WithContext(baselineCtx),
+		tea.WithInput(nil),
+		tea.WithOutput(io.Discard),
+		tea.WithoutSignalHandler(),
+	)
+	go func() {
+		final, err := baselineProgram.Run()
+		baselineApp.runError <- err
+		if m, ok := final.(Model); ok {
+			baselineApp.result <- m
+		} else {
+			baselineApp.result <- Model{}
+		}
+	}()
+	var baselineReady time.Duration
+	select {
+	case ready := <-selectedReady:
+		if ready.username != baselineApp.username {
+			t.Fatalf("baseline readiness belongs to %s, want %s", ready.username, baselineApp.username)
+		}
+		baselineReady = ready.started.Sub(baselineStartedAt)
+	case <-time.After(5 * time.Second):
+		t.Fatal("synchronously authenticated baseline did not select a project")
+	}
+	if readinessP95 > baselineReady+100*time.Millisecond {
+		t.Fatalf("p95 selected-project readiness after login = %v, synchronous same-host baseline %v, allowed regression 100ms", readinessP95, baselineReady)
+	}
+	t.Logf("20 Bubble Tea runs: p95 first frame %s, login completion %s, selected project after login %s (synchronous baseline %s)", firstFrameP95, loginP95, readinessP95, baselineReady)
+
+	for _, app := range programs {
+		app.cancel()
+		select {
+		case m := <-app.result:
+			app.done = true
+			m.Cleanup()
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s terminal program did not stop", app.username)
+		}
+	}
+}
+
+func TestConfiguredLoginRejectionReturnsToMaskedPasswordRecovery(t *testing.T) {
+	const username = "private-startup-user"
+	const password = "private-startup-password"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/login" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c).WithConfiguredCredentials(username, password)
+	commands, ok := m.Init()().(tea.BatchMsg)
+	if !ok || len(commands) == 0 {
+		t.Fatalf("configured login Init = %T, want startup command batch", m.Init()())
+	}
+	msg := commands[0]()
+	updated, _ := m.Update(msg)
+	m = updated.(Model)
+	if !m.loginActive || !m.loginPassword || m.loginSubmitting {
+		t.Fatalf("rejected startup login state = active:%v password:%v submitting:%v", m.loginActive, m.loginPassword, m.loginSubmitting)
+	}
+	if m.loginUsername != username || m.input.EchoMode != textinput.EchoPassword {
+		t.Fatalf("recovery did not retain username and mask password input: username=%q echo=%v", m.loginUsername, m.input.EchoMode)
+	}
+	if !strings.Contains(transcript(m), "invalid credentials") {
+		t.Fatalf("rejected startup login omitted safe recovery message:\n%s", transcript(m))
+	}
+	for _, secret := range []string{username, password} {
+		if strings.Contains(transcript(m), secret) || strings.Contains(m.View(), secret) {
+			t.Fatalf("rejected startup login exposed configured credential %q", secret)
+		}
+	}
+}
 
 // newTestModel returns a sized model wired to a stub server.
 func newTestModel(t *testing.T) Model {
