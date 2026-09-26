@@ -13,7 +13,9 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/openvibely/openvibely-terminal/internal/client"
@@ -146,6 +148,66 @@ func TestInterspersedGlobalFlagsDispatch(t *testing.T) {
 	out := dispatch(t, []string{"tasks", "--project", "openvibely", "--json"})
 	if !json.Valid([]byte(out)) || !strings.Contains(out, `"title":"Task with spaces"`) {
 		t.Fatalf("interspersed task JSON output = %q", out)
+	}
+}
+
+func TestRunKeepsConfiguredLoginSynchronousForCLICommands(t *testing.T) {
+	const password = "synchronous-cli-password"
+	var loginFinished atomic.Bool
+	var projectsRequest atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("ParseForm: %v", err)
+			}
+			if r.FormValue("username") != "cli-user" || r.FormValue("password") != password {
+				t.Errorf("configured CLI credentials were not passed to /login")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+			http.SetCookie(w, &http.Cookie{Name: "ov_session", Value: "cli-session"})
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+			loginFinished.Store(true)
+		case "/api/projects":
+			projectsRequest.Store(true)
+			if !loginFinished.Load() {
+				t.Error("CLI project request started before configured login completed")
+				http.Error(w, "login incomplete", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		default:
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("OPENVIBELY_SERVER_URL", srv.URL)
+	t.Setenv("OPENVIBELY_AUTH_USERNAME", "cli-user")
+	t.Setenv("OPENVIBELY_AUTH_PASSWORD", password)
+
+	oldArgs, oldCommandLine, oldStdout := os.Args, flag.CommandLine, os.Stdout
+	defer func() {
+		os.Args, flag.CommandLine, os.Stdout = oldArgs, oldCommandLine, oldStdout
+	}()
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	os.Stdout = devNull
+	flag.CommandLine = flag.NewFlagSet("openvibely-terminal", flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	os.Args = []string{"openvibely-terminal", "projects", "list"}
+
+	if err := run(); err != nil {
+		t.Fatalf("run CLI command: %v", err)
+	}
+	if !loginFinished.Load() || !projectsRequest.Load() {
+		t.Fatalf("CLI execution did not complete login and project request: login=%v projects=%v", loginFinished.Load(), projectsRequest.Load())
 	}
 }
 

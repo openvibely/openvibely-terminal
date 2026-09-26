@@ -39,6 +39,9 @@ func (m Model) View() string {
 		return dimStyle.Render("bye.\n")
 	}
 	if m.width == 0 {
+		if m.loginActive && m.loginSubmitting {
+			return "Signing in with configured credentials…"
+		}
 		return "starting…"
 	}
 

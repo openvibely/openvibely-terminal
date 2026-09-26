@@ -93,18 +93,16 @@ func run() error {
 		return terminal.RunCLI(c, os.Stdout, *project, args, *force, *json)
 	}
 
-	// If credentials were provided, establish a cookie session up front. An
-	// interactive run without them can use /login after a reachable auth failure.
-	if err := loginWithConfiguredCredentials(c, *username, configuredPassword); err != nil {
-		return err
-	}
-
-	// Arguments after the flags mean "run this one command and exit".
+	// Arguments after the flags mean "run this one command and exit". Preserve
+	// synchronous authentication for these short-lived CLI requests.
 	if len(args) > 0 {
+		if err := loginWithConfiguredCredentials(c, *username, configuredPassword); err != nil {
+			return err
+		}
 		return runCLI(c, *project, args, *force, *json)
 	}
 
-	return runTUI(c, *project)
+	return runTUI(c, *project, *username, configuredPassword)
 }
 
 type boolFlag interface {
@@ -254,8 +252,8 @@ func loginWithConfiguredCredentials(c *client.Client, username, password string)
 	return nil
 }
 
-func runTUI(c *client.Client, project string) error {
-	model := terminal.New(c).WithProject(project)
+func runTUI(c *client.Client, project, username, password string) error {
+	model := terminal.New(c).WithProject(project).WithConfiguredCredentials(username, password)
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if m, ok := finalModel.(terminal.Model); ok {

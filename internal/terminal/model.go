@@ -71,6 +71,11 @@ type pendingCmd struct {
 	cmd     tea.Cmd // executed when the user types "yes" and presses Enter
 }
 
+type configuredLoginCredentials struct {
+	username string
+	password string
+}
+
 // Model is the root Bubble Tea model: one chat transcript plus one input.
 type Model struct {
 	client *client.Client
@@ -149,6 +154,7 @@ type Model struct {
 	loginRestorePlaceholder string
 	loginRestoreEchoMode    textinput.EchoMode
 	loginResumeSSE          bool
+	startupLogin            *configuredLoginCredentials
 
 	// channelWizard holds interactive channel setup/edit state. Secret values
 	// exist only in the masked input/form while needed for the mutation and are
@@ -359,6 +365,25 @@ func (m Model) WithProject(ref string) Model {
 	return m
 }
 
+// WithConfiguredCredentials starts interactive authentication during TUI
+// initialization rather than blocking before the terminal program is rendered.
+func (m Model) WithConfiguredCredentials(username, password string) Model {
+	if username == "" && password == "" {
+		return m
+	}
+	m.ensureInteractiveModels()
+	m.startupLogin = &configuredLoginCredentials{username: username, password: password}
+	m.loginActive = true
+	m.loginSubmitting = true
+	m.loginUsername = username
+	m.loginRestorePrompt = m.input.Prompt
+	m.loginRestorePlaceholder = m.input.Placeholder
+	m.loginRestoreEchoMode = m.input.EchoMode
+	m.busy = true
+	m.append(entry{role: "system", text: "Signing in with configured credentials…"})
+	return m
+}
+
 // projectLoadSelectionHint returns the startup project reference only until
 // the first active project has been installed. Reloads must preserve the
 // current selection, including after authentication recovery.
@@ -373,6 +398,19 @@ func (m Model) projectLoadSelectionHint() string {
 // stream is opened by the project-load response after it installs a selected
 // project, rather than racing that response with an unscoped stream.
 func (m Model) Init() tea.Cmd {
+	if credentials := m.startupLogin; credentials != nil {
+		c := m.client
+		sessionGeneration := sessionGenerationOf(m)
+		login := func() tea.Msg {
+			username, password := credentials.username, credentials.password
+			credentials.username = ""
+			credentials.password = ""
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			return loginResultMsg{sessionGeneration: sessionGeneration, err: c.Login(ctx, username, password)}
+		}
+		return tea.Batch(login, m.tick(), m.spin.Tick, textinput.Blink)
+	}
 	_, projectLoad := m.beginProjectLoadWithSSE(false, m.projectLoadSelectionHint(), true)
 	return tea.Batch(
 		m.checkConnection(),
