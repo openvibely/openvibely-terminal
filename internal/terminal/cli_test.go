@@ -2155,6 +2155,48 @@ func TestCLITaskMutationsStayScopedToSelectedProject(t *testing.T) {
 	}
 }
 
+func TestCLIStatusAliasesRejectUnexpectedOperandsBeforeBackendCalls(t *testing.T) {
+	for _, commandName := range []string{"status", "health"} {
+		t.Run(commandName, func(t *testing.T) {
+			c, rec := cliServer(t, nil)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "", []string{commandName, "extra"}, false, false)
+			if err == nil || !strings.Contains(err.Error(), "usage: status") {
+				t.Fatalf("error = %v, want usage error for %s", err, commandName)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("invalid %s invocation made backend requests before rejection:\n%s", commandName, calls)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("invalid %s invocation rendered output: %q", commandName, out.String())
+			}
+		})
+	}
+}
+
+func TestCLIHealthAliasRendersStatusReport(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        `{"projects":[{"id":"p1","name":"demo"}]}`,
+		"/api/capacity/global": `{"total_running":2,"max_workers":5,"queue_size":1,"available_slots":3}`,
+		"/auth/me":             `{"authenticated":true,"username":"operator"}`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"health"}, false, false); err != nil {
+		t.Fatalf("health failed: %v", err)
+	}
+	got := stripANSI(out.String())
+	for _, want := range []string{"Status", "connected", "signed in as operator"} {
+		if !strings.Contains(strings.ToLower(got), strings.ToLower(want)) {
+			t.Errorf("health output missing %q:\n%s", want, got)
+		}
+	}
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me"} {
+		if got := rec.count("GET", path); got != 1 {
+			t.Errorf("health made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
+		}
+	}
+}
+
 func TestCLIStatusMultipleProjectsIsGlobalAndUnambiguous(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":        cliProjects,

@@ -95,6 +95,32 @@ func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 	}
 }
 
+func TestInteractiveStatusAliasesValidateOperands(t *testing.T) {
+	for _, commandName := range []string{"status", "health"} {
+		t.Run(commandName+" valid", func(t *testing.T) {
+			m := newTestModel(t)
+			next, cmd := m.runCommand("/" + commandName)
+			m = drain(next.(Model), cmd)
+			if got := transcript(m); !strings.Contains(got, "result:Status:") {
+				t.Fatalf("/%s did not render the status report:\n%s", commandName, got)
+			}
+		})
+
+		t.Run(commandName+" extra operand", func(t *testing.T) {
+			m := newTestModel(t)
+			next, cmd := m.runCommand("/" + commandName + " extra")
+			m = drain(next.(Model), cmd)
+			got := transcript(m)
+			if !strings.Contains(got, "usage: /status") {
+				t.Fatalf("/%s error missing interactive usage hint:\n%s", commandName, got)
+			}
+			if strings.Contains(got, "result:Status:") {
+				t.Fatalf("/%s rendered a status report despite an extra operand:\n%s", commandName, got)
+			}
+		})
+	}
+}
+
 func TestRunCommandRejectsUnmatchedQuotesBeforeDispatch(t *testing.T) {
 	m := newTestModel(t)
 	m.selectedID = "p1"

@@ -10411,10 +10411,15 @@ func loginCommand() command {
 
 func statusCommand() command {
 	return command{
-		name:    "status",
-		aliases: []string{"health"},
-		desc:    "connection, auth and capacity",
-		run: func(m Model, _ []string) (Model, tea.Cmd) {
+		name:         "status",
+		aliases:      []string{"health"},
+		desc:         "connection, auth and capacity",
+		validateArgs: validateStatusArgs,
+		run: func(m Model, args []string) (Model, tea.Cmd) {
+			if err := validateStatusArgs(args); err != nil {
+				m.busy = false
+				return m, errCmd(err.Error())
+			}
 			m.busy = false
 			m.append(entry{role: "result", head: "Status", text: m.renderStatus()})
 			// RunCLI prefetches counts before rendering and drains returned
@@ -10426,6 +10431,13 @@ func statusCommand() command {
 			return m, m.fetchStatusCounts()
 		},
 	}
+}
+
+func validateStatusArgs(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: %sstatus", cmdPrefix)
+	}
+	return nil
 }
 
 func eventsCommand() command {
