@@ -14,65 +14,66 @@ fail() {
 
 [[ -x "$shared_script" ]] || fail "shared vet/test script is not executable"
 
-verification_run=$(awk '
-  /^      - name: Run vet and all tests with coverage$/ { found=1; next }
-  found && /^        run: / {
-    sub(/^        run: /, "")
-    print
-    exit
-  }
-  found && /^      - name:/ { exit }
-' "$workflow")
-[[ "$verification_run" == ".github/workflows/vet-test-coverage.sh" ]] ||
-  fail "verification step does not call the shared script: $verification_run"
+extract_step_field() {
+  local workflow_file=$1
+  local step_name=$2
+  local field_name=$3
+  local indentation=$4
+  local keep_field=${5:-false}
 
-mode_env=$(awk '
-  /^      - name: Run vet and all tests with coverage$/ { found=1; next }
-  found && /^          VTC_MODE: / {
-    sub(/^          VTC_MODE: /, "")
-    print
-    exit
-  }
-  found && /^      - name:/ { exit }
-' "$workflow")
-[[ "$mode_env" == "\${{ inputs.uncached && 'uncached' || 'routine' }}" ]] ||
-  fail "workflow no longer maps uncached input to shared script mode: $mode_env"
+  awk \
+    -v step_name="$step_name" \
+    -v field_name="$field_name" \
+    -v indentation="$indentation" \
+    -v keep_field="$keep_field" '
+    BEGIN {
+      step_header = "      - name: " step_name
+      field_prefix = sprintf("%*s%s: ", indentation, "", field_name)
+    }
+    /^      - name:/ {
+      if (in_step) exit
+      if ($0 == step_header) {
+        in_step=1
+        next
+      }
+    }
+    in_step && index($0, field_prefix) == 1 {
+      if (keep_field == "true") {
+        print substr($0, indentation + 1)
+      } else {
+        print substr($0, length(field_prefix) + 1)
+      }
+      exit
+    }
+  ' "$workflow_file"
+}
 
-annotation_env=$(awk '
-  /^      - name: Run vet and all tests with coverage$/ { found=1; next }
-  found && /^          VTC_GITHUB_ANNOTATIONS: / {
-    sub(/^          VTC_GITHUB_ANNOTATIONS: /, "")
-    print
-    exit
-  }
-  found && /^      - name:/ { exit }
-' "$workflow")
-[[ "$annotation_env" == '"true"' ]] ||
-  fail "workflow no longer enables GitHub error annotations"
+validate_workflow_fields() {
+  local workflow=$1
+  local verification_run mode_env annotation_env summary_run summary_if
 
-summary_run=$(awk '
-  /^      - name: Show coverage summary$/ { found=1; next }
-  found && /^        run: / {
-    sub(/^        run: /, "")
-    print
-    exit
-  }
-  found && /^      - name:/ { exit }
-' "$workflow")
-[[ "$summary_run" == "go tool cover -func=coverage.txt | tail -1" ]] ||
-  fail "coverage summary command changed: $summary_run"
+  verification_run=$(extract_step_field "$workflow" "Run vet and all tests with coverage" run 8)
+  [[ "$verification_run" == ".github/workflows/vet-test-coverage.sh" ]] ||
+    fail "verification step does not call the shared script: $verification_run"
 
-summary_if=$(awk '
-  /^      - name: Show coverage summary$/ { found=1; next }
-  found && /^        if: / {
-    sub(/^        /, "")
-    print
-    exit
-  }
-  found && /^      - name:/ { exit }
-' "$workflow")
-[[ "$summary_if" == 'if: ${{ success() }}' ]] ||
-  fail "coverage summary is not success-gated"
+  mode_env=$(extract_step_field "$workflow" "Run vet and all tests with coverage" VTC_MODE 10)
+  [[ "$mode_env" == "\${{ inputs.uncached && 'uncached' || 'routine' }}" ]] ||
+    fail "workflow no longer maps uncached input to shared script mode: $mode_env"
+
+  annotation_env=$(extract_step_field "$workflow" "Run vet and all tests with coverage" VTC_GITHUB_ANNOTATIONS 10)
+  [[ "$annotation_env" == '"true"' ]] ||
+    fail "workflow no longer enables GitHub error annotations"
+
+  summary_run=$(extract_step_field "$workflow" "Show coverage summary" run 8)
+  [[ "$summary_run" == "go tool cover -func=coverage.txt | tail -1" ]] ||
+    fail "coverage summary command changed: $summary_run"
+
+  summary_if=$(extract_step_field "$workflow" "Show coverage summary" if 8 true)
+  [[ "$summary_if" == 'if: ${{ success() }}' ]] ||
+    fail "coverage summary is not success-gated"
+}
+
+validate_workflow_fields "$workflow"
 
 run_line=$(grep -n '^      - name: Run vet and all tests with coverage$' "$workflow" | cut -d: -f1)
 summary_line=$(grep -n '^      - name: Show coverage summary$' "$workflow" | cut -d: -f1)
@@ -95,6 +96,148 @@ done
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/openvibely-workflow-test.XXXXXX")
 trap 'rm -rf "$test_root"' EXIT
+
+validator_fixture="$test_root/validator-workflow.yml"
+validator_log="$test_root/validator.log"
+cat >"$validator_fixture" <<'VALIDATOR_WORKFLOW'
+      - name: Run vet and all tests with coverage
+        run: .github/workflows/vet-test-coverage.sh
+        env:
+          VTC_MODE: ${{ inputs.uncached && 'uncached' || 'routine' }}
+          VTC_GITHUB_ANNOTATIONS: "true"
+      - name: Show coverage summary
+        if: ${{ success() }}
+        run: go tool cover -func=coverage.txt | tail -1
+      - name: Later step with duplicate verification fields
+        run: .github/workflows/vet-test-coverage.sh
+        env:
+          VTC_MODE: ${{ inputs.uncached && 'uncached' || 'routine' }}
+          VTC_GITHUB_ANNOTATIONS: "true"
+      - name: Later step with duplicate coverage fields
+        if: ${{ success() }}
+        run: go tool cover -func=coverage.txt | tail -1
+VALIDATOR_WORKFLOW
+
+replace_fixture_once() {
+  python3 - "$1" "$2" "$3" <<'PY'
+from pathlib import Path
+import sys
+
+path, old, new = sys.argv[1:]
+content = Path(path).read_text()
+if old not in content:
+    raise SystemExit(f"fixture text not found: {old!r}")
+Path(path).write_text(content.replace(old, new, 1))
+PY
+}
+
+assert_validator_rejects() {
+  local case_name=$1
+  local expected_message=$2
+  if (validate_workflow_fields "$validator_fixture") >"$validator_log" 2>&1; then
+    fail "$case_name unexpectedly passed workflow validation"
+  fi
+  grep -Fq "workflow validation failed: $expected_message" "$validator_log" ||
+    fail "$case_name reported an unexpected validation failure: $(<"$validator_log")"
+}
+
+run_validator_regression() {
+  local case_name=$1
+  local old_line=$2
+  local new_line=$3
+  local expected_message=$4
+  cp "$test_root/validator-workflow-baseline.yml" "$validator_fixture"
+  replace_fixture_once "$validator_fixture" "$old_line" "$new_line"
+  assert_validator_rejects "$case_name" "$expected_message"
+}
+
+cp "$validator_fixture" "$test_root/validator-workflow-baseline.yml"
+validate_workflow_fields "$validator_fixture"
+
+boundary_fixture="$test_root/step-boundary.yml"
+cat >"$boundary_fixture" <<'STEP_BOUNDARY'
+      - name: Boundary target
+      - name: Separator
+      - name: Later step with matching fields
+        run: .github/workflows/vet-test-coverage.sh
+        env:
+          VTC_MODE: ${{ inputs.uncached && 'uncached' || 'routine' }}
+          VTC_GITHUB_ANNOTATIONS: "true"
+        if: ${{ success() }}
+STEP_BOUNDARY
+assert_extractor_empty() {
+  local case_name=$1
+  local field_name=$2
+  local indentation=$3
+  local keep_field=${4:-false}
+  local actual
+  actual=$(extract_step_field "$boundary_fixture" "Boundary target" "$field_name" "$indentation" "$keep_field")
+  [[ -z "$actual" ]] || fail "$case_name crossed a step boundary and returned: $actual"
+}
+assert_extractor_empty "verification command lookup" run 8
+assert_extractor_empty "mode lookup" VTC_MODE 10
+assert_extractor_empty "annotation lookup" VTC_GITHUB_ANNOTATIONS 10
+assert_extractor_empty "coverage command lookup" run 8
+assert_extractor_empty "coverage condition lookup" if 8 true
+
+cat >"$boundary_fixture" <<'REPEATED_STEP_BOUNDARY'
+      - name: Boundary target
+      - name: Boundary target
+        run: later duplicate
+REPEATED_STEP_BOUNDARY
+assert_extractor_empty "repeated step-name lookup" run 8
+
+run_validator_regression \
+  "verification command mismatch" \
+  "        run: .github/workflows/vet-test-coverage.sh" \
+  "        run: go vet ./..." \
+  "verification step does not call the shared script: go vet ./..."
+run_validator_regression \
+  "mode mismatch" \
+  "          VTC_MODE: \${{ inputs.uncached && 'uncached' || 'routine' }}" \
+  "          VTC_MODE: wrong" \
+  "workflow no longer maps uncached input to shared script mode: wrong"
+run_validator_regression \
+  "annotation mismatch" \
+  '          VTC_GITHUB_ANNOTATIONS: "true"' \
+  '          VTC_GITHUB_ANNOTATIONS: "false"' \
+  "workflow no longer enables GitHub error annotations"
+run_validator_regression \
+  "coverage command mismatch" \
+  "        run: go tool cover -func=coverage.txt | tail -1" \
+  "        run: echo wrong" \
+  "coverage summary command changed: echo wrong"
+run_validator_regression \
+  "coverage condition mismatch" \
+  '        if: ${{ success() }}' \
+  '        if: ${{ always() }}' \
+  "coverage summary is not success-gated"
+run_validator_regression \
+  "verification command missing with later duplicate" \
+  "        run: .github/workflows/vet-test-coverage.sh" \
+  "" \
+  "verification step does not call the shared script: "
+run_validator_regression \
+  "mode missing with later duplicate" \
+  "          VTC_MODE: \${{ inputs.uncached && 'uncached' || 'routine' }}" \
+  "" \
+  "workflow no longer maps uncached input to shared script mode: "
+run_validator_regression \
+  "annotations missing with later duplicate" \
+  '          VTC_GITHUB_ANNOTATIONS: "true"' \
+  "" \
+  "workflow no longer enables GitHub error annotations"
+run_validator_regression \
+  "coverage command missing with later duplicate" \
+  "        run: go tool cover -func=coverage.txt | tail -1" \
+  "" \
+  "coverage summary command changed: "
+run_validator_regression \
+  "coverage condition missing with later duplicate" \
+  '        if: ${{ success() }}' \
+  "" \
+  "coverage summary is not success-gated"
+
 fake_bin="$test_root/bin"
 mkdir -p "$fake_bin"
 original_path=$PATH
