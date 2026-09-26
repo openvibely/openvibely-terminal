@@ -195,6 +195,14 @@ type scheduleDeleteTargetMsg struct {
 	err               error
 }
 
+type taskDeleteTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	task              client.Task
+	err               error
+}
+
 type webhookMutationTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64

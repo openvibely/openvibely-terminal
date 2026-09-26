@@ -1491,6 +1491,149 @@ func TestTasksRunCanonicalFullIDStillUsesBoard(t *testing.T) {
 	}
 }
 
+func TestTasksDeleteResolvesTypedTargetBeforeConfirmation(t *testing.T) {
+	originalTask := client.Task{ID: "t-original", ProjectID: "p1", Title: "Deploy original", Category: "backlog", Status: "pending"}
+	replacementTask := client.Task{ID: "t-rebound", ProjectID: "p1", Title: "Deploy replacement", Category: "backlog", Status: "pending"}
+	partialTask := client.Task{ID: "t-partial", ProjectID: "p1", Title: "Deploy production", Category: "backlog", Status: "pending"}
+	duplicateTasks := []client.Task{
+		{ID: "t-1", ProjectID: "p1", Title: "Duplicate", Category: "backlog", Status: "pending"},
+		{ID: "t-2", ProjectID: "p1", Title: "Duplicate", Category: "active", Status: "pending"},
+	}
+
+	taskCatalogJSON := func(tasks []client.Task) string {
+		encoded, err := json.Marshal(struct {
+			Tasks []client.Task `json:"tasks"`
+		}{Tasks: tasks})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+
+	taskBoard := func(tasks []client.Task) string {
+		var b strings.Builder
+		b.WriteString("<div>")
+		for _, task := range tasks {
+			fmt.Fprintf(&b, `<div data-task-id="%s" data-task-status="%s" data-task-category="%s"><a href="/tasks/%s" title="%s">%s</a></div>`, task.ID, task.Status, task.Category, task.ID, task.Title, task.Title)
+		}
+		b.WriteString("</div>")
+		return b.String()
+	}
+
+	type testServer struct {
+		m             Model
+		setTasks      func([]client.Task)
+		refRequests   *int
+		boardRequests *int
+		deletes       *[]string
+	}
+	newTestServer := func(t *testing.T, initialTasks []client.Task) testServer {
+		t.Helper()
+		tasks := append([]client.Task(nil), initialTasks...)
+		refRequests := 0
+		boardRequests := 0
+		deletes := []string(nil)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+				refRequests++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, taskCatalogJSON(tasks))
+			case r.Method == http.MethodGet && r.URL.Path == "/tasks":
+				boardRequests++
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, taskBoard(tasks))
+			case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/tasks/"):
+				deletes = append(deletes, r.URL.Path)
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, taskBoard(tasks))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := New(c)
+		m.selectedID, m.selectedName = "p1", "demo"
+		return testServer{
+			m:             m,
+			setTasks:      func(next []client.Task) { tasks = append([]client.Task(nil), next...) },
+			refRequests:   &refRequests,
+			boardRequests: &boardRequests,
+			deletes:       &deletes,
+		}
+	}
+
+	t.Run("unknown does not prompt", func(t *testing.T) {
+		ts := newTestServer(t, []client.Task{originalTask})
+		m := runLine(t, ts.m, "/tasks delete missing")
+		if m.pendingConfirmation != nil || *ts.refRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("unknown delete state: pending=%v refs=%d deletes=%v", m.pendingConfirmation != nil, *ts.refRequests, *ts.deletes)
+		}
+		if out := stripANSI(transcript(m)); !strings.Contains(out, `nothing matches "missing"`) {
+			t.Fatalf("unknown delete did not report resolution error:\n%s", out)
+		}
+	})
+
+	t.Run("ambiguous does not prompt", func(t *testing.T) {
+		ts := newTestServer(t, duplicateTasks)
+		m := runLine(t, ts.m, "/tasks delete Duplicate")
+		if m.pendingConfirmation != nil || *ts.refRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("ambiguous delete state: pending=%v refs=%d deletes=%v", m.pendingConfirmation != nil, *ts.refRequests, *ts.deletes)
+		}
+		if out := stripANSI(transcript(m)); !strings.Contains(out, `"Duplicate" is ambiguous:`) {
+			t.Fatalf("ambiguous delete did not report resolution error:\n%s", out)
+		}
+	})
+
+	t.Run("unique partial uses canonical prompt and no cancels", func(t *testing.T) {
+		ts := newTestServer(t, []client.Task{partialTask})
+		m := runLine(t, ts.m, "/tasks delete product")
+		if m.pendingConfirmation == nil || *ts.refRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("partial delete state: pending=%v refs=%d deletes=%v", m.pendingConfirmation != nil, *ts.refRequests, *ts.deletes)
+		}
+		if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `"Deploy production (t-partial)"`) {
+			t.Fatalf("partial delete prompt = %q, want canonical title and ID", prompt)
+		}
+		m = runLine(t, m, "no")
+		if m.pendingConfirmation != nil || len(*ts.deletes) != 0 || *ts.boardRequests != 0 {
+			t.Fatalf("cancelled partial delete state: pending=%v boards=%d deletes=%v", m.pendingConfirmation != nil, *ts.boardRequests, *ts.deletes)
+		}
+	})
+
+	t.Run("confirmation captures resolved ID", func(t *testing.T) {
+		ts := newTestServer(t, []client.Task{originalTask})
+		m := runLine(t, ts.m, "/tasks delete deploy")
+		if m.pendingConfirmation == nil || *ts.refRequests != 1 || len(*ts.deletes) != 0 {
+			t.Fatalf("original task was not resolved before confirmation: pending=%v refs=%d deletes=%v", m.pendingConfirmation != nil, *ts.refRequests, *ts.deletes)
+		}
+		if prompt := m.pendingConfirmation.message; !strings.Contains(prompt, `"Deploy original (t-original)"`) {
+			t.Fatalf("confirmation prompt = %q, want original canonical title and ID", prompt)
+		}
+		ts.setTasks([]client.Task{replacementTask})
+		m = runLine(t, m, "yes")
+		if *ts.refRequests != 1 || len(*ts.deletes) != 1 || (*ts.deletes)[0] != "/tasks/t-original" {
+			t.Fatalf("confirmed delete rebound after list changed: refs=%d deletes=%v", *ts.refRequests, *ts.deletes)
+		}
+	})
+
+	t.Run("Esc cancels without mutation", func(t *testing.T) {
+		ts := newTestServer(t, []client.Task{originalTask})
+		m := runLine(t, ts.m, "/tasks delete deploy")
+		if m.pendingConfirmation == nil || len(*ts.deletes) != 0 {
+			t.Fatalf("delete should wait for confirmation: pending=%v deletes=%v", m.pendingConfirmation != nil, *ts.deletes)
+		}
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		m = next.(Model)
+		if cmd != nil || m.pendingConfirmation != nil || len(*ts.deletes) != 0 || *ts.boardRequests != 0 {
+			t.Fatalf("Esc cancellation state: cmd=%v pending=%v boards=%d deletes=%v", cmd != nil, m.pendingConfirmation != nil, *ts.boardRequests, *ts.deletes)
+		}
+	})
+}
+
 func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	t.Run("delete", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})

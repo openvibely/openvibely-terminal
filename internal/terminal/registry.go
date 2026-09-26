@@ -223,6 +223,46 @@ func confirmScheduleDeletion(m Model, projectID string, schedule client.Schedule
 		cmd)
 }
 
+// resolveTaskDeletion captures the unique task selected by a typed reference
+// before either interactive confirmation or the headless force gate.
+func resolveTaskDeletion(m Model, c *client.Client, projectID, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := m.commandContext(cmdTimeout)
+		defer cancel()
+		task, err := resolveTask(ctx, c, projectID, ref)
+		return taskDeleteTargetMsg{projectID: projectID, task: task, err: err}
+	}
+}
+
+// confirmTaskDeletion closes over the resolved ID so catalog changes after the
+// prompt cannot rebind the destructive request.
+func confirmTaskDeletion(m Model, projectID string, task client.Task) (Model, tea.Cmd) {
+	taskID := task.ID
+	display := taskDeletionDisplayName(task)
+	c := m.client
+	cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+		if err := c.DeleteTaskForProject(ctx, taskID, projectID); err != nil {
+			return "", err
+		}
+		return refreshAndRender("delete: "+firstNonEmpty(task.Title, task.ID),
+			func() ([]client.Task, error) { return c.ListTasks(ctx, projectID) },
+			renderBoard)
+	})
+	return confirmOr(m,
+		fmt.Sprintf("Delete task %q? Type 'yes' to confirm or Esc to cancel.", display),
+		fmt.Sprintf("use --force to confirm deletion of task %q", display),
+		cmd)
+}
+
+func taskDeletionDisplayName(task client.Task) string {
+	label := sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))
+	id := sanitizeAutomationDetailText(task.ID)
+	if id == "" || id == label {
+		return label
+	}
+	return fmt.Sprintf("%s (%s)", label, id)
+}
+
 // taskReviewsOutput fetches and formats the read-only review view for a task.
 func taskReviewsOutput(ctx context.Context, t client.Task, fetch func(context.Context, string) ([]client.ReviewComment, error)) (string, error) {
 	reviews, err := fetch(ctx, t.ID)
@@ -1186,6 +1226,9 @@ func tasksCommand() command {
 				if ref == "" {
 					return taskSelector(m, "usage: /tasks "+action+" <task>", "tasks "+action, false)
 				}
+				if action == "delete" {
+					return m, resolveTaskDeletion(m, c, pid, ref)
+				}
 				cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTaskForModel(m, ctx, c, pid, ref)
 					if err != nil {
@@ -1199,8 +1242,6 @@ func tasksCommand() command {
 						err = c.RunTaskForProject(ctx, t.ID, pid)
 					case "stop":
 						err = c.CancelTaskForProject(ctx, t.ID, pid)
-					case "delete":
-						err = c.DeleteTaskForProject(ctx, t.ID, pid)
 					}
 					if err != nil {
 						return "", err
@@ -1209,12 +1250,6 @@ func tasksCommand() command {
 						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
 						renderBoard)
 				})
-				if action == "delete" {
-					return confirmOr(m,
-						fmt.Sprintf("Delete task %q? Type 'yes' to confirm or Esc to cancel.", ref),
-						fmt.Sprintf("use --force to confirm deletion of task %q", ref),
-						cmd)
-				}
 				return m, cmd
 
 			case "move":
