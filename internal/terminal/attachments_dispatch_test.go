@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -466,6 +467,118 @@ func TestPublishDefaultAttachmentFallsBackWhenHardLinksUnavailable(t *testing.T)
 	}
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("published bytes = %q, want %q", got, payload)
+	}
+}
+
+func TestSafeAttachmentDownloadNameSanitizesWindowsNames(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{name: `bad:name?.txt`, want: `bad_name_.txt`},
+		{name: `report<final>|*.txt`, want: `report_final___.txt`},
+		{name: `double"quote.txt`, want: `double_quote.txt`},
+		{name: `CON`, want: `_CON`},
+		{name: `CON.txt`, want: `_CON.txt`},
+		{name: `con.tar.gz`, want: `_con.tar.gz`},
+		{name: `PRN.log`, want: `_PRN.log`},
+		{name: `AUX`, want: `_AUX`},
+		{name: `NUL.json`, want: `_NUL.json`},
+		{name: `COM1.txt`, want: `_COM1.txt`},
+		{name: `COM¹.txt`, want: `_COM¹.txt`},
+		{name: `LPT9.data`, want: `_LPT9.data`},
+		{name: `CONIN$.txt`, want: `_CONIN$.txt`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := safeAttachmentDownloadName(tc.name); got != tc.want {
+				t.Fatalf("safeAttachmentDownloadName(%q) = %q, want %q", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSafeAttachmentDownloadNameKeepsPathsContained(t *testing.T) {
+	for _, name := range []string{`../../outside.txt`, `..\\..\\outside.txt`, `/absolute/path.txt`, `C:\\Windows\\CON.txt`, `..`, `...`} {
+		t.Run(name, func(t *testing.T) {
+			got := safeAttachmentDownloadName(name)
+			if filepath.IsAbs(got) || filepath.Base(got) != got || strings.ContainsAny(got, `/\\`) {
+				t.Fatalf("safeAttachmentDownloadName(%q) escaped its local directory: %q", name, got)
+			}
+			if got == "" || got == "." || got == ".." {
+				t.Fatalf("safeAttachmentDownloadName(%q) returned unsafe name %q", name, got)
+			}
+		})
+	}
+}
+
+func TestTasksAttachmentsDownloadDefaultNameSanitizesWindowsNames(t *testing.T) {
+	payload := []byte("exact backend bytes\x00\xff")
+	cases := []struct {
+		id       string
+		fileName string
+		wantPath string
+	}{
+		{id: "att-invalid", fileName: `report:final?.txt`, wantPath: `report_final_.txt`},
+		{id: "att-device", fileName: `CON.txt`, wantPath: `_CON.txt`},
+	}
+	previousJSON := jsonMode
+	jsonMode = true
+	t.Cleanup(func() { jsonMode = previousJSON })
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			dir := t.TempDir()
+			oldWD, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := os.Chdir(oldWD); err != nil {
+					t.Errorf("restoring working directory: %v", err)
+				}
+			}()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/attachments/"+tc.id {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write(payload)
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := downloadTaskAttachmentResult(t.Context(), c, "p1", client.Task{ID: "task-1", Title: "task"}, client.Attachment{ID: tc.id, FileName: tc.fileName}, "")
+			if err != nil {
+				t.Fatalf("downloading attachment with default name: %v", err)
+			}
+
+			var gotResult struct {
+				TaskID       string `json:"task_id"`
+				AttachmentID string `json:"attachment_id"`
+				FileName     string `json:"file_name"`
+				Path         string `json:"path"`
+			}
+			if err := json.Unmarshal([]byte(result), &gotResult); err != nil {
+				t.Fatalf("decoding download result %q: %v", result, err)
+			}
+			if gotResult.TaskID != "task-1" || gotResult.AttachmentID != tc.id || gotResult.FileName != tc.fileName || gotResult.Path != tc.wantPath {
+				t.Fatalf("download result = %+v, want task/attachment identity and path %q", gotResult, tc.wantPath)
+			}
+			got, err := os.ReadFile(tc.wantPath)
+			if err != nil {
+				t.Fatalf("reading sanitized download %q: %v", tc.wantPath, err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("downloaded bytes = %q, want exact backend bytes %q", got, payload)
+			}
+		})
 	}
 }
 
