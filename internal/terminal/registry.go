@@ -240,7 +240,7 @@ func confirmTaskDeletion(m Model, projectID string, task client.Task) (Model, te
 	taskID := task.ID
 	display := taskDeletionDisplayName(task)
 	c := m.client
-	cmd := run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
+	cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
 		if err := c.DeleteTaskForProject(ctx, taskID, projectID); err != nil {
 			return "", err
 		}

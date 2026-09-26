@@ -2456,6 +2456,69 @@ func TestCLITaskCancellationPropagatesToBlockedCompactCatalogRequest(t *testing.
 	}
 }
 
+func TestCLICanceledForcedTaskDeleteBetweenLookupAndMutationDoesNotDelete(t *testing.T) {
+	const taskBoard = `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`
+	var deleteCalls int
+	var deleteMu sync.Mutex
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, compactTaskCatalogForTest(taskBoard))
+		case r.Method == http.MethodDelete && r.URL.Path == "/tasks/t-1":
+			deleteMu.Lock()
+			deleteCalls++
+			deleteMu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := New(c)
+	m.selectedID = "p1"
+	m.cliContext = ctx
+	previousCLI, previousForce := cliMode, forceMode
+	cliMode, forceMode = true, true
+	defer func() { cliMode, forceMode = previousCLI, previousForce }()
+
+	next, lookupCmd := m.runCommandFields([]string{"tasks", "delete", "Refactor"})
+	if lookupCmd == nil {
+		t.Fatal("task-delete lookup command is nil")
+	}
+	lookupMsg, ok := lookupCmd().(taskDeleteTargetMsg)
+	if !ok || lookupMsg.err != nil || lookupMsg.task.ID != "t-1" {
+		t.Fatalf("task-delete lookup result = %#v, want resolved task t-1", lookupMsg)
+	}
+
+	// Cancel after successful lookup but before the target message creates and
+	// runs the forced-delete command, exercising the lookup-to-mutation boundary.
+	cancel()
+	next, mutationCmd := next.(Model).Update(lookupMsg)
+	if mutationCmd == nil {
+		t.Fatal("forced task-delete mutation command is nil")
+	}
+	result, ok := mutationCmd().(resultMsg)
+	if !ok || !errors.Is(result.err, context.Canceled) {
+		t.Fatalf("forced task-delete result = %#v, want context cancellation", result)
+	}
+
+	deleteMu.Lock()
+	gotDeletes := deleteCalls
+	deleteMu.Unlock()
+	if gotDeletes != 0 {
+		t.Fatalf("canceled forced delete sent %d DELETE requests after lookup succeeded", gotDeletes)
+	}
+}
+
 func TestCLICanceledForcedTaskDeleteDoesNotMutateAfterLookupRelease(t *testing.T) {
 	const taskBoard = `<div data-task-id="t-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-1" title="Refactor">Refactor</a></div>`
 	lookupStarted := make(chan struct{})
