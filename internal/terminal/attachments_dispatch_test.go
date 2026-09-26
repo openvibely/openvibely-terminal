@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -439,6 +440,35 @@ func TestTasksAttachmentsDownloadFailuresPreserveExplicitOutput(t *testing.T) {
 	}
 }
 
+func TestPublishDefaultAttachmentFallsBackWhenHardLinksUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	tempPath := filepath.Join(dir, "download.tmp")
+	targetPath := filepath.Join(dir, "attachment.bin")
+	payload := []byte("complete attachment payload\x00\xff")
+	if err := os.WriteFile(tempPath, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	linkAttempts := 0
+	err := publishDefaultAttachment(tempPath, targetPath, func(string, string) error {
+		linkAttempts++
+		return errors.New("hard links unsupported")
+	})
+	if err != nil {
+		t.Fatalf("publishing with unsupported hard links: %v", err)
+	}
+	if linkAttempts != 1 {
+		t.Fatalf("hard-link attempts = %d, want 1", linkAttempts)
+	}
+	got, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatalf("reading published attachment: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("published bytes = %q, want %q", got, payload)
+	}
+}
+
 func TestTasksAttachmentsDownloadDefaultNameCollisionDoesNotOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	oldWD, err := os.Getwd()
@@ -467,8 +497,8 @@ func TestTasksAttachmentsDownloadDefaultNameCollisionDoesNotOverwrite(t *testing
 		t.Fatal(err)
 	}
 	_, err = downloadTaskAttachmentResult(t.Context(), c, "p1", client.Task{ID: "t-1", Title: "task"}, client.Attachment{ID: "att-1", FileName: "race.bin"}, "")
-	if err == nil {
-		t.Fatal("default-name collision unexpectedly succeeded")
+	if err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("default-name collision error = %v, want a clear collision error", err)
 	}
 	got, err := os.ReadFile("race.bin")
 	if err != nil {
@@ -476,6 +506,46 @@ func TestTasksAttachmentsDownloadDefaultNameCollisionDoesNotOverwrite(t *testing
 	}
 	if !bytes.Equal(got, competitor) {
 		t.Fatalf("default-name collision overwrote competing file with %q", got)
+	}
+}
+
+func TestTasksAttachmentsDownloadFailedDefaultTransferCleansUp(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWD) }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/attachments/att-1" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Length", "1000")
+		_, _ = w.Write([]byte("partial transfer"))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = downloadTaskAttachmentResult(t.Context(), c, "p1", client.Task{ID: "t-1"}, client.Attachment{ID: "att-1", FileName: "failed.bin"}, "")
+	if err == nil {
+		t.Fatal("failed transfer returned no error")
+	}
+	if _, err := os.Stat("failed.bin"); !os.IsNotExist(err) {
+		t.Fatalf("failed transfer left destination behind: %v", err)
+	}
+	tempFiles, err := filepath.Glob(filepath.Join(dir, ".attachment-download-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tempFiles) != 0 {
+		t.Fatalf("failed transfer left temporary downloads: %v", tempFiles)
 	}
 }
 
