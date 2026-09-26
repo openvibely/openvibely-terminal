@@ -2180,6 +2180,8 @@ func safeAttachmentDownloadName(name string) string {
 		switch {
 		case r == '/' || r == '\\' || r == os.PathSeparator || unicode.IsControl(r):
 			return '_'
+		case strings.ContainsRune(`<>":|?*`, r):
+			return '_'
 		default:
 			return r
 		}
@@ -2187,6 +2189,20 @@ func safeAttachmentDownloadName(name string) string {
 	name = strings.Trim(name, " .")
 	if name == "" || name == "." || name == ".." {
 		return "attachment"
+	}
+
+	stem := strings.ToUpper(strings.Trim(strings.SplitN(name, ".", 2)[0], " ."))
+	reserved := stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || stem == "CONIN$" || stem == "CONOUT$"
+	for _, prefix := range []string{"COM", "LPT"} {
+		if strings.HasPrefix(stem, prefix) {
+			switch strings.TrimPrefix(stem, prefix) {
+			case "1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³":
+				reserved = true
+			}
+		}
+	}
+	if reserved {
+		name = "_" + name
 	}
 	return name
 }
