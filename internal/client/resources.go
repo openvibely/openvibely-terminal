@@ -308,57 +308,58 @@ func aggregateAlertPages(pages []htmlPage, projectID string) []Alert {
 	)
 }
 
-func parseAlerts(root *html.Node, projectID string) []Alert {
-	nodes := findAll(root, func(e *html.Node) bool { return attr(e, "data-alert-id") != "" })
-
-	seen := map[string]bool{}
-	out := make([]Alert, 0, len(nodes))
-	for _, n := range nodes {
-		id := attr(n, "data-alert-id")
-		// Nested action buttons repeat the id but not the row markers.
-		if id == "" || seen[id] || attr(n, "data-alert-scroll-anchor") == "" {
-			continue
+func walkAlertRows(root *html.Node, visit func(*html.Node) bool) {
+	var walk func(*html.Node) bool
+	walk = func(n *html.Node) bool {
+		if n.Type == html.ElementNode && attr(n, "data-alert-id") != "" && attr(n, "data-alert-scroll-anchor") != "" {
+			if !visit(n) {
+				return false
+			}
 		}
-		seen[id] = true
-		out = append(out, parseAlertCard(n, projectID))
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			if !walk(child) {
+				return false
+			}
+		}
+		return true
 	}
+	if root != nil {
+		walk(root)
+	}
+}
+
+func parseAlerts(root *html.Node, projectID string) []Alert {
+	seen := map[string]struct{}{}
+	out := make([]Alert, 0)
+	walkAlertRows(root, func(n *html.Node) bool {
+		id := attr(n, "data-alert-id")
+		if _, ok := seen[id]; ok {
+			return true
+		}
+		seen[id] = struct{}{}
+		out = append(out, parseAlertCard(n, projectID))
+		return true
+	})
 	return out
 }
 
 func collectBoundedAlerts(root *html.Node, out []Alert, seen map[string]struct{}, projectID string, limit int) ([]Alert, int, bool) {
 	parsed := 0
 	stopped := false
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if stopped {
-			return
+	walkAlertRows(root, func(n *html.Node) bool {
+		id := attr(n, "data-alert-id")
+		if _, ok := seen[id]; ok {
+			return true
 		}
-		if n.Type == html.ElementNode && attr(n, "data-alert-id") != "" {
-			id := attr(n, "data-alert-id")
-			// Nested action buttons repeat the id but not the row markers.
-			if id == "" || attr(n, "data-alert-scroll-anchor") == "" {
-				return
-			}
-			if _, ok := seen[id]; ok {
-				return
-			}
-			if len(out) >= limit {
-				stopped = true
-				return
-			}
-			seen[id] = struct{}{}
-			parsed++
-			out = append(out, parseAlertCard(n, projectID))
-			return
+		if len(out) >= limit {
+			stopped = true
+			return false
 		}
-		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-			if stopped {
-				return
-			}
-		}
-	}
-	walk(root)
+		seen[id] = struct{}{}
+		parsed++
+		out = append(out, parseAlertCard(n, projectID))
+		return true
+	})
 	return out, parsed, stopped
 }
 
