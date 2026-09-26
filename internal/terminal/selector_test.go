@@ -931,6 +931,62 @@ func TestProjectNoArgOpensSelector(t *testing.T) {
 	}
 }
 
+func TestProjectPickerPathOwnershipRendering(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		baseURL    string
+		pickerText string
+	}{
+		{
+			name:       "local backend",
+			baseURL:    "http://localhost:3001",
+			pickerText: "local path: /workspace/demo",
+		},
+		{
+			name:       "remote backend",
+			baseURL:    "https://backend.example",
+			pickerText: "server path: /workspace/demo",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, nil)
+			defer m.Cleanup()
+			configuredClient, err := client.New(tc.baseURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m.client = configuredClient
+			m.projects = []client.Project{
+				{ID: "demo-id", Name: "Demo", Path: "/workspace/demo"},
+				{ID: "other-id", Name: "Other", Path: "/workspace/other"},
+			}
+			m.projectsLoaded = true
+			m = runLine(t, m, "/project")
+			if !m.selectorActive {
+				t.Fatalf("project picker did not open:\n%s", transcript(m))
+			}
+			pickerOutput := stripANSI(m.View())
+			if !strings.Contains(pickerOutput, tc.pickerText) {
+				t.Fatalf("project picker did not identify path ownership or preserve path text %q:\n%s", tc.pickerText, pickerOutput)
+			}
+			if m.selectorItems[0].ref != "demo-id" || m.selectorItems[0].detail != tc.pickerText {
+				t.Fatalf("picker changed the project reference or displayed path: %+v", m.selectorItems[0])
+			}
+			if got := m.projects[0].Path; got != "/workspace/demo" {
+				t.Fatalf("project path changed during rendering: %q", got)
+			}
+			m = typeSelectorRunes(t, m, "/workspace/demo")
+			if got := m.selectorFilteredCount(); got != 1 {
+				t.Fatalf("existing path filter matched %d projects, want 1", got)
+			}
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			if m.selectedID != "demo-id" || m.projects[0].Path != "/workspace/demo" {
+				t.Fatalf("picker selection or path changed: selected=%q path=%q", m.selectedID, m.projects[0].Path)
+			}
+		})
+	}
+}
+
 func TestProjectPickerRowsMatchAcrossEntryPoints(t *testing.T) {
 	projects := []client.Project{
 		{ID: "project-first", Name: "First Project", Path: "/workspace/projects/first/with/a/very/long/path"},
@@ -938,9 +994,9 @@ func TestProjectPickerRowsMatchAcrossEntryPoints(t *testing.T) {
 		{ID: "project-third", Name: "Third Project", Path: "/workspace/projects/third"},
 	}
 	wantItems := []selectorItem{
-		{ref: projects[0].ID, label: projects[0].Name, detail: truncate(projects[0].Path, 40)},
-		{ref: projects[1].ID, label: projects[1].Name, detail: truncate(projects[1].Path, 40)},
-		{ref: projects[2].ID, label: projects[2].Name, detail: truncate(projects[2].Path, 40)},
+		{ref: projects[0].ID, label: projects[0].Name, detail: "local path: " + truncate(projects[0].Path, 40)},
+		{ref: projects[1].ID, label: projects[1].Name, detail: "local path: " + truncate(projects[1].Path, 40)},
+		{ref: projects[2].ID, label: projects[2].Name, detail: "local path: " + truncate(projects[2].Path, 40)},
 	}
 	cases := []struct {
 		name           string

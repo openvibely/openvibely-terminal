@@ -1673,7 +1673,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m, reconnect := m.pickProject(msg.selectName)
 			if msg.echo && len(m.log) > logStart && m.log[len(m.log)-1].role == "system" {
 				m.log = m.log[:len(m.log)-1]
-				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
+				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID, m.client.BaseURL())})
 			}
 			return m, reconnect
 		}
@@ -1684,7 +1684,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setActiveProject(m.projects[0])
 		}
 		if !msg.echo && !cliMode && m.projectsLoaded && len(m.projects) == 0 && m.selectedID == "" {
-			m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
+			m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID, m.client.BaseURL())})
 		}
 		var reconnect tea.Cmd
 		if !m.authRequired && m.selectedID != "" && (m.sseCancel != nil || m.sseRetryAfterProject) {
@@ -1692,7 +1692,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			reconnect = m.connectSSE()
 		}
 		if msg.echo {
-			m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID)})
+			m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, msg.capacities, m.selectedID, m.client.BaseURL())})
 		}
 		return m, reconnect
 
@@ -1775,7 +1775,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.markAuthRequiredQuiet()
 		}
 
-		body, err := projectDeleteActionOutput(msg, selected)
+		body, err := projectDeleteActionOutput(msg, selected, m.client.BaseURL())
 		if err != nil {
 			m.append(entry{role: "error", text: err.Error()})
 			return m, nil

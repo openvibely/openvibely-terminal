@@ -514,6 +514,13 @@ disabled in the environment. Both forms select the backend-assigned project in
 the TUI, and one-shot CLI output supports plain text and `--json` project
 records.
 
+In `/projects` listings and the interactive `/project` picker, repository path
+ownership follows the configured backend URL: a local backend shows `LOCAL PATH`
+(or `local path` in picker rows), while a remote backend shows `SERVER PATH`
+(or `server path`). For a remote backend, the displayed path is on the connected
+server, not necessarily on the computer running the terminal. The path text remains
+the value returned by the backend and is not rewritten or resolved locally.
+
 The same GitHub syntax works in one-shot mode (`openvibely-terminal projects github-create ...`); add `--json` for a machine-readable created-project record.
 
 Inspect or update an existing project's backend-owned settings without opening a

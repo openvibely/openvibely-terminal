@@ -2722,11 +2722,40 @@ func TestRenderBoardEmptyStates(t *testing.T) {
 }
 
 func TestRenderProjectsEmptyStateOffersCreationCommand(t *testing.T) {
-	out := stripANSI(renderProjects(nil, nil, ""))
+	out := stripANSI(renderProjects(nil, nil, "", "http://localhost:3001"))
 	for _, want := range []string{"no projects", "/projects create <name> <path>"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("empty project state missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestRenderProjectsIdentifiesPathOwnership(t *testing.T) {
+	projects := []client.Project{{ID: "p1", Name: "Demo", Path: "/workspace/demo"}}
+	for _, tc := range []struct {
+		name     string
+		baseURL  string
+		wantHead string
+	}{
+		{name: "local backend", baseURL: "http://localhost:3001", wantHead: "LOCAL PATH"},
+		{name: "remote backend", baseURL: "https://backend.example", wantHead: "SERVER PATH"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := stripANSI(renderProjects(projects, nil, "p1", tc.baseURL))
+			if !strings.Contains(out, tc.wantHead) || !strings.Contains(out, "/workspace/demo") {
+				t.Fatalf("project list does not identify %s ownership or preserve the path:\n%s", tc.wantHead, out)
+			}
+			if !strings.Contains(out, "●") {
+				t.Fatalf("project list lost the active-project marker:\n%s", out)
+			}
+			otherHead := "SERVER PATH"
+			if tc.wantHead == otherHead {
+				otherHead = "LOCAL PATH"
+			}
+			if strings.Contains(out, otherHead) {
+				t.Fatalf("project list contains incorrect ownership label %q:\n%s", otherHead, out)
+			}
+		})
 	}
 }
 

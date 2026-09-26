@@ -9410,10 +9410,10 @@ func projectCommand() command {
 					projects := m.projects
 					return m, selectorFor("Projects", "project", "no projects", false,
 						func(context.Context) ([]selectorItem, error) {
-							return projectSelectorItems(projects), nil
+							return projectSelectorItems(projects, m.client.BaseURL()), nil
 						})
 				}
-				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, nil, m.selectedID)})
+				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, nil, m.selectedID, m.client.BaseURL())})
 				return m, nil
 			}
 			name := strings.Join(args, " ")
@@ -9524,7 +9524,7 @@ func projectsCommand() command {
 			case "show":
 				ref := strings.TrimSpace(strings.Join(rest, " "))
 				if ref == "" {
-					return selectorOr(m, commandUsage("projects", "show"), projectSelector(m.projects, "projects show", ""))
+					return selectorOr(m, commandUsage("projects", "show"), projectSelector(m.projects, m.client.BaseURL(), "projects show", ""))
 				}
 				project, err := matchProject(m.projects, ref)
 				if err != nil {
@@ -9547,7 +9547,7 @@ func projectsCommand() command {
 					return m, errCmd(err.Error())
 				}
 				if ref == "" {
-					return selectorOr(m, commandUsage("projects", "edit"), projectSelector(m.projects, "projects edit", " "))
+					return selectorOr(m, commandUsage("projects", "edit"), projectSelector(m.projects, m.client.BaseURL(), "projects edit", " "))
 				}
 				c := m.client
 				sessionGeneration := sessionGenerationOf(m)
@@ -9583,7 +9583,7 @@ func projectsCommand() command {
 			case "delete":
 				ref := strings.TrimSpace(strings.Join(rest, " "))
 				if ref == "" {
-					return selectorOr(m, commandUsage("projects", "delete"), projectSelector(m.projects, "projects delete", ""))
+					return selectorOr(m, commandUsage("projects", "delete"), projectSelector(m.projects, m.client.BaseURL(), "projects delete", ""))
 				}
 				project, err := matchProject(m.projects, ref)
 				if err != nil {
@@ -9709,7 +9709,7 @@ func projectDeletionRefreshStatus(err error) string {
 	return fmt.Sprintf("project catalog refresh unavailable (%s): %s", kind, safeConnectionDiagnosticText(err.Error()))
 }
 
-func projectDeleteActionOutput(msg projectDeletedMsg, selected client.Project) (string, error) {
+func projectDeleteActionOutput(msg projectDeletedMsg, selected client.Project, baseURL string) (string, error) {
 	result := projectDeleteResult{
 		Deleted:           true,
 		ProjectID:         msg.projectID,
@@ -9729,7 +9729,7 @@ func projectDeleteActionOutput(msg projectDeletedMsg, selected client.Project) (
 	if msg.refreshErr != nil {
 		return status + "\n" + result.RefreshError, nil
 	}
-	return status + "\n\n" + renderProjects(msg.projects, nil, selected.ID), nil
+	return status + "\n\n" + renderProjects(msg.projects, nil, selected.ID, baseURL), nil
 }
 
 type projectEditOptionSpec struct {
@@ -10160,17 +10160,22 @@ func canonicalProjectGitHubRepository(raw string) string {
 	return "github.com/" + strings.ToLower(strings.TrimSuffix(strings.Trim(value, "/"), ".git"))
 }
 
-func projectSelectorItems(projects []client.Project) []selectorItem {
+func projectSelectorItems(projects []client.Project, baseURL string) []selectorItem {
 	items := make([]selectorItem, 0, len(projects))
+	pathOwner := projectPathOwner(baseURL)
 	for _, project := range projects {
-		items = append(items, selectorItem{ref: project.ID, label: project.Name, detail: truncate(project.Path, 40)})
+		items = append(items, selectorItem{
+			ref:    project.ID,
+			label:  project.Name,
+			detail: pathOwner + " path: " + truncate(project.Path, 40),
+		})
 	}
 	return items
 }
 
-func projectSelector(projects []client.Project, command, suffix string) tea.Cmd {
+func projectSelector(projects []client.Project, baseURL, command, suffix string) tea.Cmd {
 	return selectorForWithSuffix("Projects", command, "no projects", suffix, func(context.Context) ([]selectorItem, error) {
-		return projectSelectorItems(projects), nil
+		return projectSelectorItems(projects, baseURL), nil
 	})
 }
 

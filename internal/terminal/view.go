@@ -3990,7 +3990,14 @@ func renderWorkersLive(overview workersOverview) string {
 
 // --- projects ---
 
-func renderProjects(projects []client.Project, caps []client.ProjectCapacity, selectedID string) string {
+func projectPathOwner(baseURL string) string {
+	if isRemoteServerURL(baseURL) {
+		return "server"
+	}
+	return "local"
+}
+
+func renderProjects(projects []client.Project, caps []client.ProjectCapacity, selectedID, baseURL string) string {
 	if len(projects) == 0 {
 		return dimStyle.Render(noProjectsGuidance())
 	}
@@ -3998,7 +4005,8 @@ func renderProjects(projects []client.Project, caps []client.ProjectCapacity, se
 	for _, c := range caps {
 		byID[c.ID] = c
 	}
-	rows := [][]string{{"", "NAME", "RUNNING", "QUEUED", "PATH"}}
+	pathHeader := strings.ToUpper(projectPathOwner(baseURL)) + " PATH"
+	rows := [][]string{{"", "NAME", "RUNNING", "QUEUED", pathHeader}}
 	for _, p := range projects {
 		mark := " "
 		if p.ID == selectedID {
