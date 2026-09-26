@@ -2032,23 +2032,33 @@ func downloadTaskAttachmentResult(ctx context.Context, c *client.Client, project
 	if err != nil {
 		return "", err
 	}
-	file, err := openAttachmentDownloadFile(targetPath, outputPath == "")
+	file, tempPath, err := openAttachmentDownloadFile(targetPath)
 	if err != nil {
 		return "", err
 	}
-	closeFile := true
+	fileClosed := false
 	defer func() {
-		if closeFile {
+		if !fileClosed {
 			_ = file.Close()
 		}
+		_ = os.Remove(tempPath)
 	}()
 	if err := c.DownloadTaskAttachment(ctx, attachment.ID, projectID, file); err != nil {
 		return "", err
 	}
 	if err := file.Close(); err != nil {
+		fileClosed = true
 		return "", fmt.Errorf("write attachment %q: %w", targetPath, err)
 	}
-	closeFile = false
+	fileClosed = true
+
+	if strings.TrimSpace(outputPath) == "" {
+		if err := os.Link(tempPath, targetPath); err != nil {
+			return "", fmt.Errorf("create download path %q: %w", targetPath, err)
+		}
+	} else if err := os.Rename(tempPath, targetPath); err != nil {
+		return "", fmt.Errorf("replace download path %q: %w", targetPath, err)
+	}
 	if jsonMode {
 		return marshalJSON(struct {
 			TaskID       string `json:"task_id"`
@@ -2103,18 +2113,13 @@ func safeAttachmentDownloadName(name string) string {
 	return name
 }
 
-func openAttachmentDownloadFile(path string, exclusive bool) (*os.File, error) {
-	flag := os.O_WRONLY | os.O_CREATE
-	if exclusive {
-		flag |= os.O_EXCL
-	} else {
-		flag |= os.O_TRUNC
-	}
-	file, err := os.OpenFile(path, flag, 0o600)
+func openAttachmentDownloadFile(path string) (*os.File, string, error) {
+	tempPath := filepath.Join(filepath.Dir(path), ".attachment-download-*")
+	file, err := os.CreateTemp(filepath.Dir(path), filepath.Base(tempPath))
 	if err != nil {
-		return nil, fmt.Errorf("open download path %q: %w", path, err)
+		return nil, "", fmt.Errorf("open download path %q: %w", path, err)
 	}
-	return file, nil
+	return file, file.Name(), nil
 }
 
 func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, args []string, usage string) (Model, tea.Cmd) {
