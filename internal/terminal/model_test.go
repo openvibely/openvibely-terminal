@@ -3469,6 +3469,69 @@ func TestTranscriptAppendPreservesTruncationOrderAndBottom(t *testing.T) {
 	}
 }
 
+func TestTranscriptRolloverMatchesFullRefreshAcrossWrapAndResize(t *testing.T) {
+	m := newTestModel(t)
+	m.log = nil
+	for i := 0; i < maxTranscript; i++ {
+		m.log = append(m.log, entry{
+			role: "event",
+			text: fmt.Sprintf("seed-%03d: %s\ncontinuation-%03d: %s", i, strings.Repeat("wrapped words ", 3), i, strings.Repeat("tail ", 4)),
+		})
+	}
+	m.transcript.Height = 8
+	m.refreshTranscript()
+
+	appendID := maxTranscript
+	for _, width := range []int{32, 58, 40} {
+		updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+		m = updated.(Model)
+		for i := 0; i < 3; i++ {
+			m.append(entry{role: "event", text: fmt.Sprintf("rollover-%03d: %s\ncontinued: %s", appendID, strings.Repeat("new wrapped text ", 4), strings.Repeat("more lines ", 3))})
+			if got, want := m.log[0].text, fmt.Sprintf("seed-%03d: %s\ncontinuation-%03d: %s", appendID-maxTranscript+1, strings.Repeat("wrapped words ", 3), appendID-maxTranscript+1, strings.Repeat("tail ", 4)); got != want {
+				t.Fatalf("oldest retained text after append %d = %q, want %q", appendID, got, want)
+			}
+			assertTranscriptMatchesFullRefresh(t, &m)
+			appendID++
+		}
+	}
+}
+
+func TestTranscriptRolloverRefreshesInvalidCache(t *testing.T) {
+	m := newTestModel(t)
+	m.log = nil
+	for i := 0; i < maxTranscript; i++ {
+		m.log = append(m.log, entry{role: "event", text: fmt.Sprintf("event-%03d", i)})
+	}
+	m.refreshTranscript()
+	m.transcriptBlockLineCounts = nil
+
+	m.append(entry{role: "event", text: "event-after-invalid-cache"})
+	if len(m.transcriptBlockLineCounts) != maxTranscript {
+		t.Fatalf("line-count cache length = %d, want %d", len(m.transcriptBlockLineCounts), maxTranscript)
+	}
+	assertTranscriptMatchesFullRefresh(t, &m)
+}
+
+func assertTranscriptMatchesFullRefresh(t *testing.T, m *Model) {
+	t.Helper()
+	incrementalContent := m.transcriptContent
+	incrementalView := m.transcript.View()
+	if !m.transcript.AtBottom() {
+		t.Fatal("transcript append should keep the viewport at the bottom")
+	}
+
+	full := *m
+	viewportCopy := *m.transcript
+	full.transcript = &viewportCopy
+	full.refreshTranscript()
+	if full.transcriptContent != incrementalContent {
+		t.Fatalf("incremental transcript differs from full refresh\nincremental:\n%q\nfull:\n%q", incrementalContent, full.transcriptContent)
+	}
+	if got := full.transcript.View(); got != incrementalView {
+		t.Fatalf("incremental viewport differs from full refresh\nincremental:\n%s\nfull:\n%s", incrementalView, got)
+	}
+}
+
 func TestCtrlCQuits(t *testing.T) {
 	m := newTestModel(t)
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})

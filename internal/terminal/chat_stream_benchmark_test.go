@@ -16,6 +16,48 @@ import (
 
 const benchmarkChunksPerCadence = int(chatStreamRenderInterval / time.Millisecond)
 
+func BenchmarkTranscriptAppend(b *testing.B) {
+	for _, retained := range []int{499, 500} {
+		name := fmt.Sprintf("retained=%d", retained)
+		b.Run(name, func(b *testing.B) {
+			template := transcriptAppendBenchmarkModel(retained)
+			m := template
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				m = cloneTranscriptAppendBenchmarkModel(template)
+				b.StartTimer()
+				m.appendTranscriptEntry(entry{role: "event", text: "benchmark append entry"})
+			}
+		})
+	}
+}
+
+func transcriptAppendBenchmarkModel(retained int) Model {
+	vp := viewport.New(100, 25)
+	input := textinput.New()
+	editor := textarea.New()
+	m := Model{transcript: &vp, input: &input, automationEditor: &editor}
+	for i := 0; i < retained; i++ {
+		m.log = append(m.log, entry{role: "event", text: fmt.Sprintf("history entry %03d", i)})
+	}
+	m.refreshTranscript()
+	return m
+}
+
+func cloneTranscriptAppendBenchmarkModel(template Model) Model {
+	m := template
+	m.log = append([]entry(nil), template.log...)
+	m.transcriptBlocks = append([]string(nil), template.transcriptBlocks...)
+	m.transcriptBlockLineCounts = append([]int(nil), template.transcriptBlockLineCounts...)
+	m.transcriptBlockMaxWidths = append([]int(nil), template.transcriptBlockMaxWidths...)
+	m.transcriptLines = append([]string(nil), template.transcriptLines...)
+	viewportCopy := *template.transcript
+	m.transcript = &viewportCopy
+	return m
+}
+
 // BenchmarkChatStreamMutation exercises the production Update path while
 // simulating one chunk arriving per millisecond. A real render message is
 // delivered at the 33 ms cadence and a terminal event forces the final flush.

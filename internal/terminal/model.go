@@ -3262,7 +3262,7 @@ func (m *Model) append(e entry) {
 func (m *Model) appendTranscriptEntry(e entry) {
 	m.ensureTranscriptContent()
 	width := m.effectiveTranscriptWidth()
-	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log)
+	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log) && len(m.transcriptBlockLineCounts) == len(m.log) && len(m.transcriptBlockMaxWidths) == len(m.log)
 	block := ""
 	if canAppend {
 		block = renderTranscriptEntry(e, transcriptWrap(width))
@@ -3281,27 +3281,100 @@ func (m *Model) appendTranscriptEntry(e entry) {
 			}
 		}
 	}
-	if !canAppend || dropped > len(m.transcriptBlocks) {
+	if !canAppend {
 		m.refreshTranscript()
 		return
 	}
 
 	if dropped > 0 {
-		m.refreshTranscript()
+		if dropped != 1 || !m.evictOldestTranscriptBlock(block) {
+			m.refreshTranscript()
+		}
 		return
 	}
-	m.transcriptBlocks = append(m.transcriptBlocks, block)
+
+	m.appendRenderedTranscriptBlock(block, false)
+}
+
+func (m *Model) appendRenderedTranscriptBlock(block string, updateViewportCache bool) {
 	blockLines, blockMaxWidth := renderedLines(block)
 	beforeLines := len(m.transcriptLines)
 	m.transcriptLines = appendRenderedLines(m.transcriptLines, blockLines)
 	m.transcriptBlockLineCounts = append(m.transcriptBlockLineCounts, len(m.transcriptLines)-beforeLines)
 	m.transcriptBlockMaxWidths = append(m.transcriptBlockMaxWidths, blockMaxWidth)
+	m.transcriptBlocks = append(m.transcriptBlocks, block)
 	if blockMaxWidth > m.transcriptMaxLineWidth {
 		m.transcriptMaxLineWidth = blockMaxWidth
 	}
 	m.transcriptContent += block
-	m.transcript.SetContent(m.transcriptContent)
+	if updateViewportCache {
+		setViewportCachedContent(m.transcript, m.transcriptLines, m.transcriptMaxLineWidth)
+	} else {
+		m.transcript.SetContent(m.transcriptContent)
+	}
 	m.transcript.GotoBottom()
+}
+
+// evictOldestTranscriptBlock updates the rendered cache alongside maxTranscript
+// eviction. A false result leaves the cache untouched so the caller can rebuild it.
+func (m *Model) evictOldestTranscriptBlock(block string) bool {
+	count := len(m.log)
+	if count != maxTranscript || len(m.transcriptBlocks) != count || len(m.transcriptBlockLineCounts) != count || len(m.transcriptBlockMaxWidths) != count || len(m.transcriptLines) == 0 {
+		return false
+	}
+	lineTotal := 0
+	for _, lineCount := range m.transcriptBlockLineCounts {
+		if lineCount <= 0 {
+			return false
+		}
+		lineTotal += lineCount
+	}
+	if lineTotal != len(m.transcriptLines) {
+		return false
+	}
+	oldBlock := m.transcriptBlocks[0]
+	oldLineCount := m.transcriptBlockLineCounts[0]
+	if oldLineCount > len(m.transcriptLines) || !strings.HasPrefix(m.transcriptContent, oldBlock) {
+		return false
+	}
+
+	var nextBlockFirstLine string
+	if count > 1 {
+		nextLines := strings.Split(m.transcriptBlocks[1], "\n")
+		if len(nextLines) == 0 {
+			return false
+		}
+		nextBlockFirstLine = nextLines[0]
+	}
+
+	m.transcriptContent = m.transcriptContent[len(oldBlock):]
+
+	remainingLines := m.transcriptLines[oldLineCount:]
+	oldLinesLen := len(m.transcriptLines)
+	if count > 1 {
+		copy(m.transcriptLines[1:], remainingLines)
+		m.transcriptLines[0] = nextBlockFirstLine
+		newLinesLen := len(remainingLines) + 1
+		clear(m.transcriptLines[newLinesLen:oldLinesLen])
+		m.transcriptLines = m.transcriptLines[:newLinesLen]
+		copy(m.transcriptBlocks, m.transcriptBlocks[1:])
+		copy(m.transcriptBlockLineCounts, m.transcriptBlockLineCounts[1:])
+		copy(m.transcriptBlockMaxWidths, m.transcriptBlockMaxWidths[1:])
+		m.transcriptBlocks = m.transcriptBlocks[:count-1]
+		m.transcriptBlockLineCounts = m.transcriptBlockLineCounts[:count-1]
+		m.transcriptBlockLineCounts[0]++
+		m.transcriptBlockMaxWidths = m.transcriptBlockMaxWidths[:count-1]
+	} else {
+		clear(m.transcriptLines)
+		m.transcriptLines = m.transcriptLines[:0]
+		m.transcriptBlocks = m.transcriptBlocks[:0]
+		m.transcriptBlockLineCounts = m.transcriptBlockLineCounts[:0]
+		m.transcriptBlockMaxWidths = m.transcriptBlockMaxWidths[:0]
+	}
+
+	m.transcriptMaxLineWidth = maxInt(m.transcriptBlockMaxWidths)
+	m.appendRenderedTranscriptBlock(block, true)
+	return true
 }
 
 func (m Model) transcriptHeight() int {
