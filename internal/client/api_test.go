@@ -872,6 +872,113 @@ func TestGetMostFrequentTasks(t *testing.T) {
 	}
 }
 
+func TestFullHistoryTaskAnalyticsRequestAndJSONErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		call func(context.Context, *Client) (bool, error)
+	}{
+		{
+			name: "most-frequent-tasks",
+			call: func(ctx context.Context, c *Client) (bool, error) {
+				items, err := c.GetMostFrequentTasks(ctx, "p")
+				return items != nil, err
+			},
+		},
+		{
+			name: "failed-task-patterns",
+			call: func(ctx context.Context, c *Client) (bool, error) {
+				items, err := c.GetFailedTaskPatterns(ctx, "p")
+				return items != nil, err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name+"/request error", func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("unexpected request to %s", r.URL.Path)
+			}))
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			itemsNonNil, err := tc.call(ctx, c)
+			if !errors.Is(err, context.Canceled) || itemsNonNil {
+				t.Fatalf("request failure returned itemsNonNil=%t err=%v, want canceled request and nil items", itemsNonNil, err)
+			}
+		})
+
+		t.Run(tc.name+"/malformed JSON", func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("[{"))
+			}))
+			itemsNonNil, err := tc.call(context.Background(), c)
+			if err == nil || !strings.Contains(err.Error(), "decoding") || itemsNonNil {
+				t.Fatalf("malformed JSON returned itemsNonNil=%t err=%v, want decode error and nil items", itemsNonNil, err)
+			}
+		})
+	}
+}
+
+func TestBoundedTaskAnalyticsZeroLimitOmitsLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		call func(context.Context, *Client) error
+	}{
+		{
+			name: "most-frequent-tasks",
+			path: "/api/analytics/most-frequent-tasks",
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.GetMostFrequentTasksWithLimit(ctx, "p", 0)
+				return err
+			},
+		},
+		{
+			name: "failed-task-patterns",
+			path: "/api/analytics/failed-task-patterns",
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.GetFailedTaskPatternsWithLimit(ctx, "p", 0)
+				return err
+			},
+		},
+		{
+			name: "avg-execution-time-by-task",
+			path: "/api/analytics/avg-execution-time-by-task",
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.GetAvgExecutionTimeByTaskWithLimit(ctx, "p", 0)
+				return err
+			},
+		},
+		{
+			name: "avg-execution-time-by-agent",
+			path: "/api/analytics/avg-execution-time-by-agent",
+			call: func(ctx context.Context, c *Client) error {
+				_, err := c.GetAvgExecutionTimeByAgentWithLimit(ctx, "p", 0)
+				return err
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path {
+					t.Errorf("path = %q, want %q", r.URL.Path, tc.path)
+				}
+				if got := r.URL.Query().Get("project_id"); got != "p" {
+					t.Errorf("project_id = %q, want p", got)
+				}
+				if _, ok := r.URL.Query()["limit"]; ok {
+					t.Errorf("zero bounded limit was sent: %q", r.URL.Query().Get("limit"))
+				}
+				_, _ = w.Write([]byte("[]"))
+			}))
+			if err := tc.call(context.Background(), c); err != nil {
+				t.Fatalf("bounded analytics request: %v", err)
+			}
+		})
+	}
+}
+
 func TestGetMostFrequentTasksWithLimit(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/analytics/most-frequent-tasks" {
