@@ -1427,7 +1427,9 @@ func (c *Client) SteerTaskThreadQueuedInputForProject(ctx context.Context, taskI
 	if strings.TrimSpace(state.ActiveTurnID) == "" {
 		return nil, fmt.Errorf("no active response for queued input %q; it remains queued", input.ID)
 	}
-	doc, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/thread/queued/"+url.PathEscape(input.ID)+"/steer"+query("project_id", projectID), nil)
+	form := url.Values{}
+	form.Set("expected_turn_id", state.ActiveTurnID)
+	doc, err := c.doFormHTML(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/thread/queued/"+url.PathEscape(input.ID)+"/steer"+query("project_id", projectID), form)
 	if err != nil {
 		return nil, err
 	}
