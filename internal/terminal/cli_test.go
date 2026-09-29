@@ -5426,6 +5426,62 @@ func TestCLIQueuedPromotionTerminalStatusesAndCompletedID(t *testing.T) {
 	}
 }
 
+func TestCLIStreamRetryDelayIncreasesByProductionInterval(t *testing.T) {
+	for attempt := 1; attempt <= cliStreamReconnectLimit; attempt++ {
+		want := time.Duration(attempt) * 25 * time.Millisecond
+		if got := cliStreamRetryDelay(attempt); got != want {
+			t.Errorf("retry %d delay = %s, want %s", attempt, got, want)
+		}
+	}
+}
+
+func TestCLIStreamRetryWaitCancellationUsesRealTimer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(10*time.Millisecond, cancel)
+
+	start := time.Now()
+	if waitCLIStreamRetry(ctx, cliStreamReconnectLimit) {
+		t.Fatal("retry returned true after cancellation")
+	}
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("cancelled retry returned after %s, want prompt cancellation", elapsed)
+	}
+}
+
+func TestCLIExecutionTerminalStreamErrorsDoNotRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+	}{
+		{name: "authentication", statusCode: http.StatusUnauthorized},
+		{name: "other terminal", statusCode: http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var streams, waits int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				streams++
+				http.Error(w, "stream rejected", tc.statusCode)
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			status := func() (*client.ChatStatus, error) {
+				return &client.ChatStatus{MessageID: "exec", Status: "processing"}, nil
+			}
+			err := streamCLIExecutionWithRetryWait(context.Background(), c, io.Discard, "p1", "", "exec", false, status, func(context.Context, int) bool {
+				waits++
+				return true
+			})
+			if err == nil {
+				t.Fatal("expected terminal stream error")
+			}
+			if streams != 1 || waits != 0 {
+				t.Fatalf("stream attempts=%d retry waits=%d, want 1 and 0", streams, waits)
+			}
+		})
+	}
+}
+
 func TestCLIExecutionDisconnectExhaustionIsNotSuccess(t *testing.T) {
 	var streams int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -5438,12 +5494,24 @@ func TestCLIExecutionDisconnectExhaustionIsNotSuccess(t *testing.T) {
 	status := func() (*client.ChatStatus, error) {
 		return &client.ChatStatus{MessageID: "exec", Status: "processing"}, nil
 	}
-	err := streamCLIExecution(context.Background(), c, io.Discard, "p1", "", "exec", false, status)
+	var waits []int
+	err := streamCLIExecutionWithRetryWait(context.Background(), c, io.Discard, "p1", "", "exec", false, status, func(_ context.Context, attempt int) bool {
+		waits = append(waits, attempt)
+		return true
+	})
 	if !errors.Is(err, client.ErrEventStreamClosed) {
 		t.Fatalf("error = %v, want event stream closed", err)
 	}
 	if streams != cliStreamReconnectLimit+1 {
 		t.Fatalf("stream attempts = %d, want %d", streams, cliStreamReconnectLimit+1)
+	}
+	if len(waits) != cliStreamReconnectLimit {
+		t.Fatalf("retry waits = %d, want %d", len(waits), cliStreamReconnectLimit)
+	}
+	for i, attempt := range waits {
+		if attempt != i+1 {
+			t.Fatalf("retry wait %d received attempt %d, want %d", i+1, attempt, i+1)
+		}
 	}
 }
 
