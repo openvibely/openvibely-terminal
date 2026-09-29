@@ -1845,6 +1845,12 @@ func TestSteerTaskThreadQueuedInputForProjectGuardsActiveTurnAndScope(t *testing
 			if r.URL.Query().Get("project_id") != "project-2" {
 				t.Fatalf("steer project_id = %q", r.URL.Query().Get("project_id"))
 			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse steer form: %v", err)
+			}
+			if got := r.PostForm.Get("expected_turn_id"); got != "turn-1" {
+				t.Fatalf("steer expected_turn_id = %q, want observed turn-1", got)
+			}
 			_, _ = fmt.Fprint(w, `<div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="steering"></div>`)
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
@@ -1875,5 +1881,52 @@ func TestSteerTaskThreadQueuedInputForProjectGuardsActiveTurnAndScope(t *testing
 	}
 	if posts != 0 {
 		t.Fatalf("stale queued steer POST count = %d", posts)
+	}
+}
+
+func TestSteerTaskThreadQueuedInputRejectsStaleTurnWithoutChangingQueuedInput(t *testing.T) {
+	const currentTurnID = "turn-2"
+	inputMode := "queued"
+	var posts int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tasks/task-1/thread/pending-inputs":
+			_, _ = fmt.Fprintf(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="%s"></div></div>`, inputMode)
+		case "/tasks/task-1/thread":
+			// The client observes turn-1; the backend's active turn changes before POST.
+			_, _ = fmt.Fprint(w, `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`)
+		case "/tasks/task-1/thread/queued/q1/steer":
+			posts++
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse steer form: %v", err)
+			}
+			if got := r.PostForm.Get("expected_turn_id"); got != "turn-1" {
+				t.Fatalf("steer expected_turn_id = %q, want observed turn-1", got)
+			}
+			if r.PostForm.Get("expected_turn_id") != currentTurnID {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_, _ = fmt.Fprint(w, `{"error":"active turn changed"}`)
+				return
+			}
+			inputMode = "steering"
+			_, _ = fmt.Fprint(w, `<div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="steering"></div>`)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+
+	if _, err := c.SteerTaskThreadQueuedInputForProject(context.Background(), "task-1", "project-2", "q1"); err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("stale-turn error = %v, want conflict response", err)
+	}
+	if posts != 1 {
+		t.Fatalf("stale-turn steer POST count = %d, want 1", posts)
+	}
+	input, err := c.pendingTaskThreadInput(context.Background(), "task-1", "project-2", "q1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.InputMode != "queued" || input.InputStatus != "pending" {
+		t.Fatalf("stale input = %#v, want pending queued input", input)
 	}
 }
