@@ -1411,7 +1411,7 @@ func (c *Client) CancelTaskThreadInputForProject(ctx context.Context, taskID, pr
 
 // SteerTaskThreadQueuedInputForProject converts one queued follow-up to
 // steering. The active turn is read immediately before the mutation and sent
-// as expected_turn_id; the backend must enforce that client-observed identity.
+// as expected_turn_id; the backend enforces this identity atomically with conversion.
 func (c *Client) SteerTaskThreadQueuedInputForProject(ctx context.Context, taskID, projectID, inputID string) (*TaskThreadSteerAccepted, error) {
 	input, err := c.pendingTaskThreadInput(ctx, taskID, projectID, inputID)
 	if err != nil {
