@@ -251,6 +251,21 @@ func globalWorkerCapacityText(c *client.GlobalCapacity) string {
 		c.TotalRunning, c.MaxWorkers, c.QueueSize, c.AvailableSlots)
 }
 
+func offlineStatusRecoveryHints(baseURL string) []string {
+	if isRemoteServerURL(baseURL) {
+		return []string{
+			"check or correct the configured remote server URL, then run /status",
+			"set -server <url> or OPENVIBELY_SERVER_URL",
+			"run /setup or openvibely-terminal setup for read-only connection guidance",
+		}
+	}
+	return []string{
+		"run /setup or openvibely-terminal setup for read-only setup steps",
+		"start/check your local backend, then run /status",
+		"set -server <url> or OPENVIBELY_SERVER_URL",
+	}
+}
+
 // renderStatus is the /status block.
 func (m Model) renderStatus() string {
 	var b strings.Builder
@@ -271,14 +286,8 @@ func (m Model) renderStatus() string {
 			} else {
 				row("network", statusErrStyle.Render("offline"))
 				row("error", safeConnectionDiagnosticText(m.connErr))
-				if isRemoteServerURL(m.client.BaseURL()) {
-					row("try", "check or correct the configured remote server URL, then run /status")
-					row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
-					row("try", "run /setup or openvibely-terminal setup for read-only connection guidance")
-				} else {
-					row("try", "run /setup or openvibely-terminal setup for read-only setup steps")
-					row("try", "start/check your local backend, then run /status")
-					row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+				for _, hint := range offlineStatusRecoveryHints(m.client.BaseURL()) {
+					row("try", hint)
 				}
 			}
 		}
@@ -301,14 +310,8 @@ func (m Model) renderStatus() string {
 			if m.connErr != "" {
 				row("error", safeConnectionDiagnosticText(m.connErr))
 			}
-			if isRemoteServerURL(m.client.BaseURL()) {
-				row("try", "check or correct the configured remote server URL, then run /status")
-				row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
-				row("try", "run /setup or openvibely-terminal setup for read-only connection guidance")
-			} else {
-				row("try", "run /setup or openvibely-terminal setup for read-only setup steps")
-				row("try", "start/check your local backend, then run /status")
-				row("try", "set -server <url> or OPENVIBELY_SERVER_URL")
+			for _, hint := range offlineStatusRecoveryHints(m.client.BaseURL()) {
+				row("try", hint)
 			}
 		case connectionPhaseUnhealthy:
 			row("server", statusErrStyle.Render("backend error (unhealthy)")+dimStyle.Render(" "+serverURLDisplay(m.client.BaseURL())))

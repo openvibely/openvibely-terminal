@@ -737,6 +737,152 @@ func TestAuthRequiredRemoteOfflineStatusPrioritizesURLCorrection(t *testing.T) {
 	}
 }
 
+func TestOfflineStatusUsesConsistentRecoveryHints(t *testing.T) {
+	cases := []struct {
+		name      string
+		serverURL string
+		wantHints []string
+		unwanted  []string
+	}{
+		{
+			name:      "local",
+			serverURL: "http://127.0.0.1:3001",
+			wantHints: []string{
+				"run /setup or openvibely-terminal setup for read-only setup steps",
+				"start/check your local backend, then run /status",
+				"set -server <url> or OPENVIBELY_SERVER_URL",
+			},
+			unwanted: []string{"check or correct the configured remote server URL"},
+		},
+		{
+			name:      "remote",
+			serverURL: "https://ops.example:3001",
+			wantHints: []string{
+				"check or correct the configured remote server URL, then run /status",
+				"set -server <url> or OPENVIBELY_SERVER_URL",
+				"run /setup or openvibely-terminal setup for read-only connection guidance",
+			},
+			unwanted: []string{"start/check your local backend"},
+		},
+	}
+
+	statusTryRows := func(status string) []string {
+		var rows []string
+		for _, line := range strings.Split(status, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == "try" {
+				rows = append(rows, strings.Join(fields[1:], " "))
+			}
+		}
+		return rows
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := client.New(tc.serverURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			normal := New(c)
+			normal.connChecked = true
+			normal.connErr = "dial refused"
+			normalStatus := stripANSI(normal.renderStatus())
+
+			authRequired := normal
+			authRequired.authRequired = true
+			authStatus := stripANSI(authRequired.renderStatus())
+			filterAuthRows := func(rows []string) []string {
+				var hints []string
+				for _, row := range rows {
+					if row != "use /login to enter credentials" && row != "help remains available without a backend" {
+						hints = append(hints, row)
+					}
+				}
+				return hints
+			}
+			normalHints := statusTryRows(normalStatus)
+			authHints := filterAuthRows(statusTryRows(authStatus))
+			if strings.Join(authHints, "\n") != strings.Join(normalHints, "\n") {
+				t.Errorf("auth-required offline hints differ from ordinary offline hints:\nnormal:\n%s\nauth-required:\n%s", strings.Join(normalHints, "\n"), strings.Join(authHints, "\n"))
+			}
+			if len(normalHints) != len(tc.wantHints) {
+				t.Fatalf("offline try rows = %q, want %q", normalHints, tc.wantHints)
+			}
+			for i, want := range tc.wantHints {
+				if normalHints[i] != want {
+					t.Errorf("offline hint %d = %q, want %q", i, normalHints[i], want)
+				}
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(normalStatus, unwanted) || strings.Contains(authStatus, unwanted) {
+					t.Errorf("offline status for %s server contains %q", tc.name, unwanted)
+				}
+			}
+			for _, want := range []string{"sign-in required · /login", "use /login to enter credentials", "help remains available without a backend"} {
+				if !strings.Contains(authStatus, want) {
+					t.Errorf("auth-required status missing %q:\n%s", want, authStatus)
+				}
+			}
+		})
+	}
+
+	t.Run("backend unhealthy remains specific", func(t *testing.T) {
+		m := newTestModel(t)
+		m.connChecked = true
+		m.connReachableError = true
+		m.connErr = "health check failed"
+		status := stripANSI(m.renderStatus())
+		for _, want := range []string{"backend error (unhealthy)", "backend responded but is unhealthy; check backend logs, then run /status"} {
+			if !strings.Contains(status, want) {
+				t.Errorf("unhealthy status missing %q:\n%s", want, status)
+			}
+		}
+		if strings.Contains(status, "start/check your local backend") || strings.Contains(status, "check or correct the configured remote server URL") {
+			t.Fatalf("unhealthy status contains offline recovery guidance:\n%s", status)
+		}
+
+		m.authRequired = true
+		authStatus := stripANSI(m.renderStatus())
+		for _, want := range []string{"sign-in required · /login", "backend error (unhealthy)", "check backend logs, then run /status"} {
+			if !strings.Contains(authStatus, want) {
+				t.Errorf("auth-required unhealthy status missing %q:\n%s", want, authStatus)
+			}
+		}
+		if strings.Contains(authStatus, "start/check your local backend") || strings.Contains(authStatus, "check or correct the configured remote server URL") {
+			t.Fatalf("auth-required unhealthy status contains offline recovery guidance:\n%s", authStatus)
+		}
+	})
+
+	for _, state := range []struct {
+		name string
+		edit func(*Model)
+	}{
+		{name: "connecting"},
+		{name: "connected", edit: func(m *Model) { m.connected = true }},
+	} {
+		t.Run(state.name+" omits offline recovery", func(t *testing.T) {
+			c, err := client.New("https://ops.example:3001")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			if state.edit != nil {
+				state.edit(&m)
+			}
+			status := stripANSI(m.renderStatus())
+			for _, unwanted := range []string{
+				"check or correct the configured remote server URL",
+				"start/check your local backend",
+				"run /setup or openvibely-terminal setup for read-only",
+			} {
+				if strings.Contains(status, unwanted) {
+					t.Errorf("%s status contains offline recovery hint %q:\n%s", state.name, unwanted, status)
+				}
+			}
+		})
+	}
+}
+
 func TestSetupGuidanceIsTerminalSafe(t *testing.T) {
 	const secret = "very-secret-password"
 	baseURL := "https://user:" + secret + "@remote.example:3001/path?token=also-secret#fragment\x1b[31m"
