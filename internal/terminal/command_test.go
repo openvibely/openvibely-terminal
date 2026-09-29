@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
@@ -1688,6 +1689,31 @@ func TestSkillsHelpDocumentsEquivalentAutomaticLoadingAliases(t *testing.T) {
 	}
 }
 
+func TestWorkersHelpRefreshIntervalUsesRuntimeSetting(t *testing.T) {
+	cmd := lookupCommand("workers")
+	if cmd == nil {
+		t.Fatal("workers command missing")
+	}
+	defaultHelp := renderCommandHelp(*cmd)
+	defaultWant := "refreshes every " + workersLiveRefreshIntervalLabel() + "; Esc stops"
+	if !strings.Contains(defaultHelp, defaultWant) {
+		t.Fatalf("workers help missing default runtime cadence %q:\n%s", defaultWant, defaultHelp)
+	}
+
+	previousInterval := workersLiveRefreshInterval
+	workersLiveRefreshInterval = 137 * time.Millisecond
+	t.Cleanup(func() { workersLiveRefreshInterval = previousInterval })
+
+	help := renderCommandHelp(*cmd)
+	want := "workers watch                              live worker-capacity view (refreshes every " + workersLiveRefreshIntervalLabel() + "; Esc stops)"
+	if !strings.Contains(help, want) {
+		t.Fatalf("workers help missing runtime refresh interval %q:\n%s", want, help)
+	}
+	if strings.Contains(help, "refreshes every 3s") {
+		t.Fatalf("workers help retained hard-coded refresh interval:\n%s", help)
+	}
+}
+
 // Listing action names isn't enough to use a command, so every command with
 // actions must also spell out their concrete syntax. VISION.md "Friendly By
 // Default" further requires examples, not only syntax — so every command with
@@ -1697,7 +1723,7 @@ func TestCommandsWithActionsDocumentTheirSyntax(t *testing.T) {
 		if len(c.actions) == 0 {
 			continue
 		}
-		if len(c.usage) == 0 {
+		if len(c.usage) == 0 && c.usageLines == nil {
 			t.Errorf("%s%s lists actions but has no usage lines", cmdPrefix, c.name)
 			continue
 		}

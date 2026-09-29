@@ -685,6 +685,29 @@ func TestCLIWorkersWatchRefreshesUntilContextCancellation(t *testing.T) {
 	}
 }
 
+func TestCLIWorkersWatchTimingLabelUsesRuntimeInterval(t *testing.T) {
+	previousInterval := workersLiveRefreshInterval
+	workersLiveRefreshInterval = 137 * time.Millisecond
+	t.Cleanup(func() { workersLiveRefreshInterval = previousInterval })
+
+	c, _ := cliServer(t, map[string]string{
+		"/api/capacity/global":   `{"total_running":1,"max_workers":4,"queue_size":0}`,
+		"/api/capacity/projects": `[]`,
+		"/api/capacity/models":   `[]`,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	out := &cancelAfterLineWriter{cancel: cancel}
+	if err := RunCLIContext(ctx, c, out, "", []string{"workers", "watch"}, false, false); err != nil {
+		t.Fatalf("workers watch returned error after cancellation: %v", err)
+	}
+	if !strings.Contains(out.String(), "workers watch: refreshes every "+workersLiveRefreshIntervalLabel()+"; press Ctrl-C to stop") {
+		t.Fatalf("workers watch omitted runtime refresh interval:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "refreshes every 3s") {
+		t.Fatalf("workers watch retained hard-coded refresh interval:\n%s", out.String())
+	}
+}
+
 func TestCLIWorkersLimitOperandValidation(t *testing.T) {
 	cases := []struct {
 		name     string
