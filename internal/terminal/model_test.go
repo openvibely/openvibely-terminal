@@ -2982,6 +2982,28 @@ func TestAuthRequiredInvalidatesInFlightConnectionChecks(t *testing.T) {
 	}
 }
 
+func TestSSEEventProjectOwnershipParity(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		projectID  string
+		taskID     string
+		wantAccept bool
+	}{
+		{name: "task scoped missing project", taskID: "t1"},
+		{name: "task scoped matching project", projectID: "p1", taskID: "t1", wantAccept: true},
+		{name: "task scoped foreign project", projectID: "p2", taskID: "t1"},
+		{name: "taskless missing project", wantAccept: true},
+		{name: "taskless matching project", projectID: "p1", wantAccept: true},
+		{name: "taskless foreign project", projectID: "p2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := acceptsSSEEventProjectOwnership("p1", tc.projectID, tc.taskID); got != tc.wantAccept {
+				t.Fatalf("acceptsSSEEventProjectOwnership(%q, %q, %q) = %t, want %t", "p1", tc.projectID, tc.taskID, got, tc.wantAccept)
+			}
+		})
+	}
+}
+
 func TestCurrentForeignSSEEventIsIgnored(t *testing.T) {
 	m := newTestModel(t)
 	m.sseGeneration = 2

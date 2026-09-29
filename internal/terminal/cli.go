@@ -1442,10 +1442,7 @@ func formatCLIEventBytes(ev client.Event, projectID string, jsonOutput bool) ([]
 		payloadErr = json.Unmarshal(ev.Data, &payload)
 	}
 	payload.ProjectID = strings.TrimSpace(payload.ProjectID)
-	if strings.TrimSpace(payload.TaskID) != "" && payload.ProjectID == "" {
-		return nil, false, nil
-	}
-	if payload.ProjectID != "" && payload.ProjectID != projectID {
+	if !acceptsSSEEventProjectOwnership(projectID, payload.ProjectID, payload.TaskID) {
 		return nil, false, nil
 	}
 	if payload.ProjectID == "" {
