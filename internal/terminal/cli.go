@@ -425,6 +425,10 @@ func waitForCLIChatExecution(ctx context.Context, status func() (*client.ChatSta
 }
 
 func streamCLIExecution(ctx context.Context, c *client.Client, out io.Writer, projectID, taskID, execID string, jsonOutput bool, status func() (*client.ChatStatus, error)) error {
+	return streamCLIExecutionWithRetryWait(ctx, c, out, projectID, taskID, execID, jsonOutput, status, waitCLIStreamRetry)
+}
+
+func streamCLIExecutionWithRetryWait(ctx context.Context, c *client.Client, out io.Writer, projectID, taskID, execID string, jsonOutput bool, status func() (*client.ChatStatus, error), waitRetry func(context.Context, int) bool) error {
 	if strings.TrimSpace(execID) == "" {
 		return nil
 	}
@@ -548,7 +552,7 @@ func streamCLIExecution(ctx context.Context, c *client.Client, out io.Writer, pr
 			}
 			return cliStreamDiagnostic(c, firstNonNil(streamErr, client.ErrEventStreamClosed))
 		}
-		if !waitCLIStreamRetry(ctx, reconnects) {
+		if !waitRetry(ctx, reconnects) {
 			return finishForContext()
 		}
 	}
@@ -641,9 +645,14 @@ func cliContextResult(ctx context.Context) error {
 	return ctx.Err()
 }
 
+const cliStreamRetryInterval = 25 * time.Millisecond
+
+func cliStreamRetryDelay(attempt int) time.Duration {
+	return time.Duration(attempt) * cliStreamRetryInterval
+}
+
 func waitCLIStreamRetry(ctx context.Context, attempt int) bool {
-	delay := time.Duration(attempt) * 25 * time.Millisecond
-	timer := time.NewTimer(delay)
+	timer := time.NewTimer(cliStreamRetryDelay(attempt))
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
