@@ -715,9 +715,12 @@ openvibely-terminal -project demo --json tasks inputs steer Refactor q1
 Missing, stale, already-applied, ambiguous, and foreign-task/project input
 references fail before mutation. Cancellation reports success only when the
 backend confirms that the pending row was cancelled; already-applied or
-otherwise no-longer-pending rows return an error. The backend also rechecks the
-active turn atomically, so a race cannot redirect a queued input onto a
-different response. Cancellation posts only to the input-cancel route and never
+otherwise no-longer-pending rows return an error. For queued steering, the
+terminal sends the active turn ID it observed as `expected_turn_id`, but the
+currently available backend route does not enforce that client-observed guard.
+A turn change between the thread read and POST can therefore still redirect the
+queued input; do not rely on queued steering to reject this race until backend
+support is deployed. Cancellation posts only to the input-cancel route and never
 cancels the active task execution. Mutation output reports the canonical input
 ID and resulting state; `--json` emits stable fields and `[]` for an empty
 inspection.
