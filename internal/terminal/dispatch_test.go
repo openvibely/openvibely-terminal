@@ -2101,13 +2101,62 @@ func TestTasksSwarmCreateValidationAndOutput(t *testing.T) {
 
 	t.Run("active starts planner message", func(t *testing.T) {
 		activeBoard := `<div data-task-id="swarm-active" data-task-status="queued" data-task-category="active"><a href="/tasks/swarm-active" title="Coordinate release">Coordinate release</a></div>`
-		m, _ := dispatchModel(t, map[string]string{"POST /tasks": activeBoard})
+		m, rec := dispatchModel(t, map[string]string{"POST /tasks": activeBoard})
 		m = runLine(t, m, `/tasks swarm --category active Coordinate release | Split validation across workers`)
 		out := transcript(m)
 		if !strings.Contains(out, "Planner starts immediately because the swarm parent is Active") {
 			t.Fatalf("active planner message missing:\n%s", out)
 		}
+		for _, want := range []string{"swarm_reviewer_enabled=true", "swarm_merger_enabled=true"} {
+			if !rec.sawForm(want) {
+				t.Errorf("default-enabled swarm form missing %q; forms: %v", want, rec.forms)
+			}
+		}
 	})
+
+	for _, tc := range []struct {
+		name string
+		flag string
+		want string
+	}{
+		{name: "reviewer enabled", flag: "--reviewer", want: "swarm_reviewer_enabled=true"},
+		{name: "reviewer disabled", flag: "--no-reviewer", want: "swarm_reviewer_enabled=false"},
+		{name: "merger enabled", flag: "--merger", want: "swarm_merger_enabled=true"},
+		{name: "merger disabled", flag: "--no-merger", want: "swarm_merger_enabled=false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"POST /tasks": swarmBoard})
+			line := "/tasks swarm " + tc.flag + " Coordinate release | work"
+			_ = runLine(t, m, line)
+			if !rec.sawForm(tc.want) {
+				t.Fatalf("swarm form missing %q; forms: %v", tc.want, rec.forms)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "reviewer conflict enabled then disabled", line: `/tasks swarm --reviewer --no-reviewer Coordinate release | work`, want: "conflicting swarm reviewer options"},
+		{name: "reviewer conflict disabled then enabled", line: `/tasks swarm --no-reviewer --reviewer Coordinate release | work`, want: "conflicting swarm reviewer options"},
+		{name: "merger conflict enabled then disabled", line: `/tasks swarm --merger --no-merger Coordinate release | work`, want: "conflicting swarm merger options"},
+		{name: "merger conflict disabled then enabled", line: `/tasks swarm --no-merger --merger Coordinate release | work`, want: "conflicting swarm merger options"},
+		{name: "repeated reviewer option", line: `/tasks swarm --reviewer --reviewer Coordinate release | work`, want: "--reviewer may only be provided once"},
+		{name: "repeated merger option", line: `/tasks swarm --merger --merger Coordinate release | work`, want: "--merger may only be provided once"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.line)
+			if requests := rec.urlsSnapshot(); len(requests) != 0 {
+				t.Fatalf("invalid swarm command made backend requests: %v", requests)
+			}
+			if out := transcript(m); !strings.Contains(out, tc.want) {
+				t.Fatalf("output missing %q:\n%s", tc.want, out)
+			}
+		})
+	}
 
 	for _, tc := range []struct {
 		name string

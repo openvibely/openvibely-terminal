@@ -1855,6 +1855,13 @@ func parseTaskSwarmArgs(args []string) (taskSwarmSpec, error) {
 		i++
 	}
 
+	if seen["--reviewer"] && seen["--no-reviewer"] {
+		return taskSwarmSpec{}, errors.New("conflicting swarm reviewer options: use only one of --reviewer or --no-reviewer")
+	}
+	if seen["--merger"] && seen["--no-merger"] {
+		return taskSwarmSpec{}, errors.New("conflicting swarm merger options: use only one of --merger or --no-merger")
+	}
+
 	title, prompt := splitPipe(strings.Join(args[i:], " "))
 	if title == "" || prompt == "" {
 		return taskSwarmSpec{}, errors.New(commandUsage("tasks", "swarm"))
