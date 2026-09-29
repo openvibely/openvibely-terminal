@@ -928,15 +928,21 @@ func (m Model) acceptsSSEEvent(ev client.Event) bool {
 		return true
 	}
 	projectID := strings.TrimSpace(scope.ProjectID)
-	if strings.TrimSpace(scope.TaskID) != "" {
-		// Task-scoped events must prove exact project ownership before they can
-		// reach either the generic /events renderer or active-thread handling.
-		return projectID != "" && m.selectedID != "" && projectID == m.selectedID
+	taskID := strings.TrimSpace(scope.TaskID)
+	return acceptsSSEEventProjectOwnership(m.selectedID, projectID, taskID)
+}
+
+// acceptsSSEEventProjectOwnership applies the project-isolation policy to IDs
+// already extracted from an event payload. Task-scoped events must prove exact
+// project ownership, while taskless legacy events may omit project_id.
+func acceptsSSEEventProjectOwnership(selectedProjectID, eventProjectID, eventTaskID string) bool {
+	if strings.TrimSpace(eventTaskID) != "" {
+		return eventProjectID != "" && selectedProjectID != "" && eventProjectID == selectedProjectID
 	}
-	if projectID == "" {
-		return true // older/single-project project-chat payloads may omit scope
+	if eventProjectID == "" {
+		return true
 	}
-	return m.selectedID != "" && projectID == m.selectedID
+	return selectedProjectID != "" && eventProjectID == selectedProjectID
 }
 
 func sseEventProjectID(ev client.Event) string {
