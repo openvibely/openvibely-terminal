@@ -85,8 +85,10 @@ type command struct {
 	completions   []commandCompletion
 	selectorPaths [][]string // exact argument paths whose next operand is a resource ref
 	// usage holds static usage/help lines. Action-specific syntax shared with
-	// runtime validation lives in actionUsages below.
-	usage []string
+	// runtime validation lives in actionUsages below. usageLines can provide
+	// usage text whose values are determined at render time.
+	usage      []string
+	usageLines func() []string
 	// actionUsages is the canonical syntax for runtime validation messages and
 	// the corresponding help lines for high-churn action arguments.
 	actionUsages []commandActionUsage

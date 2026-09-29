@@ -2863,11 +2863,18 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 }
 
 func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
+	previousInterval := workersLiveRefreshInterval
+	workersLiveRefreshInterval = 137 * time.Millisecond
 	previousTick := workersLiveTick
-	workersLiveTick = func(_ time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+	var tickInterval time.Duration
+	workersLiveTick = func(interval time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
+		tickInterval = interval
 		return func() tea.Msg { return fn(time.Now()) }
 	}
-	t.Cleanup(func() { workersLiveTick = previousTick })
+	t.Cleanup(func() {
+		workersLiveRefreshInterval = previousInterval
+		workersLiveTick = previousTick
+	})
 
 	var mu sync.Mutex
 	refresh := 0
@@ -2909,8 +2916,11 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 	next, tickCmd := m.Update(cmd())
 	m = next.(Model)
 	out := stripANSI(transcript(m))
-	if !strings.Contains(out, "1 / 4") || !strings.Contains(out, "live refresh every 3s") {
-		t.Fatalf("first live workers response not rendered:\n%s", out)
+	if !strings.Contains(out, "1 / 4") || !strings.Contains(out, "live refresh every "+workersLiveRefreshIntervalLabel()) || strings.Contains(out, "live refresh every 3s") {
+		t.Fatalf("first live workers response not rendered with runtime refresh interval:\n%s", out)
+	}
+	if tickInterval != workersLiveRefreshInterval {
+		t.Fatalf("workers live tick interval = %s, want %s", tickInterval, workersLiveRefreshInterval)
 	}
 	if tickCmd == nil {
 		t.Fatal("first live workers response did not schedule a refresh")

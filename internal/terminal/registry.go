@@ -5978,11 +5978,13 @@ func workersCommand() command {
 		},
 		desc:         "worker pool stats and concurrency caps",
 		validateArgs: validateWorkersArgs,
-		usage: []string{
-			"workers                                    show one worker-capacity snapshot",
-			"workers watch                              live worker-capacity view (refreshes every 3s; Esc stops)",
-			"workers limit <n>                          set the global worker cap (0 = unlimited)",
-			"workers project <n>                        set this project's worker cap (0 = no limit)",
+		usageLines: func() []string {
+			return []string{
+				"workers                                    show one worker-capacity snapshot",
+				fmt.Sprintf("workers watch                              live worker-capacity view (refreshes every %s; Esc stops)", workersLiveRefreshIntervalLabel()),
+				"workers limit <n>                          set the global worker cap (0 = unlimited)",
+				"workers project <n>                        set this project's worker cap (0 = no limit)",
+			}
 		},
 		examples: []string{
 			`workers watch`,
