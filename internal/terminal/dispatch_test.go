@@ -13628,16 +13628,33 @@ func TestTaskReviewReadPathsHaveEquivalentJSONOutputAndCanonicalRouting(t *testi
 
 			got := taskReviewsResultText(m)
 			var decoded []client.ReviewComment
-			if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+			if tc.name == "show review tab" || tc.name == "canonical full ID review" {
+				var envelope struct {
+					Task client.Task            `json:"task"`
+					Tab  string                 `json:"tab"`
+					Data []client.ReviewComment `json:"data"`
+				}
+				if err := json.Unmarshal([]byte(got), &envelope); err != nil {
+					t.Fatalf("review output is not a JSON tab envelope: %v\n%s", err, transcript(m))
+				}
+				if envelope.Task.ID != taskID || envelope.Tab != "review" {
+					t.Fatalf("review task envelope = %+v tab %q", envelope.Task, envelope.Tab)
+				}
+				decoded = envelope.Data
+			} else if err := json.Unmarshal([]byte(got), &decoded); err != nil {
 				t.Fatalf("review output is not a JSON array: %v\n%s", err, transcript(m))
 			}
 			if len(decoded) != 1 || decoded[0].ID != "rc-1" || decoded[0].CommentText != "Needs error handling" {
 				t.Fatalf("review JSON = %+v, want parsed review comment", decoded)
 			}
+			normalized, err := json.Marshal(decoded)
+			if err != nil {
+				t.Fatalf("marshal normalized reviews: %v", err)
+			}
 			if want == "" {
-				want = got
-			} else if got != want {
-				t.Errorf("review JSON differs from the first read path:\n%s\nwant:\n%s", got, want)
+				want = string(normalized)
+			} else if string(normalized) != want {
+				t.Errorf("review data differs from the first read path:\n%s\nwant:\n%s", normalized, want)
 			}
 			if got := rec.count("GET", "/tasks/"+taskID+"/reviews"); got != 1 {
 				t.Fatalf("review display should make exactly one review request, got %d:\n%s", got, rec.all())

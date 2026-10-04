@@ -10178,6 +10178,182 @@ func TestCLIJSONTasksShow(t *testing.T) {
 	}
 }
 
+func TestCLIJSONTasksShowSelectedTabs(t *testing.T) {
+	const fullID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const title = "Refactor the API"
+	const detailTabPage = `<div data-task-id="TASK_ID" data-project-id="p1" data-task-status="running" data-task-category="active">
+		<h2 class="font-bold">Refactor the API</h2>
+		<div id="tab-details">details payload</div>
+		<div id="tab-chat" hx-get="/tasks/TASK_ID/thread"></div>
+		<div id="tab-changes" hx-get="/tasks/TASK_ID/changes"></div>
+		<div id="tab-schedules">schedules payload</div>
+		<div id="tab-chaining">chaining payload</div>
+		<div id="tab-attachments">attachments payload</div>
+		<div id="tab-lifecycle">lifecycle payload</div>
+	</div>`
+	const thread = `<div>thread payload</div>`
+	const changes = `<div>changes payload</div>`
+
+	for _, tc := range []struct {
+		name      string
+		taskRef   string
+		taskID    string
+		tab       string
+		wantTab   string
+		wantData  string
+		canonical bool
+	}{
+		{name: "changes by full ID", taskRef: fullID, taskID: fullID, tab: "changes", wantTab: "changes", wantData: "changes payload", canonical: true},
+		{name: "changes by title", taskRef: title, taskID: "t-1", tab: "changes", wantTab: "changes", wantData: "changes payload"},
+		{name: "diff alias by full ID", taskRef: fullID, taskID: fullID, tab: "diff", wantTab: "changes", wantData: "changes payload", canonical: true},
+		{name: "details", taskRef: title, taskID: "t-1", tab: "details", wantTab: "details", wantData: "details payload"},
+		{name: "thread alias", taskRef: title, taskID: "t-1", tab: "chat", wantTab: "thread", wantData: "thread payload"},
+		{name: "schedules", taskRef: title, taskID: "t-1", tab: "schedules", wantTab: "schedules", wantData: "schedules payload"},
+		{name: "schedule alias", taskRef: title, taskID: "t-1", tab: "schedule", wantTab: "schedules", wantData: "schedules payload"},
+		{name: "chaining", taskRef: title, taskID: "t-1", tab: "chaining", wantTab: "chaining", wantData: "chaining payload"},
+		{name: "chain alias", taskRef: title, taskID: "t-1", tab: "chain", wantTab: "chaining", wantData: "chaining payload"},
+		{name: "attachments", taskRef: title, taskID: "t-1", tab: "attachments", wantTab: "attachments", wantData: "attachments payload"},
+		{name: "attachment alias", taskRef: title, taskID: "t-1", tab: "attach", wantTab: "attachments", wantData: "attachments payload"},
+		{name: "lifecycle", taskRef: title, taskID: "t-1", tab: "lifecycle", wantTab: "lifecycle", wantData: "lifecycle payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			page := strings.ReplaceAll(detailTabPage, "TASK_ID", tc.taskID)
+			bodies := map[string]string{
+				"/api/projects":                    cliProjects,
+				"/tasks/" + tc.taskID:              page,
+				"/tasks/" + tc.taskID + "/thread":  thread,
+				"/tasks/" + tc.taskID + "/changes": changes,
+			}
+			if !tc.canonical {
+				bodies["/tasks"] = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
+			}
+			c, _ := cliServer(t, bodies)
+
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"tasks", "show", tc.taskRef, tc.tab}, false, true); err != nil {
+				t.Fatalf("tasks show %s --json failed: %v", tc.tab, err)
+			}
+			var decoded struct {
+				Task client.Task `json:"task"`
+				Tab  string      `json:"tab"`
+				Data string      `json:"data"`
+			}
+			got := strings.TrimSpace(out.String())
+			if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+				t.Fatalf("output is not selected-tab JSON: %v\noutput: %s", err, got)
+			}
+			if decoded.Task.ID != tc.taskID || decoded.Task.Title != title {
+				t.Errorf("task identity = {id:%q title:%q}, want {%q %q}", decoded.Task.ID, decoded.Task.Title, tc.taskID, title)
+			}
+			if decoded.Tab != tc.wantTab || decoded.Data != tc.wantData {
+				t.Errorf("selected tab = %q, data = %q; want %q and %q", decoded.Tab, decoded.Data, tc.wantTab, tc.wantData)
+			}
+		})
+	}
+}
+
+func TestCLIJSONTasksShowWithoutTabKeepsTaskCardShape(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
+	c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/tasks": board})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "show", "t-1"}, false, true); err != nil {
+		t.Fatalf("tasks show --json failed: %v", err)
+	}
+	got := strings.TrimSpace(out.String())
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(got), &object); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, got)
+	}
+	var task client.Task
+	if err := json.Unmarshal([]byte(got), &task); err != nil {
+		t.Fatalf("output is not a task card: %v\noutput: %s", err, got)
+	}
+	if task.ID != "t-1" || task.Title != "Refactor the API" {
+		t.Fatalf("task card = %+v", task)
+	}
+	if _, ok := object["task"]; ok {
+		t.Fatalf("unqualified task card unexpectedly uses the selected-tab envelope: %s", got)
+	}
+	if _, ok := object["tab"]; ok {
+		t.Fatalf("unqualified task card unexpectedly names a tab: %s", got)
+	}
+}
+
+func TestCLIJSONTasksShowReviewTabIncludesTaskAndComments(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":      cliProjects,
+		"/tasks":             board,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "show", "t-1", "reviews"}, false, true); err != nil {
+		t.Fatalf("tasks show reviews --json failed: %v", err)
+	}
+	var decoded struct {
+		Task client.Task            `json:"task"`
+		Tab  string                 `json:"tab"`
+		Data []client.ReviewComment `json:"data"`
+	}
+	got := strings.TrimSpace(out.String())
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("output is not review-tab JSON: %v\noutput: %s", err, got)
+	}
+	if decoded.Task.ID != "t-1" || decoded.Task.Title != "Refactor the API" || decoded.Tab != "review" {
+		t.Fatalf("review task envelope = task %+v, tab %q", decoded.Task, decoded.Tab)
+	}
+	if len(decoded.Data) != 1 || decoded.Data[0].ID != "rc-1" || decoded.Data[0].FilePath != "internal/client/tasks.go" {
+		t.Fatalf("review comments = %+v", decoded.Data)
+	}
+}
+
+func TestCLIJSONTasksShowSelectedTabLoadFailureReturnsErrorWithoutText(t *testing.T) {
+	const taskID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const page = `<div data-task-id="` + taskID + `" data-project-id="p1" data-task-status="running" data-task-category="active">
+		<h2 class="font-bold">Broken changes</h2>
+		<div id="tab-details">details</div>
+		<div id="tab-chat"></div>
+		<div id="tab-changes"></div>
+		<div id="tab-lifecycle">lifecycle</div>
+	</div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/tasks/" + taskID:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, page)
+		case "/tasks/" + taskID + "/thread":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div>thread</div>`)
+		case "/tasks/" + taskID + "/changes":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":"changes fetch failed"}`)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"tasks", "show", taskID, "changes"}, false, true)
+	if err == nil || !strings.Contains(err.Error(), "changes") {
+		t.Fatalf("tasks show changes --json error = %v, want a changes load error", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "" {
+		t.Fatalf("failed tab emitted non-JSON or misleading output: %q", got)
+	}
+}
+
 func TestCLILifecycleJSONEmptyExecutionsPreservesPageEnvelope(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":                       cliProjects,
@@ -10601,7 +10777,20 @@ func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing
 					}
 					got := strings.TrimSpace(out.String())
 					var reviews []client.ReviewComment
-					if err := json.Unmarshal([]byte(got), &reviews); err != nil {
+					if path.name == "show review tab" {
+						var envelope struct {
+							Task client.Task            `json:"task"`
+							Tab  string                 `json:"tab"`
+							Data []client.ReviewComment `json:"data"`
+						}
+						if err := json.Unmarshal([]byte(got), &envelope); err != nil {
+							t.Fatalf("%v output is not valid review-tab JSON: %v\noutput: %s", path.name, err, got)
+						}
+						if envelope.Task.ID != "t-1" || envelope.Tab != "review" {
+							t.Fatalf("%v task envelope = %+v tab %q", path.name, envelope.Task, envelope.Tab)
+						}
+						reviews = envelope.Data
+					} else if err := json.Unmarshal([]byte(got), &reviews); err != nil {
 						t.Fatalf("%v output is not valid JSON: %v\noutput: %s", path.name, err, got)
 					}
 					if len(reviews) != tc.wantCount {
@@ -10609,6 +10798,15 @@ func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing
 					}
 					if tc.wantCount == 1 && (reviews[0].ID != "rc-1" || reviews[0].FilePath != "internal/client/tasks.go" || reviews[0].LineNumber != 42) {
 						t.Fatalf("%v returned unexpected review: %+v", path.name, reviews[0])
+					}
+					normalized, err := json.Marshal(reviews)
+					if err != nil {
+						t.Fatalf("marshal normalized reviews: %v", err)
+					}
+					if want == "" {
+						want = string(normalized)
+					} else if string(normalized) != want {
+						t.Errorf("%v review data differs from the first read path: %s\nwant: %s", path.name, normalized, want)
 					}
 					if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
 						t.Fatalf("%v should make exactly one compact catalog request, got %d:\n%s", path.name, got, rec.all())
@@ -10618,11 +10816,6 @@ func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing
 					}
 					if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
 						t.Fatalf("%v should make exactly one review request, got %d:\n%s", path.name, got, rec.all())
-					}
-					if want == "" {
-						want = got
-					} else if got != want {
-						t.Errorf("%v JSON differs from the first read path: %s\nwant: %s", path.name, got, want)
 					}
 				})
 			}

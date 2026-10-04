@@ -606,6 +606,12 @@ Tabs: `details`, `thread`, `changes`, `review`, `schedules`, `chaining`,
 `attachments`, `lifecycle`. Lazy thread, changes, and lifecycle failures are shown as explicit
 errors rather than empty tabs; successfully loaded sections remain visible.
 
+With `--json`, `tasks show <ref>` without a tab keeps returning the task-card
+object. Selecting a tab returns an envelope with the task identity, canonical
+tab name, and selected tab data, for example `{"task":{"id":"…"},"tab":"changes","data":"…"}`.
+For the `review` tab, `data` is the array of review comments. A tab load failure
+returns a command error and does not emit human-rendered text as JSON.
+
 ### Task review comments
 
 Review comments are inline notes attached to a task's code review view by file
