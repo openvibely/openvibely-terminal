@@ -48,6 +48,36 @@ func InvalidServerURLMessage(string) string {
 	return "Invalid configured server URL.\nCorrect -server or OPENVIBELY_SERVER_URL, then run /status.\nThe URL was not sent to a backend."
 }
 
+type setupBackendProcess interface {
+	Handoff() error
+	Stop()
+}
+
+type localBackendProcess struct {
+	cmd *exec.Cmd
+}
+
+func (p *localBackendProcess) Handoff() error {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return errors.New("local backend process is unavailable for handoff")
+	}
+	if err := p.cmd.Process.Release(); err != nil {
+		return fmt.Errorf("releasing local backend process: %w", err)
+	}
+	p.cmd = nil
+	return nil
+}
+
+func (p *localBackendProcess) Stop() {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return
+	}
+	cmd := p.cmd
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+	p.cmd = nil
+}
+
 // setupGuidance renders only instructions that the user may choose to run. It
 // intentionally performs no backend, project, authentication, process, or file
 // operation so it remains useful on a first launch and when offline.
@@ -133,7 +163,7 @@ func localBackendLifecycleGuidance(platform, baseURL string) string {
 	endpoint := serverURLDisplay(baseURL)
 	var b strings.Builder
 	b.WriteString("Local backend lifecycle\n")
-	b.WriteString("Stop: this terminal does not track a backend PID. Stop only the OpenVibely backend process you started.\n")
+	b.WriteString("Stop: after the health check succeeds, the backend continues running independently. This terminal does not track its PID; stop only the OpenVibely backend process you started.\n")
 	if platform == "windows" {
 		fmt.Fprintf(&b, "  netstat -ano | findstr :%s\n", port)
 		b.WriteString("  taskkill /PID <pid>\n")
@@ -504,14 +534,31 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 		}
 	}
 	fmt.Fprintf(&b, "\nStarting local backend with: %s\n", sanitizeAutomationDetailText(check.Start.Display))
-	if err := setupStartProcess(ctx, check.Start); err != nil {
+	process, err := setupStartProcess(ctx, check.Start)
+	if err != nil {
 		return b.String(), err
 	}
+	if process == nil {
+		return b.String(), errors.New("starting local backend returned no process handle")
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			process.Stop()
+		}
+	}()
 	b.WriteString("Start command launched. Waiting for backend health...\n")
 	next, err := waitForSetupHealth(ctx, c, setupHealthWaitTimeout, setupHealthPoll)
 	if err != nil {
 		return b.String(), err
 	}
+	if err := ctx.Err(); err != nil {
+		return b.String(), err
+	}
+	if err := process.Handoff(); err != nil {
+		return b.String(), err
+	}
+	handedOff = true
 	b.WriteString("Backend health check succeeded.\n")
 	b.WriteString(next)
 	return strings.TrimRight(b.String(), "\n"), nil
@@ -566,22 +613,27 @@ func runLocalBackendInstaller(ctx context.Context, platform string, steps []setu
 	return nil
 }
 
-func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) error {
+func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
 	if strings.TrimSpace(spec.Name) == "" {
-		return errors.New("no start command available")
+		return nil, errors.New("no start command available")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	name := spec.Name
 	if spec.Display == "./start.sh" {
 		name = filepath.Clean("./start.sh")
 	}
-	cmd := setupExecCommand(ctx, name, spec.Args...)
+	cmd := exec.Command(name, spec.Args...)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting local backend: %w", err)
+		return nil, fmt.Errorf("starting local backend: %w", err)
 	}
-	if cmd.Process != nil {
-		_ = cmd.Process.Release()
+	process := &localBackendProcess{cmd: cmd}
+	if err := ctx.Err(); err != nil {
+		process.Stop()
+		return nil, err
 	}
-	return nil
+	return process, nil
 }
 
 func probeSetupHealth(ctx context.Context, c *client.Client) (string, bool, error) {

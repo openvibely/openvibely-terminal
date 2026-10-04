@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -600,11 +602,14 @@ func TestSetupBootstrapInstallCanProvideMissingStartCommand(t *testing.T) {
 	t.Cleanup(func() { setupRunInstaller = oldInstaller })
 
 	oldStart := setupStartProcess
-	setupStartProcess = func(_ context.Context, spec setupCommandSpec) error {
+	setupStartProcess = func(_ context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
 		if spec.Name != backendPath {
-			return fmt.Errorf("unexpected start command %q", spec.Name)
+			return nil, fmt.Errorf("unexpected start command %q", spec.Name)
 		}
-		return os.WriteFile(startMarker, []byte("started"), 0644)
+		if err := os.WriteFile(startMarker, []byte("started"), 0644); err != nil {
+			return nil, err
+		}
+		return &testSetupBackendProcess{stop: func() { _ = os.Remove(startMarker) }}, nil
 	}
 	t.Cleanup(func() { setupStartProcess = oldStart })
 
@@ -662,7 +667,7 @@ func TestSetupBootstrapReportsHealthFailure(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "backend did not become healthy") {
 		t.Fatalf("setup bootstrap health error = %v, output:\n%s", err, out.String())
 	}
-	assertFileEventuallyContains(t, startMarker, "started")
+	assertFileMissing(t, startMarker)
 	if !strings.Contains(out.String(), "Waiting for backend health") {
 		t.Fatalf("health wait was not disclosed in output:\n%s", out.String())
 	}
@@ -1160,6 +1165,289 @@ func setupStartFixture(t *testing.T, healthStatus int) (string, *client.Client) 
 	return startMarker, c
 }
 
+type testSetupBackendProcess struct {
+	stop      func()
+	handedOff bool
+}
+
+func (p *testSetupBackendProcess) Handoff() error {
+	p.handedOff = true
+	return nil
+}
+
+func (p *testSetupBackendProcess) Stop() {
+	if p != nil && !p.handedOff && p.stop != nil {
+		p.stop()
+	}
+}
+
+func TestSetupStartedBackendSurvivesSetupContextCancellationInCLI(t *testing.T) {
+	marker, c, observed := setupRealBackendFixture(t, setupBackendHealthHealthy)
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("CLI setup start failed: %v\n%s", err, out.String())
+	}
+	assertHelperProcessRunning(t, marker)
+	if _, err := c.GetGlobalCapacity(context.Background()); err != nil {
+		t.Fatalf("backend was not reachable after CLI setup returned: %v", err)
+	}
+	select {
+	case <-observed:
+	default:
+		t.Fatal("health check did not observe the started backend")
+	}
+}
+
+func TestSetupStartedBackendSurvivesSetupContextCancellationInTUI(t *testing.T) {
+	marker, c, _ := setupRealBackendFixture(t, setupBackendHealthHealthy)
+	m := New(c)
+	m, cmd := confirmSetupCommand(t, m, "/setup start")
+	msg := cmd()
+	result, ok := msg.(resultMsg)
+	if !ok || result.err != nil {
+		t.Fatalf("TUI setup start result = %#v", msg)
+	}
+	next, _ := m.Update(msg)
+	m = next.(Model)
+	if !strings.Contains(transcript(m), "Backend health check succeeded") {
+		t.Fatalf("TUI setup result omitted health success:\n%s", transcript(m))
+	}
+	assertHelperProcessRunning(t, marker)
+	if _, err := c.GetGlobalCapacity(context.Background()); err != nil {
+		t.Fatalf("backend was not reachable after TUI setup returned: %v", err)
+	}
+}
+
+func TestSetupCancellationBeforeHandoffStopsBackendProcess(t *testing.T) {
+	marker, c, observed := setupRealBackendFixture(t, setupBackendHealthBlocksUntilCanceled)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunCLIContext(ctx, c, io.Discard, "", []string{"setup", "start"}, true, false)
+	}()
+	select {
+	case <-observed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("setup did not reach backend health polling")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("canceled CLI setup returned error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("CLI setup did not stop after cancellation")
+	}
+	assertHelperProcessStopped(t, marker)
+}
+
+func TestSetupHealthTimeoutInTUIStopsBackendProcess(t *testing.T) {
+	marker, c, observed := setupRealBackendFixture(t, setupBackendHealthUnhealthy)
+	m := New(c)
+	m, cmd := confirmSetupCommand(t, m, "/setup start")
+	msg := cmd()
+	result, ok := msg.(resultMsg)
+	if !ok || result.err == nil || !strings.Contains(result.err.Error(), "backend did not become healthy") {
+		t.Fatalf("TUI setup timeout result = %#v", msg)
+	}
+	select {
+	case <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("health polling did not observe the started backend")
+	}
+	assertHelperProcessStopped(t, marker)
+}
+
+func TestStartLocalBackendRejectsCanceledContextAndReportsStartFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a Unix helper command")
+	}
+	marker, _, _ := setupRealBackendFixture(t, setupBackendHealthHealthy)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := startLocalBackendProcess(ctx, setupCommandSpec{Name: "unused"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled process start error = %v, want context canceled", err)
+	}
+	assertFileMissing(t, marker)
+
+	_, err = startLocalBackendProcess(context.Background(), setupCommandSpec{Name: filepath.Join(t.TempDir(), "missing-backend")})
+	if err == nil || !strings.Contains(err.Error(), "starting local backend") {
+		t.Fatalf("missing backend start error = %v, want startup failure", err)
+	}
+}
+
+func confirmSetupCommand(t *testing.T, m Model, line string) (Model, tea.Cmd) {
+	t.Helper()
+	next, cmd := m.runCommand(line)
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("setup command did not wait for confirmation: cmd=%v pending=%v", cmd != nil, m.pendingConfirmation != nil)
+	}
+	m.input.SetValue("yes")
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("confirmed setup command returned no command")
+	}
+	return m, cmd
+}
+
+type setupBackendHealthMode int
+
+const (
+	setupBackendHealthHealthy setupBackendHealthMode = iota
+	setupBackendHealthUnhealthy
+	setupBackendHealthBlocksUntilCanceled
+)
+
+func setupRealBackendFixture(t *testing.T, mode setupBackendHealthMode) (string, *client.Client, <-chan struct{}) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a Unix executable helper")
+	}
+	oldTimeout := setupHealthWaitTimeout
+	oldPoll := setupHealthPoll
+	setupHealthWaitTimeout = 3 * time.Second
+	setupHealthPoll = 10 * time.Millisecond
+	t.Cleanup(func() {
+		setupHealthWaitTimeout = oldTimeout
+		setupHealthPoll = oldPoll
+	})
+	withoutSetupStartScript(t)
+	tmp := t.TempDir()
+	marker := filepath.Join(tmp, "backend-helper")
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENVIBELY_SETUP_HELPER_BINARY", binary)
+	t.Setenv("OPENVIBELY_SETUP_HELPER_MODE", "1")
+	t.Setenv("OPENVIBELY_SETUP_HELPER_MARKER", marker)
+	launcher := filepath.Join(tmp, "openvibely")
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\nexec \"$OPENVIBELY_SETUP_HELPER_BINARY\" '-test.run=^TestSetupBackendHelperProcess$'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	fakeSetupToolPaths(t, map[string]string{"openvibely": launcher})
+
+	observed := make(chan struct{})
+	var observedOnce sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/capacity/global" {
+			http.NotFound(w, r)
+			return
+		}
+		_, statErr := os.Stat(marker)
+		started := statErr == nil
+		if started {
+			observedOnce.Do(func() { close(observed) })
+		}
+		if started && mode == setupBackendHealthBlocksUntilCanceled {
+			<-r.Context().Done()
+			return
+		}
+		if started && mode == setupBackendHealthHealthy {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"max_workers":1,"available_slots":1,"has_capacity":true}`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		data, err := os.ReadFile(marker)
+		if err != nil {
+			return
+		}
+		fields := strings.Fields(string(data))
+		if len(fields) < 2 {
+			return
+		}
+		pid, err := strconv.Atoi(fields[1])
+		if err == nil {
+			if process, err := os.FindProcess(pid); err == nil {
+				_ = process.Kill()
+			}
+		}
+	})
+	return marker, c, observed
+}
+
+func TestSetupBackendHelperProcess(t *testing.T) {
+	if os.Getenv("OPENVIBELY_SETUP_HELPER_MODE") != "1" {
+		return
+	}
+	marker := os.Getenv("OPENVIBELY_SETUP_HELPER_MARKER")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("helper listen: %v", err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	if err := os.WriteFile(marker, []byte(fmt.Sprintf("%s %d", listener.Addr().String(), os.Getpid())), 0600); err != nil {
+		t.Fatalf("write helper marker: %v", err)
+	}
+	select {}
+}
+
+func assertHelperProcessRunning(t *testing.T, marker string) {
+	t.Helper()
+	address, _ := readHelperMarker(t, marker)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("helper process at %s did not remain alive", address)
+}
+
+func assertHelperProcessStopped(t *testing.T, marker string) {
+	t.Helper()
+	address, _ := readHelperMarker(t, marker)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond)
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("helper process at %s remained alive after setup stopped it", address)
+}
+
+func readHelperMarker(t *testing.T, marker string) (string, int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(marker)
+		if err == nil {
+			fields := strings.Fields(string(data))
+			if len(fields) == 2 {
+				pid, parseErr := strconv.Atoi(fields[1])
+				if parseErr == nil {
+					return fields[0], pid
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("helper process did not write marker %s", marker)
+	return "", 0
+}
+
 func setupFakeBackendCommand(t *testing.T) string {
 	t.Helper()
 	withoutSetupStartScript(t)
@@ -1168,11 +1456,14 @@ func setupFakeBackendCommand(t *testing.T) string {
 	backendPath := filepath.Join(binDir, "openvibely")
 	fakeSetupToolPaths(t, map[string]string{"openvibely": backendPath})
 	oldStart := setupStartProcess
-	setupStartProcess = func(_ context.Context, spec setupCommandSpec) error {
+	setupStartProcess = func(_ context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
 		if spec.Name != backendPath {
-			return fmt.Errorf("unexpected start command %q", spec.Name)
+			return nil, fmt.Errorf("unexpected start command %q", spec.Name)
 		}
-		return os.WriteFile(marker, []byte("started"), 0644)
+		if err := os.WriteFile(marker, []byte("started"), 0644); err != nil {
+			return nil, err
+		}
+		return &testSetupBackendProcess{stop: func() { _ = os.Remove(marker) }}, nil
 	}
 	t.Cleanup(func() { setupStartProcess = oldStart })
 	return marker
