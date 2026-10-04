@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -49,16 +50,39 @@ func InvalidServerURLMessage(string) string {
 }
 
 type setupBackendProcess interface {
-	Handoff() error
+	Handoff(context.Context) error
 	Stop()
 }
 
 type localBackendProcess struct {
+	mu  sync.Mutex
 	cmd *exec.Cmd
 }
 
-func (p *localBackendProcess) Handoff() error {
-	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+func (p *localBackendProcess) Handoff(ctx context.Context) error {
+	if p == nil {
+		return errors.New("local backend process is unavailable for handoff")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	// Unregister cancellation before releasing the child. A false result means
+	// cancellation has already started (or completed), so keep ownership and
+	// stop the process. A successful unregister is the handoff's linearization
+	// point: later cancellation belongs to the caller after ownership transfer.
+	stopCancellation := context.AfterFunc(ctx, p.Stop)
+	if !stopCancellation() {
+		p.Stop()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("local backend process cancellation interrupted handoff")
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd == nil || p.cmd.Process == nil {
 		return errors.New("local backend process is unavailable for handoff")
 	}
 	if err := p.cmd.Process.Release(); err != nil {
@@ -69,7 +93,12 @@ func (p *localBackendProcess) Handoff() error {
 }
 
 func (p *localBackendProcess) Stop() {
-	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cmd == nil || p.cmd.Process == nil {
 		return
 	}
 	cmd := p.cmd
@@ -555,7 +584,7 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 	if err := ctx.Err(); err != nil {
 		return b.String(), err
 	}
-	if err := process.Handoff(); err != nil {
+	if err := process.Handoff(ctx); err != nil {
 		return b.String(), err
 	}
 	handedOff = true
