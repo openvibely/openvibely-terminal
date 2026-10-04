@@ -263,6 +263,44 @@ func taskDeletionDisplayName(task client.Task) string {
 	return fmt.Sprintf("%s (%s)", label, id)
 }
 
+// taskDetailTabJSON is the stable JSON representation of an explicitly selected
+// task detail tab. The task card remains the output for an unqualified show.
+type taskDetailTabJSON struct {
+	Task client.Task `json:"task"`
+	Tab  string      `json:"tab"`
+	Data any         `json:"data"`
+}
+
+func marshalTaskDetailTab(task client.Task, tab string, data any) (string, error) {
+	meta, ok := client.TaskDetailTabByName(tab)
+	if !ok {
+		return "", fmt.Errorf("unknown task detail tab %q", tab)
+	}
+	return marshalJSON(taskDetailTabJSON{Task: task, Tab: meta.Name, Data: data})
+}
+
+func marshalTaskDetailContent(task client.Task, detail *client.TaskDetail, tab string) (string, error) {
+	meta, ok := client.TaskDetailTabByName(tab)
+	if !ok {
+		return "", fmt.Errorf("unknown task detail tab %q", tab)
+	}
+	if err := detail.TabError(tab); err != nil {
+		return "", err
+	}
+	return marshalTaskDetailTab(task, meta.Name, meta.Text(detail))
+}
+
+func taskReviewTabOutput(ctx context.Context, task client.Task, fetch func(context.Context, string) ([]client.ReviewComment, error)) (string, error) {
+	reviews, err := fetch(ctx, task.ID)
+	if err != nil {
+		return "", err
+	}
+	if jsonMode {
+		return marshalTaskDetailTab(task, "review", reviews)
+	}
+	return renderTaskReviews(task, reviews), nil
+}
+
 // taskReviewsOutput fetches and formats the read-only review view for a task.
 func taskReviewsOutput(ctx context.Context, t client.Task, fetch func(context.Context, string) ([]client.ReviewComment, error)) (string, error) {
 	reviews, err := fetch(ctx, t.ID)
@@ -1019,6 +1057,22 @@ func tasksCommand() command {
 				}
 				return m, m.run("Task", cmdTimeout, func(ctx context.Context) (string, error) {
 					if isCanonicalFullTaskID(showRef) {
+						if jsonMode && tab != "" {
+							if isReviewTab(tab) {
+								d, err := c.GetTaskMetadataForProjectExact(ctx, showRef, pid)
+								if err != nil {
+									return "", err
+								}
+								return taskReviewTabOutput(ctx, d.Task, func(ctx context.Context, taskID string) ([]client.ReviewComment, error) {
+									return c.ListTaskReviewsForProject(ctx, taskID, pid)
+								})
+							}
+							d, err := c.GetTaskForProjectExact(ctx, showRef, pid)
+							if err != nil {
+								return "", err
+							}
+							return marshalTaskDetailContent(d.Task, d, tab)
+						}
 						if isReviewTab(tab) || jsonMode {
 							d, err := c.GetTaskMetadataForProjectExact(ctx, showRef, pid)
 							if err != nil {
@@ -1045,6 +1099,18 @@ func tasksCommand() command {
 					t, err := resolveTaskForModel(m, ctx, c, pid, showRef)
 					if err != nil {
 						return "", err
+					}
+					if jsonMode && tab != "" {
+						if isReviewTab(tab) {
+							return taskReviewTabOutput(ctx, t, func(ctx context.Context, taskID string) ([]client.ReviewComment, error) {
+								return c.ListTaskReviewsForProject(ctx, taskID, pid)
+							})
+						}
+						d, err := c.GetTaskForProject(ctx, t.ID, pid)
+						if err != nil {
+							return "", err
+						}
+						return marshalTaskDetailContent(t, d, tab)
 					}
 					if isReviewTab(tab) {
 						return taskReviewsOutput(ctx, t, func(ctx context.Context, taskID string) ([]client.ReviewComment, error) {
