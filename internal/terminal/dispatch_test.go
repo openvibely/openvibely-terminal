@@ -15775,3 +15775,99 @@ func TestSkillsListJSONKeepsFullContentContract(t *testing.T) {
 		t.Fatalf("list requests = %d, detail requests = %d", listRequests, detailRequests)
 	}
 }
+
+func TestChannelsConnectTUIConfirmsSelectedProjectsMatchingChannel(t *testing.T) {
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = false, false
+	t.Cleanup(func() { cliMode, forceMode = oldCLI, oldForce })
+
+	page := `<div data-channel-type="slack" data-search-text="Slack Connected"></div><div data-channel-type="github" data-search-text="GitHub Not connected"></div>`
+	m, rec := dispatchModel(t, map[string]string{"/channels": page})
+	m.selectedID = "selected-project"
+	m.selectedName = "selected project"
+
+	m = runLine(t, m, "/channels connect slack")
+	if m.pendingConfirmation == nil {
+		t.Fatal("connect should present a guided browser handoff")
+	}
+	prompt := m.pendingConfirmation.message
+	if !strings.Contains(prompt, "/channels/slack/connect?project_id=selected-project") || !strings.Contains(prompt, "type 'yes'") {
+		t.Fatalf("handoff did not show the project-scoped URL and recheck step: %q", prompt)
+	}
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("starting OAuth handoff must not claim status or make a backend request:\n%s", calls)
+	}
+
+	m = runLine(t, m, "yes")
+	if !strings.Contains(transcript(m), "Slack connection confirmed by the backend") {
+		t.Fatalf("confirmed status missing from output:\n%s", transcript(m))
+	}
+	if rec.all() != "GET /channels" || !rec.sawQuery("project_id=selected-project") {
+		t.Fatalf("status recheck did not read the selected project's matching channel: %s", rec.all())
+	}
+	if strings.Contains(transcript(m), "GitHub connection confirmed") {
+		t.Fatalf("status recheck reported a different channel:\n%s", transcript(m))
+	}
+}
+
+func TestChannelsConnectDeniedOrCanceledAuthorizationStaysRetryable(t *testing.T) {
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = false, false
+	t.Cleanup(func() { cliMode, forceMode = oldCLI, oldForce })
+
+	t.Run("backend reports not connected after browser denial", func(t *testing.T) {
+		page := `<div data-channel-type="slack" data-search-text="Slack Not connected"></div><div data-channel-type="github" data-search-text="GitHub Connected"></div>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": page})
+		m.selectedID = "selected-project"
+		m = runLine(t, m, "/channels connect slack")
+		m = runLine(t, m, "yes")
+
+		out := transcript(m)
+		if !strings.Contains(out, "authorization is not confirmed") || !strings.Contains(out, "remains incomplete") || !strings.Contains(out, "channels connect slack") {
+			t.Fatalf("unconfirmed authorization was not clearly retryable:\n%s", out)
+		}
+		if rec.all() != "GET /channels" || !rec.sawQuery("project_id=selected-project") {
+			t.Fatalf("status check did not stay scoped to the selected project: %s", rec.all())
+		}
+		if strings.Contains(out, "Slack connection confirmed") {
+			t.Fatalf("unconnected Slack was reported as connected:\n%s", out)
+		}
+	})
+
+	t.Run("user cancels the handoff", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels connect github")
+		m = runLine(t, m, "no")
+		out := transcript(m)
+		if !strings.Contains(out, "authorization remains unconfirmed") || !strings.Contains(out, "channels connect github") {
+			t.Fatalf("cancel did not leave an explicit retry path:\n%s", out)
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("canceling handoff unexpectedly checked status:\n%s", calls)
+		}
+	})
+}
+
+func TestChannelsConnectCLIIsOneShotAndDoesNotConfirmAuthorization(t *testing.T) {
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = true, false
+	t.Cleanup(func() { cliMode, forceMode = oldCLI, oldForce })
+
+	for _, channelType := range []string{"slack", "github"} {
+		t.Run(channelType, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = "selected-project"
+			m = runLine(t, m, "/channels connect "+channelType)
+			out := transcript(m)
+			if !strings.Contains(out, "/channels/"+channelType+"/connect?project_id=selected-project") || !strings.Contains(out, "does not confirm authorization") || !strings.Contains(out, "channels show "+channelType) {
+				t.Fatalf("CLI handoff output is incomplete or implies success:\n%s", out)
+			}
+			if strings.Contains(out, "connection confirmed") || m.pendingConfirmation != nil {
+				t.Fatalf("CLI treated URL generation as completed authorization:\n%s", out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("CLI connect must be one-shot and nonblocking, got backend calls:\n%s", calls)
+			}
+		})
+	}
+}

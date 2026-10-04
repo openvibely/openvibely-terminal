@@ -64,11 +64,11 @@ type entry struct {
 	text string
 }
 
-// pendingCmd holds a destructive command that is waiting for explicit user
-// confirmation before it is allowed to execute.
+// pendingCmd holds a command or status check that waits for explicit user input.
 type pendingCmd struct {
-	message string  // confirmation prompt shown in the status area
-	cmd     tea.Cmd // executed when the user types "yes" and presses Enter
+	message       string  // confirmation prompt shown in the status area
+	cmd           tea.Cmd // executed when the user types "yes" and presses Enter
+	cancelMessage string  // optional completion text when the prompt is canceled
 }
 
 type configuredLoginCredentials struct {
@@ -2854,9 +2854,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.pendingConfirmation != nil {
+			pending := m.pendingConfirmation
 			m.pendingConfirmation = nil
 			m.input.SetValue("")
-			m.append(entry{role: "system", text: "cancelled"})
+			message := pending.cancelMessage
+			if message == "" {
+				message = "cancelled"
+			}
+			m.append(entry{role: "system", text: message})
 			return m, nil
 		}
 		if m.personalityBulkLookupCancel != nil {
@@ -2895,7 +2900,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.busy = true
 				return m, pending.cmd
 			}
-			m.append(entry{role: "system", text: "cancelled"})
+			message := pending.cancelMessage
+			if message == "" {
+				message = "cancelled"
+			}
+			m.append(entry{role: "system", text: message})
 			return m, nil
 		}
 		return m.submit()
