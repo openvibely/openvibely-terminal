@@ -236,6 +236,11 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 			_, _ = w.Write([]byte(body))
 			return
 		}
+		if r.URL.Path == "/api/capacity/snapshot" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/channels/") && strings.HasSuffix(r.URL.Path, "/test") {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<div class="text-success"><span>Connection successful!</span></div>`))
@@ -2927,25 +2932,24 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 
 	var mu sync.Mutex
 	refresh := 0
+	changedAt := time.Time{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path != "/api/capacity/snapshot" {
+			http.NotFound(w, r)
+			return
+		}
 		mu.Lock()
+		refresh++
 		current := refresh
-		if r.URL.Path == "/api/capacity/global" {
-			refresh++
-			current = refresh
+		if refresh == 2 {
+			changedAt = time.Now()
 		}
 		mu.Unlock()
-		switch r.URL.Path {
-		case "/api/capacity/global":
-			fmt.Fprintf(w, `{"total_running":%d,"max_workers":4,"queue_size":%d}`, current, current+1)
-		case "/api/capacity/projects":
-			fmt.Fprintf(w, `[{"id":"p1","name":"demo","running":%d,"queue_size":%d,"max_workers":2}]`, current, current+2)
-		case "/api/capacity/models":
-			fmt.Fprintf(w, `[{"name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":3}]`, current)
-		default:
-			fmt.Fprint(w, `{}`)
+		if current == 2 {
+			time.Sleep(10 * time.Millisecond)
 		}
+		fmt.Fprintf(w, `{"global":{"total_running":%d,"max_workers":4,"queue_size":%d},"projects":[{"id":"p1","name":"demo","running":%d,"queue_size":%d,"max_workers":2}],"models":[{"name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":3}]}`, current, current+1, current, current+2, current)
 	}))
 	t.Cleanup(srv.Close)
 	c, err := client.New(srv.URL)
@@ -2965,8 +2969,8 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 	next, tickCmd := m.Update(cmd())
 	m = next.(Model)
 	out := stripANSI(transcript(m))
-	if !strings.Contains(out, "1 / 4") || !strings.Contains(out, "live refresh every "+workersLiveRefreshIntervalLabel()) || strings.Contains(out, "live refresh every 3s") {
-		t.Fatalf("first live workers response not rendered with runtime refresh interval:\n%s", out)
+	if !strings.Contains(out, "1 / 4") || !strings.Contains(out, "demo") || !strings.Contains(out, "Sonnet") || !strings.Contains(out, "live refresh every "+workersLiveRefreshIntervalLabel()) || strings.Contains(out, "live refresh every 3s") {
+		t.Fatalf("first live workers response did not render global/project/model values with runtime refresh interval:\n%s", out)
 	}
 	if tickInterval != workersLiveRefreshInterval {
 		t.Fatalf("workers live tick interval = %s, want %s", tickInterval, workersLiveRefreshInterval)
@@ -2983,8 +2987,14 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 	next, tickCmd = m.Update(fetchCmd())
 	m = next.(Model)
 	out = stripANSI(transcript(m))
-	if !strings.Contains(out, "2 / 4") || strings.Contains(out, "1 / 4") || strings.Count(out, "Worker capacity") != 1 {
-		t.Fatalf("changed live workers response did not replace the prior table:\n%s", out)
+	if !strings.Contains(out, "2 / 4") || strings.Contains(out, "1 / 4") || !strings.Contains(out, "demo") || !strings.Contains(out, "Sonnet") || strings.Count(out, "Worker capacity") != 1 {
+		t.Fatalf("changed live workers response did not replace global/project/model capacity:\n%s", out)
+	}
+	mu.Lock()
+	latency := time.Since(changedAt)
+	mu.Unlock()
+	if latency > 3*time.Second {
+		t.Fatalf("changed snapshot-to-display latency = %s, want <= 3s", latency)
 	}
 	if tickCmd == nil {
 		t.Fatal("second live workers response did not keep the refresh active")
@@ -12891,13 +12901,17 @@ func TestWorkersShowFetchesConcurrently(t *testing.T) {
 				t.Errorf("GET %s count = %d, want 1; calls:\n%s", path, got, rec.all())
 			}
 		}
-		if got := len(rec.urlsSnapshot()); got != 3 {
-			t.Errorf("workers show made %d requests, want exactly 3; calls:\n%s", got, rec.all())
+		if got := len(rec.urlsSnapshot()); got != 4 {
+			t.Errorf("workers show made %d requests, want one snapshot probe plus three legacy calls; calls:\n%s", got, rec.all())
 		}
 	})
 
 	t.Run("secondary failures render partial table", func(t *testing.T) {
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/capacity/snapshot" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if r.URL.Path == "/api/capacity/global" {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(capacityJSON))
@@ -12922,6 +12936,10 @@ func TestWorkersShowFetchesConcurrently(t *testing.T) {
 
 	t.Run("global failure propagates", func(t *testing.T) {
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/capacity/snapshot" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if r.URL.Path == "/api/capacity/global" {
 				w.WriteHeader(http.StatusInternalServerError)
 				return

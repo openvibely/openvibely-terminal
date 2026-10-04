@@ -1206,7 +1206,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 |---|---|
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
-| Capacity | `/api/capacity/global`, `/projects`, `/models` |
+| Capacity | `GET /api/capacity/snapshot` (combined snapshot when supported), `GET /api/capacity/global`, `GET /api/capacity/projects`, `GET /api/capacity/models` |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
 | Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1`; exact `data-schedule-next-run` values are preferred, and schedule-tab detail is read only when a card needs exact `Next:` timing |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |

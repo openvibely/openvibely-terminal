@@ -7,6 +7,8 @@
 //   - GET  /api/chat/message/:id       → chat status polling
 //   - GET  /api/capacity/global        → worker pool capacity
 //   - GET  /api/capacity/projects      → per-project capacity
+//   - GET  /api/capacity/models        → per-model capacity
+//   - GET  /api/capacity/snapshot      → combined worker-capacity view (newer backends)
 //   - GET  /auth/me                    → session check
 //   - POST /login                      → cookie session login (optional auth)
 //   - GET  /events/live                → SSE stream (task/chat/file events)
@@ -54,6 +56,10 @@ func IsInvalidServerURL(err error) bool {
 // transport or authentication failure. Callers may treat it as clean EOF when
 // a foreground stream has no reconnect owner.
 var ErrEventStreamClosed = errors.New("event stream closed by server")
+
+// ErrCapacitySnapshotUnsupported identifies older backends without a combined
+// worker-capacity snapshot endpoint.
+var ErrCapacitySnapshotUnsupported = errors.New("combined worker-capacity snapshot is not supported")
 
 // AuthRequiredError is returned when the backend responds with an
 // authentication redirect or HTTP 401. It deliberately contains only the
@@ -171,6 +177,9 @@ type Client struct {
 
 	memoryMu                 sync.RWMutex
 	memoryBackendUnsupported bool
+
+	capacitySnapshotMu          sync.RWMutex
+	capacitySnapshotUnsupported bool
 }
 
 // New creates a Client for the given base URL (e.g. "http://localhost:3001").

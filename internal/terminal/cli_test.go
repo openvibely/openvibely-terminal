@@ -71,6 +71,11 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 				return
 			}
 		}
+		if r.URL.Path == "/api/capacity/snapshot" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/channels/") && strings.HasSuffix(r.URL.Path, "/test") {
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(`<div class="text-success"><span>Connection successful!</span></div>`))
@@ -642,6 +647,9 @@ func TestCLIWorkersWatchRefreshesUntilContextCancellation(t *testing.T) {
 		}
 		mu.Unlock()
 		switch r.URL.Path {
+		case "/api/capacity/snapshot":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"not found"}`)
 		case "/api/capacity/global":
 			fmt.Fprintf(w, `{"total_running":%d,"max_workers":4,"queue_size":0}`, current)
 		case "/api/capacity/projects":

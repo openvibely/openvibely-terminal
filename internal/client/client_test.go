@@ -801,6 +801,106 @@ func TestProjectStatusCountsPreserveTransportErrors(t *testing.T) {
 	}
 }
 
+func TestGetCapacitySnapshot(t *testing.T) {
+	var requests int
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/capacity/snapshot" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"global":{"max_workers":5,"total_running":2},"projects":[{"id":"p1","name":"Demo","running":1}],"models":[{"id":"m1","name":"Sonnet","model":"claude-sonnet","running":1}]}`)
+	}))
+
+	snapshot, err := c.GetCapacitySnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("GetCapacitySnapshot: %v", err)
+	}
+	if snapshot.Global == nil || snapshot.Global.MaxWorkers != 5 || len(snapshot.Projects) != 1 || len(snapshot.Models) != 1 {
+		t.Fatalf("unexpected capacity snapshot: %+v", snapshot)
+	}
+	if requests != 1 {
+		t.Fatalf("snapshot requests = %d, want 1", requests)
+	}
+}
+
+func TestGetCapacitySnapshotCachesOnlyUnsupportedRoute(t *testing.T) {
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/api/capacity/snapshot" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":"not found"}`)
+	}))
+
+	for range 2 {
+		_, err := c.GetCapacitySnapshot(context.Background())
+		if !errors.Is(err, ErrCapacitySnapshotUnsupported) {
+			t.Fatalf("GetCapacitySnapshot error = %v, want unsupported route", err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("unsupported snapshot probes = %d, want one cached route probe", requests)
+	}
+}
+
+func TestGetCapacitySnapshotAuthenticationFailureCanRecover(t *testing.T) {
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"global":{"max_workers":4,"total_running":1},"projects":[],"models":[]}`)
+	}))
+
+	if _, err := c.GetCapacitySnapshot(context.Background()); !IsAuthRequired(err) {
+		t.Fatalf("first snapshot error = %v, want authentication error", err)
+	}
+	snapshot, err := c.GetCapacitySnapshot(context.Background())
+	if err != nil || snapshot.Global == nil || snapshot.Global.MaxWorkers != 4 {
+		t.Fatalf("snapshot after authentication recovery = %+v, %v", snapshot, err)
+	}
+	if requests != 2 {
+		t.Fatalf("snapshot requests = %d, want retry after auth failure", requests)
+	}
+}
+
+func TestGetCapacitySnapshotCancellation(t *testing.T) {
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+		close(finished)
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.GetCapacitySnapshot(ctx)
+		done <- err
+	}()
+	<-started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("snapshot error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled capacity snapshot did not return promptly")
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("server handler did not observe canceled capacity snapshot")
+	}
+}
+
 func TestGetGlobalCapacity(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/capacity/global" {
