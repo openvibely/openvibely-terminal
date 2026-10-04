@@ -244,11 +244,21 @@ func (m Model) hint() string {
 // pool, so status must not present that sentinel as a finite free count.
 func globalWorkerCapacityText(c *client.GlobalCapacity) string {
 	limit := workerLimitLabel("global", &c.MaxWorkers)
+	status := workerStatusLabel(workerCapacityStatus(c.TotalRunning, &c.MaxWorkers))
 	if c.MaxWorkers == 0 {
-		return fmt.Sprintf("%d running / %s, %d queued", c.TotalRunning, limit, c.QueueSize)
+		return fmt.Sprintf("Global · %d running / %s, %d queued · %s", c.TotalRunning, limit, c.QueueSize, status)
 	}
-	return fmt.Sprintf("%d running / %d max, %d queued, %d free",
-		c.TotalRunning, c.MaxWorkers, c.QueueSize, c.AvailableSlots)
+	return fmt.Sprintf("Global · %d running / %d max, %d queued, %d free · %s",
+		c.TotalRunning, c.MaxWorkers, c.QueueSize, c.AvailableSlots, status)
+}
+
+func projectWorkerCapacityText(c *client.ProjectCapacity) string {
+	status := workerStatusLabel(workerCapacityStatus(c.Running, c.MaxWorkers))
+	limit := workerLimitLabel("project", c.MaxWorkers)
+	if c.MaxWorkers != nil && *c.MaxWorkers > 0 {
+		return fmt.Sprintf("Project · %d running / %d max, %d queued · %s", c.Running, *c.MaxWorkers, c.QueueSize, status)
+	}
+	return fmt.Sprintf("Project · %d running, %d queued, %s · %s", c.Running, c.QueueSize, limit, status)
 }
 
 func offlineStatusRecoveryHints(baseURL string) []string {
@@ -344,6 +354,13 @@ func (m Model) renderStatus() string {
 	if c := m.capacity; c != nil {
 		row("workers", globalWorkerCapacityText(c))
 	}
+	if m.selectedID != "" && (m.projectCapacity != nil || m.projectCapUnavailable) {
+		if m.projectCapUnavailable || m.projectCapacity == nil {
+			row("project workers", statusErrStyle.Render("project capacity unavailable (partial failure)"))
+		} else {
+			row("project workers", projectWorkerCapacityText(m.projectCapacity))
+		}
+	}
 	if m.selectedID != "" {
 		if m.alertsCountUnavailable {
 			row("alerts", statusErrStyle.Render("unavailable")+dimStyle.Render(" (partial failure)"))
@@ -354,7 +371,7 @@ func (m Model) renderStatus() string {
 		}
 		if m.tasksCountUnavailable {
 			row("tasks", statusErrStyle.Render("unavailable")+dimStyle.Render(" (partial failure)"))
-		} else if m.activeTaskCount > 0 || m.queuedTaskCount > 0 {
+		} else if m.activeTaskCount > 0 || m.queuedTaskCount > 0 || m.failedTaskCount > 0 {
 			var taskParts []string
 			if m.activeTaskCount > 0 {
 				taskParts = append(taskParts, fmt.Sprintf("%d active", m.activeTaskCount))
@@ -362,7 +379,14 @@ func (m Model) renderStatus() string {
 			if m.queuedTaskCount > 0 {
 				taskParts = append(taskParts, fmt.Sprintf("%d queued", m.queuedTaskCount))
 			}
-			row("tasks", noticeStyle.Render(strings.Join(taskParts, ", ")))
+			if m.failedTaskCount > 0 {
+				taskParts = append(taskParts, fmt.Sprintf("%d failed", m.failedTaskCount))
+			}
+			value := noticeStyle.Render(strings.Join(taskParts, ", "))
+			if m.failedTaskCount > 0 {
+				value += dimStyle.Render(" · review with /tasks")
+			}
+			row("tasks", value)
 		} else {
 			row("tasks", dimStyle.Render("none active"))
 		}

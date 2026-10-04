@@ -3468,6 +3468,85 @@ func TestRenderVoteRecordsIsDeterministicAndExplicit(t *testing.T) {
 	}
 }
 
+func TestRenderStatusShowsGlobalAndSelectedProjectWorkerCapacity(t *testing.T) {
+	zeroLimit := 0
+	finiteLimit := 2
+	cases := []struct {
+		name     string
+		global   client.GlobalCapacity
+		project  *client.ProjectCapacity
+		want     []string
+		unwanted []string
+	}{
+		{
+			name:    "project at cap while global has room",
+			global:  client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 1, QueueSize: 2, AvailableSlots: 3},
+			project: &client.ProjectCapacity{ID: "p1", Running: 2, QueueSize: 1, MaxWorkers: &finiteLimit},
+			want:    []string{"Global · 1 running / 4 max, 2 queued, 3 free · Active", "Project · 2 running / 2 max, 1 queued · At capacity"},
+		},
+		{
+			name:    "global full while project has room",
+			global:  client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 4, QueueSize: 3, AvailableSlots: 0},
+			project: &client.ProjectCapacity{ID: "p1", Running: 1, QueueSize: 2, MaxWorkers: &finiteLimit},
+			want:    []string{"Global · 4 running / 4 max, 3 queued, 0 free · At capacity", "Project · 1 running / 2 max, 2 queued · Active"},
+		},
+		{
+			name:     "unset inherited limit",
+			global:   client.GlobalCapacity{MaxWorkers: 0, TotalRunning: 1},
+			project:  &client.ProjectCapacity{ID: "p1", Running: 1},
+			want:     []string{"Global · 1 running / Unlimited, 0 queued · Active", "Project · 1 running, 0 queued, No limit · Active"},
+			unwanted: []string{"At capacity"},
+		},
+		{
+			name:    "zero project limit means no limit",
+			global:  client.GlobalCapacity{MaxWorkers: 4, AvailableSlots: 4},
+			project: &client.ProjectCapacity{ID: "p1", MaxWorkers: &zeroLimit},
+			want:    []string{"Project · 0 running, 0 queued, No limit · Idle"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestModel(t)
+			m.connected = true
+			m.selectedID = "p1"
+			m.selectedName = "Demo"
+			m.capacity = &tc.global
+			m.projectCapacity = tc.project
+
+			out := stripANSI(m.renderStatus())
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("status missing %q:\n%s", want, out)
+				}
+			}
+			if !strings.Contains(out, "project workers") {
+				t.Errorf("status did not label selected project capacity:\n%s", out)
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(out, unwanted) {
+					t.Errorf("status contains %q:\n%s", unwanted, out)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderStatusLabelsProjectCapacityUnavailableWithoutHidingGlobal(t *testing.T) {
+	m := newTestModel(t)
+	m.connected = true
+	m.selectedID = "p1"
+	m.capacity = &client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 4, AvailableSlots: 0}
+	m.projectCapUnavailable = true
+
+	out := stripANSI(m.renderStatus())
+	for _, want := range []string{"Global · 4 running / 4 max", "At capacity", "project capacity unavailable", "partial failure"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderWorkersTable(t *testing.T) {
 	unlimited := 0
 	limited := 2

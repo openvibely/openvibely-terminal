@@ -705,7 +705,7 @@ func TestProjectStatusCountsUseCompactProjectScopedJSON(t *testing.T) {
 		case "/api/alerts/pending-count":
 			body = `{"count":17}`
 		case "/api/tasks/status-counts":
-			body = `{"active_tasks":23,"queued_tasks":11}`
+			body = `{"active_tasks":23,"queued_tasks":11,"failed_tasks":5}`
 		default:
 			t.Fatalf("unexpected status-count path %q", r.URL.Path)
 		}
@@ -722,8 +722,8 @@ func TestProjectStatusCountsUseCompactProjectScopedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTaskStatusCounts: %v", err)
 	}
-	if pending != 17 || tasks.ActiveTasks != 23 || tasks.QueuedTasks != 11 {
-		t.Fatalf("compact counts = %d/%+v, want 17/{active_tasks:23 queued_tasks:11}", pending, tasks)
+	if pending != 17 || tasks.ActiveTasks != 23 || tasks.QueuedTasks != 11 || tasks.FailedTasks != 5 {
+		t.Fatalf("compact counts = %d/%+v, want 17/{active_tasks:23 queued_tasks:11 failed_tasks:5}", pending, tasks)
 	}
 	if len(requests) != 2 || totalBytes >= 1024 {
 		t.Fatalf("compact requests/response bytes = %d/%d, want two small JSON responses: %v", len(requests), totalBytes, requests)
@@ -1548,6 +1548,46 @@ func TestStreamEventsCancellation(t *testing.T) {
 		}
 		if events == nil {
 			return
+		}
+	}
+}
+
+func TestStreamEventsBackpressureCancellation(t *testing.T) {
+	const frameCount = 40
+	written := make(chan struct{})
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for i := 0; i < frameCount; i++ {
+			fmt.Fprint(w, "data: {}\n\n")
+		}
+		w.(http.Flusher).Flush()
+		close(written)
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, errs := c.StreamEvents(ctx, "")
+	select {
+	case <-written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not write the event frames")
+	}
+
+	deadline := time.After(5 * time.Second)
+	for len(events) < cap(events) {
+		select {
+		case <-deadline:
+			t.Fatal("stream did not fill the event buffer")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+
+	for range events {
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("cancellation returned error: %v", err)
 		}
 	}
 }

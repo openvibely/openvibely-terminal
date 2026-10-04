@@ -82,6 +82,21 @@ func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 			line: `/tasks show ""`,
 			want: []string{"tasks", "show", ""},
 		},
+		{
+			name: "double quoted argument preserves backslash",
+			line: `/memory show "path\name.md"`,
+			want: []string{"memory", "show", `path\name.md`},
+		},
+		{
+			name: "double quoted argument preserves repeated backslashes",
+			line: `/memory show "path\\name.md"`,
+			want: []string{"memory", "show", `path\\name.md`},
+		},
+		{
+			name: "double quoted argument may end with backslash",
+			line: `/memory show "path\` + `"`,
+			want: []string{"memory", "show", `path\`},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +106,30 @@ func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("tokenizeCommand(%q) = %#v, want %#v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSelectorArgumentFormattingRoundTripsThroughCommandTokenizer(t *testing.T) {
+	for _, reference := range []string{
+		"plain-id",
+		"name with spaces",
+		"apostrophe's.md",
+		`double"quote.md`,
+		`both ' and ".md`,
+		`path with back\slash.md`,
+		`path ending with backslash\`,
+	} {
+		t.Run(reference, func(t *testing.T) {
+			line := "/memory show " + formatSelectorArgument(reference)
+			got, err := tokenizeCommand(line)
+			if err != nil {
+				t.Fatalf("tokenizeCommand(%q): %v", line, err)
+			}
+			want := []string{"memory", "show", reference}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("tokenizeCommand(%q) = %#v, want %#v", line, got, want)
 			}
 		})
 	}
@@ -978,6 +1017,61 @@ func TestMatchRefByIDPrefixAndName(t *testing.T) {
 	}
 }
 
+func TestResolveTaskWithOperandsRetainsLaterAmbiguity(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "alpha", Title: "Alpha"},
+		{ID: "alpha-beta-1", Title: "Alpha Beta"},
+		{ID: "alpha-beta-2", Title: "Alpha Beta"},
+	}
+
+	got, operands, err := resolveTaskWithOperands(tasks, []string{"Alpha", "Beta"}, 1)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("resolveTaskWithOperands error = %v, want the later Alpha Beta ambiguity", err)
+	}
+	if got.ID != "" || len(operands) != 0 {
+		t.Fatalf("ambiguous resolution returned task=%q operands=%v", got.ID, operands)
+	}
+}
+
+func TestResolveTaskWithOperandsAllowsUniqueLongerTitleAfterAmbiguity(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "alpha", Title: "Alpha"},
+		{ID: "alpha-beta-1", Title: "Alpha Beta"},
+		{ID: "alpha-beta-2", Title: "Alpha Beta"},
+		{ID: "alpha-beta-gamma", Title: "Alpha Beta Gamma"},
+	}
+
+	got, operands, err := resolveTaskWithOperands(tasks, []string{"Alpha", "Beta", "Gamma", "request.txt"}, 1)
+	if err != nil {
+		t.Fatalf("resolveTaskWithOperands returned error: %v", err)
+	}
+	if got.ID != "alpha-beta-gamma" {
+		t.Fatalf("resolved task = %q, want unique longer title", got.ID)
+	}
+	if !reflect.DeepEqual(operands, []string{"request.txt"}) {
+		t.Fatalf("remaining operands = %v, want [request.txt]", operands)
+	}
+}
+
+func TestResolveTaskWithOperandsKeepsShortTitleAndOrdinaryOperand(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "alpha", Title: "Alpha"},
+		{ID: "alpha-beta-1", Title: "Alpha Beta"},
+		{ID: "alpha-beta-2", Title: "Alpha Beta"},
+	}
+
+	got, operands, err := resolveTaskWithOperands(tasks, []string{"Alpha", "request.txt"}, 1)
+	if err != nil {
+		t.Fatalf("resolveTaskWithOperands returned error: %v", err)
+	}
+	if got.ID != "alpha" {
+		t.Fatalf("resolved task = %q, want shorter title Alpha", got.ID)
+	}
+	if !reflect.DeepEqual(operands, []string{"request.txt"}) {
+		t.Fatalf("remaining operands = %v, want [request.txt]", operands)
+	}
+}
+
 // An exact title must win over a longer title that contains it, whatever the
 // listing order.
 func TestMatchRefPrefersExactName(t *testing.T) {
@@ -1173,6 +1267,51 @@ func TestRenderTaskDetailShowsTabs(t *testing.T) {
 	}
 	if strings.Contains(only, "2 files") {
 		t.Errorf("tab view should show one tab only:\n%s", only)
+	}
+}
+
+func TestRenderTaskDetailShowsChainingStateInBothViews(t *testing.T) {
+	task := client.Task{ID: "t1", Title: "Refactor", Category: "active"}
+	cases := []struct {
+		name     string
+		chaining string
+		want     []string
+	}{
+		{
+			name:     "absent",
+			chaining: "No follow-up configured.",
+			want:     []string{"No follow-up configured."},
+		},
+		{
+			name:     "enabled on completion",
+			chaining: "Follow-up task: enabled\nTrigger: After task completion\nChild category: Active\nChild model: Claude Sonnet",
+			want:     []string{"Follow-up task: enabled", "Trigger: After task completion", "Child category: Active", "Child model: Claude Sonnet"},
+		},
+		{
+			name:     "enabled on planning complete uses default model",
+			chaining: "Follow-up task: enabled\nTrigger: After planning completes\nChild category: Backlog\nChild model: Use default model",
+			want:     []string{"Trigger: After planning completes", "Child category: Backlog", "Child model: Use default model"},
+		},
+		{
+			name:     "saved disabled chain",
+			chaining: "Follow-up task: disabled\nTrigger: After task completion\nChild category: Backlog\nChild model: GPT 5",
+			want:     []string{"Follow-up task: disabled", "Child category: Backlog", "Child model: GPT 5"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := &client.TaskDetail{Task: client.Task{Status: "running"}, Details: "task details", Chaining: tc.chaining}
+			full := renderTaskDetail(task, detail, "")
+			tab := renderTaskDetail(task, detail, "chaining")
+			for _, want := range tc.want {
+				if !strings.Contains(full, want) {
+					t.Errorf("full detail is missing %q:\n%s", want, full)
+				}
+				if !strings.Contains(tab, want) {
+					t.Errorf("chaining tab is missing %q:\n%s", want, tab)
+				}
+			}
+		})
 	}
 }
 

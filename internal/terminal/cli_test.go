@@ -2257,6 +2257,170 @@ func TestCLIStatusMultipleProjectsIsGlobalAndUnambiguous(t *testing.T) {
 	}
 }
 
+func TestCLIStatusWorkerCapacityShowsGlobalAndSelectedProjectScopes(t *testing.T) {
+	cases := []struct {
+		name       string
+		projectRef string
+		global     string
+		projects   string
+		want       []string
+		unwanted   []string
+	}{
+		{
+			name:       "selected project at cap while global has room",
+			projectRef: "demo",
+			global:     `{"total_running":1,"max_workers":4,"queue_size":2,"available_slots":3}`,
+			projects:   `[{"id":"p1","name":"demo","running":2,"queue_size":1,"max_workers":2}]`,
+			want:       []string{"Global · 1 running / 4 max, 2 queued, 3 free · Active", "Project · 2 running / 2 max, 1 queued · At capacity"},
+		},
+		{
+			name:       "global full while selected project has room",
+			projectRef: "demo",
+			global:     `{"total_running":4,"max_workers":4,"queue_size":3,"available_slots":0}`,
+			projects:   `[{"id":"p1","name":"demo","running":1,"queue_size":2,"max_workers":3}]`,
+			want:       []string{"Global · 4 running / 4 max, 3 queued, 0 free · At capacity", "Project · 1 running / 3 max, 2 queued · Active"},
+		},
+		{
+			name:       "inherited project limit",
+			projectRef: "demo",
+			global:     `{"total_running":1,"max_workers":0,"queue_size":0}`,
+			projects:   `[{"id":"p1","name":"demo","running":1,"queue_size":0}]`,
+			want:       []string{"Global · 1 running / Unlimited, 0 queued · Active", "Project · 1 running, 0 queued, No limit · Active"},
+			unwanted:   []string{"Project · 1 running / 0 max", "Project · 1 running · At capacity"},
+		},
+		{
+			name:       "zero project limit means no limit",
+			projectRef: "demo",
+			global:     `{"total_running":0,"max_workers":4,"available_slots":4}`,
+			projects:   `[{"id":"p1","name":"demo","running":0,"max_workers":0}]`,
+			want:       []string{"Project · 0 running, 0 queued, No limit · Idle"},
+		},
+		{
+			name:       "project selection picks matching capacity row",
+			projectRef: "other",
+			global:     `{"total_running":1,"max_workers":4,"available_slots":3}`,
+			projects:   `[{"id":"p1","name":"demo","running":2,"max_workers":2},{"id":"p2","name":"other","running":1,"queue_size":3,"max_workers":4}]`,
+			want:       []string{"other", "Project · 1 running / 4 max, 3 queued · Active"},
+			unwanted:   []string{"Project · 2 running / 2 max", "At capacity"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":          cliProjects,
+				"/api/capacity/global":   tc.global,
+				"/api/capacity/projects": tc.projects,
+				"/auth/me":               `{"authenticated":false}`,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, tc.projectRef, []string{"status"}, false, false); err != nil {
+				t.Fatalf("status failed: %v", err)
+			}
+			got := stripANSI(out.String())
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("status missing %q:\n%s", want, got)
+				}
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("status contains %q:\n%s", unwanted, got)
+				}
+			}
+			if got := rec.count("GET", "/api/capacity/projects"); got != 1 {
+				t.Errorf("selected-project status made %d capacity lookups, want 1:\n%s", got, rec.all())
+			}
+		})
+	}
+}
+
+func TestCLIStatusProjectCapacityFailurePreservesGlobalCapacity(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		switch r.URL.Path {
+		case "/api/projects":
+			_, _ = io.WriteString(w, cliProjects)
+		case "/api/capacity/global":
+			_, _ = io.WriteString(w, `{"total_running":4,"max_workers":4,"available_slots":0}`)
+		case "/api/capacity/projects":
+			http.Error(w, "project capacity offline", http.StatusServiceUnavailable)
+		case "/auth/me":
+			_, _ = io.WriteString(w, `{"authenticated":false}`)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed on best-effort project capacity error: %v", err)
+	}
+	got := strings.ToLower(stripANSI(out.String()))
+	for _, want := range []string{"global · 4 running / 4 max", "at capacity", "project capacity unavailable", "partial failure"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+	if rec.count("GET", "/api/capacity/projects") != 1 {
+		t.Fatalf("project capacity failure made an unexpected request count:\n%s", rec.all())
+	}
+}
+
+func TestCLIStatusWithoutSelectedProjectSkipsProjectCapacityLookup(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":        cliProjects,
+		"/api/capacity/global": `{"total_running":1,"max_workers":4,"available_slots":3}`,
+		"/auth/me":             `{"authenticated":false}`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	got := stripANSI(out.String())
+	if !strings.Contains(got, "Global · 1 running / 4 max") {
+		t.Fatalf("status did not preserve global capacity without project selection:\n%s", got)
+	}
+	if strings.Contains(got, "project workers") {
+		t.Fatalf("unselected status rendered project capacity:\n%s", got)
+	}
+	if rec.count("GET", "/api/capacity/projects") != 0 {
+		t.Fatalf("unselected status made a project capacity lookup:\n%s", rec.all())
+	}
+}
+
+func TestInteractiveStatusRefreshesSelectedProjectCapacity(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/capacity/projects":    `[{"id":"p1","name":"demo","running":2,"queue_size":1,"max_workers":2},{"id":"p2","name":"other","running":0,"max_workers":0}]`,
+		"/api/alerts/pending-count": `{"count":1}`,
+		"/api/tasks/status-counts":  `{"active_tasks":2,"queued_tasks":1}`,
+	})
+	m := New(c)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+	m.capacity = &client.GlobalCapacity{MaxWorkers: 4, TotalRunning: 1, QueueSize: 2, AvailableSlots: 3}
+	m.connected = true
+	m.connChecked = true
+
+	m = runLine(t, m, "/status")
+	got := stripANSI(m.renderStatus())
+	for _, want := range []string{"Global · 1 running / 4 max", "Project · 2 running / 2 max, 1 queued · At capacity", "1 pending approvals", "2 active, 1 queued"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("interactive status missing %q:\n%s", want, got)
+		}
+	}
+	if rec.count("GET", "/api/capacity/projects") != 1 {
+		t.Fatalf("interactive /status made %d project capacity lookups:\n%s", rec.count("GET", "/api/capacity/projects"), rec.all())
+	}
+}
+
 func TestCLIStatusZeroProjectsSkipsScopedCounts(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":        `{"projects":[]}`,
@@ -2282,6 +2446,9 @@ func TestCLIStatusZeroProjectsSkipsScopedCounts(t *testing.T) {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("zero-project status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
+	}
+	if rec.count("GET", "/api/capacity/projects") != 0 {
+		t.Fatalf("zero-project status made a per-project capacity request:\n%s", rec.all())
 	}
 	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
 		t.Fatalf("zero-project status made scoped requests:\n%s", rec.all())
@@ -2724,11 +2891,12 @@ func TestCLIStatusPreservesAuthRequiredAndOfflineOutput(t *testing.T) {
 
 func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	const alertsJSON = `{"count":1}`
-	const tasksJSON = `{"active_tasks":2,"queued_tasks":1}`
+	const tasksJSON = `{"active_tasks":2,"queued_tasks":1,"failed_tasks":3}`
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":             cliProjects,
 		"/api/alerts/pending-count": alertsJSON,
 		"/api/tasks/status-counts":  tasksJSON,
+		"/api/capacity/projects":    `[{"id":"p1","name":"demo","running":1,"queue_size":0,"max_workers":4}]`,
 	})
 
 	var out bytes.Buffer
@@ -2737,7 +2905,13 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	}
 	got := stripANSI(out.String())
 	selectedProjectRows := statusRowsForKey(got, "project")
-	if len(selectedProjectRows) != 1 || normalizedStatusRow(selectedProjectRows[0]) != "project demo" {
+	var selectedProject []string
+	for _, row := range selectedProjectRows {
+		if normalizedStatusRow(row) == "project demo" {
+			selectedProject = append(selectedProject, row)
+		}
+	}
+	if len(selectedProject) != 1 {
 		t.Fatalf("selected-project status row = %v, want exactly project demo\n%s", selectedProjectRows, got)
 	}
 	projectRows := statusRowsForKey(got, "projects")
@@ -2750,10 +2924,13 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	if !rec.saw("GET", "/api/tasks/status-counts") {
 		t.Errorf("expected compact task-count fetch during CLI status:\n%s", rec.all())
 	}
+	if !rec.saw("GET", "/api/capacity/projects") {
+		t.Errorf("expected selected-project capacity fetch during CLI status:\n%s", rec.all())
+	}
 	if rec.saw("GET", "/alerts") || rec.saw("GET", "/tasks") {
 		t.Errorf("CLI status fetched a full collection:\n%s", rec.all())
 	}
-	for _, path := range []string{"/api/alerts/pending-count", "/api/tasks/status-counts"} {
+	for _, path := range []string{"/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("CLI status made %d GET requests to %s, want exactly 1:\n%s", got, path, rec.all())
 		}
@@ -2761,8 +2938,8 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	if !strings.Contains(got, "1 pending approvals") {
 		t.Errorf("status missing pending alert count:\n%s", got)
 	}
-	if !strings.Contains(got, "2 active, 1 queued") {
-		t.Errorf("status missing task counts:\n%s", got)
+	if !strings.Contains(got, "2 active, 1 queued, 3 failed") || !strings.Contains(got, "review with /tasks") {
+		t.Errorf("status missing task counts or failed-task route:\n%s", got)
 	}
 	if strings.Contains(got, "none pending") || strings.Contains(got, "none active") {
 		t.Errorf("status rendered zero-count placeholders despite mocked counts:\n%s", got)
@@ -2813,7 +2990,7 @@ func TestCLIStatusAuthFailurePreservesSuccessfulOverlappedCounts(t *testing.T) {
 			t.Errorf("status output missing %q:\n%s", want, got)
 		}
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -2847,7 +3024,7 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 			case "/auth/me":
 				_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
 			}
-		case "/api/alerts/pending-count", "/api/tasks/status-counts":
+		case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
 			mu.Lock()
 			if !projectCompleted {
 				scopedStartedEarly = true
@@ -2856,8 +3033,10 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 			w.Header().Set("Content-Type", "application/json")
 			if r.URL.Path == "/api/alerts/pending-count" {
 				_, _ = io.WriteString(w, `{"count":0}`)
-			} else {
+			} else if r.URL.Path == "/api/tasks/status-counts" {
 				_, _ = io.WriteString(w, `{"active_tasks":0,"queued_tasks":0}`)
+			} else {
+				_, _ = io.WriteString(w, `[{"id":"p1","name":"demo","running":0,"max_workers":2}]`)
 			}
 		default:
 			http.NotFound(w, r)
@@ -2901,7 +3080,7 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 	if early {
 		t.Fatal("project-scoped counts started before project selection completed")
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -2910,7 +3089,7 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 
 func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T) {
 	globalStarted := make(chan string, 2)
-	countsStarted := make(chan string, 2)
+	countsStarted := make(chan string, 3)
 	releaseGlobal := make(chan struct{})
 	projectReady := make(chan struct{})
 	var releaseOnce sync.Once
@@ -2932,16 +3111,19 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 			} else {
 				_, _ = io.WriteString(w, `{"total_running":1,"max_workers":4,"available_slots":3}`)
 			}
-		case "/api/alerts/pending-count", "/api/tasks/status-counts":
-			if got := r.URL.RawQuery; got != "project_id=p1" {
-				t.Errorf("%s query = %q, want exact selected project_id", r.URL.Path, got)
+		case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
+			if r.URL.Path != "/api/capacity/projects" && r.URL.RawQuery != "project_id=p1" {
+				t.Errorf("%s query = %q, want exact selected project_id", r.URL.Path, r.URL.RawQuery)
 			}
 			countsStarted <- r.URL.Path
 			w.Header().Set("Content-Type", "application/json")
-			if r.URL.Path == "/api/alerts/pending-count" {
+			switch r.URL.Path {
+			case "/api/alerts/pending-count":
 				_, _ = io.WriteString(w, `{"count":2}`)
-			} else {
+			case "/api/tasks/status-counts":
 				_, _ = io.WriteString(w, `{"active_tasks":3,"queued_tasks":1}`)
+			default:
+				_, _ = io.WriteString(w, `[{"id":"p1","name":"demo","running":1,"max_workers":2}]`)
 			}
 		default:
 			http.NotFound(w, r)
@@ -2982,6 +3164,11 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 	case <-time.After(time.Second):
 		t.Fatal("second scoped count did not start while global checks were blocked")
 	}
+	select {
+	case <-countsStarted:
+	case <-time.After(time.Second):
+		t.Fatal("project capacity lookup did not start while global checks were blocked")
+	}
 	releaseOnce.Do(func() { close(releaseGlobal) })
 	select {
 	case err := <-result:
@@ -2991,7 +3178,7 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 	case <-time.After(time.Second):
 		t.Fatal("status did not complete after releasing global checks")
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -2999,8 +3186,8 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 }
 
 func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t *testing.T) {
-	started := make(chan string, 4)
-	canceled := make(chan string, 4)
+	started := make(chan string, 5)
+	canceled := make(chan string, 5)
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.recordURL(r.Method, r.URL.RequestURI())
@@ -3008,7 +3195,7 @@ func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t 
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts":
+		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
 			if strings.HasPrefix(r.URL.Path, "/api/alerts/") || strings.HasPrefix(r.URL.Path, "/api/tasks/") {
 				if got := r.URL.RawQuery; got != "project_id=p1" {
 					t.Errorf("%s query = %q, want exact selected project_id", r.URL.Path, got)
@@ -3033,8 +3220,8 @@ func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t 
 	go func() {
 		result <- RunCLIContext(ctx, c, &bytes.Buffer{}, "", []string{"status"}, false, false)
 	}()
-	seen := make(map[string]bool, 4)
-	for len(seen) < 4 {
+	seen := make(map[string]bool, 5)
+	for len(seen) < 5 {
 		select {
 		case path := <-started:
 			seen[path] = true
@@ -3051,8 +3238,8 @@ func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t 
 	case <-time.After(time.Second):
 		t.Fatal("canceled status did not return promptly")
 	}
-	canceledSeen := make(map[string]bool, 4)
-	for len(canceledSeen) < 4 {
+	canceledSeen := make(map[string]bool, 5)
+	for len(canceledSeen) < 5 {
 		select {
 		case path := <-canceled:
 			canceledSeen[path] = true
@@ -3060,7 +3247,7 @@ func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t 
 			t.Fatalf("not every started request observed cancellation: %v", canceledSeen)
 		}
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("canceled status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -3068,8 +3255,8 @@ func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t 
 }
 
 func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *testing.T) {
-	started := make(chan string, 4)
-	canceled := make(chan string, 4)
+	started := make(chan string, 5)
+	canceled := make(chan string, 5)
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec.recordURL(r.Method, r.URL.RequestURI())
@@ -3077,7 +3264,7 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts":
+		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
 			started <- r.URL.Path
 			<-r.Context().Done()
 			canceled <- r.URL.Path
@@ -3097,8 +3284,8 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 	go func() {
 		result <- RunCLIContext(ctx, c, &bytes.Buffer{}, "", []string{"status"}, false, false)
 	}()
-	seen := make(map[string]bool, 4)
-	for len(seen) < 4 {
+	seen := make(map[string]bool, 5)
+	for len(seen) < 5 {
 		select {
 		case path := <-started:
 			seen[path] = true
@@ -3114,8 +3301,8 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 	case <-time.After(2 * time.Second):
 		t.Fatal("deadline status did not return promptly")
 	}
-	canceledSeen := make(map[string]bool, 4)
-	for len(canceledSeen) < 4 {
+	canceledSeen := make(map[string]bool, 5)
+	for len(canceledSeen) < 5 {
 		select {
 		case path := <-canceled:
 			canceledSeen[path] = true
@@ -3123,7 +3310,7 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 			t.Fatalf("not every started request observed deadline cancellation: %v", canceledSeen)
 		}
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("deadline status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -3169,7 +3356,7 @@ func TestCLIStatusLatencyOverlapsBalancedAndSlowDiscovery(t *testing.T) {
 				switch r.URL.Path {
 				case "/api/projects":
 					delay = tc.project
-				case "/api/alerts/pending-count", "/api/tasks/status-counts":
+				case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
 					delay = tc.counts
 				}
 				time.Sleep(delay)
@@ -3259,7 +3446,7 @@ func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
 	slices.Sort(durations)
 	median := durations[len(durations)/2]
 
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
 		if got := rec.count("GET", path); got != runs {
 			t.Errorf("delayed status made %d GET requests to %s, want %d:\n%s", got, path, runs, rec.all())
 		}
@@ -10186,6 +10373,182 @@ func TestCLIJSONTasksShow(t *testing.T) {
 	}
 }
 
+func TestCLIJSONTasksShowSelectedTabs(t *testing.T) {
+	const fullID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const title = "Refactor the API"
+	const detailTabPage = `<div data-task-id="TASK_ID" data-project-id="p1" data-task-status="running" data-task-category="active">
+		<h2 class="font-bold">Refactor the API</h2>
+		<div id="tab-details">details payload</div>
+		<div id="tab-chat" hx-get="/tasks/TASK_ID/thread"></div>
+		<div id="tab-changes" hx-get="/tasks/TASK_ID/changes"></div>
+		<div id="tab-schedules">schedules payload</div>
+		<div id="tab-chaining">chaining payload</div>
+		<div id="tab-attachments">attachments payload</div>
+		<div id="tab-lifecycle">lifecycle payload</div>
+	</div>`
+	const thread = `<div>thread payload</div>`
+	const changes = `<div>changes payload</div>`
+
+	for _, tc := range []struct {
+		name      string
+		taskRef   string
+		taskID    string
+		tab       string
+		wantTab   string
+		wantData  string
+		canonical bool
+	}{
+		{name: "changes by full ID", taskRef: fullID, taskID: fullID, tab: "changes", wantTab: "changes", wantData: "changes payload", canonical: true},
+		{name: "changes by title", taskRef: title, taskID: "t-1", tab: "changes", wantTab: "changes", wantData: "changes payload"},
+		{name: "diff alias by full ID", taskRef: fullID, taskID: fullID, tab: "diff", wantTab: "changes", wantData: "changes payload", canonical: true},
+		{name: "details", taskRef: title, taskID: "t-1", tab: "details", wantTab: "details", wantData: "details payload"},
+		{name: "thread alias", taskRef: title, taskID: "t-1", tab: "chat", wantTab: "thread", wantData: "thread payload"},
+		{name: "schedules", taskRef: title, taskID: "t-1", tab: "schedules", wantTab: "schedules", wantData: "schedules payload"},
+		{name: "schedule alias", taskRef: title, taskID: "t-1", tab: "schedule", wantTab: "schedules", wantData: "schedules payload"},
+		{name: "chaining", taskRef: title, taskID: "t-1", tab: "chaining", wantTab: "chaining", wantData: "chaining payload"},
+		{name: "chain alias", taskRef: title, taskID: "t-1", tab: "chain", wantTab: "chaining", wantData: "chaining payload"},
+		{name: "attachments", taskRef: title, taskID: "t-1", tab: "attachments", wantTab: "attachments", wantData: "attachments payload"},
+		{name: "attachment alias", taskRef: title, taskID: "t-1", tab: "attach", wantTab: "attachments", wantData: "attachments payload"},
+		{name: "lifecycle", taskRef: title, taskID: "t-1", tab: "lifecycle", wantTab: "lifecycle", wantData: "lifecycle payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			page := strings.ReplaceAll(detailTabPage, "TASK_ID", tc.taskID)
+			bodies := map[string]string{
+				"/api/projects":                    cliProjects,
+				"/tasks/" + tc.taskID:              page,
+				"/tasks/" + tc.taskID + "/thread":  thread,
+				"/tasks/" + tc.taskID + "/changes": changes,
+			}
+			if !tc.canonical {
+				bodies["/tasks"] = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
+			}
+			c, _ := cliServer(t, bodies)
+
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"tasks", "show", tc.taskRef, tc.tab}, false, true); err != nil {
+				t.Fatalf("tasks show %s --json failed: %v", tc.tab, err)
+			}
+			var decoded struct {
+				Task client.Task `json:"task"`
+				Tab  string      `json:"tab"`
+				Data string      `json:"data"`
+			}
+			got := strings.TrimSpace(out.String())
+			if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+				t.Fatalf("output is not selected-tab JSON: %v\noutput: %s", err, got)
+			}
+			if decoded.Task.ID != tc.taskID || decoded.Task.Title != title {
+				t.Errorf("task identity = {id:%q title:%q}, want {%q %q}", decoded.Task.ID, decoded.Task.Title, tc.taskID, title)
+			}
+			if decoded.Tab != tc.wantTab || decoded.Data != tc.wantData {
+				t.Errorf("selected tab = %q, data = %q; want %q and %q", decoded.Tab, decoded.Data, tc.wantTab, tc.wantData)
+			}
+		})
+	}
+}
+
+func TestCLIJSONTasksShowWithoutTabKeepsTaskCardShape(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
+	c, _ := cliServer(t, map[string]string{"/api/projects": cliProjects, "/tasks": board})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "show", "t-1"}, false, true); err != nil {
+		t.Fatalf("tasks show --json failed: %v", err)
+	}
+	got := strings.TrimSpace(out.String())
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(got), &object); err != nil {
+		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, got)
+	}
+	var task client.Task
+	if err := json.Unmarshal([]byte(got), &task); err != nil {
+		t.Fatalf("output is not a task card: %v\noutput: %s", err, got)
+	}
+	if task.ID != "t-1" || task.Title != "Refactor the API" {
+		t.Fatalf("task card = %+v", task)
+	}
+	if _, ok := object["task"]; ok {
+		t.Fatalf("unqualified task card unexpectedly uses the selected-tab envelope: %s", got)
+	}
+	if _, ok := object["tab"]; ok {
+		t.Fatalf("unqualified task card unexpectedly names a tab: %s", got)
+	}
+}
+
+func TestCLIJSONTasksShowReviewTabIncludesTaskAndComments(t *testing.T) {
+	const board = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects":      cliProjects,
+		"/tasks":             board,
+		"/tasks/t-1/reviews": taskReviewHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "show", "t-1", "reviews"}, false, true); err != nil {
+		t.Fatalf("tasks show reviews --json failed: %v", err)
+	}
+	var decoded struct {
+		Task client.Task            `json:"task"`
+		Tab  string                 `json:"tab"`
+		Data []client.ReviewComment `json:"data"`
+	}
+	got := strings.TrimSpace(out.String())
+	if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+		t.Fatalf("output is not review-tab JSON: %v\noutput: %s", err, got)
+	}
+	if decoded.Task.ID != "t-1" || decoded.Task.Title != "Refactor the API" || decoded.Tab != "review" {
+		t.Fatalf("review task envelope = task %+v, tab %q", decoded.Task, decoded.Tab)
+	}
+	if len(decoded.Data) != 1 || decoded.Data[0].ID != "rc-1" || decoded.Data[0].FilePath != "internal/client/tasks.go" {
+		t.Fatalf("review comments = %+v", decoded.Data)
+	}
+}
+
+func TestCLIJSONTasksShowSelectedTabLoadFailureReturnsErrorWithoutText(t *testing.T) {
+	const taskID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const page = `<div data-task-id="` + taskID + `" data-project-id="p1" data-task-status="running" data-task-category="active">
+		<h2 class="font-bold">Broken changes</h2>
+		<div id="tab-details">details</div>
+		<div id="tab-chat"></div>
+		<div id="tab-changes"></div>
+		<div id="tab-lifecycle">lifecycle</div>
+	</div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case "/tasks/" + taskID:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, page)
+		case "/tasks/" + taskID + "/thread":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div>thread</div>`)
+		case "/tasks/" + taskID + "/changes":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":"changes fetch failed"}`)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "demo", []string{"tasks", "show", taskID, "changes"}, false, true)
+	if err == nil || !strings.Contains(err.Error(), "changes") {
+		t.Fatalf("tasks show changes --json error = %v, want a changes load error", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "" {
+		t.Fatalf("failed tab emitted non-JSON or misleading output: %q", got)
+	}
+}
+
 func TestCLILifecycleJSONEmptyExecutionsPreservesPageEnvelope(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":                       cliProjects,
@@ -10609,7 +10972,20 @@ func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing
 					}
 					got := strings.TrimSpace(out.String())
 					var reviews []client.ReviewComment
-					if err := json.Unmarshal([]byte(got), &reviews); err != nil {
+					if path.name == "show review tab" {
+						var envelope struct {
+							Task client.Task            `json:"task"`
+							Tab  string                 `json:"tab"`
+							Data []client.ReviewComment `json:"data"`
+						}
+						if err := json.Unmarshal([]byte(got), &envelope); err != nil {
+							t.Fatalf("%v output is not valid review-tab JSON: %v\noutput: %s", path.name, err, got)
+						}
+						if envelope.Task.ID != "t-1" || envelope.Tab != "review" {
+							t.Fatalf("%v task envelope = %+v tab %q", path.name, envelope.Task, envelope.Tab)
+						}
+						reviews = envelope.Data
+					} else if err := json.Unmarshal([]byte(got), &reviews); err != nil {
 						t.Fatalf("%v output is not valid JSON: %v\noutput: %s", path.name, err, got)
 					}
 					if len(reviews) != tc.wantCount {
@@ -10617,6 +10993,15 @@ func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing
 					}
 					if tc.wantCount == 1 && (reviews[0].ID != "rc-1" || reviews[0].FilePath != "internal/client/tasks.go" || reviews[0].LineNumber != 42) {
 						t.Fatalf("%v returned unexpected review: %+v", path.name, reviews[0])
+					}
+					normalized, err := json.Marshal(reviews)
+					if err != nil {
+						t.Fatalf("marshal normalized reviews: %v", err)
+					}
+					if want == "" {
+						want = string(normalized)
+					} else if string(normalized) != want {
+						t.Errorf("%v review data differs from the first read path: %s\nwant: %s", path.name, normalized, want)
 					}
 					if got := rec.count("GET", "/api/tasks/reference-catalog"); got != 1 {
 						t.Fatalf("%v should make exactly one compact catalog request, got %d:\n%s", path.name, got, rec.all())
@@ -10626,11 +11011,6 @@ func TestCLIJSONTaskReviewReadPathsHaveEquivalentOutputAndSingleFetch(t *testing
 					}
 					if got := rec.count("GET", "/tasks/t-1/reviews"); got != 1 {
 						t.Fatalf("%v should make exactly one review request, got %d:\n%s", path.name, got, rec.all())
-					}
-					if want == "" {
-						want = got
-					} else if got != want {
-						t.Errorf("%v JSON differs from the first read path: %s\nwant: %s", path.name, got, want)
 					}
 				})
 			}

@@ -30,6 +30,103 @@ const refreshedAttachmentRowsHTML = `<div id="attachment-list" data-project-id="
 	<div class="attachment-row"><div><p class="text-sm font-medium">trace.json</p><p class="text-xs">2.0 KB</p></div><button hx-delete="/attachments/att-2?project_id=p1"></button></div>
 </div>`
 
+const ambiguousAttachmentTaskBoardHTML = `<div>
+	<div class="card" data-task-id="t-alpha" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-alpha" title="Alpha">Alpha</a></div>
+	<div class="card" data-task-id="t-alpha-beta-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-alpha-beta-1" title="Alpha Beta">Alpha Beta</a></div>
+	<div class="card" data-task-id="t-alpha-beta-2" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-alpha-beta-2" title="Alpha Beta">Alpha Beta</a></div>
+</div>`
+
+const ambiguousAttachmentTaskCatalog = `{"tasks":[
+	{"id":"t-alpha","project_id":"p1","title":"Alpha","category":"backlog","status":"pending","attachments":[]},
+	{"id":"t-alpha-beta-1","project_id":"p1","title":"Alpha Beta","category":"backlog","status":"pending","attachments":[]},
+	{"id":"t-alpha-beta-2","project_id":"p1","title":"Alpha Beta","category":"backlog","status":"pending","attachments":[]}
+]}`
+
+func TestTasksAttachmentsUploadRejectsLaterAmbiguousTaskPrefix(t *testing.T) {
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Beta"), []byte("attachment"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":                           ambiguousAttachmentTaskBoardHTML,
+		"GET /api/tasks/reference-catalog": ambiguousAttachmentTaskCatalog,
+	})
+	m = runLine(t, m, "/tasks attachments add Alpha Beta")
+
+	for _, request := range rec.urlsSnapshot() {
+		if strings.HasPrefix(request, "POST ") {
+			t.Fatalf("ambiguous upload sent a POST %q:\n%s", request, rec.all())
+		}
+	}
+	if !strings.Contains(stripANSI(transcript(m)), "ambiguous") {
+		t.Fatalf("ambiguous upload did not report the target ambiguity:\n%s", transcript(m))
+	}
+}
+
+func TestAmbiguousTaskPrefixStopsAttachmentAndThreadInputCommands(t *testing.T) {
+	t.Run("delete", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/tasks":                           ambiguousAttachmentTaskBoardHTML,
+			"GET /api/tasks/reference-catalog": ambiguousAttachmentTaskCatalog,
+		})
+		m = runLine(t, m, "/tasks attachments delete Alpha Beta att-1")
+		if m.pendingConfirmation != nil {
+			t.Fatal("ambiguous delete opened a confirmation for a guessed task")
+		}
+		if rec.saw("DELETE", "/attachments/att-1") || rec.saw("GET", "/tasks/t-alpha") {
+			t.Fatalf("ambiguous delete looked up or mutated an attachment:\n%s", rec.all())
+		}
+		if !strings.Contains(stripANSI(transcript(m)), "ambiguous") {
+			t.Fatalf("ambiguous delete did not report the target ambiguity:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("download", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/tasks":                           ambiguousAttachmentTaskBoardHTML,
+			"GET /api/tasks/reference-catalog": ambiguousAttachmentTaskCatalog,
+		})
+		m = runLine(t, m, "/tasks attachments download Alpha Beta att-1")
+		if rec.saw("GET", "/attachments/att-1") || rec.saw("GET", "/tasks/t-alpha") {
+			t.Fatalf("ambiguous download looked up or fetched an attachment:\n%s", rec.all())
+		}
+		if !strings.Contains(stripANSI(transcript(m)), "ambiguous") {
+			t.Fatalf("ambiguous download did not report the target ambiguity:\n%s", transcript(m))
+		}
+	})
+
+	t.Run("thread input cancellation", func(t *testing.T) {
+		m, rec := dispatchModel(t, map[string]string{
+			"/tasks": ambiguousAttachmentTaskBoardHTML,
+		})
+		m = runLine(t, m, "/tasks inputs cancel Alpha Beta input-1")
+		if rec.saw("GET", "/tasks/t-alpha/thread/pending-inputs") || rec.saw("POST", "/thread-inputs/input-1/cancel") {
+			t.Fatalf("ambiguous thread-input target reached lookup or mutation:\n%s", rec.all())
+		}
+		for _, request := range rec.urlsSnapshot() {
+			if !strings.HasPrefix(request, "GET ") {
+				t.Fatalf("ambiguous thread-input target sent a mutation request %q:\n%s", request, rec.all())
+			}
+		}
+		if !strings.Contains(stripANSI(transcript(m)), "ambiguous") {
+			t.Fatalf("ambiguous thread-input target did not report the ambiguity:\n%s", transcript(m))
+		}
+	})
+}
+
 func TestTasksAttachmentsAddDispatchesAndRendersRefreshedFiles(t *testing.T) {
 	dir := t.TempDir()
 	firstPath := filepath.Join(dir, "request.txt")

@@ -117,12 +117,13 @@ After the server starts, verify its health with `/status` in the TUI or
 `openvibely-terminal status` in a shell. A local server normally listens at
 `http://localhost:3001`.
 
-Stop a setup-started local backend manually: the terminal does not track a backend
-PID, so stop only the OpenVibely process you recognize. On macOS/Linux, identify
-the local listener with `lsof -nP -iTCP:3001 -sTCP:LISTEN`, then stop that PID
-with `kill <pid>`; on Windows, use Task Manager or `netstat -ano | findstr :3001`
-followed by `taskkill /PID <pid>`. Reconnect to a running backend with `/status`
-or `openvibely-terminal -server http://localhost:3001 status`. Update a local backend
+Stop a setup-started local backend manually after its health check succeeds: it continues
+running independently, and the terminal does not track a backend PID, so stop only the
+OpenVibely process you recognize. On macOS/Linux, identify the local listener with
+`lsof -nP -iTCP:3001 -sTCP:LISTEN`, then stop that PID with `kill <pid>`; on Windows,
+use Task Manager or `netstat -ano | findstr :3001` followed by `taskkill /PID <pid>`.
+Reconnect to a running backend with `/status` or
+`openvibely-terminal -server http://localhost:3001 status`. Update a local backend
 by stopping it first, then running the documented installer again or
 `openvibely-terminal --force setup bootstrap --install`, which downloads over
 HTTPS, allows installer file changes, starts again, and waits for health.
@@ -604,6 +605,12 @@ one:
 Tabs: `details`, `thread`, `changes`, `review`, `schedules`, `chaining`,
 `attachments`, `lifecycle`. Lazy thread, changes, and lifecycle failures are shown as explicit
 errors rather than empty tabs; successfully loaded sections remain visible.
+
+With `--json`, `tasks show <ref>` without a tab keeps returning the task-card
+object. Selecting a tab returns an envelope with the task identity, canonical
+tab name, and selected tab data, for example `{"task":{"id":"…"},"tab":"changes","data":"…"}`.
+For the `review` tab, `data` is the array of review comments. A tab load failure
+returns a command error and does not emit human-rendered text as JSON.
 
 ### Task review comments
 

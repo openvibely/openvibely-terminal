@@ -504,6 +504,109 @@ func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 	}
 }
 
+func TestGetTaskParsesSavedChainingConfiguration(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	controlMarkup := func(enabled, trigger, category, modelID, modelLabel, override string) string {
+		return `<form data-chain-form>
+			<input type="hidden" name="chain_enabled" value="` + enabled + `">
+			<select name="chain_trigger"><option value="on_completion"` + selectedAttribute(trigger == "on_completion") + `>On task completion</option><option value="on_planning_complete"` + selectedAttribute(trigger == "on_planning_complete") + `>On planning complete</option></select>
+			<select name="chain_child_category"><option value=""` + selectedAttribute(category == "") + `>Same as parent</option><option value="active"` + selectedAttribute(category == "active") + `>Active (run immediately)</option><option value="backlog"` + selectedAttribute(category == "backlog") + `>Backlog</option></select>
+			<select name="chain_child_agent_id"><option value="">Use default model</option><option value="` + modelID + `"` + selectedAttribute(modelID != "") + `>` + modelLabel + `</option></select>
+			<input type="text" name="chain_child_model" value="` + override + `">
+		</form>`
+	}
+	cases := []struct {
+		name       string
+		configured string
+		enabled    string
+		trigger    string
+		category   string
+		modelID    string
+		model      string
+		override   string
+		want       []string
+	}{
+		{
+			name: "absent chain ignores stale empty state and confirmation copy", configured: "false",
+			enabled: "false", trigger: "on_completion",
+			want: []string{"No follow-up configured."},
+		},
+		{
+			name: "enabled completion chain shows category model and override", configured: "true",
+			enabled: "true", trigger: "on_completion", category: "active", modelID: "model-1", model: "Claude Sonnet", override: "sonnet-v3",
+			want: []string{"Follow-up task: enabled", "Trigger: After task completion", "Child category: Active", "Child model: Claude Sonnet", "Child model override: sonnet-v3"},
+		},
+		{
+			name: "enabled planning chain shows backlog and default model", configured: "true",
+			enabled: "true", trigger: "on_planning_complete", category: "backlog",
+			want: []string{"Follow-up task: enabled", "Trigger: After planning completes", "Child category: Backlog", "Child model: Use default model"},
+		},
+		{
+			name: "saved disabled chain remains configured", configured: "true",
+			enabled: "false", trigger: "on_completion", category: "backlog", modelID: "model-2", model: "GPT 5",
+			want: []string{"Follow-up task: disabled", "Trigger: After task completion", "Child category: Backlog", "Child model: GPT 5"},
+		},
+		{
+			name: "saved disabled default configuration uses configured marker", configured: "true",
+			enabled: "false", trigger: "on_completion",
+			want: []string{"Follow-up task: disabled", "Trigger: After task completion", "Child category: Same as parent", "Child model: Use default model"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var requestCount atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requestCount.Add(1)
+				if r.URL.Path != "/tasks/"+taskID || r.URL.Query().Get("project_id") != "p1" {
+					t.Fatalf("unexpected scoped request %s", r.URL.RequestURI())
+				}
+				markup := `<div data-task-id="` + taskID + `" data-project-id="p1" data-task-status="running" data-task-category="active">
+					<h2 class="font-bold">Exact task</h2>
+					<div id="tab-chaining"><div id="task-chain-panel" data-configured="` + tc.configured + `">
+						<p data-chain-empty>No follow-up configured. Stale browser empty state.</p>
+						` + controlMarkup(tc.enabled, tc.trigger, tc.category, tc.modelID, tc.model, tc.override) + `
+						<dialog hidden><p>DELETE CONFIRMATION COPY MUST NOT APPEAR</p></dialog>
+					</div></div>
+				</div>`
+				_, _ = io.WriteString(w, markup)
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail, err := c.GetTaskMetadataForProjectExact(context.Background(), taskID, "p1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if detail.Task.ID != taskID || detail.Task.ProjectID != "p1" {
+				t.Fatalf("task identity = %q/%q, want %q/p1", detail.Task.ID, detail.Task.ProjectID, taskID)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(detail.Chaining, want) {
+					t.Errorf("chaining = %q, want to contain %q", detail.Chaining, want)
+				}
+			}
+			for _, forbidden := range []string{"Stale browser empty state", "DELETE CONFIRMATION COPY"} {
+				if strings.Contains(detail.Chaining, forbidden) {
+					t.Errorf("chaining included non-configuration text %q: %q", forbidden, detail.Chaining)
+				}
+			}
+			if got := requestCount.Load(); got != 1 {
+				t.Fatalf("requests = %d, want one project-scoped detail request", got)
+			}
+		})
+	}
+}
+
+func selectedAttribute(selected bool) string {
+	if selected {
+		return ` selected="selected"`
+	}
+	return ""
+}
+
 func TestGetTaskCollectsTabs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
