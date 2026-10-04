@@ -4777,6 +4777,73 @@ func TestChatStreamDisconnectFlushesBeforeReconnect(t *testing.T) {
 	}
 }
 
+func TestChatStreamLargeUpdateAdvancesReconnectOffset(t *testing.T) {
+	requestedOffset := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestedOffset <- r.URL.Query().Get("offset")
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: done\ndata: completed\n\n")
+	}))
+	defer srv.Close()
+	streamClient, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := pendingChatStreamTestModel(t)
+	m.client = streamClient
+	payload := strings.Repeat("z", (1<<20)+37)
+
+	next, _ := m.Update(chatStreamEventMsg{
+		generation:   m.chatStreamGeneration,
+		submissionID: m.chatSubmissionID,
+		projectID:    m.pendingMsgProjectID,
+		execID:       m.chatStreamExecID,
+		event:        client.ChatOutputEvent{Data: payload},
+	})
+	m = next.(Model)
+	if m.chatStreamOffset != len([]byte(payload)) {
+		t.Fatalf("large output byte offset = %d, want %d", m.chatStreamOffset, len([]byte(payload)))
+	}
+
+	next, cmd := m.Update(chatStreamDisconnectedMsg{
+		generation:   m.chatStreamGeneration,
+		submissionID: m.chatSubmissionID,
+		projectID:    m.pendingMsgProjectID,
+		execID:       m.chatStreamExecID,
+	})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("disconnected large chat stream did not schedule recovery")
+	}
+	reconnect := m.chatStreamReconnectMessage(m.chatStreamGeneration)
+	if reconnect.offset != len([]byte(payload)) {
+		t.Fatalf("reconnect offset = %d, want delivered UTF-8 byte offset %d", reconnect.offset, len([]byte(payload)))
+	}
+
+	next, reconnectCmd := m.Update(reconnect)
+	m = next.(Model)
+	if reconnectCmd == nil {
+		t.Fatal("large chat reconnect did not start a stream")
+	}
+	defer func() {
+		if m.chatStreamCancel != nil {
+			m.chatStreamCancel()
+		}
+	}()
+	if _, ok := reconnectCmd().(chatStreamEventMsg); !ok {
+		t.Fatal("reconnected stream did not deliver its terminal frame")
+	}
+	select {
+	case gotOffset := <-requestedOffset:
+		if gotOffset != fmt.Sprint(len([]byte(payload))) {
+			t.Fatalf("reconnect request offset = %q, want %d", gotOffset, len([]byte(payload)))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconnect request was not made")
+	}
+}
+
 func TestChatStreamReconnectSchedulesProductionDelay(t *testing.T) {
 	m := pendingChatStreamTestModel(t)
 	var gotDelay time.Duration
