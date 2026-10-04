@@ -301,6 +301,40 @@ func TestMemorySelectorPreservesWarningsAndSanitizesDisplay(t *testing.T) {
 	}
 }
 
+func TestMemorySelectorOpensIndexedFilesWithQuoteCharacters(t *testing.T) {
+	for _, filename := range []string{
+		"apostrophe ' topic.md",
+		`double " topic.md`,
+		`both ' " topic.md`,
+	} {
+		t.Run(filename, func(t *testing.T) {
+			repo := t.TempDir()
+			index := "- [Quoted Topic](" + filename + ")\n- [Other Topic](other.md)\n"
+			writeTUIProjectMemory(t, repo, index, map[string]string{
+				filename:   "# Quoted Topic\n\nexact selected file body\n",
+				"other.md": "# Other Topic\n\nother file body\n",
+			})
+			m, _ := memoryDispatchModel(t, repo)
+			m = runLine(t, m, "/memory show")
+			if !m.selectorActive {
+				t.Fatalf("memory selector did not open:\n%s", transcript(m))
+			}
+			if got := m.selectorItems[0].ref; got != filename {
+				t.Fatalf("indexed selector reference = %q, want %q", got, filename)
+			}
+
+			m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "file "+filename) {
+				t.Fatalf("selected file name missing from output:\n%s", out)
+			}
+			if !strings.Contains(out, "exact selected file body") || strings.Contains(out, "other file body") {
+				t.Fatalf("selector did not open exactly %q:\n%s", filename, out)
+			}
+		})
+	}
+}
+
 func TestMemorySelectorEmptyStateIncludesWarnings(t *testing.T) {
 	m, _ := memoryDispatchModel(t, t.TempDir())
 	m = runLine(t, m, "/memory show")
