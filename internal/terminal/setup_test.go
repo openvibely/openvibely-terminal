@@ -1165,12 +1165,86 @@ func setupStartFixture(t *testing.T, healthStatus int) (string, *client.Client) 
 	return startMarker, c
 }
 
+func TestSetupCancellationBetweenHealthAndHandoffStopsBackendProcess(t *testing.T) {
+	marker, c, _ := setupRealBackendFixture(t, setupBackendHealthHealthy)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	reachedHandoff := make(chan struct{})
+	resumeHandoff := make(chan struct{})
+	handoffReleased := false
+	defer func() {
+		if !handoffReleased {
+			close(resumeHandoff)
+		}
+	}()
+	oldStart := setupStartProcess
+	setupStartProcess = func(ctx context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
+		process, err := startLocalBackendProcess(ctx, spec)
+		if err != nil {
+			return nil, err
+		}
+		return &gatedSetupBackendProcess{
+			process: process,
+			reached: reachedHandoff,
+			resume:  resumeHandoff,
+		}, nil
+	}
+	defer func() { setupStartProcess = oldStart }()
+
+	check := inspectLocalBackendSetup(runtime.GOOS, c.BaseURL(), false)
+	result := make(chan error, 1)
+	go func() {
+		_, err := runSetupBootstrap(ctx, c, check, setupOptions{action: "start"})
+		result <- err
+	}()
+	select {
+	case <-reachedHandoff:
+	case <-time.After(3 * time.Second):
+		t.Fatal("setup did not reach handoff after backend health succeeded")
+	}
+
+	// runSetupBootstrap has passed its final ctx.Err check and is now waiting
+	// inside Handoff, reproducing cancellation in the previously racy interval.
+	cancel()
+	close(resumeHandoff)
+	handoffReleased = true
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("setup result after pre-handoff cancellation = %v, want context canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("setup did not finish after pre-handoff cancellation")
+	}
+	assertHelperProcessStopped(t, marker)
+}
+
+type gatedSetupBackendProcess struct {
+	process setupBackendProcess
+	reached chan<- struct{}
+	resume  <-chan struct{}
+}
+
+func (p *gatedSetupBackendProcess) Handoff(ctx context.Context) error {
+	close(p.reached)
+	<-p.resume
+	return p.process.Handoff(ctx)
+}
+
+func (p *gatedSetupBackendProcess) Stop() {
+	p.process.Stop()
+}
+
 type testSetupBackendProcess struct {
 	stop      func()
 	handedOff bool
 }
 
-func (p *testSetupBackendProcess) Handoff() error {
+func (p *testSetupBackendProcess) Handoff(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	p.handedOff = true
 	return nil
 }
