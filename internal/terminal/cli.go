@@ -188,7 +188,7 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 		// discovery succeeds, while preserving the deterministic connection-
 		// then-counts application order below.
 		countResult := make(chan tea.Msg, 1)
-		countFetch := m.fetchStatusCounts()
+		countFetch := m.fetchStatusSnapshot(false, true)
 		go func() { countResult <- countFetch() }()
 		statusCountsResult = countResult
 	}
@@ -230,7 +230,7 @@ func RunCLIContextWithInput(ctx context.Context, c *client.Client, out io.Writer
 				return msg
 			})
 		} else {
-			m = drain(m, m.fetchStatusCounts())
+			m = drain(m, m.fetchStatusSnapshot(false, true))
 		}
 	}
 
