@@ -796,6 +796,57 @@ func TestTasksAttachmentsDownloadFailuresAreClear(t *testing.T) {
 	})
 }
 
+func TestTaskAttachmentDownloadAndDeletePickersShareScopedRows(t *testing.T) {
+	rows := `<div id="attachment-list" data-project-id="p2">` +
+		`<div class="attachment-row"><div><p class="text-sm font-medium">request.txt</p><p class="text-xs">11 B</p></div><button hx-delete="/attachments/att-1?project_id=p2"></button></div>` +
+		`<div class="attachment-row"><div><p class="text-sm font-medium">trace.json</p><p class="text-xs">2.0 KB</p></div><button hx-delete="/attachments/att-2?project_id=p2"></button></div>` +
+		`</div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"GET /api/tasks/reference-catalog": `{"tasks":[{"id":"t-1","project_id":"p2","title":"Refactor the API","category":"backlog","status":"pending"}]}`,
+		"/tasks/t-1":                       rows,
+	})
+	m.selectedID = "p2"
+
+	_, downloadCmd := taskAttachmentDownloadSelector(m, m.client, m.selectedID, "Refactor", filepath.Join(t.TempDir(), "download"), "download usage")
+	downloadMsg, ok := downloadCmd().(selectorActiveMsg)
+	if !ok {
+		t.Fatal("download picker did not return selector rows")
+	}
+	_, deleteCmd := taskAttachmentSelector(m, m.client, m.selectedID, "Refactor", "delete usage")
+	deleteMsg, ok := deleteCmd().(selectorActiveMsg)
+	if !ok {
+		t.Fatal("delete picker did not return selector rows")
+	}
+
+	if len(downloadMsg.items) != 2 || len(deleteMsg.items) != 2 {
+		t.Fatalf("picker row counts = download:%d delete:%d, want 2 each", len(downloadMsg.items), len(deleteMsg.items))
+	}
+	for i, want := range []selectorItem{
+		{ref: "att-1", label: "request.txt", detail: "11 B"},
+		{ref: "att-2", label: "trace.json", detail: "2.0 KB"},
+	} {
+		downloadItem, deleteItem := downloadMsg.items[i], deleteMsg.items[i]
+		if downloadItem.ref != want.ref || downloadItem.label != want.label || downloadItem.detail != want.detail {
+			t.Errorf("download row %d = (%q, %q, %q), want (%q, %q, %q)", i, downloadItem.ref, downloadItem.label, downloadItem.detail, want.ref, want.label, want.detail)
+		}
+		if deleteItem.ref != want.ref || deleteItem.label != want.label || deleteItem.detail != want.detail {
+			t.Errorf("delete row %d = (%q, %q, %q), want (%q, %q, %q)", i, deleteItem.ref, deleteItem.label, deleteItem.detail, want.ref, want.label, want.detail)
+		}
+		if downloadItem.ref != deleteItem.ref || downloadItem.label != deleteItem.label || downloadItem.detail != deleteItem.detail {
+			t.Errorf("picker rows differ at %d: download=%#v delete=%#v", i, downloadItem, deleteItem)
+		}
+		if downloadItem.dispatch == nil || deleteItem.dispatch == nil {
+			t.Errorf("picker row %d is missing its action dispatch", i)
+		}
+	}
+	if !rec.sawQuery("GET /api/tasks/reference-catalog?project_id=p2") || !rec.sawQuery("GET /tasks/t-1?project_id=p2") {
+		t.Fatalf("picker loading did not use the selected project scope:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	if rec.sawQuery("project_id=p1") {
+		t.Fatalf("picker loading unexpectedly used another project scope:\n%s", strings.Join(rec.urls, "\n"))
+	}
+}
+
 func TestTasksAttachmentsDownloadPickerDoesNotDumpBinaryToTerminal(t *testing.T) {
 	dir := t.TempDir()
 	oldWD, err := os.Getwd()

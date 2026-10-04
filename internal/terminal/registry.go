@@ -2042,31 +2042,40 @@ func taskAttachmentDownloadSelector(m Model, c *client.Client, projectID, taskRe
 	command := "tasks attachments download " + taskRef
 	return m, selectorFor("Attachments", command, attachmentEmptyStateHint, false,
 		func(ctx context.Context) ([]selectorItem, error) {
-			task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
-			if err != nil {
-				return nil, err
-			}
-			attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
-			if err != nil {
-				return nil, err
-			}
-			items := make([]selectorItem, 0, len(attachments))
-			for _, attachment := range attachments {
-				attachment := attachment
-				item := selectorItem{
-					ref:    attachment.ID,
-					label:  firstNonEmpty(attachment.FileName, attachment.ID),
-					detail: attachmentSizeText(attachment.FileSize),
-				}
-				item.dispatch = func(mm Model) (Model, tea.Cmd) {
-					return mm, mm.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-						return downloadTaskAttachmentResult(ctx, mm.client, projectID, task, attachment, outputPath)
-					})
-				}
-				items = append(items, item)
-			}
-			return items, nil
+			return loadTaskAttachmentSelectorItems(ctx, m, c, projectID, taskRef,
+				func(task client.Task, attachment client.Attachment) selectorItemDispatch {
+					return func(mm Model) (Model, tea.Cmd) {
+						return mm, mm.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+							return downloadTaskAttachmentResult(ctx, mm.client, projectID, task, attachment, outputPath)
+						})
+					}
+				})
 		})
+}
+
+func loadTaskAttachmentSelectorItems(ctx context.Context, m Model, c *client.Client, projectID, taskRef string, dispatch func(client.Task, client.Attachment) selectorItemDispatch) ([]selectorItem, error) {
+	task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
+	if err != nil {
+		return nil, err
+	}
+	attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]selectorItem, 0, len(attachments))
+	for _, attachment := range attachments {
+		attachment := attachment
+		item := selectorItem{
+			ref:    attachment.ID,
+			label:  firstNonEmpty(attachment.FileName, attachment.ID),
+			detail: attachmentSizeText(attachment.FileSize),
+		}
+		if dispatch != nil {
+			item.dispatch = dispatch(task, attachment)
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func downloadTaskAttachmentResult(ctx context.Context, c *client.Client, projectID string, task client.Task, attachment client.Attachment, outputPath string) (string, error) {
@@ -2332,28 +2341,12 @@ func taskAttachmentSelector(m Model, c *client.Client, projectID, taskRef, usage
 	command := "tasks attachments delete " + taskRef
 	return m, selectorFor("Attachments", command, attachmentEmptyStateHint, false,
 		func(ctx context.Context) ([]selectorItem, error) {
-			task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
-			if err != nil {
-				return nil, err
-			}
-			attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
-			if err != nil {
-				return nil, err
-			}
-			items := make([]selectorItem, 0, len(attachments))
-			for _, attachment := range attachments {
-				attachment := attachment
-				item := selectorItem{
-					ref:    attachment.ID,
-					label:  firstNonEmpty(attachment.FileName, attachment.ID),
-					detail: attachmentSizeText(attachment.FileSize),
-				}
-				item.dispatch = func(mm Model) (Model, tea.Cmd) {
-					return confirmTaskAttachmentDeletion(mm, projectID, task, attachment)
-				}
-				items = append(items, item)
-			}
-			return items, nil
+			return loadTaskAttachmentSelectorItems(ctx, m, c, projectID, taskRef,
+				func(task client.Task, attachment client.Attachment) selectorItemDispatch {
+					return func(mm Model) (Model, tea.Cmd) {
+						return confirmTaskAttachmentDeletion(mm, projectID, task, attachment)
+					}
+				})
 		})
 }
 
