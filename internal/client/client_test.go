@@ -1411,6 +1411,46 @@ func TestStreamEventsCancellation(t *testing.T) {
 	}
 }
 
+func TestStreamEventsBackpressureCancellation(t *testing.T) {
+	const frameCount = 40
+	written := make(chan struct{})
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for i := 0; i < frameCount; i++ {
+			fmt.Fprint(w, "data: {}\n\n")
+		}
+		w.(http.Flusher).Flush()
+		close(written)
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, errs := c.StreamEvents(ctx, "")
+	select {
+	case <-written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not write the event frames")
+	}
+
+	deadline := time.After(5 * time.Second)
+	for len(events) < cap(events) {
+		select {
+		case <-deadline:
+			t.Fatal("stream did not fill the event buffer")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+
+	for range events {
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("cancellation returned error: %v", err)
+		}
+	}
+}
+
 func TestReadRequestsClassifyUnauthorizedHealthAndProjects(t *testing.T) {
 	for _, status := range []int{http.StatusFound, http.StatusUnauthorized} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
