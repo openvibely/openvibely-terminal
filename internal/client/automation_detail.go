@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"regexp"
 	"sort"
@@ -242,33 +241,8 @@ func (c *Client) GetAutomationDetail(ctx context.Context, projectID, automationI
 }
 
 func (c *Client) getAutomationDetailHTML(ctx context.Context, path, projectID, automationID string) (*html.Node, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "text/html")
-	req.Header.Set("HX-Request", "true")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", path, err)
-	}
-	defer drainAndClose(resp.Body)
-
-	if isReadAuthResponse(resp) {
-		return nil, newAuthRequiredError(http.MethodGet, path, resp)
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, &AutomationNotFoundError{ID: automationID, ProjectID: projectID}
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, apiError(resp)
-	}
-	parsed, err := html.Parse(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("parsing automation detail: %w", err)
-	}
-	return parsed, nil
+	root, _, err := c.getHTMLDocument(ctx, path, &AutomationNotFoundError{ID: automationID, ProjectID: projectID}, "parsing automation detail")
+	return root, err
 }
 
 // parseAutomationDetail parses stable live-page markers and structured

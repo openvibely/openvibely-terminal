@@ -123,6 +123,27 @@ func TestGetHTMLLargeBody(t *testing.T) {
 	}
 }
 
+func TestHTMLPaginationHeadersAreParsedByPaginatedLoader(t *testing.T) {
+	transport := htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set(cardPageTotalHeader, "invalid-total")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(`<div>page</div>`)),
+			Request:    r,
+		}, nil
+	})
+	c := &Client{baseURL: "http://backend.test", http: &http.Client{Transport: transport}}
+
+	if _, _, err := c.getHTMLDocument(context.Background(), "/page", nil, ""); err != nil {
+		t.Fatalf("shared document loader parsed pagination metadata: %v", err)
+	}
+	if _, _, err := c.getHTMLPageMeta(context.Background(), "/page"); err == nil || !strings.Contains(err.Error(), "invalid "+cardPageTotalHeader) {
+		t.Fatalf("paginated loader error = %v, want invalid total header error", err)
+	}
+}
+
 // TestGetHTMLUnauthorized checks that 302 and 401 responses produce an
 // "unauthorized" error rather than a nil node.
 func TestGetHTMLUnauthorized(t *testing.T) {
