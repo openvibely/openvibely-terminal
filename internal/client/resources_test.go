@@ -4391,6 +4391,25 @@ func TestListChannelsReturnsStructuredSecretFreeRecords(t *testing.T) {
 	}
 }
 
+func TestListChannelsTreatsDisconnectedOAuthChannelsAsUnconnected(t *testing.T) {
+	c := htmlServer(t, `<div data-channel-type="slack"><span class="badge badge-warning">Disconnected</span></div><div data-channel-type="github" data-search-text="GitHub Disconnected"></div>`)
+	channels, err := c.ListChannels(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(channels) != 2 {
+		t.Fatalf("channels = %#v, want Slack and GitHub", channels)
+	}
+	for _, channel := range channels {
+		if channel.Type != "slack" && channel.Type != "github" {
+			continue
+		}
+		if channel.Connected || channel.Status != "not connected" {
+			t.Errorf("%s disconnected status = connected:%t status:%q, want false and not connected", channel.Type, channel.Connected, channel.Status)
+		}
+	}
+}
+
 func TestListChannelsParsesXSemanticStatusWithoutBackendText(t *testing.T) {
 	for _, tt := range []struct {
 		badge string

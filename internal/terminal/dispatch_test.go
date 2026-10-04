@@ -15834,6 +15834,25 @@ func TestChannelsConnectDeniedOrCanceledAuthorizationStaysRetryable(t *testing.T
 		}
 	})
 
+	t.Run("backend reports disconnected after browser denial", func(t *testing.T) {
+		page := `<div data-channel-type="slack" data-search-text="Slack Disconnected"></div>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": page})
+		m.selectedID = "selected-project"
+		m = runLine(t, m, "/channels connect slack")
+		m = runLine(t, m, "yes")
+
+		out := transcript(m)
+		if !strings.Contains(out, "authorization is not confirmed") || !strings.Contains(out, "remains incomplete") {
+			t.Fatalf("disconnected authorization was not reported as incomplete:\n%s", out)
+		}
+		if strings.Contains(out, "Slack connection confirmed") {
+			t.Fatalf("disconnected Slack was reported as connected:\n%s", out)
+		}
+		if rec.all() != "GET /channels" || !rec.sawQuery("project_id=selected-project") {
+			t.Fatalf("disconnected status check did not use the selected project: %s", rec.all())
+		}
+	})
+
 	t.Run("user cancels the handoff", func(t *testing.T) {
 		m, rec := dispatchModel(t, nil)
 		m = runLine(t, m, "/channels connect github")

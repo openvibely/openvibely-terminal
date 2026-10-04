@@ -3377,7 +3377,7 @@ func channelBadgeStatus(root *html.Node, channelType string) string {
 			return "configured, offline"
 		case "not configured":
 			return "not configured"
-		case "not connected":
+		case "disconnected", "not connected":
 			return "not connected"
 		}
 	}
@@ -3396,7 +3396,7 @@ func channelCardStatus(root *html.Node, card Card, channelType, displayName stri
 	switch {
 	case strings.Contains(status, "not configured"):
 		return "not configured"
-	case strings.Contains(status, "not connected"):
+	case strings.Contains(status, "disconnected") || strings.Contains(status, "not connected"):
 		return "not connected"
 	case strings.Contains(status, "gateway offline") || strings.Contains(status, "not running"):
 		return "configured, offline"
@@ -3433,7 +3433,7 @@ func (c *Client) ListChannels(ctx context.Context, projectID string) ([]Channel,
 		base.Status = channelCardStatus(root, card, base.Type, base.Name)
 		base.configuration = channelConfiguration(root, base.Type, card)
 		lowerStatus := strings.ToLower(base.Status)
-		base.Connected = strings.Contains(lowerStatus, "connected") && !strings.Contains(lowerStatus, "not connected")
+		base.Connected = lowerStatus == "connected"
 		base.Running = card.Bool("channel-running") || strings.Contains(lowerStatus, "running")
 		base.Configured = base.Connected || base.Running || (strings.Contains(lowerStatus, "configured") && !strings.Contains(lowerStatus, "not configured"))
 		if (base.Type == "github" || base.Type == "slack") && base.Status == "not connected" {
