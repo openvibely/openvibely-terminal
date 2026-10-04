@@ -55,8 +55,13 @@ type setupBackendProcess interface {
 }
 
 type localBackendProcess struct {
-	mu  sync.Mutex
-	cmd *exec.Cmd
+	mu               sync.Mutex
+	cmd              *exec.Cmd
+	done             chan struct{}
+	stopOnce         sync.Once
+	stopCancellation func() bool
+	handedOff        bool
+	stopped          bool
 }
 
 func (p *localBackendProcess) Handoff(ctx context.Context) error {
@@ -66,13 +71,11 @@ func (p *localBackendProcess) Handoff(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-
-	// Unregister cancellation before releasing the child. A false result means
-	// cancellation has already started (or completed), so keep ownership and
-	// stop the process. A successful unregister is the handoff's linearization
-	// point: later cancellation belongs to the caller after ownership transfer.
-	stopCancellation := context.AfterFunc(ctx, p.Stop)
-	if !stopCancellation() {
+	if err := ctx.Err(); err != nil {
+		p.Stop()
+		return err
+	}
+	if p.stopCancellation == nil || !p.stopCancellation() {
 		p.Stop()
 		if err := ctx.Err(); err != nil {
 			return err
@@ -80,15 +83,24 @@ func (p *localBackendProcess) Handoff(ctx context.Context) error {
 		return errors.New("local backend process cancellation interrupted handoff")
 	}
 
+	// Stop and join the asynchronous cancellation callback before the final
+	// context check. If cancellation won while the callback was being removed,
+	// retain ownership and stop the child; a successful final check commits the
+	// handoff, after which later cancellation belongs to the caller.
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.cmd == nil || p.cmd.Process == nil {
+	if p.stopped || p.cmd == nil || p.cmd.Process == nil {
+		p.mu.Unlock()
 		return errors.New("local backend process is unavailable for handoff")
 	}
-	if err := p.cmd.Process.Release(); err != nil {
-		return fmt.Errorf("releasing local backend process: %w", err)
+	p.handedOff = true
+	if err := ctx.Err(); err != nil {
+		p.handedOff = false
+		p.mu.Unlock()
+		p.Stop()
+		return err
 	}
 	p.cmd = nil
+	p.mu.Unlock()
 	return nil
 }
 
@@ -96,15 +108,22 @@ func (p *localBackendProcess) Stop() {
 	if p == nil {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.cmd == nil || p.cmd.Process == nil {
-		return
-	}
-	cmd := p.cmd
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
-	p.cmd = nil
+	p.stopOnce.Do(func() {
+		p.mu.Lock()
+		if p.handedOff {
+			p.mu.Unlock()
+			return
+		}
+		p.stopped = true
+		cmd := p.cmd
+		p.mu.Unlock()
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		if p.done != nil {
+			<-p.done
+		}
+	})
 }
 
 // setupGuidance renders only instructions that the user may choose to run. It
@@ -646,6 +665,9 @@ func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setup
 	if strings.TrimSpace(spec.Name) == "" {
 		return nil, errors.New("no start command available")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -657,7 +679,12 @@ func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setup
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting local backend: %w", err)
 	}
-	process := &localBackendProcess{cmd: cmd}
+	process := &localBackendProcess{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(process.done)
+	}()
+	process.stopCancellation = context.AfterFunc(ctx, process.Stop)
 	if err := ctx.Err(); err != nil {
 		process.Stop()
 		return nil, err

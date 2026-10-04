@@ -1165,6 +1165,76 @@ func setupStartFixture(t *testing.T, healthStatus int) (string, *client.Client) 
 	return startMarker, c
 }
 
+func TestSetupCancellationAfterCallbackRemovalBeforeHandoffCommitStopsBackend(t *testing.T) {
+	marker, c, _ := setupRealBackendFixture(t, setupBackendHealthHealthy)
+	baseCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	callbackRemoved := make(chan struct{})
+	resumeHandoff := make(chan struct{})
+	wrappedDone := make(chan struct{})
+	go func() {
+		<-baseCtx.Done()
+		close(wrappedDone)
+	}()
+	var resumeOnce sync.Once
+	releaseHandoff := func() { resumeOnce.Do(func() { close(resumeHandoff) }) }
+	ctx := &gatedAfterFuncContext{
+		Context:         baseCtx,
+		done:            wrappedDone,
+		callbackRemoved: callbackRemoved,
+		resume:          resumeHandoff,
+	}
+	check := inspectLocalBackendSetup(runtime.GOOS, c.BaseURL(), false)
+	process, err := startLocalBackendProcess(ctx, check.Start)
+	if err != nil {
+		t.Fatalf("starting helper backend: %v", err)
+	}
+	defer process.Stop()
+	defer releaseHandoff()
+	assertHelperProcessRunning(t, marker)
+
+	handoffResult := make(chan error, 1)
+	go func() { handoffResult <- process.Handoff(ctx) }()
+	select {
+	case <-callbackRemoved:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handoff did not unregister the cancellation callback")
+	}
+	cancel()
+	releaseHandoff()
+	select {
+	case err := <-handoffResult:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("handoff result after cancellation before commit = %v, want context canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handoff did not finish after cancellation")
+	}
+	assertHelperProcessStopped(t, marker)
+}
+
+type gatedAfterFuncContext struct {
+	context.Context
+	done            <-chan struct{}
+	callbackRemoved chan struct{}
+	resume          <-chan struct{}
+}
+
+func (c *gatedAfterFuncContext) Done() <-chan struct{} { return c.done }
+
+func (c *gatedAfterFuncContext) Value(any) any { return nil }
+
+func (c *gatedAfterFuncContext) AfterFunc(f func()) func() bool {
+	stop := context.AfterFunc(c.Context, f)
+	return func() bool {
+		stopped := stop()
+		close(c.callbackRemoved)
+		<-c.resume
+		return stopped
+	}
+}
+
 func TestSetupCancellationBetweenHealthAndHandoffStopsBackendProcess(t *testing.T) {
 	marker, c, _ := setupRealBackendFixture(t, setupBackendHealthHealthy)
 	ctx, cancel := context.WithCancel(context.Background())
