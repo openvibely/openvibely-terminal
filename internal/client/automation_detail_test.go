@@ -195,8 +195,14 @@ func TestGetAutomationDetailMalformedNotFoundAndBackendErrors(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
 			}
-			if tc.wantNotFound && !errors.Is(err, ErrAutomationNotFound) {
-				t.Fatalf("error %v does not unwrap to ErrAutomationNotFound", err)
+			if tc.wantNotFound {
+				if !errors.Is(err, ErrAutomationNotFound) {
+					t.Fatalf("error %v does not unwrap to ErrAutomationNotFound", err)
+				}
+				var notFound *AutomationNotFoundError
+				if !errors.As(err, &notFound) || notFound.ID != "au1" || notFound.ProjectID != "p1" {
+					t.Fatalf("not found error = %#v, want automation au1 in project p1", notFound)
+				}
 			}
 		})
 	}

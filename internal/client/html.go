@@ -79,31 +79,12 @@ func (c *Client) getHTMLPage(ctx context.Context, path string) (*html.Node, bool
 }
 
 func (c *Client) getHTMLPageMeta(ctx context.Context, path string) (*html.Node, htmlPageMeta, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, htmlPageMeta{}, err
-	}
-	req.Header.Set("Accept", "text/html")
-	req.Header.Set("HX-Request", "true")
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, htmlPageMeta{}, fmt.Errorf("GET %s: %w", path, err)
-	}
-	defer drainAndClose(resp.Body)
-
-	if isReadAuthResponse(resp) {
-		return nil, htmlPageMeta{}, newAuthRequiredError(http.MethodGet, path, resp)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, htmlPageMeta{}, apiError(resp)
-	}
-	root, err := html.Parse(io.LimitReader(resp.Body, 8<<20))
+	root, headers, err := c.getHTMLDocument(ctx, path, nil, "")
 	if err != nil {
 		return nil, htmlPageMeta{}, err
 	}
 	meta := htmlPageMeta{}
-	rawTotal := strings.TrimSpace(resp.Header.Get(cardPageTotalHeader))
+	rawTotal := strings.TrimSpace(headers.Get(cardPageTotalHeader))
 	if rawTotal != "" {
 		total, parseErr := strconv.Atoi(rawTotal)
 		if parseErr != nil || total < 0 {
@@ -122,7 +103,7 @@ func (c *Client) getHTMLPageMeta(ctx context.Context, path string) (*html.Node, 
 			meta.total, meta.totalKnown = total, true
 		}
 	}
-	rawHasMore := strings.TrimSpace(resp.Header.Get(cardPageMoreHeader))
+	rawHasMore := strings.TrimSpace(headers.Get(cardPageMoreHeader))
 	if rawHasMore != "" {
 		hasMore, parseErr := strconv.ParseBool(rawHasMore)
 		if parseErr != nil {
@@ -133,6 +114,42 @@ func (c *Client) getHTMLPageMeta(ctx context.Context, path string) (*html.Node, 
 	}
 	meta.hasMore = paginationRoot != nil && attr(paginationRoot, "data-card-pagination-has-more") == "true"
 	return root, meta, nil
+}
+
+// getHTMLDocument owns the shared GET request and response lifecycle for HTML
+// pages. notFoundErr lets a caller preserve a page-specific 404 classification;
+// parseContext preserves useful context for callers with page-specific parsers.
+func (c *Client) getHTMLDocument(ctx context.Context, path string, notFoundErr error, parseContext string) (*html.Node, http.Header, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("HX-Request", "true")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer drainAndClose(resp.Body)
+
+	if isReadAuthResponse(resp) {
+		return nil, nil, newAuthRequiredError(http.MethodGet, path, resp)
+	}
+	if resp.StatusCode == http.StatusNotFound && notFoundErr != nil {
+		return nil, nil, notFoundErr
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, apiError(resp)
+	}
+	root, err := html.Parse(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		if parseContext != "" {
+			err = fmt.Errorf("%s: %w", parseContext, err)
+		}
+		return nil, nil, err
+	}
+	return root, resp.Header, nil
 }
 
 func parseCardPaginationTotal(paginationRoot *html.Node) (int, bool, error) {

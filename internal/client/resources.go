@@ -2095,10 +2095,13 @@ type PluginRuntimeMCP struct {
 }
 
 type AgentPluginInstallResult struct {
-	OK              bool   `json:"ok"`
-	Warning         string `json:"warning,omitempty"`
-	EnabledForAgent bool   `json:"enabled_for_agent,omitempty"`
-	EnableError     string `json:"enable_error,omitempty"`
+	OK              bool            `json:"ok"`
+	Warning         string          `json:"warning,omitempty"`
+	Details         json.RawMessage `json:"details,omitempty"`
+	Message         string          `json:"message,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	EnabledForAgent bool            `json:"enabled_for_agent,omitempty"`
+	EnableError     string          `json:"enable_error,omitempty"`
 }
 
 func (c *Client) GetAgentPluginState(ctx context.Context) (AgentPluginState, error) {
