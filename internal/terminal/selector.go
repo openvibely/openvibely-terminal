@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -508,7 +509,7 @@ func (m Model) handleSelectorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // the input is primed with "/<command> <ref> | " instead of executing. For
 // direct-action items, the already-resolved resource is passed to its callback.
 func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix string, it selectorItem) (tea.Model, tea.Cmd) {
-	line := "/" + command + " " + it.ref
+	line := "/" + command + " " + formatSelectorArgument(it.ref)
 	m = m.clearReviewPrefill()
 	if it.resolvedTask != nil {
 		m.reviewPrefillTask = it.resolvedTask
@@ -536,7 +537,29 @@ func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix stri
 		next, cmd := it.dispatch(m)
 		return next, withMessageGeneration(cmd, sessionGenerationOf(next), projectGenerationOf(next))
 	}
-	return m.runCommand(line)
+	return m.runCommandFields(append(strings.Fields(strings.TrimPrefix(command, "/")), it.ref))
+}
+
+// formatSelectorArgument renders one reference so it can be embedded in an
+// interactive command line and recovered as the same single argument.
+func formatSelectorArgument(ref string) string {
+	if ref != "" && strings.IndexFunc(ref, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '\'' || r == '"'
+	}) < 0 {
+		return ref
+	}
+
+	var quoted strings.Builder
+	quoted.Grow(len(ref) + 2)
+	quoted.WriteByte('"')
+	for _, r := range ref {
+		if r == '\\' || r == '"' {
+			quoted.WriteByte('\\')
+		}
+		quoted.WriteRune(r)
+	}
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 // renderSelector draws the inline picker: a filter prompt plus the matching

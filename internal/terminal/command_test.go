@@ -96,6 +96,30 @@ func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 	}
 }
 
+func TestSelectorArgumentFormattingRoundTripsThroughCommandTokenizer(t *testing.T) {
+	for _, reference := range []string{
+		"plain-id",
+		"name with spaces",
+		"apostrophe's.md",
+		`double"quote.md`,
+		`both ' and ".md`,
+		`path with back\slash.md`,
+		`path ending with backslash\`,
+	} {
+		t.Run(reference, func(t *testing.T) {
+			line := "/memory show " + formatSelectorArgument(reference)
+			got, err := tokenizeCommand(line)
+			if err != nil {
+				t.Fatalf("tokenizeCommand(%q): %v", line, err)
+			}
+			want := []string{"memory", "show", reference}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("tokenizeCommand(%q) = %#v, want %#v", line, got, want)
+			}
+		})
+	}
+}
+
 func TestInteractiveStatusAliasesValidateOperands(t *testing.T) {
 	for _, commandName := range []string{"status", "health"} {
 		t.Run(commandName+" valid", func(t *testing.T) {
