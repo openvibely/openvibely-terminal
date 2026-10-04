@@ -240,37 +240,14 @@ func (c *Client) GetSkillAnalytics(ctx context.Context, projectID string) (*Skil
 	return analyticsObject[SkillAnalytics](ctx, c, "skills", projectID)
 }
 
-// CapacitySnapshot is an atomic worker-capacity view returned by backends that
-// support GET /api/capacity/snapshot. Older backends can continue using the
-// individual capacity endpoints.
+// CapacitySnapshot is the combined worker-capacity view parsed from the
+// server-rendered Workers page.
 type CapacitySnapshot struct {
-	Global   *GlobalCapacity   `json:"global"`
-	Projects []ProjectCapacity `json:"projects"`
-	Models   []ModelCapacity   `json:"models"`
-}
-
-// GetCapacitySnapshot fetches global, project, and model capacity in one
-// request. A 404 is remembered for this client so older servers are not probed
-// on every watch refresh. Snapshot values themselves are never cached.
-func (c *Client) GetCapacitySnapshot(ctx context.Context) (*CapacitySnapshot, error) {
-	c.capacitySnapshotMu.RLock()
-	unsupported := c.capacitySnapshotUnsupported
-	c.capacitySnapshotMu.RUnlock()
-	if unsupported {
-		return nil, ErrCapacitySnapshotUnsupported
-	}
-
-	var out CapacitySnapshot
-	if err := c.getJSON(ctx, "/api/capacity/snapshot", &out); err != nil {
-		if IsNotFoundError(err) {
-			c.capacitySnapshotMu.Lock()
-			c.capacitySnapshotUnsupported = true
-			c.capacitySnapshotMu.Unlock()
-			return nil, ErrCapacitySnapshotUnsupported
-		}
-		return nil, err
-	}
-	return &out, nil
+	Global            *GlobalCapacity   `json:"global"`
+	Projects          []ProjectCapacity `json:"projects"`
+	Models            []ModelCapacity   `json:"models"`
+	ProjectsAvailable bool              `json:"projects_available"`
+	ModelsAvailable   bool              `json:"models_available"`
 }
 
 // --- Capacity by model (/api/capacity/models) ---

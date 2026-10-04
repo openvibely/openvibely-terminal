@@ -5964,7 +5964,16 @@ func fetchWorkersOverview(ctx context.Context, c *client.Client) (workersOvervie
 		if snapshot.Global == nil {
 			return workersOverview{}, errors.New("combined worker-capacity snapshot omitted global capacity")
 		}
-		return newWorkersOverview(snapshot.Global, snapshot.Projects, snapshot.Models, nil, true), nil
+		warnings := make([]string, 0, 2)
+		if !snapshot.ProjectsAvailable {
+			warnings = append(warnings, "project worker capacity unavailable")
+			snapshot.Projects = nil
+		}
+		if !snapshot.ModelsAvailable {
+			warnings = append(warnings, "model worker capacity unavailable")
+			snapshot.Models = nil
+		}
+		return newWorkersOverview(snapshot.Global, snapshot.Projects, snapshot.Models, warnings, snapshot.ModelsAvailable), nil
 	}
 	if !errors.Is(err, client.ErrCapacitySnapshotUnsupported) {
 		return workersOverview{}, err

@@ -801,34 +801,57 @@ func TestProjectStatusCountsPreserveTransportErrors(t *testing.T) {
 	}
 }
 
-func TestGetCapacitySnapshot(t *testing.T) {
+const workerCapacitySnapshotHTML = `
+<div id="worker-settings-content">
+  <table><tbody id="project-stats-tbody">
+    <tr id="global-row"><td>Global</td><td>All Projects</td><td>2 / 5</td><td>3</td><td><input name="max_workers" id="limit-input-global" value="5"></td><td>Active</td></tr>
+    <tr id="project-row-p1"><td>Project</td><td>Demo</td><td>1 / 2</td><td>4</td><td><input name="max_workers" id="limit-input-p1" value="2"></td><td>Active</td></tr>
+  </tbody></table>
+  <table><tbody id="model-stats-tbody">
+    <tr><td><div>Sonnet</div><div>claude-sonnet</div></td><td>1 / 3</td><td>3</td><td>Active</td></tr>
+  </tbody></table>
+</div>`
+
+func TestGetCapacitySnapshotParsesWorkersPageInOneRequest(t *testing.T) {
 	var requests int
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if r.URL.Path != "/api/capacity/snapshot" {
+		if r.URL.Path != "/workers" {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"global":{"max_workers":5,"total_running":2},"projects":[{"id":"p1","name":"Demo","running":1}],"models":[{"id":"m1","name":"Sonnet","model":"claude-sonnet","running":1}]}`)
+		if got := r.Header.Get("HX-Request"); got != "true" {
+			t.Errorf("HX-Request = %q, want true", got)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, workerCapacitySnapshotHTML)
 	}))
 
 	snapshot, err := c.GetCapacitySnapshot(context.Background())
 	if err != nil {
 		t.Fatalf("GetCapacitySnapshot: %v", err)
 	}
-	if snapshot.Global == nil || snapshot.Global.MaxWorkers != 5 || len(snapshot.Projects) != 1 || len(snapshot.Models) != 1 {
-		t.Fatalf("unexpected capacity snapshot: %+v", snapshot)
+	if snapshot.Global == nil || snapshot.Global.MaxWorkers != 5 || snapshot.Global.TotalRunning != 2 || snapshot.Global.QueueSize != 3 {
+		t.Fatalf("unexpected global capacity: %+v", snapshot.Global)
+	}
+	if len(snapshot.Projects) != 1 || snapshot.Projects[0].ID != "p1" || snapshot.Projects[0].Name != "Demo" || snapshot.Projects[0].Running != 1 || snapshot.Projects[0].QueueSize != 4 || snapshot.Projects[0].MaxWorkers == nil || *snapshot.Projects[0].MaxWorkers != 2 {
+		t.Fatalf("unexpected project capacity: %+v", snapshot.Projects)
+	}
+	if len(snapshot.Models) != 1 || snapshot.Models[0].Name != "Sonnet" || snapshot.Models[0].Model != "claude-sonnet" || snapshot.Models[0].Running != 1 || snapshot.Models[0].MaxWorkers != 3 {
+		t.Fatalf("unexpected model capacity: %+v", snapshot.Models)
+	}
+	if !snapshot.ProjectsAvailable || !snapshot.ModelsAvailable {
+		t.Fatalf("complete workers page marked a source unavailable: %+v", snapshot)
 	}
 	if requests != 1 {
 		t.Fatalf("snapshot requests = %d, want 1", requests)
 	}
 }
 
-func TestGetCapacitySnapshotCachesOnlyUnsupportedRoute(t *testing.T) {
+func TestGetCapacitySnapshotCachesUnsupportedWorkersPage(t *testing.T) {
 	requests := 0
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
-		if r.URL.Path != "/api/capacity/snapshot" {
+		if r.URL.Path != "/workers" {
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -842,7 +865,7 @@ func TestGetCapacitySnapshotCachesOnlyUnsupportedRoute(t *testing.T) {
 		}
 	}
 	if requests != 1 {
-		t.Fatalf("unsupported snapshot probes = %d, want one cached route probe", requests)
+		t.Fatalf("unsupported page probes = %d, want one cached probe", requests)
 	}
 }
 
@@ -854,15 +877,15 @@ func TestGetCapacitySnapshotAuthenticationFailureCanRecover(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"global":{"max_workers":4,"total_running":1},"projects":[],"models":[]}`)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, workerCapacitySnapshotHTML)
 	}))
 
 	if _, err := c.GetCapacitySnapshot(context.Background()); !IsAuthRequired(err) {
 		t.Fatalf("first snapshot error = %v, want authentication error", err)
 	}
 	snapshot, err := c.GetCapacitySnapshot(context.Background())
-	if err != nil || snapshot.Global == nil || snapshot.Global.MaxWorkers != 4 {
+	if err != nil || snapshot.Global == nil || snapshot.Global.MaxWorkers != 5 {
 		t.Fatalf("snapshot after authentication recovery = %+v, %v", snapshot, err)
 	}
 	if requests != 2 {

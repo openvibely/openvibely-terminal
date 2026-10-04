@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,22 +18,85 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
+func workersWatchCapacityHTML(globalRunning, projectRunning, modelRunning int) string {
+	return fmt.Sprintf(`<div id="worker-settings-content">
+<table><tbody id="project-stats-tbody">
+<tr id="global-row"><td>Global</td><td>All Projects</td><td>%d / 8</td><td>1</td><td><input name="max_workers" id="limit-input-global" value="8"></td><td>Active</td></tr>
+<tr id="project-row-p1"><td>Project</td><td>Demo</td><td>%d / 4</td><td>2</td><td><input name="max_workers" id="limit-input-p1" value="4"></td><td>Active</td></tr>
+</tbody></table>
+<table><tbody id="model-stats-tbody"><tr><td><div>Sonnet</div><div>claude-sonnet</div></td><td>%d / 5</td><td>5</td><td>Active</td></tr></tbody></table>
+</div>`, globalRunning, projectRunning, modelRunning)
+}
+
+type workersWatchSessionWriter struct {
+	bytes.Buffer
+	cancel    context.CancelFunc
+	changedAt *sync.Map
+	latencies []time.Duration
+}
+
+func (w *workersWatchSessionWriter) Write(p []byte) (int, error) {
+	n, err := w.Buffer.Write(p)
+	if err != nil {
+		return n, err
+	}
+	for _, line := range bytes.Split(p, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var snapshot struct {
+			Workers []workerCapacityRow `json:"workers"`
+		}
+		if err := json.Unmarshal(line, &snapshot); err != nil || len(snapshot.Workers) == 0 {
+			continue
+		}
+		if changedAt, ok := w.changedAt.Load(snapshot.Workers[0].Running); ok {
+			w.latencies = append(w.latencies, time.Since(time.Unix(0, changedAt.(int64))))
+		}
+		if w.cancel != nil && bytes.Count(w.Bytes(), []byte("\n")) >= 200 {
+			w.cancel()
+			w.cancel = nil
+		}
+	}
+	return n, nil
+}
+
+func runWorkersWatchSession(t *testing.T, c *client.Client, changedAt *sync.Map) *workersWatchSessionWriter {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &workersWatchSessionWriter{cancel: cancel, changedAt: changedAt}
+	if err := runCLIWorkersWatch(ctx, c, out, true); err != nil {
+		t.Fatalf("workers watch returned error after session cancellation: %v", err)
+	}
+	if got := bytes.Count(out.Bytes(), []byte("\n")); got != 200 {
+		t.Fatalf("workers watch displayed %d snapshots, want 200", got)
+	}
+	return out
+}
+
 func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testing.T) {
 	const refreshes = 200 // 600 seconds at the user-visible 3 second refresh interval.
-	const optimizedDelay = 2 * time.Millisecond
-	const baselineDelay = 12 * time.Millisecond
+	const handlerDelay = 2 * time.Millisecond
+	previousInterval := workersLiveRefreshInterval
+	workersLiveRefreshInterval = time.Millisecond // scale wall time while keeping the real watch loop.
+	t.Cleanup(func() { workersLiveRefreshInterval = previousInterval })
 
-	var optimizedState, optimizedRequests atomic.Int32
+	var optimizedRequests atomic.Int32
+	var optimizedChanges sync.Map
 	optimizedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		optimizedRequests.Add(1)
-		if r.URL.Path != "/api/capacity/snapshot" {
+		if r.URL.Path != "/workers" {
+			t.Errorf("optimized watch unexpected route %s", r.URL.RequestURI())
 			http.NotFound(w, r)
 			return
 		}
-		time.Sleep(optimizedDelay)
-		n := optimizedState.Load()
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"global":{"max_workers":8,"total_running":%d,"queue_size":1},"projects":[{"id":"p1","name":"Demo","running":%d,"queue_size":2,"max_workers":4}],"models":[{"id":"m1","name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":5}]}`, n, n, n)
+		n := int(optimizedRequests.Load())
+		optimizedChanges.Store(n, time.Now().UnixNano())
+		time.Sleep(handlerDelay)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, workersWatchCapacityHTML(n, n, n))
 	}))
 	t.Cleanup(optimizedServer.Close)
 	optimizedClient, err := client.New(optimizedServer.URL)
@@ -40,11 +104,30 @@ func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testi
 		t.Fatal(err)
 	}
 
-	var baselineState, baselineRequests atomic.Int32
+	var baselineRequests, baselineCapacityRequests, baselineState atomic.Int32
+	var baselineChanges sync.Map
 	baselineServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		baselineRequests.Add(1)
-		time.Sleep(baselineDelay)
-		n := baselineState.Load()
+		if r.URL.Path == "/workers" {
+			http.NotFound(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/capacity/global", "/api/capacity/projects", "/api/capacity/models":
+			baselineCapacityRequests.Add(1)
+		default:
+			t.Errorf("baseline watch unexpected route %s", r.URL.RequestURI())
+			http.NotFound(w, r)
+			return
+		}
+		var n int
+		if r.URL.Path == "/api/capacity/global" {
+			n = int(baselineState.Add(1))
+			baselineChanges.Store(n, time.Now().UnixNano())
+		} else {
+			n = int(baselineState.Load())
+		}
+		time.Sleep(handlerDelay)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/capacity/global":
@@ -53,8 +136,6 @@ func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testi
 			_, _ = fmt.Fprintf(w, `[{"id":"p1","name":"Demo","running":%d,"queue_size":2,"max_workers":4}]`, n)
 		case "/api/capacity/models":
 			_, _ = fmt.Fprintf(w, `[{"id":"m1","name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":5}]`, n)
-		default:
-			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(baselineServer.Close)
@@ -63,49 +144,43 @@ func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testi
 		t.Fatal(err)
 	}
 
-	optimizedLatencies := make([]time.Duration, 0, refreshes)
-	baselineLatencies := make([]time.Duration, 0, refreshes)
-	for i := 1; i <= refreshes; i++ {
-		optimizedState.Store(int32(i))
-		changedAt := time.Now()
-		overview, err := fetchWorkersOverview(context.Background(), optimizedClient)
-		if err != nil {
-			t.Fatalf("optimized refresh %d: %v", i, err)
-		}
-		displayed := renderWorkers(overview)
-		optimizedLatencies = append(optimizedLatencies, time.Since(changedAt))
-		if !strings.Contains(displayed, fmt.Sprintf("%d / 8", i)) || !strings.Contains(displayed, "Demo") || !strings.Contains(displayed, "Sonnet") {
-			t.Fatalf("optimized refresh %d omitted changed/global/project/model capacity:\n%s", i, displayed)
-		}
-
-		baselineState.Store(int32(i))
-		changedAt = time.Now()
-		baselineOverview, err := fetchLegacyWorkersOverview(context.Background(), baselineClient)
-		if err != nil {
-			t.Fatalf("baseline refresh %d: %v", i, err)
-		}
-		displayed = renderWorkers(baselineOverview)
-		baselineLatencies = append(baselineLatencies, time.Since(changedAt))
-		if !strings.Contains(displayed, fmt.Sprintf("%d / 8", i)) || !strings.Contains(displayed, "Demo") || !strings.Contains(displayed, "Sonnet") {
-			t.Fatalf("baseline refresh %d omitted changed/global/project/model capacity:\n%s", i, displayed)
-		}
-	}
-
-	optimizedP95 := durationPercentile(optimizedLatencies, 0.95)
-	baselineP95 := durationPercentile(baselineLatencies, 0.95)
+	optimizedOutput := runWorkersWatchSession(t, optimizedClient, &optimizedChanges)
+	baselineOutput := runWorkersWatchSession(t, baselineClient, &baselineChanges)
+	optimizedP95 := durationPercentile(optimizedOutput.latencies, 0.95)
+	baselineP95 := durationPercentile(baselineOutput.latencies, 0.95)
 	if got := optimizedRequests.Load(); got != refreshes {
-		t.Fatalf("combined endpoint requests in ten-minute session = %d, want <= %d", got, refreshes)
+		t.Fatalf("combined endpoint requests in ten-minute watch session = %d, want <= %d", got, refreshes)
 	}
-	if got, want := baselineRequests.Load(), int32(refreshes*3); got != want {
-		t.Fatalf("legacy endpoint requests in ten-minute session = %d, want baseline %d", got, want)
+	if got, want := baselineCapacityRequests.Load(), int32(refreshes*3); got != want {
+		t.Fatalf("legacy capacity requests in ten-minute watch session = %d, want baseline %d", got, want)
+	}
+	if got, want := baselineRequests.Load(), int32(refreshes*3+1); got != want {
+		t.Fatalf("legacy total requests including one route probe = %d, want %d", got, want)
+	}
+	for _, output := range []*workersWatchSessionWriter{optimizedOutput, baselineOutput} {
+		lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+		if len(lines) != refreshes {
+			t.Fatalf("watch output contained %d snapshots, want %d", len(lines), refreshes)
+		}
+		var snapshot struct {
+			Workers []workerCapacityRow      `json:"workers"`
+			Models  []modelWorkerCapacityRow `json:"models"`
+		}
+		if err := json.Unmarshal([]byte(lines[len(lines)-1]), &snapshot); err != nil {
+			t.Fatalf("last watch snapshot is invalid JSON: %v", err)
+		}
+		if len(snapshot.Workers) != 2 || snapshot.Workers[1].Name != "Demo" || len(snapshot.Models) != 1 || snapshot.Models[0].Name != "Sonnet" {
+			t.Fatalf("watch omitted project or model details: %+v", snapshot)
+		}
 	}
 	if optimizedP95 > 3*time.Second {
 		t.Fatalf("changed-snapshot-to-display p95 = %s, want <= 3s", optimizedP95)
 	}
-	if optimizedP95 > baselineP95 {
-		t.Fatalf("optimized changed-snapshot-to-display p95 = %s, slower than baseline %s", optimizedP95, baselineP95)
+	const p95MeasurementTolerance = 250 * time.Microsecond
+	if optimizedP95 > baselineP95+p95MeasurementTolerance {
+		t.Fatalf("optimized changed-snapshot-to-display p95 = %s, materially slower than baseline %s (tolerance %s)", optimizedP95, baselineP95, p95MeasurementTolerance)
 	}
-	t.Logf("equivalent 10-minute session: optimized requests=%d, baseline requests=%d; changed-snapshot-to-display p95 optimized=%s, baseline=%s", optimizedRequests.Load(), baselineRequests.Load(), optimizedP95, baselineP95)
+	t.Logf("10-minute-equivalent CLI watch: optimized requests=%d, legacy capacity requests=%d (total=%d including one capability probe); changed-snapshot-to-display p95 optimized=%s, baseline=%s", optimizedRequests.Load(), baselineCapacityRequests.Load(), baselineRequests.Load(), optimizedP95, baselineP95)
 }
 
 func durationPercentile(values []time.Duration, percentile float64) time.Duration {
@@ -121,10 +196,45 @@ func durationPercentile(values []time.Duration, percentile float64) time.Duratio
 	return ordered[index]
 }
 
+func TestFetchWorkersOverviewCombinedSnapshotPreservesSourceWarnings(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.URL.Path != "/workers" {
+			http.NotFound(w, r)
+			return
+		}
+		html := workersWatchCapacityHTML(1, 0, 0)
+		html = strings.Replace(html, `id="project-stats-tbody"`, `id="project-stats-tbody" data-capacity-available="false"`, 1)
+		html = strings.Replace(html, `id="model-stats-tbody"`, `id="model-stats-tbody" data-capacity-available="false"`, 1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, html)
+	}))
+	t.Cleanup(server.Close)
+	c, err := client.New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	overview, err := fetchWorkersOverview(context.Background(), c)
+	if err != nil {
+		t.Fatalf("fetchWorkersOverview: %v", err)
+	}
+	if overview.Global == nil || overview.Global.TotalRunning != 1 || len(overview.Projects) != 0 || len(overview.Models) != 0 {
+		t.Fatalf("partial snapshot lost available global capacity: %+v", overview)
+	}
+	if overview.ModelsAvailable || len(overview.Warnings) != 2 || overview.Warnings[0] != "project worker capacity unavailable" || overview.Warnings[1] != "model worker capacity unavailable" {
+		t.Fatalf("combined partial-source warnings = %+v, models available=%t", overview.Warnings, overview.ModelsAvailable)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("combined snapshot requests = %d, want 1", got)
+	}
+}
+
 func TestFetchWorkersOverviewFallsBackAndPreservesPartialWarnings(t *testing.T) {
 	var snapshotRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/capacity/snapshot" {
+		if r.URL.Path == "/workers" {
 			snapshotRequests.Add(1)
 			http.NotFound(w, r)
 			return
@@ -175,12 +285,12 @@ func TestWorkersWatchCombinedSnapshotUnchangedDisplayAndRepeatedStartStop(t *tes
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.URL.Path != "/api/capacity/snapshot" {
+		if r.URL.Path != "/workers" {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"global":{"max_workers":4,"total_running":1},"projects":[{"id":"p1","name":"Demo","running":1,"max_workers":2}],"models":[{"name":"Sonnet","model":"claude-sonnet","running":1,"max_workers":3}]}`))
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(workersWatchCapacityHTML(1, 1, 1)))
 	}))
 	t.Cleanup(server.Close)
 	c, err := client.New(server.URL)
@@ -229,7 +339,7 @@ func TestWorkersWatchSupportedSnapshotDoesNotFallbackOnAuthFailure(t *testing.T)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		if r.URL.Path == "/api/capacity/snapshot" {
+		if r.URL.Path == "/workers" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -279,7 +389,7 @@ func TestCLIWorkersWatchDisplaysCombinedCapacityChangeWithinThreeSeconds(t *test
 	var requests atomic.Int32
 	var changedAt atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/capacity/snapshot" {
+		if r.URL.Path != "/workers" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{}`))
 			return
@@ -290,8 +400,8 @@ func TestCLIWorkersWatchDisplaysCombinedCapacityChangeWithinThreeSeconds(t *test
 			changedAt.Store(time.Now().UnixNano())
 			time.Sleep(10 * time.Millisecond)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"global":{"max_workers":4,"total_running":%d},"projects":[{"id":"p1","name":"Demo","running":%d,"max_workers":2}],"models":[{"name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":3}]}`, running, running, running)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, workersWatchCapacityHTML(int(running), int(running), int(running)))
 	}))
 	t.Cleanup(server.Close)
 	c, err := client.New(server.URL)

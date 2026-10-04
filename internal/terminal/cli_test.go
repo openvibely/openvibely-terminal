@@ -71,7 +71,7 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 				return
 			}
 		}
-		if r.URL.Path == "/api/capacity/snapshot" {
+		if r.Method == http.MethodGet && r.URL.Path == "/workers" {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
 			return
@@ -647,7 +647,7 @@ func TestCLIWorkersWatchRefreshesUntilContextCancellation(t *testing.T) {
 		}
 		mu.Unlock()
 		switch r.URL.Path {
-		case "/api/capacity/snapshot":
+		case "/workers":
 			w.WriteHeader(http.StatusNotFound)
 			fmt.Fprint(w, `{"error":"not found"}`)
 		case "/api/capacity/global":

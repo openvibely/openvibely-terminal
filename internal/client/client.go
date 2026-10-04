@@ -8,7 +8,7 @@
 //   - GET  /api/capacity/global        → worker pool capacity
 //   - GET  /api/capacity/projects      → per-project capacity
 //   - GET  /api/capacity/models        → per-model capacity
-//   - GET  /api/capacity/snapshot      → combined worker-capacity view (newer backends)
+//   - GET  /workers                    → combined worker-capacity view
 //   - GET  /auth/me                    → session check
 //   - POST /login                      → cookie session login (optional auth)
 //   - GET  /events/live                → SSE stream (task/chat/file events)
@@ -57,8 +57,8 @@ func IsInvalidServerURL(err error) bool {
 // a foreground stream has no reconnect owner.
 var ErrEventStreamClosed = errors.New("event stream closed by server")
 
-// ErrCapacitySnapshotUnsupported identifies older backends without a combined
-// worker-capacity snapshot endpoint.
+// ErrCapacitySnapshotUnsupported identifies servers without the structured
+// worker-capacity page.
 var ErrCapacitySnapshotUnsupported = errors.New("combined worker-capacity snapshot is not supported")
 
 // AuthRequiredError is returned when the backend responds with an
