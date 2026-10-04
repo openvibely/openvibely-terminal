@@ -622,6 +622,15 @@ func (m *Model) replaceWorkersLiveBody(body string) {
 	m.append(entry{role: "result", head: workersLiveHead, text: body})
 }
 
+func (m Model) workersLiveBodyMatches(body string) bool {
+	for i := len(m.log) - 1; i >= 0; i-- {
+		if m.log[i].role == "result" && m.log[i].head == workersLiveHead {
+			return m.log[i].text == body
+		}
+	}
+	return false
+}
+
 func (m Model) beginProjectLoad(echo bool, selectName string) (Model, tea.Cmd) {
 	return m.beginProjectLoadWithSSE(echo, selectName, m.sseRetryAfterProject)
 }
@@ -1914,7 +1923,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: "workers live refresh failed: " + safeConnectionDiagnosticText(msg.err.Error())})
 			return m, nil
 		}
-		m.replaceWorkersLiveBody(renderWorkersLive(msg.overview))
+		body := renderWorkersLive(msg.overview)
+		if !m.workersLiveBodyMatches(body) {
+			m.replaceWorkersLiveBody(body)
+		}
 		return m, m.scheduleWorkersLiveTick(msg.requestID, msg.projectID)
 
 	case workersLiveTickMsg:

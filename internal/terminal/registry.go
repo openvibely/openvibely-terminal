@@ -5923,6 +5923,21 @@ const workersLiveRequestTimeout = 10 * time.Second
 var workersLiveTick = tea.Tick
 
 func fetchWorkersOverview(ctx context.Context, c *client.Client) (workersOverview, error) {
+	snapshot, err := c.GetCapacitySnapshot(ctx)
+	if err == nil {
+		if snapshot.Global == nil {
+			return workersOverview{}, errors.New("combined worker-capacity snapshot omitted global capacity")
+		}
+		return newWorkersOverview(snapshot.Global, snapshot.Projects, snapshot.Models, nil, true), nil
+	}
+	if !errors.Is(err, client.ErrCapacitySnapshotUnsupported) {
+		return workersOverview{}, err
+	}
+
+	return fetchLegacyWorkersOverview(ctx, c)
+}
+
+func fetchLegacyWorkersOverview(ctx context.Context, c *client.Client) (workersOverview, error) {
 	var (
 		wg          sync.WaitGroup
 		capacity    *client.GlobalCapacity
