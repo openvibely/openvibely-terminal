@@ -15365,6 +15365,60 @@ func TestWebhooksEditOptionRequiresReferenceBeforeOpeningSelector(t *testing.T) 
 	}
 }
 
+func TestWebhooksEditAcceptsQuotedOptionLikeStringValues(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"GET /channels":             webhookCardsHTML,
+		"GET /channels/webhooks/w1": webhookDetailJSON,
+		"PUT /channels/webhooks/w1": "",
+	})
+	m = runLine(t, m, `/channels webhooks edit "Pager Duty" --system-instructions "-- review each alert" --title-template "-- title from alert" --prompt-template "-- create a task"`)
+	if !rec.saw(http.MethodPut, "/channels/webhooks/w1") {
+		t.Fatalf("interactive edit did not update webhook; calls: %s\n%s", rec.all(), transcript(m))
+	}
+	want := map[string]string{
+		"system_instructions": "-- review each alert",
+		"title_template":      "-- title from alert",
+		"prompt_template":     "-- create a task",
+	}
+	for _, form := range rec.formsSnapshot() {
+		if !strings.HasPrefix(form, http.MethodPut+" /channels/webhooks/w1?") {
+			continue
+		}
+		query := strings.TrimPrefix(form, http.MethodPut+" /channels/webhooks/w1?")
+		values, err := url.ParseQuery(query)
+		if err != nil {
+			t.Fatalf("could not parse submitted webhook form %q: %v", form, err)
+		}
+		for key, value := range want {
+			if got := values.Get(key); got != value {
+				t.Errorf("submitted %s = %q, want %q", key, got, value)
+			}
+		}
+		return
+	}
+	t.Fatalf("webhook update form not recorded: %v", rec.formsSnapshot())
+}
+
+func TestWebhooksOptionsValidateBeforeAnyRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{name: "missing value", line: "/webhooks edit pager --system-instructions"},
+		{name: "unknown option", line: "/webhooks edit pager --unknown value"},
+		{name: "invalid boolean", line: "/webhooks edit pager --enabled maybe"},
+		{name: "invalid priority", line: "/webhooks edit pager --priority 5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m = runLine(t, m, tc.line)
+			if got := rec.all(); got != "" {
+				t.Fatalf("%q made backend requests: %s", tc.line, got)
+			}
+		})
+	}
+}
+
 func TestWebhooksInvalidOptionsFailBeforeRequests(t *testing.T) {
 	for _, line := range []string{"/webhooks create hook --enabled maybe", "/webhooks edit w1 --priority 5", "/webhooks edit w1 --name"} {
 		m, rec := dispatchModel(t, nil)

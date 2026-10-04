@@ -7923,7 +7923,7 @@ func parseWebhookOptions(args []string) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("unknown webhook option %q", args[0])
 		}
-		if len(args) < 2 || strings.HasPrefix(args[1], "--") {
+		if len(args) < 2 {
 			return nil, fmt.Errorf("webhook option %s requires a value", args[0])
 		}
 		if _, duplicate := values[key]; duplicate {
