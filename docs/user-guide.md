@@ -1206,7 +1206,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 |---|---|
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
-| Capacity | `GET /api/capacity/snapshot` (combined snapshot when supported), `GET /api/capacity/global`, `GET /api/capacity/projects`, `GET /api/capacity/models` |
+| Capacity | `GET /api/capacity/global`, `GET /api/capacity/projects`, `GET /api/capacity/models` (compatibility fallback for workers watch) |
 | Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
 | Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1`; exact `data-schedule-next-run` values are preferred, and schedule-tab detail is read only when a card needs exact `Next:` timing |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
@@ -1219,8 +1219,10 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 **HTML/HTMX** — the task board, alerts, skills, models, agents, schedule,
 workers, channels, personality list, reflection, grades, insights and
 automations screens are served as templ-rendered fragments with no JSON list
-equivalent. Pulse still uses the HTML briefing for plain output and `summary`,
-while `--json pulse` combines the compact task catalog with current- and
+equivalent. `GET /workers` is also the single-request global, project, and model
+capacity snapshot used by workers watch when the response contains the structured
+capacity tables. Older servers fall back to the individual JSON capacity routes.
+Pulse still uses the HTML briefing for plain output and `summary`, while `--json pulse` combines the compact task catalog with current- and
 next-week structured schedule card attributes, preferring exact
 `data-schedule-next-run` values and reading schedule-tab `Next:` detail only
 for cards that need exact timing, to avoid chat/model-dependent output. Personality custom detail

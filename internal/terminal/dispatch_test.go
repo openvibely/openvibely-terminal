@@ -236,7 +236,7 @@ func dispatchModel(t *testing.T, bodies map[string]string) (Model, *recorder) {
 			_, _ = w.Write([]byte(body))
 			return
 		}
-		if r.URL.Path == "/api/capacity/snapshot" {
+		if r.Method == http.MethodGet && r.URL.Path == "/workers" {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"not found"}`))
 			return
@@ -2934,8 +2934,8 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 	refresh := 0
 	changedAt := time.Time{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path != "/api/capacity/snapshot" {
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path != "/workers" {
 			http.NotFound(w, r)
 			return
 		}
@@ -2949,7 +2949,7 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 		if current == 2 {
 			time.Sleep(10 * time.Millisecond)
 		}
-		fmt.Fprintf(w, `{"global":{"total_running":%d,"max_workers":4,"queue_size":%d},"projects":[{"id":"p1","name":"demo","running":%d,"queue_size":%d,"max_workers":2}],"models":[{"name":"Sonnet","model":"claude-sonnet","running":%d,"max_workers":3}]}`, current, current+1, current, current+2, current)
+		fmt.Fprint(w, workersWatchCapacityHTML(current, current, current))
 	}))
 	t.Cleanup(srv.Close)
 	c, err := client.New(srv.URL)
@@ -2969,7 +2969,7 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 	next, tickCmd := m.Update(cmd())
 	m = next.(Model)
 	out := stripANSI(transcript(m))
-	if !strings.Contains(out, "1 / 4") || !strings.Contains(out, "demo") || !strings.Contains(out, "Sonnet") || !strings.Contains(out, "live refresh every "+workersLiveRefreshIntervalLabel()) || strings.Contains(out, "live refresh every 3s") {
+	if !strings.Contains(out, "1 / 4") || !strings.Contains(out, "Demo") || !strings.Contains(out, "Sonnet") || !strings.Contains(out, "live refresh every "+workersLiveRefreshIntervalLabel()) || strings.Contains(out, "live refresh every 3s") {
 		t.Fatalf("first live workers response did not render global/project/model values with runtime refresh interval:\n%s", out)
 	}
 	if tickInterval != workersLiveRefreshInterval {
@@ -2987,7 +2987,7 @@ func TestWorkersWatchRendersChangedCapacityResponse(t *testing.T) {
 	next, tickCmd = m.Update(fetchCmd())
 	m = next.(Model)
 	out = stripANSI(transcript(m))
-	if !strings.Contains(out, "2 / 4") || strings.Contains(out, "1 / 4") || !strings.Contains(out, "demo") || !strings.Contains(out, "Sonnet") || strings.Count(out, "Worker capacity") != 1 {
+	if !strings.Contains(out, "2 / 4") || strings.Contains(out, "1 / 4") || !strings.Contains(out, "Demo") || !strings.Contains(out, "Sonnet") || strings.Count(out, "Worker capacity") != 1 {
 		t.Fatalf("changed live workers response did not replace global/project/model capacity:\n%s", out)
 	}
 	mu.Lock()
@@ -12908,7 +12908,7 @@ func TestWorkersShowFetchesConcurrently(t *testing.T) {
 
 	t.Run("secondary failures render partial table", func(t *testing.T) {
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/capacity/snapshot" {
+			if r.URL.Path == "/workers" {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
@@ -12936,7 +12936,7 @@ func TestWorkersShowFetchesConcurrently(t *testing.T) {
 
 	t.Run("global failure propagates", func(t *testing.T) {
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/api/capacity/snapshot" {
+			if r.URL.Path == "/workers" {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
