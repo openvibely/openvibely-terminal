@@ -7893,6 +7893,11 @@ var webhookOptionNames = map[string]string{
 	"--agents": "agent_ids", "--agent-ids": "agent_ids",
 }
 
+func isWebhookOption(arg string) bool {
+	_, ok := webhookOptionNames[strings.ToLower(arg)]
+	return ok
+}
+
 var webhookOptionCompletions = []string{
 	"--name", "--enabled", "--priority", "--default-priority", "--system-instructions",
 	"--title-template", "--prompt-template", "--agents", "--agent-ids",
@@ -7923,7 +7928,7 @@ func parseWebhookOptions(args []string) (map[string]string, error) {
 		if !ok {
 			return nil, fmt.Errorf("unknown webhook option %q", args[0])
 		}
-		if len(args) < 2 {
+		if len(args) < 2 || isWebhookOption(args[1]) {
 			return nil, fmt.Errorf("webhook option %s requires a value", args[0])
 		}
 		if _, duplicate := values[key]; duplicate {

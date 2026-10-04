@@ -15404,8 +15404,9 @@ func TestWebhooksOptionsValidateBeforeAnyRequest(t *testing.T) {
 		name string
 		line string
 	}{
-		{name: "missing value", line: "/webhooks edit pager --system-instructions"},
-		{name: "unknown option", line: "/webhooks edit pager --unknown value"},
+			{name: "missing value", line: "/webhooks edit pager --system-instructions"},
+			{name: "recognized option after missing value", line: "/webhooks edit pager --system-instructions --enabled"},
+			{name: "unknown option", line: "/webhooks edit pager --unknown value"},
 		{name: "invalid boolean", line: "/webhooks edit pager --enabled maybe"},
 		{name: "invalid priority", line: "/webhooks edit pager --priority 5"},
 	} {
