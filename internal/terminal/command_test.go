@@ -1231,6 +1231,51 @@ func TestRenderTaskDetailShowsTabs(t *testing.T) {
 	}
 }
 
+func TestRenderTaskDetailShowsChainingStateInBothViews(t *testing.T) {
+	task := client.Task{ID: "t1", Title: "Refactor", Category: "active"}
+	cases := []struct {
+		name     string
+		chaining string
+		want     []string
+	}{
+		{
+			name:     "absent",
+			chaining: "No follow-up configured.",
+			want:     []string{"No follow-up configured."},
+		},
+		{
+			name:     "enabled on completion",
+			chaining: "Follow-up task: enabled\nTrigger: After task completion\nChild category: Active\nChild model: Claude Sonnet",
+			want:     []string{"Follow-up task: enabled", "Trigger: After task completion", "Child category: Active", "Child model: Claude Sonnet"},
+		},
+		{
+			name:     "enabled on planning complete uses default model",
+			chaining: "Follow-up task: enabled\nTrigger: After planning completes\nChild category: Backlog\nChild model: Use default model",
+			want:     []string{"Trigger: After planning completes", "Child category: Backlog", "Child model: Use default model"},
+		},
+		{
+			name:     "saved disabled chain",
+			chaining: "Follow-up task: disabled\nTrigger: After task completion\nChild category: Backlog\nChild model: GPT 5",
+			want:     []string{"Follow-up task: disabled", "Child category: Backlog", "Child model: GPT 5"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			detail := &client.TaskDetail{Task: client.Task{Status: "running"}, Details: "task details", Chaining: tc.chaining}
+			full := renderTaskDetail(task, detail, "")
+			tab := renderTaskDetail(task, detail, "chaining")
+			for _, want := range tc.want {
+				if !strings.Contains(full, want) {
+					t.Errorf("full detail is missing %q:\n%s", want, full)
+				}
+				if !strings.Contains(tab, want) {
+					t.Errorf("chaining tab is missing %q:\n%s", want, tab)
+				}
+			}
+		})
+	}
+}
+
 func TestAlertsShowHelpAndCompletion(t *testing.T) {
 	cmd := lookupCommand("alerts")
 	if cmd == nil {

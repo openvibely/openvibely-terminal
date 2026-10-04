@@ -683,7 +683,11 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 	for _, tab := range taskDetailTabs {
 		for _, panelID := range tab.PanelIDs {
 			if n := findByID(root, panelID); n != nil {
-				tab.setText(d, NodeText(n))
+				if tab.Name == "chaining" {
+					tab.setText(d, taskDetailChaining(root, n))
+				} else {
+					tab.setText(d, NodeText(n))
+				}
 				break
 			}
 		}
@@ -848,7 +852,7 @@ func populateExactTaskMetadata(root *html.Node, task *Task) {
 	if taskDetailSwarmChild(root) {
 		appendBadge("Chained")
 	}
-	if taskDetailCheckedControl(root, "chain_enabled") {
+	if taskDetailChainEnabled(root) {
 		appendBadge("Chain")
 	}
 	if taskDetailHasGoal(root) {
@@ -891,11 +895,142 @@ func taskDetailSwarmChild(root *html.Node) bool {
 	return strings.Contains(NodeText(heading.Parent.Parent), "Part of swarm:")
 }
 
-func taskDetailCheckedControl(root *html.Node, name string) bool {
-	control := findNode(root, func(e *html.Node) bool {
-		return (e.Data == "input" || e.Data == "option") && attr(e, "name") == name
-	})
-	return control != nil && nodeHasAttr(control, "checked")
+func taskDetailChainEnabled(root *html.Node) bool {
+	if root == nil {
+		return false
+	}
+	control := taskDetailChainControls(root)
+	if enabled := findNode(control, func(e *html.Node) bool {
+		return e.Data == "input" && attr(e, "name") == "chain_enabled"
+	}); enabled != nil {
+		if strings.EqualFold(strings.TrimSpace(attr(enabled, "type")), "checkbox") {
+			return nodeHasAttr(enabled, "checked")
+		}
+		if hasHTMLAttr(enabled, "value") {
+			value := strings.TrimSpace(attr(enabled, "value"))
+			return strings.EqualFold(value, "true") || value == "1"
+		}
+		return nodeHasAttr(enabled, "checked")
+	}
+	return false
+}
+
+func taskDetailChaining(root, tabPanel *html.Node) string {
+	chainPanel := findByID(tabPanel, "task-chain-panel")
+	if chainPanel == nil {
+		chainPanel = findByID(root, "task-chain-panel")
+	}
+	if chainPanel == nil {
+		return NodeText(tabPanel)
+	}
+
+	controls := taskDetailChainControls(chainPanel)
+	trigger := taskDetailChainSelect(controls, "chain_trigger")
+	category := taskDetailChainSelect(controls, "chain_child_category")
+	model := taskDetailChainSelect(controls, "chain_child_agent_id")
+	modelOverride := strings.TrimSpace(attr(taskDetailNamedControl(controls, "input", "chain_child_model"), "value"))
+
+	configured := false
+	if hasHTMLAttr(chainPanel, "data-configured") {
+		configured = strings.EqualFold(strings.TrimSpace(attr(chainPanel, "data-configured")), "true")
+	} else {
+		// Older task pages do not expose data-configured. Infer saved state from
+		// the enabled flag and non-default form values when possible.
+		configured = taskDetailChainEnabled(chainPanel) ||
+			(trigger.value != "" && trigger.value != "on_completion") ||
+			category.value != "" || model.value != "" || modelOverride != ""
+	}
+	if !configured {
+		return "No follow-up configured."
+	}
+
+	state := "disabled"
+	if taskDetailChainEnabled(chainPanel) {
+		state = "enabled"
+	}
+	triggerText := "After task completion"
+	if trigger.value == "on_planning_complete" {
+		triggerText = "After planning completes"
+	} else if trigger.value != "" && trigger.value != "on_completion" {
+		triggerText = taskDetailChainOptionText(trigger.option, trigger.value)
+	}
+	categoryText := "Same as parent"
+	switch strings.ToLower(category.value) {
+	case "active":
+		categoryText = "Active"
+	case "backlog":
+		categoryText = "Backlog"
+	case "":
+		if category.option != nil {
+			if label := strings.TrimSpace(taskDetailControlText(category.option)); label != "" {
+				categoryText = label
+			}
+		}
+	default:
+		categoryText = taskDetailChainOptionText(category.option, category.value)
+	}
+	modelText := "Use default model"
+	if model.value != "" {
+		modelText = taskDetailChainOptionText(model.option, model.value)
+	} else if model.option != nil {
+		label := strings.TrimSpace(taskDetailControlText(model.option))
+		if label != "" {
+			modelText = label
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "Follow-up task: %s\nTrigger: %s\nChild category: %s\nChild model: %s", state, triggerText, categoryText, modelText)
+	if modelOverride != "" {
+		fmt.Fprintf(&b, "\nChild model override: %s", modelOverride)
+	}
+	return b.String()
+}
+
+type taskDetailChainSelectValue struct {
+	value  string
+	option *html.Node
+}
+
+func taskDetailChainControls(root *html.Node) *html.Node {
+	if root == nil {
+		return nil
+	}
+	if form := findNode(root, func(e *html.Node) bool { return hasHTMLAttr(e, "data-chain-form") }); form != nil {
+		return form
+	}
+	return root
+}
+
+func taskDetailChainSelect(root *html.Node, name string) taskDetailChainSelectValue {
+	if root == nil {
+		return taskDetailChainSelectValue{}
+	}
+	selectNode := taskDetailNamedControl(root, "select", name)
+	if selectNode == nil {
+		return taskDetailChainSelectValue{}
+	}
+	options := findAll(selectNode, func(e *html.Node) bool { return e.Data == "option" })
+	if len(options) == 0 {
+		return taskDetailChainSelectValue{}
+	}
+	selected := options[0]
+	for _, option := range options {
+		if nodeHasAttr(option, "selected") {
+			selected = option
+			break
+		}
+	}
+	return taskDetailChainSelectValue{value: strings.TrimSpace(attr(selected, "value")), option: selected}
+}
+
+func taskDetailChainOptionText(option *html.Node, fallback string) string {
+	if option != nil {
+		if text := strings.TrimSpace(taskDetailControlText(option)); text != "" {
+			return text
+		}
+	}
+	return fallback
 }
 
 func taskDetailSelectedLabel(root *html.Node, name, emptyLabel string) string {
