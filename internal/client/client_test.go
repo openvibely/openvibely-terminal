@@ -1016,6 +1016,30 @@ func TestStreamChatOutputParsesChunksAndTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestStreamChatOutputDeliversDataLinesLargerThanOneMiB(t *testing.T) {
+	payload := strings.Repeat("x", (1<<20)+137)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: chunk\ndata: %s\n\n", payload)
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events, errs := c.StreamChatOutput(ctx, "exec-large", 0)
+	got, ok := <-events
+	if !ok {
+		t.Fatal("large chat event was not delivered")
+	}
+	if got.Name != "chunk" || got.Data != payload {
+		t.Fatalf("large chat event mismatch: name=%q data length=%d, want name=chunk data length=%d", got.Name, len(got.Data), len(payload))
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("large chat stream error: %v", err)
+		}
+	}
+}
+
 func TestSSEStreamsSendSharedHeadersAndBlockLoginRedirects(t *testing.T) {
 	type streamRequest struct {
 		method       string
@@ -1179,37 +1203,39 @@ func TestSSEStreamsPreserveStatusErrors(t *testing.T) {
 	}
 }
 
-func TestSSEStreamsReportOversizedFrames(t *testing.T) {
+func TestSSEStreamsDeliverFramesOverOneMiB(t *testing.T) {
 	const oversizedDataBytes = 1024*1024 + 1
+	payload := strings.Repeat("x", oversizedDataBytes)
 	for _, tc := range []struct {
-		name        string
-		path        string
-		errorPrefix string
-		stream      func(context.Context, *Client) (<-chan error, func())
+		name          string
+		path          string
+		readFirstData func(context.Context, *Client) (string, <-chan error)
+		wantCloseErr  bool
 	}{
 		{
-			name:        "chat output",
-			path:        "/events/chat/exec",
-			errorPrefix: "chat output stream read:",
-			stream: func(ctx context.Context, c *Client) (<-chan error, func()) {
+			name: "chat output",
+			path: "/events/chat/exec",
+			readFirstData: func(ctx context.Context, c *Client) (string, <-chan error) {
 				events, errs := c.StreamChatOutput(ctx, "exec", 0)
-				return errs, func() {
-					for range events {
-					}
+				event, ok := <-events
+				if !ok {
+					return "", errs
 				}
+				return event.Data, errs
 			},
 		},
 		{
-			name:        "live events",
-			path:        "/events/live",
-			errorPrefix: "event stream read:",
-			stream: func(ctx context.Context, c *Client) (<-chan error, func()) {
+			name: "live events",
+			path: "/events/live",
+			readFirstData: func(ctx context.Context, c *Client) (string, <-chan error) {
 				events, errs := c.StreamEvents(ctx, "")
-				return errs, func() {
-					for range events {
-					}
+				event, ok := <-events
+				if !ok {
+					return "", errs
 				}
+				return string(event.Data), errs
 			},
+			wantCloseErr: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1218,15 +1244,21 @@ func TestSSEStreamsReportOversizedFrames(t *testing.T) {
 					t.Fatalf("path = %q, want %q", r.URL.Path, tc.path)
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprint(w, "data: "+strings.Repeat("x", oversizedDataBytes)+"\n\n")
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
 			}))
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			errs, drainEvents := tc.stream(ctx, c)
-			drainEvents()
-			err := <-errs
-			if err == nil || !strings.Contains(err.Error(), tc.errorPrefix) {
-				t.Fatalf("error = %v, want prefix %q", err, tc.errorPrefix)
+			got, errs := tc.readFirstData(ctx, c)
+			if got != payload {
+				t.Fatalf("delivered data length = %d, want intact %d-byte payload", len(got), len(payload))
+			}
+			err, ok := <-errs
+			if tc.wantCloseErr {
+				if !ok || !errors.Is(err, ErrEventStreamClosed) {
+					t.Fatalf("stream close error = %v (open=%t), want ErrEventStreamClosed", err, ok)
+				}
+			} else if ok && err != nil {
+				t.Fatalf("unexpected stream error: %v", err)
 			}
 		})
 	}
@@ -1371,6 +1403,38 @@ func TestStreamEvents(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for stream end")
+	}
+}
+
+func TestStreamEventsDeliversLargeNamedPayloadIntact(t *testing.T) {
+	payload := `{"type":"large","payload":"` + strings.Repeat("y", (1<<20)+211) + `"}`
+	secondPayload := `{"type":"large","payload":"` + strings.Repeat("z", (1<<20)+89) + `"}`
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: large_event\ndata: %s\n\n", payload)
+		_, _ = fmt.Fprintf(w, "event: second_large_event\ndata: %s\n\n", secondPayload)
+	}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events, errs := c.StreamEvents(ctx, "")
+	for _, want := range []struct {
+		name string
+		data string
+	}{
+		{name: "large_event", data: payload},
+		{name: "second_large_event", data: secondPayload},
+	} {
+		got, ok := <-events
+		if !ok {
+			t.Fatalf("large live event %q was not delivered", want.name)
+		}
+		if got.Name != want.name || string(got.Data) != want.data {
+			t.Fatalf("large live event mismatch: name=%q data length=%d, want name=%q data length=%d", got.Name, len(got.Data), want.name, len(want.data))
+		}
+	}
+	if err := <-errs; !errors.Is(err, ErrEventStreamClosed) {
+		t.Fatalf("large live stream error = %v, want ErrEventStreamClosed", err)
 	}
 }
 

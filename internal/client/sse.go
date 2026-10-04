@@ -129,51 +129,90 @@ func (c *Client) openSSEStream(ctx context.Context, cfg sseStreamConfig) (*http.
 }
 
 func scanSSEFrames(r io.Reader, dataLineMode sseDataLineMode, handle func(rawSSEFrame) bool) error {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
+	reader := bufio.NewReaderSize(r, 64*1024)
 	var frame rawSSEFrame
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		switch {
-		case len(line) == 0:
-			if frame.dataLineCount > 0 && !handle(frame) {
+	var lineBuffer []byte
+
+	for {
+		line, err := readSSELine(reader, &lineBuffer)
+		if len(line) > 0 {
+			if bytes.HasSuffix(line, []byte{'\n'}) {
+				line = line[:len(line)-1]
+				line = bytes.TrimSuffix(line, []byte{'\r'})
+			}
+			switch {
+			case len(line) == 0:
+				if frame.dataLineCount > 0 && !handle(frame) {
+					return nil
+				}
+				frame = rawSSEFrame{}
+			case bytes.HasPrefix(line, []byte("event:")):
+				frame.eventName = string(line[len("event:"):])
+			case bytes.HasPrefix(line, []byte("data:")):
+				data := line[len("data:"):]
+				switch dataLineMode {
+				case sseDataLineChatOutput:
+					if len(data) > 0 && data[0] == ' ' {
+						data = data[1:]
+					}
+				case sseDataLineLiveEvent:
+					data = bytes.TrimSpace(data)
+				}
+				if frame.dataLineCount == 0 {
+					if len(data) > 0 && len(data) <= 128 {
+						// Short multiline frames commonly split into similarly sized lines.
+						// Reserve for the next line and separator to avoid growing twice.
+						frame.payload = make([]byte, 0, 2*len(data)+1)
+					}
+					if len(lineBuffer) > 0 {
+						// A long line already owns its storage; keep the payload slice
+						// instead of copying the full line into a second allocation.
+						frame.payload = data
+					} else {
+						frame.payload = append(frame.payload, data...)
+					}
+				} else {
+					extra := len(data) + 1
+					if extra > cap(frame.payload)-len(frame.payload) {
+						frame.payload = slices.Grow(frame.payload, extra)
+					}
+					frame.payload = append(frame.payload, '\n')
+					frame.payload = append(frame.payload, data...)
+				}
+				frame.dataLineCount++
+			case len(line) > 0 && line[0] == ':':
+				// Comment / keep-alive ping.
+			}
+			// A long line's buffer is either retained by the frame or no longer
+			// needed, so allocate fresh scratch storage for the next line.
+			if len(lineBuffer) > 0 {
+				lineBuffer = nil
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
 				return nil
 			}
-			frame = rawSSEFrame{}
-		case bytes.HasPrefix(line, []byte("event:")):
-			frame.eventName = string(line[len("event:"):])
-		case bytes.HasPrefix(line, []byte("data:")):
-			data := line[len("data:"):]
-			switch dataLineMode {
-			case sseDataLineChatOutput:
-				if len(data) > 0 && data[0] == ' ' {
-					data = data[1:]
-				}
-			case sseDataLineLiveEvent:
-				data = bytes.TrimSpace(data)
-			}
-			if frame.dataLineCount == 0 {
-				if len(data) > 0 && len(data) <= 128 {
-					// Short multiline frames commonly split into similarly sized lines.
-					// Reserve for the next line and separator to avoid growing twice.
-					frame.payload = make([]byte, 0, 2*len(data)+1)
-				}
-				frame.payload = append(frame.payload, data...)
-			} else {
-				extra := len(data) + 1
-				if extra > cap(frame.payload)-len(frame.payload) {
-					frame.payload = slices.Grow(frame.payload, extra)
-				}
-				frame.payload = append(frame.payload, '\n')
-				frame.payload = append(frame.payload, data...)
-			}
-			frame.dataLineCount++
-		case len(line) > 0 && line[0] == ':':
-			// Comment / keep-alive ping.
+			return err
 		}
 	}
-	return scanner.Err()
+}
+
+// readSSELine joins ReadSlice fragments without imposing a token-size limit.
+// The returned bytes are only valid until the next call when no scratch buffer
+// was needed; callers process each line before reading again.
+func readSSELine(reader *bufio.Reader, scratch *[]byte) ([]byte, error) {
+	*scratch = (*scratch)[:0]
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(*scratch) == 0 && err != bufio.ErrBufferFull {
+			return fragment, err
+		}
+		*scratch = append(*scratch, fragment...)
+		if err != bufio.ErrBufferFull {
+			return *scratch, err
+		}
+	}
 }
 
 const (
