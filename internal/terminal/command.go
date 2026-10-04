@@ -367,7 +367,9 @@ func tokenizeCommandTokens(line string) ([]commandToken, error) {
 		tokenQuoted = false
 	}
 
-	for _, r := range line {
+	runes := []rune(line)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		if quoted != 0 {
 			if r == quoted {
 				quoted = 0

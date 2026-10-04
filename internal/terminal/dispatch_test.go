@@ -13275,12 +13275,11 @@ func TestDestructiveNonEmptyRefStillConfirms(t *testing.T) {
 
 func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 	// The status path uses only compact JSON projections, not the ordinary HTML
-	// alert/task collections. The responses deliberately represent mixed states
-	// that the old card parser would have counted as one pending, two active,
-	// and one queued.
+	// alert/task collections. The response represents mixed active, queued, and
+	// failed states for the selected project.
 	m, rec := dispatchModel(t, map[string]string{
 		"/api/alerts/pending-count": `{"count":1}`,
-		"/api/tasks/status-counts":  `{"active_tasks":2,"queued_tasks":1}`,
+		"/api/tasks/status-counts":  `{"active_tasks":2,"queued_tasks":1,"failed_tasks":1}`,
 	})
 
 	// First /status call triggers fetchStatusCounts and processes the result
@@ -13309,6 +13308,9 @@ func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 	if m.queuedTaskCount != 1 {
 		t.Errorf("queuedTaskCount = %d, want 1", m.queuedTaskCount)
 	}
+	if m.failedTaskCount != 1 {
+		t.Errorf("failedTaskCount = %d, want 1", m.failedTaskCount)
+	}
 
 	// Second /status call renders with the populated counts.
 	m = runLine(t, m, "/status")
@@ -13319,6 +13321,9 @@ func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 	}
 	if !strings.Contains(tx, "active") {
 		t.Errorf("status missing active tasks row:\n%s", tx)
+	}
+	if !strings.Contains(tx, "1 failed") || !strings.Contains(tx, "review with /tasks") {
+		t.Errorf("status missing failed-task count or review route:\n%s", tx)
 	}
 }
 
@@ -13641,16 +13646,33 @@ func TestTaskReviewReadPathsHaveEquivalentJSONOutputAndCanonicalRouting(t *testi
 
 			got := taskReviewsResultText(m)
 			var decoded []client.ReviewComment
-			if err := json.Unmarshal([]byte(got), &decoded); err != nil {
+			if tc.name == "show review tab" || tc.name == "canonical full ID review" {
+				var envelope struct {
+					Task client.Task            `json:"task"`
+					Tab  string                 `json:"tab"`
+					Data []client.ReviewComment `json:"data"`
+				}
+				if err := json.Unmarshal([]byte(got), &envelope); err != nil {
+					t.Fatalf("review output is not a JSON tab envelope: %v\n%s", err, transcript(m))
+				}
+				if envelope.Task.ID != taskID || envelope.Tab != "review" {
+					t.Fatalf("review task envelope = %+v tab %q", envelope.Task, envelope.Tab)
+				}
+				decoded = envelope.Data
+			} else if err := json.Unmarshal([]byte(got), &decoded); err != nil {
 				t.Fatalf("review output is not a JSON array: %v\n%s", err, transcript(m))
 			}
 			if len(decoded) != 1 || decoded[0].ID != "rc-1" || decoded[0].CommentText != "Needs error handling" {
 				t.Fatalf("review JSON = %+v, want parsed review comment", decoded)
 			}
+			normalized, err := json.Marshal(decoded)
+			if err != nil {
+				t.Fatalf("marshal normalized reviews: %v", err)
+			}
 			if want == "" {
-				want = got
-			} else if got != want {
-				t.Errorf("review JSON differs from the first read path:\n%s\nwant:\n%s", got, want)
+				want = string(normalized)
+			} else if string(normalized) != want {
+				t.Errorf("review data differs from the first read path:\n%s\nwant:\n%s", normalized, want)
 			}
 			if got := rec.count("GET", "/tasks/"+taskID+"/reviews"); got != 1 {
 				t.Fatalf("review display should make exactly one review request, got %d:\n%s", got, rec.all())
@@ -15786,5 +15808,120 @@ func TestSkillsListJSONKeepsFullContentContract(t *testing.T) {
 	}
 	if listRequests != 1 || detailRequests != 1 {
 		t.Fatalf("list requests = %d, detail requests = %d", listRequests, detailRequests)
+	}
+}
+
+func TestChannelsConnectTUIConfirmsSelectedProjectsMatchingChannel(t *testing.T) {
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = false, false
+	t.Cleanup(func() { cliMode, forceMode = oldCLI, oldForce })
+
+	page := `<div data-channel-type="slack" data-search-text="Slack Connected"></div><div data-channel-type="github" data-search-text="GitHub Not connected"></div>`
+	m, rec := dispatchModel(t, map[string]string{"/channels": page})
+	m.selectedID = "selected-project"
+	m.selectedName = "selected project"
+
+	m = runLine(t, m, "/channels connect slack")
+	if m.pendingConfirmation == nil {
+		t.Fatal("connect should present a guided browser handoff")
+	}
+	prompt := m.pendingConfirmation.message
+	if !strings.Contains(prompt, "/channels/slack/connect?project_id=selected-project") || !strings.Contains(prompt, "type 'yes'") {
+		t.Fatalf("handoff did not show the project-scoped URL and recheck step: %q", prompt)
+	}
+	if calls := rec.all(); calls != "" {
+		t.Fatalf("starting OAuth handoff must not claim status or make a backend request:\n%s", calls)
+	}
+
+	m = runLine(t, m, "yes")
+	if !strings.Contains(transcript(m), "Slack connection confirmed by the backend") {
+		t.Fatalf("confirmed status missing from output:\n%s", transcript(m))
+	}
+	if rec.all() != "GET /channels" || !rec.sawQuery("project_id=selected-project") {
+		t.Fatalf("status recheck did not read the selected project's matching channel: %s", rec.all())
+	}
+	if strings.Contains(transcript(m), "GitHub connection confirmed") {
+		t.Fatalf("status recheck reported a different channel:\n%s", transcript(m))
+	}
+}
+
+func TestChannelsConnectDeniedOrCanceledAuthorizationStaysRetryable(t *testing.T) {
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = false, false
+	t.Cleanup(func() { cliMode, forceMode = oldCLI, oldForce })
+
+	t.Run("backend reports not connected after browser denial", func(t *testing.T) {
+		page := `<div data-channel-type="slack" data-search-text="Slack Not connected"></div><div data-channel-type="github" data-search-text="GitHub Connected"></div>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": page})
+		m.selectedID = "selected-project"
+		m = runLine(t, m, "/channels connect slack")
+		m = runLine(t, m, "yes")
+
+		out := transcript(m)
+		if !strings.Contains(out, "authorization is not confirmed") || !strings.Contains(out, "remains incomplete") || !strings.Contains(out, "channels connect slack") {
+			t.Fatalf("unconfirmed authorization was not clearly retryable:\n%s", out)
+		}
+		if rec.all() != "GET /channels" || !rec.sawQuery("project_id=selected-project") {
+			t.Fatalf("status check did not stay scoped to the selected project: %s", rec.all())
+		}
+		if strings.Contains(out, "Slack connection confirmed") {
+			t.Fatalf("unconnected Slack was reported as connected:\n%s", out)
+		}
+	})
+
+	t.Run("backend reports disconnected after browser denial", func(t *testing.T) {
+		page := `<div data-channel-type="slack" data-search-text="Slack Disconnected"></div>`
+		m, rec := dispatchModel(t, map[string]string{"/channels": page})
+		m.selectedID = "selected-project"
+		m = runLine(t, m, "/channels connect slack")
+		m = runLine(t, m, "yes")
+
+		out := transcript(m)
+		if !strings.Contains(out, "authorization is not confirmed") || !strings.Contains(out, "remains incomplete") {
+			t.Fatalf("disconnected authorization was not reported as incomplete:\n%s", out)
+		}
+		if strings.Contains(out, "Slack connection confirmed") {
+			t.Fatalf("disconnected Slack was reported as connected:\n%s", out)
+		}
+		if rec.all() != "GET /channels" || !rec.sawQuery("project_id=selected-project") {
+			t.Fatalf("disconnected status check did not use the selected project: %s", rec.all())
+		}
+	})
+
+	t.Run("user cancels the handoff", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/channels connect github")
+		m = runLine(t, m, "no")
+		out := transcript(m)
+		if !strings.Contains(out, "authorization remains unconfirmed") || !strings.Contains(out, "channels connect github") {
+			t.Fatalf("cancel did not leave an explicit retry path:\n%s", out)
+		}
+		if calls := rec.all(); calls != "" {
+			t.Fatalf("canceling handoff unexpectedly checked status:\n%s", calls)
+		}
+	})
+}
+
+func TestChannelsConnectCLIIsOneShotAndDoesNotConfirmAuthorization(t *testing.T) {
+	oldCLI, oldForce := cliMode, forceMode
+	cliMode, forceMode = true, false
+	t.Cleanup(func() { cliMode, forceMode = oldCLI, oldForce })
+
+	for _, channelType := range []string{"slack", "github"} {
+		t.Run(channelType, func(t *testing.T) {
+			m, rec := dispatchModel(t, nil)
+			m.selectedID = "selected-project"
+			m = runLine(t, m, "/channels connect "+channelType)
+			out := transcript(m)
+			if !strings.Contains(out, "/channels/"+channelType+"/connect?project_id=selected-project") || !strings.Contains(out, "does not confirm authorization") || !strings.Contains(out, "channels show "+channelType) {
+				t.Fatalf("CLI handoff output is incomplete or implies success:\n%s", out)
+			}
+			if strings.Contains(out, "connection confirmed") || m.pendingConfirmation != nil {
+				t.Fatalf("CLI treated URL generation as completed authorization:\n%s", out)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("CLI connect must be one-shot and nonblocking, got backend calls:\n%s", calls)
+			}
+		})
 	}
 }

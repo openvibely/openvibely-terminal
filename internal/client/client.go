@@ -287,6 +287,7 @@ type ProjectCapacity struct {
 type TaskStatusCounts struct {
 	ActiveTasks int `json:"active_tasks"`
 	QueuedTasks int `json:"queued_tasks"`
+	FailedTasks int `json:"failed_tasks"`
 }
 
 // PendingAlertCount is the compact project-scoped alert projection used by
@@ -444,9 +445,9 @@ func (c *Client) GetPendingAlertCount(ctx context.Context, projectID string) (in
 	return out.Count, nil
 }
 
-// GetTaskStatusCounts fetches the active-category and queued-status counts for
-// one project. The response is intentionally independent from full task-card
-// pagination so status cannot fall back to downloading the board.
+// GetTaskStatusCounts fetches active-category, queued-status, and failed-status
+// counts for one project. The response is intentionally independent from full
+// task-card pagination so status cannot fall back to downloading the board.
 func (c *Client) GetTaskStatusCounts(ctx context.Context, projectID string) (*TaskStatusCounts, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("project ID is required for task status counts")

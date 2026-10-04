@@ -2,12 +2,14 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -57,9 +59,17 @@ type ChatOutputEvent struct {
 	Data string
 }
 
+type sseDataLineMode uint8
+
+const (
+	sseDataLineChatOutput sseDataLineMode = iota
+	sseDataLineLiveEvent
+)
+
 type rawSSEFrame struct {
-	eventName string
-	dataLines []string
+	eventName     string
+	payload       []byte
+	dataLineCount int
 }
 
 type sseStreamConfig struct {
@@ -118,24 +128,48 @@ func (c *Client) openSSEStream(ctx context.Context, cfg sseStreamConfig) (*http.
 	return resp, nil
 }
 
-func scanSSEFrames(r io.Reader, handle func(rawSSEFrame) bool) error {
+func scanSSEFrames(r io.Reader, dataLineMode sseDataLineMode, handle func(rawSSEFrame) bool) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	var frame rawSSEFrame
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := scanner.Bytes()
 		switch {
-		case line == "":
-			if len(frame.dataLines) > 0 && !handle(frame) {
+		case len(line) == 0:
+			if frame.dataLineCount > 0 && !handle(frame) {
 				return nil
 			}
 			frame = rawSSEFrame{}
-		case strings.HasPrefix(line, "event:"):
-			frame.eventName = strings.TrimPrefix(line, "event:")
-		case strings.HasPrefix(line, "data:"):
-			frame.dataLines = append(frame.dataLines, strings.TrimPrefix(line, "data:"))
-		case strings.HasPrefix(line, ":"):
+		case bytes.HasPrefix(line, []byte("event:")):
+			frame.eventName = string(line[len("event:"):])
+		case bytes.HasPrefix(line, []byte("data:")):
+			data := line[len("data:"):]
+			switch dataLineMode {
+			case sseDataLineChatOutput:
+				if len(data) > 0 && data[0] == ' ' {
+					data = data[1:]
+				}
+			case sseDataLineLiveEvent:
+				data = bytes.TrimSpace(data)
+			}
+			if frame.dataLineCount == 0 {
+				if len(data) > 0 && len(data) <= 128 {
+					// Short multiline frames commonly split into similarly sized lines.
+					// Reserve for the next line and separator to avoid growing twice.
+					frame.payload = make([]byte, 0, 2*len(data)+1)
+				}
+				frame.payload = append(frame.payload, data...)
+			} else {
+				extra := len(data) + 1
+				if extra > cap(frame.payload)-len(frame.payload) {
+					frame.payload = slices.Grow(frame.payload, extra)
+				}
+				frame.payload = append(frame.payload, '\n')
+				frame.payload = append(frame.payload, data...)
+			}
+			frame.dataLineCount++
+		case len(line) > 0 && line[0] == ':':
 			// Comment / keep-alive ping.
 		}
 	}
@@ -181,14 +215,10 @@ func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int
 		}
 		defer resp.Body.Close()
 
-		err = scanSSEFrames(resp.Body, func(frame rawSSEFrame) bool {
-			dataLines := make([]string, len(frame.dataLines))
-			for i, line := range frame.dataLines {
-				dataLines[i] = strings.TrimPrefix(line, " ")
-			}
+		err = scanSSEFrames(resp.Body, sseDataLineChatOutput, func(frame rawSSEFrame) bool {
 			event := ChatOutputEvent{
 				Name: strings.TrimSpace(frame.eventName),
-				Data: strings.Join(dataLines, "\n"),
+				Data: string(frame.payload),
 			}
 			select {
 			case events <- event:
@@ -301,14 +331,10 @@ func (c *Client) StreamEvents(ctx context.Context, projectID string) (<-chan Eve
 		}
 		defer resp.Body.Close()
 
-		err = scanSSEFrames(resp.Body, func(frame rawSSEFrame) bool {
-			dataLines := make([]string, len(frame.dataLines))
-			for i, line := range frame.dataLines {
-				dataLines[i] = strings.TrimSpace(line)
-			}
+		err = scanSSEFrames(resp.Body, sseDataLineLiveEvent, func(frame rawSSEFrame) bool {
 			event := Event{
 				Name: strings.TrimSpace(frame.eventName),
-				Data: json.RawMessage(strings.Join(dataLines, "\n")),
+				Data: json.RawMessage(frame.payload),
 			}
 			select {
 			case events <- event:

@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -46,6 +47,83 @@ var (
 // input cannot be safely parsed for userinfo, query, fragment, or control data.
 func InvalidServerURLMessage(string) string {
 	return "Invalid configured server URL.\nCorrect -server or OPENVIBELY_SERVER_URL, then run /status.\nThe URL was not sent to a backend."
+}
+
+type setupBackendProcess interface {
+	Handoff(context.Context) error
+	Stop()
+}
+
+type localBackendProcess struct {
+	mu               sync.Mutex
+	cmd              *exec.Cmd
+	done             chan struct{}
+	stopOnce         sync.Once
+	stopCancellation func() bool
+	handedOff        bool
+	stopped          bool
+}
+
+func (p *localBackendProcess) Handoff(ctx context.Context) error {
+	if p == nil {
+		return errors.New("local backend process is unavailable for handoff")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		p.Stop()
+		return err
+	}
+	if p.stopCancellation == nil || !p.stopCancellation() {
+		p.Stop()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("local backend process cancellation interrupted handoff")
+	}
+
+	// Stop and join the asynchronous cancellation callback before the final
+	// context check. If cancellation won while the callback was being removed,
+	// retain ownership and stop the child; a successful final check commits the
+	// handoff, after which later cancellation belongs to the caller.
+	p.mu.Lock()
+	if p.stopped || p.cmd == nil || p.cmd.Process == nil {
+		p.mu.Unlock()
+		return errors.New("local backend process is unavailable for handoff")
+	}
+	p.handedOff = true
+	if err := ctx.Err(); err != nil {
+		p.handedOff = false
+		p.mu.Unlock()
+		p.Stop()
+		return err
+	}
+	p.cmd = nil
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *localBackendProcess) Stop() {
+	if p == nil {
+		return
+	}
+	p.stopOnce.Do(func() {
+		p.mu.Lock()
+		if p.handedOff {
+			p.mu.Unlock()
+			return
+		}
+		p.stopped = true
+		cmd := p.cmd
+		p.mu.Unlock()
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		if p.done != nil {
+			<-p.done
+		}
+	})
 }
 
 // setupGuidance renders only instructions that the user may choose to run. It
@@ -133,7 +211,7 @@ func localBackendLifecycleGuidance(platform, baseURL string) string {
 	endpoint := serverURLDisplay(baseURL)
 	var b strings.Builder
 	b.WriteString("Local backend lifecycle\n")
-	b.WriteString("Stop: this terminal does not track a backend PID. Stop only the OpenVibely backend process you started.\n")
+	b.WriteString("Stop: after the health check succeeds, the backend continues running independently. This terminal does not track its PID; stop only the OpenVibely backend process you started.\n")
 	if platform == "windows" {
 		fmt.Fprintf(&b, "  netstat -ano | findstr :%s\n", port)
 		b.WriteString("  taskkill /PID <pid>\n")
@@ -504,14 +582,31 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 		}
 	}
 	fmt.Fprintf(&b, "\nStarting local backend with: %s\n", sanitizeAutomationDetailText(check.Start.Display))
-	if err := setupStartProcess(ctx, check.Start); err != nil {
+	process, err := setupStartProcess(ctx, check.Start)
+	if err != nil {
 		return b.String(), err
 	}
+	if process == nil {
+		return b.String(), errors.New("starting local backend returned no process handle")
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			process.Stop()
+		}
+	}()
 	b.WriteString("Start command launched. Waiting for backend health...\n")
 	next, err := waitForSetupHealth(ctx, c, setupHealthWaitTimeout, setupHealthPoll)
 	if err != nil {
 		return b.String(), err
 	}
+	if err := ctx.Err(); err != nil {
+		return b.String(), err
+	}
+	if err := process.Handoff(ctx); err != nil {
+		return b.String(), err
+	}
+	handedOff = true
 	b.WriteString("Backend health check succeeded.\n")
 	b.WriteString(next)
 	return strings.TrimRight(b.String(), "\n"), nil
@@ -566,22 +661,35 @@ func runLocalBackendInstaller(ctx context.Context, platform string, steps []setu
 	return nil
 }
 
-func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) error {
+func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
 	if strings.TrimSpace(spec.Name) == "" {
-		return errors.New("no start command available")
+		return nil, errors.New("no start command available")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	name := spec.Name
 	if spec.Display == "./start.sh" {
 		name = filepath.Clean("./start.sh")
 	}
-	cmd := setupExecCommand(ctx, name, spec.Args...)
+	cmd := exec.Command(name, spec.Args...)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting local backend: %w", err)
+		return nil, fmt.Errorf("starting local backend: %w", err)
 	}
-	if cmd.Process != nil {
-		_ = cmd.Process.Release()
+	process := &localBackendProcess{cmd: cmd, done: make(chan struct{})}
+	go func() {
+		_ = cmd.Wait()
+		close(process.done)
+	}()
+	process.stopCancellation = context.AfterFunc(ctx, process.Stop)
+	if err := ctx.Err(); err != nil {
+		process.Stop()
+		return nil, err
 	}
-	return nil
+	return process, nil
 }
 
 func probeSetupHealth(ctx context.Context, c *client.Client) (string, bool, error) {

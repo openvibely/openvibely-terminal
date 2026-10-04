@@ -433,12 +433,17 @@ type reconnectTickMsg struct {
 
 // statusCountsMsg carries the operational counts fetched for the /status command.
 type statusCountsMsg struct {
-	sessionGeneration uint64
-	projectGeneration uint64
-	pendingAlerts     int
-	activeTasks       int
-	queuedTasks       int
-	alertsUnavailable bool
-	tasksUnavailable  bool
-	err               error
+	sessionGeneration     uint64
+	projectGeneration     uint64
+	pendingAlerts         int
+	activeTasks           int
+	queuedTasks           int
+	failedTasks           int
+	projectCapacity       *client.ProjectCapacity
+	alertsUnavailable     bool
+	tasksUnavailable      bool
+	projectCapUnavailable bool
+	projectCapChecked     bool
+	renderStatus          bool
+	err                   error
 }
