@@ -12551,8 +12551,9 @@ func TestCLIWebhookOptionsStillValidateBeforeRequests(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
-		{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
+			{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
+			{name: "recognized option after missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions", "--enabled"}},
+			{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
 		{name: "invalid boolean", args: []string{"webhooks", "edit", "pager", "--enabled", "maybe"}},
 		{name: "invalid priority", args: []string{"webhooks", "edit", "pager", "--priority", "5"}},
 	} {
