@@ -2031,13 +2031,14 @@ func TestProjectScopedAsyncResultsAreIgnoredAfterProjectSwitch(t *testing.T) {
 					pendingAlerts:     5,
 					activeTasks:       4,
 					queuedTasks:       3,
+					failedTasks:       2,
 					alertsUnavailable: true,
 					tasksUnavailable:  true,
 				}
 			},
 			check: func(t *testing.T, m Model, before string) {
-				if m.pendingAlertCount != 0 || m.activeTaskCount != 0 || m.queuedTaskCount != 0 || m.alertsCountUnavailable || m.tasksCountUnavailable || transcript(m) != before {
-					t.Fatalf("stale status counts changed state: alerts=%d active=%d queued=%d alertsUnavailable=%t tasksUnavailable=%t transcript=%q", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount, m.alertsCountUnavailable, m.tasksCountUnavailable, transcript(m))
+				if m.pendingAlertCount != 0 || m.activeTaskCount != 0 || m.queuedTaskCount != 0 || m.failedTaskCount != 0 || m.alertsCountUnavailable || m.tasksCountUnavailable || transcript(m) != before {
+					t.Fatalf("stale status counts changed state: alerts=%d active=%d queued=%d failed=%d alertsUnavailable=%t tasksUnavailable=%t transcript=%q", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount, m.failedTaskCount, m.alertsCountUnavailable, m.tasksCountUnavailable, transcript(m))
 				}
 			},
 		},
@@ -3423,6 +3424,7 @@ func TestStatusCountsAuthFailureEntersSignInRequired(t *testing.T) {
 	m.pendingAlertCount = 4
 	m.activeTaskCount = 3
 	m.queuedTaskCount = 2
+	m.failedTaskCount = 6
 
 	msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
 	if !ok {
@@ -3437,8 +3439,8 @@ func TestStatusCountsAuthFailureEntersSignInRequired(t *testing.T) {
 	if cmd != nil || !m.authRequired || m.connected {
 		t.Fatalf("status count auth failure did not enter recovery: authRequired=%t connected=%t cmd=%v", m.authRequired, m.connected, cmd)
 	}
-	if m.pendingAlertCount != 4 || m.activeTaskCount != 3 || m.queuedTaskCount != 2 {
-		t.Fatalf("auth failure overwrote cached counts: alerts=%d active=%d queued=%d", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount)
+	if m.pendingAlertCount != 4 || m.activeTaskCount != 3 || m.queuedTaskCount != 2 || m.failedTaskCount != 6 {
+		t.Fatalf("auth failure overwrote cached counts: alerts=%d active=%d queued=%d failed=%d", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount, m.failedTaskCount)
 	}
 }
 
@@ -3507,6 +3509,7 @@ func TestStatusCountsRenderTaskCountUnavailableOnPartialFailure(t *testing.T) {
 	m.connChecked = true
 	m.activeTaskCount = 9
 	m.queuedTaskCount = 8
+	m.failedTaskCount = 7
 
 	msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
 	if !ok {
@@ -3527,8 +3530,8 @@ func TestStatusCountsRenderTaskCountUnavailableOnPartialFailure(t *testing.T) {
 	if strings.Contains(status, "none active") {
 		t.Fatalf("status rendered false task empty state after task-count failure:\n%s", status)
 	}
-	if m.pendingAlertCount != 4 || m.activeTaskCount != 9 || m.queuedTaskCount != 8 {
-		t.Fatalf("partial count update = alerts=%d active=%d queued=%d, want alerts updated and cached task counts preserved", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount)
+	if m.pendingAlertCount != 4 || m.activeTaskCount != 9 || m.queuedTaskCount != 8 || m.failedTaskCount != 7 {
+		t.Fatalf("partial count update = alerts=%d active=%d queued=%d failed=%d, want alerts updated and cached task counts preserved", m.pendingAlertCount, m.activeTaskCount, m.queuedTaskCount, m.failedTaskCount)
 	}
 }
 
@@ -3610,6 +3613,163 @@ func TestStatusCountsRenderEmptyRowsWhenCompactCountsAreZero(t *testing.T) {
 	}
 	if strings.Contains(status, "unavailable") || strings.Contains(status, "partial failure") {
 		t.Fatalf("zero counts rendered partial failure:\n%s", status)
+	}
+}
+
+func TestStatusTaskCountsRenderFailureStatesWithoutLoadingBoard(t *testing.T) {
+	tests := []struct {
+		name     string
+		response string
+		want     []string
+		unwanted []string
+	}{
+		{
+			name:     "failed only",
+			response: `{"active_tasks":0,"queued_tasks":0,"failed_tasks":2}`,
+			want:     []string{"2 failed", "review with /tasks"},
+			unwanted: []string{"none active"},
+		},
+		{
+			name:     "mixed states",
+			response: `{"active_tasks":3,"queued_tasks":4,"failed_tasks":2}`,
+			want:     []string{"3 active", "4 queued", "2 failed", "review with /tasks"},
+			unwanted: []string{"none active"},
+		},
+		{
+			name:     "quiet zero",
+			response: `{"active_tasks":0,"queued_tasks":0,"failed_tasks":0}`,
+			want:     []string{"none active"},
+			unwanted: []string{"failed", "review with /tasks"},
+		},
+		{
+			name:     "cancelled only",
+			response: `{"active_tasks":0,"queued_tasks":0,"failed_tasks":0,"cancelled_tasks":9}`,
+			want:     []string{"none active"},
+			unwanted: []string{"failed", "review with /tasks"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			projectID := "status-project"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != projectID {
+					t.Errorf("project_id = %q, want %q", got, projectID)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/alerts/pending-count":
+					_, _ = io.WriteString(w, `{"count":0}`)
+				case "/api/tasks/status-counts":
+					_, _ = io.WriteString(w, tc.response)
+				case "/tasks":
+					t.Error("status fetched the full task board")
+					http.Error(w, "unexpected board request", http.StatusInternalServerError)
+				default:
+					t.Errorf("unexpected request path %q", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := New(c)
+			m.selectedID = projectID
+			m.connected = true
+			m.connChecked = true
+
+			msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+			if !ok {
+				t.Fatalf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+			}
+			if msg.err != nil || msg.tasksUnavailable {
+				t.Fatalf("status count fetch = %+v, want available project counts", msg)
+			}
+			next, cmd := m.Update(msg)
+			if cmd != nil {
+				t.Fatalf("status count update returned unexpected command %T", cmd)
+			}
+			m = next.(Model)
+			status := strings.ToLower(stripANSI(m.renderStatus()))
+			for _, want := range tc.want {
+				if !strings.Contains(status, want) {
+					t.Errorf("status missing %q:\n%s", want, status)
+				}
+			}
+			for _, unwanted := range tc.unwanted {
+				if strings.Contains(status, unwanted) {
+					t.Errorf("status unexpectedly contains %q:\n%s", unwanted, status)
+				}
+			}
+		})
+	}
+}
+
+func TestStatusTaskCountsRemainScopedAcrossProjectSwitch(t *testing.T) {
+	var requestedProject string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tasks/status-counts" {
+			requestedProject = r.URL.Query().Get("project_id")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/alerts/pending-count":
+			_, _ = io.WriteString(w, `{"count":0}`)
+		case "/api/tasks/status-counts":
+			if requestedProject == "project-b" {
+				_, _ = io.WriteString(w, `{"active_tasks":1,"queued_tasks":2,"failed_tasks":3}`)
+			} else {
+				_, _ = io.WriteString(w, `{"active_tasks":0,"queued_tasks":0,"failed_tasks":8}`)
+			}
+		default:
+			t.Errorf("unexpected status request %q", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	m.projects = []client.Project{{ID: "project-a", Name: "A"}, {ID: "project-b", Name: "B"}}
+	m.selectedID = "project-a"
+	m.selectedName = "A"
+	m.failedTaskCount = 8
+	oldGeneration := m.projectGeneration
+	m, _ = m.pickProject("project-b")
+	if m.failedTaskCount != 0 {
+		t.Fatalf("project switch retained previous failed count %d", m.failedTaskCount)
+	}
+
+	msg, ok := m.fetchStatusCounts()().(statusCountsMsg)
+	if !ok {
+		t.Fatalf("status count command returned %T, want statusCountsMsg", m.fetchStatusCounts()())
+	}
+	if requestedProject != "project-b" || msg.failedTasks != 3 || msg.activeTasks != 1 || msg.queuedTasks != 2 {
+		t.Fatalf("project B status counts request/result = %q/%+v, want project-b and 1/2/3", requestedProject, msg)
+	}
+	next, _ := m.Update(msg)
+	m = next.(Model)
+	status := strings.ToLower(stripANSI(m.renderStatus()))
+	for _, want := range []string{"1 active", "2 queued", "3 failed"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("project B status missing %q:\n%s", want, status)
+		}
+	}
+
+	stale, _ := m.Update(statusCountsMsg{
+		sessionGeneration: m.sessionGeneration,
+		projectGeneration: oldGeneration,
+		failedTasks:       8,
+	})
+	m = stale.(Model)
+	if m.failedTaskCount != 3 {
+		t.Fatalf("stale project A status changed failed count to %d, want project B's 3", m.failedTaskCount)
 	}
 }
 

@@ -13257,12 +13257,11 @@ func TestDestructiveNonEmptyRefStillConfirms(t *testing.T) {
 
 func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 	// The status path uses only compact JSON projections, not the ordinary HTML
-	// alert/task collections. The responses deliberately represent mixed states
-	// that the old card parser would have counted as one pending, two active,
-	// and one queued.
+	// alert/task collections. The response represents mixed active, queued, and
+	// failed states for the selected project.
 	m, rec := dispatchModel(t, map[string]string{
 		"/api/alerts/pending-count": `{"count":1}`,
-		"/api/tasks/status-counts":  `{"active_tasks":2,"queued_tasks":1}`,
+		"/api/tasks/status-counts":  `{"active_tasks":2,"queued_tasks":1,"failed_tasks":1}`,
 	})
 
 	// First /status call triggers fetchStatusCounts and processes the result
@@ -13291,6 +13290,9 @@ func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 	if m.queuedTaskCount != 1 {
 		t.Errorf("queuedTaskCount = %d, want 1", m.queuedTaskCount)
 	}
+	if m.failedTaskCount != 1 {
+		t.Errorf("failedTaskCount = %d, want 1", m.failedTaskCount)
+	}
 
 	// Second /status call renders with the populated counts.
 	m = runLine(t, m, "/status")
@@ -13301,6 +13303,9 @@ func TestStatusCommandShowsAlertAndTaskCounts(t *testing.T) {
 	}
 	if !strings.Contains(tx, "active") {
 		t.Errorf("status missing active tasks row:\n%s", tx)
+	}
+	if !strings.Contains(tx, "1 failed") || !strings.Contains(tx, "review with /tasks") {
+		t.Errorf("status missing failed-task count or review route:\n%s", tx)
 	}
 }
 

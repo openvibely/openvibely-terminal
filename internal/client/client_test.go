@@ -705,7 +705,7 @@ func TestProjectStatusCountsUseCompactProjectScopedJSON(t *testing.T) {
 		case "/api/alerts/pending-count":
 			body = `{"count":17}`
 		case "/api/tasks/status-counts":
-			body = `{"active_tasks":23,"queued_tasks":11}`
+			body = `{"active_tasks":23,"queued_tasks":11,"failed_tasks":5}`
 		default:
 			t.Fatalf("unexpected status-count path %q", r.URL.Path)
 		}
@@ -722,8 +722,8 @@ func TestProjectStatusCountsUseCompactProjectScopedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTaskStatusCounts: %v", err)
 	}
-	if pending != 17 || tasks.ActiveTasks != 23 || tasks.QueuedTasks != 11 {
-		t.Fatalf("compact counts = %d/%+v, want 17/{active_tasks:23 queued_tasks:11}", pending, tasks)
+	if pending != 17 || tasks.ActiveTasks != 23 || tasks.QueuedTasks != 11 || tasks.FailedTasks != 5 {
+		t.Fatalf("compact counts = %d/%+v, want 17/{active_tasks:23 queued_tasks:11 failed_tasks:5}", pending, tasks)
 	}
 	if len(requests) != 2 || totalBytes >= 1024 {
 		t.Fatalf("compact requests/response bytes = %d/%d, want two small JSON responses: %v", len(requests), totalBytes, requests)

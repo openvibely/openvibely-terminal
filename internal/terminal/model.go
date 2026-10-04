@@ -235,6 +235,7 @@ type Model struct {
 	pendingAlertCount      int
 	activeTaskCount        int
 	queuedTaskCount        int
+	failedTaskCount        int
 	alertsCountUnavailable bool
 	tasksCountUnavailable  bool
 
@@ -491,9 +492,9 @@ func (m Model) checkConnectionWithGeneration(generation int) tea.Cmd {
 	}
 }
 
-// fetchStatusCounts concurrently fetches the pending-alert count and
-// active/queued task counts for the selected project. It is a no-op when no
-// project is selected.
+// fetchStatusCounts concurrently fetches the pending-alert count and the
+// active, queued, and failed task counts for the selected project. It is a no-op
+// when no project is selected.
 func (m Model) fetchStatusCounts() tea.Cmd {
 	if m.selectedID == "" {
 		return nil
@@ -509,6 +510,7 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 			pendingAlerts int
 			activeTasks   int
 			queuedTasks   int
+			failedTasks   int
 			alertsErr     error
 			tasksErr      error
 		)
@@ -528,6 +530,7 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 			if counts != nil {
 				activeTasks = counts.ActiveTasks
 				queuedTasks = counts.QueuedTasks
+				failedTasks = counts.FailedTasks
 			}
 		}()
 
@@ -538,6 +541,7 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 			pendingAlerts:     pendingAlerts,
 			activeTasks:       activeTasks,
 			queuedTasks:       queuedTasks,
+			failedTasks:       failedTasks,
 		}
 		// Counts are best-effort, but an auth failure proves the session is no
 		// longer usable and must enter sign-in recovery instead of being hidden.
@@ -865,6 +869,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.pendingAlertCount = 0
 		m.activeTaskCount = 0
 		m.queuedTaskCount = 0
+		m.failedTaskCount = 0
 		m.alertsCountUnavailable = false
 		m.tasksCountUnavailable = false
 		m.input.Placeholder = defaultPlaceholder
@@ -1684,6 +1689,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.tasksUnavailable {
 			m.activeTaskCount = msg.activeTasks
 			m.queuedTaskCount = msg.queuedTasks
+			m.failedTaskCount = msg.failedTasks
 		}
 		return m, nil
 	case projectsLoadedMsg:
