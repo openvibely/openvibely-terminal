@@ -23,12 +23,12 @@ import (
 
 const (
 	backendInstallationGuideURL  = "https://docs.openvibely.ai/installation"
-	backendInstallerUnixURL      = "https://openvibely.ai/install.sh"
-	backendInstallerWindowsURL   = "https://openvibely.ai/install.ps1"
 	maxConnectionDiagnosticWidth = 240
 )
 
 var (
+	backendInstallerUnixURL    = "https://openvibely.ai/install.sh"
+	backendInstallerWindowsURL = "https://openvibely.ai/install.ps1"
 	connectionDiagnosticURL    = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
 	connectionDiagnosticSecret = regexp.MustCompile(`(?i)\b(?:access[_-]?token|api[_-]?key|authorization|cookie|credential|password|secret|token)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic)\s+)?[^\s,;]+)`)
 
@@ -68,12 +68,12 @@ func setupGuidance(platform, baseURL string) string {
 	switch platform {
 	case "windows":
 		b.WriteString("In PowerShell, explicitly install the server using the backend's documented Windows command:\n")
-		b.WriteString("  & ([scriptblock]::Create((irm https://openvibely.ai/install.ps1))) -Variant binary\n")
+		fmt.Fprintf(&b, "  & ([scriptblock]::Create((irm %s))) -Variant binary\n", backendInstallerWindowsURL)
 		b.WriteString("For a source checkout in a shell that supports it, start the server with:\n")
 		b.WriteString("  ./start.sh\n")
 	default:
 		b.WriteString("On macOS or Linux, explicitly install the server using the backend's documented command:\n")
-		b.WriteString("  curl -fsSL https://openvibely.ai/install.sh | bash -s -- --variant binary\n")
+		fmt.Fprintf(&b, "  curl -fsSL %s | bash -s -- --variant binary\n", backendInstallerUnixURL)
 		b.WriteString("From an OpenVibely source checkout, start the server with:\n")
 		b.WriteString("  ./start.sh\n")
 	}

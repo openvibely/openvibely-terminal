@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -147,6 +149,91 @@ func TestSetupGuidanceUsesAuthoritativePlatformInstructions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetupGuidanceAndInstallerExecutionShareAuthoritativeURLs(t *testing.T) {
+	oldUnixURL, oldWindowsURL := backendInstallerUnixURL, backendInstallerWindowsURL
+	backendInstallerUnixURL = "https://installer.example.test/custom-unix.sh"
+	backendInstallerWindowsURL = "https://installer.example.test/custom-windows.ps1"
+	t.Cleanup(func() {
+		backendInstallerUnixURL, backendInstallerWindowsURL = oldUnixURL, oldWindowsURL
+	})
+
+	testCases := []struct {
+		platform string
+		wantLine string
+		steps    []setupCommandSpec
+	}{
+		{
+			platform: "linux",
+			wantLine: "curl -fsSL " + backendInstallerUnixURL + " | bash -s -- --variant binary",
+			steps: []setupCommandSpec{
+				{Name: "curl", Found: true},
+				{Name: "bash", Found: true},
+			},
+		},
+		{
+			platform: "windows",
+			wantLine: "& ([scriptblock]::Create((irm " + backendInstallerWindowsURL + "))) -Variant binary",
+			steps:    []setupCommandSpec{{Name: "powershell.exe", Found: true}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.platform, func(t *testing.T) {
+			guidance := setupGuidance(tc.platform, "http://localhost:3001")
+			if !strings.Contains(guidance, tc.wantLine) {
+				t.Fatalf("setup guidance missing authoritative installer command %q:\n%s", tc.wantLine, guidance)
+			}
+
+			type invocation struct {
+				name string
+				args []string
+			}
+			var invocations []invocation
+			oldExecCommand := setupExecCommand
+			setupExecCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				invocations = append(invocations, invocation{name: name, args: append([]string(nil), args...)})
+				role := name
+				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSetupInstallerExecutionHelper$")
+				cmd.Env = append(os.Environ(), "OPENVIBELY_INSTALLER_HELPER=1", "OPENVIBELY_INSTALLER_ROLE="+role)
+				return cmd
+			}
+			t.Cleanup(func() { setupExecCommand = oldExecCommand })
+
+			if err := runLocalBackendInstaller(context.Background(), tc.platform, tc.steps); err != nil {
+				t.Fatalf("runLocalBackendInstaller() error = %v", err)
+			}
+
+			if tc.platform == "windows" {
+				wantArgs := []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", tc.wantLine}
+				if len(invocations) != 1 || invocations[0].name != "powershell.exe" || strings.Join(invocations[0].args, "\x00") != strings.Join(wantArgs, "\x00") {
+					t.Fatalf("installer invocation = %#v, want powershell.exe %#v", invocations, wantArgs)
+				}
+				return
+			}
+
+			if len(invocations) != 2 || invocations[0].name != "curl" || strings.Join(invocations[0].args, "\x00") != strings.Join([]string{"-fsSL", backendInstallerUnixURL}, "\x00") {
+				t.Fatalf("Unix installer download invocation = %#v, want curl -fsSL %q", invocations, backendInstallerUnixURL)
+			}
+			if invocations[1].name != "bash" || strings.Join(invocations[1].args, "\x00") != strings.Join([]string{"-s", "--", "--variant", "binary"}, "\x00") {
+				t.Fatalf("Unix installer shell invocation = %#v, want bash -s -- --variant binary", invocations[1])
+			}
+		})
+	}
+}
+
+func TestSetupInstallerExecutionHelper(t *testing.T) {
+	if os.Getenv("OPENVIBELY_INSTALLER_HELPER") != "1" {
+		return
+	}
+	switch os.Getenv("OPENVIBELY_INSTALLER_ROLE") {
+	case "curl":
+		_, _ = io.WriteString(os.Stdout, "installer contents")
+	case "bash":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+	}
+	os.Exit(0)
 }
 
 func TestSetupLifecycleGuidanceCoversStopReconnectAndUpdate(t *testing.T) {
