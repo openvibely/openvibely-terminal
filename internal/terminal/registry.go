@@ -4040,6 +4040,38 @@ type agentPluginCommandResult struct {
 	State  client.AgentPluginState          `json:"state"`
 }
 
+func agentPluginInstallResponseNotes(result client.AgentPluginInstallResult) []string {
+	var notes []string
+	if value := strings.TrimSpace(result.Warning); value != "" {
+		notes = append(notes, "warning: "+sanitizeAutomationDetailText(value))
+	}
+	if value := strings.TrimSpace(result.Message); value != "" {
+		notes = append(notes, "message: "+sanitizeAutomationDetailText(value))
+	}
+	if value := strings.TrimSpace(result.Error); value != "" {
+		notes = append(notes, "error: "+sanitizeAutomationDetailText(value))
+	}
+	if len(result.Details) != 0 && string(result.Details) != "null" {
+		detail := strings.TrimSpace(string(result.Details))
+		var text string
+		if json.Unmarshal(result.Details, &text) == nil {
+			detail = text
+		}
+		if detail != "" {
+			notes = append(notes, "details: "+sanitizeAutomationDetailText(detail))
+		}
+	}
+	return notes
+}
+
+func agentPluginInstallFailure(pluginID string, result client.AgentPluginInstallResult) string {
+	message := "failed to install " + sanitizeAutomationDetailText(pluginID)
+	if notes := agentPluginInstallResponseNotes(result); len(notes) != 0 {
+		message += "; " + strings.Join(notes, "; ")
+	}
+	return message
+}
+
 type agentPluginActionName struct {
 	word    string
 	syntax  string
@@ -4376,6 +4408,17 @@ func agentsPluginInstallCommand(m Model, c *client.Client, projectID string, arg
 		if err != nil {
 			return "", err
 		}
+		if !result.OK {
+			status := agentPluginInstallFailure(pluginID, result)
+			if jsonMode {
+				body, marshalErr := marshalJSON(map[string]any{"status": status, "result": result})
+				if marshalErr != nil {
+					return "", marshalErr
+				}
+				return body, fmt.Errorf("%s", status)
+			}
+			return status, fmt.Errorf("%s", status)
+		}
 		state, refreshErr := c.GetAgentPluginState(ctx)
 		status := "installed " + sanitizeAutomationDetailText(pluginID)
 		if agentID != "" {
@@ -4385,8 +4428,8 @@ func agentsPluginInstallCommand(m Model, c *client.Client, projectID string, arg
 				status += "; enabling for " + sanitizeAutomationDetailText(agentName) + " failed: " + sanitizeAutomationDetailText(result.EnableError)
 			}
 		}
-		if result.Warning != "" {
-			status += "; warning: " + sanitizeAutomationDetailText(result.Warning)
+		for _, note := range agentPluginInstallResponseNotes(result) {
+			status += "; " + note
 		}
 		if jsonMode {
 			if refreshErr != nil {
