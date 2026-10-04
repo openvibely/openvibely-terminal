@@ -4722,15 +4722,25 @@ func TestChannelConnectURLRedactsServerCredentialsAndScopesProject(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := c.ChannelConnectURL("slack", "project two")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "https://example.com/base/channels/slack/connect?project_id=project+two" {
-		t.Fatalf("connect URL = %q", got)
-	}
-	if strings.Contains(got, "server-secret") || strings.Contains(got, "unsafe") || strings.Contains(got, "fragment") {
-		t.Fatalf("connect URL exposed configured URL data: %q", got)
+	for _, tc := range []struct {
+		channelType string
+		want        string
+	}{
+		{"slack", "https://example.com/base/channels/slack/connect?project_id=project+two"},
+		{"github", "https://example.com/base/channels/github/connect?project_id=project+two"},
+	} {
+		t.Run(tc.channelType, func(t *testing.T) {
+			got, err := c.ChannelConnectURL(tc.channelType, "project two")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("connect URL = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "server-secret") || strings.Contains(got, "unsafe") || strings.Contains(got, "fragment") {
+				t.Fatalf("connect URL exposed configured URL data: %q", got)
+			}
+		})
 	}
 }
 

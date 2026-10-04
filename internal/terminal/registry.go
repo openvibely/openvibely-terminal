@@ -7506,7 +7506,7 @@ func channelsCommand() command {
 			{action: "list", description: "list safe channel identity and connection state"},
 			{action: "show", args: "<channel>", description: "show safe channel details"},
 			{action: "add", args: "<type> <options>", description: "configure a new channel"},
-			{action: "connect", args: "<github|slack>", description: "show the browser OAuth URL"},
+			{action: "connect", args: "<github|slack>", description: "start browser authorization and explain how to check connection status"},
 			{action: "edit", args: "<channel> <options>", description: "update channel settings"},
 			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, X, or Email"},
 			{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
@@ -7682,9 +7682,34 @@ func channelsCommand() command {
 				if err != nil {
 					return m, errCmd(err.Error())
 				}
-				return m, run("Channels", cmdTimeout, func(context.Context) (string, error) {
-					return "Open this URL in a browser to connect " + ch.Name + ":\n" + safeURL, nil
+				if cliMode {
+					return m, run("Channels", cmdTimeout, func(context.Context) (string, error) {
+						return "Open this URL in a browser to authorize " + ch.Name + " for the selected project:\n" + safeURL +
+							"\nNext: finish authorization in the browser, then check completion with `channels show " + ch.Type + "` (or `channels list`). This command does not confirm authorization; if the browser flow was canceled or denied, retry with `channels connect " + ch.Type + "`.", nil
+					})
+				}
+				checkStatus := run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
+					current, err := c.GetChannel(ctx, pid, ch.Type)
+					if err != nil {
+						return "", err
+					}
+					if current.Connected {
+						return ch.Name + " connection confirmed by the backend for the selected project.", nil
+					}
+					status := current.Status
+					if status == "" {
+						status = "unknown"
+					}
+					return ch.Name + " authorization is not confirmed for the selected project (backend status: " + status + "). If the browser flow was canceled or denied, it remains incomplete. Retry with `channels connect " + ch.Type + "`; recheck anytime with `channels show " + ch.Type + "`.", nil
 				})
+				m.busy = false
+				m.pendingConfirmation = &pendingCmd{
+					message: "Open this URL in a browser to authorize " + ch.Name + " for the selected project:\n" + safeURL +
+						"\nAfter finishing the browser step, type 'yes' and press Enter to recheck this project's " + ch.Name + " status. Esc ends the handoff without claiming success. You can also recheck with /channels show " + ch.Type + ".",
+					cmd:           withMessageGeneration(checkStatus, sessionGenerationOf(m), projectGenerationOf(m)),
+					cancelMessage: ch.Name + " authorization remains unconfirmed. Retry with /channels connect " + ch.Type + "; check current state with /channels show " + ch.Type + ".",
+				}
+				return m, nil
 			}
 			runAction := run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
 				if err := c.ChannelAction(ctx, ch.Type, action, pid); err != nil {
