@@ -20,11 +20,11 @@ import (
 
 func workersWatchCapacityHTML(globalRunning, projectRunning, modelRunning int) string {
 	return fmt.Sprintf(`<div id="worker-settings-content">
-<table><tbody id="project-stats-tbody">
+<table><tbody id="project-stats-tbody" data-capacity-available="true">
 <tr id="global-row"><td>Global</td><td>All Projects</td><td>%d / 8</td><td>1</td><td><input name="max_workers" id="limit-input-global" value="8"></td><td>Active</td></tr>
 <tr id="project-row-p1"><td>Project</td><td>Demo</td><td>%d / 4</td><td>2</td><td><input name="max_workers" id="limit-input-p1" value="4"></td><td>Active</td></tr>
 </tbody></table>
-<table><tbody id="model-stats-tbody"><tr><td><div>Sonnet</div><div>claude-sonnet</div></td><td>%d / 5</td><td>5</td><td>Active</td></tr></tbody></table>
+<table><tbody id="model-stats-tbody" data-capacity-available="true"><tr><td><div>Sonnet</div><div>claude-sonnet</div></td><td>%d / 5</td><td>5</td><td>Active</td></tr></tbody></table>
 </div>`, globalRunning, projectRunning, modelRunning)
 }
 
@@ -205,8 +205,8 @@ func TestFetchWorkersOverviewCombinedSnapshotPreservesSourceWarnings(t *testing.
 			return
 		}
 		html := workersWatchCapacityHTML(1, 0, 0)
-		html = strings.Replace(html, `id="project-stats-tbody"`, `id="project-stats-tbody" data-capacity-available="false"`, 1)
-		html = strings.Replace(html, `id="model-stats-tbody"`, `id="model-stats-tbody" data-capacity-available="false"`, 1)
+		html = strings.Replace(html, `data-capacity-available="true"`, `data-capacity-available="false"`, 1)
+		html = strings.Replace(html, `data-capacity-available="true"`, `data-capacity-available="false"`, 1)
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = fmt.Fprint(w, html)
 	}))
@@ -236,7 +236,8 @@ func TestFetchWorkersOverviewFallsBackAndPreservesPartialWarnings(t *testing.T) 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/workers" {
 			snapshotRequests.Add(1)
-			http.NotFound(w, r)
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(w, strings.ReplaceAll(workersWatchCapacityHTML(0, 0, 0), ` data-capacity-available="true"`, ""))
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

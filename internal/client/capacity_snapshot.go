@@ -34,11 +34,15 @@ func parseWorkerSettingsCapacity(root *html.Node) (*CapacitySnapshot, error) {
 		return nil, fmt.Errorf("reading global worker queue: %w", err)
 	}
 
+	projectAvailability := attr(projectBody, "data-capacity-available")
+	if projectAvailability != "true" && projectAvailability != "false" {
+		return nil, ErrCapacitySnapshotUnsupported
+	}
 	snapshot := &CapacitySnapshot{
 		Global:            &GlobalCapacity{MaxWorkers: maxWorkers, TotalRunning: running, QueueSize: queueSize},
 		Projects:          make([]ProjectCapacity, 0),
 		Models:            make([]ModelCapacity, 0),
-		ProjectsAvailable: attr(projectBody, "data-capacity-available") != "false",
+		ProjectsAvailable: projectAvailability == "true",
 		ModelsAvailable:   true,
 	}
 	if !snapshot.ProjectsAvailable {
@@ -74,7 +78,7 @@ func parseWorkerSettingsCapacity(root *html.Node) (*CapacitySnapshot, error) {
 
 	modelBody := findByID(root, "model-stats-tbody")
 	if modelBody != nil {
-		snapshot.ModelsAvailable = attr(modelBody, "data-capacity-available") != "false"
+		snapshot.ModelsAvailable = attr(modelBody, "data-capacity-available") == "true"
 		if snapshot.ModelsAvailable {
 			for _, row := range capacityHTMLRows(modelBody) {
 				cells := capacityHTMLCells(row)
