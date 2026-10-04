@@ -803,11 +803,11 @@ func TestProjectStatusCountsPreserveTransportErrors(t *testing.T) {
 
 const workerCapacitySnapshotHTML = `
 <div id="worker-settings-content">
-  <table><tbody id="project-stats-tbody">
+  <table><tbody id="project-stats-tbody" data-capacity-available="true">
     <tr id="global-row"><td>Global</td><td>All Projects</td><td>2 / 5</td><td>3</td><td><input name="max_workers" id="limit-input-global" value="5"></td><td>Active</td></tr>
     <tr id="project-row-p1"><td>Project</td><td>Demo</td><td>1 / 2</td><td>4</td><td><input name="max_workers" id="limit-input-p1" value="2"></td><td>Active</td></tr>
   </tbody></table>
-  <table><tbody id="model-stats-tbody">
+  <table><tbody id="model-stats-tbody" data-capacity-available="true">
     <tr><td><div>Sonnet</div><div>claude-sonnet</div></td><td>1 / 3</td><td>3</td><td>Active</td></tr>
   </tbody></table>
 </div>`
@@ -866,6 +866,24 @@ func TestGetCapacitySnapshotCachesUnsupportedWorkersPage(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("unsupported page probes = %d, want one cached probe", requests)
+	}
+}
+
+func TestGetCapacitySnapshotTreatsUnmarkedWorkersPageAsUnsupported(t *testing.T) {
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, strings.ReplaceAll(workerCapacitySnapshotHTML, ` data-capacity-available="true"`, ""))
+	}))
+
+	for range 2 {
+		if _, err := c.GetCapacitySnapshot(context.Background()); !errors.Is(err, ErrCapacitySnapshotUnsupported) {
+			t.Fatalf("GetCapacitySnapshot error = %v, want unsupported legacy markup", err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("legacy markup probes = %d, want one cached probe", requests)
 	}
 }
 
