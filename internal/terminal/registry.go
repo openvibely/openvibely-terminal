@@ -2373,16 +2373,33 @@ func resolveTaskWithOperands(tasks []client.Task, args []string, trailing int) (
 	maxRefWords := len(args) - trailing
 	var matched client.Task
 	matchedAt := 0
-	for end := 1; end <= maxRefWords; end++ {
+	var ambiguousErr error
+	ambiguousAt := 0
+	// Inspect even required operand words for ambiguity: an operand can also
+	// complete a longer task title, and must not hide a conflicting target.
+	for end := 1; end <= len(args); end++ {
 		task, err := matchRef(tasks, strings.Join(args[:end], " "),
 			func(t client.Task) string { return t.ID },
 			func(t client.Task) string { return t.Title })
 		if err == nil {
-			matched = task
-			matchedAt = end
+			if end <= maxRefWords {
+				matched = task
+				matchedAt = end
+			}
+			continue
+		}
+		if !isMatchRefNotFound(err) {
+			ambiguousErr = err
+			ambiguousAt = end
 		}
 	}
+	if ambiguousAt > matchedAt {
+		return zero, nil, ambiguousErr
+	}
 	if matchedAt == 0 {
+		if ambiguousErr != nil {
+			return zero, nil, ambiguousErr
+		}
 		task, err := matchRef(tasks, strings.Join(args[:maxRefWords], " "),
 			func(t client.Task) string { return t.ID },
 			func(t client.Task) string { return t.Title })

@@ -978,6 +978,61 @@ func TestMatchRefByIDPrefixAndName(t *testing.T) {
 	}
 }
 
+func TestResolveTaskWithOperandsRetainsLaterAmbiguity(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "alpha", Title: "Alpha"},
+		{ID: "alpha-beta-1", Title: "Alpha Beta"},
+		{ID: "alpha-beta-2", Title: "Alpha Beta"},
+	}
+
+	got, operands, err := resolveTaskWithOperands(tasks, []string{"Alpha", "Beta"}, 1)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("resolveTaskWithOperands error = %v, want the later Alpha Beta ambiguity", err)
+	}
+	if got.ID != "" || len(operands) != 0 {
+		t.Fatalf("ambiguous resolution returned task=%q operands=%v", got.ID, operands)
+	}
+}
+
+func TestResolveTaskWithOperandsAllowsUniqueLongerTitleAfterAmbiguity(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "alpha", Title: "Alpha"},
+		{ID: "alpha-beta-1", Title: "Alpha Beta"},
+		{ID: "alpha-beta-2", Title: "Alpha Beta"},
+		{ID: "alpha-beta-gamma", Title: "Alpha Beta Gamma"},
+	}
+
+	got, operands, err := resolveTaskWithOperands(tasks, []string{"Alpha", "Beta", "Gamma", "request.txt"}, 1)
+	if err != nil {
+		t.Fatalf("resolveTaskWithOperands returned error: %v", err)
+	}
+	if got.ID != "alpha-beta-gamma" {
+		t.Fatalf("resolved task = %q, want unique longer title", got.ID)
+	}
+	if !reflect.DeepEqual(operands, []string{"request.txt"}) {
+		t.Fatalf("remaining operands = %v, want [request.txt]", operands)
+	}
+}
+
+func TestResolveTaskWithOperandsKeepsShortTitleAndOrdinaryOperand(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "alpha", Title: "Alpha"},
+		{ID: "alpha-beta-1", Title: "Alpha Beta"},
+		{ID: "alpha-beta-2", Title: "Alpha Beta"},
+	}
+
+	got, operands, err := resolveTaskWithOperands(tasks, []string{"Alpha", "request.txt"}, 1)
+	if err != nil {
+		t.Fatalf("resolveTaskWithOperands returned error: %v", err)
+	}
+	if got.ID != "alpha" {
+		t.Fatalf("resolved task = %q, want shorter title Alpha", got.ID)
+	}
+	if !reflect.DeepEqual(operands, []string{"request.txt"}) {
+		t.Fatalf("remaining operands = %v, want [request.txt]", operands)
+	}
+}
+
 // An exact title must win over a longer title that contains it, whatever the
 // listing order.
 func TestMatchRefPrefersExactName(t *testing.T) {
