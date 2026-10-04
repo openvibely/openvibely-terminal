@@ -553,8 +553,15 @@ func formatSelectorArgument(ref string) string {
 	quoted.Grow(len(ref) + 2)
 	quoted.WriteByte('"')
 	for _, r := range ref {
-		if r == '\\' || r == '"' {
-			quoted.WriteByte('\\')
+		if r == '"' {
+			// A quote of the active delimiter is represented by closing the
+			// double-quoted segment, placing a literal quote in a single-quoted
+			// segment, and reopening the double-quoted segment. This preserves
+			// the tokenizer's literal backslash behavior inside quotes.
+			quoted.WriteByte('"')
+			quoted.WriteString(`'"'`)
+			quoted.WriteByte('"')
+			continue
 		}
 		quoted.WriteRune(r)
 	}

@@ -371,11 +371,6 @@ func tokenizeCommandTokens(line string) ([]commandToken, error) {
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
 		if quoted != 0 {
-			if quoted == '"' && r == '\\' && i+1 < len(runes) && (runes[i+1] == '\\' || runes[i+1] == '"') {
-				i++
-				current.WriteRune(runes[i])
-				continue
-			}
 			if r == quoted {
 				quoted = 0
 			} else {

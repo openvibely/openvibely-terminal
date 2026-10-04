@@ -82,6 +82,21 @@ func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 			line: `/tasks show ""`,
 			want: []string{"tasks", "show", ""},
 		},
+		{
+			name: "double quoted argument preserves backslash",
+			line: `/memory show "path\name.md"`,
+			want: []string{"memory", "show", `path\name.md`},
+		},
+		{
+			name: "double quoted argument preserves repeated backslashes",
+			line: `/memory show "path\\name.md"`,
+			want: []string{"memory", "show", `path\\name.md`},
+		},
+		{
+			name: "double quoted argument may end with backslash",
+			line: `/memory show "path\` + `"`,
+			want: []string{"memory", "show", `path\`},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
