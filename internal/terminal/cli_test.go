@@ -12502,6 +12502,72 @@ func TestCLIWebhookEditOptionsAndOptionLikeName(t *testing.T) {
 	}
 }
 
+func TestCLIWebhookEditAcceptsOptionLikeStringValues(t *testing.T) {
+	const detail = `{"id":"w1","project_id":"p1","name":"pager","enabled":true,"path_token":"pager-token","system_instructions":"","title_template":"","prompt_template":"","default_priority":2,"agent_ids":[]}`
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":         cliProjects,
+		"/channels":             webhookCardsHTML,
+		"/channels/webhooks/w1": detail,
+	})
+	args := []string{
+		"channels", "webhooks", "edit", "Pager Duty",
+		"--system-instructions", "-- review each alert",
+		"--title-template", "-- title from alert",
+		"--prompt-template", "-- create a task",
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err != nil {
+		t.Fatalf("edit rejected option-like string values: %v", err)
+	}
+	const path = "/channels/webhooks/w1"
+	if !rec.saw(http.MethodPut, path) {
+		t.Fatalf("edit did not update webhook; calls: %s", rec.all())
+	}
+	want := map[string]string{
+		"system_instructions": "-- review each alert",
+		"title_template":      "-- title from alert",
+		"prompt_template":     "-- create a task",
+	}
+	for _, form := range rec.formsSnapshot() {
+		if !strings.HasPrefix(form, http.MethodPut+" "+path+"?") {
+			continue
+		}
+		query := strings.TrimPrefix(form, http.MethodPut+" "+path+"?")
+		values, err := url.ParseQuery(query)
+		if err != nil {
+			t.Fatalf("could not parse submitted webhook form %q: %v", form, err)
+		}
+		for key, value := range want {
+			if got := values.Get(key); got != value {
+				t.Errorf("submitted %s = %q, want %q", key, got, value)
+			}
+		}
+		return
+	}
+	t.Fatalf("webhook update form not recorded: %v", rec.formsSnapshot())
+}
+
+func TestCLIWebhookOptionsStillValidateBeforeRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
+		{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
+		{name: "invalid boolean", args: []string{"webhooks", "edit", "pager", "--enabled", "maybe"}},
+		{name: "invalid priority", args: []string{"webhooks", "edit", "pager", "--priority", "5"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, false); err == nil {
+				t.Fatalf("invalid arguments were accepted: %v", tc.args)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("invalid arguments made backend requests: %s", calls)
+			}
+		})
+	}
+}
+
 func TestCLIChannelsWebhooksValidatesBeforeAnyRequest(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})
 	err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"channels", "webhooks", "create", "Hook", "--enabled", "maybe"}, false, false)
