@@ -438,6 +438,7 @@ type statusCountsMsg struct {
 	pendingAlerts     int
 	activeTasks       int
 	queuedTasks       int
+	failedTasks       int
 	alertsUnavailable bool
 	tasksUnavailable  bool
 	err               error

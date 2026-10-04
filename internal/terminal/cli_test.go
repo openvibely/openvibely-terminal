@@ -2716,7 +2716,7 @@ func TestCLIStatusPreservesAuthRequiredAndOfflineOutput(t *testing.T) {
 
 func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	const alertsJSON = `{"count":1}`
-	const tasksJSON = `{"active_tasks":2,"queued_tasks":1}`
+	const tasksJSON = `{"active_tasks":2,"queued_tasks":1,"failed_tasks":3}`
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects":             cliProjects,
 		"/api/alerts/pending-count": alertsJSON,
@@ -2753,8 +2753,8 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	if !strings.Contains(got, "1 pending approvals") {
 		t.Errorf("status missing pending alert count:\n%s", got)
 	}
-	if !strings.Contains(got, "2 active, 1 queued") {
-		t.Errorf("status missing task counts:\n%s", got)
+	if !strings.Contains(got, "2 active, 1 queued, 3 failed") || !strings.Contains(got, "review with /tasks") {
+		t.Errorf("status missing task counts or failed-task route:\n%s", got)
 	}
 	if strings.Contains(got, "none pending") || strings.Contains(got, "none active") {
 		t.Errorf("status rendered zero-count placeholders despite mocked counts:\n%s", got)

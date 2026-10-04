@@ -354,7 +354,7 @@ func (m Model) renderStatus() string {
 		}
 		if m.tasksCountUnavailable {
 			row("tasks", statusErrStyle.Render("unavailable")+dimStyle.Render(" (partial failure)"))
-		} else if m.activeTaskCount > 0 || m.queuedTaskCount > 0 {
+		} else if m.activeTaskCount > 0 || m.queuedTaskCount > 0 || m.failedTaskCount > 0 {
 			var taskParts []string
 			if m.activeTaskCount > 0 {
 				taskParts = append(taskParts, fmt.Sprintf("%d active", m.activeTaskCount))
@@ -362,7 +362,14 @@ func (m Model) renderStatus() string {
 			if m.queuedTaskCount > 0 {
 				taskParts = append(taskParts, fmt.Sprintf("%d queued", m.queuedTaskCount))
 			}
-			row("tasks", noticeStyle.Render(strings.Join(taskParts, ", ")))
+			if m.failedTaskCount > 0 {
+				taskParts = append(taskParts, fmt.Sprintf("%d failed", m.failedTaskCount))
+			}
+			value := noticeStyle.Render(strings.Join(taskParts, ", "))
+			if m.failedTaskCount > 0 {
+				value += dimStyle.Render(" · review with /tasks")
+			}
+			row("tasks", value)
 		} else {
 			row("tasks", dimStyle.Render("none active"))
 		}
