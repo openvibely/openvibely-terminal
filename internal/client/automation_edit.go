@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,26 +55,9 @@ func (c *Client) LoadAutomationDefinition(ctx context.Context, projectID, automa
 		return nil, fmt.Errorf("automation ID is required")
 	}
 	path := "/automations/" + url.PathEscape(automationID) + "/builder" + query("project_id", projectID)
-	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	root, _, err := c.getHTMLDocument(ctx, path, nil, "parsing automation builder")
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Accept", "text/html")
-	req.Header.Set("HX-Request", "true")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", path, err)
-	}
-	defer drainAndClose(resp.Body)
-	if isReadAuthResponse(resp) {
-		return nil, newAuthRequiredError(http.MethodGet, path, resp)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, apiError(resp)
-	}
-	root, err := html.Parse(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("parsing automation builder: %w", err)
 	}
 	return parseAutomationDefinition(root, projectID, automationID)
 }

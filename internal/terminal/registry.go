@@ -2042,31 +2042,40 @@ func taskAttachmentDownloadSelector(m Model, c *client.Client, projectID, taskRe
 	command := "tasks attachments download " + taskRef
 	return m, selectorFor("Attachments", command, attachmentEmptyStateHint, false,
 		func(ctx context.Context) ([]selectorItem, error) {
-			task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
-			if err != nil {
-				return nil, err
-			}
-			attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
-			if err != nil {
-				return nil, err
-			}
-			items := make([]selectorItem, 0, len(attachments))
-			for _, attachment := range attachments {
-				attachment := attachment
-				item := selectorItem{
-					ref:    attachment.ID,
-					label:  firstNonEmpty(attachment.FileName, attachment.ID),
-					detail: attachmentSizeText(attachment.FileSize),
-				}
-				item.dispatch = func(mm Model) (Model, tea.Cmd) {
-					return mm, mm.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-						return downloadTaskAttachmentResult(ctx, mm.client, projectID, task, attachment, outputPath)
-					})
-				}
-				items = append(items, item)
-			}
-			return items, nil
+			return loadTaskAttachmentSelectorItems(ctx, m, c, projectID, taskRef,
+				func(task client.Task, attachment client.Attachment) selectorItemDispatch {
+					return func(mm Model) (Model, tea.Cmd) {
+						return mm, mm.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
+							return downloadTaskAttachmentResult(ctx, mm.client, projectID, task, attachment, outputPath)
+						})
+					}
+				})
 		})
+}
+
+func loadTaskAttachmentSelectorItems(ctx context.Context, m Model, c *client.Client, projectID, taskRef string, dispatch func(client.Task, client.Attachment) selectorItemDispatch) ([]selectorItem, error) {
+	task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
+	if err != nil {
+		return nil, err
+	}
+	attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]selectorItem, 0, len(attachments))
+	for _, attachment := range attachments {
+		attachment := attachment
+		item := selectorItem{
+			ref:    attachment.ID,
+			label:  firstNonEmpty(attachment.FileName, attachment.ID),
+			detail: attachmentSizeText(attachment.FileSize),
+		}
+		if dispatch != nil {
+			item.dispatch = dispatch(task, attachment)
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 func downloadTaskAttachmentResult(ctx context.Context, c *client.Client, projectID string, task client.Task, attachment client.Attachment, outputPath string) (string, error) {
@@ -2332,28 +2341,12 @@ func taskAttachmentSelector(m Model, c *client.Client, projectID, taskRef, usage
 	command := "tasks attachments delete " + taskRef
 	return m, selectorFor("Attachments", command, attachmentEmptyStateHint, false,
 		func(ctx context.Context) ([]selectorItem, error) {
-			task, err := resolveTaskForModel(m, ctx, c, projectID, taskRef)
-			if err != nil {
-				return nil, err
-			}
-			attachments, err := c.ListTaskAttachments(ctx, task.ID, projectID)
-			if err != nil {
-				return nil, err
-			}
-			items := make([]selectorItem, 0, len(attachments))
-			for _, attachment := range attachments {
-				attachment := attachment
-				item := selectorItem{
-					ref:    attachment.ID,
-					label:  firstNonEmpty(attachment.FileName, attachment.ID),
-					detail: attachmentSizeText(attachment.FileSize),
-				}
-				item.dispatch = func(mm Model) (Model, tea.Cmd) {
-					return confirmTaskAttachmentDeletion(mm, projectID, task, attachment)
-				}
-				items = append(items, item)
-			}
-			return items, nil
+			return loadTaskAttachmentSelectorItems(ctx, m, c, projectID, taskRef,
+				func(task client.Task, attachment client.Attachment) selectorItemDispatch {
+					return func(mm Model) (Model, tea.Cmd) {
+						return confirmTaskAttachmentDeletion(mm, projectID, task, attachment)
+					}
+				})
 		})
 }
 
@@ -4040,6 +4033,38 @@ type agentPluginCommandResult struct {
 	State  client.AgentPluginState          `json:"state"`
 }
 
+func agentPluginInstallResponseNotes(result client.AgentPluginInstallResult) []string {
+	var notes []string
+	if value := strings.TrimSpace(result.Warning); value != "" {
+		notes = append(notes, "warning: "+sanitizeAutomationDetailText(value))
+	}
+	if value := strings.TrimSpace(result.Message); value != "" {
+		notes = append(notes, "message: "+sanitizeAutomationDetailText(value))
+	}
+	if value := strings.TrimSpace(result.Error); value != "" {
+		notes = append(notes, "error: "+sanitizeAutomationDetailText(value))
+	}
+	if len(result.Details) != 0 && string(result.Details) != "null" {
+		detail := strings.TrimSpace(string(result.Details))
+		var text string
+		if json.Unmarshal(result.Details, &text) == nil {
+			detail = text
+		}
+		if detail != "" {
+			notes = append(notes, "details: "+sanitizeAutomationDetailText(detail))
+		}
+	}
+	return notes
+}
+
+func agentPluginInstallFailure(pluginID string, result client.AgentPluginInstallResult) string {
+	message := "failed to install " + sanitizeAutomationDetailText(pluginID)
+	if notes := agentPluginInstallResponseNotes(result); len(notes) != 0 {
+		message += "; " + strings.Join(notes, "; ")
+	}
+	return message
+}
+
 type agentPluginActionName struct {
 	word    string
 	syntax  string
@@ -4376,6 +4401,17 @@ func agentsPluginInstallCommand(m Model, c *client.Client, projectID string, arg
 		if err != nil {
 			return "", err
 		}
+		if !result.OK {
+			status := agentPluginInstallFailure(pluginID, result)
+			if jsonMode {
+				body, marshalErr := marshalJSON(map[string]any{"status": status, "result": result})
+				if marshalErr != nil {
+					return "", marshalErr
+				}
+				return body, fmt.Errorf("%s", status)
+			}
+			return status, fmt.Errorf("%s", status)
+		}
 		state, refreshErr := c.GetAgentPluginState(ctx)
 		status := "installed " + sanitizeAutomationDetailText(pluginID)
 		if agentID != "" {
@@ -4385,8 +4421,8 @@ func agentsPluginInstallCommand(m Model, c *client.Client, projectID string, arg
 				status += "; enabling for " + sanitizeAutomationDetailText(agentName) + " failed: " + sanitizeAutomationDetailText(result.EnableError)
 			}
 		}
-		if result.Warning != "" {
-			status += "; warning: " + sanitizeAutomationDetailText(result.Warning)
+		for _, note := range agentPluginInstallResponseNotes(result) {
+			status += "; " + note
 		}
 		if jsonMode {
 			if refreshErr != nil {
