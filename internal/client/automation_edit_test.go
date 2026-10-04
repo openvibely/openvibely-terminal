@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,6 +15,12 @@ func TestLoadAutomationDefinitionUsesScopedBuilderContract(t *testing.T) {
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/automations/au-1/builder" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Accept"); got != "text/html" {
+			t.Errorf("Accept = %q, want text/html", got)
+		}
+		if got := r.Header.Get("HX-Request"); got != "true" {
+			t.Errorf("HX-Request = %q, want true", got)
 		}
 		gotQuery = r.URL.Query()
 		_, _ = w.Write([]byte(`<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p2"></form><textarea name="automation_yaml">schema_version: 1
@@ -33,6 +40,122 @@ name: Keep &amp; edit
 		t.Fatalf("YAML = %q", definition.YAML)
 	}
 }
+
+func TestLoadAutomationDefinitionSharedGETLifecycleErrorsAndCleanup(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		location    string
+		body        string
+		wantErr     string
+		wantAuthErr bool
+	}{
+		{name: "bare redirect is authentication", status: http.StatusFound, wantErr: "unauthorized", wantAuthErr: true},
+		{name: "unauthorized", status: http.StatusUnauthorized, wantErr: "unauthorized", wantAuthErr: true},
+		{name: "backend error", status: http.StatusBadGateway, body: `{"error":"upstream unavailable"}`, wantErr: "server error (502): upstream unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := &trackedResponseBody{Reader: strings.NewReader(tc.body)}
+			transport := htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodGet || r.URL.Path != "/automations/au-1/builder" {
+					t.Errorf("request = %s %s", r.Method, r.URL)
+				}
+				if got := r.Header.Get("Accept"); got != "text/html" {
+					t.Errorf("Accept = %q, want text/html", got)
+				}
+				if got := r.Header.Get("HX-Request"); got != "true" {
+					t.Errorf("HX-Request = %q, want true", got)
+				}
+				header := make(http.Header)
+				if tc.location != "" {
+					header.Set("Location", tc.location)
+				}
+				return &http.Response{StatusCode: tc.status, Header: header, Body: body, Request: r}, nil
+			})
+			c := &Client{baseURL: "http://backend.test", http: &http.Client{Transport: transport}}
+			_, err := c.LoadAutomationDefinition(context.Background(), "p1", "au-1")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
+			}
+			if got := IsAuthRequired(err); got != tc.wantAuthErr {
+				t.Errorf("IsAuthRequired = %t, want %t", got, tc.wantAuthErr)
+			}
+			if !body.closed {
+				t.Error("response body was not closed")
+			}
+		})
+	}
+}
+
+func TestLoadAutomationDefinitionTransportFailureContext(t *testing.T) {
+	transportErr := errors.New("transport unavailable")
+	c := &Client{baseURL: "http://backend.test", http: &http.Client{Transport: htmlTestRoundTripper(func(*http.Request) (*http.Response, error) {
+		return nil, transportErr
+	})}}
+	_, err := c.LoadAutomationDefinition(context.Background(), "p1", "au-1")
+	if !errors.Is(err, transportErr) || !strings.Contains(err.Error(), "GET /automations/au-1/builder?project_id=p1") {
+		t.Fatalf("error = %v, want GET path and wrapped transport failure", err)
+	}
+}
+
+func TestLoadAutomationDefinitionParsingContextAndBodyLimit(t *testing.T) {
+	t.Run("parse error context and cleanup", func(t *testing.T) {
+		parseErr := errors.New("body read failed")
+		body := &failingHTMLBody{err: parseErr}
+		c := &Client{baseURL: "http://backend.test", http: &http.Client{Transport: htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: r}, nil
+		})}}
+		_, err := c.LoadAutomationDefinition(context.Background(), "p1", "au-1")
+		if !errors.Is(err, parseErr) || !strings.Contains(err.Error(), "parsing automation builder") {
+			t.Fatalf("error = %v, want builder parse context wrapping read error", err)
+		}
+		if !body.closed {
+			t.Error("response body was not closed after parse error")
+		}
+	})
+
+	t.Run("oversized HTML is bounded", func(t *testing.T) {
+		page := `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form><textarea name="automation_yaml">valid</textarea></div>` + strings.Repeat("x", 9<<20)
+		body := &countingTrackedHTMLBody{Reader: strings.NewReader(page)}
+		c := &Client{baseURL: "http://backend.test", http: &http.Client{Transport: htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body, Request: r}, nil
+		})}}
+		definition, err := c.LoadAutomationDefinition(context.Background(), "p1", "au-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if definition.YAML != "valid" {
+			t.Fatalf("YAML = %q, want valid", definition.YAML)
+		}
+		if body.read > (8<<20)+(64<<10) || body.read >= len(page) {
+			t.Fatalf("read %d of %d bytes; parser limit was not retained", body.read, len(page))
+		}
+		if !body.closed {
+			t.Error("response body was not closed")
+		}
+	})
+}
+
+type failingHTMLBody struct {
+	err    error
+	closed bool
+}
+
+func (b *failingHTMLBody) Read([]byte) (int, error) { return 0, b.err }
+func (b *failingHTMLBody) Close() error             { b.closed = true; return nil }
+
+type countingTrackedHTMLBody struct {
+	*strings.Reader
+	read   int
+	closed bool
+}
+
+func (b *countingTrackedHTMLBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	b.read += n
+	return n, err
+}
+func (b *countingTrackedHTMLBody) Close() error { b.closed = true; return nil }
 
 func TestLoadAutomationDefinitionFailsClosedWithoutMatchingFormIdentity(t *testing.T) {
 	cases := []struct {

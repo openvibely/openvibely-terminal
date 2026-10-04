@@ -299,6 +299,93 @@ func TestAgentsPluginInstallCanIncludeAgent(t *testing.T) {
 	}
 }
 
+func TestAgentsPluginInstallReportsServiceFailureInPlainAndJSON(t *testing.T) {
+	for _, jsonMode := range []bool{false, true} {
+		name := "plain"
+		if jsonMode {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, _ := agentPluginCommandServerWithInstallResponse(
+				t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON,
+				`{"ok":false,"warning":"installation failed"}`, nil,
+			)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", []string{"agents", "plugins", "install", "stagehand@official"}, false, jsonMode)
+			if err == nil || !strings.Contains(err.Error(), "failed to install stagehand@official") {
+				t.Fatalf("install error = %v, output=%s", err, out.String())
+			}
+			if jsonMode {
+				var response struct {
+					Status string                          `json:"status"`
+					Result client.AgentPluginInstallResult `json:"result"`
+				}
+				if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &response); err != nil {
+					t.Fatalf("failed install output was not JSON: %v\n%s", err, out.String())
+				}
+				if !strings.Contains(response.Status, "failed") || strings.Contains(response.Status, "installed stagehand") {
+					t.Fatalf("failed install status = %q", response.Status)
+				}
+				if response.Result.OK || response.Result.Warning != "installation failed" {
+					t.Fatalf("failed install result = %#v", response.Result)
+				}
+			} else if !strings.Contains(out.String(), "failed to install stagehand@official") || !strings.Contains(out.String(), "warning: installation failed") {
+				t.Fatalf("plain failed install output = %s", out.String())
+			}
+		})
+	}
+}
+
+func TestAgentsPluginInstallSuccessSurfacesWarningDetailsAndAgentEnableFailure(t *testing.T) {
+	response := `{"ok":true,"warning":"runtime warning","details":{"phase":"runtime"},"enable_error":"agent unavailable"}`
+	for _, jsonMode := range []bool{false, true} {
+		name := "plain"
+		if jsonMode {
+			name = "json"
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, _ := agentPluginCommandServerWithInstallResponse(
+				t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON, response, nil,
+			)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", []string{"agents", "plugins", "install", "stagehand@official", "Code", "Reviewer"}, false, jsonMode)
+			if err != nil {
+				t.Fatalf("install: %v\n%s", err, out.String())
+			}
+			if jsonMode {
+				var result agentPluginCommandResult
+				if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &result); err != nil {
+					t.Fatalf("successful install output was not JSON: %v\n%s", err, out.String())
+				}
+				var details map[string]string
+				if err := json.Unmarshal(result.Result.Details, &details); err != nil {
+					t.Fatalf("install details were not preserved: %v (%s)", err, result.Result.Details)
+				}
+				if !strings.Contains(result.Status, "installed stagehand@official") || !strings.Contains(result.Status, "enabling for Code Reviewer failed: agent unavailable") || !strings.Contains(result.Status, "warning: runtime warning") {
+					t.Fatalf("successful install status = %q", result.Status)
+				}
+				if !result.Result.OK || result.Result.Warning != "runtime warning" || details["phase"] != "runtime" || result.Result.EnableError != "agent unavailable" {
+					t.Fatalf("successful install result = %#v details=%#v", result.Result, details)
+				}
+			} else {
+				for _, want := range []string{"installed stagehand@official", "enabling for Code Reviewer failed: agent unavailable", "warning: runtime warning", `details: {"phase":"runtime"}`} {
+					if !strings.Contains(out.String(), want) {
+						t.Fatalf("plain output missing %q:\n%s", want, out.String())
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestAgentsPluginUninstallRequiresConfirmationOrForce(t *testing.T) {
 	srv, rec := agentPluginCommandServer(t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON, nil)
 	c, err := client.New(srv.URL)
@@ -525,8 +612,13 @@ func (r *agentPluginRecorder) jsonBody(call string) map[string]string {
 }
 
 func agentPluginCommandServer(t *testing.T, state, agentsHTML, agentJSON string, onPut func(*http.Request)) (*httptest.Server, *agentPluginRecorder) {
+	return agentPluginCommandServerWithInstallResponse(t, state, agentsHTML, agentJSON, `{"ok":true,"enabled_for_agent":true}`, onPut)
+}
+
+func agentPluginCommandServerWithInstallResponse(t *testing.T, state, agentsHTML, agentJSON, installResponse string, onPut func(*http.Request)) (*httptest.Server, *agentPluginRecorder) {
 	t.Helper()
 	rec := &agentPluginRecorder{jsonBodies: map[string]map[string]string{}}
+	baseHandler := agentPluginTestHandler(t, state, agentsHTML, agentJSON, onPut)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		call := r.Method + " " + r.URL.EscapedPath()
 		var body map[string]string
@@ -536,7 +628,12 @@ func agentPluginCommandServer(t *testing.T, state, agentsHTML, agentJSON string,
 			}
 		}
 		rec.recordCall(call, body)
-		agentPluginTestHandler(t, state, agentsHTML, agentJSON, onPut).ServeHTTP(w, r)
+		if r.Method == http.MethodPost && r.URL.Path == "/agents/plugins/install" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, installResponse)
+			return
+		}
+		baseHandler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(srv.Close)
 	return srv, rec
