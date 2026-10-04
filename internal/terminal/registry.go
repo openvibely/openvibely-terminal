@@ -10590,14 +10590,13 @@ func statusCommand() command {
 				return m, errCmd(err.Error())
 			}
 			m.busy = false
-			m.append(entry{role: "result", head: "Status", text: m.renderStatus()})
-			// RunCLI prefetches counts before rendering and drains returned
-			// commands after dispatch. The one-shot output is already rendered,
-			// so only interactive mode needs the follow-up refresh.
-			if cliMode {
+			if cliMode || m.selectedID == "" {
+				m.append(entry{role: "result", head: "Status", text: m.renderStatus()})
 				return m, nil
 			}
-			return m, m.fetchStatusCounts()
+			// Interactive status renders after the scoped snapshot arrives so it
+			// shows fresh project worker capacity and task/alert counts together.
+			return m, m.fetchStatusSnapshot(true, true)
 		},
 	}
 }

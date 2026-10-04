@@ -142,6 +142,8 @@ type Model struct {
 	connReachableError        bool // connErr came from a responding but unhealthy backend
 	statusProjectsUnavailable bool // one-shot status could not list projects; global rows remain useful
 	capacity                  *client.GlobalCapacity
+	projectCapacity           *client.ProjectCapacity
+	projectCapUnavailable     bool
 	auth                      *client.AuthStatus
 
 	// interactive cookie-session sign-in. Password text is held only while the
@@ -496,6 +498,13 @@ func (m Model) checkConnectionWithGeneration(generation int) tea.Cmd {
 // active, queued, and failed task counts for the selected project. It is a no-op
 // when no project is selected.
 func (m Model) fetchStatusCounts() tea.Cmd {
+	return m.fetchStatusSnapshot(false, false)
+}
+
+// fetchStatusSnapshot fetches the selected project's compact counts and worker
+// capacity. Project capacity is best-effort and remains independent of the
+// global capacity used as the health check.
+func (m Model) fetchStatusSnapshot(renderStatus bool, includeProjectCapacity bool) tea.Cmd {
 	if m.selectedID == "" {
 		return nil
 	}
@@ -511,18 +520,23 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 			activeTasks   int
 			queuedTasks   int
 			failedTasks   int
+			projectCap    *client.ProjectCapacity
 			alertsErr     error
 			tasksErr      error
+			projectCapErr error
 		)
 
+		requestCount := 2
+		if includeProjectCapacity {
+			requestCount++
+		}
 		var wg sync.WaitGroup
-		wg.Add(2)
+		wg.Add(requestCount)
 
 		go func() {
 			defer wg.Done()
 			pendingAlerts, alertsErr = c.GetPendingAlertCount(ctx, pid)
 		}()
-
 		go func() {
 			defer wg.Done()
 			var counts *client.TaskStatusCounts
@@ -533,30 +547,58 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 				failedTasks = counts.FailedTasks
 			}
 		}()
+		if includeProjectCapacity {
+			go func() {
+				defer wg.Done()
+				var capacities []client.ProjectCapacity
+				capacities, projectCapErr = c.GetProjectCapacities(ctx)
+				if projectCapErr == nil {
+					projectCap = findProjectCapacity(capacities, pid)
+					if projectCap == nil {
+						projectCapErr = fmt.Errorf("selected project capacity was not returned")
+					}
+				}
+			}()
+		}
 
 		wg.Wait()
 		counts := statusCountsMsg{
-			sessionGeneration: sessionGeneration,
-			projectGeneration: projectGeneration,
-			pendingAlerts:     pendingAlerts,
-			activeTasks:       activeTasks,
-			queuedTasks:       queuedTasks,
-			failedTasks:       failedTasks,
+			sessionGeneration:     sessionGeneration,
+			projectGeneration:     projectGeneration,
+			pendingAlerts:         pendingAlerts,
+			activeTasks:           activeTasks,
+			queuedTasks:           queuedTasks,
+			failedTasks:           failedTasks,
+			projectCapacity:       projectCap,
+			projectCapUnavailable: includeProjectCapacity && projectCapErr != nil,
+			projectCapChecked:     includeProjectCapacity,
+			renderStatus:          renderStatus,
 		}
-		// Counts are best-effort, but an auth failure proves the session is no
-		// longer usable and must enter sign-in recovery instead of being hidden.
-		if client.IsAuthRequired(alertsErr) {
-			counts.err = alertsErr
-		} else if alertsErr != nil {
+		// Counts and capacity are best-effort, but an auth failure proves the
+		// session is no longer usable and must enter shared sign-in recovery.
+		for _, err := range []error{alertsErr, tasksErr, projectCapErr} {
+			if client.IsAuthRequired(err) {
+				counts.err = err
+				break
+			}
+		}
+		if !client.IsAuthRequired(alertsErr) && alertsErr != nil {
 			counts.alertsUnavailable = true
 		}
-		if client.IsAuthRequired(tasksErr) {
-			counts.err = tasksErr
-		} else if tasksErr != nil {
+		if !client.IsAuthRequired(tasksErr) && tasksErr != nil {
 			counts.tasksUnavailable = true
 		}
 		return counts
 	}
+}
+
+func findProjectCapacity(capacities []client.ProjectCapacity, projectID string) *client.ProjectCapacity {
+	for i := range capacities {
+		if capacities[i].ID == projectID {
+			return &capacities[i]
+		}
+	}
+	return nil
 }
 
 func (m Model) beginWorkersLive() (Model, tea.Cmd) {
@@ -870,6 +912,8 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.activeTaskCount = 0
 		m.queuedTaskCount = 0
 		m.failedTaskCount = 0
+		m.projectCapacity = nil
+		m.projectCapUnavailable = false
 		m.alertsCountUnavailable = false
 		m.tasksCountUnavailable = false
 		m.input.Placeholder = defaultPlaceholder
@@ -1677,8 +1721,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale status counts from an older session or project
 		}
+		if msg.projectCapChecked {
+			m.projectCapacity = msg.projectCapacity
+			m.projectCapUnavailable = msg.projectCapUnavailable
+		}
 		if client.IsAuthRequired(msg.err) {
 			m.markAuthRequired()
+			if msg.renderStatus {
+				m.append(entry{role: "result", head: "Status", text: m.renderStatus()})
+			}
 			return m, nil
 		}
 		m.alertsCountUnavailable = msg.alertsUnavailable
@@ -1690,6 +1741,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTaskCount = msg.activeTasks
 			m.queuedTaskCount = msg.queuedTasks
 			m.failedTaskCount = msg.failedTasks
+		}
+		if msg.renderStatus {
+			m.append(entry{role: "result", head: "Status", text: m.renderStatus()})
 		}
 		return m, nil
 	case projectsLoadedMsg:
