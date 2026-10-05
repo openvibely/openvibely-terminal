@@ -9366,11 +9366,7 @@ func automationsCommand() command {
 							}))
 				}
 				return m, run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
-					a, err := resolveAutomationRef(ctx, c, pid, ref)
-					if err != nil {
-						return "", err
-					}
-					return loadAutomationDetail(ctx, c, pid, a)
+					return loadAutomationDetailForRef(ctx, c, pid, ref)
 				})
 			default:
 				if ref == "" {
@@ -9448,6 +9444,104 @@ func resolveAutomationRef(ctx context.Context, c *client.Client, projectID, ref 
 		func(a client.Automation) string { return a.Name })
 }
 
+// loadAutomationDetailForRef skips the catalog only for a well-formed,
+// canonical-looking ID. The detail endpoint validates both requested identities,
+// so a successful response is sufficient to render the same detail that catalog
+// resolution would have selected. A 404 falls back to the complete, paginated
+// resolver to retain draft metadata and name matching; pagination already caps
+// this fallback at the shared page/card safety limits.
+func loadAutomationDetailForRef(ctx context.Context, c *client.Client, projectID, ref string) (string, error) {
+	if automationID, ok := canonicalAutomationIDRef(ref); ok {
+		detail, err := c.GetAutomationDetail(ctx, projectID, automationID)
+		if err == nil {
+			return renderAutomationDetailResult(detail)
+		}
+		if !errors.Is(err, client.ErrAutomationNotFound) {
+			return "", err
+		}
+
+		automation, resolveErr := resolveAutomationRef(ctx, c, projectID, ref)
+		if resolveErr != nil {
+			return "", resolveErr
+		}
+		if strings.EqualFold(automation.ID, automationID) {
+			if strings.EqualFold(automation.State, "draft") {
+				draft := automationDraftDetail(projectID, automation)
+				return renderAutomationDetailResult(&draft)
+			}
+			if automation.ID != automationID {
+				// The catalog matcher treats ID case variants as equivalent; reload
+				// using the backend's exact ID spelling, as the original path did.
+				return loadAutomationDetail(ctx, c, projectID, automation)
+			}
+			// Preserve the detail endpoint's not-found diagnostic for a catalog
+			// card that exists but has no live detail and is not a draft.
+			return "", err
+		}
+		// A canonical-looking reference can also be an exact name. Preserve the
+		// normal resolver's name match if no card has this ID.
+		return loadAutomationDetail(ctx, c, projectID, automation)
+	}
+
+	automation, err := resolveAutomationRef(ctx, c, projectID, ref)
+	if err != nil {
+		return "", err
+	}
+	return loadAutomationDetail(ctx, c, projectID, automation)
+}
+
+// canonicalAutomationIDRef accepts only complete lowercase backend ID forms.
+// In particular, ordinary words, prefixes, malformed ID-like strings, and
+// case-insensitive variants still go through catalog matching.
+func canonicalAutomationIDRef(ref string) (string, bool) {
+	if ref == "" || ref != strings.TrimSpace(ref) || ref != strings.ToLower(ref) {
+		return "", false
+	}
+	var suffix string
+	switch {
+	case strings.HasPrefix(ref, "au-"):
+		suffix = strings.TrimPrefix(ref, "au-")
+	case strings.HasPrefix(ref, "au_"):
+		suffix = strings.TrimPrefix(ref, "au_")
+	case len(ref) > 2 && strings.HasPrefix(ref, "au") && ref[2] >= '0' && ref[2] <= '9':
+		suffix = ref[2:]
+	case strings.HasPrefix(ref, "automation-"):
+		suffix = strings.TrimPrefix(ref, "automation-")
+	default:
+		if isCanonicalAutomationUUID(ref) {
+			return ref, true
+		}
+		return "", false
+	}
+	if suffix == "" || suffix[0] == '-' || suffix[len(suffix)-1] == '-' {
+		return "", false
+	}
+	for _, r := range suffix {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return "", false
+		}
+	}
+	return ref, true
+}
+
+func isCanonicalAutomationUUID(ref string) bool {
+	if len(ref) != 36 {
+		return false
+	}
+	for i, r := range ref {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				return false
+			}
+			continue
+		}
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func loadAutomationDetail(ctx context.Context, c *client.Client, projectID string, automation client.Automation) (string, error) {
 	detail, err := c.GetAutomationDetail(ctx, projectID, automation.ID)
 	if err != nil {
@@ -9457,14 +9551,14 @@ func loadAutomationDetail(ctx context.Context, c *client.Client, projectID strin
 		// empty graph.
 		if errors.Is(err, client.ErrAutomationNotFound) && strings.EqualFold(automation.State, "draft") {
 			draft := automationDraftDetail(projectID, automation)
-			detail = &draft
-			if jsonMode {
-				return marshalJSON(detail)
-			}
-			return renderAutomationDetail(*detail), nil
+			return renderAutomationDetailResult(&draft)
 		}
 		return "", err
 	}
+	return renderAutomationDetailResult(detail)
+}
+
+func renderAutomationDetailResult(detail *client.AutomationDetail) (string, error) {
 	if detail == nil {
 		return "", fmt.Errorf("automation detail: backend returned no detail")
 	}
