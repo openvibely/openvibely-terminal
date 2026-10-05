@@ -48,3 +48,29 @@ jobs:
       - name: Show coverage summary
         if: ${{ success() }}
         run: go tool cover -func=coverage.txt | tail -1
+
+  portable:
+    name: Portable Go validation (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build all Go packages
+        run: go build ./...
+
+      - name: Run all Go tests
+        run: go test ./... -timeout 120s
