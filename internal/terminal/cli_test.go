@@ -25,6 +25,44 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
+func TestIsForegroundCLICommandUsesRegisteredCommandMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "events monitors by default", args: []string{"events"}, want: true},
+		{name: "slash-prefixed events", args: []string{"/events", "on"}, want: true},
+		{name: "stream alias", args: []string{"stream", "on"}, want: true},
+		{name: "case-insensitive log alias", args: []string{"LOG", "off"}, want: true},
+		{name: "trimmed slash-prefixed alias", args: []string{" /LoG ", "on"}, want: true},
+		{name: "chat with message", args: []string{"chat", "wait"}, want: true},
+		{name: "slash-prefixed chat", args: []string{"/CHAT", "wait"}, want: true},
+		{name: "back alias with message", args: []string{"back", "continue"}, want: true},
+		{name: "leave alias with message", args: []string{"LEAVE", "continue"}, want: true},
+		{name: "bare chat", args: []string{"chat"}},
+		{name: "bare chat alias", args: []string{"/back"}},
+		{name: "task reply", args: []string{"tasks", "reply", "task", "|", "go"}, want: true},
+		{name: "case-insensitive task reply", args: []string{"tasks", "REPLY", "task"}, want: true},
+		{name: "task alias reply", args: []string{"task", "reply", "task"}, want: true},
+		{name: "registered task alias reply", args: []string{"board", "reply", "task"}, want: true},
+		{name: "slash-prefixed task alias reply", args: []string{"/T", "reply", "task"}, want: true},
+		{name: "reply without operands", args: []string{"tasks", "reply"}},
+		{name: "ordinary task list", args: []string{"tasks"}},
+		{name: "ordinary task action", args: []string{"tasks", "run", "task"}},
+		{name: "ordinary task alias action", args: []string{"t", "delete", "task"}},
+		{name: "unregistered command", args: []string{"not-a-command", "events"}},
+		{name: "empty arguments", args: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsForegroundCLICommand(tc.args); got != tc.want {
+				t.Fatalf("IsForegroundCLICommand(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
 
 type cancelAfterLineWriter struct {

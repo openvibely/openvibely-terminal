@@ -960,8 +960,11 @@ func tasksCommand() command {
 		`tasks steer "Fix login bug" | Stop and use the new interface`,
 	}...)...)
 	return command{
-		name:          "tasks",
-		aliases:       []string{"task", "t", "board"},
+		name:    "tasks",
+		aliases: []string{"task", "t", "board"},
+		foregroundCLIWhen: func(args []string) bool {
+			return len(args) > 1 && strings.EqualFold(strings.TrimSpace(args[0]), "reply")
+		},
 		args:          "[filter|id]",
 		actions:       actions,
 		completions:   completions,
@@ -10750,11 +10753,12 @@ func validateStatusArgs(args []string) error {
 
 func eventsCommand() command {
 	return command{
-		name:        "events",
-		aliases:     []string{"stream", "log"},
-		args:        "[on|off]",
-		completions: []commandCompletion{{values: []string{"on", "off", "true", "false"}}},
-		desc:        "stream live task/chat events (interactive toggle or CLI foreground monitor)",
+		name:          "events",
+		aliases:       []string{"stream", "log"},
+		foregroundCLI: true,
+		args:          "[on|off]",
+		completions:   []commandCompletion{{values: []string{"on", "off", "true", "false"}}},
+		desc:          "stream live task/chat events (interactive toggle or CLI foreground monitor)",
 		usage: []string{
 			"events [on]                                interactive: show events from the TUI stream",
 			"events off                                 interactive: hide events; CLI off cannot stop another process",
@@ -10807,8 +10811,11 @@ func chatCommand() command {
 	return command{
 		name:    "chat",
 		aliases: []string{"back", "leave"},
-		args:    "[message]",
-		desc:    "return to project chat, or send a message",
+		foregroundCLIWhen: func(args []string) bool {
+			return len(args) > 0
+		},
+		args: "[message]",
+		desc: "return to project chat, or send a message",
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			if len(args) > 0 && m.hasPendingChat() {
 				// Reject the overlapping project-chat turn without invalidating the
