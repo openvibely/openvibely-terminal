@@ -129,16 +129,19 @@ func (c *Client) openSSEStream(ctx context.Context, cfg sseStreamConfig) (*http.
 }
 
 func scanSSEFrames(r io.Reader, dataLineMode sseDataLineMode, handle func(rawSSEFrame) bool) error {
-	reader := bufio.NewReaderSize(r, 64*1024)
+	lineReader := sseLineReader{reader: bufio.NewReaderSize(r, 64*1024)}
 	var frame rawSSEFrame
-	var lineBuffer []byte
+	lineBuffer := make([]byte, 0, 256)
 
 	for {
-		line, err := readSSELine(reader, &lineBuffer)
+		line, err := lineReader.readLine(&lineBuffer)
 		if len(line) > 0 {
-			if bytes.HasSuffix(line, []byte{'\n'}) {
+			switch {
+			case bytes.HasSuffix(line, []byte{'\n'}):
 				line = line[:len(line)-1]
 				line = bytes.TrimSuffix(line, []byte{'\r'})
+			case bytes.HasSuffix(line, []byte{'\r'}):
+				line = line[:len(line)-1]
 			}
 			switch {
 			case len(line) == 0:
@@ -165,8 +168,8 @@ func scanSSEFrames(r io.Reader, dataLineMode sseDataLineMode, handle func(rawSSE
 						frame.payload = make([]byte, 0, 2*len(data)+1)
 					}
 					if len(lineBuffer) > 0 {
-						// A long line already owns its storage; keep the payload slice
-						// instead of copying the full line into a second allocation.
+						// A long line already owns its storage; retain it as the payload
+						// instead of copying it into a second allocation.
 						frame.payload = data
 					} else {
 						frame.payload = append(frame.payload, data...)
@@ -198,19 +201,72 @@ func scanSSEFrames(r io.Reader, dataLineMode sseDataLineMode, handle func(rawSSE
 	}
 }
 
-// readSSELine joins ReadSlice fragments without imposing a token-size limit.
-// The returned bytes are only valid until the next call when no scratch buffer
-// was needed; callers process each line before reading again.
-func readSSELine(reader *bufio.Reader, scratch *[]byte) ([]byte, error) {
+// sseLineReader treats CR, LF, and CRLF as line endings. A CR ends the line
+// immediately; a following LF is skipped on the next call so CRLF still forms
+// one delimiter even when the pair arrives in separate reads.
+type sseLineReader struct {
+	reader *bufio.Reader
+	skipLF bool
+}
+
+func (r *sseLineReader) readLine(scratch *[]byte) ([]byte, error) {
 	*scratch = (*scratch)[:0]
-	for {
-		fragment, err := reader.ReadSlice('\n')
-		if len(*scratch) == 0 && err != bufio.ErrBufferFull {
-			return fragment, err
+	if r.skipLF {
+		r.skipLF = false
+		b, err := r.reader.Peek(1)
+		if err != nil {
+			return nil, err
 		}
-		*scratch = append(*scratch, fragment...)
-		if err != bufio.ErrBufferFull {
-			return *scratch, err
+		if b[0] == '\n' {
+			if _, err := r.reader.Discard(1); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	for {
+		available := r.reader.Buffered()
+		if available == 0 {
+			if _, err := r.reader.Peek(1); err != nil {
+				if len(*scratch) > 0 {
+					return *scratch, err
+				}
+				return nil, err
+			}
+			available = r.reader.Buffered()
+		}
+		buffered, err := r.reader.Peek(available)
+		if err != nil {
+			return nil, err
+		}
+
+		cr := bytes.IndexByte(buffered, '\r')
+		lf := bytes.IndexByte(buffered, '\n')
+		end := -1
+		if cr >= 0 && (lf < 0 || cr < lf) {
+			end = cr
+		} else if lf >= 0 {
+			end = lf
+		}
+		if end >= 0 {
+			end++
+			line := buffered[:end]
+			if len(*scratch) > 0 {
+				*scratch = append(*scratch, line...)
+				line = *scratch
+			}
+			if _, err := r.reader.Discard(end); err != nil {
+				return nil, err
+			}
+			if buffered[end-1] == '\r' {
+				r.skipLF = true
+			}
+			return line, nil
+		}
+
+		*scratch = append(*scratch, buffered...)
+		if _, err := r.reader.Discard(available); err != nil {
+			return nil, err
 		}
 	}
 }
