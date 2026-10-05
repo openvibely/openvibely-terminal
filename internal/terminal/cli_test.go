@@ -6490,20 +6490,21 @@ func TestCLIAutomationActionJSONMutations(t *testing.T) {
 
 // One-shot CLI mode works headlessly for automation detail and JSON output.
 func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
-	const automationsHTML = `<div class="card" data-automation-url="/automations/au-1?project_id=p2">
+	const automationID = "123e4567-e89b-12d3-a456-426614174000"
+	const automationsHTML = `<div class="card" data-automation-url="/automations/` + automationID + `?project_id=p2">
 		<div class="card-body relative">
 			<span class="badge badge-outline badge-sm">active</span>
-			<button type="button" data-automation-card-delete="au-1" data-automation-name="Native SDLC"></button>
+			<button type="button" data-automation-card-delete="` + automationID + `" data-automation-name="Native SDLC"></button>
 		</div>
 	</div>`
 	c, rec := cliServer(t, map[string]string{
-		"/api/projects":     cliProjects,
-		"/automations":      automationsHTML,
-		"/automations/au-1": automationDetailHTML("au-1", "p2", "Native SDLC"),
+		"/api/projects":                cliProjects,
+		"/automations":                 automationsHTML,
+		"/automations/" + automationID: automationDetailHTML(automationID, "p2", "Native SDLC"),
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "other", []string{"automations", "show", "au-1"}, false, false); err != nil {
+	if err := RunCLI(c, &out, "other", []string{"automations", "show", automationID}, false, false); err != nil {
 		t.Fatalf("plain automation show failed: %v", err)
 	}
 	plain := stripANSI(out.String())
@@ -6515,19 +6516,19 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	if strings.Contains(out.String(), "\x1b[") {
 		t.Fatalf("plain CLI detail contains ANSI styling: %q", out.String())
 	}
-	if rec.sawQuery("GET /automations?project_id=p2") || !rec.sawQuery("GET /automations/au-1?project_id=p2") {
+	if rec.sawQuery("GET /automations?project_id=p2") || !rec.sawQuery("GET /automations/"+automationID+"?project_id=p2") {
 		t.Fatalf("canonical-ID automation show requests =\n%s", rec.all())
 	}
 
 	out.Reset()
-	if err := RunCLI(c, &out, "other", []string{"automations", "show", "au-1"}, false, true); err != nil {
+	if err := RunCLI(c, &out, "other", []string{"automations", "show", automationID}, false, true); err != nil {
 		t.Fatalf("JSON automation show failed: %v", err)
 	}
 	var detail client.AutomationDetail
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &detail); err != nil {
 		t.Fatalf("automation detail JSON = %q: %v", out.String(), err)
 	}
-	if detail.Automation.ID != "au-1" || detail.Automation.ProjectID != "p2" || detail.Automation.Name != "Native SDLC" || detail.Automation.LifecycleState != "active" {
+	if detail.Automation.ID != automationID || detail.Automation.ProjectID != "p2" || detail.Automation.Name != "Native SDLC" || detail.Automation.LifecycleState != "active" {
 		t.Fatalf("automation detail JSON identity = %+v", detail.Automation)
 	}
 	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.ResourcesAvailable || !detail.ExternalStateAvailable || len(detail.Warnings) != 0 {
@@ -6545,7 +6546,7 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	if strings.Contains(out.String(), "\x1b[") || strings.Contains(out.String(), "OpenVibely") {
 		t.Fatalf("JSON detail contains styling or a banner: %q", out.String())
 	}
-	if rec.sawQuery("GET /automations?project_id=p2") || rec.count("GET", "/automations/au-1") != 2 {
+	if rec.sawQuery("GET /automations?project_id=p2") || rec.count("GET", "/automations/"+automationID) != 2 {
 		t.Fatalf("plain/JSON canonical-ID request counts changed:\n%s", rec.all())
 	}
 }

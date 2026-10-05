@@ -30,7 +30,7 @@ func BenchmarkAutomationShowCanonicalID(b *testing.B) {
 				for _, path := range []string{"legacy-catalog", "canonical-id"} {
 					name := fmt.Sprintf("cards=%d/delay=%dms/action=%s/path=%s", total, delay.Milliseconds(), action, path)
 					b.Run(name, func(b *testing.B) {
-						id := fmt.Sprintf("au-%04d", total-1)
+						id := automationUUIDTestID(total - 1)
 						var requests, catalogRequests, catalogBytes, responseBytes atomic.Int64
 						srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 							requests.Add(1)
@@ -113,7 +113,7 @@ func benchmarkAutomationPage(start, end, total int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="%t" data-card-pagination-total="%d">`, end < total, total)
 	for i := start; i < end; i++ {
-		b.WriteString(automationCardHTML(fmt.Sprintf("au-%04d", i), fmt.Sprintf("Automation %04d", i), "active"))
+		b.WriteString(automationCardHTML(automationUUIDTestID(i), fmt.Sprintf("Automation %04d", i), "active"))
 	}
 	b.WriteString(`</div>`)
 	return b.String()
