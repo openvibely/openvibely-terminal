@@ -1489,31 +1489,15 @@ func parseMemorySearchDocument(entry memoryIndexEntry, raw []byte, lowerQuery []
 	content := raw[bodyOffset:]
 	memory := Memory{
 		File:    entry.File,
-		Title:   strings.TrimSpace(entry.Title),
-		Summary: strings.TrimSpace(entry.Summary),
 		Snippet: "",
 		Body:    "",
 	}
-	if value := strings.TrimSpace(metadata["title"]); value != "" {
-		memory.Title = value
-	}
-	if memory.Title == "" {
-		memory.Title = strings.TrimSpace(metadata["name"])
-	}
-	if memory.Title == "" {
-		memory.Title = firstMemoryHeadingBytes(content)
-	}
-	if memory.Title == "" {
-		memory.Title = memoryTitleFromFile(entry.File)
-	}
-	if value := strings.TrimSpace(metadata["summary"]); value != "" {
-		memory.Summary = value
-	} else if value := strings.TrimSpace(metadata["description"]); value != "" {
-		memory.Summary = value
-	}
-	if memory.Summary == "" {
-		memory.Summary = firstMemoryParagraphBytes(content)
-	}
+	memory.Title, memory.Summary = resolveMemoryTitleSummary(
+		entry,
+		metadata,
+		func() string { return firstMemoryHeadingBytes(content) },
+		func() string { return firstMemoryParagraphBytes(content) },
+	)
 
 	if metadataMatch {
 		memory.Snippet = memorySearchSnippetBytes(content, lowerQuery)
@@ -1847,33 +1831,46 @@ func parseMemoryDocument(entry memoryIndexEntry, raw string) (Memory, string, []
 	raw = strings.ToValidUTF8(strings.ReplaceAll(raw, "\r\n", "\n"), "\uFFFD")
 	metadata, content, warnings := parseMemoryFrontMatter(raw)
 	memory := Memory{
-		File:    entry.File,
-		Title:   strings.TrimSpace(entry.Title),
-		Summary: strings.TrimSpace(entry.Summary),
-		Snippet: "",
-		Body:    raw,
+		File: entry.File,
+		Body: raw,
 	}
-	if value := strings.TrimSpace(metadata["title"]); value != "" {
-		memory.Title = value
-	}
-	if memory.Title == "" {
-		memory.Title = strings.TrimSpace(metadata["name"])
-	}
-	if memory.Title == "" {
-		memory.Title = firstMemoryHeading(content)
-	}
-	if memory.Title == "" {
-		memory.Title = memoryTitleFromFile(entry.File)
-	}
-	if value := strings.TrimSpace(metadata["summary"]); value != "" {
-		memory.Summary = value
-	} else if value := strings.TrimSpace(metadata["description"]); value != "" {
-		memory.Summary = value
-	}
-	if memory.Summary == "" {
-		memory.Summary = firstMemoryParagraph(content)
-	}
+	memory.Title, memory.Summary = resolveMemoryTitleSummary(
+		entry,
+		metadata,
+		func() string { return firstMemoryHeading(content) },
+		func() string { return firstMemoryParagraph(content) },
+	)
 	return memory, content, warnings
+}
+
+// resolveMemoryTitleSummary applies the shared metadata precedence while each
+// caller retains its own body extraction path. The callbacks are lazy so search
+// only scans for fallback text when the index and front matter provide none.
+func resolveMemoryTitleSummary(entry memoryIndexEntry, metadata map[string]string, headingFallback, paragraphFallback func() string) (string, string) {
+	title := strings.TrimSpace(entry.Title)
+	if value := strings.TrimSpace(metadata["title"]); value != "" {
+		title = value
+	}
+	if title == "" {
+		title = strings.TrimSpace(metadata["name"])
+	}
+	if title == "" {
+		title = headingFallback()
+	}
+	if title == "" {
+		title = memoryTitleFromFile(entry.File)
+	}
+
+	summary := strings.TrimSpace(entry.Summary)
+	if value := strings.TrimSpace(metadata["summary"]); value != "" {
+		summary = value
+	} else if value := strings.TrimSpace(metadata["description"]); value != "" {
+		summary = value
+	}
+	if summary == "" {
+		summary = paragraphFallback()
+	}
+	return title, summary
 }
 
 func parseMemoryFrontMatter(raw string) (map[string]string, string, []string) {

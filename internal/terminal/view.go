@@ -48,6 +48,20 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader() + "\n")
 	b.WriteString(m.transcript.View() + "\n")
+	if m.skillEditorActive {
+		title := "Edit skill: " + firstNonEmpty(m.skillEditorSkill.Name, m.skillEditorSkill.Handle)
+		if m.skillEditorCreate {
+			title = "Create skill: " + m.skillEditorName
+		}
+		b.WriteString(sectionStyle.Render(title) + "\n")
+		b.WriteString(m.skillEditor.View() + "\n")
+		hint := "Ctrl+S save · Esc cancel"
+		if m.skillEditorSaving {
+			hint = "saving skill…"
+		}
+		b.WriteString(helpStyle.Render(hint))
+		return b.String()
+	}
 	if m.automationEditActive {
 		title := "Edit automation: " + sanitizeAutomationDetailText(firstNonEmpty(m.automationEditName, m.automationEditID))
 		b.WriteString(sectionStyle.Render(title) + "\n")

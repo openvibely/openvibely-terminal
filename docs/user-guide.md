@@ -207,6 +207,7 @@ Commands take a resource, an optional action, and arguments:
 /personality delete-bulk old_one "Old Two"   delete selected inactive custom personalities (confirm)
 /projects delete demo                  # type yes to confirm, or press Esc
 /skills add notes | writes release notes
+/skills edit notes
 /skills load notes
 /tasks move Refactor active   move a task between columns
 /tasks show Refactor review     inspect inline review comments
@@ -230,6 +231,13 @@ Commands take a resource, an optional action, and arguments:
 /schedule edit a1b2c3 repeat hourly
 ```
 
+`/skills add <name> [| <description>]` opens a multiline editor in the TUI; press
+`Ctrl+S` to create the skill or `Esc` to cancel. `/skills edit <skill>` opens the
+selected skill's full body in the same editor. Inline bodies remain supported with
+`/skills add <name> | <description> | <body>` and
+`/skills edit <skill> | <body>`. For one-shot CLI use, read a complete body from a
+file with `skills add <name> --file <path>` or `skills edit <skill> --file <path>`.
+
 `/skills always <skill>` and `/skills load <skill>` are equivalent project-scoped
 names for marking a skill for automatic loading. The same syntax is available in
 one-shot mode by omitting the leading slash and selecting the project explicitly:
@@ -237,6 +245,8 @@ one-shot mode by omitting the leading slash and selecting the project explicitly
 ```bash
 /skills load retry-logic
 openvibely-terminal -project demo skills load retry-logic
+openvibely-terminal -project demo skills add retry-logic --file retry.md
+openvibely-terminal -project demo skills edit retry-logic --file retry.md
 ```
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID

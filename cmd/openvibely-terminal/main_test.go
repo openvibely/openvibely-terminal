@@ -518,30 +518,3 @@ func TestLoginWithConfiguredCredentialsSkipsEmptyConfiguration(t *testing.T) {
 		t.Fatal("empty credential configuration made a login request")
 	}
 }
-
-func TestStreamingForegroundCommandsUseInterruptContext(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{name: "events", args: []string{"events"}, want: true},
-		{name: "events with slash", args: []string{"/events", "on"}, want: true},
-		{name: "stream alias", args: []string{"stream", "on"}, want: true},
-		{name: "log alias case insensitive", args: []string{"LOG", "off"}, want: true},
-		{name: "tasks run remains ordinary", args: []string{"tasks", "run", "task"}, want: false},
-		{name: "task reply streams", args: []string{"tasks", "reply", "task", "|", "go"}, want: true},
-		{name: "chat streams", args: []string{"chat", "wait"}, want: true},
-		{name: "chat alias streams", args: []string{"LEAVE", "wait"}, want: true},
-		{name: "bare chat remains ordinary", args: []string{"chat"}, want: false},
-		{name: "help events remains ordinary", args: []string{"help", "events"}, want: false},
-		{name: "empty arguments", args: nil, want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isForegroundCLICommand(tc.args); got != tc.want {
-				t.Fatalf("isForegroundCLICommand(%v) = %v, want %v", tc.args, got, tc.want)
-			}
-		})
-	}
-}

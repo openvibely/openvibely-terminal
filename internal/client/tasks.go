@@ -612,7 +612,7 @@ func parseReviewComments(root *html.Node, taskID string) []ReviewComment {
 
 // GetTask fetches the task detail page and extracts each tab's content.
 func (c *Client) GetTask(ctx context.Context, taskID string) (*TaskDetail, error) {
-	return c.getTask(ctx, taskID, "", false, true)
+	return c.getTask(ctx, taskID, "", false, true, "")
 }
 
 // GetTaskForProject fetches a task detail page within the selected project.
@@ -622,7 +622,20 @@ func (c *Client) GetTaskForProject(ctx context.Context, taskID, projectID string
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("project ID is required for task details")
 	}
-	return c.getTask(ctx, taskID, projectID, false, true)
+	return c.getTask(ctx, taskID, projectID, false, true, "")
+}
+
+// GetTaskForProjectTab fetches the task page and only the requested lazy tab.
+// An empty tab preserves GetTaskForProject's full-detail behavior.
+func (c *Client) GetTaskForProjectTab(ctx context.Context, taskID, projectID, tab string) (*TaskDetail, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task details")
+	}
+	canonicalTab, err := taskDetailLoadTab(tab)
+	if err != nil {
+		return nil, err
+	}
+	return c.getTask(ctx, taskID, projectID, false, true, canonicalTab)
 }
 
 // GetTaskForProjectExact fetches task detail after requiring the response's
@@ -633,7 +646,32 @@ func (c *Client) GetTaskForProjectExact(ctx context.Context, taskID, projectID s
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("project ID is required for task details")
 	}
-	return c.getTask(ctx, taskID, projectID, true, true)
+	return c.getTask(ctx, taskID, projectID, true, true, "")
+}
+
+// GetTaskForProjectExactTab validates the task and project identity on the
+// initial page, then fetches only the requested lazy tab. An empty tab loads all
+// lazy sections as GetTaskForProjectExact does.
+func (c *Client) GetTaskForProjectExactTab(ctx context.Context, taskID, projectID, tab string) (*TaskDetail, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project ID is required for task details")
+	}
+	canonicalTab, err := taskDetailLoadTab(tab)
+	if err != nil {
+		return nil, err
+	}
+	return c.getTask(ctx, taskID, projectID, true, true, canonicalTab)
+}
+
+func taskDetailLoadTab(tab string) (string, error) {
+	if strings.TrimSpace(tab) == "" {
+		return "", nil
+	}
+	meta, ok := TaskDetailTabByName(strings.TrimSpace(tab))
+	if !ok {
+		return "", fmt.Errorf("unknown task detail tab %q", tab)
+	}
+	return meta.Name, nil
 }
 
 // GetTaskMetadataForProjectExact validates and returns only metadata embedded
@@ -643,10 +681,10 @@ func (c *Client) GetTaskMetadataForProjectExact(ctx context.Context, taskID, pro
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("project ID is required for task details")
 	}
-	return c.getTask(ctx, taskID, projectID, true, false)
+	return c.getTask(ctx, taskID, projectID, true, false, "")
 }
 
-func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, loadLazy bool) (*TaskDetail, error) {
+func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, loadLazy bool, selectedTab string) (*TaskDetail, error) {
 	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID))
 	if err != nil {
 		return nil, err
@@ -719,10 +757,13 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 		return d, nil
 	}
 
-	// Thread and changes load asynchronously in the browser, so their panels
-	// are empty placeholders in the initial page; fetch the real fragments.
-	// Lifecycle executions (when needed) are independent of both, so all three
-	// fetches run concurrently rather than sequentially.
+	// Thread, changes, and lifecycle are independent deferred sections. A tab
+	// request loads only its requested section; the ordinary detail view keeps
+	// loading all three concurrently.
+	loadAll := selectedTab == ""
+	loadThread := loadAll || selectedTab == "thread"
+	loadChanges := loadAll || selectedTab == "changes"
+	needLife := selectedTab == "lifecycle" || (loadAll && d.Life == "")
 	var wg sync.WaitGroup
 	var threadNode, changesNode *html.Node
 	var threadErr, changesErr error
@@ -734,19 +775,21 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 		changesPath += query("project_id", projectID)
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		threadNode, threadErr = c.getHTML(ctx, threadPath)
-	}()
+	if loadThread {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			threadNode, threadErr = c.getHTML(ctx, threadPath)
+		}()
+	}
+	if loadChanges {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			changesNode, changesErr = c.getHTML(ctx, changesPath)
+		}()
+	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		changesNode, changesErr = c.getHTML(ctx, changesPath)
-	}()
-
-	needLife := d.Life == ""
 	var execs []LifecycleExecution
 	var lifeErr error
 	if needLife {
@@ -763,17 +806,17 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 
 	wg.Wait()
 
-	if threadErr == nil {
+	if loadThread && threadErr == nil {
 		if text := NodeText(threadNode); text != "" {
 			d.Thread = text
 		}
 	}
-	if changesErr == nil {
+	if loadChanges && changesErr == nil {
 		if text := NodeText(changesNode); text != "" {
 			d.Changes = text
 		}
 	}
-	if needLife && lifeErr == nil && len(execs) > 0 {
+	if needLife && d.Life == "" && lifeErr == nil && len(execs) > 0 {
 		var b strings.Builder
 		for _, e := range execs {
 			fmt.Fprintf(&b, "%s  %s  %s  %s\n", e.When, e.SkillKey, e.Status, e.StartedAt)
@@ -781,9 +824,12 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 		d.Life = b.String()
 	}
 
-	loadErr := &TaskDetailLoadError{
-		Thread:  threadErr,
-		Changes: changesErr,
+	loadErr := &TaskDetailLoadError{}
+	if loadThread {
+		loadErr.Thread = threadErr
+	}
+	if loadChanges {
+		loadErr.Changes = changesErr
 	}
 	if needLife {
 		loadErr.Lifecycle = lifeErr

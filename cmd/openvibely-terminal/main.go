@@ -167,7 +167,7 @@ func flagToken(arg string) (name string, hasValue, ok bool) {
 }
 
 func runCLI(c *client.Client, project string, args []string, force, jsonOutput bool) error {
-	if !isForegroundCLICommand(args) {
+	if !terminal.IsForegroundCLICommand(args) {
 		// Preserve the original CLI behavior for short-lived commands: Ctrl-C keeps
 		// its normal process-interrupt semantics instead of being consumed by a
 		// context that those commands do not use.
@@ -191,23 +191,6 @@ func cliCredentialInput() *os.File {
 
 func canUseCLISecretInput(mode os.FileMode) bool {
 	return mode&os.ModeCharDevice == 0
-}
-
-func isForegroundCLICommand(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(args[0]), "/"))
-	switch name {
-	case "events", "stream", "log":
-		return true
-	case "chat", "back", "leave":
-		return len(args) > 1
-	case "tasks", "task":
-		return len(args) > 1 && strings.EqualFold(strings.TrimSpace(args[1]), "reply")
-	default:
-		return false
-	}
 }
 
 func isStaticHelpCommand(args []string) bool {

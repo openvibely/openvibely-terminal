@@ -664,6 +664,92 @@ func TestMemorySearchPreservesUnicodeFoldedFrontMatterKeys(t *testing.T) {
 		t.Fatalf("search metadata = %#v, want legacy document metadata %#v", memory, document)
 	}
 }
+
+func TestMemoryDocumentTitleSummaryResolutionIsShared(t *testing.T) {
+	tests := []struct {
+		name        string
+		entry       memoryIndexEntry
+		raw         []byte
+		wantTitle   string
+		wantSummary string
+		wantWarning []string
+	}{
+		{
+			name:        "front matter title and summary beat index and competing keys",
+			entry:       memoryIndexEntry{File: "competing.md", Title: "Indexed title", Summary: "Indexed summary"},
+			raw:         []byte("---\ntitle: Front matter title\nname: Front matter name\nsummary: Front matter summary\ndescription: Front matter description\n---\n\nBody paragraph.\n"),
+			wantTitle:   "Front matter title",
+			wantSummary: "Front matter summary",
+		},
+		{
+			name:        "name and description metadata fallback",
+			entry:       memoryIndexEntry{File: "named.md"},
+			raw:         []byte("---\nname: Front matter name\ndescription: Front matter description\n---\n\nBody paragraph.\n"),
+			wantTitle:   "Front matter name",
+			wantSummary: "Front matter description",
+		},
+		{
+			name:        "heading and paragraph fallback",
+			entry:       memoryIndexEntry{File: "fallback.md"},
+			raw:         []byte("# Extracted heading\n\nFirst paragraph line.\nContinued paragraph.\n\nLater paragraph.\n"),
+			wantTitle:   "Extracted heading",
+			wantSummary: "First paragraph line. Continued paragraph.",
+		},
+		{
+			name:        "index metadata fallback",
+			entry:       memoryIndexEntry{File: "indexed.md", Title: "  Indexed title  ", Summary: "  Indexed summary  "},
+			raw:         []byte("# Body heading\n\nBody paragraph.\n"),
+			wantTitle:   "Indexed title",
+			wantSummary: "Indexed summary",
+		},
+		{
+			name:        "filename fallback",
+			entry:       memoryIndexEntry{File: "nested/filename-fallback.md"},
+			raw:         []byte("\n"),
+			wantTitle:   "filename-fallback",
+			wantSummary: "",
+		},
+		{
+			name:        "invalid UTF-8 heading and paragraph",
+			entry:       memoryIndexEntry{File: "invalid.md"},
+			raw:         []byte{'#', ' ', 'H', 'e', 'a', 'd', ' ', 0xff, '\n', '\n', 'P', 'a', 'r', 'a', 'g', 'r', 'a', 'p', 'h', ' ', 0xfe, ' ', 't', 'e', 'x', 't'},
+			wantTitle:   "Head �",
+			wantSummary: "Paragraph � text",
+		},
+		{
+			name:        "unterminated front matter is treated as body text",
+			entry:       memoryIndexEntry{File: "unterminated.md"},
+			raw:         []byte("---\ntitle: Not metadata\nsummary: Not metadata\n# Extracted heading\n\nBody paragraph.\n"),
+			wantTitle:   "Extracted heading",
+			wantSummary: "--- title: Not metadata summary: Not metadata",
+			wantWarning: []string{"memory file front matter is unterminated"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			full, _, fullWarnings := parseMemoryDocument(tt.entry, string(tt.raw))
+			search, _, searchWarnings := parseMemorySearchDocument(tt.entry, tt.raw, []byte("no match"), true)
+
+			if full.Title != tt.wantTitle || full.Summary != tt.wantSummary {
+				t.Errorf("full document metadata = (%q, %q), want (%q, %q)", full.Title, full.Summary, tt.wantTitle, tt.wantSummary)
+			}
+			if search.Title != tt.wantTitle || search.Summary != tt.wantSummary {
+				t.Errorf("search metadata = (%q, %q), want (%q, %q)", search.Title, search.Summary, tt.wantTitle, tt.wantSummary)
+			}
+			if full.Title != search.Title || full.Summary != search.Summary {
+				t.Errorf("search metadata (%q, %q) differs from full document metadata (%q, %q)", search.Title, search.Summary, full.Title, full.Summary)
+			}
+			if !slices.Equal(fullWarnings, tt.wantWarning) || !slices.Equal(searchWarnings, tt.wantWarning) {
+				t.Errorf("warnings: full=%#v search=%#v, want %#v", fullWarnings, searchWarnings, tt.wantWarning)
+			}
+			if full.Body != strings.ToValidUTF8(strings.ReplaceAll(string(tt.raw), "\r\n", "\n"), "\uFFFD") || search.Body != "" {
+				t.Errorf("body output changed: full=%q search=%q", full.Body, search.Body)
+			}
+		})
+	}
+}
+
 func TestMemorySearchInvalidUTF8LongLineUsesBoundedTemporaryStorage(t *testing.T) {
 	content := bytes.Repeat([]byte("x"), maxMemoryFileBytes)
 	content[len(content)/2] = 0xff

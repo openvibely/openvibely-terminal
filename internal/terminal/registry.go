@@ -960,8 +960,11 @@ func tasksCommand() command {
 		`tasks steer "Fix login bug" | Stop and use the new interface`,
 	}...)...)
 	return command{
-		name:          "tasks",
-		aliases:       []string{"task", "t", "board"},
+		name:    "tasks",
+		aliases: []string{"task", "t", "board"},
+		foregroundCLIWhen: func(args []string) bool {
+			return len(args) > 1 && strings.EqualFold(strings.TrimSpace(args[0]), "reply")
+		},
 		args:          "[filter|id]",
 		actions:       actions,
 		completions:   completions,
@@ -1067,7 +1070,7 @@ func tasksCommand() command {
 									return c.ListTaskReviewsForProject(ctx, taskID, pid)
 								})
 							}
-							d, err := c.GetTaskForProjectExact(ctx, showRef, pid)
+							d, err := c.GetTaskForProjectExactTab(ctx, showRef, pid, tab)
 							if err != nil {
 								return "", err
 							}
@@ -1086,7 +1089,7 @@ func tasksCommand() command {
 							return marshalJSON(d.Task)
 						}
 
-						d, err := c.GetTaskForProjectExact(ctx, showRef, pid)
+						d, err := c.GetTaskForProjectExactTab(ctx, showRef, pid, tab)
 						if err != nil {
 							if d == nil {
 								return "", err
@@ -1106,7 +1109,7 @@ func tasksCommand() command {
 								return c.ListTaskReviewsForProject(ctx, taskID, pid)
 							})
 						}
-						d, err := c.GetTaskForProject(ctx, t.ID, pid)
+						d, err := c.GetTaskForProjectTab(ctx, t.ID, pid, tab)
 						if err != nil {
 							return "", err
 						}
@@ -1120,7 +1123,7 @@ func tasksCommand() command {
 					if jsonMode {
 						return marshalJSON(t)
 					}
-					d, err := c.GetTaskForProject(ctx, t.ID, pid)
+					d, err := c.GetTaskForProjectTab(ctx, t.ID, pid, tab)
 					if err != nil {
 						if d == nil {
 							return "", err
@@ -3503,6 +3506,50 @@ func alertsCommand() command {
 
 // --- skills ---
 
+func beginSkillInteractiveCreate(m Model, projectID, name, description string) (Model, tea.Cmd) {
+	m.skillEditorRequestID++
+	m.skillEditorActive = true
+	m.skillEditorSaving = false
+	m.skillEditorProjectID = projectID
+	m.skillEditorSkill = client.Skill{}
+	m.skillEditorCreate = true
+	m.skillEditorName = name
+	m.skillEditorDescription = description
+	m.skillEditorOriginal = ""
+	m.skillEditor.SetValue("")
+	m.skillEditor.Focus()
+	m.input.Blur()
+	m.resize()
+	return m, nil
+}
+
+func beginSkillInteractiveEdit(m Model, c *client.Client, projectID, ref string) (Model, tea.Cmd) {
+	m.skillEditorRequestID++
+	requestID := m.skillEditorRequestID
+	m.busy = true
+	cmd := func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		skills, err := c.ListSkills(ctx, projectID)
+		if err != nil {
+			return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		skill, err := matchRef(skills, ref,
+			func(skill client.Skill) string { return skill.Handle },
+			func(skill client.Skill) string { return skill.Name })
+		if err != nil {
+			return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
+		if err != nil {
+			return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		skill.Content = detail.Content
+		return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, skill: skill}
+	}
+	return m, withMessageGeneration(cmd, sessionGenerationOf(m), projectGenerationOf(m))
+}
+
 // skillSelector opens the inline skill picker for a ref-less skills subcommand.
 func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
@@ -3604,6 +3651,38 @@ func listSkillsWithFilteredContent(ctx context.Context, c *client.Client, projec
 	return filtered, nil
 }
 
+func skillBodyFileOption(value string) (prefix, path string, found bool, err error) {
+	for i := 0; i < len(value); i++ {
+		if !strings.HasPrefix(value[i:], "--file") || (i > 0 && !unicode.IsSpace(rune(value[i-1]))) {
+			continue
+		}
+		after := i + len("--file")
+		if after < len(value) && value[after] != '=' && !unicode.IsSpace(rune(value[after])) {
+			continue
+		}
+		rest := value[after:]
+		if strings.HasPrefix(rest, "=") {
+			rest = rest[1:]
+		} else {
+			rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+		}
+		path = strings.TrimSpace(rest)
+		if path == "" {
+			return "", "", true, fmt.Errorf("--file requires a body file path")
+		}
+		return strings.TrimSpace(value[:i]), path, true, nil
+	}
+	return value, "", false, nil
+}
+
+func readSkillBodyFile(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading skill body file %q: %w", path, err)
+	}
+	return string(body), nil
+}
+
 func skillsCommand() command {
 	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always", "load"}
 	return command{
@@ -3616,18 +3695,22 @@ func skillsCommand() command {
 		usage: []string{
 			"skills [filter]                            list skills",
 			"skills show <skill>                        show one skill's body",
+			"skills add <name> [| <description>] [| <body>] [--file <path>]",
+			"skills edit <skill> [| <new body>] [--file <path>]",
 			"skills delete <skill>                      remove a skill",
 			"skills enable|disable <skill>              toggle availability",
 			"skills always|load <skill>                 always load this skill",
 			"omit <skill> on show/edit/delete/enable/disable/always/load → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
-			{action: "add", args: "<name> [| <description>] [| <body>]"},
-			{action: "edit", args: "<skill> | <new body>", description: "replace a skill's body"},
+			{action: "add", args: "<name> [| <description>] [| <body>] [--file <path>]", description: "create a skill; TUI opens an editor when body is omitted"},
+			{action: "edit", args: "<skill> [| <new body>] [--file <path>]", description: "edit a skill body; TUI opens an editor when omitted"},
 		},
 		examples: []string{
-			`skills add retry-logic | Wrap HTTP calls in exponential backoff`,
+			`skills add retry-logic | Wrap HTTP calls in exponential backoff | # Retries`,
+			`skills add retry-logic | Wrap HTTP calls in exponential backoff --file retry.md`,
 			`skills edit retry-logic | Always retry on 429 and 503 with jitter up to 60s`,
+			`skills edit retry-logic --file retry.md`,
 			`skills load retry-logic`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
@@ -3679,11 +3762,29 @@ func skillsCommand() command {
 					return m, errCmd(commandUsage("skills", "add"))
 				}
 				desc, body := "", ""
+				hasInlineBody := len(parts) > 2
 				if len(parts) > 1 {
 					desc = strings.TrimSpace(parts[1])
 				}
-				if len(parts) > 2 {
+				if hasInlineBody {
 					body = strings.TrimSpace(parts[2])
+				} else {
+					prefix, filePath, fromFile, err := skillBodyFileOption(ref)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+					if fromFile {
+						name, desc = splitPipe(prefix)
+						if name == "" {
+							return m, errCmd(commandUsage("skills", "add"))
+						}
+						body, err = readSkillBodyFile(filePath)
+						if err != nil {
+							return m, errCmd(err.Error())
+						}
+					} else if !cliMode {
+						return beginSkillInteractiveCreate(m, pid, name, desc)
+					}
 				}
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
 					if err := c.CreateSkill(ctx, pid, name, desc, body); err != nil {
@@ -3698,7 +3799,23 @@ func skillsCommand() command {
 				if ref2 == "" {
 					return skillSelector(m, commandUsage("skills", "edit"), "skills edit", true)
 				}
-				if body == "" {
+				if !strings.Contains(ref, "|") {
+					prefix, filePath, fromFile, err := skillBodyFileOption(ref)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+					if fromFile {
+						ref2 = prefix
+						body, err = readSkillBodyFile(filePath)
+						if err != nil {
+							return m, errCmd(err.Error())
+						}
+					} else if !cliMode {
+						return beginSkillInteractiveEdit(m, c, pid, ref2)
+					} else {
+						return m, errCmd(commandUsage("skills", "edit"))
+					}
+				} else if body == "" {
 					return m, errCmd(commandUsage("skills", "edit"))
 				}
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -3712,7 +3829,7 @@ func skillsCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.UpdateSkill(ctx, pid, s.Handle, s.Scope, s.Name, s.Description, s.Enabled, body); err != nil {
+					if err := c.UpdateSkill(ctx, pid, s.Handle, s.Scope, s.Name, s.Description, s.Enabled, s.AlwaysUse, body); err != nil {
 						return "", err
 					}
 					return "updated skill " + s.Handle, nil
@@ -3818,14 +3935,9 @@ func memoryCommand() command {
 				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
 					list, err := c.ListMemories(ctx, project)
 					list = filterMemoryList(list, ref)
-					if jsonMode {
-						body, marshalErr := marshalJSON(list)
-						if marshalErr != nil {
-							return "", marshalErr
-						}
-						return body, err
-					}
-					return renderMemoryListForFilter(list, ref), err
+					return memoryOutput(list, err, func() string {
+						return renderMemoryListForFilter(list, ref)
+					}, jsonMode)
 				})
 			case "show":
 				if ref == "" {
@@ -3833,15 +3945,9 @@ func memoryCommand() command {
 				}
 				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
 					document, err := c.ShowMemory(ctx, project, ref)
-					if jsonMode {
-						body, marshalErr := marshalJSON(document)
-						if marshalErr != nil {
-							return "", marshalErr
-						}
-						return body, err
-					}
-					body := renderMemoryDocument(document)
-					return body, err
+					return memoryOutput(document, err, func() string {
+						return renderMemoryDocument(document)
+					}, jsonMode)
 				})
 			case "search":
 				if strings.TrimSpace(ref) == "" {
@@ -3849,20 +3955,28 @@ func memoryCommand() command {
 				}
 				return m, run("Memory Search", cmdTimeout, func(ctx context.Context) (string, error) {
 					result, err := c.SearchMemories(ctx, project, ref)
-					if jsonMode {
-						body, marshalErr := marshalJSON(result)
-						if marshalErr != nil {
-							return "", marshalErr
-						}
-						return body, err
-					}
-					return renderMemorySearch(result), err
+					return memoryOutput(result, err, func() string {
+						return renderMemorySearch(result)
+					}, jsonMode)
 				})
 			default:
 				return m, errCmd(commandUsage("memory", action))
 			}
 		},
 	}
+}
+
+// memoryOutput keeps the three memory actions' JSON and plain presentation
+// behavior aligned while leaving each action's reads and renderer independent.
+func memoryOutput(value any, readErr error, renderPlain func() string, jsonOutput bool) (string, error) {
+	if jsonOutput {
+		body, marshalErr := marshalJSON(value)
+		if marshalErr != nil {
+			return "", marshalErr
+		}
+		return body, readErr
+	}
+	return renderPlain(), readErr
 }
 
 func filterMemoryList(list client.MemoryList, filter string) client.MemoryList {
@@ -10710,11 +10824,12 @@ func validateStatusArgs(args []string) error {
 
 func eventsCommand() command {
 	return command{
-		name:        "events",
-		aliases:     []string{"stream", "log"},
-		args:        "[on|off]",
-		completions: []commandCompletion{{values: []string{"on", "off", "true", "false"}}},
-		desc:        "stream live task/chat events (interactive toggle or CLI foreground monitor)",
+		name:          "events",
+		aliases:       []string{"stream", "log"},
+		foregroundCLI: true,
+		args:          "[on|off]",
+		completions:   []commandCompletion{{values: []string{"on", "off", "true", "false"}}},
+		desc:          "stream live task/chat events (interactive toggle or CLI foreground monitor)",
 		usage: []string{
 			"events [on]                                interactive: show events from the TUI stream",
 			"events off                                 interactive: hide events; CLI off cannot stop another process",
@@ -10767,8 +10882,11 @@ func chatCommand() command {
 	return command{
 		name:    "chat",
 		aliases: []string{"back", "leave"},
-		args:    "[message]",
-		desc:    "return to project chat, or send a message",
+		foregroundCLIWhen: func(args []string) bool {
+			return len(args) > 0
+		},
+		args: "[message]",
+		desc: "return to project chat, or send a message",
 		run: func(m Model, args []string) (Model, tea.Cmd) {
 			if len(args) > 0 && m.hasPendingChat() {
 				// Reject the overlapping project-chat turn without invalidating the

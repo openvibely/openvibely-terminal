@@ -369,42 +369,92 @@ func outboundTargetMutationStatus(action string, target client.OutboundTarget) s
 }
 
 func outboundTargetMutationOutput(ctx context.Context, c *client.Client, projectID, action, status string, target client.OutboundTarget) (string, error) {
+	return outboundTargetMutationOutputWithSavedPage(ctx, c, projectID, action, status, target, nil, nil, false)
+}
+
+func outboundTargetMutationOutputWithSavedPage(ctx context.Context, c *client.Client, projectID, action, status string, target client.OutboundTarget, previous, saved []client.OutboundTarget, hasSavedPage bool) (string, error) {
+	if jsonMode && hasSavedPage {
+		if canonical, ok := findOutboundTargetMutation(action, previous, saved, target); ok {
+			return outboundTargetActionOutput(action, canonical)
+		}
+	}
+
+	// Plain output always refreshes the complete list. JSON falls back to this
+	// read only when the save response did not provide a canonical page or that
+	// page did not identify the changed row.
 	targets, err := c.ListOutboundTargets(ctx, projectID)
 	if err != nil {
 		if jsonMode {
-			return outboundTargetActionOutput(action, target)
+			if action == "remove" {
+				return outboundTargetActionOutput(action, target)
+			}
+			return "", err
 		}
 		return status, nil
 	}
-	for _, candidate := range targets {
-		if target.ID != "" && candidate.ID == target.ID {
-			target = candidate
-			break
+	if canonical, ok := findOutboundTargetMutation(action, previous, targets, target); ok {
+		target = canonical
+		if canonicalStatus := outboundTargetMutationStatus(action, target); canonicalStatus != "" {
+			status = canonicalStatus
 		}
-	}
-	if target.ID == "" {
-		var candidate client.OutboundTarget
-		matches := 0
-		for _, current := range targets {
-			if strings.EqualFold(current.Platform, target.Platform) &&
-				strings.EqualFold(current.TargetKind, target.TargetKind) &&
-				strings.EqualFold(current.Destination, target.Destination) &&
-				current.ThreadID == target.ThreadID {
-				candidate = current
-				matches++
-			}
-		}
-		if matches == 1 {
-			target = candidate
-			if canonicalStatus := outboundTargetMutationStatus(action, target); canonicalStatus != "" {
-				status = canonicalStatus
-			}
-		}
+	} else if jsonMode && action != "remove" {
+		return "", errors.New("saved outbound target could not be identified in the persisted target list")
 	}
 	if jsonMode {
 		return outboundTargetActionOutput(action, target)
 	}
 	return status + "\n\n" + renderOutboundTargets(targets), nil
+}
+
+func findOutboundTargetMutation(action string, previous, current []client.OutboundTarget, target client.OutboundTarget) (client.OutboundTarget, bool) {
+	if target.ID != "" {
+		for _, candidate := range current {
+			if candidate.ID == target.ID {
+				return candidate, true
+			}
+		}
+		return client.OutboundTarget{}, false
+	}
+	if action == "add" {
+		previousIDs := make(map[string]struct{}, len(previous))
+		for _, candidate := range previous {
+			if candidate.ID != "" {
+				previousIDs[candidate.ID] = struct{}{}
+			}
+		}
+		var added client.OutboundTarget
+		addedCount := 0
+		for _, candidate := range current {
+			if candidate.ID == "" {
+				continue
+			}
+			if _, existed := previousIDs[candidate.ID]; existed {
+				continue
+			}
+			added = candidate
+			addedCount++
+		}
+		if addedCount == 1 {
+			return added, true
+		}
+	}
+	if previous != nil {
+		return client.OutboundTarget{}, false
+	}
+	// This fallback supports callers without a pre-save snapshot while refusing
+	// to guess when normalization leaves multiple possible matches.
+	var match client.OutboundTarget
+	matches := 0
+	for _, candidate := range current {
+		if strings.EqualFold(candidate.Platform, target.Platform) &&
+			strings.EqualFold(candidate.TargetKind, target.TargetKind) &&
+			strings.EqualFold(candidate.Destination, target.Destination) &&
+			candidate.ThreadID == target.ThreadID {
+			match = candidate
+			matches++
+		}
+	}
+	return match, matches == 1
 }
 
 func outboundTargetSelector(m Model, action string) (Model, tea.Cmd) {
@@ -629,10 +679,17 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 			}
 			target.ProjectID = projectID
 			targets := append(append([]client.OutboundTarget(nil), page.Targets...), target)
-			if err := c.SaveOutboundTargets(ctx, projectID, targets, page.ExplicitUnsavedTargetsAllowed); err != nil {
+			var savedPage client.OutboundTargetsPage
+			hasSavedPage := false
+			if jsonMode {
+				savedPage, hasSavedPage, err = c.SaveOutboundTargetsWithResult(ctx, projectID, targets, page.ExplicitUnsavedTargetsAllowed)
+			} else {
+				err = c.SaveOutboundTargets(ctx, projectID, targets, page.ExplicitUnsavedTargetsAllowed)
+			}
+			if err != nil {
 				return "", err
 			}
-			return outboundTargetMutationOutput(ctx, c, projectID, "add", "added outbound target "+outboundTargetName(target), target)
+			return outboundTargetMutationOutputWithSavedPage(ctx, c, projectID, "add", "added outbound target "+outboundTargetName(target), target, page.Targets, savedPage.Targets, hasSavedPage)
 		})
 	}
 	if action == "edit" {
@@ -656,10 +713,17 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 					break
 				}
 			}
+			if jsonMode {
+				savedPage, hasSavedPage, err := c.SaveOutboundTargetsWithResult(ctx, projectID, page.Targets, page.ExplicitUnsavedTargetsAllowed)
+				if err != nil {
+					return "", err
+				}
+				return outboundTargetMutationOutputWithSavedPage(ctx, c, projectID, "edit", "edited outbound target "+outboundTargetName(updated), updated, page.Targets, savedPage.Targets, hasSavedPage)
+			}
 			if err := c.SaveOutboundTargets(ctx, projectID, page.Targets, page.ExplicitUnsavedTargetsAllowed); err != nil {
 				return "", err
 			}
-			return outboundTargetMutationOutput(ctx, c, projectID, "edit", "edited outbound target "+outboundTargetName(updated), updated)
+			return outboundTargetMutationOutputWithSavedPage(ctx, c, projectID, "edit", "edited outbound target "+outboundTargetName(updated), updated, page.Targets, nil, false)
 		})
 	}
 	if action == "show" || action == "test" {
