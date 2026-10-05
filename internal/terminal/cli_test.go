@@ -198,7 +198,7 @@ func TestCLISkillBodyFilesPreserveContentsAndReportReadFailures(t *testing.T) {
 			t.Errorf("mutation %d query = %q, want project_id=p1", i, mutations[i].query)
 		}
 	}
-	if mutations[1].body["name"] != "Deploy" || mutations[1].body["description"] != "ship safely" || mutations[1].body["scope"] != "project" || mutations[1].body["enabled"] != false {
+	if mutations[1].body["name"] != "Deploy" || mutations[1].body["description"] != "ship safely" || mutations[1].body["scope"] != "project" || mutations[1].body["enabled"] != false || mutations[1].body["always_use"] != true {
 		t.Errorf("file edit did not preserve selected skill metadata: %#v", mutations[1].body)
 	}
 

@@ -2999,7 +2999,7 @@ func (m Model) handleSkillEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if created {
 				err = m.client.CreateSkill(ctx, projectID, m.skillEditorName, m.skillEditorDescription, body)
 			} else {
-				err = m.client.UpdateSkill(ctx, projectID, skill.Handle, skill.Scope, skill.Name, skill.Description, skill.Enabled, body)
+				err = m.client.UpdateSkill(ctx, projectID, skill.Handle, skill.Scope, skill.Name, skill.Description, skill.Enabled, skill.AlwaysUse, body)
 			}
 			return skillEditorSavedMsg{projectID: projectID, requestID: requestID, name: name, created: created, err: err}
 		}

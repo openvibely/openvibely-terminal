@@ -3354,11 +3354,11 @@ func TestSkillMutationsSendBackendJSONContract(t *testing.T) {
 		{
 			name: "edit",
 			fn: func() error {
-				return c.UpdateSkill(ctx, "p1", "retry-logic", "project", "Retry Logic", "wrap retries", false, "new body")
+				return c.UpdateSkill(ctx, "p1", "retry-logic", "project", "Retry Logic", "wrap retries", false, true, "new body")
 			},
 			method:   http.MethodPut,
 			path:     "/skills/retry-logic",
-			wantBody: map[string]any{"handle": "retry-logic", "name": "Retry Logic", "description": "wrap retries", "scope": "project", "body": "new body", "enabled": false},
+			wantBody: map[string]any{"handle": "retry-logic", "name": "Retry Logic", "description": "wrap retries", "scope": "project", "body": "new body", "enabled": false, "always_use": true},
 		},
 		{
 			name:     "enable",
@@ -3460,12 +3460,12 @@ func TestGlobalSkillMutationsSendGlobalScope(t *testing.T) {
 		{
 			name: "edit",
 			fn: func() error {
-				return c.UpdateSkill(ctx, "p1", "global-skill", "global", "Global Skill", "global description", false, "new body")
+				return c.UpdateSkill(ctx, "p1", "global-skill", "global", "Global Skill", "global description", false, false, "new body")
 			},
 			path: "/skills/global-skill",
 			body: map[string]any{
 				"handle": "global-skill", "name": "Global Skill", "description": "global description",
-				"scope": "global", "body": "new body", "enabled": false,
+				"scope": "global", "body": "new body", "enabled": false, "always_use": false,
 			},
 		},
 		{
@@ -6152,7 +6152,7 @@ func TestSkillDetailReadsFreshContentAfterMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.UpdateSkill(context.Background(), "p1", "deploy", "project", "Deploy", "", false, "after edit"); err != nil {
+	if err := c.UpdateSkill(context.Background(), "p1", "deploy", "project", "Deploy", "", false, false, "after edit"); err != nil {
 		t.Fatal(err)
 	}
 	after, err := c.GetSkillDetail(context.Background(), "p1", "deploy", "project")
