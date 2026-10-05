@@ -125,6 +125,99 @@ func cliSkillsServer(t *testing.T) (*client.Client, *recorder) {
 	return c, rec
 }
 
+func TestCLISkillBodyFilesPreserveContentsAndReportReadFailures(t *testing.T) {
+	const skillList = `<div data-skill-handle="deploy" data-skill-name="Deploy" data-skill-description="ship safely" data-skill-scope="project" data-skill-source="project" data-skill-enabled="false" data-skill-always-use="true"></div>`
+	fileBody := "# Multi paragraph 📝\n\n- Keep the literal | delimiter\n- Unicode stays: 東京\n" + strings.Repeat("- Long file body line | Ω\n", 1000)
+	inlineCreateBody := "# Inline create\n\n- Keep | exactly"
+	inlineEditBody := "# Inline edit | exact\n\nSecond paragraph"
+
+	filePath := filepath.Join(t.TempDir(), "skill body.md")
+	if err := os.WriteFile(filePath, []byte(fileBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type mutation struct {
+		method string
+		path   string
+		query  string
+		body   map[string]any
+	}
+	var mutations []mutation
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, skillList)
+		case r.Method == http.MethodPost && r.URL.Path == "/skills", r.Method == http.MethodPut && r.URL.Path == "/skills/deploy":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode skill mutation payload: %v", err)
+			}
+			mutations = append(mutations, mutation{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: payload})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Errorf("unexpected CLI skills request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) error {
+		t.Helper()
+		var out bytes.Buffer
+		return RunCLI(c, &out, "demo", args, false, false)
+	}
+	if err := run("skills", "add", "file-create", "|", "file instructions", "--file", filePath); err != nil {
+		t.Fatalf("create from file: %v", err)
+	}
+	if err := run("skills", "edit", "deploy", "--file", filePath); err != nil {
+		t.Fatalf("edit from file: %v", err)
+	}
+	if err := run("skills", "add", "inline-create", "|", "inline description", "|", inlineCreateBody); err != nil {
+		t.Fatalf("inline create: %v", err)
+	}
+	if err := run("skills", "edit", "deploy", "|", inlineEditBody); err != nil {
+		t.Fatalf("inline edit: %v", err)
+	}
+	if len(mutations) != 4 {
+		t.Fatalf("mutations = %d, want 4", len(mutations))
+	}
+	for i, want := range []string{fileBody, fileBody, inlineCreateBody, inlineEditBody} {
+		if got := mutations[i].body["body"]; got != want {
+			t.Errorf("mutation %d body = %q, want exact %q", i, got, want)
+		}
+		if mutations[i].query != "project_id=p1" {
+			t.Errorf("mutation %d query = %q, want project_id=p1", i, mutations[i].query)
+		}
+	}
+	if mutations[1].body["name"] != "Deploy" || mutations[1].body["description"] != "ship safely" || mutations[1].body["scope"] != "project" || mutations[1].body["enabled"] != false {
+		t.Errorf("file edit did not preserve selected skill metadata: %#v", mutations[1].body)
+	}
+
+	missingPath := filepath.Join(t.TempDir(), "missing.md")
+	for _, args := range [][]string{
+		{"skills", "add", "missing-body", "--file", missingPath},
+		{"skills", "edit", "deploy", "--file", missingPath},
+	} {
+		before := len(mutations)
+		err := run(args...)
+		if err == nil || !strings.Contains(err.Error(), "reading skill body file") || !strings.Contains(err.Error(), missingPath) {
+			t.Errorf("run(%q) error = %v, want clear unreadable body file error", args, err)
+		}
+		if len(mutations) != before {
+			t.Errorf("unreadable body file caused a mutation for %q", args)
+		}
+	}
+}
+
 func cliFilteredSkillsServer(t *testing.T) (*client.Client, *recorder) {
 	t.Helper()
 	summaries := []client.Skill{
@@ -12552,9 +12645,9 @@ func TestCLIWebhookOptionsStillValidateBeforeRequests(t *testing.T) {
 		name string
 		args []string
 	}{
-			{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
-			{name: "recognized option after missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions", "--enabled"}},
-			{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
+		{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
+		{name: "recognized option after missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions", "--enabled"}},
+		{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
 		{name: "invalid boolean", args: []string{"webhooks", "edit", "pager", "--enabled", "maybe"}},
 		{name: "invalid priority", args: []string{"webhooks", "edit", "pager", "--priority", "5"}},
 	} {
