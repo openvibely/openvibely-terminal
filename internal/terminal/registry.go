@@ -1067,7 +1067,7 @@ func tasksCommand() command {
 									return c.ListTaskReviewsForProject(ctx, taskID, pid)
 								})
 							}
-							d, err := c.GetTaskForProjectExact(ctx, showRef, pid)
+							d, err := c.GetTaskForProjectExactTab(ctx, showRef, pid, tab)
 							if err != nil {
 								return "", err
 							}
@@ -1086,7 +1086,7 @@ func tasksCommand() command {
 							return marshalJSON(d.Task)
 						}
 
-						d, err := c.GetTaskForProjectExact(ctx, showRef, pid)
+						d, err := c.GetTaskForProjectExactTab(ctx, showRef, pid, tab)
 						if err != nil {
 							if d == nil {
 								return "", err
@@ -1106,7 +1106,7 @@ func tasksCommand() command {
 								return c.ListTaskReviewsForProject(ctx, taskID, pid)
 							})
 						}
-						d, err := c.GetTaskForProject(ctx, t.ID, pid)
+						d, err := c.GetTaskForProjectTab(ctx, t.ID, pid, tab)
 						if err != nil {
 							return "", err
 						}
@@ -1120,7 +1120,7 @@ func tasksCommand() command {
 					if jsonMode {
 						return marshalJSON(t)
 					}
-					d, err := c.GetTaskForProject(ctx, t.ID, pid)
+					d, err := c.GetTaskForProjectTab(ctx, t.ID, pid, tab)
 					if err != nil {
 						if d == nil {
 							return "", err

@@ -1195,10 +1195,17 @@ func TestTasksShowCanonicalFullIDBypassesBoard(t *testing.T) {
 	if got := rec.count("GET", "/api/tasks/"+taskID+"/swarm"); got != 0 {
 		t.Fatalf("global metadata requests = %d, want 0; calls:\n%s", got, rec.all())
 	}
-	for _, path := range []string{"/tasks/" + taskID, "/tasks/" + taskID + "/thread", "/tasks/" + taskID + "/changes"} {
-		if !rec.sawQuery("GET " + path + "?project_id=p1") {
-			t.Errorf("request %s was not project scoped: %v", path, rec.urlsSnapshot())
-		}
+	if got := rec.count("GET", "/tasks/"+taskID+"/thread"); got != 0 {
+		t.Fatalf("unselected thread requests = %d, want 0; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/tasks/"+taskID+"/changes"); got != 1 {
+		t.Fatalf("selected changes requests = %d, want 1; calls:\n%s", got, rec.all())
+	}
+	if got := rec.count("GET", "/api/tasks/"+taskID+"/lifecycle-executions"); got != 0 {
+		t.Fatalf("unselected lifecycle requests = %d, want 0; calls:\n%s", got, rec.all())
+	}
+	if !rec.sawQuery("GET /tasks/"+taskID+"?project_id=p1") || !rec.sawQuery("GET /tasks/"+taskID+"/changes?project_id=p1") {
+		t.Fatalf("selected detail requests were not project scoped: %v", rec.urlsSnapshot())
 	}
 	out := stripANSI(transcript(m))
 	for _, want := range []string{"Exact task", "changes loaded"} {
@@ -1209,6 +1216,71 @@ func TestTasksShowCanonicalFullIDBypassesBoard(t *testing.T) {
 	if strings.Contains(out, "error:") {
 		t.Fatalf("unexpected error:\n%s", out)
 	}
+}
+
+func TestTasksShowSelectedDeferredTabsAndFullDetailRequests(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	page := strings.ReplaceAll(canonicalTaskDetailHTML(taskID, "p1"), "life loaded", "")
+	bodies := map[string]string{
+		"/tasks/" + taskID:                               page,
+		"/tasks/" + taskID + "/thread":                   `<div>thread output</div>`,
+		"/tasks/" + taskID + "/changes":                  `<div>changes output</div>`,
+		"/api/tasks/" + taskID + "/lifecycle-executions": `[{"id":"exec-1","skill_key":"review","when":"before task","status":"completed","started_at":"2025-01-02T03:04:05Z"}]`,
+	}
+	for _, tc := range []struct {
+		tab      string
+		path     string
+		wantText string
+	}{
+		{tab: "thread", path: "/tasks/" + taskID + "/thread", wantText: "thread output"},
+		{tab: "changes", path: "/tasks/" + taskID + "/changes", wantText: "changes output"},
+		{tab: "lifecycle", path: "/api/tasks/" + taskID + "/lifecycle-executions", wantText: "review  completed"},
+	} {
+		t.Run(tc.tab, func(t *testing.T) {
+			m, rec := dispatchModel(t, bodies)
+			m = runLine(t, m, "/tasks show "+taskID+" "+tc.tab)
+			if got := rec.count("GET", "/tasks/"+taskID); got != 1 {
+				t.Fatalf("task page requests = %d, want 1; calls:\n%s", got, rec.all())
+			}
+			if got := rec.count("GET", tc.path); got != 1 {
+				t.Fatalf("selected %s requests = %d, want 1; calls:\n%s", tc.tab, got, rec.all())
+			}
+			for _, other := range []string{
+				"/tasks/" + taskID + "/thread",
+				"/tasks/" + taskID + "/changes",
+				"/api/tasks/" + taskID + "/lifecycle-executions",
+			} {
+				if other != tc.path && rec.count("GET", other) != 0 {
+					t.Errorf("unselected endpoint %s was requested; calls:\n%s", other, rec.all())
+				}
+			}
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.wantText) {
+				t.Fatalf("selected %s output missing %q:\n%s", tc.tab, tc.wantText, out)
+			}
+		})
+	}
+
+	t.Run("full detail", func(t *testing.T) {
+		m, rec := dispatchModel(t, bodies)
+		m = runLine(t, m, "/tasks show "+taskID)
+		for _, path := range []string{
+			"/tasks/" + taskID,
+			"/tasks/" + taskID + "/thread",
+			"/tasks/" + taskID + "/changes",
+			"/api/tasks/" + taskID + "/lifecycle-executions",
+		} {
+			if got := rec.count("GET", path); got != 1 {
+				t.Errorf("full detail %s requests = %d, want 1; calls:\n%s", path, got, rec.all())
+			}
+		}
+		out := stripANSI(transcript(m))
+		for _, want := range []string{"thread output", "changes output", "review  completed"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("full detail output missing %q:\n%s", want, out)
+			}
+		}
+	})
 }
 
 func TestTasksShowCanonicalFullIDJSONAndReviewBypassBoard(t *testing.T) {
