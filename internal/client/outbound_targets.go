@@ -109,9 +109,22 @@ func (c *Client) SetOutboundTargetPolicy(ctx context.Context, projectID string, 
 // Empty IDs are intentionally preserved for new rows so the backend allocates
 // canonical IDs; existing IDs are sent unchanged for edits and removals.
 func (c *Client) SaveOutboundTargets(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool) error {
+	_, _, err := c.saveOutboundTargets(ctx, projectID, targets, explicitAllowed, false)
+	return err
+}
+
+// SaveOutboundTargetsWithResult submits the replacement form and returns the
+// canonical saved-target page when the server includes one in its response.
+// A response without that page remains a successful save for compatibility;
+// callers that need persisted fields can then fetch the list.
+func (c *Client) SaveOutboundTargetsWithResult(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool) (OutboundTargetsPage, bool, error) {
+	return c.saveOutboundTargets(ctx, projectID, targets, explicitAllowed, true)
+}
+
+func (c *Client) saveOutboundTargets(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed, wantCanonical bool) (OutboundTargetsPage, bool, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
-		return errors.New("project ID is required for outbound targets")
+		return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, errors.New("project ID is required for outbound targets")
 	}
 	form := url.Values{}
 	form.Set("project_id", projectID)
@@ -130,20 +143,110 @@ func (c *Client) SaveOutboundTargets(ctx context.Context, projectID string, targ
 	}
 	resp, err := c.doFormResponse(ctx, http.MethodPost, "/channels/send-message-explicit-targets", form)
 	if err != nil {
-		return err
+		return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, err
 	}
 	defer drainAndClose(resp.Body)
 	root, parseErr := html.Parse(resp.Body)
 	if parseErr != nil {
-		return fmt.Errorf("decoding outbound target save response: %w", parseErr)
+		return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, fmt.Errorf("decoding outbound target save response: %w", parseErr)
 	}
 	if strings.Contains(resp.Header.Get("HX-Trigger"), "outbound-targets-save-error") {
 		if message := outboundTargetSaveMessage(root); message != "" {
-			return errors.New(message)
+			return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, errors.New(message)
 		}
-		return errors.New("failed to save outbound targets")
+		return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, errors.New("failed to save outbound targets")
 	}
-	return nil
+	if !wantCanonical {
+		return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, nil
+	}
+	if findByID(root, "outbound-targets-section") != nil {
+		page, err := parseOutboundTargetsPage(root, projectID)
+		if err != nil {
+			return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, fmt.Errorf("decoding canonical outbound target save response: %w", err)
+		}
+		return page, true, nil
+	}
+	if findByID(root, "outbound-target-saved-target") != nil {
+		target, err := parseCanonicalSavedOutboundTarget(root, projectID)
+		if err != nil {
+			return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, fmt.Errorf("decoding canonical outbound target save response: %w", err)
+		}
+		return OutboundTargetsPage{Targets: []OutboundTarget{target}}, true, nil
+	}
+	return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, nil
+}
+
+// parseCanonicalSavedOutboundTarget accepts the narrow save reply wrapper and
+// reads only the same safe semantic fields used by the outbound-target list
+// parser. Other response fields, including credentials, are ignored.
+func parseCanonicalSavedOutboundTarget(root *html.Node, projectID string) (OutboundTarget, error) {
+	wrappers := findAll(root, func(node *html.Node) bool {
+		return node.Data == "div" && attr(node, "id") == "outbound-target-saved-target"
+	})
+	if len(wrappers) != 1 {
+		return OutboundTarget{}, errors.New("outbound target save response has invalid canonical target wrapper")
+	}
+	wrapper := wrappers[0]
+	if strings.TrimSpace(attr(wrapper, "data-project-id")) != projectID {
+		return OutboundTarget{}, errors.New("outbound target save response does not belong to selected project")
+	}
+	id, err := requiredOutboundTargetField(wrapper, "target_row_id")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return OutboundTarget{}, errors.New("outbound target save response has an empty target ID")
+	}
+	platform, err := requiredOutboundTargetField(wrapper, "target_platform")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	kind, err := requiredOutboundTargetField(wrapper, "target_kind")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	name, err := requiredOutboundTargetField(wrapper, "target_name")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	destination, err := requiredOutboundTargetField(wrapper, "target_target_id")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	threadID, err := requiredOutboundTargetField(wrapper, "target_thread_id")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	home, err := requiredOutboundTargetField(wrapper, "target_is_home")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	subject, err := requiredOutboundTargetField(wrapper, "target_default_subject")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	isHome, err := strconv.ParseBool(home)
+	if err != nil {
+		return OutboundTarget{}, errors.New("outbound target save response has invalid home state")
+	}
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	name = strings.TrimSpace(name)
+	destination = strings.TrimSpace(destination)
+	threadID = strings.TrimSpace(threadID)
+	subject = strings.TrimSpace(subject)
+	if platform == "" || kind == "" || destination == "" {
+		return OutboundTarget{}, errors.New("outbound target save response is missing required fields")
+	}
+	if !supportedOutboundTargetPlatform(platform) {
+		return OutboundTarget{}, errors.New("outbound target save response has unsupported platform")
+	}
+	return OutboundTarget{
+		ID: id, ProjectID: projectID, Platform: platform, TargetKind: kind, Name: name,
+		Destination: destination, TargetID: destination, ThreadID: threadID,
+		Home: isHome, DefaultSubject: subject,
+	}, nil
 }
 
 // TestOutboundTarget tests one saved destination and returns the backend's

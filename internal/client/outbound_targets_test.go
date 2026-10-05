@@ -259,6 +259,72 @@ func TestSaveOutboundTargetsPreservesBackendFormAndSurfacesValidation(t *testing
 	}
 }
 
+func TestSaveOutboundTargetsWithResultParsesCanonicalTargetSafely(t *testing.T) {
+	body := `<div id="outbound-target-saved-target" data-project-id="project-2" data-token="secret"><input name="target_row_id" value="internal-row"><input name="target_platform" value="EMAIL"><input name="target_kind" value="EMAIL"><input name="target_name" value="Canonical name"><input name="target_target_id" value="person@example.com"><input name="target_thread_id" value="7"><input name="target_is_home" value="true"><input name="target_default_subject" value="Canonical subject"><input name="channel_token" value="provider-secret"></div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/channels/send-message-explicit-targets" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []OutboundTarget{{
+		ID: "internal-row", ProjectID: "project-2", Platform: "email", TargetKind: "email",
+		Name: "Canonical name", Destination: "person@example.com", TargetID: "person@example.com",
+		ThreadID: "7", Home: true, DefaultSubject: "Canonical subject",
+	}}
+	if !available || !reflect.DeepEqual(page.Targets, want) {
+		t.Fatalf("save result = %#v, available=%t; want %#v", page, available, want)
+	}
+	encoded, err := json.Marshal(page.Targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "internal-row") || strings.Contains(string(encoded), "project-2") || strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "target_id\"") {
+		t.Fatalf("canonical save JSON leaked internal or credential data: %s", encoded)
+	}
+}
+
+func TestSaveOutboundTargetsWithResultRejectsMalformedCanonicalResponse(t *testing.T) {
+	for name, body := range map[string]string{
+		"wrong project":  `<div id="outbound-target-saved-target" data-project-id="other"><input name="target_row_id" value="a"></div>`,
+		"missing fields": `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="a"></div>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false)
+			if err == nil || available || len(page.Targets) != 0 {
+				t.Fatalf("malformed response = %#v, available=%t, err=%v", page, available, err)
+			}
+		})
+	}
+}
+
+func TestSaveOutboundTargetsWithResultKeepsLegacyResponseAsUnavailable(t *testing.T) {
+	c := htmlServer(t, `<div class="alert-success">saved</div>`)
+	page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false)
+	if err != nil || available || page.Targets == nil || len(page.Targets) != 0 {
+		t.Fatalf("legacy result = %#v, available=%t, err=%v", page, available, err)
+	}
+}
+
 func TestSetOutboundTargetPolicySurfacesValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
