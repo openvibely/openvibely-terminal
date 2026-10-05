@@ -10114,7 +10114,7 @@ func TestSkillsMutationsUseBackendJSONContract(t *testing.T) {
 			line:     "/skills edit deploy | new body",
 			method:   http.MethodPut,
 			path:     "/skills/deploy",
-			wantBody: map[string]any{"handle": "deploy", "name": "Deploy", "description": "ship to prod", "scope": "project", "body": "new body", "enabled": true},
+			wantBody: map[string]any{"handle": "deploy", "name": "Deploy", "description": "ship to prod", "scope": "project", "body": "new body", "enabled": true, "always_use": false},
 		},
 		{
 			name:     "enable",
@@ -10323,7 +10323,7 @@ func TestSkillEditorPreservesExactBodiesAndSelectedMetadata(t *testing.T) {
 		t.Errorf("edited body payload = %q, want exact %q", got, editedBody)
 	}
 	wantMetadata := map[string]any{
-		"handle": "deploy", "name": "Deploy", "description": "ship safely", "scope": "project", "enabled": false,
+		"handle": "deploy", "name": "Deploy", "description": "ship safely", "scope": "project", "enabled": false, "always_use": true,
 	}
 	for key, want := range wantMetadata {
 		if got := gotBodies[1][key]; got != want {
@@ -10407,6 +10407,7 @@ func TestSkillsEditPreservesDisabledState(t *testing.T) {
 		"scope":       "project",
 		"body":        "new body",
 		"enabled":     false,
+		"always_use":  false,
 	}
 	if !reflect.DeepEqual(gotBody, wantBody) {
 		t.Errorf("JSON body = %#v, want %#v", gotBody, wantBody)
@@ -10434,7 +10435,7 @@ func TestGlobalSkillMutationsUseResolvedScope(t *testing.T) {
 			path:   "/skills/global-skill",
 			wantBody: map[string]any{
 				"handle": "global-skill", "name": "Global Skill", "description": "global description",
-				"scope": "global", "body": "new body", "enabled": true,
+				"scope": "global", "body": "new body", "enabled": true, "always_use": false,
 			},
 		},
 		{
