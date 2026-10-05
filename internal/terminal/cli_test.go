@@ -10414,10 +10414,11 @@ func TestCLIJSONTasksShowSelectedTabs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			page := strings.ReplaceAll(detailTabPage, "TASK_ID", tc.taskID)
 			bodies := map[string]string{
-				"/api/projects":                    cliProjects,
-				"/tasks/" + tc.taskID:              page,
-				"/tasks/" + tc.taskID + "/thread":  thread,
-				"/tasks/" + tc.taskID + "/changes": changes,
+				"/api/projects":                                     cliProjects,
+				"/tasks/" + tc.taskID:                               page,
+				"/tasks/" + tc.taskID + "/thread":                   thread,
+				"/tasks/" + tc.taskID + "/changes":                  changes,
+				"/api/tasks/" + tc.taskID + "/lifecycle-executions": `[]`,
 			}
 			if !tc.canonical {
 				bodies["/tasks"] = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
