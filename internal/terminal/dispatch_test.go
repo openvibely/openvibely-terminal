@@ -8470,12 +8470,12 @@ func TestAutomationsShowResolvesReferencesAndLoadsScopedDetail(t *testing.T) {
 		id              string
 		catalogRequests int
 	}{
-		{name: "exact id", line: "/automations show au-1", id: "au-1", catalogRequests: 0},
+		{name: "opaque exact id uses catalog", line: "/automations show au-1", id: "au-1", catalogRequests: 1},
 		{name: "case insensitive ID uses catalog", line: "/automations show AU-1", id: "au-1", catalogRequests: 1},
 		{name: "exact name", line: "/automations show Native SDLC", id: "au-1", catalogRequests: 1},
 		{name: "unique prefix", line: "/automations show Native", id: "au-1", catalogRequests: 1},
 		{name: "unique substring", line: "/automations show GitHub", id: "au-2", catalogRequests: 1},
-		{name: "open alias", line: "/automations open au-1", id: "au-1", catalogRequests: 0},
+		{name: "open alias opaque exact id uses catalog", line: "/automations open au-1", id: "au-1", catalogRequests: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -8511,11 +8511,34 @@ func TestAutomationsShowResolvesReferencesAndLoadsScopedDetail(t *testing.T) {
 	}
 }
 
+func TestAutomationsShowPreservesCaseInsensitiveDuplicateIDAmbiguity(t *testing.T) {
+	catalog := `<div>` +
+		automationCardHTML("au-1", "Lowercase flow", "active") +
+		automationCardHTML("AU-1", "Uppercase flow", "paused") +
+		`</div>`
+	for _, action := range []string{"show", "open"} {
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{
+				"/automations":      catalog,
+				"/automations/au-1": automationDetailHTML("au-1", "p1", "Lowercase flow"),
+			})
+			m = runLine(t, m, "/automations "+action+" au-1")
+			out := transcript(m)
+			if !strings.Contains(out, `"au-1" is ambiguous`) || !strings.Contains(out, "Lowercase flow") || !strings.Contains(out, "Uppercase flow") {
+				t.Fatalf("case-insensitive duplicate ID ambiguity was lost:\n%s", out)
+			}
+			if rec.count(http.MethodGet, "/automations") != 1 || rec.count(http.MethodGet, "/automations/au-1") != 0 {
+				t.Fatalf("duplicate reference did not use catalog-only matching:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 func TestAutomationsShowCanonicalIDSkipsCatalogAcrossCatalogSizes(t *testing.T) {
 	for _, total := range []int{10, 100, 1000} {
 		for _, action := range []string{"show", "open"} {
 			t.Run(fmt.Sprintf("%s/%d", action, total), func(t *testing.T) {
-				id := fmt.Sprintf("au-%04d", total-1)
+				id := automationUUIDTestID(total - 1)
 				var catalogRequests, catalogBytes atomic.Int64
 				var detailRequests atomic.Int64
 				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
@@ -8527,7 +8550,7 @@ func TestAutomationsShowCanonicalIDSkipsCatalogAcrossCatalogSizes(t *testing.T) 
 						if end > total {
 							end = total
 						}
-						body := automationPaginatedHTML(offset, end, total)
+						body := canonicalAutomationPaginatedHTML(offset, end, total)
 						catalogBytes.Add(int64(len(body)))
 						w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(end < total))
 						w.Header().Set("X-OpenVibely-Card-Page-Total", strconv.Itoa(total))
@@ -8562,12 +8585,16 @@ func TestCanonicalAutomationIDReferenceIsConservative(t *testing.T) {
 		ref string
 		ok  bool
 	}{
-		{ref: "au-1", ok: true},
-		{ref: "au1", ok: true},
-		{ref: "au_draft", ok: true},
-		{ref: "au-draft", ok: true},
-		{ref: "automation-long-id", ok: true},
-		{ref: "123e4567-e89b-12d3-a456-426614174000", ok: true},
+		{
+			ref: "123e4567-e89b-12d3-a456-426614174000",
+			ok:  true,
+		},
+		{ref: "123E4567-E89B-12D3-A456-426614174000", ok: false},
+		{ref: "au-1", ok: false},
+		{ref: "au1", ok: false},
+		{ref: "au_draft", ok: false},
+		{ref: "au-draft", ok: false},
+		{ref: "automation-long-id", ok: false},
 		{ref: "Native", ok: false},
 		{ref: "Native SDLC", ok: false},
 		{ref: "au-", ok: false},
@@ -8587,22 +8614,23 @@ func TestCanonicalAutomationIDReferenceIsConservative(t *testing.T) {
 
 func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.T) {
 	t.Run("draft metadata", func(t *testing.T) {
+		id := automationUUIDTestID(17)
 		var catalogRequests, detailRequests atomic.Int64
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/automations":
 				catalogRequests.Add(1)
-				_, _ = io.WriteString(w, `<div>`+automationCardHTML("au-draft", "Draft flow", "draft")+`</div>`)
-			case "/automations/au-draft":
+				_, _ = io.WriteString(w, `<div>`+automationCardHTML(id, "Draft flow", "draft")+`</div>`)
+			case "/automations/" + id:
 				detailRequests.Add(1)
 				w.WriteHeader(http.StatusNotFound)
 			default:
 				http.NotFound(w, r)
 			}
 		})
-		m = runLine(t, m, "/automations show au-draft")
+		m = runLine(t, m, "/automations show "+id)
 		out := stripANSI(transcript(m))
-		for _, want := range []string{"Automation: Draft flow", "ID au-draft", "draft automation has no live graph", "nodes: unavailable", "edges: unavailable"} {
+		for _, want := range []string{"Automation: Draft flow", "ID " + id, "draft automation has no live graph", "nodes: unavailable", "edges: unavailable"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("draft fallback missing %q:\n%s", want, out)
 			}
@@ -8613,22 +8641,23 @@ func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.
 	})
 
 	t.Run("unknown canonical ID diagnostic and selected project", func(t *testing.T) {
+		id := automationUUIDTestID(18)
 		var catalogProject, detailProject string
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/automations":
 				catalogProject = r.URL.Query().Get("project_id")
 				_, _ = io.WriteString(w, `<div>`+automationCardHTML("au-other", "Other flow", "active")+`</div>`)
-			case "/automations/au-missing":
+			case "/automations/" + id:
 				detailProject = r.URL.Query().Get("project_id")
 				w.WriteHeader(http.StatusNotFound)
 			default:
 				http.NotFound(w, r)
 			}
 		})
-		m = runLine(t, m, "/automations show au-missing")
+		m = runLine(t, m, "/automations show "+id)
 		out := transcript(m)
-		if !strings.Contains(out, `nothing matches "au-missing"`) {
+		if !strings.Contains(out, `nothing matches "`+id+`"`) {
 			t.Fatalf("unknown ID diagnostic changed:\n%s", out)
 		}
 		if catalogProject != "p1" || detailProject != "p1" {
@@ -8637,56 +8666,59 @@ func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.
 	})
 
 	t.Run("catalog card without detail retains detail not-found error", func(t *testing.T) {
+		id := automationUUIDTestID(19)
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/automations":
-				_, _ = io.WriteString(w, `<div>`+automationCardHTML("au-missing", "Broken active flow", "active")+`</div>`)
-			case "/automations/au-missing":
+				_, _ = io.WriteString(w, `<div>`+automationCardHTML(id, "Broken active flow", "active")+`</div>`)
+			case "/automations/" + id:
 				w.WriteHeader(http.StatusNotFound)
 			default:
 				http.NotFound(w, r)
 			}
 		})
-		m = runLine(t, m, "/automations show au-missing")
-		if !strings.Contains(transcript(m), `automation "au-missing" not found`) {
+		m = runLine(t, m, "/automations show "+id)
+		if !strings.Contains(transcript(m), `automation "`+id+`" not found`) {
 			t.Fatalf("catalog card detail error changed:\n%s", transcript(m))
 		}
 	})
 
 	t.Run("empty catalog keeps not-found diagnostic", func(t *testing.T) {
+		id := automationUUIDTestID(20)
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/automations":
 				_, _ = io.WriteString(w, `<div></div>`)
-			case "/automations/au-missing":
+			case "/automations/" + id:
 				w.WriteHeader(http.StatusNotFound)
 			default:
 				http.NotFound(w, r)
 			}
 		})
-		m = runLine(t, m, "/automations open au-missing")
-		if !strings.Contains(transcript(m), `nothing matches "au-missing"`) {
+		m = runLine(t, m, "/automations open "+id)
+		if !strings.Contains(transcript(m), `nothing matches "`+id+`"`) {
 			t.Fatalf("empty catalog diagnostic changed:\n%s", transcript(m))
 		}
 	})
 
 	t.Run("canonical-looking name falls back to catalog resolution", func(t *testing.T) {
+		id := automationUUIDTestID(21)
 		var seenDetail string
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/automations":
-				_, _ = io.WriteString(w, `<div>`+automationCardHTML("au-real", "au-missing", "active")+`</div>`)
-			case "/automations/au-missing":
+				_, _ = io.WriteString(w, `<div>`+automationCardHTML("au-real", id, "active")+`</div>`)
+			case "/automations/" + id:
 				w.WriteHeader(http.StatusNotFound)
 			case "/automations/au-real":
 				seenDetail = r.URL.Path
-				_, _ = io.WriteString(w, automationDetailHTML("au-real", "p1", "au-missing"))
+				_, _ = io.WriteString(w, automationDetailHTML("au-real", "p1", id))
 			default:
 				http.NotFound(w, r)
 			}
 		})
-		m = runLine(t, m, "/automations show au-missing")
-		if seenDetail != "/automations/au-real" || !strings.Contains(transcript(m), "au-missing") {
+		m = runLine(t, m, "/automations show "+id)
+		if seenDetail != "/automations/au-real" || !strings.Contains(transcript(m), id) {
 			t.Fatalf("canonical-looking exact name was not preserved: detail=%q output:\n%s", seenDetail, transcript(m))
 		}
 	})
@@ -8729,15 +8761,16 @@ func TestAutomationsShowReferenceFailuresDoNotLoadDetailOrMutate(t *testing.T) {
 }
 
 func TestAutomationsShowCanonicalIDOutputMatchesCatalogResolution(t *testing.T) {
+	id := automationUUIDTestID(22)
 	m, _ := dispatchModel(t, map[string]string{
-		"/automations":      `<div>` + automationCardHTML("au-1", "Native SDLC", "active") + `</div>`,
-		"/automations/au-1": automationDetailHTML("au-1", "p1", "Native SDLC"),
+		"/automations":       `<div>` + automationCardHTML(id, "Native SDLC", "active") + `</div>`,
+		"/automations/" + id: automationDetailHTML(id, "p1", "Native SDLC"),
 	})
 	previousJSONMode := jsonMode
 	defer func() { jsonMode = previousJSONMode }()
 	for _, jsonOutput := range []bool{false, true} {
 		jsonMode = jsonOutput
-		automation, err := resolveAutomationRef(context.Background(), m.client, "p1", "au-1")
+		automation, err := resolveAutomationRef(context.Background(), m.client, "p1", id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8745,7 +8778,7 @@ func TestAutomationsShowCanonicalIDOutputMatchesCatalogResolution(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, err := loadAutomationDetailForRef(context.Background(), m.client, "p1", "au-1")
+		got, err := loadAutomationDetailForRef(context.Background(), m.client, "p1", id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8856,6 +8889,20 @@ func TestAutomationsListFiltersStructuredRows(t *testing.T) {
 	if strings.Contains(out, "Native SDLC") || !strings.Contains(out, "GitHub SDLC") {
 		t.Errorf("filtered automations output:\n%s", out)
 	}
+}
+
+func automationUUIDTestID(index int) string {
+	return fmt.Sprintf("00000000-0000-4000-8000-%012x", index)
+}
+
+func canonicalAutomationPaginatedHTML(start, end, total int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="%t" data-card-pagination-total="%d">`, end < total, total)
+	for i := start; i < end; i++ {
+		b.WriteString(automationCardHTML(automationUUIDTestID(i), fmt.Sprintf("Automation %04d", i), "active"))
+	}
+	b.WriteString(`</div>`)
+	return b.String()
 }
 
 func automationPaginatedHTML(start, end, total int) string {

@@ -9444,12 +9444,13 @@ func resolveAutomationRef(ctx context.Context, c *client.Client, projectID, ref 
 		func(a client.Automation) string { return a.Name })
 }
 
-// loadAutomationDetailForRef skips the catalog only for a well-formed,
-// canonical-looking ID. The detail endpoint validates both requested identities,
-// so a successful response is sufficient to render the same detail that catalog
-// resolution would have selected. A 404 falls back to the complete, paginated
-// resolver to retain draft metadata and name matching; pagination already caps
-// this fallback at the shared page/card safety limits.
+// loadAutomationDetailForRef skips the catalog only for a canonical lowercase
+// UUID. UUID identity is case-insensitive at the backend, so separate IDs that
+// differ only by letter case cannot coexist. Opaque IDs remain on the catalog
+// path because the catalog matcher intentionally treats case variants as
+// ambiguous. The detail endpoint validates both requested identities. A 404
+// falls back to the complete, paginated resolver to retain draft metadata and
+// name matching; pagination caps this fallback at the shared safety limits.
 func loadAutomationDetailForRef(ctx context.Context, c *client.Client, projectID, ref string) (string, error) {
 	if automationID, ok := canonicalAutomationIDRef(ref); ok {
 		detail, err := c.GetAutomationDetail(ctx, projectID, automationID)
@@ -9490,36 +9491,12 @@ func loadAutomationDetailForRef(ctx context.Context, c *client.Client, projectID
 	return loadAutomationDetail(ctx, c, projectID, automation)
 }
 
-// canonicalAutomationIDRef accepts only complete lowercase backend ID forms.
-// In particular, ordinary words, prefixes, malformed ID-like strings, and
-// case-insensitive variants still go through catalog matching.
+// canonicalAutomationIDRef accepts only complete lowercase UUID references.
+// Opaque IDs, prefixes, malformed ID-like strings, and case variants continue
+// through catalog matching, where duplicate case-insensitive IDs are diagnosed.
 func canonicalAutomationIDRef(ref string) (string, bool) {
-	if ref == "" || ref != strings.TrimSpace(ref) || ref != strings.ToLower(ref) {
+	if ref != strings.ToLower(ref) || !isCanonicalAutomationUUID(ref) {
 		return "", false
-	}
-	var suffix string
-	switch {
-	case strings.HasPrefix(ref, "au-"):
-		suffix = strings.TrimPrefix(ref, "au-")
-	case strings.HasPrefix(ref, "au_"):
-		suffix = strings.TrimPrefix(ref, "au_")
-	case len(ref) > 2 && strings.HasPrefix(ref, "au") && ref[2] >= '0' && ref[2] <= '9':
-		suffix = ref[2:]
-	case strings.HasPrefix(ref, "automation-"):
-		suffix = strings.TrimPrefix(ref, "automation-")
-	default:
-		if isCanonicalAutomationUUID(ref) {
-			return ref, true
-		}
-		return "", false
-	}
-	if suffix == "" || suffix[0] == '-' || suffix[len(suffix)-1] == '-' {
-		return "", false
-	}
-	for _, r := range suffix {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' {
-			return "", false
-		}
 	}
 	return ref, true
 }
