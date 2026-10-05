@@ -6503,11 +6503,11 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	})
 
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "other", []string{"automations", "show", "Native"}, false, false); err != nil {
+	if err := RunCLI(c, &out, "other", []string{"automations", "show", "au-1"}, false, false); err != nil {
 		t.Fatalf("plain automation show failed: %v", err)
 	}
 	plain := stripANSI(out.String())
-	for _, want := range []string{"Automation: Native SDLC", "Graph", "Nodes", "Runtime", "Resources", "External state"} {
+	for _, want := range []string{"Automation: Native SDLC", "Graph", "Nodes", "Runtime", "active invocations: 2", "active work items: 3", "Resources", "ready", "External state", "fresh"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("plain detail missing %q:\n%s", want, out.String())
 		}
@@ -6515,26 +6515,38 @@ func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
 	if strings.Contains(out.String(), "\x1b[") {
 		t.Fatalf("plain CLI detail contains ANSI styling: %q", out.String())
 	}
-	if !rec.sawQuery("GET /automations?project_id=p2") || !rec.sawQuery("GET /automations/au-1?project_id=p2") {
-		t.Fatalf("automation show lost selected project:\n%s", rec.all())
+	if rec.sawQuery("GET /automations?project_id=p2") || !rec.sawQuery("GET /automations/au-1?project_id=p2") {
+		t.Fatalf("canonical-ID automation show requests =\n%s", rec.all())
 	}
 
 	out.Reset()
-	if err := RunCLI(c, &out, "other", []string{"automations", "show", "Native"}, false, true); err != nil {
+	if err := RunCLI(c, &out, "other", []string{"automations", "show", "au-1"}, false, true); err != nil {
 		t.Fatalf("JSON automation show failed: %v", err)
 	}
 	var detail client.AutomationDetail
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &detail); err != nil {
 		t.Fatalf("automation detail JSON = %q: %v", out.String(), err)
 	}
-	if detail.Automation.ID != "au-1" || detail.Automation.ProjectID != "p2" || detail.Automation.Name != "Native SDLC" {
-		t.Fatalf("automation detail JSON = %+v", detail.Automation)
+	if detail.Automation.ID != "au-1" || detail.Automation.ProjectID != "p2" || detail.Automation.Name != "Native SDLC" || detail.Automation.LifecycleState != "active" {
+		t.Fatalf("automation detail JSON identity = %+v", detail.Automation)
+	}
+	if !detail.GraphAvailable || !detail.NodesAvailable || !detail.ResourcesAvailable || !detail.ExternalStateAvailable || len(detail.Warnings) != 0 {
+		t.Fatalf("automation detail JSON availability/warnings changed: %+v", detail)
 	}
 	if len(detail.Nodes) != 1 || !detail.Nodes[0].Counts.RunningAvailable || detail.Nodes[0].Counts.Running != 1 {
 		t.Fatalf("automation count availability was not preserved in JSON: %+v", detail.Nodes)
 	}
+	if detail.ActiveInvocations != 2 || detail.ActiveWorkItems != 3 || !detail.ActiveInvocationsAvailable || !detail.ActiveWorkItemsAvailable {
+		t.Fatalf("automation runtime details were not preserved in JSON: %+v", detail)
+	}
+	if len(detail.Resources) != 1 || !detail.ResourcesAvailable || detail.Resources[0].Status != "ready" || detail.ExternalState.Status != "fresh" || !detail.ExternalStateAvailable {
+		t.Fatalf("automation resources/external state were not preserved in JSON: %+v", detail)
+	}
 	if strings.Contains(out.String(), "\x1b[") || strings.Contains(out.String(), "OpenVibely") {
 		t.Fatalf("JSON detail contains styling or a banner: %q", out.String())
+	}
+	if rec.sawQuery("GET /automations?project_id=p2") || rec.count("GET", "/automations/au-1") != 2 {
+		t.Fatalf("plain/JSON canonical-ID request counts changed:\n%s", rec.all())
 	}
 }
 
