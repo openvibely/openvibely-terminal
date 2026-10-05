@@ -3932,14 +3932,9 @@ func memoryCommand() command {
 				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
 					list, err := c.ListMemories(ctx, project)
 					list = filterMemoryList(list, ref)
-					if jsonMode {
-						body, marshalErr := marshalJSON(list)
-						if marshalErr != nil {
-							return "", marshalErr
-						}
-						return body, err
-					}
-					return renderMemoryListForFilter(list, ref), err
+					return memoryOutput(list, err, func() string {
+						return renderMemoryListForFilter(list, ref)
+					}, jsonMode)
 				})
 			case "show":
 				if ref == "" {
@@ -3947,15 +3942,9 @@ func memoryCommand() command {
 				}
 				return m, run("Memory", cmdTimeout, func(ctx context.Context) (string, error) {
 					document, err := c.ShowMemory(ctx, project, ref)
-					if jsonMode {
-						body, marshalErr := marshalJSON(document)
-						if marshalErr != nil {
-							return "", marshalErr
-						}
-						return body, err
-					}
-					body := renderMemoryDocument(document)
-					return body, err
+					return memoryOutput(document, err, func() string {
+						return renderMemoryDocument(document)
+					}, jsonMode)
 				})
 			case "search":
 				if strings.TrimSpace(ref) == "" {
@@ -3963,20 +3952,28 @@ func memoryCommand() command {
 				}
 				return m, run("Memory Search", cmdTimeout, func(ctx context.Context) (string, error) {
 					result, err := c.SearchMemories(ctx, project, ref)
-					if jsonMode {
-						body, marshalErr := marshalJSON(result)
-						if marshalErr != nil {
-							return "", marshalErr
-						}
-						return body, err
-					}
-					return renderMemorySearch(result), err
+					return memoryOutput(result, err, func() string {
+						return renderMemorySearch(result)
+					}, jsonMode)
 				})
 			default:
 				return m, errCmd(commandUsage("memory", action))
 			}
 		},
 	}
+}
+
+// memoryOutput keeps the three memory actions' JSON and plain presentation
+// behavior aligned while leaving each action's reads and renderer independent.
+func memoryOutput(value any, readErr error, renderPlain func() string, jsonOutput bool) (string, error) {
+	if jsonOutput {
+		body, marshalErr := marshalJSON(value)
+		if marshalErr != nil {
+			return "", marshalErr
+		}
+		return body, readErr
+	}
+	return renderPlain(), readErr
 }
 
 func filterMemoryList(list client.MemoryList, filter string) client.MemoryList {
