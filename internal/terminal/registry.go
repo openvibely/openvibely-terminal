@@ -3503,6 +3503,50 @@ func alertsCommand() command {
 
 // --- skills ---
 
+func beginSkillInteractiveCreate(m Model, projectID, name, description string) (Model, tea.Cmd) {
+	m.skillEditorRequestID++
+	m.skillEditorActive = true
+	m.skillEditorSaving = false
+	m.skillEditorProjectID = projectID
+	m.skillEditorSkill = client.Skill{}
+	m.skillEditorCreate = true
+	m.skillEditorName = name
+	m.skillEditorDescription = description
+	m.skillEditorOriginal = ""
+	m.skillEditor.SetValue("")
+	m.skillEditor.Focus()
+	m.input.Blur()
+	m.resize()
+	return m, nil
+}
+
+func beginSkillInteractiveEdit(m Model, c *client.Client, projectID, ref string) (Model, tea.Cmd) {
+	m.skillEditorRequestID++
+	requestID := m.skillEditorRequestID
+	m.busy = true
+	cmd := func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		defer cancel()
+		skills, err := c.ListSkills(ctx, projectID)
+		if err != nil {
+			return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		skill, err := matchRef(skills, ref,
+			func(skill client.Skill) string { return skill.Handle },
+			func(skill client.Skill) string { return skill.Name })
+		if err != nil {
+			return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
+		if err != nil {
+			return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, err: err}
+		}
+		skill.Content = detail.Content
+		return skillEditorLoadedMsg{projectID: projectID, requestID: requestID, skill: skill}
+	}
+	return m, withMessageGeneration(cmd, sessionGenerationOf(m), projectGenerationOf(m))
+}
+
 // skillSelector opens the inline skill picker for a ref-less skills subcommand.
 func skillSelector(m Model, usage, command string, prefill bool) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
@@ -3604,6 +3648,38 @@ func listSkillsWithFilteredContent(ctx context.Context, c *client.Client, projec
 	return filtered, nil
 }
 
+func skillBodyFileOption(value string) (prefix, path string, found bool, err error) {
+	for i := 0; i < len(value); i++ {
+		if !strings.HasPrefix(value[i:], "--file") || (i > 0 && !unicode.IsSpace(rune(value[i-1]))) {
+			continue
+		}
+		after := i + len("--file")
+		if after < len(value) && value[after] != '=' && !unicode.IsSpace(rune(value[after])) {
+			continue
+		}
+		rest := value[after:]
+		if strings.HasPrefix(rest, "=") {
+			rest = rest[1:]
+		} else {
+			rest = strings.TrimLeftFunc(rest, unicode.IsSpace)
+		}
+		path = strings.TrimSpace(rest)
+		if path == "" {
+			return "", "", true, fmt.Errorf("--file requires a body file path")
+		}
+		return strings.TrimSpace(value[:i]), path, true, nil
+	}
+	return value, "", false, nil
+}
+
+func readSkillBodyFile(path string) (string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading skill body file %q: %w", path, err)
+	}
+	return string(body), nil
+}
+
 func skillsCommand() command {
 	actions := []string{"list", "show", "add", "edit", "delete", "enable", "disable", "always", "load"}
 	return command{
@@ -3616,18 +3692,22 @@ func skillsCommand() command {
 		usage: []string{
 			"skills [filter]                            list skills",
 			"skills show <skill>                        show one skill's body",
+			"skills add <name> [| <description>] [| <body>] [--file <path>]",
+			"skills edit <skill> [| <new body>] [--file <path>]",
 			"skills delete <skill>                      remove a skill",
 			"skills enable|disable <skill>              toggle availability",
 			"skills always|load <skill>                 always load this skill",
 			"omit <skill> on show/edit/delete/enable/disable/always/load → interactive selector",
 		},
 		actionUsages: []commandActionUsage{
-			{action: "add", args: "<name> [| <description>] [| <body>]"},
-			{action: "edit", args: "<skill> | <new body>", description: "replace a skill's body"},
+			{action: "add", args: "<name> [| <description>] [| <body>] [--file <path>]", description: "create a skill; TUI opens an editor when body is omitted"},
+			{action: "edit", args: "<skill> [| <new body>] [--file <path>]", description: "edit a skill body; TUI opens an editor when omitted"},
 		},
 		examples: []string{
-			`skills add retry-logic | Wrap HTTP calls in exponential backoff`,
+			`skills add retry-logic | Wrap HTTP calls in exponential backoff | # Retries`,
+			`skills add retry-logic | Wrap HTTP calls in exponential backoff --file retry.md`,
 			`skills edit retry-logic | Always retry on 429 and 503 with jitter up to 60s`,
+			`skills edit retry-logic --file retry.md`,
 			`skills load retry-logic`,
 		},
 		run: func(m Model, args []string) (Model, tea.Cmd) {
@@ -3679,11 +3759,29 @@ func skillsCommand() command {
 					return m, errCmd(commandUsage("skills", "add"))
 				}
 				desc, body := "", ""
+				hasInlineBody := len(parts) > 2
 				if len(parts) > 1 {
 					desc = strings.TrimSpace(parts[1])
 				}
-				if len(parts) > 2 {
+				if hasInlineBody {
 					body = strings.TrimSpace(parts[2])
+				} else {
+					prefix, filePath, fromFile, err := skillBodyFileOption(ref)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+					if fromFile {
+						name, desc = splitPipe(prefix)
+						if name == "" {
+							return m, errCmd(commandUsage("skills", "add"))
+						}
+						body, err = readSkillBodyFile(filePath)
+						if err != nil {
+							return m, errCmd(err.Error())
+						}
+					} else if !cliMode {
+						return beginSkillInteractiveCreate(m, pid, name, desc)
+					}
 				}
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {
 					if err := c.CreateSkill(ctx, pid, name, desc, body); err != nil {
@@ -3698,7 +3796,23 @@ func skillsCommand() command {
 				if ref2 == "" {
 					return skillSelector(m, commandUsage("skills", "edit"), "skills edit", true)
 				}
-				if body == "" {
+				if !strings.Contains(ref, "|") {
+					prefix, filePath, fromFile, err := skillBodyFileOption(ref)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+					if fromFile {
+						ref2 = prefix
+						body, err = readSkillBodyFile(filePath)
+						if err != nil {
+							return m, errCmd(err.Error())
+						}
+					} else if !cliMode {
+						return beginSkillInteractiveEdit(m, c, pid, ref2)
+					} else {
+						return m, errCmd(commandUsage("skills", "edit"))
+					}
+				} else if body == "" {
 					return m, errCmd(commandUsage("skills", "edit"))
 				}
 				return m, run("Skills", cmdTimeout, func(ctx context.Context) (string, error) {

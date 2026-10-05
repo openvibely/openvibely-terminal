@@ -2313,11 +2313,14 @@ func TestSkillsAddEmptyNameFromPipeInput(t *testing.T) {
 		}
 	})
 
-	t.Run("name_without_pipe_succeeds", func(t *testing.T) {
+	t.Run("name_without_body_opens_editor", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
-		runLine(t, m, "/skills add my-skill")
-		if !rec.saw("POST", "/skills") {
-			t.Errorf("expected CreateSkill call, calls:\n%s", rec.all())
+		m = runLine(t, m, "/skills add my-skill")
+		if !m.skillEditorActive || !m.skillEditorCreate {
+			t.Fatalf("skill create editor did not open")
+		}
+		if rec.saw("POST", "/skills") {
+			t.Errorf("opening the skill editor must not create the skill, calls:\n%s", rec.all())
 		}
 	})
 }
@@ -2749,7 +2752,7 @@ func TestSkillsCommandAddAndToggle(t *testing.T) {
 
 	t.Run("add", func(t *testing.T) {
 		m, rec := dispatchModel(t, map[string]string{"/skills": skillsHTML})
-		runLine(t, m, "/skills add release-notes | writes release notes")
+		runLine(t, m, "/skills add release-notes | writes release notes | # Release notes")
 		if !rec.saw("POST", "/skills") {
 			t.Errorf("calls:\n%s", rec.all())
 		}
@@ -10216,6 +10219,128 @@ func TestSkillsMutationsUseBackendJSONContract(t *testing.T) {
 	}
 }
 
+func saveSkillEditor(t *testing.T, m Model) Model {
+	t.Helper()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("saving skill editor returned no command")
+	}
+	msg := cmd()
+	next, followUp := m.Update(msg)
+	m = next.(Model)
+	if followUp != nil {
+		t.Fatal("skill editor save unexpectedly returned a follow-up command")
+	}
+	return m
+}
+
+func TestSkillEditorPreservesExactBodiesAndSelectedMetadata(t *testing.T) {
+	const skillsHTML = `<div data-skill-handle="deploy" data-skill-name="Deploy"
+		data-skill-description="ship safely" data-skill-enabled="false" data-skill-always-use="true" data-skill-scope="project"></div>`
+	initialBody := "# Deploy 🚀\n\n- Keep the literal | delimiter\n- Preserve Unicode: café\n" + strings.Repeat("- Retained long document line\n", 120)
+	editedBody := "# Updated 🧭\n\n- first paragraph\n\n- second | paragraph — exact\n"
+
+	var gotBodies []map[string]any
+	var detailQueries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, skillsHTML)
+		case r.Method == http.MethodGet && r.URL.Path == "/skills/deploy/details":
+			detailQueries = append(detailQueries, r.URL.RawQuery)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"handle":"deploy","name":"Deploy","description":"ship safely","scope":"project","source":"project","content":%q,"enabled":false,"always_use":true}`, initialBody)
+		case r.Method == http.MethodPost && r.URL.Path == "/skills":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode create payload: %v", err)
+			}
+			gotBodies = append(gotBodies, payload)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPut && r.URL.Path == "/skills/deploy":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode edit payload: %v", err)
+			}
+			gotBodies = append(gotBodies, payload)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m.selectedID = "p1"
+	m.selectedName = "demo"
+
+	m = runLine(t, m, "/skills add new-skill | instructions")
+	if !m.skillEditorActive || !m.skillEditorCreate {
+		t.Fatal("multiline skill creation did not open the editor")
+	}
+	m.skillEditor.SetValue(initialBody)
+	m = saveSkillEditor(t, m)
+	if m.skillEditorActive {
+		t.Fatal("skill editor remained open after successful creation")
+	}
+
+	m = runLine(t, m, "/skills edit deploy")
+	if !m.skillEditorActive || m.skillEditorCreate {
+		t.Fatal("skill edit did not open the editor")
+	}
+	if got := m.skillEditor.Value(); got != initialBody {
+		t.Fatalf("editor prefill = %q, want exact skill body %q", got, initialBody)
+	}
+	// Cancellation closes the editor without sending an update.
+	beforeCancel := len(gotBodies)
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.skillEditorActive || len(gotBodies) != beforeCancel {
+		t.Fatal("cancelling skill edit sent an update or left the editor active")
+	}
+
+	m = runLine(t, m, "/skills edit deploy")
+	m.skillEditor.SetValue(editedBody)
+	m = saveSkillEditor(t, m)
+	if len(gotBodies) != 2 {
+		t.Fatalf("mutation payload count = %d, want create and edit", len(gotBodies))
+	}
+	if got := gotBodies[0]["body"]; got != initialBody {
+		t.Errorf("created body payload = %q, want exact %q", got, initialBody)
+	}
+	if got := gotBodies[1]["body"]; got != editedBody {
+		t.Errorf("edited body payload = %q, want exact %q", got, editedBody)
+	}
+	wantMetadata := map[string]any{
+		"handle": "deploy", "name": "Deploy", "description": "ship safely", "scope": "project", "enabled": false,
+	}
+	for key, want := range wantMetadata {
+		if got := gotBodies[1][key]; got != want {
+			t.Errorf("edit payload %s = %#v, want %#v", key, got, want)
+		}
+	}
+	if len(detailQueries) != 2 {
+		t.Fatalf("detail requests = %v, want two project scoped loads", detailQueries)
+	}
+	for _, query := range detailQueries {
+		values, _ := url.ParseQuery(query)
+		if values.Get("project_id") != "p1" || values.Get("scope") != "project" {
+			t.Errorf("detail query = %q, want selected project and skill scope", query)
+		}
+	}
+}
+
 // TestSkillsEditPreservesDisabledState verifies that a body-only edit carries the
 // existing disabled state back to the backend instead of implicitly re-enabling it.
 func TestSkillsEditPreservesDisabledState(t *testing.T) {
@@ -15476,9 +15601,9 @@ func TestWebhooksOptionsValidateBeforeAnyRequest(t *testing.T) {
 		name string
 		line string
 	}{
-			{name: "missing value", line: "/webhooks edit pager --system-instructions"},
-			{name: "recognized option after missing value", line: "/webhooks edit pager --system-instructions --enabled"},
-			{name: "unknown option", line: "/webhooks edit pager --unknown value"},
+		{name: "missing value", line: "/webhooks edit pager --system-instructions"},
+		{name: "recognized option after missing value", line: "/webhooks edit pager --system-instructions --enabled"},
+		{name: "unknown option", line: "/webhooks edit pager --unknown value"},
 		{name: "invalid boolean", line: "/webhooks edit pager --enabled maybe"},
 		{name: "invalid priority", line: "/webhooks edit pager --priority 5"},
 	} {

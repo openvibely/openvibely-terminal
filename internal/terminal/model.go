@@ -95,6 +95,20 @@ type Model struct {
 	input      *textinput.Model
 	spin       spinner.Model
 
+	// skillEditor holds the complete skill instruction body only while an
+	// interactive create or edit session is active.
+	skillEditor            *textarea.Model
+	skillEditorActive      bool
+	skillEditorSaving      bool
+	skillEditorCancel      context.CancelFunc
+	skillEditorProjectID   string
+	skillEditorSkill       client.Skill
+	skillEditorCreate      bool
+	skillEditorName        string
+	skillEditorDescription string
+	skillEditorOriginal    string
+	skillEditorRequestID   uint64
+
 	// automationEditor holds the complete authoritative YAML only while an
 	// interactive edit session is active. It is never appended to the transcript.
 	automationEditor           *textarea.Model
@@ -307,6 +321,9 @@ func New(c *client.Client) Model {
 	editor.Placeholder = "Complete automation YAML"
 	editor.CharLimit = maxAutomationDefinitionEditorBytes
 	editor.ShowLineNumbers = true
+	skillEditor := textarea.New()
+	skillEditor.Placeholder = "Complete skill body"
+	skillEditor.MaxHeight = 0
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -317,6 +334,7 @@ func New(c *client.Client) Model {
 		client:             c,
 		input:              &ti,
 		automationEditor:   &editor,
+		skillEditor:        &skillEditor,
 		spin:               sp,
 		transcript:         &vp,
 		sseBackoff:         time.Second,
@@ -353,6 +371,12 @@ func (m *Model) ensureInteractiveModels() {
 		input.CharLimit = 8000
 		input.Prompt = "❯ "
 		m.input = &input
+	}
+	if m.skillEditor == nil {
+		editor := textarea.New()
+		editor.Placeholder = "Complete skill body"
+		editor.MaxHeight = 0
+		m.skillEditor = &editor
 	}
 	if m.automationEditor == nil {
 		editor := textarea.New()
@@ -847,6 +871,26 @@ func (m *Model) advanceProjectGeneration() uint64 {
 	return m.projectGeneration
 }
 
+func (m *Model) clearSkillEditor() {
+	if m.skillEditorCancel != nil {
+		m.skillEditorCancel()
+		m.skillEditorCancel = nil
+	}
+	m.skillEditorRequestID++
+	m.skillEditorActive = false
+	m.skillEditorSaving = false
+	m.skillEditorProjectID = ""
+	m.skillEditorSkill = client.Skill{}
+	m.skillEditorCreate = false
+	m.skillEditorName = ""
+	m.skillEditorDescription = ""
+	m.skillEditorOriginal = ""
+	m.skillEditor.SetValue("")
+	m.skillEditor.Blur()
+	m.input.Focus()
+	m.busy = false
+}
+
 func (m *Model) clearAutomationEdit() {
 	if m.automationEditCancel != nil {
 		m.automationEditCancel()
@@ -910,6 +954,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.invalidatePersonalityBulkLookup()
 		m.invalidateWorkersLive()
 		m.pendingConfirmation = nil
+		m.clearSkillEditor()
 		m.clearAutomationEdit()
 		if m.selectorActive {
 			*m = m.clearSelector()
@@ -1484,6 +1529,14 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case skillEditorLoadedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case skillEditorSavedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case automationEditLoadedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -1586,6 +1639,7 @@ func (m Model) scheduleReconnect(generation int) tea.Cmd {
 
 // Cleanup releases all model-owned background work; called on shutdown.
 func (m *Model) Cleanup() {
+	m.clearSkillEditor()
 	m.clearAutomationEdit()
 	m.invalidatePersonalityBulkLookup()
 	m.invalidateWorkersLive()
@@ -1626,6 +1680,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case selectorActiveMsg:
 		return m.handleSelector(msg)
+
+	case skillEditorLoadedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			msg.projectID != m.selectedID || msg.requestID != m.skillEditorRequestID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		if msg.skill.Handle == "" || msg.skill.Scope == "" {
+			m.append(entry{role: "error", text: "skill editor: loaded skill identity is incomplete"})
+			return m, nil
+		}
+		m.skillEditorActive = true
+		m.skillEditorSaving = false
+		m.skillEditorProjectID = msg.projectID
+		m.skillEditorSkill = msg.skill
+		m.skillEditorCreate = false
+		m.skillEditorName = ""
+		m.skillEditorDescription = ""
+		m.skillEditorOriginal = msg.skill.Content
+		m.skillEditor.SetValue(msg.skill.Content)
+		m.skillEditor.Focus()
+		m.input.Blur()
+		m.resize()
+		return m, nil
+
+	case skillEditorSavedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			!m.skillEditorActive || msg.projectID != m.selectedID || msg.projectID != m.skillEditorProjectID ||
+			msg.requestID != m.skillEditorRequestID {
+			return m, nil
+		}
+		m.busy = false
+		m.skillEditorSaving = false
+		if m.skillEditorCancel != nil {
+			m.skillEditorCancel()
+			m.skillEditorCancel = nil
+		}
+		if msg.err != nil {
+			m.skillEditor.Focus()
+			m.handleCompletedRequestError(msg.err)
+			return m, nil
+		}
+		created := msg.created
+		name := msg.name
+		m.clearSkillEditor()
+		m.resize()
+		verb := "updated"
+		if created {
+			verb = "created"
+		}
+		m.append(entry{role: "result", head: "Skills", text: verb + " skill " + name})
+		return m, nil
 
 	case automationEditLoadedMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
@@ -2840,6 +2949,71 @@ func loginFailureText(baseURL string, err error) string {
 	return "sign-in failed for " + serverURLDisplay(baseURL) + "; check the credentials and backend, then try again or press Esc to cancel."
 }
 
+func (m Model) handleSkillEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quitting = true
+		m.clearSkillEditor()
+		m.Cleanup()
+		return m, tea.Quit
+	case tea.KeyEsc:
+		if m.skillEditorSaving {
+			return m, nil
+		}
+		created := m.skillEditorCreate
+		m.clearSkillEditor()
+		m.resize()
+		if created {
+			m.append(entry{role: "system", text: "skill creation cancelled"})
+		} else {
+			m.append(entry{role: "system", text: "skill edit cancelled"})
+		}
+		return m, nil
+	case tea.KeyCtrlS:
+		if m.skillEditorSaving {
+			return m, nil
+		}
+		body := m.skillEditor.Value()
+		if !m.skillEditorCreate && body == m.skillEditorOriginal {
+			m.clearSkillEditor()
+			m.resize()
+			m.append(entry{role: "system", text: "skill edit cancelled: body unchanged"})
+			return m, nil
+		}
+		projectID := m.skillEditorProjectID
+		requestID := m.skillEditorRequestID
+		name := m.skillEditorName
+		created := m.skillEditorCreate
+		skill := m.skillEditorSkill
+		if !created {
+			name = skill.Handle
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		m.skillEditorCancel = cancel
+		m.skillEditorSaving = true
+		m.busy = true
+		m.skillEditor.Blur()
+		cmd := func() tea.Msg {
+			defer cancel()
+			var err error
+			if created {
+				err = m.client.CreateSkill(ctx, projectID, m.skillEditorName, m.skillEditorDescription, body)
+			} else {
+				err = m.client.UpdateSkill(ctx, projectID, skill.Handle, skill.Scope, skill.Name, skill.Description, skill.Enabled, body)
+			}
+			return skillEditorSavedMsg{projectID: projectID, requestID: requestID, name: name, created: created, err: err}
+		}
+		return m, withMessageGeneration(cmd, sessionGenerationOf(m), projectGenerationOf(m))
+	}
+	if m.skillEditorSaving {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	editor, cmd := m.skillEditor.Update(msg)
+	*m.skillEditor = editor
+	return m, cmd
+}
+
 func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -2898,6 +3072,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.loginActive {
 		return m.handleLoginKey(msg)
+	}
+	if m.skillEditorActive {
+		return m.handleSkillEditorKey(msg)
 	}
 	if m.automationEditActive {
 		return m.handleAutomationEditKey(msg)
@@ -3505,7 +3682,7 @@ func (m *Model) evictOldestTranscriptBlock(block string) bool {
 func (m Model) transcriptHeight() int {
 	// Normal layout reserves 5 rows (header + blank + input/menu + help + margin).
 	reserve := 5
-	if m.automationEditActive {
+	if m.skillEditorActive || m.automationEditActive {
 		reserve = 18
 	} else if m.selectorActive {
 		// The selector takes up to 12 rows (title + filter + 8 items + overflow +
@@ -3536,6 +3713,8 @@ func (m *Model) resize() {
 		editorHeight = 3
 	}
 	m.automationEditor.SetHeight(editorHeight)
+	m.skillEditor.SetWidth(editorWidth)
+	m.skillEditor.SetHeight(editorHeight)
 	m.refreshTranscript()
 }
 
@@ -4002,6 +4181,7 @@ func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
 	// backend reported that the session was unauthorized.
 	if !wasRequired {
 		m.advanceSessionGeneration()
+		m.clearSkillEditor()
 		m.clearAutomationEdit()
 		m.invalidateWorkersLive()
 		m.invalidateSSE()
