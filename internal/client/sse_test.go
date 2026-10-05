@@ -3,9 +3,70 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 )
+
+func TestScanSSEFramesRecognizesBareCRAndMixedLineEndings(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		reader       func(string) io.Reader
+		mode         sseDataLineMode
+		wantNames    []string
+		wantPayloads []string
+	}{
+		{
+			name:         "bare CR",
+			input:        "event: first\rdata:  hello\r\r",
+			reader:       func(input string) io.Reader { return strings.NewReader(input) },
+			mode:         sseDataLineChatOutput,
+			wantNames:    []string{"first"},
+			wantPayloads: []string{" hello"},
+		},
+		{
+			name: "mixed CR LF and CRLF split across reads",
+			input: "event: first\r\ndata:  alpha\n\r" +
+				"event: second\rdata:  beta\r\n\r\n",
+			reader:       func(input string) io.Reader { return oneByteReader{reader: strings.NewReader(input)} },
+			mode:         sseDataLineChatOutput,
+			wantNames:    []string{"first", "second"},
+			wantPayloads: []string{" alpha", " beta"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var names, payloads []string
+			err := scanSSEFrames(tc.reader(tc.input), tc.mode, func(frame rawSSEFrame) bool {
+				names = append(names, strings.TrimSpace(frame.eventName))
+				payloads = append(payloads, string(frame.payload))
+				return true
+			})
+			if err != nil {
+				t.Fatalf("scanSSEFrames: %v", err)
+			}
+			if !equalSSEStrings(names, tc.wantNames) {
+				t.Errorf("event names = %#v, want %#v", names, tc.wantNames)
+			}
+			if !equalSSEStrings(payloads, tc.wantPayloads) {
+				t.Errorf("payloads = %#v, want %#v", payloads, tc.wantPayloads)
+			}
+		})
+	}
+}
+
+type oneByteReader struct {
+	reader *strings.Reader
+}
+
+func (r oneByteReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return r.reader.Read(p[:1])
+}
 
 func TestScanSSEFramesPreservesConsumerDataSemantics(t *testing.T) {
 	input := ": keepalive\r\n" +
