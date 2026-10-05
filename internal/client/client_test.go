@@ -1157,6 +1157,39 @@ func TestStreamChatOutputParsesChunksAndTerminalEvents(t *testing.T) {
 	}
 }
 
+func TestStreamChatOutputDeliversBareCRFrameBeforeConnectionCloses(t *testing.T) {
+	release := make(chan struct{})
+	frameFlushed := make(chan struct{})
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: chunk\rdata: bare CR output\r\r")
+		w.(http.Flusher).Flush()
+		close(frameFlushed)
+		<-release
+	}))
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events, _ := c.StreamChatOutput(ctx, "exec-bare-cr", 0)
+	select {
+	case <-frameFlushed:
+	case <-ctx.Done():
+		t.Fatal("server did not flush the bare-CR frame")
+	}
+	select {
+	case event, ok := <-events:
+		if !ok {
+			t.Fatal("chat stream closed before delivering the bare-CR frame")
+		}
+		if event.Name != "chunk" || event.Data != "bare CR output" {
+			t.Fatalf("event = %#v, want name=chunk data=%q", event, "bare CR output")
+		}
+	case <-ctx.Done():
+		t.Fatal("bare-CR chat frame was not delivered while the response remained open")
+	}
+}
+
 func TestStreamChatOutputDeliversDataLinesLargerThanOneMiB(t *testing.T) {
 	payload := strings.Repeat("x", (1<<20)+137)
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1544,6 +1577,40 @@ func TestStreamEvents(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for stream end")
+	}
+}
+
+func TestStreamEventsDeliversBareCRFrameBeforeConnectionCloses(t *testing.T) {
+	release := make(chan struct{})
+	frameFlushed := make(chan struct{})
+	payload := `{"type":"bare_cr","project_id":"p1","exec_id":"e1"}`
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "event: bare_cr_event\rdata: %s\r\r", payload)
+		w.(http.Flusher).Flush()
+		close(frameFlushed)
+		<-release
+	}))
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	events, _ := c.StreamEvents(ctx, "")
+	select {
+	case <-frameFlushed:
+	case <-ctx.Done():
+		t.Fatal("server did not flush the bare-CR frame")
+	}
+	select {
+	case event, ok := <-events:
+		if !ok {
+			t.Fatal("live event stream closed before delivering the bare-CR frame")
+		}
+		if event.Name != "bare_cr_event" || string(event.Data) != payload {
+			t.Fatalf("event = (%q, %q), want (%q, %q)", event.Name, event.Data, "bare_cr_event", payload)
+		}
+	case <-ctx.Done():
+		t.Fatal("bare-CR live event was not delivered while the response remained open")
 	}
 }
 

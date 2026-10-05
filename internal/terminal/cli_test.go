@@ -25,6 +25,44 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
+func TestIsForegroundCLICommandUsesRegisteredCommandMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "events monitors by default", args: []string{"events"}, want: true},
+		{name: "slash-prefixed events", args: []string{"/events", "on"}, want: true},
+		{name: "stream alias", args: []string{"stream", "on"}, want: true},
+		{name: "case-insensitive log alias", args: []string{"LOG", "off"}, want: true},
+		{name: "trimmed slash-prefixed alias", args: []string{" /LoG ", "on"}, want: true},
+		{name: "chat with message", args: []string{"chat", "wait"}, want: true},
+		{name: "slash-prefixed chat", args: []string{"/CHAT", "wait"}, want: true},
+		{name: "back alias with message", args: []string{"back", "continue"}, want: true},
+		{name: "leave alias with message", args: []string{"LEAVE", "continue"}, want: true},
+		{name: "bare chat", args: []string{"chat"}},
+		{name: "bare chat alias", args: []string{"/back"}},
+		{name: "task reply", args: []string{"tasks", "reply", "task", "|", "go"}, want: true},
+		{name: "case-insensitive task reply", args: []string{"tasks", "REPLY", "task"}, want: true},
+		{name: "task alias reply", args: []string{"task", "reply", "task"}, want: true},
+		{name: "registered task alias reply", args: []string{"board", "reply", "task"}, want: true},
+		{name: "slash-prefixed task alias reply", args: []string{"/T", "reply", "task"}, want: true},
+		{name: "reply without operands", args: []string{"tasks", "reply"}},
+		{name: "ordinary task list", args: []string{"tasks"}},
+		{name: "ordinary task action", args: []string{"tasks", "run", "task"}},
+		{name: "ordinary task alias action", args: []string{"t", "delete", "task"}},
+		{name: "unregistered command", args: []string{"not-a-command", "events"}},
+		{name: "empty arguments", args: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsForegroundCLICommand(tc.args); got != tc.want {
+				t.Fatalf("IsForegroundCLICommand(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 const cliProjects = `{"projects":[{"id":"p1","name":"demo"},{"id":"p2","name":"other"}]}`
 
 type cancelAfterLineWriter struct {
@@ -123,6 +161,99 @@ func cliSkillsServer(t *testing.T) (*client.Client, *recorder) {
 		t.Fatal(err)
 	}
 	return c, rec
+}
+
+func TestCLISkillBodyFilesPreserveContentsAndReportReadFailures(t *testing.T) {
+	const skillList = `<div data-skill-handle="deploy" data-skill-name="Deploy" data-skill-description="ship safely" data-skill-scope="project" data-skill-source="project" data-skill-enabled="false" data-skill-always-use="true"></div>`
+	fileBody := "# Multi paragraph 📝\n\n- Keep the literal | delimiter\n- Unicode stays: 東京\n" + strings.Repeat("- Long file body line | Ω\n", 1000)
+	inlineCreateBody := "# Inline create\n\n- Keep | exactly"
+	inlineEditBody := "# Inline edit | exact\n\nSecond paragraph"
+
+	filePath := filepath.Join(t.TempDir(), "skill body.md")
+	if err := os.WriteFile(filePath, []byte(fileBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type mutation struct {
+		method string
+		path   string
+		query  string
+		body   map[string]any
+	}
+	var mutations []mutation
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/skills":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, skillList)
+		case r.Method == http.MethodPost && r.URL.Path == "/skills", r.Method == http.MethodPut && r.URL.Path == "/skills/deploy":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode skill mutation payload: %v", err)
+			}
+			mutations = append(mutations, mutation{method: r.Method, path: r.URL.Path, query: r.URL.RawQuery, body: payload})
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		default:
+			t.Errorf("unexpected CLI skills request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) error {
+		t.Helper()
+		var out bytes.Buffer
+		return RunCLI(c, &out, "demo", args, false, false)
+	}
+	if err := run("skills", "add", "file-create", "|", "file instructions", "--file", filePath); err != nil {
+		t.Fatalf("create from file: %v", err)
+	}
+	if err := run("skills", "edit", "deploy", "--file", filePath); err != nil {
+		t.Fatalf("edit from file: %v", err)
+	}
+	if err := run("skills", "add", "inline-create", "|", "inline description", "|", inlineCreateBody); err != nil {
+		t.Fatalf("inline create: %v", err)
+	}
+	if err := run("skills", "edit", "deploy", "|", inlineEditBody); err != nil {
+		t.Fatalf("inline edit: %v", err)
+	}
+	if len(mutations) != 4 {
+		t.Fatalf("mutations = %d, want 4", len(mutations))
+	}
+	for i, want := range []string{fileBody, fileBody, inlineCreateBody, inlineEditBody} {
+		if got := mutations[i].body["body"]; got != want {
+			t.Errorf("mutation %d body = %q, want exact %q", i, got, want)
+		}
+		if mutations[i].query != "project_id=p1" {
+			t.Errorf("mutation %d query = %q, want project_id=p1", i, mutations[i].query)
+		}
+	}
+	if mutations[1].body["name"] != "Deploy" || mutations[1].body["description"] != "ship safely" || mutations[1].body["scope"] != "project" || mutations[1].body["enabled"] != false || mutations[1].body["always_use"] != true {
+		t.Errorf("file edit did not preserve selected skill metadata: %#v", mutations[1].body)
+	}
+
+	missingPath := filepath.Join(t.TempDir(), "missing.md")
+	for _, args := range [][]string{
+		{"skills", "add", "missing-body", "--file", missingPath},
+		{"skills", "edit", "deploy", "--file", missingPath},
+	} {
+		before := len(mutations)
+		err := run(args...)
+		if err == nil || !strings.Contains(err.Error(), "reading skill body file") || !strings.Contains(err.Error(), missingPath) {
+			t.Errorf("run(%q) error = %v, want clear unreadable body file error", args, err)
+		}
+		if len(mutations) != before {
+			t.Errorf("unreadable body file caused a mutation for %q", args)
+		}
+	}
 }
 
 func cliFilteredSkillsServer(t *testing.T) (*client.Client, *recorder) {
@@ -10427,10 +10558,11 @@ func TestCLIJSONTasksShowSelectedTabs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			page := strings.ReplaceAll(detailTabPage, "TASK_ID", tc.taskID)
 			bodies := map[string]string{
-				"/api/projects":                    cliProjects,
-				"/tasks/" + tc.taskID:              page,
-				"/tasks/" + tc.taskID + "/thread":  thread,
-				"/tasks/" + tc.taskID + "/changes": changes,
+				"/api/projects":                                     cliProjects,
+				"/tasks/" + tc.taskID:                               page,
+				"/tasks/" + tc.taskID + "/thread":                   thread,
+				"/tasks/" + tc.taskID + "/changes":                  changes,
+				"/api/tasks/" + tc.taskID + "/lifecycle-executions": `[]`,
 			}
 			if !tc.canonical {
 				bodies["/tasks"] = `<div data-task-id="t-1" data-task-status="running" data-task-category="active"><a href="/tasks/t-1" title="Refactor the API">Refactor the API</a></div>`
@@ -12564,9 +12696,9 @@ func TestCLIWebhookOptionsStillValidateBeforeRequests(t *testing.T) {
 		name string
 		args []string
 	}{
-			{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
-			{name: "recognized option after missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions", "--enabled"}},
-			{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
+		{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
+		{name: "recognized option after missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions", "--enabled"}},
+		{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
 		{name: "invalid boolean", args: []string{"webhooks", "edit", "pager", "--enabled", "maybe"}},
 		{name: "invalid priority", args: []string{"webhooks", "edit", "pager", "--priority", "5"}},
 	} {

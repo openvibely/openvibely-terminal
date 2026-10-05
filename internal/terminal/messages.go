@@ -401,6 +401,25 @@ type selectorActiveMsg struct {
 	err           error
 }
 
+type skillEditorLoadedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	requestID         uint64
+	skill             client.Skill
+	err               error
+}
+
+type skillEditorSavedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	requestID         uint64
+	name              string
+	created           bool
+	err               error
+}
+
 type automationEditLoadedMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
