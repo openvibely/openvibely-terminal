@@ -99,7 +99,12 @@ type command struct {
 	desc         string
 	hidden       bool // compatibility-only entries remain dispatchable but are omitted from command discovery
 	validateArgs func([]string) error
-	run          func(m Model, args []string) (Model, tea.Cmd)
+	// foregroundCLI marks commands whose CLI execution owns a long-running
+	// stream and should receive an interrupt-cancelable context. Conditional
+	// routing stays with the registered command so aliases share its policy.
+	foregroundCLI     bool
+	foregroundCLIWhen func([]string) bool
+	run               func(m Model, args []string) (Model, tea.Cmd)
 }
 
 func (c command) actionSyntax(action string) string {
@@ -212,6 +217,24 @@ func lookupCommand(name string) *command {
 		}
 	}
 	return nil
+}
+
+// IsForegroundCLICommand reports whether args select a registered command
+// whose CLI operation should run with an interrupt-cancelable context. Names,
+// aliases, and slash-prefixed interactive command names all resolve through
+// the same registry used for dispatch.
+func IsForegroundCLICommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	def := lookupCommand(strings.TrimSpace(args[0]))
+	if def == nil {
+		return false
+	}
+	if def.foregroundCLI {
+		return true
+	}
+	return def.foregroundCLIWhen != nil && def.foregroundCLIWhen(args[1:])
 }
 
 // suggest returns commands whose name/alias starts with word.
