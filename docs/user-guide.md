@@ -936,13 +936,12 @@ the canonical detail action and `open` is a compatibility alias with identical
 selection and output. `run-now` remains accepted as a compatibility alias for `run`.
 Plain human `list` output is bounded for large catalogs; use `list --all` when you need the complete catalog. `show` renders the saved graph topology, node and transition status/config summaries,
 runtime totals, resources, external state, and explicit unavailable or empty sections.
-Exact lowercase UUID automation IDs load detail directly. Opaque IDs continue through
-catalog matching so the CLI can preserve case-insensitive duplicate-ID diagnostics. If a
-direct UUID detail request returns 404, the CLI scans the paginated catalog (subject to
-the shared pagination safety limits) to recover draft metadata and preserve name
-matching; a draft or unknown UUID can therefore still incur the catalog scan. `create --file <yaml>` posts a complete builder YAML
-definition to the backend builder route and creates only when backend parsing and
-validation succeeds. `edit` consumes
+Exact 32-character lowercase hexadecimal automation IDs load detail directly. If that
+request returns 404, the CLI scans the paginated catalog (subject to the shared
+pagination safety limits) to recover draft metadata and preserve name matching; a
+draft or unknown ID can therefore still incur the catalog scan. `create --file <yaml>`
+posts a complete builder YAML definition to the backend builder route and creates
+only when backend parsing and validation succeeds. `edit` consumes
 the backend builder's complete YAML definition, previews it through the backend
 validator, and saves only a valid changed definition.
 

@@ -8534,30 +8534,36 @@ func TestResolveAutomationRefFailsWithoutExtraCatalogRequests(t *testing.T) {
 }
 
 func TestAutomationsShowResolvesReferencesAndLoadsScopedDetail(t *testing.T) {
+	const canonicalID = "0123456789abcdef0123456789abcdef"
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +
 		automationCardHTML("au-2", "GitHub SDLC", "paused") +
+		automationCardHTML(canonicalID, "Backend ID flow", "active") +
 		"</div>"
 
 	cases := []struct {
 		name            string
 		line            string
 		id              string
+		wantName        string
 		catalogRequests int
 	}{
-		{name: "opaque exact id uses catalog", line: "/automations show au-1", id: "au-1", catalogRequests: 1},
-		{name: "case insensitive ID uses catalog", line: "/automations show AU-1", id: "au-1", catalogRequests: 1},
-		{name: "exact name", line: "/automations show Native SDLC", id: "au-1", catalogRequests: 1},
-		{name: "unique prefix", line: "/automations show Native", id: "au-1", catalogRequests: 1},
-		{name: "unique substring", line: "/automations show GitHub", id: "au-2", catalogRequests: 1},
-		{name: "open alias opaque exact id uses catalog", line: "/automations open au-1", id: "au-1", catalogRequests: 1},
+		{name: "opaque exact ID uses catalog", line: "/automations show au-1", id: "au-1", wantName: "Native SDLC", catalogRequests: 1},
+		{name: "case insensitive ID uses catalog", line: "/automations show AU-1", id: "au-1", wantName: "Native SDLC", catalogRequests: 1},
+		{name: "backend canonical ID skips catalog", line: "/automations show " + canonicalID, id: canonicalID, wantName: "Backend ID flow", catalogRequests: 0},
+		{name: "exact name", line: "/automations show Native SDLC", id: "au-1", wantName: "Native SDLC", catalogRequests: 1},
+		{name: "unique prefix", line: "/automations show Native", id: "au-1", wantName: "Native SDLC", catalogRequests: 1},
+		{name: "unique substring", line: "/automations show GitHub", id: "au-2", wantName: "GitHub SDLC", catalogRequests: 1},
+		{name: "open alias opaque exact ID uses catalog", line: "/automations open au-1", id: "au-1", wantName: "Native SDLC", catalogRequests: 1},
+		{name: "open alias backend canonical ID skips catalog", line: "/automations open " + canonicalID, id: canonicalID, wantName: "Backend ID flow", catalogRequests: 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rec := dispatchModel(t, map[string]string{
-				"/automations":      automationsHTML,
-				"/automations/au-1": automationDetailHTML("au-1", "p1", "Native SDLC"),
-				"/automations/au-2": automationDetailHTML("au-2", "p1", "GitHub SDLC"),
+				"/automations":                automationsHTML,
+				"/automations/au-1":           automationDetailHTML("au-1", "p1", "Native SDLC"),
+				"/automations/au-2":           automationDetailHTML("au-2", "p1", "GitHub SDLC"),
+				"/automations/" + canonicalID: automationDetailHTML(canonicalID, "p1", "Backend ID flow"),
 			})
 			m = runLine(t, m, tc.line)
 			if got := rec.count("GET", "/automations"); got != tc.catalogRequests {
@@ -8570,11 +8576,7 @@ func TestAutomationsShowResolvesReferencesAndLoadsScopedDetail(t *testing.T) {
 				t.Fatalf("detail request lost selected project:\n%s", rec.all())
 			}
 			out := transcript(m)
-			wantName := "Native SDLC"
-			if tc.id == "au-2" {
-				wantName = "GitHub SDLC"
-			}
-			for _, want := range []string{wantName, "Graph", "Nodes", "Runtime", "active invocations", "Resources", "External state"} {
+			for _, want := range []string{tc.wantName, "Graph", "Nodes", "Runtime", "active invocations", "Resources", "External state"} {
 				if !strings.Contains(out, want) {
 					t.Errorf("detail output missing %q:\n%s", want, out)
 				}
@@ -8613,7 +8615,7 @@ func TestAutomationsShowCanonicalIDSkipsCatalogAcrossCatalogSizes(t *testing.T) 
 	for _, total := range []int{10, 100, 1000} {
 		for _, action := range []string{"show", "open"} {
 			t.Run(fmt.Sprintf("%s/%d", action, total), func(t *testing.T) {
-				id := automationUUIDTestID(total - 1)
+				id := automationCanonicalTestID(total - 1)
 				var catalogRequests, catalogBytes atomic.Int64
 				var detailRequests atomic.Int64
 				m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
@@ -8660,12 +8662,11 @@ func TestCanonicalAutomationIDReferenceIsConservative(t *testing.T) {
 		ref string
 		ok  bool
 	}{
-		{
-			ref: "123e4567-e89b-12d3-a456-426614174000",
-			ok:  true,
-		},
-		{ref: "123E4567-E89B-12D3-A456-426614174000", ok: false},
+		{ref: "0123456789abcdef0123456789abcdef", ok: true},
+		{ref: "0123456789ABCDEF0123456789ABCDEF", ok: false},
+		{ref: "123e4567-e89b-12d3-a456-426614174000", ok: false},
 		{ref: "au-1", ok: false},
+		{ref: "AU-1", ok: false},
 		{ref: "au1", ok: false},
 		{ref: "au_draft", ok: false},
 		{ref: "au-draft", ok: false},
@@ -8674,9 +8675,7 @@ func TestCanonicalAutomationIDReferenceIsConservative(t *testing.T) {
 		{ref: "Native SDLC", ok: false},
 		{ref: "au-", ok: false},
 		{ref: "au--broken", ok: false},
-		{ref: "au-1?project_id=p2", ok: false},
-		{ref: "AU-1", ok: false},
-		{ref: " au-1", ok: false},
+		{ref: "0123456789abcdef0123456789abcde?", ok: false},
 	} {
 		t.Run(tc.ref, func(t *testing.T) {
 			_, got := canonicalAutomationIDRef(tc.ref)
@@ -8689,7 +8688,7 @@ func TestCanonicalAutomationIDReferenceIsConservative(t *testing.T) {
 
 func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.T) {
 	t.Run("draft metadata", func(t *testing.T) {
-		id := automationUUIDTestID(17)
+		id := automationCanonicalTestID(17)
 		var catalogRequests, detailRequests atomic.Int64
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -8716,7 +8715,7 @@ func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.
 	})
 
 	t.Run("unknown canonical ID diagnostic and selected project", func(t *testing.T) {
-		id := automationUUIDTestID(18)
+		id := automationCanonicalTestID(18)
 		var catalogProject, detailProject string
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -8741,7 +8740,7 @@ func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.
 	})
 
 	t.Run("catalog card without detail retains detail not-found error", func(t *testing.T) {
-		id := automationUUIDTestID(19)
+		id := automationCanonicalTestID(19)
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/automations":
@@ -8759,7 +8758,7 @@ func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.
 	})
 
 	t.Run("empty catalog keeps not-found diagnostic", func(t *testing.T) {
-		id := automationUUIDTestID(20)
+		id := automationCanonicalTestID(20)
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/automations":
@@ -8777,7 +8776,7 @@ func TestAutomationsShowCanonicalIDFallbacksPreserveCatalogSemantics(t *testing.
 	})
 
 	t.Run("canonical-looking name falls back to catalog resolution", func(t *testing.T) {
-		id := automationUUIDTestID(21)
+		id := automationCanonicalTestID(21)
 		var seenDetail string
 		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -8836,7 +8835,7 @@ func TestAutomationsShowReferenceFailuresDoNotLoadDetailOrMutate(t *testing.T) {
 }
 
 func TestAutomationsShowCanonicalIDOutputMatchesCatalogResolution(t *testing.T) {
-	id := automationUUIDTestID(22)
+	id := automationCanonicalTestID(22)
 	m, _ := dispatchModel(t, map[string]string{
 		"/automations":       `<div>` + automationCardHTML(id, "Native SDLC", "active") + `</div>`,
 		"/automations/" + id: automationDetailHTML(id, "p1", "Native SDLC"),
@@ -8966,15 +8965,15 @@ func TestAutomationsListFiltersStructuredRows(t *testing.T) {
 	}
 }
 
-func automationUUIDTestID(index int) string {
-	return fmt.Sprintf("00000000-0000-4000-8000-%012x", index)
+func automationCanonicalTestID(index int) string {
+	return fmt.Sprintf("%032x", index)
 }
 
 func canonicalAutomationPaginatedHTML(start, end, total int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="%t" data-card-pagination-total="%d">`, end < total, total)
 	for i := start; i < end; i++ {
-		b.WriteString(automationCardHTML(automationUUIDTestID(i), fmt.Sprintf("Automation %04d", i), "active"))
+		b.WriteString(automationCardHTML(automationCanonicalTestID(i), fmt.Sprintf("Automation %04d", i), "active"))
 	}
 	b.WriteString(`</div>`)
 	return b.String()
