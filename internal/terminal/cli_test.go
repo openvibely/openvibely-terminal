@@ -6621,7 +6621,7 @@ func TestCLIAutomationActionJSONMutations(t *testing.T) {
 
 // One-shot CLI mode works headlessly for automation detail and JSON output.
 func TestCLIRunsAutomationsShowAndJSON(t *testing.T) {
-	const automationID = "123e4567-e89b-12d3-a456-426614174000"
+	const automationID = "0123456789abcdef0123456789abcdef"
 	const automationsHTML = `<div class="card" data-automation-url="/automations/` + automationID + `?project_id=p2">
 		<div class="card-body relative">
 			<span class="badge badge-outline badge-sm">active</span>
