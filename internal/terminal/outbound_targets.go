@@ -33,7 +33,6 @@ var outboundTargetOptionDefinitions = []outboundTargetOptionDefinition{
 	{canonical: "default_subject", names: []string{"--default-subject", "--subject"}},
 }
 
-var outboundTargetPlatforms = []string{"slack", "telegram", "email", "discord", "x"}
 var outboundTargetActions = []string{"list", "show", "add", "edit", "test", "remove", "policy"}
 
 const outboundTargetPlatformError = "outbound target platform must be slack, telegram, email, discord, or x"
@@ -215,7 +214,7 @@ func parseOutboundTargetAdd(args []string) (client.OutboundTarget, error) {
 		destination = positional[1]
 	}
 	platform = strings.ToLower(strings.TrimSpace(platform))
-	if !isOutboundTargetPlatform(platform) {
+	if !client.IsSupportedOutboundTargetPlatform(platform) {
 		return client.OutboundTarget{}, errors.New(outboundTargetPlatformError)
 	}
 	if strings.TrimSpace(destination) == "" {
@@ -246,22 +245,12 @@ func parseOutboundTargetEdit(args []string) (string, map[string]string, error) {
 	}
 	if platform, ok := values["platform"]; ok {
 		platform = strings.ToLower(strings.TrimSpace(platform))
-		if !isOutboundTargetPlatform(platform) {
+		if !client.IsSupportedOutboundTargetPlatform(platform) {
 			return "", nil, errors.New(outboundTargetPlatformError)
 		}
 		values["platform"] = platform
 	}
 	return strings.TrimSpace(args[0]), values, nil
-}
-
-func isOutboundTargetPlatform(platform string) bool {
-	platform = strings.ToLower(strings.TrimSpace(platform))
-	for _, supported := range outboundTargetPlatforms {
-		if platform == supported {
-			return true
-		}
-	}
-	return false
 }
 
 func outboundTargetName(target client.OutboundTarget) string {
