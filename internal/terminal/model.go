@@ -3961,6 +3961,10 @@ func (m *Model) rebuildTranscriptLineCache() {
 }
 
 func renderedLines(s string) ([]string, int) {
+	// viewport.SetContent normalizes CRLF before splitting into lines. Keep the
+	// incremental cache in the same form so direct viewport updates match a full
+	// content refresh.
+	s = strings.ReplaceAll(s, "\r\n", "\n")
 	lines := strings.Split(s, "\n")
 	maxWidth := 0
 	for _, line := range lines {
