@@ -4094,6 +4094,26 @@ func TestTranscriptRolloverRefreshesInvalidCache(t *testing.T) {
 	assertTranscriptMatchesFullRefresh(t, &m)
 }
 
+func TestTranscriptAppendRefreshesInvalidLineCache(t *testing.T) {
+	m := newTestModel(t)
+	m.log = []entry{
+		{role: "event", text: "retained history one"},
+		{role: "event", text: "retained history two"},
+	}
+	m.refreshTranscript()
+	m.transcriptLines = nil
+
+	m.append(entry{role: "event", text: "event-after-invalid-lines"})
+
+	if len(m.transcriptLines) == 0 || len(m.transcriptBlocks) != len(m.log) {
+		t.Fatalf("append did not rebuild invalid line cache: lines=%d blocks=%d log=%d", len(m.transcriptLines), len(m.transcriptBlocks), len(m.log))
+	}
+	if got := renderedTranscriptContent(&m); !strings.Contains(got, "retained history one") || !strings.Contains(got, "event-after-invalid-lines") {
+		t.Fatalf("rebuilt transcript lost retained or appended content: %q", got)
+	}
+	assertTranscriptMatchesFullRefresh(t, &m)
+}
+
 func assertTranscriptMatchesFullRefresh(t *testing.T, m *Model) {
 	t.Helper()
 	incrementalContent := renderedTranscriptContent(m)
@@ -4928,6 +4948,30 @@ func TestChatStreamEmptyTerminalFramesDoNotCreateAgentEntry(t *testing.T) {
 				t.Fatalf("empty %s frame created agent output: entries=%d index=%d transcript=%q", eventName, len(m.log), m.chatStreamLogIndex, transcript(m))
 			}
 		})
+	}
+}
+
+func TestChatStreamUnicodeGraphemeAppendMatchesCanonicalWrapping(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.log = nil
+	m.chatStreamLogIndex = -1
+	m.transcript.Width = 8 // six columns of wrapped assistant body
+	m.refreshTranscript()
+
+	for _, chunk := range []string{"123", "👩", "\u200d", "💻"} {
+		m.updateChatStreamOutput(chunk)
+		m.flushChatStreamOutput()
+
+		want := renderTranscriptEntry(entry{role: "agent", text: m.chatStreamOutput}, transcriptWrap(m.effectiveTranscriptWidth()))
+		if got := m.transcriptBlocks[m.chatStreamLogIndex]; got != want {
+			t.Fatalf("streamed block after %q differs from canonical grapheme wrapping\ngot  %q\nwant %q", chunk, got, want)
+		}
+		assertTranscriptMatchesFullRefresh(t, &m)
+	}
+
+	body, ok := renderedAgentBlockBody(m.transcriptBlocks[m.chatStreamLogIndex])
+	if !ok || strings.Contains(body, "👩‍\n💻") {
+		t.Fatalf("ZWJ emoji was split across wrapped lines: %q", body)
 	}
 }
 

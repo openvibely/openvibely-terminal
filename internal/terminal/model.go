@@ -3563,7 +3563,7 @@ func (m *Model) append(e entry) {
 
 func (m *Model) appendTranscriptEntry(e entry) {
 	width := m.effectiveTranscriptWidth()
-	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log) && len(m.transcriptBlockLineCounts) == len(m.log) && len(m.transcriptBlockMaxWidths) == len(m.log)
+	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && m.transcriptLineCacheValid()
 	block := ""
 	if canAppend {
 		block = renderTranscriptEntry(e, transcriptWrap(width))
@@ -3595,6 +3595,21 @@ func (m *Model) appendTranscriptEntry(e entry) {
 	}
 
 	m.appendRenderedTranscriptBlock(block)
+}
+
+func (m *Model) transcriptLineCacheValid() bool {
+	count := len(m.log)
+	if len(m.transcriptBlocks) != count || len(m.transcriptBlockLineCounts) != count || len(m.transcriptBlockMaxWidths) != count {
+		return false
+	}
+	lineTotal := 0
+	for _, lineCount := range m.transcriptBlockLineCounts {
+		if lineCount <= 0 {
+			return false
+		}
+		lineTotal += lineCount
+	}
+	return lineTotal == len(m.transcriptLines)
 }
 
 func (m *Model) appendRenderedTranscriptBlock(block string) {
@@ -3817,9 +3832,12 @@ func renderedAgentBlockBody(block string) (string, bool) {
 	return block[headerEnd+1 : len(block)-2], true
 }
 
+// isHardWrapOnlyDelta accepts only printable ASCII. Non-ASCII stream chunks can
+// extend a grapheme from an earlier chunk (for example with a combining mark or
+// emoji ZWJ sequence), so they must use Lipgloss's canonical wrapper.
 func isHardWrapOnlyDelta(delta string) bool {
 	for _, r := range delta {
-		if r == utf8.RuneError || r == '\x1b' || unicode.IsSpace(r) || unicode.IsControl(r) {
+		if r >= utf8.RuneSelf || r == '\x1b' || unicode.IsSpace(r) || unicode.IsControl(r) {
 			return false
 		}
 	}
