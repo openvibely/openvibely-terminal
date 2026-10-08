@@ -5038,6 +5038,35 @@ func TestChatStreamMutableReplacementKeepsViewportAtBottom(t *testing.T) {
 	assertTranscriptMatchesFullRefresh(t, &m)
 }
 
+func TestChatStreamReplacementRefreshesTruncatedLineCache(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.log = []entry{
+		{role: "system", text: "retained history one"},
+		{role: "system", text: "retained history two"},
+	}
+	m.refreshTranscript()
+	m.updateChatStreamOutput("first")
+	m.flushChatStreamOutput()
+
+	// Drop the leading cached line while leaving enough lines for the old
+	// replacement path to accept its computed prefix and mutate the viewport.
+	m.transcriptLines = m.transcriptLines[1:]
+	if m.transcriptLineCacheValid() {
+		t.Fatal("fixture should have an inconsistent transcript line cache")
+	}
+
+	m.updateChatStreamOutput("more")
+	m.flushChatStreamOutput()
+
+	if !m.transcriptLineCacheValid() {
+		t.Fatal("mutable replacement should rebuild the inconsistent line cache")
+	}
+	if got := renderedTranscriptContent(&m); !strings.Contains(got, "retained history one") || !strings.Contains(got, "retained history two") {
+		t.Fatalf("rebuilt transcript lost retained history: %q", got)
+	}
+	assertTranscriptMatchesFullRefresh(t, &m)
+}
+
 func TestChatStreamReplacementFallsBackAfterCacheInvalidation(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

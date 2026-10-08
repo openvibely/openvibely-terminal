@@ -3766,7 +3766,7 @@ func (m *Model) refreshTranscript() {
 // full-invalidation behavior.
 func (m *Model) replaceTranscriptBlock(index int) {
 	width := m.effectiveTranscriptWidth()
-	if !m.transcriptReady || m.transcriptRenderWidth != width || len(m.transcriptBlocks) != len(m.log) || index < 0 || index >= len(m.log) {
+	if !m.transcriptReady || m.transcriptRenderWidth != width || !m.transcriptLineCacheValid() || index < 0 || index >= len(m.log) {
 		m.refreshTranscript()
 		return
 	}
@@ -3783,7 +3783,7 @@ func (m *Model) replaceTranscriptBlock(index int) {
 func (m *Model) replaceChatStreamTranscriptBlock(index int, previousOutput, output string) bool {
 	width := m.effectiveTranscriptWidth()
 	wrapWidth := width - 2
-	if wrapWidth < 1 || index != len(m.transcriptBlocks)-1 || m.chatStreamRenderedWidth != width || m.chatStreamRenderedOutput != previousOutput || !strings.HasPrefix(output, previousOutput) {
+	if !m.transcriptLineCacheValid() || wrapWidth < 1 || index != len(m.transcriptBlocks)-1 || m.chatStreamRenderedWidth != width || m.chatStreamRenderedOutput != previousOutput || !strings.HasPrefix(output, previousOutput) {
 		return false
 	}
 	delta := strings.TrimPrefix(output, previousOutput)
@@ -3891,7 +3891,7 @@ func appendHardWrappedText(rendered, delta string, limit int) string {
 }
 
 func (m *Model) replaceTranscriptViewportBlock(index int, block string) bool {
-	if index != len(m.transcriptBlocks)-1 || index >= len(m.transcriptBlockLineCounts) || index >= len(m.transcriptBlockMaxWidths) {
+	if !m.transcriptLineCacheValid() || index != len(m.transcriptBlocks)-1 || index >= len(m.transcriptBlockLineCounts) || index >= len(m.transcriptBlockMaxWidths) {
 		return false
 	}
 	oldLineCount := m.transcriptBlockLineCounts[index]
