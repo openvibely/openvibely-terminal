@@ -6,6 +6,7 @@ package client
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -37,8 +38,9 @@ func HTMLToText(fragment string) string {
 		return strings.TrimSpace(fragment)
 	}
 	var b strings.Builder
-	renderNodeText(&b, root)
-	return tidyText(b.String())
+	var preserved []string
+	renderNodeText(&b, root, &preserved)
+	return restorePreformattedText(tidyText(b.String()), preserved)
 }
 
 // NodeText renders a parsed subtree as plain text.
@@ -50,15 +52,16 @@ func NodeText(n *html.Node) string {
 		return text
 	}
 	var b strings.Builder
-	renderNodeText(&b, n)
-	return tidyText(b.String())
+	var preserved []string
+	renderNodeText(&b, n, &preserved)
+	return restorePreformattedText(tidyText(b.String()), preserved)
 }
 
 func simpleNodeText(n *html.Node) (string, bool) {
 	if n.Type == html.TextNode {
 		return tidyInlineText(n.Data), true
 	}
-	if n.Type != html.ElementNode || skippedTags[n.Data] {
+	if n.Type != html.ElementNode || skippedTags[n.Data] || n.Data == "pre" {
 		return "", false
 	}
 	if n.FirstChild == nil {
@@ -132,7 +135,7 @@ func isASCIISpace(ch byte) bool {
 	}
 }
 
-func renderNodeText(b *strings.Builder, n *html.Node) {
+func renderNodeText(b *strings.Builder, n *html.Node, preserved *[]string) {
 	switch n.Type {
 	case html.TextNode:
 		text := strings.Join(strings.Fields(n.Data), " ")
@@ -145,16 +148,64 @@ func renderNodeText(b *strings.Builder, n *html.Node) {
 		if skippedTags[n.Data] {
 			return
 		}
+		if n.Data == "pre" {
+			index := len(*preserved)
+			*preserved = append(*preserved, rawPreformattedText(n))
+			b.WriteByte('\n')
+			b.WriteString(preformattedTextMarker(index))
+			b.WriteByte('\n')
+			return
+		}
 		if blockTags[n.Data] {
 			b.WriteString("\n")
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		renderNodeText(b, c)
+		renderNodeText(b, c, preserved)
 	}
 	if n.Type == html.ElementNode && blockTags[n.Data] {
 		b.WriteString("\n")
 	}
+}
+
+func rawPreformattedText(n *html.Node) string {
+	var b strings.Builder
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			b.WriteString(node.Data)
+			return
+		}
+		if node.Type == html.ElementNode {
+			if skippedTags[node.Data] {
+				return
+			}
+			if node.Data == "br" {
+				b.WriteByte('\n')
+				return
+			}
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(n)
+	return b.String()
+}
+
+func preformattedTextMarker(index int) string {
+	return "\x00OPENVIBELY_PRE_" + strconv.Itoa(index) + "\x00"
+}
+
+func restorePreformattedText(text string, preserved []string) string {
+	if len(preserved) == 0 {
+		return text
+	}
+	replacements := make([]string, 0, len(preserved)*2)
+	for index, content := range preserved {
+		replacements = append(replacements, preformattedTextMarker(index), content)
+	}
+	return strings.NewReplacer(replacements...).Replace(text)
 }
 
 func tidyText(s string) string {
