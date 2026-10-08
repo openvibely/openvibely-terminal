@@ -10372,85 +10372,56 @@ type projectEditParseCandidate struct {
 	boundary int
 }
 
-func parseProjectEditArgs(projects []client.Project, args []string) (client.Project, string, projectEditValues, error) {
+type projectEditParseResult struct {
+	candidates            []projectEditParseCandidate
+	strongestMatchErr     error
+	strongestMatchErrTier int
+	malformedErr          error
+	malformedBoundary     int
+}
+
+// evaluateBoundary applies the common project matching, option parsing, and
+// error ranking rules to either kind of project edit boundary. refEnd excludes
+// the boundary token from the project reference; optionsStart selects the
+// option tail, which differs for explicit separators and option-token
+// boundaries.
+func (result *projectEditParseResult) evaluateBoundary(projects []client.Project, args []string, refEnd, optionsStart int) {
+	ref := strings.TrimSpace(strings.Join(args[:refEnd], " "))
+	project, matchErr := matchProject(projects, ref)
+	edits, parseErr := parseProjectEditOptions(args[optionsStart:])
+	if matchErr == nil && parseErr == nil {
+		result.candidates = append(result.candidates, projectEditParseCandidate{
+			project: project, ref: ref, edits: edits,
+			tier: projectReferenceTier(project, ref), boundary: refEnd,
+		})
+		return
+	}
+	if matchErr == nil && parseErr != nil && refEnd > result.malformedBoundary {
+		result.malformedBoundary, result.malformedErr = refEnd, parseErr
+	}
+	if parseErr == nil && matchErr != nil {
+		tier := projectReferenceErrorTier(projects, ref)
+		if result.strongestMatchErr == nil || tier < result.strongestMatchErrTier {
+			result.strongestMatchErrTier, result.strongestMatchErr = tier, matchErr
+		}
+	}
+}
+
+func (result projectEditParseResult) resolve(args []string) (client.Project, string, projectEditValues, error) {
 	var zeroProject client.Project
 	var zeroEdits projectEditValues
-	if len(args) == 0 {
-		return zeroProject, "", zeroEdits, nil
-	}
-
-	var candidates []projectEditParseCandidate
-	var strongestMatchErr error
-	var strongestMatchErrTier = 100
-	var malformedErr error
-	malformedBoundary := -1
-
-	// A standalone | or -- can separate the complete project reference from
-	// trailing edit options, but that interpretation is only one candidate. The
-	// same token may be a literal option value, so separator and ordinary option
-	// boundaries must compete under identical canonical reference ranking.
-	for i := 1; i < len(args); i++ {
-		if args[i] != "|" && args[i] != "--" {
-			continue
-		}
-		ref := strings.TrimSpace(strings.Join(args[:i], " "))
-		project, matchErr := matchProject(projects, ref)
-		edits, parseErr := parseProjectEditOptions(args[i+1:])
-		if matchErr == nil && parseErr == nil {
-			candidates = append(candidates, projectEditParseCandidate{
-				project: project, ref: ref, edits: edits,
-				tier: projectReferenceTier(project, ref), boundary: i,
-			})
-			continue
-		}
-		if matchErr == nil && parseErr != nil && i > malformedBoundary {
-			malformedBoundary, malformedErr = i, parseErr
-		}
-		if parseErr == nil && matchErr != nil {
-			tier := projectReferenceErrorTier(projects, ref)
-			if strongestMatchErr == nil || tier < strongestMatchErrTier {
-				strongestMatchErrTier, strongestMatchErr = tier, matchErr
-			}
-		}
-	}
-
-	for boundary := 1; boundary < len(args); boundary++ {
-		if !strings.HasPrefix(args[boundary], "--") {
-			continue
-		}
-		ref := strings.TrimSpace(strings.Join(args[:boundary], " "))
-		project, matchErr := matchProject(projects, ref)
-		edits, parseErr := parseProjectEditOptions(args[boundary:])
-		if matchErr == nil && parseErr == nil {
-			candidates = append(candidates, projectEditParseCandidate{
-				project: project, ref: ref, edits: edits,
-				tier: projectReferenceTier(project, ref), boundary: boundary,
-			})
-			continue
-		}
-		if matchErr == nil && parseErr != nil && boundary > malformedBoundary {
-			malformedBoundary, malformedErr = boundary, parseErr
-		}
-		if parseErr == nil && matchErr != nil {
-			tier := projectReferenceErrorTier(projects, ref)
-			if strongestMatchErr == nil || tier < strongestMatchErrTier {
-				strongestMatchErrTier, strongestMatchErr = tier, matchErr
-			}
-		}
-	}
-
-	if len(candidates) > 0 {
+	if len(result.candidates) > 0 {
 		bestTier := 100
-		for _, candidate := range candidates {
+		for _, candidate := range result.candidates {
 			if candidate.tier < bestTier {
 				bestTier = candidate.tier
 			}
 		}
-		if strongestMatchErr != nil && strongestMatchErrTier <= bestTier {
-			return zeroProject, "", zeroEdits, strongestMatchErr
+		if result.strongestMatchErr != nil && result.strongestMatchErrTier <= bestTier {
+			return zeroProject, "", zeroEdits, result.strongestMatchErr
 		}
 		var best []projectEditParseCandidate
-		for _, candidate := range candidates {
+		for _, candidate := range result.candidates {
 			if candidate.tier == bestTier {
 				best = append(best, candidate)
 			}
@@ -10469,13 +10440,42 @@ func parseProjectEditArgs(projects []client.Project, args []string) (client.Proj
 		}
 		return chosen.project, chosen.ref, chosen.edits, nil
 	}
-	if malformedErr != nil {
-		return zeroProject, "", zeroEdits, malformedErr
+	if result.malformedErr != nil {
+		return zeroProject, "", zeroEdits, result.malformedErr
 	}
-	if strongestMatchErr != nil {
-		return zeroProject, "", zeroEdits, strongestMatchErr
+	if result.strongestMatchErr != nil {
+		return zeroProject, "", zeroEdits, result.strongestMatchErr
 	}
 	return zeroProject, strings.TrimSpace(strings.Join(args, " ")), zeroEdits, fmt.Errorf("%s", commandUsage("projects", "edit"))
+}
+
+func parseProjectEditArgs(projects []client.Project, args []string) (client.Project, string, projectEditValues, error) {
+	var zeroProject client.Project
+	var zeroEdits projectEditValues
+	if len(args) == 0 {
+		return zeroProject, "", zeroEdits, nil
+	}
+
+	result := projectEditParseResult{strongestMatchErrTier: 100, malformedBoundary: -1}
+	// A standalone | or -- can separate the complete project reference from
+	// trailing edit options, but that interpretation is only one candidate. The
+	// same token may be a literal option value, so separator and ordinary option
+	// boundaries must compete under identical canonical reference ranking.
+	for i := 1; i < len(args); i++ {
+		if args[i] != "|" && args[i] != "--" {
+			continue
+		}
+		result.evaluateBoundary(projects, args, i, i+1)
+	}
+
+	for boundary := 1; boundary < len(args); boundary++ {
+		if !strings.HasPrefix(args[boundary], "--") {
+			continue
+		}
+		result.evaluateBoundary(projects, args, boundary, boundary)
+	}
+
+	return result.resolve(args)
 }
 
 func parseProjectEditOptions(args []string) (projectEditValues, error) {
