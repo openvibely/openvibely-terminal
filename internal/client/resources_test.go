@@ -3636,6 +3636,38 @@ func TestCreateScheduleSendsRepeat(t *testing.T) {
 	if form.Get("repeat_interval") != "1" {
 		t.Errorf("repeat_interval = %q", form.Get("repeat_interval"))
 	}
+	if _, ok := form["clear_context_on_start"]; ok {
+		t.Errorf("clear_context_on_start should be omitted when unset, form = %v", form)
+	}
+}
+
+func TestCreateScheduleSendsClearContextChoice(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		clear bool
+	}{
+		{name: "fresh start", clear: true},
+		{name: "retain context", clear: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var form url.Values
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = r.ParseForm()
+				form = r.PostForm
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			c, _ := New(srv.URL)
+			if err := c.CreateSchedule(context.Background(), "p1", "t1", "2026-01-02T09:00", "daily", 1, &tc.clear); err != nil {
+				t.Fatal(err)
+			}
+			want := strconv.FormatBool(tc.clear)
+			if got := form.Get("clear_context_on_start"); got != want {
+				t.Fatalf("clear_context_on_start = %q, want %q; form = %v", got, want, form)
+			}
+		})
+	}
 }
 
 func TestCreateScheduleTranslatesHourlyToHours(t *testing.T) {

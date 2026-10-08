@@ -2131,7 +2131,7 @@ func TestScheduleEditHelpAndCompletionMetadata(t *testing.T) {
 		t.Fatal("schedule command missing")
 	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"schedule edit <id>", "run-at", "once|daily|weekly|monthly|hourly|seconds|minutes|hours", "clear-context <true|false>", "schedule edit a1b2c3"} {
+	for _, want := range []string{"schedule add <task>", "clear-context <true|false>", "schedule edit <id>", "run-at", "once|daily|weekly|monthly|hourly|seconds|minutes|hours", "schedule edit a1b2c3"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("help missing %q:\n%s", want, help)
 		}
@@ -2140,6 +2140,8 @@ func TestScheduleEditHelpAndCompletionMetadata(t *testing.T) {
 		after []string
 		want  string
 	}{
+		{after: []string{"add", "Refactor", "2026-01-20T09:00"}, want: "clear-context"},
+		{after: []string{"add", "Refactor", "2026-01-20T09:00", "clear-context"}, want: "true"},
 		{after: []string{"edit", "s1"}, want: "run-at"},
 		{after: []string{"edit", "s1", "repeat"}, want: "hourly"},
 		{after: []string{"edit", "s1", "clear-context"}, want: "false"},

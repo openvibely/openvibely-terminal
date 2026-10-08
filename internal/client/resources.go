@@ -2499,8 +2499,12 @@ func (c *Client) UpdateSchedule(ctx context.Context, current ScheduleConfig, upd
 // CreateSchedule schedules a task. repeat is
 // once/daily/weekly/monthly/seconds/minutes/hours/hourly. The user-facing
 // "hourly" keyword is translated to the backend's "hours" repeat_type, since
-// the backend has no "hourly" value.
-func (c *Client) CreateSchedule(ctx context.Context, projectID, taskID, runAt, repeat string, interval int) error {
+// the backend has no "hourly" value. When clearContextOnStart is omitted or nil,
+// the backend default applies.
+func (c *Client) CreateSchedule(ctx context.Context, projectID, taskID, runAt, repeat string, interval int, clearContextOnStart ...*bool) error {
+	if len(clearContextOnStart) > 1 {
+		return fmt.Errorf("at most one clear-context choice may be specified")
+	}
 	if interval < 1 || interval > 365 {
 		return fmt.Errorf("repeat interval must be between 1 and 365")
 	}
@@ -2509,6 +2513,9 @@ func (c *Client) CreateSchedule(ctx context.Context, projectID, taskID, runAt, r
 	v.Set("run_at", runAt)
 	v.Set("repeat_type", repeat)
 	v.Set("repeat_interval", strconv.Itoa(interval))
+	if len(clearContextOnStart) == 1 && clearContextOnStart[0] != nil {
+		v.Set("clear_context_on_start", strconv.FormatBool(*clearContextOnStart[0]))
+	}
 	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/schedule"+query("project_id", projectID), v)
 }
 
