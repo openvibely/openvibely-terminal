@@ -431,6 +431,11 @@ func transcript(m Model) string {
 	return b.String()
 }
 
+func renderedTranscriptContent(m *Model) string {
+	m.ensureTranscriptContent()
+	return m.transcriptContent
+}
+
 func TestStartupUsesConnectingCopyUntilHealthPasses(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3946,7 +3951,7 @@ func TestIncrementalTranscriptAppendMatchesFullRefresh(t *testing.T) {
 	for _, e := range entries {
 		m.append(e)
 	}
-	incremental := m.transcriptContent
+	incremental := renderedTranscriptContent(&m)
 	incrementalView := m.transcript.View()
 
 	m.refreshTranscript()
@@ -3958,12 +3963,44 @@ func TestIncrementalTranscriptAppendMatchesFullRefresh(t *testing.T) {
 	}
 }
 
+func TestTranscriptAppendDefersJoinedContentMaterialization(t *testing.T) {
+	m := newTestModel(t)
+	m.log = nil
+	m.refreshTranscript()
+	initialContent := m.transcriptContent
+
+	for _, text := range []string{"first wrapped block", "second wrapped block", "third wrapped block"} {
+		m.append(entry{role: "agent", text: text})
+		if !m.transcriptContentDirty {
+			t.Fatal("append should defer rebuilding the joined transcript string")
+		}
+		if m.transcriptContent != initialContent {
+			t.Fatal("append unexpectedly materialized joined transcript history")
+		}
+	}
+
+	incrementalView := m.transcript.View()
+	if !m.transcript.AtBottom() {
+		t.Fatal("append should keep the transcript at the bottom")
+	}
+	full := m
+	viewportCopy := *m.transcript
+	full.transcript = &viewportCopy
+	full.refreshTranscript()
+	if got := full.transcript.View(); got != incrementalView {
+		t.Fatalf("incremental viewport differs from full refresh\nincremental:\n%s\nfull:\n%s", incrementalView, got)
+	}
+	if got, want := renderedTranscriptContent(&m), full.transcriptContent; got != want {
+		t.Fatalf("lazy transcript content differs from full refresh\ngot  %q\nwant %q", got, want)
+	}
+}
+
 func TestTranscriptResizeRebuildsWrappedContent(t *testing.T) {
 	m := newTestModel(t)
 	m.log = nil
 	m.refreshTranscript()
 	m.append(entry{role: "agent", text: strings.Repeat("wrapped content ", 12)})
-	wide := m.transcriptContent
+	wide := renderedTranscriptContent(&m)
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 30})
 	m = updated.(Model)
@@ -3973,8 +4010,9 @@ func TestTranscriptResizeRebuildsWrappedContent(t *testing.T) {
 	if m.transcriptContent == wide {
 		t.Fatal("resize should rebuild wrapped transcript content")
 	}
+	assertTranscriptMatchesFullRefresh(t, &m)
 
-	rebuilt := m.transcriptContent
+	rebuilt := renderedTranscriptContent(&m)
 	m.refreshTranscript()
 	if m.transcriptContent != rebuilt {
 		t.Fatal("resized transcript should match a full refresh at the new width")
@@ -3999,14 +4037,14 @@ func TestTranscriptAppendPreservesTruncationOrderAndBottom(t *testing.T) {
 	if got := m.log[len(m.log)-1].text; got != "event-new" {
 		t.Fatalf("last retained event = %q, want event-new", got)
 	}
-	if strings.Contains(m.transcriptContent, "event-000") {
+	if strings.Contains(renderedTranscriptContent(&m), "event-000") {
 		t.Fatal("truncated event still appears in transcript content")
 	}
 	if !m.transcript.AtBottom() {
 		t.Fatal("append should keep the transcript at the bottom")
 	}
 
-	incremental := m.transcriptContent
+	incremental := renderedTranscriptContent(&m)
 	m.refreshTranscript()
 	if m.transcriptContent != incremental {
 		t.Fatal("truncated incremental transcript should match full refresh")
@@ -4058,7 +4096,7 @@ func TestTranscriptRolloverRefreshesInvalidCache(t *testing.T) {
 
 func assertTranscriptMatchesFullRefresh(t *testing.T, m *Model) {
 	t.Helper()
-	incrementalContent := m.transcriptContent
+	incrementalContent := renderedTranscriptContent(m)
 	incrementalView := m.transcript.View()
 	if !m.transcript.AtBottom() {
 		t.Fatal("transcript append should keep the viewport at the bottom")
@@ -4453,18 +4491,19 @@ func TestChatStreamForcedFlushPreservesBytesCacheAndTruncation(t *testing.T) {
 		}
 	}
 	wantBlock := renderTranscriptEntry(entry{role: "agent", text: want}, transcriptWrap(m.effectiveTranscriptWidth()))
-	if m.transcriptBlocks[m.chatStreamLogIndex] != wantBlock || !strings.HasSuffix(m.transcriptContent, wantBlock) {
+	if m.transcriptBlocks[m.chatStreamLogIndex] != wantBlock || !strings.HasSuffix(renderedTranscriptContent(&m), wantBlock) {
 		t.Fatalf("forced output differs from canonical rendering:\ngot  %q\nwant %q", m.transcriptBlocks[m.chatStreamLogIndex], wantBlock)
 	}
 
 	m.transcriptReady = false
 	m.updateChatStreamOutput(" authoritative")
 	m.flushChatStreamOutput()
-	incremental := m.transcriptContent
+	incremental := renderedTranscriptContent(&m)
 	m.refreshTranscript()
 	if m.transcriptContent != incremental {
 		t.Fatalf("cache-invalidated fallback differs from full refresh\ngot  %q\nwant %q", incremental, m.transcriptContent)
 	}
+	assertTranscriptMatchesFullRefresh(t, &m)
 }
 
 func TestChatStreamSnapshotFlushesMatchingBufferedOutput(t *testing.T) {
@@ -4910,6 +4949,7 @@ func TestChatStreamMutableReplacementKeepsViewportAtBottom(t *testing.T) {
 	if !m.transcript.AtBottom() {
 		t.Fatal("mutable transcript replacement did not return viewport to bottom")
 	}
+	assertTranscriptMatchesFullRefresh(t, &m)
 }
 
 func TestChatStreamReplacementFallsBackAfterCacheInvalidation(t *testing.T) {
@@ -4928,7 +4968,7 @@ func TestChatStreamReplacementFallsBackAfterCacheInvalidation(t *testing.T) {
 			tc.invalidate(&m)
 			m.updateChatStreamOutput(" second")
 			m.flushChatStreamOutput()
-			got := m.transcriptContent
+			got := renderedTranscriptContent(&m)
 			m.refreshTranscript()
 			if got != m.transcriptContent || m.log[m.chatStreamLogIndex].text != "first second" {
 				t.Fatalf("fallback differs from canonical refresh\ngot  %q\nwant %q", got, m.transcriptContent)

@@ -3562,7 +3562,6 @@ func (m *Model) append(e entry) {
 }
 
 func (m *Model) appendTranscriptEntry(e entry) {
-	m.ensureTranscriptContent()
 	width := m.effectiveTranscriptWidth()
 	canAppend := m.transcriptReady && m.transcriptRenderWidth == width && len(m.transcriptBlocks) == len(m.log) && len(m.transcriptBlockLineCounts) == len(m.log) && len(m.transcriptBlockMaxWidths) == len(m.log)
 	block := ""
@@ -3595,10 +3594,10 @@ func (m *Model) appendTranscriptEntry(e entry) {
 		return
 	}
 
-	m.appendRenderedTranscriptBlock(block, false)
+	m.appendRenderedTranscriptBlock(block)
 }
 
-func (m *Model) appendRenderedTranscriptBlock(block string, updateViewportCache bool) {
+func (m *Model) appendRenderedTranscriptBlock(block string) {
 	blockLines, blockMaxWidth := renderedLines(block)
 	beforeLines := len(m.transcriptLines)
 	m.transcriptLines = appendRenderedLines(m.transcriptLines, blockLines)
@@ -3608,12 +3607,8 @@ func (m *Model) appendRenderedTranscriptBlock(block string, updateViewportCache 
 	if blockMaxWidth > m.transcriptMaxLineWidth {
 		m.transcriptMaxLineWidth = blockMaxWidth
 	}
-	m.transcriptContent += block
-	if updateViewportCache {
-		setViewportCachedContent(m.transcript, m.transcriptLines, m.transcriptMaxLineWidth)
-	} else {
-		m.transcript.SetContent(m.transcriptContent)
-	}
+	m.transcriptContentDirty = true
+	setViewportCachedContent(m.transcript, m.transcriptLines, m.transcriptMaxLineWidth)
 	m.transcript.GotoBottom()
 }
 
@@ -3634,9 +3629,8 @@ func (m *Model) evictOldestTranscriptBlock(block string) bool {
 	if lineTotal != len(m.transcriptLines) {
 		return false
 	}
-	oldBlock := m.transcriptBlocks[0]
 	oldLineCount := m.transcriptBlockLineCounts[0]
-	if oldLineCount > len(m.transcriptLines) || !strings.HasPrefix(m.transcriptContent, oldBlock) {
+	if oldLineCount > len(m.transcriptLines) {
 		return false
 	}
 
@@ -3648,8 +3642,6 @@ func (m *Model) evictOldestTranscriptBlock(block string) bool {
 		}
 		nextBlockFirstLine = nextLines[0]
 	}
-
-	m.transcriptContent = m.transcriptContent[len(oldBlock):]
 
 	remainingLines := m.transcriptLines[oldLineCount:]
 	oldLinesLen := len(m.transcriptLines)
@@ -3675,7 +3667,7 @@ func (m *Model) evictOldestTranscriptBlock(block string) bool {
 	}
 
 	m.transcriptMaxLineWidth = maxInt(m.transcriptBlockMaxWidths)
-	m.appendRenderedTranscriptBlock(block, true)
+	m.appendRenderedTranscriptBlock(block)
 	return true
 }
 
@@ -3758,38 +3750,19 @@ func (m *Model) refreshTranscript() {
 // still describes the current log and width. Any mismatch retains the existing
 // full-invalidation behavior.
 func (m *Model) replaceTranscriptBlock(index int) {
-	m.ensureTranscriptContent()
 	width := m.effectiveTranscriptWidth()
 	if !m.transcriptReady || m.transcriptRenderWidth != width || len(m.transcriptBlocks) != len(m.log) || index < 0 || index >= len(m.log) {
 		m.refreshTranscript()
 		return
 	}
 
-	start := 0
-	for _, block := range m.transcriptBlocks[:index] {
-		start += len(block)
-	}
-	old := m.transcriptBlocks[index]
-	end := start + len(old)
-	if end > len(m.transcriptContent) {
-		m.refreshTranscript()
-		return
-	}
 	block := renderTranscriptEntry(m.log[index], transcriptWrap(width))
-	var b strings.Builder
-	b.Grow(len(m.transcriptContent) - len(old) + len(block))
-	b.WriteString(m.transcriptContent[:start])
-	b.WriteString(block)
-	b.WriteString(m.transcriptContent[end:])
-	m.transcriptContent = b.String()
-	m.transcriptContentDirty = false
 	m.transcriptBlocks[index] = block
 	if m.replaceTranscriptViewportBlock(index, block) {
+		m.transcriptContentDirty = true
 		return
 	}
-	m.transcript.SetContent(m.transcriptContent)
-	m.rebuildTranscriptLineCache()
-	m.transcript.GotoBottom()
+	m.refreshTranscript()
 }
 
 func (m *Model) replaceChatStreamTranscriptBlock(index int, previousOutput, output string) bool {
@@ -3891,12 +3864,21 @@ func (m *Model) replaceTranscriptViewportBlock(index int, block string) bool {
 	}
 	oldLineCount := m.transcriptBlockLineCounts[index]
 	prefixLineCount := len(m.transcriptLines) - oldLineCount
-	if oldLineCount < 0 || prefixLineCount < 0 {
+	if oldLineCount < 0 || prefixLineCount < 0 || (index > 0 && prefixLineCount == 0) {
 		return false
 	}
 
 	blockLines, blockMaxWidth := renderedLines(block)
 	lines := m.transcriptLines[:prefixLineCount]
+	if index > 0 {
+		previousBlockLines, _ := renderedLines(m.transcriptBlocks[index-1])
+		if len(previousBlockLines) == 0 {
+			return false
+		}
+		// appendRenderedLines folded this block's first line into the previous
+		// block's trailing empty line. Restore that boundary before replacing it.
+		lines[len(lines)-1] = previousBlockLines[len(previousBlockLines)-1]
+	}
 	beforeLines := len(lines)
 	lines = appendRenderedLines(lines, blockLines)
 	m.transcriptLines = lines
