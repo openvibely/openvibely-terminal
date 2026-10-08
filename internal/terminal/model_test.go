@@ -4114,6 +4114,29 @@ func TestTranscriptAppendRefreshesInvalidLineCache(t *testing.T) {
 	assertTranscriptMatchesFullRefresh(t, &m)
 }
 
+func TestTranscriptRolloverCRLFViewportMatchesFullRefresh(t *testing.T) {
+	m := newTestModel(t)
+	m.log = make([]entry, 0, maxTranscript)
+	for i := 0; i < maxTranscript; i++ {
+		text := fmt.Sprintf("event-%03d", i)
+		if i == 1 {
+			text = "retained first\r\nretained second"
+		}
+		m.log = append(m.log, entry{role: "result", text: text})
+	}
+	m.refreshTranscript()
+
+	m.append(entry{role: "result", text: "event-after-rollover"})
+
+	if got := m.log[0].text; got != "retained first\r\nretained second" {
+		t.Fatalf("first retained result = %q, want CRLF result", got)
+	}
+	if cached := strings.Join(m.transcriptLines, "\n"); strings.Contains(cached, "\r") {
+		t.Fatalf("incremental viewport cache retained carriage returns after eviction: %q", cached)
+	}
+	assertTranscriptMatchesFullRefresh(t, &m)
+}
+
 func TestTranscriptAppendCRLFViewportMatchesFullRefresh(t *testing.T) {
 	m := newTestModel(t)
 	m.log = []entry{{role: "result", text: "retained first\r\nretained second"}}
