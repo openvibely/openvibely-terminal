@@ -68,6 +68,61 @@ func (r oneByteReader) Read(p []byte) (int, error) {
 	return r.reader.Read(p[:1])
 }
 
+func TestScanSSEFramesStripsOnlyInitialUTF8BOM(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		input        string
+		wantNames    []string
+		wantPayloads []string
+	}{
+		{
+			name:         "BOM before data field",
+			input:        "\uFEFFdata: payload\n\n",
+			wantNames:    []string{""},
+			wantPayloads: []string{"payload"},
+		},
+		{
+			name:         "BOM before event field",
+			input:        "\uFEFFevent: done\ndata: completed\n\n",
+			wantNames:    []string{"done"},
+			wantPayloads: []string{"completed"},
+		},
+		{
+			name:         "BOM inside payload is preserved",
+			input:        "data: before\uFEFFafter\n\n",
+			wantNames:    []string{""},
+			wantPayloads: []string{"before\uFEFFafter"},
+		},
+		{
+			name:         "BOM-free stream",
+			input:        "event: done\ndata: completed\n\n",
+			wantNames:    []string{"done"},
+			wantPayloads: []string{"completed"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var names, payloads []string
+			err := scanSSEFrames(strings.NewReader(tc.input), sseDataLineChatOutput, func(frame rawSSEFrame) bool {
+				names = append(names, strings.TrimSpace(frame.eventName))
+				payloads = append(payloads, string(frame.payload))
+				return true
+			})
+			if err != nil {
+				t.Fatalf("scanSSEFrames: %v", err)
+			}
+			if len(names) != len(tc.wantNames) {
+				t.Fatalf("event count = %d, want %d", len(names), len(tc.wantNames))
+			}
+			if !equalSSEStrings(names, tc.wantNames) {
+				t.Errorf("event names = %#v, want %#v", names, tc.wantNames)
+			}
+			if !equalSSEStrings(payloads, tc.wantPayloads) {
+				t.Errorf("payloads = %#v, want %#v", payloads, tc.wantPayloads)
+			}
+		})
+	}
+}
+
 func TestScanSSEFramesPreservesConsumerDataSemantics(t *testing.T) {
 	input := ": keepalive\r\n" +
 		"event:  first-event  \r\n" +

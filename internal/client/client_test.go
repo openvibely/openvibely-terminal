@@ -1473,6 +1473,25 @@ func TestStreamExecutionResumesFromByteOffsetAndParsesTerminalEvents(t *testing.
 	}
 }
 
+func TestStreamExecutionRecognizesBOMPrefixedDoneEvent(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "\uFEFFevent: done\ndata: completed\n\n")
+	}))
+
+	events, errs := c.StreamExecution(context.Background(), "exec", 0)
+	var got []ExecutionEvent
+	for event := range events {
+		got = append(got, event)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("stream error = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].Type != ExecutionDone || got[0].Data != "completed" {
+		t.Fatalf("events = %#v, want one completed done event", got)
+	}
+}
+
 func TestStreamExecutionReportsDisconnectCancellationAndAuthentication(t *testing.T) {
 	t.Run("disconnect", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
