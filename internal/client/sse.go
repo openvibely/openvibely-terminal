@@ -130,6 +130,15 @@ func (c *Client) openSSEStream(ctx context.Context, cfg sseStreamConfig) (*http.
 
 func scanSSEFrames(r io.Reader, dataLineMode sseDataLineMode, handle func(rawSSEFrame) bool) error {
 	lineReader := sseLineReader{reader: bufio.NewReaderSize(r, 64*1024)}
+	if prefix, _ := lineReader.reader.Peek(1); len(prefix) == 1 && prefix[0] == 0xef {
+		if prefix, _ := lineReader.reader.Peek(2); bytes.Equal(prefix, []byte{0xef, 0xbb}) {
+			if prefix, _ := lineReader.reader.Peek(3); bytes.Equal(prefix, []byte{0xef, 0xbb, 0xbf}) {
+				if _, err := lineReader.reader.Discard(3); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	var frame rawSSEFrame
 	lineBuffer := make([]byte, 0, 256)
 
