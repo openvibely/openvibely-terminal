@@ -4975,6 +4975,35 @@ func TestChatStreamUnicodeGraphemeAppendMatchesCanonicalWrapping(t *testing.T) {
 	}
 }
 
+func TestChatStreamWordBoundaryAppendMatchesCanonicalWrapping(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		chunks []string
+	}{
+		{name: "word in one chunk", chunks: []string{"1234 ", "ab"}},
+		{name: "word split across chunks", chunks: []string{"1234 ", "a", "b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			m.log = nil
+			m.chatStreamLogIndex = -1
+			m.transcript.Width = 8 // six columns of wrapped assistant body
+			m.refreshTranscript()
+
+			for _, chunk := range tc.chunks {
+				m.updateChatStreamOutput(chunk)
+				m.flushChatStreamOutput()
+
+				want := renderTranscriptEntry(entry{role: "agent", text: m.chatStreamOutput}, transcriptWrap(m.effectiveTranscriptWidth()))
+				if got := m.transcriptBlocks[m.chatStreamLogIndex]; got != want {
+					t.Fatalf("streamed block after %q differs from canonical word wrapping\ngot  %q\nwant %q", chunk, got, want)
+				}
+				assertTranscriptMatchesFullRefresh(t, &m)
+			}
+		})
+	}
+}
+
 func TestChatStreamMutableReplacementKeepsViewportAtBottom(t *testing.T) {
 	m := pendingChatStreamTestModel(t)
 	m.log = nil
