@@ -3787,7 +3787,7 @@ func (m *Model) replaceChatStreamTranscriptBlock(index int, previousOutput, outp
 		return false
 	}
 	delta := strings.TrimPrefix(output, previousOutput)
-	if delta == "" || !isHardWrapOnlyDelta(delta) {
+	if delta == "" || !isHardWrapOnlyDelta(delta) || !canAppendHardWrappedText(m.chatStreamRenderedBody, previousOutput) {
 		return false
 	}
 	body := appendHardWrappedText(m.chatStreamRenderedBody, delta, wrapWidth)
@@ -3830,6 +3830,20 @@ func renderedAgentBlockBody(block string) (string, bool) {
 		return "", false
 	}
 	return block[headerEnd+1 : len(block)-2], true
+}
+
+func canAppendHardWrappedText(rendered, output string) bool {
+	if strings.TrimRightFunc(output, unicode.IsSpace) != output {
+		return false
+	}
+	lastLine := rendered
+	if newline := strings.LastIndexByte(rendered, '\n'); newline >= 0 {
+		lastLine = rendered[newline+1:]
+	}
+	// If this line contains a word separator, a later chunk can extend the
+	// trailing word enough that Lipgloss moves the whole word to the next line.
+	// Re-render those updates canonically instead of hard-wrapping them in place.
+	return strings.IndexFunc(lastLine, unicode.IsSpace) < 0
 }
 
 // isHardWrapOnlyDelta accepts only printable ASCII. Non-ASCII stream chunks can
