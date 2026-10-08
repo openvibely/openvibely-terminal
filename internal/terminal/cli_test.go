@@ -6943,6 +6943,65 @@ func TestCLIScheduleRejectsUnknownActionAndListSurplusBeforeRequests(t *testing.
 	}
 }
 
+func TestCLIScheduleAddContextChoiceParity(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		setting     []string
+		wantContext string
+	}{
+		{name: "fresh start", setting: []string{"clear-context", "true"}, wantContext: "clear_context_on_start=true"},
+		{name: "retain context", setting: []string{"clear-context", "false"}, wantContext: "clear_context_on_start=false"},
+		{name: "backend default", wantContext: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/tasks":        taskBoardHTML,
+				"/schedule":     `<div id="schedule-content"></div>`,
+			})
+			args := []string{"schedule", "add", "Refactor", "2026-09-01T10:00", "daily"}
+			args = append(args, tc.setting...)
+			if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err != nil {
+				t.Fatalf("schedule add: %v\n%s", err, rec.all())
+			}
+			if !rec.saw(http.MethodPost, "/tasks/t-1/schedule") {
+				t.Fatalf("missing schedule mutation:\n%s", rec.all())
+			}
+			forms := strings.Join(rec.formsSnapshot(), "\n")
+			if tc.wantContext == "" {
+				if strings.Contains(forms, "clear_context_on_start=") {
+					t.Fatalf("clear_context_on_start should be omitted by default; forms:\n%s", forms)
+				}
+			} else if !strings.Contains(forms, tc.wantContext) {
+				t.Fatalf("form missing %q:\n%s", tc.wantContext, forms)
+			}
+		})
+	}
+}
+
+func TestCLIScheduleAddRejectsInvalidContextChoiceBeforeRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value []string
+	}{
+		{name: "invalid value", value: []string{"clear-context", "maybe"}},
+		{name: "missing value", value: []string{"clear-context"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects})
+			args := []string{"schedule", "add", "Refactor", "2026-09-01T10:00", "daily"}
+			args = append(args, tc.value...)
+			err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false)
+			if err == nil || !strings.Contains(err.Error(), "clear-context must be true or false") {
+				t.Fatalf("error = %v, want clear-context usage error", err)
+			}
+			if calls := rec.all(); calls != "" {
+				t.Fatalf("invalid schedule add made requests:\n%s", calls)
+			}
+		})
+	}
+}
+
 func TestCLIScheduleEditParityAndMissingReferenceValidation(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,

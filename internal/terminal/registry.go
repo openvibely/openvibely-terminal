@@ -2669,10 +2669,66 @@ func parseScheduleEdit(args []string) (string, client.ScheduleUpdate, error) {
 	return strings.Join(args[:optionAt], " "), update, nil
 }
 
+func parseScheduleAdd(args []string) (task, runAt, repeat string, interval int, clearContextOnStart *bool, err error) {
+	usage := commandUsage("schedule", "add")
+	if len(args) < 2 {
+		return "", "", "", 0, nil, fmt.Errorf("%s", usage)
+	}
+	args = append([]string(nil), args...)
+
+	if strings.EqualFold(args[len(args)-1], "clear-context") {
+		return "", "", "", 0, nil, fmt.Errorf("clear-context must be true or false")
+	}
+	if len(args) >= 2 && strings.EqualFold(args[len(args)-2], "clear-context") {
+		var clear bool
+		switch strings.ToLower(args[len(args)-1]) {
+		case "true":
+			clear = true
+		case "false":
+			clear = false
+		default:
+			return "", "", "", 0, nil, fmt.Errorf("clear-context must be true or false")
+		}
+		clearContextOnStart = &clear
+		args = args[:len(args)-2]
+	}
+	if len(args) < 2 {
+		return "", "", "", 0, nil, fmt.Errorf("%s", usage)
+	}
+
+	repeat, interval = "once", 1
+	if len(args) >= 3 && isRepeat(args[len(args)-2]) {
+		if parsedInterval, parseErr := strconv.Atoi(args[len(args)-1]); parseErr == nil {
+			interval = parsedInterval
+			args = args[:len(args)-1]
+		}
+	}
+	if interval < 1 || interval > 365 {
+		return "", "", "", 0, nil, fmt.Errorf("repeat interval must be between 1 and 365")
+	}
+	if isRepeat(args[len(args)-1]) {
+		repeat = client.NormalizeScheduleRepeat(strings.ToLower(args[len(args)-1]))
+		args = args[:len(args)-1]
+	}
+	if len(args) < 2 {
+		return "", "", "", 0, nil, fmt.Errorf("%s", usage)
+	}
+	runAt = args[len(args)-1]
+	if _, parseErr := time.Parse("2006-01-02T15:04", runAt); parseErr != nil {
+		return "", "", "", 0, nil, fmt.Errorf("run time must use 2006-01-02T15:04")
+	}
+	task = strings.Join(args[:len(args)-1], " ")
+	return task, runAt, repeat, interval, clearContextOnStart, nil
+}
+
 func validateScheduleArgs(args []string) error {
 	action, rest := splitAction([]string{"list", "show", "open", "add", "edit", "delete", "toggle"}, args)
 	if action == "" && len(args) > 0 || action == "list" && !scheduleListArgsFull(rest) {
 		return fmt.Errorf("usage: /schedule [list|show|open|add|edit|delete|toggle]")
+	}
+	if action == "add" && len(rest) > 0 {
+		_, _, _, _, _, err := parseScheduleAdd(rest)
+		return err
 	}
 	if (action == "show" || action == "open") && len(rest) == 0 {
 		return fmt.Errorf("%s", commandUsage("schedule", action))
@@ -2805,7 +2861,8 @@ func scheduleCommand() command {
 		validateArgs: validateScheduleArgs,
 		completions: []commandCompletion{
 			{after: []string{"list"}, values: []string{"--all"}},
-			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours"}},
+			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours", "clear-context"}},
+			{after: []string{"add", "*", "**", "clear-context"}, values: []string{"true", "false"}},
 			{after: []string{"edit", "*"}, values: []string{"run-at", "repeat", "interval", "clear-context"}},
 			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours"}},
 			{after: []string{"edit", "*", "clear-context"}, values: []string{"true", "false"}},
@@ -2828,12 +2885,13 @@ func scheduleCommand() command {
 			{action: "list", args: "[--all]", description: "list schedules; default output shows the first 100"},
 			{action: "show", args: "<id|name>", description: "inspect a schedule and its bound task"},
 			{action: "open", args: "<id|name>", description: "compatibility alias for show"},
-			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]]"},
+			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]] [clear-context <true|false>]"},
 			{action: "edit", args: "<id> [run-at <2006-01-02T15:04>] [repeat <once|daily|weekly|monthly|hourly|seconds|minutes|hours>] [interval <1..365>] [clear-context <true|false>]"},
 		},
 		examples: []string{
 			`schedule add "Daily standup report" 2026-01-20T09:00 daily`,
-			`schedule add "Weekly metrics" 2026-01-22T08:00 weekly`,
+			`schedule add "Fresh report" 2026-01-20T09:00 daily clear-context true`,
+			`schedule add "Retained report" 2026-01-20T09:00 daily clear-context false`,
 			`schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false`,
 			`schedule toggle a1b2c3`,
 		},
@@ -2910,30 +2968,16 @@ func scheduleCommand() command {
 				if len(rest) == 0 {
 					return taskSelectorWithSuffix(m, commandUsage("schedule", "add"), "schedule add", " ")
 				}
-				if len(rest) < 2 {
-					return m, errCmd(commandUsage("schedule", "add"))
+				target, when, repeat, interval, clearContextOnStart, err := parseScheduleAdd(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
 				}
-				repeat := "once"
-				interval := 1
-				if n, err := strconv.Atoi(rest[len(rest)-1]); err == nil && len(rest) >= 3 && isRepeat(rest[len(rest)-2]) {
-					interval = n
-					rest = rest[:len(rest)-1]
-				}
-				if interval < 1 || interval > 365 {
-					return m, errCmd("repeat interval must be between 1 and 365")
-				}
-				if isRepeat(rest[len(rest)-1]) {
-					repeat = client.NormalizeScheduleRepeat(strings.ToLower(rest[len(rest)-1]))
-					rest = rest[:len(rest)-1]
-				}
-				when := rest[len(rest)-1]
-				target := strings.Join(rest[:len(rest)-1], " ")
 				return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
 					t, err := resolveTaskForModel(m, ctx, c, pid, target)
 					if err != nil {
 						return "", err
 					}
-					if err := c.CreateSchedule(ctx, pid, t.ID, when, repeat, interval); err != nil {
+					if err := c.CreateSchedule(ctx, pid, t.ID, when, repeat, interval, clearContextOnStart); err != nil {
 						return "", err
 					}
 					return scheduleMutationOutput("scheduled "+t.Title+" for "+when+" ("+repeat+")", nil,

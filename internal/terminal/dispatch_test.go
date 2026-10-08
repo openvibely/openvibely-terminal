@@ -5859,19 +5859,22 @@ func TestScheduleAddFastRepeatTypes(t *testing.T) {
 		line           string
 		wantRepeatType string
 		wantInterval   string
+		wantContext    string
 	}{
-		{"/schedule add Refactor 2026-09-01T10:00 once", "repeat_type=once", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 daily", "repeat_type=daily", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 weekly", "repeat_type=weekly", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 monthly", "repeat_type=monthly", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 seconds", "repeat_type=seconds", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 seconds 1", "repeat_type=seconds", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 seconds 30", "repeat_type=seconds", "repeat_interval=30"},
-		{"/schedule add Refactor 2026-09-01T10:00 minutes", "repeat_type=minutes", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 minutes 15", "repeat_type=minutes", "repeat_interval=15"},
-		{"/schedule add Refactor 2026-09-01T10:00 hours", "repeat_type=hours", "repeat_interval=1"},
-		{"/schedule add Refactor 2026-09-01T10:00 hours 4", "repeat_type=hours", "repeat_interval=4"},
-		{"/schedule add Refactor 2026-09-01T10:00 HoUrLy", "repeat_type=hours", "repeat_interval=1"},
+		{"/schedule add Refactor 2026-09-01T10:00 once", "repeat_type=once", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 daily", "repeat_type=daily", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 weekly", "repeat_type=weekly", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 monthly", "repeat_type=monthly", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 seconds", "repeat_type=seconds", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 seconds 1", "repeat_type=seconds", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 seconds 30", "repeat_type=seconds", "repeat_interval=30", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 minutes", "repeat_type=minutes", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 minutes 15", "repeat_type=minutes", "repeat_interval=15", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 hours", "repeat_type=hours", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 hours 4", "repeat_type=hours", "repeat_interval=4", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 HoUrLy", "repeat_type=hours", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 daily clear-context true", "repeat_type=daily", "repeat_interval=1", "clear_context_on_start=true"},
+		{"/schedule add Refactor 2026-09-01T10:00 daily clear-context false", "repeat_type=daily", "repeat_interval=1", "clear_context_on_start=false"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.line, func(t *testing.T) {
@@ -5886,26 +5889,37 @@ func TestScheduleAddFastRepeatTypes(t *testing.T) {
 			if !rec.sawForm(tc.wantInterval) {
 				t.Errorf("expected %q in form data:\n%v", tc.wantInterval, rec.forms)
 			}
+			if tc.wantContext != "" && !rec.sawForm(tc.wantContext) {
+				t.Errorf("expected %q in form data:\n%v", tc.wantContext, rec.forms)
+			}
+			if tc.wantContext == "" && strings.Contains(strings.Join(rec.formsSnapshot(), "\n"), "clear_context_on_start=") {
+				t.Errorf("clear_context_on_start should be omitted by default; forms: %v", rec.formsSnapshot())
+			}
 		})
 	}
 }
 
 func TestScheduleAddRejectsInvalidRepeatIntervals(t *testing.T) {
-	cases := []string{
-		"/schedule add Refactor 2026-09-01T10:00 seconds 0",
-		"/schedule add Refactor 2026-09-01T10:00 minutes -5",
-		"/schedule add Refactor 2026-09-01T10:00 hours 366",
+	cases := []struct {
+		line string
+		want string
+	}{
+		{line: "/schedule add Refactor 2026-09-01T10:00 seconds 0", want: "repeat interval must be between 1 and 365"},
+		{line: "/schedule add Refactor 2026-09-01T10:00 minutes -5", want: "repeat interval must be between 1 and 365"},
+		{line: "/schedule add Refactor 2026-09-01T10:00 hours 366", want: "repeat interval must be between 1 and 365"},
+		{line: "/schedule add Refactor 2026-09-01T10:00 daily clear-context maybe", want: "clear-context must be true or false"},
+		{line: "/schedule add Refactor 2026-09-01T10:00 daily clear-context", want: "clear-context must be true or false"},
 	}
-	for _, line := range cases {
-		t.Run(line, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.line, func(t *testing.T) {
 			m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
-			m = runLine(t, m, line)
+			m = runLine(t, m, tc.line)
 			if strings.Contains(rec.all(), "POST ") {
-				t.Fatalf("invalid interval should not mutate backend, calls:\n%s", rec.all())
+				t.Fatalf("invalid schedule setting should not mutate backend, calls:\n%s", rec.all())
 			}
 			out := transcript(m)
-			if !strings.Contains(out, "repeat interval must be between 1 and 365") {
-				t.Errorf("expected interval validation message:\n%s", out)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("expected validation message %q:\n%s", tc.want, out)
 			}
 		})
 	}

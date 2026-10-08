@@ -249,6 +249,18 @@ openvibely-terminal -project demo skills add retry-logic --file retry.md
 openvibely-terminal -project demo skills edit retry-logic --file retry.md
 ```
 
+`/schedule add <task> <2006-01-02T15:04> [repeat [interval]] [clear-context <true|false>]`
+creates a scheduled run. Set `clear-context true` to start fresh or
+`clear-context false` to retain the task's context. Leaving the option out uses the
+backend default. For example:
+
+```text
+/schedule add "Fresh daily report" 2026-01-20T09:00 daily clear-context true
+/schedule add "Continue weekly report" 2026-01-22T08:00 weekly clear-context false
+```
+
+Existing schedules can be changed with `/schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false`.
+
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
 prefix or by a substring of their name/title** — `/tasks run refactor` works.
 Ambiguous references report the candidates instead of guessing.
