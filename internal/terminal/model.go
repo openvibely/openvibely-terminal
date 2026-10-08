@@ -3651,7 +3651,7 @@ func (m *Model) evictOldestTranscriptBlock(block string) bool {
 
 	var nextBlockFirstLine string
 	if count > 1 {
-		nextLines := strings.Split(m.transcriptBlocks[1], "\n")
+		nextLines, _ := renderedLines(m.transcriptBlocks[1])
 		if len(nextLines) == 0 {
 			return false
 		}
