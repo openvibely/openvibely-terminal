@@ -124,6 +124,46 @@ func TestOutboundTargetParserAcceptsDocumentedAliases(t *testing.T) {
 	}
 }
 
+func TestOutboundTargetAddAndEditUseSharedSupportedPlatforms(t *testing.T) {
+	for _, platform := range []string{"slack", "telegram", "email", "discord", "x"} {
+		t.Run(platform, func(t *testing.T) {
+			inputPlatform := strings.ToUpper(platform)
+			if platform == "slack" {
+				inputPlatform = "  Slack  "
+			}
+			target, err := parseOutboundTargetAdd([]string{inputPlatform, "destination"})
+			if err != nil {
+				t.Fatalf("add parser rejected supported platform: %v", err)
+			}
+			if target.Platform != platform {
+				t.Fatalf("add platform = %q, want %q", target.Platform, platform)
+			}
+
+			_, values, err := parseOutboundTargetEdit([]string{"target-a", "--platform", inputPlatform})
+			if err != nil {
+				t.Fatalf("edit parser rejected supported platform: %v", err)
+			}
+			if values["platform"] != platform {
+				t.Fatalf("edit platform = %q, want %q", values["platform"], platform)
+			}
+		})
+	}
+
+	for _, action := range []string{"add", "edit"} {
+		t.Run("unsupported "+action, func(t *testing.T) {
+			var err error
+			if action == "add" {
+				_, err = parseOutboundTargetAdd([]string{"mastodon", "destination"})
+			} else {
+				_, _, err = parseOutboundTargetEdit([]string{"target-a", "--platform", "mastodon"})
+			}
+			if err == nil || !strings.Contains(err.Error(), outboundTargetPlatformError) {
+				t.Fatalf("%s parser error = %v, want %q", action, err, outboundTargetPlatformError)
+			}
+		})
+	}
+}
+
 func TestOutboundTargetEditRejectsUnsupportedPlatform(t *testing.T) {
 	_, _, err := parseOutboundTargetEdit([]string{"client", "--platform", "mastodon"})
 	if err == nil || !strings.Contains(err.Error(), outboundTargetPlatformError) {

@@ -196,6 +196,73 @@ func TestOutboundTargetPolicyRejectsMalformedScopeAndAuth(t *testing.T) {
 	}
 }
 
+func TestOutboundTargetResponseParsersShareSupportedPlatforms(t *testing.T) {
+	platforms := []string{"slack", "telegram", "email", "discord", "x"}
+	for _, platform := range platforms {
+		t.Run(platform, func(t *testing.T) {
+			rawPlatform := strings.ToUpper(platform)
+			if platform == "slack" {
+				rawPlatform = "  Slack  "
+			}
+			pageBody := strings.Replace(
+				outboundTargetsFixture,
+				`name="target_platform" value="slack"`,
+				`name="target_platform" value="`+rawPlatform+`"`,
+				1,
+			)
+			root, err := parseHTML(pageBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := parseOutboundTargetsPage(root, "project-2")
+			if err != nil {
+				t.Fatalf("page parser rejected supported platform: %v", err)
+			}
+			if len(page.Targets) != 2 || page.Targets[0].Platform != platform {
+				t.Fatalf("page targets = %#v, want first platform %q", page.Targets, platform)
+			}
+
+			canonicalBody := `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="target-a"><input name="target_platform" value="` + rawPlatform + `"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div>`
+			root, err = parseHTML(canonicalBody)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := parseCanonicalSavedOutboundTarget(root, "project-2")
+			if err != nil {
+				t.Fatalf("canonical save parser rejected supported platform: %v", err)
+			}
+			if target.Platform != platform {
+				t.Fatalf("canonical target platform = %q, want %q", target.Platform, platform)
+			}
+		})
+	}
+
+	t.Run("unsupported platform", func(t *testing.T) {
+		pageBody := strings.Replace(
+			outboundTargetsFixture,
+			`name="target_platform" value="slack"`,
+			`name="target_platform" value="mastodon"`,
+			1,
+		)
+		root, err := parseHTML(pageBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseOutboundTargetsPage(root, "project-2"); err == nil || !strings.Contains(err.Error(), "unsupported platform") {
+			t.Fatalf("page parser error = %v, want unsupported platform rejection", err)
+		}
+
+		canonicalBody := `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="target-a"><input name="target_platform" value="mastodon"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div>`
+		root, err = parseHTML(canonicalBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parseCanonicalSavedOutboundTarget(root, "project-2"); err == nil || !strings.Contains(err.Error(), "unsupported platform") {
+			t.Fatalf("canonical save parser error = %v, want unsupported platform rejection", err)
+		}
+	})
+}
+
 func TestOutboundTargetsRejectMalformedAndDuplicateRows(t *testing.T) {
 	cases := []string{
 		`<div id="outbound-targets-section" data-project-id="p"><form><input name="project_id" value="p"></form><tr data-outbound-target-draft-key="a"></tr><div data-outbound-target-draft-key="a"><input name="target_row_id" value="other"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="a"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,

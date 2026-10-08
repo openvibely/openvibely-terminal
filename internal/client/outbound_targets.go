@@ -239,7 +239,7 @@ func parseCanonicalSavedOutboundTarget(root *html.Node, projectID string) (Outbo
 	if platform == "" || kind == "" || destination == "" {
 		return OutboundTarget{}, errors.New("outbound target save response is missing required fields")
 	}
-	if !supportedOutboundTargetPlatform(platform) {
+	if !IsSupportedOutboundTargetPlatform(platform) {
 		return OutboundTarget{}, errors.New("outbound target save response has unsupported platform")
 	}
 	return OutboundTarget{
@@ -435,7 +435,7 @@ func parseOutboundTargetsPage(root *html.Node, projectID string) (OutboundTarget
 		if platform == "" || kind == "" || destination == "" {
 			return page, fmt.Errorf("outbound target %q is missing required fields", safeOutboundTargetText(id))
 		}
-		if !supportedOutboundTargetPlatform(platform) {
+		if !IsSupportedOutboundTargetPlatform(platform) {
 			return page, fmt.Errorf("outbound target %q has unsupported platform", safeOutboundTargetText(id))
 		}
 		nameKey := platform + "\x00" + strings.ToLower(name)
@@ -469,8 +469,11 @@ func requiredOutboundTargetField(group *html.Node, name string) (string, error) 
 	return attr(fields[0], "value"), nil
 }
 
-func supportedOutboundTargetPlatform(platform string) bool {
-	switch platform {
+// IsSupportedOutboundTargetPlatform reports whether platform is supported by
+// outbound target parsing and terminal validation. It accepts case and
+// surrounding whitespace differences.
+func IsSupportedOutboundTargetPlatform(platform string) bool {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
 	case "slack", "telegram", "email", "discord", "x":
 		return true
 	default:
