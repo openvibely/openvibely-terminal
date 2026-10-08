@@ -34,6 +34,36 @@ func BenchmarkTranscriptAppend(b *testing.B) {
 	}
 }
 
+func BenchmarkTranscriptCumulativeAppend(b *testing.B) {
+	for _, entries := range []int{100, 500} {
+		for _, bodyBytes := range []int{1024, 16 * 1024} {
+			name := fmt.Sprintf("entries=%d/body=%dB", entries, bodyBytes)
+			b.Run(name, func(b *testing.B) {
+				body := strings.Repeat("x", bodyBytes)
+				latencies := make([]int64, b.N*entries)
+				latencyIndex := 0
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					m := transcriptAppendBenchmarkModel(0)
+					b.StartTimer()
+					for j := 0; j < entries; j++ {
+						started := time.Now()
+						m.appendTranscriptEntry(entry{role: "agent", text: body})
+						latencies[latencyIndex] = time.Since(started).Nanoseconds()
+						latencyIndex++
+					}
+				}
+				b.StopTimer()
+				sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+				p95 := latencies[(len(latencies)*95)/100]
+				b.ReportMetric(float64(p95), "p95-ns/append")
+			})
+		}
+	}
+}
+
 func transcriptAppendBenchmarkModel(retained int) Model {
 	vp := viewport.New(100, 25)
 	input := textinput.New()
