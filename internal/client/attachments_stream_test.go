@@ -60,34 +60,30 @@ func (i attachmentTestFileInfo) ModTime() time.Time { return time.Time{} }
 func (i attachmentTestFileInfo) IsDir() bool        { return false }
 func (i attachmentTestFileInfo) Sys() any           { return nil }
 
-func TestAttachmentValidationClosesRejectedDescriptor(t *testing.T) {
-	originalOpen := openAttachmentValidationFile
-	defer func() { openAttachmentValidationFile = originalOpen }()
-	file := &attachmentTestFile{
-		read: func([]byte) (int, error) { return 0, io.EOF },
+func TestAttachmentValidationRejectsNonRegularPathBeforeStreaming(t *testing.T) {
+	originalStat := statAttachmentFile
+	originalOpen := openAttachmentFile
+	defer func() {
+		statAttachmentFile = originalStat
+		openAttachmentFile = originalOpen
+	}()
+	statAttachmentFile = func(string) (os.FileInfo, error) {
+		return attachmentTestFileInfo{mode: os.ModeNamedPipe}, nil
 	}
-	openAttachmentValidationFile = func(string) (attachmentFile, error) {
-		return &attachmentFileInfoOverride{
-			attachmentFile: file,
-			info:           attachmentTestFileInfo{mode: os.ModeNamedPipe},
-		}, nil
+	var streamOpens atomic.Int32
+	openAttachmentFile = func(string) (attachmentFile, error) {
+		streamOpens.Add(1)
+		return nil, errors.New("unexpected stream open")
 	}
 
 	_, err := newAttachmentMultipartBody([]string{"fixture.fifo"})
 	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("body preparation error = %v, want not-regular error", err)
 	}
-	if file.closeCall.Load() != 1 {
-		t.Fatalf("descriptor close calls = %d, want 1", file.closeCall.Load())
+	if streamOpens.Load() != 0 {
+		t.Fatalf("stream opens = %d, want zero during preparation", streamOpens.Load())
 	}
 }
-
-type attachmentFileInfoOverride struct {
-	attachmentFile
-	info os.FileInfo
-}
-
-func (f *attachmentFileInfoOverride) Stat() (os.FileInfo, error) { return f.info, nil }
 
 func attachmentHTMLResponse(status int) *http.Response {
 	return &http.Response{
@@ -526,6 +522,29 @@ func TestAttachmentMultipartBodyRejectsChangedFile(t *testing.T) {
 				t.Fatalf("Close error = %v, want %v", closeErr, err)
 			}
 		})
+	}
+}
+
+func TestAttachmentMultipartBodyRejectsSameSizeModificationAfterPreparation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fixture.bin")
+	if err := os.WriteFile(path, []byte("base"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Unix(1, 0)
+	if err := os.Chtimes(path, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	body, err := newAttachmentMultipartBody([]string{path})
+	if err != nil {
+		t.Fatalf("newAttachmentMultipartBody: %v", err)
+	}
+	defer body.Close()
+	if err := os.WriteFile(path, []byte("edit"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.Copy(io.Discard, body)
+	if err == nil || !strings.Contains(err.Error(), "changed after upload preparation") {
+		t.Fatalf("body error = %v, want same-size modification failure", err)
 	}
 }
 
@@ -991,4 +1010,189 @@ func newAttachmentUploadServer(t attachmentTestingT, beforeGet, onPost func(*htt
 			t.Errorf("method = %s, want GET or POST", r.Method)
 		}
 	}))
+}
+
+type attachmentMetadataCounts struct {
+	opens  atomic.Int64
+	stats  atomic.Int64
+	closes atomic.Int64
+}
+
+type delayedAttachmentFile struct {
+	attachmentFile
+	counts *attachmentMetadataCounts
+	delay  time.Duration
+}
+
+func (f *delayedAttachmentFile) Stat() (os.FileInfo, error) {
+	f.counts.stats.Add(1)
+	time.Sleep(f.delay)
+	return f.attachmentFile.Stat()
+}
+
+func (f *delayedAttachmentFile) Close() error {
+	f.counts.closes.Add(1)
+	time.Sleep(f.delay)
+	return f.attachmentFile.Close()
+}
+
+// BenchmarkAttachmentUploadMetadataLatency compares the former open/stat/close
+// preflight with path-stat preflight. Each metadata operation waits 2 ms to
+// model slow or synced folders. Run with -benchtime=3x for useful p50/p95
+// samples without making the 2,000-file case excessively slow.
+func BenchmarkAttachmentUploadMetadataLatency(b *testing.B) {
+	const metadataDelay = 2 * time.Millisecond
+	cases := []struct {
+		name      string
+		fileCount int
+		fileSize  int64
+	}{
+		{name: "files=100", fileCount: 100, fileSize: 1},
+		{name: "files=500", fileCount: 500, fileSize: 1},
+		{name: "files=2000", fileCount: 2000, fileSize: 1},
+		{name: "file=128MiB", fileCount: 1, fileSize: 128 << 20},
+	}
+	for _, benchmarkCase := range cases {
+		fileCount := benchmarkCase.fileCount
+		for _, mode := range []string{"legacy", "optimized"} {
+			b.Run(benchmarkCase.name+"/"+mode, func(b *testing.B) {
+				dir := b.TempDir()
+				paths := make([]string, fileCount)
+				var rows strings.Builder
+				for i := range paths {
+					name := fmt.Sprintf("file-%04d.bin", i)
+					paths[i] = filepath.Join(dir, name)
+					if err := os.WriteFile(paths[i], []byte("x"), 0o600); err != nil {
+						b.Fatal(err)
+					}
+					if benchmarkCase.fileSize != 1 {
+						if err := os.Truncate(paths[i], benchmarkCase.fileSize); err != nil {
+							b.Fatal(err)
+						}
+					}
+					sizeLabel := "1 B"
+					if benchmarkCase.fileSize == 128<<20 {
+						sizeLabel = "128 MiB"
+					}
+					rows.WriteString(attachmentRowMarkup(fmt.Sprintf("att-%d", i), "p1", name, sizeLabel))
+				}
+				responseMarkup := attachmentListMarkup("p1", rows.String())
+
+				counts := &attachmentMetadataCounts{}
+				originalOpen := openAttachmentFile
+				originalStat := statAttachmentFile
+				b.Cleanup(func() {
+					openAttachmentFile = originalOpen
+					statAttachmentFile = originalStat
+				})
+				openAttachmentFile = func(path string) (attachmentFile, error) {
+					counts.opens.Add(1)
+					time.Sleep(metadataDelay)
+					file, err := os.Open(path)
+					if err != nil {
+						return nil, err
+					}
+					return &delayedAttachmentFile{attachmentFile: file, counts: counts, delay: metadataDelay}, nil
+				}
+				if mode == "legacy" {
+					statAttachmentFile = func(path string) (os.FileInfo, error) {
+						counts.opens.Add(1)
+						time.Sleep(metadataDelay)
+						file, err := os.Open(path)
+						if err != nil {
+							return nil, err
+						}
+						counts.stats.Add(1)
+						time.Sleep(metadataDelay)
+						info, statErr := file.Stat()
+						counts.closes.Add(1)
+						time.Sleep(metadataDelay)
+						closeErr := file.Close()
+						if statErr != nil {
+							return nil, statErr
+						}
+						if closeErr != nil {
+							return nil, closeErr
+						}
+						return info, nil
+					}
+				} else {
+					statAttachmentFile = func(path string) (os.FileInfo, error) {
+						counts.stats.Add(1)
+						time.Sleep(metadataDelay)
+						return os.Stat(path)
+					}
+				}
+
+				var started atomic.Int64
+				var firstMu sync.Mutex
+				firstDurations := make([]time.Duration, 0, b.N)
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var first [1]byte
+					if _, err := io.ReadFull(r.Body, first[:]); err != nil {
+						b.Errorf("read first request-body byte: %v", err)
+						return
+					}
+					firstMu.Lock()
+					firstDurations = append(firstDurations, time.Since(time.Unix(0, started.Load())))
+					firstMu.Unlock()
+					if _, err := io.Copy(io.Discard, r.Body); err != nil {
+						b.Errorf("read request body: %v", err)
+						return
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, responseMarkup)
+				}))
+				defer srv.Close()
+				c, err := New(srv.URL)
+				if err != nil {
+					b.Fatal(err)
+				}
+				task := Task{ID: "t-1", ProjectID: "p1", Attachments: []Attachment{}}
+				totalDurations := make([]time.Duration, 0, b.N)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					start := time.Now()
+					started.Store(start.UnixNano())
+					if _, err := c.AddTaskAttachmentsForTask(context.Background(), task, "p1", paths); err != nil {
+						b.Fatal(err)
+					}
+					totalDurations = append(totalDurations, time.Since(start))
+				}
+				b.StopTimer()
+				firstMu.Lock()
+				firstCopy := append([]time.Duration(nil), firstDurations...)
+				firstMu.Unlock()
+				if len(firstCopy) != 0 {
+					b.ReportMetric(float64(medianDuration(append([]time.Duration(nil), firstCopy...)).Nanoseconds()), "first-p50-ns")
+					b.ReportMetric(float64(attachmentPercentileDuration(firstCopy, 95).Nanoseconds()), "first-p95-ns")
+				}
+				if len(totalDurations) != 0 {
+					b.ReportMetric(float64(medianDuration(append([]time.Duration(nil), totalDurations...)).Nanoseconds()), "total-p50-ns")
+					b.ReportMetric(float64(attachmentPercentileDuration(totalDurations, 95).Nanoseconds()), "total-p95-ns")
+				}
+				divisor := float64(b.N)
+				b.ReportMetric(float64(counts.opens.Load())/divisor, "opens/upload")
+				b.ReportMetric(float64(counts.stats.Load())/divisor, "stats/upload")
+				b.ReportMetric(float64(counts.closes.Load())/divisor, "closes/upload")
+			})
+		}
+	}
+}
+
+func attachmentPercentileDuration(durations []time.Duration, percentile int) time.Duration {
+	if len(durations) == 0 {
+		return 0
+	}
+	ordered := append([]time.Duration(nil), durations...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	index := (len(ordered)*percentile+99)/100 - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(ordered) {
+		index = len(ordered) - 1
+	}
+	return ordered[index]
 }

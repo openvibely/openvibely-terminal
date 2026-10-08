@@ -307,26 +307,8 @@ var openAttachmentFile = func(path string) (attachmentFile, error) {
 	return openAttachmentPath(path)
 }
 
-var openAttachmentValidationFile = func(path string) (attachmentFile, error) {
-	return openAttachmentPath(path)
-}
-
-var statAttachmentFile = validateAttachmentPath
-
-func validateAttachmentPath(path string) (os.FileInfo, error) {
-	file, err := openAttachmentValidationFile(path)
-	if err != nil {
-		return nil, err
-	}
-	info, statErr := file.Stat()
-	closeErr := file.Close()
-	if statErr != nil {
-		return nil, fmt.Errorf("stat attachment %q: %w", path, statErr)
-	}
-	if closeErr != nil {
-		return nil, fmt.Errorf("close attachment %q: %w", path, closeErr)
-	}
-	return info, nil
+var statAttachmentFile = func(path string) (os.FileInfo, error) {
+	return os.Stat(path)
 }
 
 type attachmentMultipartBody struct {
@@ -621,7 +603,7 @@ func (b *attachmentMultipartBody) LocalError() error {
 }
 
 func samePreparedAttachment(prepared, opened os.FileInfo) bool {
-	if prepared == nil || opened == nil || prepared.Size() != opened.Size() {
+	if prepared == nil || opened == nil || prepared.Size() != opened.Size() || !prepared.ModTime().Equal(opened.ModTime()) {
 		return false
 	}
 	if prepared.Sys() == nil || opened.Sys() == nil {
