@@ -1046,19 +1046,47 @@ func tasksCommand() command {
 				}
 
 			case "show":
-				// "/tasks show <ref> <tab>" selects a detail tab; strip it before
-				// joining the remaining words into the task reference.
-				showRest := rest
-				tab := ""
-				if n := len(showRest); n > 1 && isDetailTab(showRest[n-1]) {
-					tab = showRest[n-1]
-					showRest = showRest[:n-1]
-				}
-				showRef := strings.Join(showRest, " ")
-				if showRef == "" {
+				showRest := append([]string(nil), rest...)
+				if len(showRest) == 0 {
 					return taskSelector(m, "usage: /tasks show <id|title> [tab]", "tasks show", false)
 				}
 				return m, m.run("Task", cmdTimeout, func(ctx context.Context) (string, error) {
+					showRef := strings.Join(showRest, " ")
+					tab := ""
+					var resolvedTask *client.Task
+					if n := len(showRest); n > 1 && isDetailTab(showRest[n-1]) {
+						// Canonical full IDs stay directly addressable without a catalog
+						// request; their trailing tab remains an explicit selector.
+						if isCanonicalFullTaskID(showRest[n-2]) {
+							tab = showRest[n-1]
+							showRef = showRest[n-2]
+						} else {
+							// A task title may itself end in a tab name or alias. Check the
+							// complete reference before treating its final word as a tab.
+							tasks, err := c.ListTaskReferences(ctx, pid)
+							if err != nil {
+								return "", err
+							}
+							if exact, ok, err := matchExactTaskTitle(tasks, showRef); err != nil {
+								return "", err
+							} else if ok {
+								resolvedTask = &exact
+							} else {
+								tab = showRest[n-1]
+								showRef = strings.Join(showRest[:n-1], " ")
+								if !isCanonicalFullTaskID(showRef) {
+									task, err := matchRef(tasks, showRef,
+										func(t client.Task) string { return t.ID },
+										func(t client.Task) string { return t.Title })
+									if err != nil {
+										return "", err
+									}
+									resolvedTask = &task
+								}
+							}
+						}
+					}
+
 					if isCanonicalFullTaskID(showRef) {
 						if jsonMode && tab != "" {
 							if isReviewTab(tab) {
@@ -1099,7 +1127,13 @@ func tasksCommand() command {
 						return renderTaskDetail(d.Task, d, tab), nil
 					}
 
-					t, err := resolveTaskForModel(m, ctx, c, pid, showRef)
+					var t client.Task
+					var err error
+					if resolvedTask != nil {
+						t = *resolvedTask
+					} else {
+						t, err = resolveTaskForModel(m, ctx, c, pid, showRef)
+					}
 					if err != nil {
 						return "", err
 					}
@@ -1729,6 +1763,22 @@ func isCanonicalFullID(ref string) bool {
 		}
 	}
 	return true
+}
+
+func matchExactTaskTitle(tasks []client.Task, ref string) (client.Task, bool, error) {
+	var matches []client.Task
+	for _, task := range tasks {
+		if strings.EqualFold(strings.TrimSpace(task.Title), strings.TrimSpace(ref)) {
+			matches = append(matches, task)
+		}
+	}
+	if len(matches) == 0 {
+		return client.Task{}, false, nil
+	}
+	task, err := matchRef(matches, ref,
+		func(client.Task) string { return "" },
+		func(t client.Task) string { return t.Title })
+	return task, true, err
 }
 
 func resolveTask(ctx context.Context, c *client.Client, projectID, ref string) (client.Task, error) {
