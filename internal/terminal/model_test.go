@@ -4114,6 +4114,19 @@ func TestTranscriptAppendRefreshesInvalidLineCache(t *testing.T) {
 	assertTranscriptMatchesFullRefresh(t, &m)
 }
 
+func TestTranscriptAppendCRLFViewportMatchesFullRefresh(t *testing.T) {
+	m := newTestModel(t)
+	m.log = []entry{{role: "result", text: "retained first\r\nretained second"}}
+	m.refreshTranscript()
+
+	m.append(entry{role: "result", text: "appended first\r\nappended second"})
+
+	if cached := strings.Join(m.transcriptLines, "\n"); strings.Contains(cached, "\r") {
+		t.Fatalf("incremental viewport cache retained carriage returns: %q", cached)
+	}
+	assertTranscriptMatchesFullRefresh(t, &m)
+}
+
 func assertTranscriptMatchesFullRefresh(t *testing.T, m *Model) {
 	t.Helper()
 	incrementalContent := renderedTranscriptContent(m)
