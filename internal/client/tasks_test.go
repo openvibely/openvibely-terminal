@@ -436,6 +436,36 @@ func TestGetTaskForProjectExactPreservesScopedDetailAndCancellation(t *testing.T
 	}
 }
 
+func TestGetTaskDetailsPreservesPreformattedCodeBlock(t *testing.T) {
+	const taskID = "0123456789abcdef0123456789abcdef"
+	const markup = `<div data-task-id="` + taskID + `" data-project-id="p1" data-task-status="running" data-task-category="active">
+		<h2 class="font-bold">Task details</h2>
+		<div id="tab-details"><p>Run these commands:</p><pre><code>git status
+  git commit -m "save changes"
+    git push</code></pre><p>Then review the result.</p></div>
+	</div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/tasks/"+taskID || r.URL.Query().Get("project_id") != "p1" {
+			t.Fatalf("unexpected request %s", r.URL.RequestURI())
+		}
+		_, _ = io.WriteString(w, markup)
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail, err := c.GetTaskMetadataForProjectExact(context.Background(), taskID, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Run these commands:\n\ngit status\n  git commit -m \"save changes\"\n    git push\n\nThen review the result."
+	if detail.Details != want {
+		t.Fatalf("Details = %q, want %q", detail.Details, want)
+	}
+}
+
 func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
 	prompt := "  alpha  \n\t beta   " + strings.Repeat("界", 300) + "  TAIL"

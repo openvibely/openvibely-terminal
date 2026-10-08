@@ -923,6 +923,42 @@ func TestDedupedCardsWithoutTextSkipsNodeText(t *testing.T) {
 	}
 }
 
+func TestNodeTextPreservesPreformattedCodeWhitespace(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<pre><code>git status
+  git commit -m "save changes"
+    git push</code></pre>`))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+	pre := findNode(root, func(n *html.Node) bool { return n.Data == "pre" })
+	if got, want := NodeText(pre), "git status\n  git commit -m \"save changes\"\n    git push"; got != want {
+		t.Fatalf("NodeText(pre) = %q, want %q", got, want)
+	}
+}
+
+func TestNodeTextNormalizesProseSpacesAndLineWraps(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<p>Alpha   beta
+	gamma     delta</p>`))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+	paragraph := findNode(root, func(n *html.Node) bool { return n.Data == "p" })
+	if got, want := NodeText(paragraph), "Alpha beta gamma delta"; got != want {
+		t.Fatalf("NodeText(paragraph) = %q, want %q", got, want)
+	}
+}
+
+func TestNodeTextSeparatesPreformattedBlockFromProse(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<p>Before</p><pre><code>line one
+  line two</code></pre><p>After</p>`))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+	if got, want := NodeText(root), "Before\n\nline one\n  line two\n\nAfter"; got != want {
+		t.Fatalf("NodeText = %q, want %q", got, want)
+	}
+}
+
 func TestNodeTextSimpleElementNormalizesUnicodeWhitespace(t *testing.T) {
 	root, err := html.Parse(strings.NewReader(`<p>&nbsp;Alpha&nbsp;&emsp;Beta&nbsp;</p>`))
 	if err != nil {
