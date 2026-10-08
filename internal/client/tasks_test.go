@@ -1776,7 +1776,7 @@ func TestGetTaskThreadPendingInputsParsesSafeProjection(t *testing.T) {
 	var requestURI string
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestURI = r.URL.RequestURI()
-		_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div id="thread-input-q1" data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"><div class="min-w-0 flex-1 truncate">continue <b>the docs</b><button>secret control</button></div><span aria-label="Attachments queued with this follow-up">attachment</span><button>secret control</button></div><div id="thread-input-s1" data-thread-input-id="s1" data-task-id="task-1" data-input-mode="steering"><div class="min-w-0 flex-1"><div class="text-xs">Steering pending</div><div class="truncate">stop and use the new interface</div></div><button>Cancel</button></div></div>`)
+		_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div id="thread-input-q1" data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"><div class="text-sm truncate">continue <b>the docs</b><button>secret control</button></div><span aria-label="Attachments queued with this follow-up">attachment</span><button>secret control</button></div><div id="thread-input-s1" data-thread-input-id="s1" data-task-id="task-1" data-input-mode="steering"><div class="min-w-0 flex-1"><div class="text-xs">Steering pending</div><div class="truncate">stop and use the new interface</div></div><button>Cancel</button></div></div>`)
 	}))
 	inputs, err := c.GetTaskThreadPendingInputsForProject(context.Background(), "task-1", "project-2")
 	if err != nil {

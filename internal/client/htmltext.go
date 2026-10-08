@@ -303,3 +303,14 @@ func extractIDs(n *html.Node, prefix string) []string {
 	}
 	return out
 }
+
+// hasHTMLClassToken reports whether classes contains want as an exact,
+// whitespace-separated class token.
+func hasHTMLClassToken(classes, want string) bool {
+	for _, className := range strings.Fields(classes) {
+		if className == want {
+			return true
+		}
+	}
+	return false
+}

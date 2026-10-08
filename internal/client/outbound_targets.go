@@ -483,7 +483,7 @@ func IsSupportedOutboundTargetPlatform(platform string) bool {
 
 func outboundTargetSaveMessage(root *html.Node) string {
 	for _, node := range findAll(root, func(node *html.Node) bool {
-		return node.Data == "div" && (hasClass(node, "alert-error") || hasClass(node, "alert-success"))
+		return node.Data == "div" && (hasHTMLClassToken(attr(node, "class"), "alert-error") || hasHTMLClassToken(attr(node, "class"), "alert-success"))
 	}) {
 		if message := safeOutboundTargetText(NodeText(node)); message != "" {
 			return message
@@ -497,22 +497,13 @@ func parseOutboundTargetTestResponse(body interface{ Read([]byte) (int, error) }
 	if err != nil {
 		return false, errors.New("outbound target test response was malformed")
 	}
-	if findNode(root, func(node *html.Node) bool { return hasClass(node, "text-error") }) != nil {
+	if findNode(root, func(node *html.Node) bool { return hasHTMLClassToken(attr(node, "class"), "text-error") }) != nil {
 		return false, nil
 	}
-	if findNode(root, func(node *html.Node) bool { return hasClass(node, "text-success") }) != nil {
+	if findNode(root, func(node *html.Node) bool { return hasHTMLClassToken(attr(node, "class"), "text-success") }) != nil {
 		return true, nil
 	}
 	return false, errors.New("outbound target test response was malformed")
-}
-
-func hasClass(node *html.Node, class string) bool {
-	for _, value := range strings.Fields(attr(node, "class")) {
-		if value == class {
-			return true
-		}
-	}
-	return false
 }
 
 func safeOutboundTargetText(value string) string {
