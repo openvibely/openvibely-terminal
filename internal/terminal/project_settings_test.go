@@ -723,6 +723,63 @@ func TestApplyProjectEditsCoversAllSettingsAndPathForms(t *testing.T) {
 	}
 }
 
+func TestParseProjectEditArgsUsesSharedBoundaryRanking(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		projects []client.Project
+		args     []string
+		wantID   string
+		wantRef  string
+		wantName string
+		wantDesc string
+	}{
+		{
+			name:     "explicit separator after option-like project name",
+			projects: []client.Project{{ID: "option-name", Name: "--name"}},
+			args:     []string{"--name", "|", "--description", "changed"},
+			wantID:   "option-name", wantRef: "--name", wantDesc: "changed",
+		},
+		{
+			name:     "literal separator value at option boundary",
+			projects: []client.Project{{ID: "p1", Name: "Alpha"}},
+			args:     []string{"p1", "--description", "|", "--name", "Changed"},
+			wantID:   "p1", wantRef: "p1", wantName: "Changed", wantDesc: "|",
+		},
+		{
+			name: "exact project name outranks separator substring candidate",
+			projects: []client.Project{
+				{ID: "prefix", Name: "Alpha"},
+				{ID: "exact", Name: "Alpha Project"},
+			},
+			args:   []string{"Alpha", "Project", "--description", "|", "--name", "Changed"},
+			wantID: "exact", wantRef: "Alpha Project", wantName: "Changed", wantDesc: "|",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project, ref, edits, err := parseProjectEditArgs(tc.projects, tc.args)
+			if err != nil {
+				t.Fatalf("parseProjectEditArgs error = %v", err)
+			}
+			if project.ID != tc.wantID || ref != tc.wantRef {
+				t.Fatalf("resolved project/reference = %q/%q, want %q/%q", project.ID, ref, tc.wantID, tc.wantRef)
+			}
+			if got := projectEditValue(edits.Name); got != tc.wantName {
+				t.Errorf("name edit = %q, want %q", got, tc.wantName)
+			}
+			if got := projectEditValue(edits.Description); got != tc.wantDesc {
+				t.Errorf("description edit = %q, want %q", got, tc.wantDesc)
+			}
+		})
+	}
+}
+
+func projectEditValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func TestProjectEditReferenceTiersShareCanonicalMatching(t *testing.T) {
 	projects := []client.Project{
 		{ID: "id-123", Name: "Alpha Project"},
