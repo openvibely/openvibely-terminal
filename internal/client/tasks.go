@@ -1477,7 +1477,7 @@ func taskThreadPendingInputPreview(row *html.Node) string {
 	// descendant with the truncate class. This avoids labels, attachment badges,
 	// and button text without depending on visual row layout.
 	content := findNode(row, func(n *html.Node) bool {
-		return hasClassToken(attr(n, "class"), "truncate")
+		return hasHTMLClassToken(attr(n, "class"), "truncate")
 	})
 	preview := ""
 	if content != nil {
@@ -1515,15 +1515,6 @@ func taskThreadPendingInputHasAttachments(row *html.Node) bool {
 		title := strings.ToLower(strings.TrimSpace(attr(n, "title")))
 		return strings.Contains(label, "attachment") || strings.Contains(title, "attachment")
 	}) != nil
-}
-
-func hasClassToken(classes, want string) bool {
-	for _, className := range strings.Fields(classes) {
-		if className == want {
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Client) pendingTaskThreadInput(ctx context.Context, taskID, projectID, inputID string) (TaskThreadPendingInput, error) {

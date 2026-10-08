@@ -436,6 +436,27 @@ func TestSetOutboundTargetPolicySurfacesValidation(t *testing.T) {
 	}
 }
 
+func TestParseOutboundTargetTestResponseUsesExactClassTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		sent    bool
+		wantErr bool
+	}{
+		{name: "success with layout class", body: `<span class="flex text-success">Sent</span>`, sent: true},
+		{name: "error", body: `<span class="text-error">Failed</span>`},
+		{name: "success substring", body: `<span class="text-successful">Sent</span>`, wantErr: true},
+		{name: "unrelated classes", body: `<span class="flex text-sm">Sent</span>`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent, err := parseOutboundTargetTestResponse(strings.NewReader(tc.body))
+			if sent != tc.sent || (err != nil) != tc.wantErr {
+				t.Fatalf("parseOutboundTargetTestResponse() = %t, %v; want %t, error=%t", sent, err, tc.sent, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestOutboundTargetTestsClassifySentAndFailedWithoutHTML(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
