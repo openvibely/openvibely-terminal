@@ -1055,34 +1055,33 @@ func tasksCommand() command {
 					tab := ""
 					var resolvedTask *client.Task
 					if n := len(showRest); n > 1 && isDetailTab(showRest[n-1]) {
-						// Canonical full IDs stay directly addressable without a catalog
-						// request; their trailing tab remains an explicit selector.
-						if isCanonicalFullTaskID(showRest[n-2]) {
-							tab = showRest[n-1]
-							showRef = showRest[n-2]
-						} else {
-							// A task title may itself end in a tab name or alias. Check the
-							// complete reference before treating its final word as a tab.
-							tasks, err := c.ListTaskReferences(ctx, pid)
-							if err != nil {
+						// A task title may itself end in a tab name or alias. Check the
+						// complete reference before treating its final word as a tab,
+						// including when the preceding word looks like a canonical ID.
+						tasks, err := c.ListTaskReferences(ctx, pid)
+						if err != nil {
+							// Canonical IDs remain directly addressable even if the
+							// optional catalog lookup is unavailable.
+							if !isCanonicalFullTaskID(showRest[n-2]) {
 								return "", err
 							}
-							if exact, ok, err := matchExactTaskTitle(tasks, showRef); err != nil {
-								return "", err
-							} else if ok {
-								resolvedTask = &exact
-							} else {
-								tab = showRest[n-1]
-								showRef = strings.Join(showRest[:n-1], " ")
-								if !isCanonicalFullTaskID(showRef) {
-									task, err := matchRef(tasks, showRef,
-										func(t client.Task) string { return t.ID },
-										func(t client.Task) string { return t.Title })
-									if err != nil {
-										return "", err
-									}
-									resolvedTask = &task
+							tab = showRest[n-1]
+							showRef = showRest[n-2]
+						} else if exact, ok, err := matchExactTaskTitle(tasks, showRef); err != nil {
+							return "", err
+						} else if ok {
+							resolvedTask = &exact
+						} else {
+							tab = showRest[n-1]
+							showRef = strings.Join(showRest[:n-1], " ")
+							if !isCanonicalFullTaskID(showRef) {
+								task, err := matchRef(tasks, showRef,
+									func(t client.Task) string { return t.ID },
+									func(t client.Task) string { return t.Title })
+								if err != nil {
+									return "", err
 								}
+								resolvedTask = &task
 							}
 						}
 					}

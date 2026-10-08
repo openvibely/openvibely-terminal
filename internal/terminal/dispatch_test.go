@@ -1833,6 +1833,29 @@ func TestTasksShowPrefersExactFullTitleBeforeTabSuffix(t *testing.T) {
 				t.Fatalf("unexpected show error:\n%s", transcript(m))
 			}
 		})
+
+		t.Run("canonical-looking title "+suffix, func(t *testing.T) {
+			const canonicalID = "0123456789abcdef0123456789abcdef"
+			idTask := client.Task{ID: canonicalID, Title: "Task addressed by canonical ID"}
+			fullTitleTask := client.Task{ID: "t-hex-title", Title: canonicalID + " " + suffix}
+			board := makeBoard(idTask, fullTitleTask)
+			bodies := bodiesFor(idTask, fullTitleTask)
+			bodies["/tasks"] = board
+			m, rec := dispatchModel(t, bodies)
+			m = runLine(t, m, "/tasks show "+fullTitleTask.Title)
+
+			if !rec.saw("GET", "/tasks/"+fullTitleTask.ID) {
+				t.Fatalf("canonical-looking full-title task was not opened; calls:\n%s", rec.all())
+			}
+			for _, call := range strings.Split(rec.all(), "\n") {
+				if strings.HasPrefix(call, "GET /tasks/"+canonicalID) {
+					t.Fatalf("full title was parsed as canonical task ID %q plus tab %q; calls:\n%s", canonicalID, suffix, rec.all())
+				}
+			}
+			if strings.Contains(strings.ToLower(transcript(m)), "error:") {
+				t.Fatalf("unexpected show error:\n%s", transcript(m))
+			}
+		})
 	}
 }
 
