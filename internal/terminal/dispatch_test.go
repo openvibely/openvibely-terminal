@@ -1783,6 +1783,102 @@ func TestTasksDeleteAndMoveChainArguments(t *testing.T) {
 	}
 }
 
+func TestTasksShowPrefersExactFullTitleBeforeTabSuffix(t *testing.T) {
+	var suffixes []string
+	for _, tab := range client.TaskDetailTabs() {
+		suffixes = append(suffixes, tab.Name)
+		suffixes = append(suffixes, tab.Aliases...)
+	}
+
+	makeBoard := func(tasks ...client.Task) string {
+		var board strings.Builder
+		board.WriteString("<div>")
+		for _, task := range tasks {
+			fmt.Fprintf(&board, `<div class="card" data-task-id="%s" data-task-status="pending" data-task-category="backlog"><a href="/tasks/%s" title="%s">%s</a></div>`, task.ID, task.ID, task.Title, task.Title)
+		}
+		board.WriteString("</div>")
+		return board.String()
+	}
+	bodiesFor := func(tasks ...client.Task) map[string]string {
+		bodies := map[string]string{}
+		for _, task := range tasks {
+			bodies["/tasks/"+task.ID] = canonicalTaskDetailHTML(task.ID, "p1")
+			bodies["/tasks/"+task.ID+"/thread"] = `<div>thread loaded</div>`
+			bodies["/tasks/"+task.ID+"/changes"] = `<div>changes loaded</div>`
+			bodies["/api/tasks/"+task.ID+"/lifecycle-executions"] = `[]`
+			bodies["/tasks/"+task.ID+"/reviews"] = taskReviewHTML
+		}
+		return bodies
+	}
+	baseTask := client.Task{ID: "t-plan", Title: "Plan"}
+
+	for _, suffix := range suffixes {
+		t.Run(suffix, func(t *testing.T) {
+			fullTask := client.Task{ID: "t-full", Title: "Plan " + suffix}
+			board := makeBoard(baseTask, fullTask)
+			bodies := bodiesFor(baseTask, fullTask)
+			bodies["/tasks"] = board
+			m, rec := dispatchModel(t, bodies)
+			m = runLine(t, m, "/tasks show Plan "+suffix)
+
+			if !rec.saw("GET", "/tasks/"+fullTask.ID) {
+				t.Fatalf("full-title task was not opened; calls:\n%s", rec.all())
+			}
+			for _, call := range strings.Split(rec.all(), "\n") {
+				if strings.HasPrefix(call, "GET /tasks/"+baseTask.ID) {
+					t.Fatalf("title was parsed as task %q plus tab %q; calls:\n%s", baseTask.Title, suffix, rec.all())
+				}
+			}
+			if strings.Contains(strings.ToLower(transcript(m)), "error:") {
+				t.Fatalf("unexpected show error:\n%s", transcript(m))
+			}
+		})
+	}
+}
+
+func TestTasksShowExplicitTabAfterExactTitleAndDuplicateExactTitle(t *testing.T) {
+	makeBoard := func(tasks ...client.Task) string {
+		var board strings.Builder
+		board.WriteString("<div>")
+		for _, task := range tasks {
+			fmt.Fprintf(&board, `<div class="card" data-task-id="%s" data-task-status="pending" data-task-category="backlog"><a href="/tasks/%s" title="%s">%s</a></div>`, task.ID, task.ID, task.Title, task.Title)
+		}
+		board.WriteString("</div>")
+		return board.String()
+	}
+	baseTask := client.Task{ID: "t-plan", Title: "Plan"}
+	fullTask := client.Task{ID: "t-full", Title: "Plan Review"}
+
+	t.Run("explicit review tab", func(t *testing.T) {
+		board := makeBoard(baseTask, fullTask)
+		bodies := map[string]string{
+			"/tasks":                             board,
+			"/tasks/" + fullTask.ID + "/reviews": taskReviewHTML,
+			"/tasks/" + baseTask.ID + "/reviews": taskReviewHTML,
+		}
+		m, rec := dispatchModel(t, bodies)
+		m = runLine(t, m, "/tasks show Plan Review review")
+		if !rec.saw("GET", "/tasks/"+fullTask.ID+"/reviews") || rec.saw("GET", "/tasks/"+baseTask.ID+"/reviews") {
+			t.Fatalf("explicit review tab used the wrong task; calls:\n%s", rec.all())
+		}
+	})
+
+	t.Run("duplicate exact full title is ambiguous", func(t *testing.T) {
+		duplicate := client.Task{ID: "t-full-2", Title: fullTask.Title}
+		board := makeBoard(baseTask, fullTask, duplicate)
+		m, rec := dispatchModel(t, map[string]string{"/tasks": board})
+		m = runLine(t, m, "/tasks show Plan Review")
+		if !strings.Contains(strings.ToLower(transcript(m)), "ambiguous") {
+			t.Fatalf("expected duplicate full titles to be ambiguous:\n%s", transcript(m))
+		}
+		for _, call := range strings.Split(rec.all(), "\n") {
+			if strings.HasPrefix(call, "GET /tasks/") && !strings.Contains(call, "/reference-catalog") {
+				t.Fatalf("ambiguous full title fell through to a task detail/tab request; calls:\n%s", rec.all())
+			}
+		}
+	})
+}
+
 func TestTasksShowSurfacesLazyFailuresAndPartialOutput(t *testing.T) {
 	tests := []struct {
 		name        string
