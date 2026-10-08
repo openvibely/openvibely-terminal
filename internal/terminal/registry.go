@@ -3547,7 +3547,15 @@ func alertsCommand() command {
 						selectorFor("Alerts", "alerts "+action,
 							"no pending alerts in the current project", false,
 							func(ctx context.Context) ([]selectorItem, error) {
-								alerts, err := c.ListAlerts(ctx, pid)
+								var (
+									alerts []client.Alert
+									err    error
+								)
+								if action == "approve" || action == "reject" || action == "dismiss" {
+									alerts, err = c.ListAlertsWithFilter(ctx, pid, client.AlertListFilter{DecisionState: "pending"})
+								} else {
+									alerts, err = c.ListAlerts(ctx, pid)
+								}
 								if err != nil {
 									return nil, err
 								}

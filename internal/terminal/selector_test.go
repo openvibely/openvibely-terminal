@@ -2039,6 +2039,130 @@ func TestAlertPickerLifecycleForEmptySingleMultiAndFilteredLists(t *testing.T) {
 	})
 }
 
+func TestAlertPickerDecisionActionsOnlyOfferPendingAlerts(t *testing.T) {
+	const pendingAlert = `<div data-alert-id="a-pending" data-alert-scroll-anchor="a-pending" data-alert-decision-state="pending"><p class="font-semibold">Pending alert</p></div>`
+	const pendingAlerts = pendingAlert + `
+		<div data-alert-id="a-pending-two" data-alert-scroll-anchor="a-pending-two" data-alert-decision-state="pending"><p class="font-semibold">Another pending alert</p></div>`
+	const allAlerts = pendingAlerts + `
+		<div data-alert-id="a-approved" data-alert-scroll-anchor="a-approved" data-alert-decision-state="approved"><p class="font-semibold">Approved alert</p></div>
+		<div data-alert-id="a-rejected" data-alert-scroll-anchor="a-rejected" data-alert-decision-state="rejected"><p class="font-semibold">Rejected alert</p></div>
+		<div data-alert-id="a-dismissed" data-alert-scroll-anchor="a-dismissed" data-alert-decision-state="dismissed"><p class="font-semibold">Dismissed alert</p></div>`
+
+	tests := []struct {
+		action     string
+		wantFilter string
+		wantIDs    []string
+	}{
+		{action: "show", wantIDs: []string{"a-pending", "a-pending-two", "a-approved", "a-rejected", "a-dismissed"}},
+		{action: "read", wantIDs: []string{"a-pending", "a-pending-two", "a-approved", "a-rejected", "a-dismissed"}},
+		{action: "approve", wantFilter: "pending", wantIDs: []string{"a-pending", "a-pending-two"}},
+		{action: "reject", wantFilter: "pending", wantIDs: []string{"a-pending", "a-pending-two"}},
+		{action: "dismiss", wantFilter: "pending", wantIDs: []string{"a-pending", "a-pending-two"}},
+		{action: "delete", wantIDs: []string{"a-pending", "a-pending-two", "a-approved", "a-rejected", "a-dismissed"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.action, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/alerts" {
+					http.NotFound(w, r)
+					return
+				}
+				q := r.URL.Query()
+				if q.Get("project_id") != "p1" || q.Get("decision_state") != tc.wantFilter || q.Get("processing_state") != "" {
+					t.Errorf("%s picker query = %s", tc.action, r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				if tc.wantFilter == "pending" {
+					_, _ = io.WriteString(w, pendingAlerts)
+					return
+				}
+				_, _ = io.WriteString(w, allAlerts)
+			})
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, "/alerts "+tc.action)
+			if !m.selectorActive {
+				t.Fatalf("%s picker did not open:\n%s", tc.action, transcript(m))
+			}
+			gotIDs := make([]string, 0, len(m.selectorItems))
+			for _, item := range m.selectorItems {
+				gotIDs = append(gotIDs, item.ref)
+			}
+			if !reflect.DeepEqual(gotIDs, tc.wantIDs) {
+				t.Fatalf("%s picker IDs = %v, want %v", tc.action, gotIDs, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func TestAlertDecisionPickerEmptyPendingState(t *testing.T) {
+	for _, action := range []string{"approve", "reject", "dismiss"} {
+		t.Run(action, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/alerts" {
+					http.NotFound(w, r)
+					return
+				}
+				if q := r.URL.Query(); q.Get("project_id") != "p1" || q.Get("decision_state") != "pending" {
+					t.Errorf("%s empty picker query = %s", action, r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"></div>`)
+			})
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, "/alerts "+action)
+			out := stripANSI(transcript(m))
+			if m.selectorActive || !strings.Contains(out, "no pending alerts in the current project") {
+				t.Fatalf("%s empty pending result = active:%t output:%s", action, m.selectorActive, out)
+			}
+		})
+	}
+}
+
+func TestAlertDecisionRaceAndExplicitReferenceErrorsRemainVisible(t *testing.T) {
+	const pendingAlerts = `<div data-alert-id="a-pending" data-alert-scroll-anchor="a-pending" data-alert-decision-state="pending"><p class="font-semibold">Pending alert</p></div>
+		<div data-alert-id="a-pending-two" data-alert-scroll-anchor="a-pending-two" data-alert-decision-state="pending"><p class="font-semibold">Another pending alert</p></div>`
+	tests := []struct {
+		name       string
+		line       string
+		wantFilter string
+		pick       bool
+	}{
+		{name: "picker race", line: "/alerts approve", wantFilter: "pending", pick: true},
+		{name: "explicit reference", line: "/alerts approve a-pending"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					q := r.URL.Query()
+					if q.Get("project_id") != "p1" || q.Get("decision_state") != tc.wantFilter {
+						t.Errorf("alert lookup query = %s", r.URL.RequestURI())
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, pendingAlerts)
+				case r.Method == http.MethodPost && r.URL.Path == "/alerts/a-pending/approve":
+					http.Error(w, `{"error":"alert is no longer pending"}`, http.StatusConflict)
+				default:
+					http.NotFound(w, r)
+				}
+			})
+			m.selectedID, m.selectedName = "p1", "demo"
+			m = runLine(t, m, tc.line)
+			if tc.pick {
+				if !m.selectorActive || len(m.selectorItems) != 2 || m.selectorItems[0].ref != "a-pending" {
+					t.Fatalf("pending picker state = active:%t items:%+v", m.selectorActive, m.selectorItems)
+				}
+				m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+			}
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, "no longer pending") || strings.Contains(out, "approve: Pending alert") {
+				t.Fatalf("backend race error was hidden or reported as success:\n%s", out)
+			}
+		})
+	}
+}
+
 func TestAlertPickerLoadsLaterPageInSourceOrder(t *testing.T) {
 	var requests int
 	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
