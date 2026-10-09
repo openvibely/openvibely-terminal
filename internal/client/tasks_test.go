@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2062,4 +2063,226 @@ func TestSteerTaskThreadQueuedInputRejectsStaleTurnWithoutChangingQueuedInput(t 
 	if input.InputMode != "queued" || input.InputStatus != "pending" {
 		t.Fatalf("stale input = %#v, want pending queued input", input)
 	}
+}
+
+func TestSteerTaskThreadQueuedInputValidatesStaleScopeAndServerOutcomes(t *testing.T) {
+	const pending = `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`
+	const active = `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
+	const steering = `<div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="steering"></div>`
+	tests := []struct {
+		name             string
+		pendingBody      string
+		threadBody       string
+		steeringBody     string
+		steeringStatus   int
+		queuedAtMutation bool
+		wantError        string
+		wantPosts        int32
+	}{
+		{name: "valid queued input", pendingBody: pending, threadBody: active, steeringBody: steering, steeringStatus: http.StatusOK, queuedAtMutation: true, wantPosts: 1},
+		{name: "missing stale input", pendingBody: `<div id="pending-thread-inputs" data-task-id="task-1"></div>`, threadBody: active, wantError: "missing, stale, or already applied"},
+		{name: "input already steering", pendingBody: `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="steering"></div></div>`, threadBody: active, wantError: "not a queued follow-up"},
+		{name: "no active turn", pendingBody: pending, threadBody: `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="completed"></div>`, wantError: "no active response"},
+		{name: "foreign task input", pendingBody: `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-foreign" data-input-mode="queued"></div></div>`, threadBody: active, wantError: "not owned by task"},
+		{name: "foreign project input", pendingBody: `<div id="pending-thread-inputs" data-task-id="task-1" data-project-id="project-foreign"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`, threadBody: active, wantError: "not selected project"},
+		{name: "foreign project mutation response", pendingBody: pending, threadBody: active, steeringBody: `<div data-thread-input-id="q1" data-task-id="task-1" data-project-id="project-foreign" data-input-mode="steering"></div>`, steeringStatus: http.StatusOK, queuedAtMutation: true, wantError: "another project", wantPosts: 1},
+		{name: "active turn conflict", pendingBody: pending, threadBody: active, steeringStatus: http.StatusConflict, steeringBody: `{"error":"active turn changed"}`, queuedAtMutation: true, wantError: "409", wantPosts: 1},
+		{name: "input became non-queued before mutation", pendingBody: pending, threadBody: active, steeringStatus: http.StatusConflict, steeringBody: `{"error":"input is no longer queued"}`, wantError: "no longer queued", wantPosts: 1},
+		{name: "server failure", pendingBody: pending, threadBody: active, steeringStatus: http.StatusBadGateway, steeringBody: `{"error":"steering unavailable"}`, queuedAtMutation: true, wantError: "502", wantPosts: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gets, posts atomic.Int32
+			queued := atomic.Bool{}
+			queued.Store(tc.queuedAtMutation)
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("project_id"); got != "project-2" {
+					t.Errorf("request %s project_id = %q, want project-2", r.URL.Path, got)
+				}
+				switch r.URL.Path {
+				case "/tasks/task-1/thread/pending-inputs":
+					gets.Add(1)
+					_, _ = io.WriteString(w, tc.pendingBody)
+				case "/tasks/task-1/thread":
+					gets.Add(1)
+					_, _ = io.WriteString(w, tc.threadBody)
+				case "/tasks/task-1/thread/queued/q1/steer":
+					posts.Add(1)
+					if r.Method != http.MethodPost {
+						t.Errorf("mutation method = %s, want POST", r.Method)
+					}
+					if err := r.ParseForm(); err != nil {
+						t.Errorf("parse mutation form: %v", err)
+					}
+					if got := r.PostForm.Get("expected_turn_id"); got != "turn-1" {
+						t.Errorf("expected_turn_id = %q, want observed turn-1", got)
+					}
+					if !queued.Load() && tc.name == "input became non-queued before mutation" {
+						w.WriteHeader(http.StatusConflict)
+						_, _ = io.WriteString(w, tc.steeringBody)
+						return
+					}
+					if tc.steeringStatus != 0 {
+						w.WriteHeader(tc.steeringStatus)
+					}
+					_, _ = io.WriteString(w, tc.steeringBody)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+			}))
+
+			if _, err := c.SteerTaskThreadQueuedInputForProject(context.Background(), "task-1", "project-2", "q1"); tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantError)
+				}
+			} else if err != nil {
+				t.Fatalf("valid queued steer failed: %v", err)
+			}
+			if got := posts.Load(); got != tc.wantPosts {
+				t.Fatalf("mutation requests = %d, want %d", got, tc.wantPosts)
+			}
+			if got := gets.Load(); got != 2 {
+				t.Fatalf("independent read requests = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func TestSteerTaskThreadQueuedInputLatencyComparison(t *testing.T) {
+	const trials = 30
+	endpointDelay := 150 * time.Millisecond
+	const taskID, projectID, inputID = "task-1", "project-2", "q1"
+	pendingBody := `<div id="pending-thread-inputs" data-task-id="task-1"><div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"></div></div>`
+	threadBody := `<div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div>`
+	steeringBody := `<div data-thread-input-id="q1" data-task-id="task-1" data-input-mode="steering"></div>`
+	var missing atomic.Bool
+	var requests, responseBytes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(endpointDelay)
+		requests.Add(1)
+		if got := r.URL.Query().Get("project_id"); got != projectID {
+			t.Errorf("request %s project_id = %q, want %q", r.URL.Path, got, projectID)
+		}
+		var body string
+		switch r.URL.Path {
+		case "/tasks/task-1/thread/pending-inputs":
+			body = pendingBody
+			if missing.Load() {
+				body = `<div id="pending-thread-inputs" data-task-id="task-1"></div>`
+			}
+		case "/tasks/task-1/thread":
+			body = threadBody
+		case "/tasks/task-1/thread/queued/q1/steer":
+			if r.Method != http.MethodPost {
+				t.Errorf("steer method = %s, want POST", r.Method)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse steer form: %v", err)
+			}
+			if got := r.PostForm.Get("expected_turn_id"); got != "turn-1" {
+				t.Errorf("expected_turn_id = %q, want turn-1", got)
+			}
+			body = steeringBody
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		n, err := io.WriteString(w, body)
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+		responseBytes.Add(int64(n))
+	}))
+	defer server.Close()
+	c, err := New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sequential := make([]time.Duration, 0, trials)
+	optimized := make([]time.Duration, 0, trials)
+	var sequentialRequestTotal, optimizedRequestTotal int64
+	var sequentialByteTotal, optimizedByteTotal int64
+	for i := 0; i < trials; i++ {
+		requests.Store(0)
+		responseBytes.Store(0)
+		start := time.Now()
+		if _, err := steerQueuedTaskThreadInputSequentialForTest(context.Background(), c, taskID, projectID, inputID); err != nil {
+			t.Fatalf("sequential trial %d: %v", i+1, err)
+		}
+		sequential = append(sequential, time.Since(start))
+		sequentialRequestTotal += requests.Swap(0)
+		sequentialByteTotal += responseBytes.Swap(0)
+
+		start = time.Now()
+		if _, err := c.SteerTaskThreadQueuedInputForProject(context.Background(), taskID, projectID, inputID); err != nil {
+			t.Fatalf("optimized trial %d: %v", i+1, err)
+		}
+		optimized = append(optimized, time.Since(start))
+		optimizedRequestTotal += requests.Swap(0)
+		optimizedByteTotal += responseBytes.Swap(0)
+	}
+	seqMedian, seqP95 := durationMedianAndP95(sequential)
+	optMedian, optP95 := durationMedianAndP95(optimized)
+	improvement := 1 - float64(optP95)/float64(seqP95)
+	t.Logf("valid flow fixed endpoint delay=%s trials=%d sequential median=%s p95=%s optimized median=%s p95=%s p95 improvement=%.1f%%", endpointDelay, trials, seqMedian, seqP95, optMedian, optP95, improvement*100)
+	t.Logf("valid flow request count per trial: sequential=%d optimized=%d (optimized reads overlap); response bytes per trial: sequential=%d optimized=%d", sequentialRequestTotal/int64(trials), optimizedRequestTotal/int64(trials), sequentialByteTotal/int64(trials), optimizedByteTotal/int64(trials))
+	if improvement < 0.25 {
+		t.Fatalf("p95 improvement = %.1f%%, want at least 25%%", improvement*100)
+	}
+
+	// A stale input exits before the thread read in the original flow. Parallel
+	// validation performs that independent read too; record the request and byte
+	// cost while confirming neither flow reaches the mutation endpoint.
+	missing.Store(true)
+	requests.Store(0)
+	responseBytes.Store(0)
+	start := time.Now()
+	if _, err := steerQueuedTaskThreadInputSequentialForTest(context.Background(), c, taskID, projectID, inputID); err == nil {
+		t.Fatal("sequential stale-input flow unexpectedly succeeded")
+	}
+	staleSequentialLatency := time.Since(start)
+	staleSequentialRequests := requests.Swap(0)
+	staleSequentialBytes := responseBytes.Swap(0)
+	start = time.Now()
+	if _, err := c.SteerTaskThreadQueuedInputForProject(context.Background(), taskID, projectID, inputID); err == nil {
+		t.Fatal("optimized stale-input flow unexpectedly succeeded")
+	}
+	staleOptimizedLatency := time.Since(start)
+	staleOptimizedRequests := requests.Swap(0)
+	staleOptimizedBytes := responseBytes.Swap(0)
+	t.Logf("stale input extra read cost at endpoint delay=%s: sequential latency=%s requests=%d response_bytes=%d; optimized latency=%s requests=%d response_bytes=%d", endpointDelay, staleSequentialLatency, staleSequentialRequests, staleSequentialBytes, staleOptimizedLatency, staleOptimizedRequests, staleOptimizedBytes)
+	if staleSequentialRequests != 1 || staleOptimizedRequests != 2 || staleOptimizedBytes <= staleSequentialBytes {
+		t.Fatalf("stale read cost: sequential requests/bytes=%d/%d optimized=%d/%d", staleSequentialRequests, staleSequentialBytes, staleOptimizedRequests, staleOptimizedBytes)
+	}
+}
+
+func steerQueuedTaskThreadInputSequentialForTest(ctx context.Context, c *Client, taskID, projectID, inputID string) (*TaskThreadSteerAccepted, error) {
+	input, err := c.pendingTaskThreadInput(ctx, taskID, projectID, inputID)
+	if err != nil {
+		return nil, err
+	}
+	if input.InputMode != "queued" || input.InputStatus != "pending" {
+		return nil, fmt.Errorf("pending input %q is not a queued follow-up", input.ID)
+	}
+	state, err := c.GetTaskThreadStateForProject(ctx, taskID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return c.steerQueuedTaskThreadInputAfterReads(ctx, taskID, projectID, input, state)
+}
+
+func durationMedianAndP95(samples []time.Duration) (time.Duration, time.Duration) {
+	sorted := append([]time.Duration(nil), samples...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	if len(sorted) == 0 {
+		return 0, 0
+	}
+	median := sorted[len(sorted)/2]
+	if len(sorted)%2 == 0 {
+		median = (sorted[len(sorted)/2-1] + sorted[len(sorted)/2]) / 2
+	}
+	p95Index := (95*len(sorted)+99)/100 - 1
+	return median, sorted[p95Index]
 }

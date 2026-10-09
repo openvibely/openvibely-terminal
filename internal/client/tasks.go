@@ -1582,19 +1582,50 @@ func (c *Client) CancelTaskThreadInputForProject(ctx context.Context, taskID, pr
 }
 
 // SteerTaskThreadQueuedInputForProject converts one queued follow-up to
-// steering. The active turn is read immediately before the mutation and sent
-// as expected_turn_id; the backend enforces this identity atomically with conversion.
+// steering. The pending-input and active-turn reads are independent, so they
+// run concurrently; the observed active turn is sent as expected_turn_id and
+// the backend enforces that identity atomically with conversion.
 func (c *Client) SteerTaskThreadQueuedInputForProject(ctx context.Context, taskID, projectID, inputID string) (*TaskThreadSteerAccepted, error) {
-	input, err := c.pendingTaskThreadInput(ctx, taskID, projectID, inputID)
-	if err != nil {
-		return nil, err
+	taskID = strings.TrimSpace(taskID)
+	projectID = strings.TrimSpace(projectID)
+	inputID = strings.TrimSpace(inputID)
+	if taskID == "" {
+		return nil, fmt.Errorf("task ID is required for pending task-thread inputs")
 	}
+	if projectID == "" {
+		return nil, fmt.Errorf("project ID is required for pending task-thread inputs")
+	}
+	if inputID == "" {
+		return nil, fmt.Errorf("pending input ID is required")
+	}
+
+	var input TaskThreadPendingInput
+	var inputErr error
+	var state *TaskThreadState
+	var stateErr error
+	var reads sync.WaitGroup
+	reads.Add(2)
+	go func() {
+		defer reads.Done()
+		input, inputErr = c.pendingTaskThreadInput(ctx, taskID, projectID, inputID)
+	}()
+	go func() {
+		defer reads.Done()
+		state, stateErr = c.GetTaskThreadStateForProject(ctx, taskID, projectID)
+	}()
+	reads.Wait()
+	if inputErr != nil {
+		return nil, inputErr
+	}
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	return c.steerQueuedTaskThreadInputAfterReads(ctx, taskID, projectID, input, state)
+}
+
+func (c *Client) steerQueuedTaskThreadInputAfterReads(ctx context.Context, taskID, projectID string, input TaskThreadPendingInput, state *TaskThreadState) (*TaskThreadSteerAccepted, error) {
 	if input.InputMode != "queued" || input.InputStatus != "pending" {
 		return nil, fmt.Errorf("pending input %q is not a queued follow-up", input.ID)
-	}
-	state, err := c.GetTaskThreadStateForProject(ctx, taskID, projectID)
-	if err != nil {
-		return nil, err
 	}
 	if strings.TrimSpace(state.ActiveTurnID) == "" {
 		return nil, fmt.Errorf("no active response for queued input %q; it remains queued", input.ID)
@@ -1620,6 +1651,9 @@ func (c *Client) SteerTaskThreadQueuedInputForProject(ctx context.Context, taskI
 		}
 		if rowTask != taskID {
 			return nil, fmt.Errorf("queued input %q steering response belongs to another task", input.ID)
+		}
+		if rowProject := strings.TrimSpace(attr(node, "data-project-id")); rowProject != "" && rowProject != projectID {
+			return nil, fmt.Errorf("queued input %q steering response belongs to another project", input.ID)
 		}
 	}
 	if steeringRows != 1 {
