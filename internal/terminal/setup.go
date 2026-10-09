@@ -697,12 +697,13 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 		}
 	}
 	var b strings.Builder
-	if next, reachable, err := probeSetupHealth(ctx, c); err != nil {
+	probe, err := probeSetupHealth(ctx, c)
+	if err != nil {
 		return "", err
-	} else if reachable {
+	} else if probe.reachable {
 		fmt.Fprintf(&b, "Local backend is already running at %s; skipping installer and start process.\n", serverURLDisplay(c.BaseURL()))
 		b.WriteString("Backend health check succeeded.\n")
-		b.WriteString(next)
+		b.WriteString(probe.nextSteps)
 		return strings.TrimRight(b.String(), "\n"), nil
 	}
 	if check.PortConflict != "" {
@@ -843,6 +844,12 @@ func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setup
 	return process, nil
 }
 
+type setupHealthProbeResult struct {
+	nextSteps string
+	reachable bool
+	probeErr  error
+}
+
 func mergeProcessEnvironment(environment, overrides []string) []string {
 	merged := append([]string(nil), environment...)
 	for _, override := range overrides {
@@ -862,20 +869,20 @@ func mergeProcessEnvironment(environment, overrides []string) []string {
 	return merged
 }
 
-func probeSetupHealth(ctx context.Context, c *client.Client) (string, bool, error) {
+func probeSetupHealth(ctx context.Context, c *client.Client) (setupHealthProbeResult, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	_, err := c.GetGlobalCapacity(probeCtx)
 	if err == nil {
-		return setupHealthNextSteps(c, false), true, nil
+		return setupHealthProbeResult{nextSteps: setupHealthNextSteps(c, false), reachable: true}, nil
 	}
 	if client.IsAuthRequired(err) {
-		return setupHealthNextSteps(c, true), true, nil
+		return setupHealthProbeResult{nextSteps: setupHealthNextSteps(c, true), reachable: true}, nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return "", false, ctxErr
+		return setupHealthProbeResult{}, ctxErr
 	}
-	return "", false, nil
+	return setupHealthProbeResult{probeErr: err}, nil
 }
 
 func setupHealthNextSteps(c *client.Client, authRequired bool) string {
@@ -899,16 +906,14 @@ func waitForSetupHealth(ctx context.Context, c *client.Client, timeout, interval
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		_, err := c.GetGlobalCapacity(probeCtx)
-		cancel()
-		if err == nil {
-			return setupHealthNextSteps(c, false), nil
+		probe, err := probeSetupHealth(ctx, c)
+		if err != nil {
+			return "", err
 		}
-		if client.IsAuthRequired(err) {
-			return setupHealthNextSteps(c, true), nil
+		if probe.reachable {
+			return probe.nextSteps, nil
 		}
-		lastErr = err
+		lastErr = probe.probeErr
 		if !time.Now().Before(deadline) {
 			return "", fmt.Errorf("backend did not become healthy at %s: %s", serverURLDisplay(c.BaseURL()), safeConnectionDiagnostic(lastErr))
 		}
