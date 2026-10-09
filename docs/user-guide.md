@@ -259,7 +259,7 @@ backend default. For example:
 /schedule add "Continue weekly report" 2026-01-22T08:00 weekly clear-context false
 ```
 
-Existing schedules can be changed with `/schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false`.
+Existing schedules can be changed with `/schedule edit a1b2c3 run-at 2026-01-22T10:30 repeat weekly interval 2 clear-context false`. Schedule listing includes each project schedule even when its next run is outside the current calendar week; the default view shows the first 100 entries, and `schedule list --all` shows the complete catalog.
 
 Tasks, alerts, skills, models, agents and schedules can be referenced by **ID
 prefix or by a substring of their name/title** — `/tasks run refactor` works.
@@ -1244,7 +1244,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1`; exact `data-schedule-next-run` values are preferred, and schedule-tab detail is read only when a card needs exact `Next:` timing |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
-| Schedules | `POST /api/schedules/:id/toggle` |
+| Schedules | Project schedule listing reads `GET /api/tasks/reference-catalog?project_id=...` and each task's `GET /tasks/:id?tab=schedules&project_id=...` catalog; `POST /api/schedules/:id/toggle` |
 | Personality | `POST /personality/custom`, `GET/PUT/DELETE /personality/custom/:key`, `DELETE /personality/custom/bulk` (JSON custom CRUD and guarded bulk deletion); `/personality` remains the scoped HTML list |
 | Auth | `POST /login`, `GET /auth/me` |
 | Events | `GET /events/live` (SSE) |
