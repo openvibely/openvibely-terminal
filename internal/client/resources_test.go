@@ -2527,7 +2527,27 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	  <div data-task-id="t1" data-schedule-id="s2" data-schedule-enabled="true"><div class="font-semibold truncate leading-tight">Weekly report</div><div class="opacity-60 leading-tight">weekly mon</div></div>
 	  <div data-task-id="t2" data-schedule-id="s3"><div class="font-semibold truncate leading-tight">Monthly cleanup</div><div class="opacity-60 leading-tight">monthly 03:00</div></div>
 	</div>`
-	c := htmlServer(t, page)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/schedule":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, page)
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t1","project_id":"p1"},{"id":"t2","project_id":"p1"}]}`)
+		case "/tasks/t1", "/tasks/t2":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div id="task-detail-content"></div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	entries, summary, err := c.GetSchedule(context.Background(), "p1")
 	if err != nil {
@@ -2559,6 +2579,58 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	}
 	if summary == "" {
 		t.Error("expected summary text from #schedule-content")
+	}
+}
+
+func TestGetScheduleIncludesFutureSchedulesAndDeduplicatesRecurringOccurrences(t *testing.T) {
+	const futureRun = "2026-02-15T09:30:00Z"
+	var defaultWeekRequests, taskScheduleRequests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/schedule":
+			defaultWeekRequests++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div id="schedule-content"></div>`)
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t1","project_id":"p1","title":"Later week schedule"}]}`)
+		case "/tasks/t1":
+			taskScheduleRequests++
+			if r.URL.Query().Get("tab") != "schedules" || r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("task schedule request = %s, want schedules tab scoped to p1", r.URL.RequestURI())
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div id="task-detail-content">
+				<div id="schedule-card-recurring" data-schedule-next-run="2026-01-26T08:00:00Z"><div data-schedule-id="recurring" data-schedule-enabled="true"><div class="font-semibold">Recurring report</div><span>Next: 2026-01-26 8:00 AM</span></div></div>
+				<div id="schedule-card-recurring-occurrence" data-schedule-next-run="2026-02-02T08:00:00Z"><div data-schedule-id="recurring" data-schedule-enabled="true"><div class="font-semibold">Recurring report</div><span>Next: 2026-02-02 8:00 AM</span></div></div>
+				<div id="schedule-card-future" data-schedule-next-run="`+futureRun+`"><div data-schedule-id="future" data-schedule-enabled="true"><span>Next: 2026-02-15 9:30 AM</span></div></div>
+			</div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, _, err := c.GetSchedule(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaultWeekRequests != 1 || taskScheduleRequests != 1 {
+		t.Fatalf("requests: default week %d, task schedule tabs %d; want one each", defaultWeekRequests, taskScheduleRequests)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("schedule entries = %+v, want recurring ID once plus future schedule", entries)
+	}
+	if entries[0].ScheduleID != "recurring" || entries[1].ScheduleID != "future" {
+		t.Fatalf("schedule order/IDs = %+v", entries)
+	}
+	if entries[1].Name != "Later week schedule" || entries[1].NextRun == nil || entries[1].NextRun.Format(time.RFC3339) != futureRun {
+		t.Fatalf("future schedule entry = %+v, want next run %s", entries[1], futureRun)
 	}
 }
 
@@ -6938,8 +7010,8 @@ func TestGetPulseProjectionEnrichesImpreciseTaskDetailsConcurrently(t *testing.T
 	if peakInFlight <= 1 {
 		t.Fatalf("peak task detail concurrency = %d, want concurrent fallback", peakInFlight)
 	}
-	if peakInFlight > pulseScheduleDetailConcurrencyLimit {
-		t.Fatalf("peak task detail concurrency = %d, want cap %d", peakInFlight, pulseScheduleDetailConcurrencyLimit)
+	if peakInFlight > scheduleDetailConcurrencyLimit {
+		t.Fatalf("peak task detail concurrency = %d, want cap %d", peakInFlight, scheduleDetailConcurrencyLimit)
 	}
 }
 

@@ -108,6 +108,9 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 				_, _ = w.Write([]byte(compactTaskCatalogForProjectTest(board, projectID)))
 				return
 			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tasks":[]}`))
+			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/workers" {
 			w.WriteHeader(http.StatusNotFound)
@@ -6742,6 +6745,61 @@ func TestCLIScheduleListBoundsPlainOutputAndPreservesFullModes(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleCatalogFindsLaterWeekSchedulesForListsAndReferences(t *testing.T) {
+	const taskCatalog = `{"tasks":[{"id":"future-task","project_id":"p1","title":"Later week schedule"}]}`
+	const taskDetail = `<div id="task-detail-content" data-task-id="future-task" data-project-id="p1"><h2 class="font-bold">Later week schedule</h2>
+		<div id="schedule-card-s-later" data-schedule-next-run="2026-02-15T09:30:00Z"><div data-schedule-id="s-later" data-schedule-enabled="true"><span>Next: 2026-02-15 9:30 AM</span></div></div>
+	</div>`
+	newClient := func(t *testing.T) *client.Client {
+		t.Helper()
+		c, _ := cliServer(t, map[string]string{
+			"/api/projects":                cliProjects,
+			"/api/tasks/reference-catalog": taskCatalog,
+			"/schedule":                    `<div id="schedule-content"></div>`,
+			"/tasks/future-task":           taskDetail,
+		})
+		return c
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(newClient(t), &out, "demo", []string{"schedule"}, false, false); err != nil {
+		t.Fatalf("plain schedule list: %v", err)
+	}
+	plain := stripANSI(out.String())
+	if !strings.Contains(plain, "s-later") || !strings.Contains(plain, "Later week schedule") {
+		t.Fatalf("plain list omitted schedule outside the default week:\n%s", plain)
+	}
+
+	out.Reset()
+	if err := RunCLI(newClient(t), &out, "demo", []string{"schedule", "list", "--all"}, false, false); err != nil {
+		t.Fatalf("schedule list --all: %v", err)
+	}
+	all := stripANSI(out.String())
+	if !strings.Contains(all, "s-later") || !strings.Contains(all, "Later week schedule") {
+		t.Fatalf("--all omitted schedule outside the default week:\n%s", all)
+	}
+
+	out.Reset()
+	if err := RunCLI(newClient(t), &out, "demo", []string{"schedule"}, false, true); err != nil {
+		t.Fatalf("JSON schedule list: %v", err)
+	}
+	var entries []client.ScheduleEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &entries); err != nil {
+		t.Fatalf("schedule JSON = %q: %v", out.String(), err)
+	}
+	if len(entries) != 1 || entries[0].ScheduleID != "s-later" || entries[0].NextRun == nil {
+		t.Fatalf("JSON schedule catalog = %+v, want the future schedule with next_run", entries)
+	}
+
+	out.Reset()
+	if err := RunCLI(newClient(t), &out, "demo", []string{"schedule", "show", "Later week schedule"}, false, false); err != nil {
+		t.Fatalf("show future schedule: %v", err)
+	}
+	if shown := stripANSI(out.String()); !strings.Contains(shown, "Schedule ID: s-later") || !strings.Contains(shown, "Task: Later week schedule") {
+		t.Fatalf("schedule reference lookup missed the future schedule:\n%s", shown)
+	}
+}
+
 func TestCLIScheduleMutationJSONOutput(t *testing.T) {
 	const taskCatalog = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Nightly report","category":"active","status":"pending"}]}`
 	const initialScheduleHTML = `<div id="schedule-content"><div data-task-id="t-1" data-schedule-id="s-1"><div class="font-semibold">Nightly report</div><span>Runs daily</span></div></div>`
@@ -6800,6 +6858,9 @@ func TestCLIScheduleMutationJSONOutput(t *testing.T) {
 					return
 				}
 				_, _ = io.WriteString(w, initialHTML)
+			case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div id="task-detail-content"></div>`)
 			case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/schedule":
 				mutated = true
 				w.Header().Set("Content-Type", "text/html")

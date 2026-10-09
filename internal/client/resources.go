@@ -2198,8 +2198,9 @@ type ScheduleEntry struct {
 	Text               string     `json:"text"`
 	NextRun            *time.Time `json:"next_run,omitempty"`
 	Disabled           bool       `json:"-"`
-	NextRunPrecise     bool       `json:"-"`
-	NextRunExactSource bool       `json:"-"`
+	disabledKnown      bool
+	NextRunPrecise     bool `json:"-"`
+	NextRunExactSource bool `json:"-"`
 }
 
 // ScheduleConfig is the editable state of one existing schedule.
@@ -2301,9 +2302,181 @@ func scheduleCardRenderedClock(node *html.Node) (int, int, bool) {
 	return 0, 0, false
 }
 
-// GetSchedule scrapes the Schedule screen for a project.
+// GetSchedule returns the project schedule catalog. The calendar only renders
+// occurrences in its selected week, so it cannot serve as a complete schedule
+// list. Keep its summary and first-seen order, then fill the catalog from every
+// task's schedule tab, which contains all of that task's schedules regardless
+// of their next-run date.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
-	return c.getScheduleWeek(ctx, projectID, 0)
+	entries, summary, err := c.getScheduleWeek(ctx, projectID, 0)
+	if err != nil {
+		return nil, "", err
+	}
+	tasks, err := c.ListTaskReferences(ctx, projectID)
+	if err != nil {
+		return nil, "", err
+	}
+	byTask, err := c.getTaskScheduleEntries(ctx, projectID, tasks)
+	if err != nil {
+		return nil, "", err
+	}
+
+	positions := make(map[string]int, len(entries))
+	unique := make([]ScheduleEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ScheduleID == "" {
+			continue
+		}
+		if position, ok := positions[entry.ScheduleID]; ok {
+			unique[position] = mergeScheduleEntry(unique[position], entry)
+			continue
+		}
+		positions[entry.ScheduleID] = len(unique)
+		unique = append(unique, entry)
+	}
+	for _, task := range tasks {
+		for _, entry := range byTask[task.ID] {
+			if position, ok := positions[entry.ScheduleID]; ok {
+				unique[position] = mergeScheduleEntry(unique[position], entry)
+				continue
+			}
+			positions[entry.ScheduleID] = len(unique)
+			unique = append(unique, entry)
+		}
+	}
+	return unique, summary, nil
+}
+
+func mergeScheduleEntry(current, candidate ScheduleEntry) ScheduleEntry {
+	if candidate.TaskID != "" {
+		current.TaskID = candidate.TaskID
+	}
+	if candidate.Name != "" {
+		current.Name = candidate.Name
+	}
+	if candidate.Text != "" {
+		current.Text = candidate.Text
+	}
+	if candidate.NextRun != nil {
+		preferNextRun := current.NextRun == nil
+		if !preferNextRun {
+			switch {
+			case candidate.NextRunExactSource != current.NextRunExactSource:
+				preferNextRun = candidate.NextRunExactSource
+			case candidate.NextRunPrecise != current.NextRunPrecise:
+				preferNextRun = candidate.NextRunPrecise
+			default:
+				preferNextRun = candidate.NextRun.Before(*current.NextRun)
+			}
+		}
+		if preferNextRun {
+			current.NextRun = cloneTime(*candidate.NextRun)
+			current.NextRunPrecise = candidate.NextRunPrecise
+			current.NextRunExactSource = candidate.NextRunExactSource
+		}
+	}
+	if candidate.disabledKnown {
+		current.Disabled = candidate.Disabled
+		current.disabledKnown = true
+	}
+	return current
+}
+
+func (c *Client) getTaskScheduleEntries(ctx context.Context, projectID string, tasks []Task) (map[string][]ScheduleEntry, error) {
+	type taskScheduleResult struct {
+		entries []ScheduleEntry
+		err     error
+	}
+	workerCount := min(scheduleDetailConcurrencyLimit, len(tasks))
+	results := make([]taskScheduleResult, len(tasks))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				if err := ctx.Err(); err != nil {
+					results[idx].err = err
+					continue
+				}
+				results[idx].entries, results[idx].err = c.getTaskSchedules(ctx, projectID, tasks[idx].ID, tasks[idx].Title)
+			}
+		}()
+	}
+	for i := range tasks {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return nil, ctx.Err()
+		case jobs <- i:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := make(map[string][]ScheduleEntry, len(tasks))
+	for i, task := range tasks {
+		if results[i].err != nil {
+			return nil, fmt.Errorf("load schedules for task %q: %w", task.ID, results[i].err)
+		}
+		out[task.ID] = results[i].entries
+	}
+	return out, nil
+}
+
+func (c *Client) getTaskSchedules(ctx context.Context, projectID, taskID, taskTitle string) ([]ScheduleEntry, error) {
+	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("tab", "schedules", "project_id", projectID))
+	if err != nil {
+		return nil, err
+	}
+	cards := findAll(root, func(n *html.Node) bool {
+		return n.Type == html.ElementNode && n.Data == "div" && strings.HasPrefix(attr(n, "id"), "schedule-card-")
+	})
+	entries := make([]ScheduleEntry, 0, len(cards))
+	for _, card := range cards {
+		scheduleID := strings.TrimSpace(attr(card, "data-schedule-id"))
+		if scheduleID == "" {
+			if container := findNode(card, func(n *html.Node) bool { return attr(n, "data-schedule-id") != "" }); container != nil {
+				scheduleID = strings.TrimSpace(attr(container, "data-schedule-id"))
+			}
+		}
+		if scheduleID == "" {
+			scheduleID = strings.TrimPrefix(attr(card, "id"), "schedule-card-")
+		}
+		if scheduleID == "" {
+			continue
+		}
+		text := strings.TrimSpace(cardNodeText(card))
+		name := scheduleCardName(card)
+		if name == "" {
+			name = taskTitle
+			if name == "" {
+				name = text
+			} else if text != "" {
+				text = name + " — " + text
+			}
+		}
+		entry := ScheduleEntry{TaskID: taskID, ScheduleID: scheduleID, Name: name, Text: text}
+		if enabled := findNode(card, func(n *html.Node) bool { return hasHTMLAttr(n, "data-schedule-enabled") }); enabled != nil {
+			entry.Disabled = strings.EqualFold(strings.TrimSpace(attr(enabled, "data-schedule-enabled")), "false")
+			entry.disabledKnown = true
+		}
+		if nextRun, ok := parseTaskScheduleNextRun(card); ok {
+			entry.NextRun = cloneTime(nextRun)
+			entry.NextRunPrecise = true
+			entry.NextRunExactSource = true
+		} else if nextRun, precise, exact := scheduleCardNextRun(card); nextRun != nil {
+			entry.NextRun = nextRun
+			entry.NextRunPrecise = precise
+			entry.NextRunExactSource = exact
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }
 
 func (c *Client) getScheduleWeek(ctx context.Context, projectID string, weekOffset int) ([]ScheduleEntry, string, error) {
@@ -2335,7 +2508,7 @@ func (c *Client) getScheduleWeekEntries(ctx context.Context, projectID string, w
 			name = text
 		}
 		nextRun, nextRunPrecise, nextRunExactSource := scheduleCardNextRun(card.node)
-		out = append(out, ScheduleEntry{
+		entry := ScheduleEntry{
 			TaskID:             card.attrs["data-task-id"],
 			ScheduleID:         card.attrs["data-schedule-id"],
 			Name:               name,
@@ -2344,7 +2517,11 @@ func (c *Client) getScheduleWeekEntries(ctx context.Context, projectID string, w
 			Disabled:           strings.EqualFold(strings.TrimSpace(card.attrs["data-schedule-enabled"]), "false"),
 			NextRunPrecise:     nextRunPrecise,
 			NextRunExactSource: nextRunExactSource,
-		})
+		}
+		if _, ok := card.attrs["data-schedule-enabled"]; ok {
+			entry.disabledKnown = true
+		}
+		out = append(out, entry)
 	}
 	summary := ""
 	if n := findByID(root, "schedule-content"); n != nil {
@@ -4273,9 +4450,8 @@ func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*Pul
 	return out, nil
 }
 
-// pulseScheduleDetailConcurrencyLimit caps fallback task schedule detail reads used
-// only when schedule pages lack exact data-schedule-next-run timestamps.
-const pulseScheduleDetailConcurrencyLimit = 8
+// scheduleDetailConcurrencyLimit caps concurrent reads of task schedule tabs.
+const scheduleDetailConcurrencyLimit = 8
 
 func (c *Client) enrichPulseScheduleNextRuns(ctx context.Context, projectID string, schedules []ScheduleEntry) error {
 	taskSeen := map[string]bool{}
@@ -4324,8 +4500,8 @@ type pulseTaskScheduleNextRunResult struct {
 
 func (c *Client) getPulseTaskScheduleNextRunResults(ctx context.Context, projectID string, taskIDs []string) (map[string]pulseTaskScheduleNextRunResult, error) {
 	workerCount := len(taskIDs)
-	if workerCount > pulseScheduleDetailConcurrencyLimit {
-		workerCount = pulseScheduleDetailConcurrencyLimit
+	if workerCount > scheduleDetailConcurrencyLimit {
+		workerCount = scheduleDetailConcurrencyLimit
 	}
 	jobs := make(chan int)
 	results := make([]pulseTaskScheduleNextRunResult, len(taskIDs))
@@ -4366,21 +4542,14 @@ func (c *Client) getPulseTaskScheduleNextRunResults(ctx context.Context, project
 }
 
 func (c *Client) getTaskScheduleNextRuns(ctx context.Context, projectID, taskID string) (map[string]time.Time, error) {
-	root, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+query("tab", "schedules", "project_id", projectID))
+	entries, err := c.getTaskSchedules(ctx, projectID, taskID, "")
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]time.Time{}
-	cards := findAll(root, func(n *html.Node) bool {
-		return n.Type == html.ElementNode && n.Data == "div" && strings.HasPrefix(attr(n, "id"), "schedule-card-")
-	})
-	for _, card := range cards {
-		scheduleID := strings.TrimPrefix(attr(card, "id"), "schedule-card-")
-		if strings.TrimSpace(scheduleID) == "" {
-			continue
-		}
-		if nextRun, ok := parseTaskScheduleNextRun(card); ok {
-			out[scheduleID] = nextRun
+	out := make(map[string]time.Time, len(entries))
+	for _, entry := range entries {
+		if entry.NextRun != nil && entry.NextRunExactSource {
+			out[entry.ScheduleID] = *entry.NextRun
 		}
 	}
 	return out, nil

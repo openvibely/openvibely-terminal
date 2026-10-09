@@ -12895,7 +12895,18 @@ func TestChannelsMissingArgOpensSelector(t *testing.T) {
 // newModelFromHandler wires a Model to a custom HTTP handler.
 func newModelFromHandler(t *testing.T, h http.HandlerFunc) Model {
 	t.Helper()
-	srv := httptest.NewServer(h)
+	var schedulePageRead atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/schedule" {
+			schedulePageRead.Store(true)
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog" && schedulePageRead.Load() {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tasks":[]}`)
+			return
+		}
+		h(w, r)
+	}))
 	t.Cleanup(srv.Close)
 	c, err := client.New(srv.URL)
 	if err != nil {
