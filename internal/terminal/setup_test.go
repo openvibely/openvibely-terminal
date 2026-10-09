@@ -1426,6 +1426,137 @@ func withoutSetupStartScript(t *testing.T) {
 	t.Cleanup(func() { setupStat = oldStat })
 }
 
+func TestProbeSetupHealthTreatsHealthyAndAuthRequiredAsReachable(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		wantNext  string
+		wantLogin bool
+	}{
+		{name: "healthy", status: http.StatusOK, wantNext: "Next: run /projects"},
+		{name: "auth required", status: http.StatusUnauthorized, wantNext: "Next: run /login", wantLogin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if tc.status == http.StatusOK {
+					_, _ = w.Write([]byte(`{"max_workers":1,"available_slots":1,"has_capacity":true}`))
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			probe, err := probeSetupHealth(context.Background(), c)
+			if err != nil {
+				t.Fatalf("probeSetupHealth returned error: %v", err)
+			}
+			if !probe.reachable {
+				t.Fatal("probeSetupHealth reported backend unreachable")
+			}
+			if !strings.Contains(probe.nextSteps, tc.wantNext) {
+				t.Errorf("next steps missing %q:\n%s", tc.wantNext, probe.nextSteps)
+			}
+			if gotLogin := strings.Contains(probe.nextSteps, "authenticate"); gotLogin != tc.wantLogin {
+				t.Errorf("login guidance present = %t, want %t:\n%s", gotLogin, tc.wantLogin, probe.nextSteps)
+			}
+		})
+	}
+}
+
+func TestWaitForSetupHealthRetriesUntilBackendBecomesHealthy(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"max_workers":1,"available_slots":1,"has_capacity":true}`))
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	next, err := waitForSetupHealth(context.Background(), c, time.Second, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForSetupHealth failed after backend recovered: %v", err)
+	}
+	if got := requests.Load(); got < 2 {
+		t.Errorf("health probe made %d request(s), want an initial failure and a retry", got)
+	}
+	if !strings.Contains(next, "Next: run /projects") {
+		t.Errorf("healthy response returned unexpected next steps:\n%s", next)
+	}
+}
+
+func TestWaitForSetupHealthTimeoutRetainsEndpointDiagnostic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = waitForSetupHealth(context.Background(), c, 35*time.Millisecond, 5*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "backend did not become healthy") {
+		t.Fatalf("waitForSetupHealth error = %v, want health timeout", err)
+	}
+	for _, want := range []string{serverURLDisplay(c.BaseURL()), "server error (503)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("health timeout diagnostic missing %q: %v", want, err)
+		}
+	}
+}
+
+func TestWaitForSetupHealthCanBeCanceledDuringPolling(t *testing.T) {
+	firstProbe := make(chan struct{})
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			close(firstProbe)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := waitForSetupHealth(ctx, c, 3*time.Second, time.Second)
+		result <- err
+	}()
+	select {
+	case <-firstProbe:
+	case <-time.After(time.Second):
+		t.Fatal("health polling did not make its first request")
+	}
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("waitForSetupHealth after cancellation = %v, want context canceled", err)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("health polling did not stop promptly after cancellation")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("health polling made %d requests after cancellation, want 1", got)
+	}
+}
+
 func withFastSetupHealth(t *testing.T) {
 	t.Helper()
 	oldTimeout := setupHealthWaitTimeout
