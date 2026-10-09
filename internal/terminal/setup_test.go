@@ -308,6 +308,199 @@ func TestSetupCheckOnlyReportsMissingPiecesWithoutStateChanges(t *testing.T) {
 	}
 }
 
+func TestSetupUsesConfiguredNonDefaultPortAndHealthEndpoint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix PATH/script assumptions")
+	}
+	t.Setenv("PORT", "")
+	withFastSetupHealth(t)
+	startMarker, c := setupStartFixtureBecomesHealthyAfterStart(t)
+	endpoint, err := url.Parse(c.BaseURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuredPort := endpoint.Port()
+	if configuredPort == "" || configuredPort == "3001" {
+		t.Fatalf("fixture endpoint port = %q, want a non-default port", configuredPort)
+	}
+
+	var startedWith setupCommandSpec
+	oldStart := setupStartProcess
+	setupStartProcess = func(_ context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
+		startedWith = spec
+		if err := os.WriteFile(startMarker, []byte("started"), 0644); err != nil {
+			return nil, err
+		}
+		return &testSetupBackendProcess{stop: func() { _ = os.Remove(startMarker) }}, nil
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+
+	check := inspectLocalBackendSetup("linux", c.BaseURL(), false)
+	checkText := renderSetupCheck(check)
+	if got := environmentValue(check.Start.Env, "PORT"); got != configuredPort {
+		t.Fatalf("setup start PORT = %q, want configured endpoint port %q", got, configuredPort)
+	}
+	if !strings.Contains(checkText, "Effective local endpoint to start and check: "+serverURLDisplay(c.BaseURL())) {
+		t.Fatalf("setup check omitted effective endpoint:\n%s", checkText)
+	}
+	m := New(c)
+	next, cmd := m.runCommand("/setup start")
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("setup start did not wait for confirmation: cmd=%v pending=%v", cmd, m.pendingConfirmation != nil)
+	}
+	if !strings.Contains(m.pendingConfirmation.message, serverURLDisplay(c.BaseURL())) {
+		t.Fatalf("setup confirmation omitted effective endpoint %q:\n%s", c.BaseURL(), m.pendingConfirmation.message)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("setup start on configured non-default port failed: %v\n%s", err, out.String())
+	}
+	if got := environmentValue(startedWith.Env, "PORT"); got != configuredPort {
+		t.Fatalf("started backend PORT = %q, want configured endpoint port %q (env=%v)", got, configuredPort, startedWith.Env)
+	}
+	if !strings.Contains(out.String(), "Starting local backend with: openvibely at "+serverURLDisplay(c.BaseURL())) {
+		t.Fatalf("startup output omitted effective endpoint:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Backend health check succeeded") {
+		t.Fatalf("setup did not health-check the configured endpoint:\n%s", out.String())
+	}
+}
+
+func TestSetupBlocksConflictingProcessPort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix PATH/script assumptions")
+	}
+	t.Setenv("PORT", "3001")
+	t.Setenv("PATH", t.TempDir())
+	withoutSetupStartScript(t)
+	c, err := client.New("http://localhost:3002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var starts atomic.Int32
+	oldStart := setupStartProcess
+	setupStartProcess = func(context.Context, setupCommandSpec) (setupBackendProcess, error) {
+		starts.Add(1)
+		return &testSetupBackendProcess{}, nil
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+
+	var checkOut bytes.Buffer
+	if err := RunCLI(c, &checkOut, "", []string{"setup", "check"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"PORT=3001", "conflicts with local endpoint http://localhost:3002", "Unset PORT or set PORT=3002"} {
+		if !strings.Contains(checkOut.String(), want) {
+			t.Errorf("setup check missing process-port guidance %q:\n%s", want, checkOut.String())
+		}
+	}
+	var startOut bytes.Buffer
+	err = RunCLI(c, &startOut, "", []string{"setup", "start"}, true, false)
+	if err == nil || !strings.Contains(err.Error(), "local backend startup is blocked by a port mismatch") || !strings.Contains(err.Error(), "Unset PORT or set PORT=3002") {
+		t.Fatalf("setup start conflict error = %v, output:\n%s", err, startOut.String())
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("setup started %d backend processes despite conflicting PORT", got)
+	}
+}
+
+func TestSetupBlocksConflictingSourceCheckoutEnvPort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix shell start script assumptions")
+	}
+	t.Setenv("PORT", "")
+	t.Setenv("PATH", t.TempDir())
+	checkout := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkout, "start.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, ".env"), []byte("# backend port\nPORT=3001\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(checkout)
+	c, err := client.New("http://localhost:3002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := inspectLocalBackendSetup("linux", c.BaseURL(), false)
+	if check.Start.Display != "./start.sh" {
+		t.Fatalf("source checkout command = %q, want ./start.sh", check.Start.Display)
+	}
+	for _, want := range []string{"Source checkout .env sets PORT=3001", "Remove that PORT entry or set it to 3002"} {
+		if !strings.Contains(check.PortConflict, want) {
+			t.Errorf("source .env conflict missing %q: %s", want, check.PortConflict)
+		}
+	}
+	var starts atomic.Int32
+	oldStart := setupStartProcess
+	setupStartProcess = func(context.Context, setupCommandSpec) (setupBackendProcess, error) {
+		starts.Add(1)
+		return &testSetupBackendProcess{}, nil
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"setup", "bootstrap"}, true, false)
+	if err == nil || !strings.Contains(err.Error(), "Source checkout .env sets PORT=3001") || !strings.Contains(err.Error(), "set it to 3002") {
+		t.Fatalf("setup bootstrap .env conflict error = %v, output:\n%s", err, out.String())
+	}
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("setup started %d backend processes despite conflicting source .env PORT", got)
+	}
+}
+
+func TestSetupDefaultPortRemains3001(t *testing.T) {
+	t.Setenv("PORT", "")
+	withoutSetupStartScript(t)
+	oldLookPath := setupLookPath
+	setupLookPath = func(name string) (string, error) {
+		if name == "openvibely" {
+			return "/fake/openvibely", nil
+		}
+		return oldLookPath(name)
+	}
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+	check := inspectLocalBackendSetup("linux", "http://localhost:3001", false)
+	if check.PortConflict != "" {
+		t.Fatalf("default endpoint has port conflict: %s", check.PortConflict)
+	}
+	if got := environmentValue(check.Start.Env, "PORT"); got != "3001" {
+		t.Fatalf("default backend PORT = %q, want 3001", got)
+	}
+	if got := serverURLDisplay(check.Endpoint); got != "http://localhost:3001" {
+		t.Fatalf("default effective endpoint = %q, want http://localhost:3001", got)
+	}
+}
+
+func TestSetupRemoteURLStillRefusesLocalStartup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	t.Setenv("PORT", "")
+	startMarker := setupFakeBackendCommand(t)
+	c, err := client.New("https://ops.example:3002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"setup", "start"}, true, false)
+	if err == nil || !strings.Contains(err.Error(), "Configured backend is remote") {
+		t.Fatalf("remote setup start error = %v, output:\n%s", err, out.String())
+	}
+	assertFileMissing(t, startMarker)
+}
+
+func environmentValue(environment []string, name string) string {
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && key == name {
+			return value
+		}
+	}
+	return ""
+}
+
 func TestSetupStartRequiresConfirmationOrForce(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses Unix executable fixture")
@@ -566,6 +759,7 @@ func TestSetupBootstrapInstallCanProvideMissingStartCommand(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses Unix executable fixture")
 	}
+	t.Setenv("PORT", "")
 	withFastSetupHealth(t)
 	withoutSetupStartScript(t)
 
@@ -602,10 +796,12 @@ func TestSetupBootstrapInstallCanProvideMissingStartCommand(t *testing.T) {
 	t.Cleanup(func() { setupRunInstaller = oldInstaller })
 
 	oldStart := setupStartProcess
+	var startedPort string
 	setupStartProcess = func(_ context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
 		if spec.Name != backendPath {
 			return nil, fmt.Errorf("unexpected start command %q", spec.Name)
 		}
+		startedPort = environmentValue(spec.Env, "PORT")
 		if err := os.WriteFile(startMarker, []byte("started"), 0644); err != nil {
 			return nil, err
 		}
@@ -649,6 +845,13 @@ func TestSetupBootstrapInstallCanProvideMissingStartCommand(t *testing.T) {
 	}
 	assertFileContains(t, installMarker, "installed")
 	assertFileContains(t, startMarker, "started")
+	endpoint, err := url.Parse(c.BaseURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startedPort != endpoint.Port() {
+		t.Fatalf("installed backend PORT = %q, want endpoint port %q", startedPort, endpoint.Port())
+	}
 	for _, want := range []string{"Installer completed", "Starting local backend with: openvibely", "Backend health check succeeded"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("fresh bootstrap output missing %q:\n%s", want, out.String())
@@ -1123,6 +1326,7 @@ func withFastSetupHealth(t *testing.T) {
 
 func setupStartFixtureBecomesHealthyAfterStart(t *testing.T) (string, *client.Client) {
 	t.Helper()
+	t.Setenv("PORT", "")
 	startMarker := setupFakeBackendCommand(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/capacity/global" {
@@ -1146,6 +1350,7 @@ func setupStartFixtureBecomesHealthyAfterStart(t *testing.T) (string, *client.Cl
 
 func setupStartFixture(t *testing.T, healthStatus int) (string, *client.Client) {
 	t.Helper()
+	t.Setenv("PORT", "")
 	startMarker := setupFakeBackendCommand(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/capacity/global" {
@@ -1404,6 +1609,30 @@ func TestSetupHealthTimeoutInTUIStopsBackendProcess(t *testing.T) {
 	assertHelperProcessStopped(t, marker)
 }
 
+func TestStartLocalBackendProcessAppliesPortOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a Unix shell fixture")
+	}
+	t.Setenv("PORT", "3001")
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "port")
+	script := filepath.Join(dir, "backend.sh")
+	contents := "#!/bin/sh\nprintf '%s' \"$PORT\" > \"$1\"\nexec sleep 30\n"
+	if err := os.WriteFile(script, []byte(contents), 0755); err != nil {
+		t.Fatal(err)
+	}
+	process, err := startLocalBackendProcess(context.Background(), setupCommandSpec{
+		Name: script,
+		Args: []string{marker},
+		Env:  []string{"PORT=3002"},
+	})
+	if err != nil {
+		t.Fatalf("starting backend helper: %v", err)
+	}
+	defer process.Stop()
+	assertFileEventuallyContains(t, marker, "3002")
+}
+
 func TestStartLocalBackendRejectsCanceledContextAndReportsStartFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a Unix helper command")
@@ -1449,6 +1678,7 @@ const (
 
 func setupRealBackendFixture(t *testing.T, mode setupBackendHealthMode) (string, *client.Client, <-chan struct{}) {
 	t.Helper()
+	t.Setenv("PORT", "")
 	if runtime.GOOS == "windows" {
 		t.Skip("uses a Unix executable helper")
 	}

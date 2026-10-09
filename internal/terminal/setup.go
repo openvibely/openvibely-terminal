@@ -285,6 +285,7 @@ type setupOptions struct {
 type setupCommandSpec struct {
 	Name        string
 	Args        []string
+	Env         []string
 	Display     string
 	Description string
 	Found       bool
@@ -292,6 +293,8 @@ type setupCommandSpec struct {
 
 type setupCheckResult struct {
 	BaseURL       string
+	Endpoint      string
+	PortConflict  string
 	Platform      string
 	CWD           string
 	Remote        bool
@@ -343,6 +346,9 @@ func setupCommand() command {
 			if check.Remote {
 				return m, errCmd(check.RemoteMessage)
 			}
+			if check.PortConflict != "" {
+				return m, errCmd("local backend startup is blocked by a port mismatch:\n" + strings.Join(prefixLines(strings.Split(check.PortConflict, "\n"), "  - "), "\n"))
+			}
 			cmd := m.run("Setup", setupHealthWaitTimeout+30*time.Second, func(ctx context.Context) (string, error) {
 				return runSetupBootstrap(ctx, m.client, check, opts)
 			})
@@ -384,6 +390,9 @@ func setupInstallSuffix(opts setupOptions) string {
 func setupBlockingMissing(check setupCheckResult, opts setupOptions) []string {
 	if opts.action == "bootstrap" && opts.install {
 		var missing []string
+		if check.PortConflict != "" {
+			missing = append(missing, strings.Split(check.PortConflict, "\n")...)
+		}
 		for _, step := range check.InstallSteps {
 			if !step.Found {
 				missing = append(missing, step.Description)
@@ -398,6 +407,7 @@ func inspectLocalBackendSetup(platform, baseURL string, install bool) setupCheck
 	cwd, _ := os.Getwd()
 	check := setupCheckResult{
 		BaseURL:  baseURL,
+		Endpoint: serverURLDisplay(baseURL),
 		Platform: platform,
 		CWD:      sanitizeAutomationDetailText(cwd),
 		Install:  install,
@@ -418,7 +428,13 @@ func inspectLocalBackendSetup(platform, baseURL string, install bool) setupCheck
 		return check
 	}
 
+	port := localBackendPort(baseURL)
 	check.Start = findLocalBackendStartCommand(platform)
+	check.Start.Env = []string{"PORT=" + port}
+	check.PortConflict = localBackendPortConflict(platform, baseURL, port, check.Start)
+	if check.PortConflict != "" {
+		check.Missing = append(check.Missing, strings.Split(check.PortConflict, "\n")...)
+	}
 	if !check.Start.Found {
 		check.Missing = append(check.Missing, check.Start.Description)
 	}
@@ -443,6 +459,97 @@ func inspectLocalBackendSetup(platform, baseURL string, install bool) setupCheck
 		check.Disclosures = append(check.Disclosures, "filesystem: setup start/bootstrap without --install does not create files")
 	}
 	return check
+}
+
+func localBackendPortConflict(platform, baseURL, port string, start setupCommandSpec) string {
+	var conflicts []string
+	endpoint := serverURLDisplay(baseURL)
+	if configured, ok := os.LookupEnv("PORT"); ok && configured != "" && configured != port {
+		conflicts = append(conflicts, fmt.Sprintf("Process environment PORT=%s conflicts with local endpoint %s (port %s). %s.",
+			sanitizeAutomationDetailText(configured), endpoint, port, portEnvironmentFix(platform, port)))
+	}
+	if start.Display == "./start.sh" {
+		cwd, _ := os.Getwd()
+		envPath := filepath.Join(cwd, ".env")
+		configured, found, parseable, err := sourceCheckoutPort(envPath)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				conflicts = append(conflicts, fmt.Sprintf("Could not inspect source checkout .env for PORT (%s). Check the file and remove or set its PORT entry to %s before starting.",
+					sanitizeAutomationDetailText(err.Error()), port))
+			}
+		} else if found && (!parseable || configured != port) {
+			if parseable {
+				conflicts = append(conflicts, fmt.Sprintf("Source checkout .env sets PORT=%s, which conflicts with local endpoint %s (port %s). Remove that PORT entry or set it to %s before starting.",
+					sanitizeAutomationDetailText(configured), endpoint, port, port))
+			} else {
+				conflicts = append(conflicts, fmt.Sprintf("Source checkout .env defines PORT in a form setup cannot safely resolve, which may conflict with local endpoint %s (port %s). Replace it with PORT=%s or remove the PORT entry before starting.", endpoint, port, port))
+			}
+		}
+	}
+	return strings.Join(conflicts, "\n")
+}
+
+func portEnvironmentFix(platform, port string) string {
+	if platform == "windows" {
+		return fmt.Sprintf("Clear $env:PORT or set it to %s before running setup start/bootstrap", port)
+	}
+	return fmt.Sprintf("Unset PORT or set PORT=%s before running setup start/bootstrap", port)
+}
+
+// sourceCheckoutPort reads the simple PORT assignments supported by source
+// checkout .env files without sourcing shell code or running its side effects.
+// The upstream start script sources .env after choosing its inherited default,
+// so any PORT assignment there takes precedence over the terminal's child env.
+func sourceCheckoutPort(path string) (value string, found, parseable bool, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, false, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		assignment := strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		key, rawValue, ok := strings.Cut(assignment, "=")
+		if !ok || strings.TrimSpace(key) != "PORT" {
+			continue
+		}
+		found = true
+		value, parseable = parseStaticShellAssignmentValue(strings.TrimSpace(rawValue))
+	}
+	return value, found, parseable, nil
+}
+
+func parseStaticShellAssignmentValue(raw string) (string, bool) {
+	if raw == "" {
+		return "", true
+	}
+	quote := raw[0]
+	if quote == '\'' || quote == '"' {
+		end := strings.IndexByte(raw[1:], quote)
+		if end < 0 {
+			return "", false
+		}
+		value := raw[1 : end+1]
+		tail := raw[end+2:]
+		remainder := strings.TrimSpace(tail)
+		commentAfterWhitespace := len(tail) != len(strings.TrimLeft(tail, " \t\r\n")) && strings.HasPrefix(remainder, "#")
+		if (quote == '"' && (strings.ContainsAny(value, "$`\\") || strings.Contains(value, "${"))) || (remainder != "" && !commentAfterWhitespace) {
+			return "", false
+		}
+		return value, true
+	}
+	if comment := strings.Index(raw, " #"); comment >= 0 {
+		raw = strings.TrimSpace(raw[:comment])
+	}
+	if strings.ContainsAny(raw, ";") {
+		return "", false
+	}
+	if strings.ContainsAny(raw, " \t\r\n'\"$`\\") {
+		return "", false
+	}
+	return raw, true
 }
 
 func findLocalBackendStartCommand(platform string) setupCommandSpec {
@@ -508,16 +615,28 @@ func renderSetupCheck(check setupCheckResult) string {
 		b.WriteString(check.RemoteMessage)
 		return strings.TrimRight(b.String(), "\n")
 	}
+	fmt.Fprintf(&b, "Effective local endpoint to start and check: %s\n", serverURLDisplay(check.Endpoint))
 	b.WriteString("\nLocal prerequisites\n")
 	writeSetupStep(&b, check.Start)
 	for _, step := range check.InstallSteps {
 		writeSetupStep(&b, step)
 	}
+	if check.PortConflict != "" {
+		b.WriteString("\nStatus: blocked by backend port configuration.\n")
+		for _, conflict := range strings.Split(check.PortConflict, "\n") {
+			fmt.Fprintf(&b, "  - %s\n", sanitizeAutomationDetailText(conflict))
+		}
+	}
 	if len(check.Missing) == 0 {
-		b.WriteString("\nStatus: ready for explicit setup start/bootstrap.\n")
+		if check.PortConflict == "" {
+			b.WriteString("\nStatus: ready for explicit setup start/bootstrap.\n")
+		}
 	} else {
-		b.WriteString("\nMissing\n")
+		b.WriteString("\nMissing prerequisites\n")
 		for _, missing := range check.Missing {
+			if check.PortConflict != "" && strings.Contains(check.PortConflict, missing) {
+				continue
+			}
 			fmt.Fprintf(&b, "  - %s\n", sanitizeAutomationDetailText(missing))
 		}
 	}
@@ -538,7 +657,7 @@ func writeSetupStep(b *strings.Builder, step setupCommandSpec) {
 
 func setupConfirmationMessage(check setupCheckResult, opts setupOptions) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Run setup %s%s for local backend %s? ", opts.action, setupInstallSuffix(opts), serverURLDisplay(check.BaseURL))
+	fmt.Fprintf(&b, "Run setup %s%s for local backend at %s? ", opts.action, setupInstallSuffix(opts), serverURLDisplay(check.Endpoint))
 	b.WriteString("Effects: ")
 	if opts.install {
 		b.WriteString("download and run the documented installer, which may create or replace backend files; ")
@@ -577,11 +696,12 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 		}
 		b.WriteString("Installer completed.\n")
 		check.Start = findLocalBackendStartCommand(check.Platform)
+		check.Start.Env = []string{"PORT=" + localBackendPort(check.BaseURL)}
 		if !check.Start.Found {
 			return b.String(), fmt.Errorf("setup bootstrap could not find a local backend start command after installer completed: %s", check.Start.Description)
 		}
 	}
-	fmt.Fprintf(&b, "\nStarting local backend with: %s\n", sanitizeAutomationDetailText(check.Start.Display))
+	fmt.Fprintf(&b, "\nStarting local backend with: %s at %s\n", sanitizeAutomationDetailText(check.Start.Display), serverURLDisplay(check.Endpoint))
 	process, err := setupStartProcess(ctx, check.Start)
 	if err != nil {
 		return b.String(), err
@@ -676,6 +796,9 @@ func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setup
 		name = filepath.Clean("./start.sh")
 	}
 	cmd := exec.Command(name, spec.Args...)
+	if len(spec.Env) > 0 {
+		cmd.Env = mergeProcessEnvironment(os.Environ(), spec.Env)
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting local backend: %w", err)
 	}
@@ -690,6 +813,25 @@ func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setup
 		return nil, err
 	}
 	return process, nil
+}
+
+func mergeProcessEnvironment(environment, overrides []string) []string {
+	merged := append([]string(nil), environment...)
+	for _, override := range overrides {
+		key, _, ok := strings.Cut(override, "=")
+		if !ok || key == "" {
+			continue
+		}
+		for i := 0; i < len(merged); i++ {
+			existingKey, _, hasValue := strings.Cut(merged[i], "=")
+			if hasValue && (existingKey == key || (runtime.GOOS == "windows" && strings.EqualFold(existingKey, key))) {
+				merged = append(merged[:i], merged[i+1:]...)
+				i--
+			}
+		}
+		merged = append(merged, override)
+	}
+	return merged
 }
 
 func probeSetupHealth(ctx context.Context, c *client.Client) (string, bool, error) {
