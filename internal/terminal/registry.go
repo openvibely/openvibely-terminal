@@ -4331,6 +4331,27 @@ type agentPluginCommandResult struct {
 	State  client.AgentPluginState          `json:"state"`
 }
 
+func agentPluginMutationResponse(ctx context.Context, c *client.Client, status string, result *client.AgentPluginInstallResult, plainRefreshFailure string) (string, error) {
+	state, err := c.GetAgentPluginState(ctx)
+	if err != nil {
+		if jsonMode {
+			response := map[string]any{
+				"status":        status,
+				"refresh_error": "saved; plugin state refresh failed",
+			}
+			if result != nil {
+				response["result"] = result
+			}
+			return marshalJSON(response)
+		}
+		return plainRefreshFailure, nil
+	}
+	if jsonMode {
+		return marshalJSON(agentPluginCommandResult{Status: status, Result: result, State: state})
+	}
+	return status + "\n\n" + renderAgentPlugins(state), nil
+}
+
 func agentPluginInstallResponseNotes(result client.AgentPluginInstallResult) []string {
 	var notes []string
 	if value := strings.TrimSpace(result.Warning); value != "" {
@@ -4605,17 +4626,7 @@ func agentsPluginMarketplacesCommand(m Model, c *client.Client, args []string) (
 			if err := act(ctx); err != nil {
 				return "", err
 			}
-			state, err := c.GetAgentPluginState(ctx)
-			if err != nil {
-				if jsonMode {
-					return marshalJSON(map[string]any{"status": status, "refresh_error": "saved; plugin state refresh failed"})
-				}
-				return status, nil
-			}
-			if jsonMode {
-				return marshalJSON(agentPluginCommandResult{Status: status, State: state})
-			}
-			return status + "\n\n" + renderAgentPlugins(state), nil
+			return agentPluginMutationResponse(ctx, c, status, nil, status)
 		})
 	}
 	def, ok := lookupAgentPluginAction(agentPluginMarketplaceActions, action)
@@ -4710,7 +4721,6 @@ func agentsPluginInstallCommand(m Model, c *client.Client, projectID string, arg
 			}
 			return status, fmt.Errorf("%s", status)
 		}
-		state, refreshErr := c.GetAgentPluginState(ctx)
 		status := "installed " + sanitizeAutomationDetailText(pluginID)
 		if agentID != "" {
 			if result.EnabledForAgent {
@@ -4722,16 +4732,8 @@ func agentsPluginInstallCommand(m Model, c *client.Client, projectID string, arg
 		for _, note := range agentPluginInstallResponseNotes(result) {
 			status += "; " + note
 		}
-		if jsonMode {
-			if refreshErr != nil {
-				return marshalJSON(map[string]any{"status": status, "result": result, "refresh_error": "saved; plugin state refresh failed"})
-			}
-			return marshalJSON(agentPluginCommandResult{Status: status, Result: &result, State: state})
-		}
-		if refreshErr != nil {
-			return status + " (saved; refresh failed)", nil
-		}
-		return status + "\n\n" + renderAgentPlugins(state), nil
+		refreshFailure := status + " (saved; refresh failed)"
+		return agentPluginMutationResponse(ctx, c, status, &result, refreshFailure)
 	})
 }
 
@@ -4765,18 +4767,8 @@ func agentsPluginUninstallCommand(m Model, c *client.Client, args []string) (Mod
 		if err := c.UninstallAgentPlugin(ctx, pluginID); err != nil {
 			return "", err
 		}
-		state, refreshErr := c.GetAgentPluginState(ctx)
 		status := "uninstalled " + sanitizeAutomationDetailText(pluginID)
-		if jsonMode {
-			if refreshErr != nil {
-				return marshalJSON(map[string]any{"status": status, "refresh_error": "saved; plugin state refresh failed"})
-			}
-			return marshalJSON(agentPluginCommandResult{Status: status, State: state})
-		}
-		if refreshErr != nil {
-			return status + " (saved; refresh failed)", nil
-		}
-		return status + "\n\n" + renderAgentPlugins(state), nil
+		return agentPluginMutationResponse(ctx, c, status, nil, status+" (saved; refresh failed)")
 	})
 	return confirmOr(m,
 		fmt.Sprintf("Uninstall plugin %q? This removes local plugin files. Type 'yes' to confirm or Esc to cancel.", sanitizeAutomationDetailText(pluginID)),
