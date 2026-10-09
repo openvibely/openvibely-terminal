@@ -572,6 +572,33 @@ func TestSetupStartReportsHealthyBackendWithoutStartingProcess(t *testing.T) {
 	}
 }
 
+func TestSetupStartUsesHealthyEndpointDespiteConflictingProcessPort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses Unix executable fixture")
+	}
+	startMarker, c := setupStartFixture(t, http.StatusOK)
+	endpoint, err := url.Parse(c.BaseURL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictingPort := "3001"
+	if endpoint.Port() == conflictingPort {
+		conflictingPort = "3002"
+	}
+	t.Setenv("PORT", conflictingPort)
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("setup start against healthy endpoint with conflicting PORT failed: %v\n%s", err, out.String())
+	}
+	assertFileMissing(t, startMarker)
+	for _, want := range []string{"already running", "Backend health check succeeded"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("healthy setup start output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestSetupStartReportsHealthyBackendWithoutStartPrerequisite(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses Unix executable fixture")
