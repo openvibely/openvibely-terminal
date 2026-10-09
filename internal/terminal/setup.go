@@ -346,9 +346,6 @@ func setupCommand() command {
 			if check.Remote {
 				return m, errCmd(check.RemoteMessage)
 			}
-			if check.PortConflict != "" {
-				return m, errCmd("local backend startup is blocked by a port mismatch:\n" + strings.Join(prefixLines(strings.Split(check.PortConflict, "\n"), "  - "), "\n"))
-			}
 			cmd := m.run("Setup", setupHealthWaitTimeout+30*time.Second, func(ctx context.Context) (string, error) {
 				return runSetupBootstrap(ctx, m.client, check, opts)
 			})
@@ -679,6 +676,9 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 		b.WriteString("Backend health check succeeded.\n")
 		b.WriteString(next)
 		return strings.TrimRight(b.String(), "\n"), nil
+	}
+	if check.PortConflict != "" {
+		return "", errors.New("local backend startup is blocked by a port mismatch:\n" + strings.Join(prefixLines(strings.Split(check.PortConflict, "\n"), "  - "), "\n"))
 	}
 	if missing := setupBlockingMissing(check, opts); len(missing) > 0 {
 		return "", errors.New("setup " + opts.action + " cannot continue:\n" + strings.Join(prefixLines(missing, "  - "), "\n") + "\nRun setup check for details.")
