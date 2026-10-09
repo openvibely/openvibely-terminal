@@ -800,14 +800,27 @@ func attachmentDeleteTarget(raw string) (string, string) {
 		return "", ""
 	}
 	rest := strings.TrimPrefix(u.Path, prefix)
-	if rest == "" || strings.Contains(rest, "/") {
+	if rest == "" || strings.Contains(rest, "/") || hasMalformedPathEscape(rest) {
 		return "", ""
 	}
-	id, err := url.PathUnescape(rest)
-	if err != nil {
-		return "", ""
+	return strings.TrimSpace(rest), strings.TrimSpace(u.Query().Get("project_id"))
+}
+
+func hasMalformedPathEscape(path string) bool {
+	for i := 0; i < len(path); i++ {
+		if path[i] != '%' {
+			continue
+		}
+		if i+2 >= len(path) || !isHexDigit(path[i+1]) || !isHexDigit(path[i+2]) {
+			return true
+		}
+		i += 2
 	}
-	return strings.TrimSpace(id), strings.TrimSpace(u.Query().Get("project_id"))
+	return false
+}
+
+func isHexDigit(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
 }
 
 func attachmentRow(control, list *html.Node) *html.Node {
