@@ -473,6 +473,93 @@ func TestSetupDefaultPortRemains3001(t *testing.T) {
 	}
 }
 
+func TestEffectiveLocalBackendEndpointPreservesExplicitPortsAndSchemes(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{input: "http://localhost", want: "http://localhost:3001"},
+		{input: "https://localhost", want: "https://localhost:443"},
+		{input: "http://localhost:3002", want: "http://localhost:3002"},
+		{input: "http://[::1]", want: "http://[::1]:3001"},
+		{input: "https://ops.example", want: "https://ops.example"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := effectiveLocalBackendEndpoint(tc.input); got != tc.want {
+				t.Fatalf("effectiveLocalBackendEndpoint(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetupPortlessLocalURLUsesEffectiveEndpointForHealthAndDisplay(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:3001")
+	if err != nil {
+		t.Skipf("cannot bind default local backend port 3001 for endpoint regression: %v", err)
+	}
+	var requests atomic.Int32
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/capacity/global" {
+			http.NotFound(w, r)
+			return
+		}
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"max_workers":1,"available_slots":1,"has_capacity":true}`)
+	})}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	t.Setenv("PORT", "3002")
+	t.Setenv("PATH", t.TempDir())
+	withoutSetupStartScript(t)
+	c, err := client.New("http://127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := inspectLocalBackendSetup("linux", c.BaseURL(), false)
+	const effectiveEndpoint = "http://127.0.0.1:3001"
+	if check.Endpoint != effectiveEndpoint {
+		t.Fatalf("effective endpoint = %q, want %q", check.Endpoint, effectiveEndpoint)
+	}
+	if got := environmentValue(check.Start.Env, "PORT"); got != "3001" {
+		t.Fatalf("backend PORT = %q, want 3001", got)
+	}
+	if !strings.Contains(renderSetupCheck(check), "Effective local endpoint to start and check: "+effectiveEndpoint) {
+		t.Fatalf("setup check did not display effective endpoint:\n%s", renderSetupCheck(check))
+	}
+	m := New(c)
+	next, cmd := m.runCommand("/setup start")
+	m = next.(Model)
+	if cmd != nil || m.pendingConfirmation == nil {
+		t.Fatalf("setup start did not wait for confirmation: cmd=%v pending=%v", cmd != nil, m.pendingConfirmation != nil)
+	}
+	if !strings.Contains(m.pendingConfirmation.message, effectiveEndpoint) {
+		t.Fatalf("setup confirmation omitted effective endpoint %q:\n%s", effectiveEndpoint, m.pendingConfirmation.message)
+	}
+
+	var starts atomic.Int32
+	oldStart := setupStartProcess
+	setupStartProcess = func(context.Context, setupCommandSpec) (setupBackendProcess, error) {
+		starts.Add(1)
+		return &testSetupBackendProcess{}, nil
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"setup", "start"}, true, false); err != nil {
+		t.Fatalf("setup against already-running default endpoint failed: %v\n%s", err, out.String())
+	}
+	if starts.Load() != 0 {
+		t.Fatalf("setup started a backend process although %s was healthy", effectiveEndpoint)
+	}
+	if requests.Load() == 0 {
+		t.Fatalf("setup did not health-check effective endpoint %s", effectiveEndpoint)
+	}
+	if !strings.Contains(out.String(), "already running at "+effectiveEndpoint) {
+		t.Fatalf("setup output omitted already-running effective endpoint:\n%s", out.String())
+	}
+}
+
 func TestSetupRemoteURLStillRefusesLocalStartup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses Unix executable fixture")
