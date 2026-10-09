@@ -528,6 +528,61 @@ func measureAttachmentReadCost(t *testing.T, responseBytes *atomic.Int64, fn fun
 	return medianDuration(durations), bytesTotal / int64(len(durations)), allocTotal / uint64(len(durations))
 }
 
+func TestAttachmentDeleteTargetPreservesEscapedIDForDownloadRoute(t *testing.T) {
+	const raw = "/attachments/asset%252Fpart?project_id=p1"
+	id, projectID := attachmentDeleteTarget(raw)
+	if id != "asset%2Fpart" || projectID != "p1" {
+		t.Fatalf("attachmentDeleteTarget(%q) = %q, %q; want %q, %q", raw, id, projectID, "asset%2Fpart", "p1")
+	}
+
+	var gotRequestURI, gotPath, gotProject string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI = r.RequestURI
+		gotPath = r.URL.Path
+		gotProject = r.URL.Query().Get("project_id")
+		_, _ = w.Write([]byte("attachment bytes"))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := c.DownloadTaskAttachment(context.Background(), id, projectID, &out); err != nil {
+		t.Fatalf("DownloadTaskAttachment: %v", err)
+	}
+	if gotRequestURI != "/attachments/asset%252Fpart?project_id=p1" || gotPath != "/attachments/asset%2Fpart" || gotProject != "p1" {
+		t.Fatalf("download route = RequestURI %q, Path %q, project %q; want preserved attachment ID", gotRequestURI, gotPath, gotProject)
+	}
+	if out.String() != "attachment bytes" {
+		t.Fatalf("download body = %q, want attachment bytes", out.String())
+	}
+}
+
+func TestAttachmentDeleteTargetPreservesNormalID(t *testing.T) {
+	id, projectID := attachmentDeleteTarget("/attachments/asset-123?project_id=p1")
+	if id != "asset-123" || projectID != "p1" {
+		t.Fatalf("attachmentDeleteTarget() = %q, %q; want %q, %q", id, projectID, "asset-123", "p1")
+	}
+}
+
+func TestAttachmentDeleteTargetRejectsMalformedAndExtraSegments(t *testing.T) {
+	for _, raw := range []string{
+		"/attachments/asset%2",
+		"/attachments/asset%252",
+		"/attachments/asset%2Gpart?project_id=p1",
+		"/attachments/asset/part?project_id=p1",
+		"/attachments/asset%2Fpart?project_id=p1",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if id, projectID := attachmentDeleteTarget(raw); id != "" || projectID != "" {
+				t.Fatalf("attachmentDeleteTarget(%q) = %q, %q; want rejection", raw, id, projectID)
+			}
+		})
+	}
+}
+
 func TestDeleteTaskAttachmentUsesStableIDProjectScopeAndParsesRefresh(t *testing.T) {
 	var gotProject string
 	var gotID string
