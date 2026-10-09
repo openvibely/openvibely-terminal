@@ -219,6 +219,19 @@ func New(baseURL string) (*Client, error) {
 // BaseURL returns the normalized server base URL.
 func (c *Client) BaseURL() string { return c.baseURL }
 
+// WithBaseURL returns a client for another base URL while preserving the HTTP
+// client, transport, and cookie jar used by this client.
+func (c *Client) WithBaseURL(baseURL string) (*Client, error) {
+	if c == nil {
+		return nil, fmt.Errorf("client is required")
+	}
+	target, err := New(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{baseURL: target.baseURL, http: c.http}, nil
+}
+
 // IsValidServerURL reports whether baseURL is a supported backend base URL.
 // It accepts only HTTP(S) URLs with an authority and optional path prefix. URL
 // userinfo, queries, and fragments are rejected because they are not part of a

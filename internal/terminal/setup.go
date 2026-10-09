@@ -239,6 +239,16 @@ func localBackendPort(baseURL string) string {
 	return "3001"
 }
 
+func effectiveLocalBackendEndpoint(baseURL string) string {
+	endpoint := serverURLDisplay(baseURL)
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Port() != "" || isRemoteServerURL(endpoint) {
+		return endpoint
+	}
+	u.Host = net.JoinHostPort(u.Hostname(), localBackendPort(endpoint))
+	return serverURLDisplay(u.String())
+}
+
 // safeConnectionDiagnostic returns one bounded terminal-safe line from a
 // transport or backend error. URLs and common credential assignments are
 // redacted because net/http and backend errors can include user-controlled
@@ -427,8 +437,9 @@ func inspectLocalBackendSetup(platform, baseURL string, install bool) setupCheck
 
 	port := localBackendPort(baseURL)
 	check.Start = findLocalBackendStartCommand(platform)
+	check.Endpoint = effectiveLocalBackendEndpoint(baseURL)
 	check.Start.Env = []string{"PORT=" + port}
-	check.PortConflict = localBackendPortConflict(platform, baseURL, port, check.Start)
+	check.PortConflict = localBackendPortConflict(platform, check.Endpoint, port, check.Start)
 	if check.PortConflict != "" {
 		check.Missing = append(check.Missing, strings.Split(check.PortConflict, "\n")...)
 	}
@@ -667,7 +678,24 @@ func setupConfirmationMessage(check setupCheckResult, opts setupOptions) string 
 	return b.String()
 }
 
+func setupClientForEndpoint(c *client.Client, endpoint string) (*client.Client, error) {
+	if c == nil {
+		return nil, errors.New("setup backend client is unavailable")
+	}
+	if endpoint == "" || c.BaseURL() == endpoint {
+		return c, nil
+	}
+	return c.WithBaseURL(endpoint)
+}
+
 func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckResult, opts setupOptions) (string, error) {
+	if check.Endpoint != "" {
+		var err error
+		c, err = setupClientForEndpoint(c, check.Endpoint)
+		if err != nil {
+			return "", fmt.Errorf("using effective local backend endpoint: %w", err)
+		}
+	}
 	var b strings.Builder
 	if next, reachable, err := probeSetupHealth(ctx, c); err != nil {
 		return "", err
