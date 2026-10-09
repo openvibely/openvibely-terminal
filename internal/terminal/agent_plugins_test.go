@@ -279,6 +279,130 @@ func TestAgentsPluginMarketplaceJSONRefreshFailuresStayParseable(t *testing.T) {
 	}
 }
 
+func TestAgentPluginMutationResponsesShareRefreshBehavior(t *testing.T) {
+	commands := []struct {
+		name    string
+		args    []string
+		force   bool
+		status  string
+		install bool
+	}{
+		{name: "marketplace add", args: []string{"agents", "plugins", "marketplaces", "add", "github.com/example/plugins"}, status: "added marketplace github.com/example/plugins"},
+		{name: "marketplace sync", args: []string{"agents", "plugins", "marketplaces", "sync", "official"}, status: "synced marketplace official"},
+		{name: "marketplace remove", args: []string{"agents", "plugins", "marketplaces", "remove", "official"}, force: true, status: "removed marketplace official"},
+		{name: "marketplace reset", args: []string{"agents", "plugins", "marketplaces", "reset"}, force: true, status: "reset default marketplaces"},
+		{name: "install", args: []string{"agents", "plugins", "install", "stagehand@official"}, status: "installed stagehand@official; warning: runtime warning; details: {\"phase\":\"runtime\"}", install: true},
+		{name: "uninstall", args: []string{"agents", "plugins", "uninstall", "playwright@official"}, force: true, status: "uninstalled playwright@official"},
+	}
+	for _, command := range commands {
+		for _, refreshFails := range []bool{false, true} {
+			for _, jsonOutput := range []bool{false, true} {
+				mode := "plain"
+				if jsonOutput {
+					mode = "json"
+				}
+				refresh := "success"
+				if refreshFails {
+					refresh = "failure"
+				}
+				t.Run(command.name+"/"+refresh+"/"+mode, func(t *testing.T) {
+					installResponse := `{"ok":true,"warning":"runtime warning","details":{"phase":"runtime"}}`
+					srv := agentPluginMutationResponseServer(t, installResponse, refreshFails)
+					c, err := client.New(srv.URL)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var out bytes.Buffer
+					if err := RunCLI(c, &out, "demo", command.args, command.force, jsonOutput); err != nil {
+						t.Fatalf("command failed: %v\n%s", err, out.String())
+					}
+					if jsonOutput {
+						var body map[string]json.RawMessage
+						if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &body); err != nil {
+							t.Fatalf("output was not JSON: %v\n%s", err, out.String())
+						}
+						var status string
+						if err := json.Unmarshal(body["status"], &status); err != nil || status != command.status {
+							t.Fatalf("status = %q (%v), want %q; output=%s", status, err, command.status, out.String())
+						}
+						if refreshFails {
+							var refreshError string
+							if err := json.Unmarshal(body["refresh_error"], &refreshError); err != nil || refreshError != "saved; plugin state refresh failed" {
+								t.Fatalf("refresh_error = %q (%v); output=%s", refreshError, err, out.String())
+							}
+							if _, ok := body["state"]; ok {
+								t.Fatalf("failed refresh included state: %s", out.String())
+							}
+						} else {
+							var state client.AgentPluginState
+							if err := json.Unmarshal(body["state"], &state); err != nil || len(state.Marketplaces) == 0 || len(state.Installed) == 0 {
+								t.Fatalf("successful refresh state = %#v (%v); output=%s", state, err, out.String())
+							}
+							if _, ok := body["refresh_error"]; ok {
+								t.Fatalf("successful refresh included refresh_error: %s", out.String())
+							}
+						}
+						if command.install {
+							var result client.AgentPluginInstallResult
+							if err := json.Unmarshal(body["result"], &result); err != nil || !result.OK || result.Warning != "runtime warning" || string(result.Details) != `{"phase":"runtime"}` {
+								t.Fatalf("install result = %#v (%v); output=%s", result, err, out.String())
+							}
+						} else if _, ok := body["result"]; ok {
+							t.Fatalf("unexpected result field: %s", out.String())
+						}
+					} else if refreshFails {
+						want := command.status
+						if command.install || command.name == "uninstall" {
+							want += " (saved; refresh failed)"
+						}
+						if !strings.Contains(out.String(), want) || strings.Contains(out.String(), "Marketplaces") || strings.Contains(out.String(), "Installed") {
+							t.Fatalf("refresh failure output should contain %q and omit stale state:\n%s", want, out.String())
+						}
+					} else {
+						if !strings.Contains(out.String(), command.status) || !strings.Contains(out.String(), "Marketplaces") || !strings.Contains(out.String(), "Installed") {
+							t.Fatalf("successful output omitted status or refreshed state:\n%s", out.String())
+						}
+						if command.install {
+							for _, want := range []string{"warning: runtime warning", `details: {"phase":"runtime"}`} {
+								if !strings.Contains(out.String(), want) {
+									t.Fatalf("install output missing %q:\n%s", want, out.String())
+								}
+							}
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func agentPluginMutationResponseServer(t *testing.T, installResponse string, refreshFails bool) *httptest.Server {
+	t.Helper()
+	mutated := false
+	baseHandler := agentPluginTestHandler(t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/agents/plugins/state" && mutated && refreshFails {
+			http.Error(w, "state refresh failed", http.StatusInternalServerError)
+			return
+		}
+		isInstall := r.Method == http.MethodPost && r.URL.Path == "/agents/plugins/install"
+		isMutation := isInstall || (r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/agents/plugins/marketplaces")) ||
+			(r.Method == http.MethodDelete && r.URL.Path == "/agents/plugins/marketplaces/official") ||
+			(r.Method == http.MethodPost && r.URL.Path == "/agents/plugins/uninstall")
+		if isMutation {
+			mutated = true
+		}
+		if isInstall {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, installResponse)
+			return
+		}
+		baseHandler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func TestAgentsPluginInstallCanIncludeAgent(t *testing.T) {
 	srv, rec := agentPluginCommandServer(t, agentPluginStateJSON, agentEditListHTML, agentPluginRichJSON, nil)
 	c, err := client.New(srv.URL)
