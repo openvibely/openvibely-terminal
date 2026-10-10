@@ -2474,7 +2474,7 @@ func taskAttachmentSelector(m Model, c *client.Client, projectID, taskRef, usage
 }
 
 func deleteTaskAttachmentResult(ctx context.Context, c *client.Client, projectID string, task client.Task, attachment client.Attachment) (string, error) {
-	remaining, err := c.DeleteTaskAttachment(ctx, attachment.ID, projectID)
+	remaining, err := c.DeleteTaskAttachmentForTask(ctx, task.ID, attachment.ID, projectID)
 	if err != nil {
 		return "", err
 	}

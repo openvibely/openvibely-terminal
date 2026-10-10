@@ -158,12 +158,9 @@ func (c *Client) addTaskAttachments(ctx context.Context, taskID, projectID strin
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	attachments, err := parseAttachmentMutationResponse(root, "upload attachments", projectID)
+	attachments, err := parseAttachmentMutationResponse(root, "upload attachments", taskID, projectID)
 	if err != nil {
 		return nil, err
-	}
-	for i := range attachments {
-		attachments[i].TaskID = taskID
 	}
 	uploaded, missing := matchUploadedAttachments(before, attachments, requestedNames)
 	if len(missing) > 0 {
@@ -235,8 +232,20 @@ func (c *Client) UploadTaskAttachments(ctx context.Context, taskID, projectID st
 
 // DeleteTaskAttachment deletes one attachment and returns the refreshed list
 // from the backend. The project query is mandatory so the server can reject an
-// attachment owned by another project.
+// attachment owned by another project. Use DeleteTaskAttachmentForTask when the
+// owning task ID is available and should be included in the returned rows.
 func (c *Client) DeleteTaskAttachment(ctx context.Context, attachmentID, projectID string) ([]Attachment, error) {
+	return c.deleteTaskAttachment(ctx, "", attachmentID, projectID)
+}
+
+// DeleteTaskAttachmentForTask deletes one attachment and tags the refreshed
+// list with its owning task ID. The project query remains mandatory so the
+// server can reject an attachment owned by another project.
+func (c *Client) DeleteTaskAttachmentForTask(ctx context.Context, taskID, attachmentID, projectID string) ([]Attachment, error) {
+	return c.deleteTaskAttachment(ctx, taskID, attachmentID, projectID)
+}
+
+func (c *Client) deleteTaskAttachment(ctx context.Context, taskID, attachmentID, projectID string) ([]Attachment, error) {
 	if strings.TrimSpace(attachmentID) == "" {
 		return nil, fmt.Errorf("attachment ID is required")
 	}
@@ -248,7 +257,7 @@ func (c *Client) DeleteTaskAttachment(ctx context.Context, attachmentID, project
 	if err != nil {
 		return nil, err
 	}
-	return parseAttachmentMutationResponse(root, "delete attachment", projectID)
+	return parseAttachmentMutationResponse(root, "delete attachment", taskID, projectID)
 }
 
 // DeleteAttachment is the route-oriented alias for DeleteTaskAttachment.
@@ -687,11 +696,11 @@ func (c *Client) doMultipartHTML(ctx context.Context, method, path string, body 
 	return root, nil
 }
 
-func parseAttachmentMutationResponse(root *html.Node, operation, projectID string) ([]Attachment, error) {
+func parseAttachmentMutationResponse(root *html.Node, operation, taskID, projectID string) ([]Attachment, error) {
 	if findByID(root, "attachment-list") == nil {
 		return nil, fmt.Errorf("%s response did not include the attachment list", operation)
 	}
-	return parseTaskAttachmentsForProject(root, "", projectID)
+	return parseTaskAttachmentsForProject(root, taskID, projectID)
 }
 
 func parseTaskAttachmentsForProject(root *html.Node, taskID, projectID string) ([]Attachment, error) {
