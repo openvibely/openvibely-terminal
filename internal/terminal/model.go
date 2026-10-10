@@ -234,13 +234,24 @@ type Model struct {
 	chatStreamCancel           context.CancelFunc
 	chatStreamEvents           <-chan client.ChatOutputEvent
 	chatStreamErrs             <-chan error
+	chatStreamWaitCmd          tea.Cmd
 	chatStreamExecID           string
 	chatStreamOffset           int
 	chatStreamOutput           string
 	chatStreamBuffer           []byte
-	chatStreamRenderedOutput   string
-	chatStreamRenderedBody     string
+	chatStreamRenderedOffset   int
+	chatStreamWrappedLines     []string
+	chatStreamWrapBaseLines    []string
+	chatStreamWrapWord         []byte
+	chatStreamWrapSpace        []byte
+	chatStreamWrapColumn       int
+	chatStreamStableLineCount  int
+	chatStreamHardOnly         bool
+	chatStreamHardLineStart    int
+	chatStreamHardColumn       int
+	chatStreamTranscriptStart  int
 	chatStreamRenderedWidth    int
+	chatStreamFastWrap         bool
 	chatStreamLogIndex         int
 	chatStreamRenderQueued     bool
 	chatStreamRenderGeneration uint64
@@ -1095,6 +1106,7 @@ func (m *Model) invalidateChatStream() {
 	m.chatStreamCancel = nil
 	m.chatStreamEvents = nil
 	m.chatStreamErrs = nil
+	m.chatStreamWaitCmd = nil
 	m.chatStreamExecID = ""
 	m.chatStreamRenderQueued = false
 	m.chatStreamGeneration++
@@ -1104,15 +1116,28 @@ func (m *Model) resetChatStreamOutput() {
 	m.chatStreamOffset = 0
 	m.chatStreamOutput = ""
 	m.chatStreamBuffer = nil
-	m.chatStreamRenderedOutput = ""
-	m.chatStreamRenderedBody = ""
+	m.chatStreamRenderedOffset = 0
+	m.chatStreamWrappedLines = nil
+	m.chatStreamWrapBaseLines = nil
+	m.chatStreamWrapWord = nil
+	m.chatStreamWrapSpace = nil
+	m.chatStreamWrapColumn = 0
+	m.chatStreamStableLineCount = 0
+	m.chatStreamHardOnly = true
+	m.chatStreamHardLineStart = 0
+	m.chatStreamHardColumn = 0
+	m.chatStreamTranscriptStart = 0
 	m.chatStreamRenderedWidth = 0
+	m.chatStreamFastWrap = true
 	m.chatStreamLogIndex = -1
 	m.chatStreamRenderQueued = false
 	m.chatStreamRedraws = 0
 }
 
 func (m *Model) clearPendingChat() {
+	if len(m.chatStreamBuffer) > 0 && m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) {
+		m.materializeChatStreamOutput()
+	}
 	m.invalidateChatStream()
 	if m.pendingMsgTaskID != "" {
 		m.threadReplyPendingRequestID = 0
@@ -1145,46 +1170,354 @@ func (m *Model) updateChatStreamOutput(delta string) {
 	if delta == "" {
 		return
 	}
+	if len(m.chatStreamBuffer) == 0 && m.chatStreamOffset == 0 && m.chatStreamRenderedOffset == 0 && m.chatStreamLogIndex < 0 && m.chatStreamOutput == "" {
+		m.chatStreamFastWrap = true
+	}
 	m.chatStreamBuffer = append(m.chatStreamBuffer, delta...)
-	m.chatStreamOffset += len(delta)
+	m.chatStreamOffset = len(m.chatStreamBuffer)
 }
 
 func (m *Model) currentChatStreamOutput() string {
 	if len(m.chatStreamBuffer) == 0 {
 		return m.chatStreamOutput
 	}
-	return m.chatStreamOutput + string(m.chatStreamBuffer)
+	return string(m.chatStreamBuffer)
+}
+
+func completeUTF8Prefix(data []byte, start int) int {
+	for i := start; i < len(data); {
+		if !utf8.FullRune(data[i:]) {
+			return i
+		}
+		_, size := utf8.DecodeRune(data[i:])
+		i += size
+	}
+	return len(data)
 }
 
 func (m *Model) flushChatStreamOutput() {
-	output := m.currentChatStreamOutput()
 	if m.chatStreamRenderQueued {
 		// A forced flush cannot cancel tea.Tick, so advance the render epoch to
 		// make that queued tick stale before another delta schedules a new one.
 		m.chatStreamRenderGeneration++
 	}
 	m.chatStreamRenderQueued = false
-	if output == "" && m.chatStreamLogIndex < 0 {
+
+	renderEnd := completeUTF8Prefix(m.chatStreamBuffer, m.chatStreamRenderedOffset)
+	if renderEnd == m.chatStreamRenderedOffset && m.chatStreamLogIndex < 0 {
 		return
 	}
-	if output == m.chatStreamOutput && m.chatStreamLogIndex >= 0 {
+	if renderEnd == m.chatStreamRenderedOffset && m.chatStreamLogIndex >= 0 {
 		return
 	}
-	previousOutput := m.chatStreamOutput
-	m.chatStreamOutput = output
-	m.chatStreamBuffer = m.chatStreamBuffer[:0]
-	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
-		m.log[m.chatStreamLogIndex].text = output
-		if !m.replaceChatStreamTranscriptBlock(m.chatStreamLogIndex, previousOutput, output) {
-			m.replaceTranscriptBlock(m.chatStreamLogIndex)
-			m.rememberChatStreamRenderedBlock(m.chatStreamLogIndex, output)
-		}
-	} else {
-		m.appendTranscriptEntry(entry{role: "agent", text: output})
+
+	if m.chatStreamLogIndex < 0 || m.chatStreamLogIndex >= len(m.log) || m.log[m.chatStreamLogIndex].role != "agent" {
+		m.appendTranscriptEntry(entry{role: "agent"})
 		m.chatStreamLogIndex = len(m.log) - 1
-		m.rememberChatStreamRenderedBlock(m.chatStreamLogIndex, output)
+		m.chatStreamWrappedLines = []string{""}
+		m.chatStreamWrapBaseLines = []string{""}
+		m.chatStreamWrapWord = nil
+		m.chatStreamWrapSpace = nil
+		m.chatStreamWrapColumn = 0
+		m.chatStreamStableLineCount = 1
+		m.chatStreamHardOnly = true
+		m.chatStreamHardLineStart = 0
+		m.chatStreamHardColumn = 0
+		m.chatStreamTranscriptStart = len(m.transcriptLines) - 3
+		m.chatStreamRenderedWidth = m.effectiveTranscriptWidth()
+		m.chatStreamFastWrap = true
 	}
+
+	if len(m.chatStreamBuffer) == 0 {
+		return
+	}
+	delta := m.chatStreamBuffer[m.chatStreamRenderedOffset:renderEnd]
+	width := m.effectiveTranscriptWidth()
+	canFastAppend := m.chatStreamFastWrap && m.transcriptReady && m.transcriptRenderWidth == width &&
+		m.chatStreamRenderedWidth == width && width > 2 && isStreamAppendableText(delta) && m.transcriptLineCacheValid()
+	if canFastAppend && m.chatStreamHardOnly {
+		oldBodyLines := m.chatStreamStableLineCount
+		if isStreamHardWrapText(delta) {
+			changedLine := oldBodyLines - 1
+			appendChatStreamHardWrapBytes(m, delta, m.chatStreamRenderedOffset, width-2)
+			if m.replaceChatStreamViewportSuffix(changedLine, oldBodyLines) {
+				m.chatStreamStableLineCount = len(m.chatStreamWrappedLines)
+				m.chatStreamRenderedOffset = renderEnd
+				m.chatStreamRedraws++
+				return
+			}
+		} else {
+			// Spaces and hyphens need word-aware wrapping. Switch once to the
+			// appendable ASCII wrapper, replaying the response accumulated so far.
+			m.chatStreamHardOnly = false
+			m.chatStreamWrapBaseLines = []string{""}
+			m.chatStreamWrapWord = nil
+			m.chatStreamWrapSpace = nil
+			m.chatStreamWrapColumn = 0
+			appendChatStreamWrapBytes(m, m.chatStreamBuffer[:renderEnd], width-2)
+			m.chatStreamWrappedLines = chatStreamWrapSnapshot(m, 0, width-2)
+			if m.replaceChatStreamViewportSuffix(0, oldBodyLines) {
+				m.chatStreamStableLineCount = len(m.chatStreamWrapBaseLines)
+				m.chatStreamRenderedOffset = renderEnd
+				m.chatStreamRedraws++
+				return
+			}
+		}
+	}
+	if canFastAppend && !m.chatStreamHardOnly {
+		oldBodyLines := m.chatStreamStableLineCount
+		changedLine := oldBodyLines - 1
+		appendChatStreamWrapBytes(m, delta, width-2)
+		suffixLines := chatStreamWrapSnapshot(m, changedLine, width-2)
+		if changedLine <= len(m.chatStreamWrappedLines) {
+			newLineCount := changedLine + len(suffixLines)
+			if cap(m.chatStreamWrappedLines) >= newLineCount {
+				m.chatStreamWrappedLines = m.chatStreamWrappedLines[:newLineCount]
+				copy(m.chatStreamWrappedLines[changedLine:], suffixLines)
+			} else {
+				m.chatStreamWrappedLines = append(m.chatStreamWrappedLines[:changedLine], suffixLines...)
+			}
+		} else {
+			m.chatStreamWrappedLines = suffixLines
+		}
+		if m.replaceChatStreamViewportSuffix(changedLine, oldBodyLines) {
+			m.chatStreamStableLineCount = len(m.chatStreamWrapBaseLines)
+			m.chatStreamRenderedOffset = renderEnd
+			m.chatStreamRedraws++
+			return
+		}
+	}
+
+	// Canonical rendering handles word reflow, Unicode graphemes, replacements,
+	// and every invalidated cache shape. This path materializes the response only
+	// when the append-only line path cannot represent the new suffix safely.
+	output := string(m.chatStreamBuffer[:renderEnd])
+	m.chatStreamOutput = output
+	m.log[m.chatStreamLogIndex].text = output
+	m.replaceTranscriptBlock(m.chatStreamLogIndex)
+	m.chatStreamRenderedOffset = renderEnd
+	m.chatStreamFastWrap = false
+	m.chatStreamRenderedWidth = width
 	m.chatStreamRedraws++
+}
+
+func isStreamAppendableText(delta []byte) bool {
+	if isStreamWrapASCII(delta) {
+		return true
+	}
+	for i := 0; i < len(delta); {
+		r, size := utf8.DecodeRune(delta[i:])
+		if r < utf8.RuneSelf {
+			if r <= ' ' || r == '-' {
+				return false
+			}
+		} else if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.M, r) || unicode.Is(unicode.Cf, r) ||
+			(r >= 0x1f1e6 && r <= 0x1f1ff) || (r >= 0x1f3fb && r <= 0x1f3ff) {
+			// Combining marks, joiners, flags, and skin-tone modifiers can
+			// change the previous grapheme, so leave those to canonical wrapping.
+			return false
+		}
+		i += size
+	}
+	return true
+}
+
+func isStreamHardWrapText(delta []byte) bool {
+	if isStreamWrapASCII(delta) {
+		for _, b := range delta {
+			if b <= 0x20 || b == '-' {
+				return false
+			}
+		}
+		return true
+	}
+	for i := 0; i < len(delta); {
+		r, size := utf8.DecodeRune(delta[i:])
+		if r <= ' ' || r == '-' || r == utf8.RuneError && size == 1 || unicode.IsSpace(r) || unicode.IsControl(r) ||
+			unicode.Is(unicode.M, r) || unicode.Is(unicode.Cf, r) || (r >= 0x1f1e6 && r <= 0x1f1ff) ||
+			(r >= 0x1f3fb && r <= 0x1f3ff) {
+			return false
+		}
+		i += size
+	}
+	return true
+}
+
+func appendChatStreamHardWrapBytes(m *Model, delta []byte, sourceOffset, limit int) {
+	if isStreamWrapASCII(delta) {
+		for i := range delta {
+			if m.chatStreamHardColumn == limit {
+				line := m.chatStreamBuffer[m.chatStreamHardLineStart : sourceOffset+i]
+				m.chatStreamWrappedLines[len(m.chatStreamWrappedLines)-1] = streamBufferString(line)
+				m.chatStreamWrappedLines = append(m.chatStreamWrappedLines, "")
+				m.chatStreamHardLineStart = sourceOffset + i
+				m.chatStreamHardColumn = 0
+			}
+			m.chatStreamHardColumn++
+		}
+		if len(delta) > 0 && len(m.chatStreamWrappedLines) > 0 {
+			line := m.chatStreamBuffer[m.chatStreamHardLineStart : sourceOffset+len(delta)]
+			m.chatStreamWrappedLines[len(m.chatStreamWrappedLines)-1] = streamBufferString(line)
+		}
+		return
+	}
+	for i := 0; i < len(delta); {
+		_, size := utf8.DecodeRune(delta[i:])
+		width := 1
+		if delta[i] >= utf8.RuneSelf {
+			width = ansi.StringWidth(string(delta[i : i+size]))
+		}
+		if m.chatStreamHardColumn > 0 && m.chatStreamHardColumn+width > limit {
+			line := m.chatStreamBuffer[m.chatStreamHardLineStart : sourceOffset+i]
+			m.chatStreamWrappedLines[len(m.chatStreamWrappedLines)-1] = streamBufferString(line)
+			m.chatStreamWrappedLines = append(m.chatStreamWrappedLines, "")
+			m.chatStreamHardLineStart = sourceOffset + i
+			m.chatStreamHardColumn = 0
+		}
+		m.chatStreamHardColumn += width
+		i += size
+	}
+	if len(delta) == 0 || len(m.chatStreamWrappedLines) == 0 {
+		return
+	}
+	line := m.chatStreamBuffer[m.chatStreamHardLineStart : sourceOffset+len(delta)]
+	m.chatStreamWrappedLines[len(m.chatStreamWrappedLines)-1] = streamBufferString(line)
+}
+
+// streamBufferString aliases bytes that the stream only appends to. Existing
+// bytes are immutable for the lifetime of the rendered line.
+func streamBufferString(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(data), len(data))
+}
+
+func isStreamWrapASCII(delta []byte) bool {
+	for _, b := range delta {
+		if b < 0x20 || b > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func appendChatStreamWrapBytes(m *Model, delta []byte, limit int) {
+	appendBase := func(text []byte) {
+		if len(text) > 0 {
+			last := len(m.chatStreamWrapBaseLines) - 1
+			m.chatStreamWrapBaseLines[last] += string(text)
+		}
+	}
+	addSpace := func() {
+		if len(m.chatStreamWrapSpace) == 0 {
+			return
+		}
+		m.chatStreamWrapColumn += len(m.chatStreamWrapSpace)
+		appendBase(m.chatStreamWrapSpace)
+		m.chatStreamWrapSpace = m.chatStreamWrapSpace[:0]
+	}
+	addWord := func() {
+		if len(m.chatStreamWrapWord) == 0 {
+			return
+		}
+		addSpace()
+		m.chatStreamWrapColumn += len(m.chatStreamWrapWord)
+		appendBase(m.chatStreamWrapWord)
+		m.chatStreamWrapWord = m.chatStreamWrapWord[:0]
+	}
+	addNewline := func() {
+		m.chatStreamWrapBaseLines = append(m.chatStreamWrapBaseLines, "")
+		m.chatStreamWrapColumn = 0
+		m.chatStreamWrapSpace = m.chatStreamWrapSpace[:0]
+	}
+
+	for _, b := range delta {
+		if b == ' ' {
+			addWord()
+			m.chatStreamWrapSpace = append(m.chatStreamWrapSpace, b)
+			continue
+		}
+		if b == '-' {
+			addSpace()
+			if m.chatStreamWrapColumn+len(m.chatStreamWrapWord)+1 <= limit {
+				addWord()
+				appendBase([]byte{b})
+				m.chatStreamWrapColumn++
+				continue
+			}
+		}
+		if len(m.chatStreamWrapWord)+1 > limit {
+			addWord()
+		}
+		m.chatStreamWrapWord = append(m.chatStreamWrapWord, b)
+		if m.chatStreamWrapColumn+len(m.chatStreamWrapWord)+len(m.chatStreamWrapSpace) > limit {
+			addNewline()
+		}
+	}
+}
+
+func chatStreamWrapSnapshot(m *Model, changedLine, limit int) []string {
+	if changedLine < 0 || changedLine >= len(m.chatStreamWrapBaseLines) {
+		return nil
+	}
+	lines := append([]string(nil), m.chatStreamWrapBaseLines[changedLine:]...)
+	column := m.chatStreamWrapColumn
+	space := m.chatStreamWrapSpace
+	word := m.chatStreamWrapWord
+	appendLocal := func(text []byte) {
+		if len(text) > 0 {
+			last := len(lines) - 1
+			lines[last] += string(text)
+		}
+	}
+	if len(word) == 0 {
+		if column+len(space) > limit {
+			column = 0
+		} else {
+			column += len(space)
+			appendLocal(space)
+		}
+		space = nil
+	}
+	if len(word) > 0 {
+		column += len(space)
+		appendLocal(space)
+		column += len(word)
+		appendLocal(word)
+	}
+	return lines
+}
+
+func (m *Model) replaceChatStreamViewportSuffix(changedLine, oldBodyLines int) bool {
+	index := m.chatStreamLogIndex
+	if !m.transcriptLineCacheValid() || index != len(m.transcriptBlocks)-1 || index >= len(m.transcriptBlockLineCounts) ||
+		index >= len(m.transcriptBlockMaxWidths) || changedLine < 0 || changedLine >= len(m.chatStreamWrappedLines) {
+		return false
+	}
+	start := m.chatStreamTranscriptStart
+	if oldBodyLines <= 0 || changedLine != oldBodyLines-1 || start < 0 || start+oldBodyLines+2 != len(m.transcriptLines) {
+		return false
+	}
+
+	lines := m.transcriptLines[:start+changedLine]
+	for _, line := range m.chatStreamWrappedLines[changedLine:] {
+		lines = append(lines, padTranscriptBodyLine(line, m.effectiveTranscriptWidth()-2))
+	}
+	lines = append(lines, "", "")
+	m.transcriptLines = lines
+	m.transcriptBlockLineCounts[index] += len(m.chatStreamWrappedLines) - oldBodyLines
+
+	if m.effectiveTranscriptWidth()-2 > m.transcriptBlockMaxWidths[index] {
+		m.transcriptBlockMaxWidths[index] = m.effectiveTranscriptWidth() - 2
+	}
+	if m.transcriptBlockMaxWidths[index] > m.transcriptMaxLineWidth {
+		m.transcriptMaxLineWidth = m.transcriptBlockMaxWidths[index]
+	}
+	m.transcriptContentDirty = true
+	setViewportCachedContent(m.transcript, m.transcriptLines, m.transcriptMaxLineWidth)
+	m.transcript.GotoBottom()
+	return true
 }
 
 func (m *Model) scheduleChatStreamRender() tea.Cmd {
@@ -1205,6 +1538,30 @@ func (m *Model) scheduleChatStreamRender() tea.Cmd {
 	})
 }
 
+func (m *Model) materializeChatStreamText() string {
+	if len(m.chatStreamBuffer) > 0 {
+		m.chatStreamOutput = string(m.chatStreamBuffer)
+	}
+	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
+		m.log[m.chatStreamLogIndex].text = m.chatStreamOutput
+	}
+	return m.chatStreamOutput
+}
+
+func (m *Model) materializeChatStreamOutput() string {
+	output := m.materializeChatStreamText()
+	if m.chatStreamLogIndex >= 0 && m.chatStreamLogIndex < len(m.log) && m.log[m.chatStreamLogIndex].role == "agent" {
+		block := renderTranscriptEntry(m.log[m.chatStreamLogIndex], transcriptWrap(m.effectiveTranscriptWidth()))
+		if m.chatStreamLogIndex < len(m.transcriptBlocks) {
+			m.transcriptBlocks[m.chatStreamLogIndex] = block
+		} else {
+			m.replaceTranscriptBlock(m.chatStreamLogIndex)
+		}
+		m.transcriptContentDirty = true
+	}
+	return output
+}
+
 func (m *Model) updateChatStreamSnapshot(snapshot string) {
 	current := m.currentChatStreamOutput()
 	if snapshot == "" {
@@ -1214,6 +1571,7 @@ func (m *Model) updateChatStreamSnapshot(snapshot string) {
 		if snapshot != m.chatStreamOutput || m.chatStreamLogIndex < 0 {
 			m.flushChatStreamOutput()
 		}
+		m.materializeChatStreamOutput()
 		return
 	}
 	if strings.HasPrefix(current, snapshot) {
@@ -1222,12 +1580,25 @@ func (m *Model) updateChatStreamSnapshot(snapshot string) {
 	if strings.HasPrefix(snapshot, current) {
 		m.updateChatStreamOutput(strings.TrimPrefix(snapshot, current))
 		m.flushChatStreamOutput()
+		m.materializeChatStreamOutput()
 		return
 	}
 	m.chatStreamOutput = ""
-	m.chatStreamBuffer = append(m.chatStreamBuffer[:0], snapshot...)
-	m.chatStreamOffset = len(snapshot)
+	m.chatStreamBuffer = append([]byte(nil), snapshot...)
+	m.chatStreamOffset = len(m.chatStreamBuffer)
+	m.chatStreamRenderedOffset = 0
+	m.chatStreamWrappedLines = nil
+	m.chatStreamWrapBaseLines = nil
+	m.chatStreamWrapWord = nil
+	m.chatStreamWrapSpace = nil
+	m.chatStreamWrapColumn = 0
+	m.chatStreamStableLineCount = 0
+	m.chatStreamHardOnly = false
+	m.chatStreamHardLineStart = 0
+	m.chatStreamHardColumn = 0
+	m.chatStreamFastWrap = false
 	m.flushChatStreamOutput()
+	m.materializeChatStreamOutput()
 }
 
 func (m *Model) reconcileChatStreamOutput(response string) {
@@ -1246,7 +1617,8 @@ func (m *Model) completeChat(response string, taskIDs []string) {
 	// Authoritative completion can race the first cadence tick. Materialize any
 	// accepted bytes first so the final response reconciles one assistant entry.
 	m.flushChatStreamOutput()
-	if streamed := m.chatStreamOutput; response != streamed && strings.HasPrefix(streamed, response) {
+	streamed := m.materializeChatStreamOutput()
+	if response != streamed && strings.HasPrefix(streamed, response) {
 		// A terminal status snapshot can lag the execution stream. Never erase or
 		// shorten bytes already accepted when the snapshot is an exact prefix;
 		// divergent terminal responses remain authoritative corrections.
@@ -1257,6 +1629,8 @@ func (m *Model) completeChat(response string, taskIDs []string) {
 	} else {
 		m.append(entry{role: "agent", text: response})
 	}
+	m.chatStreamOutput = response
+	m.chatStreamBuffer = nil
 	m.clearPendingChat()
 	m.busy = false
 	if len(taskIDs) > 0 {
@@ -1340,7 +1714,8 @@ func (m *Model) connectChatStream(execID string, offset int) tea.Cmd {
 	events, errs := m.client.StreamChatOutput(ctx, execID, offset)
 	m.chatStreamEvents = events
 	m.chatStreamErrs = errs
-	return m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, execID, events, errs)
+	m.chatStreamWaitCmd = m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, execID, events, errs)
+	return m.chatStreamWaitCmd
 }
 
 func (m Model) waitForChatStream(generation int, submissionID uint64, projectID, execID string, events <-chan client.ChatOutputEvent, errs <-chan error) tea.Cmd {
@@ -1371,8 +1746,11 @@ func (m Model) waitForChatStream(generation int, submissionID uint64, projectID,
 	}
 }
 
-func (m Model) waitForCurrentChatStream(generation int) tea.Cmd {
-	return m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, m.chatStreamExecID, m.chatStreamEvents, m.chatStreamErrs)
+func (m *Model) waitForCurrentChatStream(generation int) tea.Cmd {
+	if m.chatStreamWaitCmd == nil {
+		m.chatStreamWaitCmd = m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, m.chatStreamExecID, m.chatStreamEvents, m.chatStreamErrs)
+	}
+	return m.chatStreamWaitCmd
 }
 
 func (m Model) chatStreamReconnectMessage(generation int) chatStreamReconnectMsg {
@@ -2547,6 +2925,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, wait
 		case "done", "error":
 			m.flushChatStreamOutput()
+			m.materializeChatStreamText()
 			m.invalidateChatStream()
 			return m, m.fetchChatStatus(m.pendingMsgID)
 		default:
@@ -3552,11 +3931,16 @@ func (m Model) historyNext() Model {
 // --- transcript ---
 
 func (m *Model) append(e entry) {
-	output := m.currentChatStreamOutput()
-	if output != "" && (m.chatStreamLogIndex < 0 || output != m.chatStreamOutput) {
-		// Any later transcript entry must follow bytes already accepted from the
-		// assistant, even when their normal cadence render has not fired yet.
+	if len(m.chatStreamBuffer) > 0 {
+		// Any later transcript entry follows the accepted assistant bytes, even
+		// when the normal cadence render has not fired yet. This is a durable
+		// transcript boundary, so materialize the response once here.
 		m.flushChatStreamOutput()
+		output := m.materializeChatStreamOutput()
+		if m.chatStreamLogIndex < 0 && output != "" {
+			m.appendTranscriptEntry(entry{role: "agent", text: output})
+			m.chatStreamLogIndex = len(m.log) - 1
+		}
 	}
 	m.appendTranscriptEntry(e)
 }
@@ -3735,7 +4119,10 @@ func (m *Model) refreshTranscript() {
 	blockMaxWidths := make([]int, 0, len(m.log))
 	var lines []string
 	maxLineWidth := 0
-	for _, e := range m.log {
+	for i, e := range m.log {
+		if i == m.chatStreamLogIndex && len(m.chatStreamBuffer) > 0 {
+			e.text = string(m.chatStreamBuffer)
+		}
 		block := renderTranscriptEntry(e, wrap)
 		b.WriteString(block)
 		blocks = append(blocks, block)
@@ -3759,6 +4146,18 @@ func (m *Model) refreshTranscript() {
 	m.transcriptReady = true
 	m.transcript.SetContent(m.transcriptContent)
 	m.transcript.GotoBottom()
+	if m.chatStreamLogIndex >= 0 && len(m.chatStreamBuffer) > 0 {
+		m.chatStreamFastWrap = false
+		m.chatStreamRenderedWidth = width
+		m.chatStreamWrappedLines = nil
+		m.chatStreamWrapBaseLines = nil
+		m.chatStreamWrapWord = nil
+		m.chatStreamWrapSpace = nil
+		m.chatStreamStableLineCount = 0
+		m.chatStreamHardOnly = false
+		m.chatStreamHardLineStart = 0
+		m.chatStreamHardColumn = 0
+	}
 }
 
 // replaceTranscriptBlock re-renders one mutable entry when the transcript cache
@@ -3780,50 +4179,6 @@ func (m *Model) replaceTranscriptBlock(index int) {
 	m.refreshTranscript()
 }
 
-func (m *Model) replaceChatStreamTranscriptBlock(index int, previousOutput, output string) bool {
-	width := m.effectiveTranscriptWidth()
-	wrapWidth := width - 2
-	if !m.transcriptLineCacheValid() || wrapWidth < 1 || index != len(m.transcriptBlocks)-1 || m.chatStreamRenderedWidth != width || m.chatStreamRenderedOutput != previousOutput || !strings.HasPrefix(output, previousOutput) {
-		return false
-	}
-	delta := strings.TrimPrefix(output, previousOutput)
-	if delta == "" || !isHardWrapOnlyDelta(delta) || !canAppendHardWrappedText(m.chatStreamRenderedBody, previousOutput) {
-		return false
-	}
-	body := appendHardWrappedText(m.chatStreamRenderedBody, delta, wrapWidth)
-	block := chatAgentStyle.Render("● agent") + "\n" + body + "\n\n"
-
-	m.transcriptBlocks[index] = block
-	if !m.replaceTranscriptViewportBlock(index, block) {
-		m.transcriptContentDirty = true
-		return false
-	}
-	m.transcriptContentDirty = true
-	m.chatStreamRenderedOutput = output
-	m.chatStreamRenderedBody = body
-	m.chatStreamRenderedWidth = width
-	return true
-}
-
-func (m *Model) rememberChatStreamRenderedBlock(index int, output string) {
-	if index < 0 || index >= len(m.transcriptBlocks) || index >= len(m.log) || m.log[index].role != "agent" {
-		m.chatStreamRenderedOutput = ""
-		m.chatStreamRenderedBody = ""
-		m.chatStreamRenderedWidth = 0
-		return
-	}
-	body, ok := renderedAgentBlockBody(m.transcriptBlocks[index])
-	if !ok {
-		m.chatStreamRenderedOutput = ""
-		m.chatStreamRenderedBody = ""
-		m.chatStreamRenderedWidth = 0
-		return
-	}
-	m.chatStreamRenderedOutput = output
-	m.chatStreamRenderedBody = body
-	m.chatStreamRenderedWidth = m.effectiveTranscriptWidth()
-}
-
 func renderedAgentBlockBody(block string) (string, bool) {
 	headerEnd := strings.IndexByte(block, '\n')
 	if headerEnd < 0 || !strings.HasSuffix(block, "\n\n") {
@@ -3832,62 +4187,11 @@ func renderedAgentBlockBody(block string) (string, bool) {
 	return block[headerEnd+1 : len(block)-2], true
 }
 
-func canAppendHardWrappedText(rendered, output string) bool {
-	if strings.TrimRightFunc(output, unicode.IsSpace) != output {
-		return false
+func padTranscriptBodyLine(line string, width int) string {
+	if lineWidth := ansi.StringWidth(line); lineWidth < width {
+		return line + strings.Repeat(" ", width-lineWidth)
 	}
-	lastLine := rendered
-	if newline := strings.LastIndexByte(rendered, '\n'); newline >= 0 {
-		lastLine = rendered[newline+1:]
-	}
-	// If this line contains a word separator, a later chunk can extend the
-	// trailing word enough that Lipgloss moves the whole word to the next line.
-	// Re-render those updates canonically instead of hard-wrapping them in place.
-	return strings.IndexFunc(lastLine, unicode.IsSpace) < 0
-}
-
-// isHardWrapOnlyDelta accepts only printable ASCII. Non-ASCII stream chunks can
-// extend a grapheme from an earlier chunk (for example with a combining mark or
-// emoji ZWJ sequence), so they must use Lipgloss's canonical wrapper.
-func isHardWrapOnlyDelta(delta string) bool {
-	for _, r := range delta {
-		if r >= utf8.RuneSelf || r == '\x1b' || unicode.IsSpace(r) || unicode.IsControl(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func appendHardWrappedText(rendered, delta string, limit int) string {
-	if delta == "" {
-		return rendered
-	}
-	column := 0
-	if lastNewline := strings.LastIndexByte(rendered, '\n'); lastNewline >= 0 {
-		column = ansi.StringWidth(rendered[lastNewline+1:])
-	} else {
-		column = ansi.StringWidth(rendered)
-	}
-	var b strings.Builder
-	b.Grow(len(rendered) + len(delta) + len(delta)/limit + 1)
-	b.WriteString(rendered)
-	for _, r := range delta {
-		w := 1
-		if r >= utf8.RuneSelf {
-			w = ansi.StringWidth(string(r))
-			if w <= 0 {
-				b.WriteRune(r)
-				continue
-			}
-		}
-		if column+w > limit {
-			b.WriteByte('\n')
-			column = 0
-		}
-		b.WriteRune(r)
-		column += w
-	}
-	return b.String()
+	return line
 }
 
 func (m *Model) replaceTranscriptViewportBlock(index int, block string) bool {
@@ -3934,7 +4238,10 @@ func (m *Model) ensureTranscriptContent() {
 		return
 	}
 	var b strings.Builder
-	for _, block := range m.transcriptBlocks {
+	for i, block := range m.transcriptBlocks {
+		if i == m.chatStreamLogIndex && len(m.chatStreamBuffer) > 0 && i < len(m.log) {
+			block = renderTranscriptEntry(entry{role: "agent", text: string(m.chatStreamBuffer)}, transcriptWrap(m.transcriptRenderWidth))
+		}
 		b.WriteString(block)
 	}
 	m.transcriptContent = b.String()

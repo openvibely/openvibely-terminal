@@ -425,7 +425,10 @@ func pressTab(t *testing.T, m Model) Model {
 
 func transcript(m Model) string {
 	var b strings.Builder
-	for _, e := range m.log {
+	for i, e := range m.log {
+		if i == m.chatStreamLogIndex && e.text == "" && len(m.chatStreamBuffer) > 0 {
+			e.text = m.currentChatStreamOutput()
+		}
 		b.WriteString(e.role + ":" + e.head + ":" + e.text + "\n")
 	}
 	return b.String()
@@ -4592,7 +4595,11 @@ func TestChatStreamRedrawsAreCadenceBoundedAndFinalOutputMatches(t *testing.T) {
 		t.Fatalf("redraws = %d, want 3 cadence redraws and 1 terminal flush", m.chatStreamRedraws)
 	}
 	if len(m.log) == 0 || m.log[len(m.log)-1].role != "agent" || m.log[len(m.log)-1].text != want.String() {
-		t.Fatal("cadence/terminal rendering changed final output bytes")
+		var got string
+		if len(m.log) > 0 {
+			got = m.log[len(m.log)-1].text
+		}
+		t.Fatalf("cadence/terminal rendering changed final output bytes: got %d bytes, want %d", len(got), want.Len())
 	}
 }
 
@@ -5011,6 +5018,100 @@ func TestChatStreamUnicodeGraphemeAppendMatchesCanonicalWrapping(t *testing.T) {
 	}
 }
 
+func TestChatStreamAppendableWrappingAcrossRefreshes(t *testing.T) {
+	for _, chunkSize := range []int{1, 37, 512} {
+		t.Run(fmt.Sprintf("chunk-%d", chunkSize), func(t *testing.T) {
+			m := pendingChatStreamTestModel(t)
+			m.log = []entry{{role: "system", text: "retained history"}}
+			m.chatStreamLogIndex = -1
+			m.transcript.Width = 30
+			m.refreshTranscript()
+
+			want := strings.Repeat("x", 12*1024)
+			for offset := 0; offset < len(want); {
+				end := offset + chunkSize
+				if end > len(want) {
+					end = len(want)
+				}
+				m.updateChatStreamOutput(want[offset:end])
+				offset = end
+				if offset%(chunkSize*19) == 0 || offset == len(want) {
+					m.flushChatStreamOutput()
+					assertChatStreamLinesMatchCanonical(t, &m)
+				}
+			}
+
+			if !m.chatStreamFastWrap || m.chatStreamRenderedOffset != len(want) {
+				t.Fatalf("appendable wrapping state: fast=%t rendered=%d want %d", m.chatStreamFastWrap, m.chatStreamRenderedOffset, len(want))
+			}
+			if got := string(m.chatStreamBuffer); got != want {
+				t.Fatal("streamed bytes changed across cadence refreshes")
+			}
+		})
+	}
+}
+
+func TestChatStreamOneByteUnicodeAndWideWrapBoundaries(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.log = nil
+	m.chatStreamLogIndex = -1
+	m.transcript.Width = 8 // six columns of wrapped assistant body
+	m.refreshTranscript()
+
+	want := "123你45界🙂"
+	for _, b := range []byte(want) {
+		m.updateChatStreamOutput(string([]byte{b}))
+		m.flushChatStreamOutput()
+		assertChatStreamLinesMatchCanonical(t, &m)
+	}
+	if !m.chatStreamFastWrap {
+		t.Fatal("simple wide characters left the appendable wrapping path")
+	}
+	m.completeChat(want, nil)
+	if len(m.log) != 1 || m.log[0].text != want {
+		t.Fatalf("one-byte Unicode response = %#v, want one exact assistant entry", m.log)
+	}
+	assertTranscriptMatchesFullRefresh(t, &m)
+}
+
+func TestChatStreamReplacementSnapshotRebuildsCanonicalBlock(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.log = nil
+	m.chatStreamLogIndex = -1
+	m.transcript.Width = 16
+	m.refreshTranscript()
+
+	m.updateChatStreamOutput("old streamed reply")
+	m.flushChatStreamOutput()
+	const replacement = "replacement\nwide 界 output"
+	m.updateChatStreamSnapshot(replacement)
+
+	if len(m.log) != 1 || m.log[0].text != replacement {
+		t.Fatalf("replacement snapshot state: entries=%d text=%q", len(m.log), m.log[0].text)
+	}
+	want := renderTranscriptEntry(entry{role: "agent", text: replacement}, transcriptWrap(m.effectiveTranscriptWidth()))
+	if got := m.transcriptBlocks[m.chatStreamLogIndex]; got != want {
+		t.Fatalf("replacement snapshot was not canonically rendered\ngot  %q\nwant %q", got, want)
+	}
+	assertTranscriptMatchesFullRefresh(t, &m)
+}
+
+func assertChatStreamLinesMatchCanonical(t *testing.T, m *Model) {
+	t.Helper()
+	var wantLines []string
+	for i, e := range m.log {
+		if i == m.chatStreamLogIndex {
+			e.text = string(m.chatStreamBuffer[:m.chatStreamRenderedOffset])
+		}
+		block := renderTranscriptEntry(e, transcriptWrap(m.effectiveTranscriptWidth()))
+		blockLines, _ := renderedLines(block)
+		wantLines = appendRenderedLines(wantLines, blockLines)
+	}
+	if !slices.Equal(m.transcriptLines, wantLines) {
+		t.Fatalf("incremental transcript lines differ from canonical wrap\ngot  %q\nwant %q", m.transcriptLines, wantLines)
+	}
+}
+
 func TestChatStreamWordBoundaryAppendMatchesCanonicalWrapping(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -5029,6 +5130,7 @@ func TestChatStreamWordBoundaryAppendMatchesCanonicalWrapping(t *testing.T) {
 			for _, chunk := range tc.chunks {
 				m.updateChatStreamOutput(chunk)
 				m.flushChatStreamOutput()
+				m.materializeChatStreamOutput()
 
 				want := renderTranscriptEntry(entry{role: "agent", text: m.chatStreamOutput}, transcriptWrap(m.effectiveTranscriptWidth()))
 				if got := m.transcriptBlocks[m.chatStreamLogIndex]; got != want {
@@ -5040,6 +5142,36 @@ func TestChatStreamWordBoundaryAppendMatchesCanonicalWrapping(t *testing.T) {
 	}
 }
 
+func TestChatStreamASCIIWrapSegmentsMatchLipgloss(t *testing.T) {
+	for _, text := range []string{
+		"abc def ghi",
+		"abc-defghi",
+		"a  b",
+		"    abc",
+		"abcdefghi",
+		"ab-cd ef-gh",
+	} {
+		for _, chunkSize := range []int{1, 5, 17} {
+			t.Run(fmt.Sprintf("%q/chunk-%d", text, chunkSize), func(t *testing.T) {
+				m := pendingChatStreamTestModel(t)
+				m.log = nil
+				m.chatStreamLogIndex = -1
+				m.transcript.Width = 8
+				m.refreshTranscript()
+				for offset := 0; offset < len(text); {
+					end := offset + chunkSize
+					if end > len(text) {
+						end = len(text)
+					}
+					m.updateChatStreamOutput(text[offset:end])
+					m.flushChatStreamOutput()
+					offset = end
+					assertChatStreamLinesMatchCanonical(t, &m)
+				}
+			})
+		}
+	}
+}
 func TestChatStreamMutableReplacementKeepsViewportAtBottom(t *testing.T) {
 	m := pendingChatStreamTestModel(t)
 	m.log = nil
@@ -5061,6 +5193,27 @@ func TestChatStreamMutableReplacementKeepsViewportAtBottom(t *testing.T) {
 	assertTranscriptMatchesFullRefresh(t, &m)
 }
 
+func TestChatStreamAppendableWrappingKeepsViewportAtBottom(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.log = nil
+	for i := 0; i < 80; i++ {
+		m.log = append(m.log, entry{role: "system", text: fmt.Sprintf("history-%03d", i)})
+	}
+	m.refreshTranscript()
+	m.updateChatStreamOutput(strings.Repeat("x", 320))
+	m.flushChatStreamOutput()
+
+	m.transcript.GotoTop()
+	if m.transcript.AtBottom() {
+		t.Fatal("fixture did not scroll away from bottom")
+	}
+	m.updateChatStreamOutput(strings.Repeat("y", 80))
+	m.flushChatStreamOutput()
+	if !m.chatStreamFastWrap || !m.transcript.AtBottom() {
+		t.Fatalf("appendable stream update did not preserve bottom scroll: fast=%t atBottom=%t", m.chatStreamFastWrap, m.transcript.AtBottom())
+	}
+	assertChatStreamLinesMatchCanonical(t, &m)
+}
 func TestChatStreamReplacementRefreshesTruncatedLineCache(t *testing.T) {
 	m := pendingChatStreamTestModel(t)
 	m.log = []entry{
