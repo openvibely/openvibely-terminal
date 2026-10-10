@@ -2866,7 +2866,7 @@ func scheduleCommand() command {
 		validateArgs: validateScheduleArgs,
 		completions: []commandCompletion{
 			{after: []string{"list"}, values: []string{"--all"}},
-			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "seconds", "minutes", "hours", "clear-context"}},
+			{after: []string{"add", "*", "**"}, partialAfter: completionAfterScheduleTimestamp, values: []string{"once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours", "clear-context"}},
 			{after: []string{"add", "*", "**", "clear-context"}, values: []string{"true", "false"}},
 			{after: []string{"edit", "*"}, values: []string{"run-at", "repeat", "interval", "clear-context"}},
 			{after: []string{"edit", "*", "repeat"}, values: []string{"once", "daily", "weekly", "monthly", "hourly", "seconds", "minutes", "hours"}},
@@ -2890,7 +2890,7 @@ func scheduleCommand() command {
 			{action: "list", args: "[--all]", description: "list schedules; default output shows the first 100"},
 			{action: "show", args: "<id|name>", description: "inspect a schedule and its bound task"},
 			{action: "open", args: "<id|name>", description: "compatibility alias for show"},
-			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|seconds|minutes|hours [interval]] [clear-context <true|false>]"},
+			{action: "add", args: "<task> <2006-01-02T15:04> [once|daily|weekly|monthly|hourly|seconds|minutes|hours [interval]] [clear-context <true|false>]"},
 			{action: "edit", args: "<id> [run-at <2006-01-02T15:04>] [repeat <once|daily|weekly|monthly|hourly|seconds|minutes|hours>] [interval <1..365>] [clear-context <true|false>]"},
 		},
 		examples: []string{
