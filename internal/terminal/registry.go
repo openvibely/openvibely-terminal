@@ -566,6 +566,42 @@ func newTaskThreadInputTarget(m Model, projectID, action string, task client.Tas
 	}
 }
 
+func resolveTaskThreadInputTargetData(ctx context.Context, c *client.Client, projectID, action string, args []string, listTasks func(context.Context, string) ([]client.Task, error)) (client.Task, client.TaskThreadPendingInput, error) {
+	tasks, err := listTasks(ctx, projectID)
+	if err != nil {
+		return client.Task{}, client.TaskThreadPendingInput{}, err
+	}
+	task, inputRefParts, err := resolveTaskWithOperands(tasks, args, 1)
+	if err != nil {
+		return client.Task{}, client.TaskThreadPendingInput{}, err
+	}
+	inputRef := strings.TrimSpace(strings.Join(inputRefParts, " "))
+	inputs, err := c.GetTaskThreadPendingInputsForProject(ctx, task.ID, projectID)
+	if err != nil {
+		return task, client.TaskThreadPendingInput{}, err
+	}
+	input, err := matchRef(inputs, inputRef,
+		func(input client.TaskThreadPendingInput) string { return input.ID },
+		func(input client.TaskThreadPendingInput) string { return input.ID })
+	if err != nil {
+		return task, client.TaskThreadPendingInput{}, err
+	}
+	if input.TaskID != task.ID || input.ProjectID != projectID {
+		return task, input, fmt.Errorf("pending input %q does not belong to the selected task and project", sanitizeAutomationDetailText(input.ID))
+	}
+	switch action {
+	case "cancel":
+		if input.InputStatus != "pending" || (input.InputMode != "queued" && input.InputMode != "steering") {
+			return task, input, fmt.Errorf("pending input %q is no longer cancellable", sanitizeAutomationDetailText(input.ID))
+		}
+	case "steer":
+		if input.InputStatus != "pending" || input.InputMode != "queued" {
+			return task, input, fmt.Errorf("pending input %q is not a queued follow-up", sanitizeAutomationDetailText(input.ID))
+		}
+	}
+	return task, input, nil
+}
+
 func resolveTaskThreadInputTarget(m Model, c *client.Client, projectID, action string, args []string) tea.Cmd {
 	baseCtx := m.cliContext
 	if baseCtx == nil {
@@ -574,39 +610,8 @@ func resolveTaskThreadInputTarget(m Model, c *client.Client, projectID, action s
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(baseCtx, cmdTimeout)
 		defer cancel()
-		tasks, err := c.ListTasks(ctx, projectID)
-		if err != nil {
-			return newTaskThreadInputTarget(m, projectID, action, client.Task{}, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
-		}
-		task, inputRefParts, err := resolveTaskWithOperands(tasks, args, 1)
-		if err != nil {
-			return newTaskThreadInputTarget(m, projectID, action, client.Task{}, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
-		}
-		inputRef := strings.TrimSpace(strings.Join(inputRefParts, " "))
-		inputs, err := c.GetTaskThreadPendingInputsForProject(ctx, task.ID, projectID)
-		if err != nil {
-			return newTaskThreadInputTarget(m, projectID, action, task, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
-		}
-		input, err := matchRef(inputs, inputRef,
-			func(input client.TaskThreadPendingInput) string { return input.ID },
-			func(input client.TaskThreadPendingInput) string { return input.ID })
-		if err != nil {
-			return newTaskThreadInputTarget(m, projectID, action, task, client.TaskThreadPendingInput{}, safeTaskThreadInputError(err))
-		}
-		if input.TaskID != task.ID || input.ProjectID != projectID {
-			return newTaskThreadInputTarget(m, projectID, action, task, input, fmt.Errorf("pending input %q does not belong to the selected task and project", sanitizeAutomationDetailText(input.ID)))
-		}
-		switch action {
-		case "cancel":
-			if input.InputStatus != "pending" || (input.InputMode != "queued" && input.InputMode != "steering") {
-				return newTaskThreadInputTarget(m, projectID, action, task, input, fmt.Errorf("pending input %q is no longer cancellable", sanitizeAutomationDetailText(input.ID)))
-			}
-		case "steer":
-			if input.InputStatus != "pending" || input.InputMode != "queued" {
-				return newTaskThreadInputTarget(m, projectID, action, task, input, fmt.Errorf("pending input %q is not a queued follow-up", sanitizeAutomationDetailText(input.ID)))
-			}
-		}
-		return newTaskThreadInputTarget(m, projectID, action, task, input, nil)
+		task, input, err := resolveTaskThreadInputTargetData(ctx, c, projectID, action, args, c.ListTaskReferences)
+		return newTaskThreadInputTarget(m, projectID, action, task, input, safeTaskThreadInputError(err))
 	}
 }
 

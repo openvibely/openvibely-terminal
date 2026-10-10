@@ -18,6 +18,171 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
+// TestPendingInputTargetResolutionPerformanceEvidence compares full HTML-board
+// target resolution with compact-catalog resolution at 100, 1,000, and 5,000
+// tasks using the same pending-input lookup and validation path.
+func TestPendingInputTargetResolutionPerformanceEvidence(t *testing.T) {
+	if os.Getenv("OPENVIBELY_PENDING_INPUT_PERF_EVIDENCE") != "1" {
+		t.Skip("set OPENVIBELY_PENDING_INPUT_PERF_EVIDENCE=1 to run pending-input target-resolution measurements")
+	}
+
+	const fixedDelay = 10 * time.Millisecond
+	runs := statusPerformanceEnvInt(t, "OPENVIBELY_PENDING_INPUT_PERF_RUNS", 20)
+	if runs < 20 {
+		t.Fatalf("OPENVIBELY_PENDING_INPUT_PERF_RUNS = %d, want at least 20", runs)
+	}
+	bandwidth := int64(statusPerformanceEnvInt(t, "OPENVIBELY_TASK_REFERENCE_PERF_BPS", 2000000))
+	if bandwidth < 1 {
+		t.Fatalf("OPENVIBELY_TASK_REFERENCE_PERF_BPS = %d, want positive", bandwidth)
+	}
+
+	for _, cards := range []int{100, 1000, 5000} {
+		results := make(map[taskReferencePerfMode]taskReferencePerfResult, 2)
+		for _, mode := range []taskReferencePerfMode{taskReferencePerfFull, taskReferencePerfCompact} {
+			result := measurePendingInputTargetResolution(t, mode, cards, fixedDelay, bandwidth, runs)
+			results[mode] = result
+			t.Logf("pending_input_target_perf mode=%s tasks=%d fixed_delay=%s bandwidth_bps=%d runs=%d requests=%v response_bytes=%v p50=%s p95=%s allocs/op=%.1f allocated_bytes/op=%d resolved=%s", mode, cards, fixedDelay, bandwidth, runs, result.requests, result.responseBytes, result.median, result.p95, result.allocsPerOp, result.allocatedBytesPerOp, result.identity)
+		}
+
+		full, compact := results[taskReferencePerfFull], results[taskReferencePerfCompact]
+		if cards == 5000 && compact.responseBytes[len(compact.responseBytes)-1]*4 > full.responseBytes[len(full.responseBytes)-1] {
+			t.Fatalf("5,000-task compact target resolution used %d response bytes, full used %d; want at least 75%% fewer bytes", compact.responseBytes[len(compact.responseBytes)-1], full.responseBytes[len(full.responseBytes)-1])
+		}
+		if cards == 5000 && compact.p95*4 > full.p95*3 {
+			t.Fatalf("5,000-task compact target resolution p95 = %s, full p95 = %s; want at least 25%% lower", compact.p95, full.p95)
+		}
+		if cards == 100 && compact.p95 > full.p95+(full.p95/20) {
+			t.Fatalf("100-task compact target resolution p95 = %s, full p95 = %s; compact path regressed by more than 5%%", compact.p95, full.p95)
+		}
+	}
+}
+
+func measurePendingInputTargetResolution(t *testing.T, mode taskReferencePerfMode, cards int, delay time.Duration, bandwidth int64, runs int) taskReferencePerfResult {
+	t.Helper()
+	serverState := newPendingInputTargetPerfServer(mode, cards, delay, bandwidth)
+	srv := httptest.NewServer(serverState)
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := fmt.Sprintf("Task %05d", cards-1)
+	wantID := fmt.Sprintf("task-%05d", cards-1)
+	result := taskReferencePerfResult{
+		requests:      make([]int, 0, runs),
+		responseBytes: make([]int64, 0, runs),
+		durations:     make([]time.Duration, 0, runs),
+	}
+	loader := c.ListTasks
+	if mode == taskReferencePerfCompact {
+		loader = c.ListTaskReferences
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for i := 0; i < runs; i++ {
+		serverState.requests.Store(0)
+		serverState.responseBytes.Store(0)
+		start := time.Now()
+		task, input, err := resolveTaskThreadInputTargetData(context.Background(), c, "p1", "cancel", []string{ref, "input-latest"}, loader)
+		result.durations = append(result.durations, time.Since(start))
+		if err != nil {
+			t.Fatalf("%s %d-task pending-input target lookup %d failed: %v", mode, cards, i+1, err)
+		}
+		if task.ID != wantID || input.ID != "input-latest" {
+			t.Fatalf("%s %d-task target identity = %q/%q, want %q/input-latest", mode, cards, task.ID, input.ID, wantID)
+		}
+		result.identity = task.ID + "/" + input.ID
+		result.requests = append(result.requests, int(serverState.requests.Load()))
+		result.responseBytes = append(result.responseBytes, serverState.responseBytes.Load())
+	}
+	runtime.ReadMemStats(&after)
+	result.median, result.p95 = taskReferencePerfPercentiles(result.durations)
+	result.allocsPerOp = float64(after.Mallocs-before.Mallocs) / float64(runs)
+	result.allocatedBytesPerOp = int64(after.TotalAlloc-before.TotalAlloc) / int64(runs)
+	for i, requests := range result.requests {
+		if requests != 2 {
+			t.Fatalf("%s %d-task target lookup %d made %d requests, want one catalog and one pending-input request", mode, cards, i+1, requests)
+		}
+	}
+	return result
+}
+
+type pendingInputTargetPerfServer struct {
+	mode          taskReferencePerfMode
+	catalog       []byte
+	pending       []byte
+	taskID        string
+	delay         time.Duration
+	bandwidth     int64
+	requests      atomic.Int64
+	responseBytes atomic.Int64
+}
+
+func newPendingInputTargetPerfServer(mode taskReferencePerfMode, cards int, delay time.Duration, bandwidth int64) *pendingInputTargetPerfServer {
+	full, compact := taskReferencePerfBodies(cards)
+	catalog := full
+	if mode == taskReferencePerfCompact {
+		catalog = compact
+	}
+	taskID := fmt.Sprintf("task-%05d", cards-1)
+	pending := []byte(fmt.Sprintf(`<div id="pending-thread-inputs" data-task-id="%s" data-project-id="p1"><div data-thread-input-id="input-latest" data-task-id="%s" data-input-mode="queued"><div class="truncate">Continue work</div></div></div>`, taskID, taskID))
+	return &pendingInputTargetPerfServer{mode: mode, catalog: catalog, pending: pending, taskID: taskID, delay: delay, bandwidth: bandwidth}
+}
+
+func (s *pendingInputTargetPerfServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body := s.catalog
+	if r.URL.Path == "/tasks/"+s.taskID+"/thread/pending-inputs" {
+		body = s.pending
+		w.Header().Set("Content-Type", "text/html")
+	} else {
+		wantPath := "/tasks"
+		if s.mode == taskReferencePerfCompact {
+			wantPath = "/api/tasks/reference-catalog"
+			w.Header().Set("Content-Type", "application/json")
+		} else {
+			w.Header().Set("Content-Type", "text/html")
+		}
+		if r.URL.Path != wantPath || r.URL.Query().Get("project_id") != "p1" {
+			http.NotFound(w, r)
+			return
+		}
+	}
+	if r.URL.Query().Get("project_id") != "p1" {
+		http.NotFound(w, r)
+		return
+	}
+	s.requests.Add(1)
+	s.responseBytes.Add(int64(len(body)))
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	writeTaskReferencePerfBody(w, body, s.bandwidth)
+}
+
+func writeTaskReferencePerfBody(w http.ResponseWriter, body []byte, bandwidth int64) {
+	if bandwidth < 1 {
+		_, _ = w.Write(body)
+		return
+	}
+	const chunkSize = 32 * 1024
+	for offset := 0; offset < len(body); {
+		start := offset
+		end := offset + chunkSize
+		if end > len(body) {
+			end = len(body)
+		}
+		_, _ = w.Write(body[start:end])
+		offset = end
+		if offset < len(body) {
+			delay := time.Duration(int64(end-start) * int64(time.Second) / bandwidth)
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+		}
+	}
+}
+
 // TestTaskReferencePerformanceEvidence is an opt-in, repeatable comparison
 // harness for reference-only task resolution. It measures the historical HTML
 // board lookup against the compact JSON catalog at 100, 1,000, and 5,000
