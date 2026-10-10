@@ -25,15 +25,18 @@ import (
 
 // Task is one card on the kanban board.
 type Task struct {
-	ID           string   `json:"id"`
-	ProjectID    string   `json:"project_id"`
-	Title        string   `json:"title"`
-	Prompt       string   `json:"prompt"`
-	Category     string   `json:"category"` // backlog | active | completed | scheduled
-	Status       string   `json:"status"`   // pending | queued | running | completed | failed | cancelled | blocked
-	Priority     int      `json:"priority,omitempty"`
-	DisplayOrder int      `json:"display_order"`
-	Badges       []string `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
+	ID                string   `json:"id"`
+	ProjectID         string   `json:"project_id"`
+	Title             string   `json:"title"`
+	Prompt            string   `json:"prompt"`
+	Category          string   `json:"category"` // backlog | active | completed | scheduled
+	Status            string   `json:"status"`   // pending | queued | running | completed | failed | cancelled | blocked
+	Priority          int      `json:"priority,omitempty"`
+	DisplayOrder      int      `json:"display_order"`
+	Badges            []string `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
+	WorktreeBranch    string   `json:"worktree_branch,omitempty"`
+	MergeTargetBranch string   `json:"merge_target_branch,omitempty"`
+	IntegrationStatus string   `json:"integration_status,omitempty"`
 	// Attachments is a complete pre-upload snapshot when supplied by the task
 	// reference endpoint. Nil means the endpoint did not provide one.
 	Attachments []Attachment `json:"attachments,omitempty"`
@@ -459,14 +462,16 @@ func parseTaskCards(root *html.Node, projectID string) []Task {
 
 		order, _ := strconv.Atoi(attr(n, "data-display-order"))
 		tasks = append(tasks, Task{
-			ID:           id,
-			ProjectID:    projectID,
-			Title:        cardTitle(n, id),
-			Prompt:       cardPrompt(n),
-			Category:     category,
-			Status:       attr(n, "data-task-status"),
-			DisplayOrder: order,
-			Badges:       cardBadges(n),
+			ID:                id,
+			ProjectID:         projectID,
+			Title:             cardTitle(n, id),
+			Prompt:            cardPrompt(n),
+			Category:          category,
+			Status:            attr(n, "data-task-status"),
+			DisplayOrder:      order,
+			Badges:            cardBadges(n),
+			WorktreeBranch:    attr(n, "data-task-branch"),
+			IntegrationStatus: attr(n, "data-task-merge"),
 		})
 	}
 	return tasks
@@ -844,6 +849,7 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 const taskBoardPromptPreviewCodePoints = 300
 
 func populateExactTaskMetadata(root *html.Node, task *Task) {
+	populateTaskWorktreeMetadata(root, task)
 	task.Badges = make([]string, 0)
 	seenBadges := make(map[string]bool)
 	appendBadge := func(badge string) {

@@ -1871,6 +1871,10 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case taskWorktreeActionTargetMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case webhookMutationTargetMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -2604,6 +2608,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			projectID = m.selectedID
 		}
 		return confirmTaskDeletion(m, projectID, msg.task)
+
+	case taskWorktreeActionTargetMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
+			return m, nil
+		}
+		if msg.projectID != "" && msg.projectID != m.selectedID {
+			return m, nil
+		}
+		m.busy = false
+		if m.handleCompletedRequestError(msg.err) {
+			return m, nil
+		}
+		projectID := msg.projectID
+		if projectID == "" {
+			projectID = m.selectedID
+		}
+		return confirmTaskWorktreeAction(m, projectID, msg.task, msg.action, msg.strategy)
 
 	case webhookMutationTargetMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
