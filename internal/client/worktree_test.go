@@ -168,6 +168,28 @@ func TestTaskWorktreeActionRefreshesBranchStateAfterFailure(t *testing.T) {
 	}
 }
 
+func TestGetTaskWorktreeInfoRetainsMergedStatusWithoutBranch(t *testing.T) {
+	srv := worktreeActionTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `<html><body><div id="worktree-info-panel"><span class="badge badge-warning">Merged</span><div><span>Target:</span><code>main</code></div></div></body></html>`)
+	})
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := c.GetTaskWorktreeInfoForProject(context.Background(), "t-1", "p-1")
+	if err != nil {
+		t.Fatalf("GetTaskWorktreeInfoForProject: %v", err)
+	}
+	if info.Branch != "" {
+		t.Errorf("branch = %q, want empty after cleanup", info.Branch)
+	}
+	if info.IntegrationStatus != "merged" {
+		t.Errorf("integration status = %q, want merged", info.IntegrationStatus)
+	}
+}
+
 func TestGetTaskWorktreeInfoRequiresSelectedProjectOwnership(t *testing.T) {
 	var worktreeRequests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

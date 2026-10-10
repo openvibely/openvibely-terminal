@@ -124,10 +124,12 @@ func parseTaskWorktreeInfo(root *html.Node, taskID, projectID string) TaskWorktr
 	info.Branch = worktreeLabelValue(panel, "Branch:")
 	info.TargetBranch = worktreeLabelValue(panel, "Target:")
 	info.IntegrationStatus = parseWorktreeIntegrationStatus(panel)
-	if info.Branch == "" {
-		info.IntegrationStatus = "none"
-	} else if info.IntegrationStatus == "" {
-		info.IntegrationStatus = "unknown"
+	if info.IntegrationStatus == "" {
+		if info.Branch == "" {
+			info.IntegrationStatus = "none"
+		} else {
+			info.IntegrationStatus = "unknown"
+		}
 	}
 	return info
 }
