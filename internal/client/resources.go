@@ -718,10 +718,9 @@ func dedupeAlertIDs(ids []string) ([]string, error) {
 	return unique, nil
 }
 
-// DeleteAlert removes one alert.
+// DeleteAlert removes one alert without loading the refreshed list.
 func (c *Client) DeleteAlert(ctx context.Context, alertID, projectID string) error {
-	_, err := c.DeleteAlertAndList(ctx, alertID, projectID)
-	return err
+	return c.doForm(ctx, http.MethodDelete, "/alerts/"+url.PathEscape(alertID)+query("project_id", projectID), nil)
 }
 
 // DeleteAlertAndList removes one alert and parses the refreshed alert list from

@@ -561,6 +561,57 @@ func TestListAlertsBoundedPreservesWorkflowPredicatesAndMalformedPagination(t *t
 	})
 }
 
+func TestListAlertsBoundedRefreshPerformanceEvidence(t *testing.T) {
+	if !performanceEvidenceEnabled() {
+		t.Skip("set OPENVIBELY_PERF_EVIDENCE=1 to run delayed alert refresh evidence")
+	}
+
+	const samples = 30
+	for _, total := range []int{50, 1000, 5000} {
+		t.Run(fmt.Sprintf("alerts_%d", total), func(t *testing.T) {
+			c, requests, bytesServed, _ := alertCatalogServer(t, total, 50*time.Millisecond)
+			durations := make([]time.Duration, 0, samples)
+			decodedRows := 0
+			for i := 0; i < samples; i++ {
+				beforeRequests, beforeBytes := *requests, *bytesServed
+				start := time.Now()
+				result, err := c.ListAlertsBounded(context.Background(), "p1", AlertListFilter{}, DefaultAlertListLimit)
+				durations = append(durations, time.Since(start))
+				if err != nil {
+					t.Fatalf("bounded refresh %d: %v", i+1, err)
+				}
+				if got := *requests - beforeRequests; got != 1 {
+					t.Fatalf("bounded refresh %d requests = %d, want one", i+1, got)
+				}
+				if len(result.Alerts) != DefaultAlertListLimit || result.ParsedAlerts != DefaultAlertListLimit {
+					t.Fatalf("bounded refresh %d decoded %d retained/%d parsed rows, want 50", i+1, len(result.Alerts), result.ParsedAlerts)
+				}
+				if result.MoreAvailable != (total > DefaultAlertListLimit) || !result.TotalKnown || result.Total != total {
+					t.Fatalf("bounded refresh %d pagination metadata = %+v", i+1, result)
+				}
+				decodedRows += result.ParsedAlerts
+				if got := *bytesServed - beforeBytes; got != alertCatalogPageBytes(total, 0) {
+					t.Fatalf("bounded refresh %d response bytes = %d, want first-page bytes %d", i+1, got, alertCatalogPageBytes(total, 0))
+				}
+			}
+			requestCount := *requests
+			responseBytes := *bytesServed
+			if requestCount != samples || decodedRows != samples*DefaultAlertListLimit {
+				t.Fatalf("benchmark totals: requests=%d decoded_rows=%d, want %d/%d", requestCount, decodedRows, samples, samples*DefaultAlertListLimit)
+			}
+			t.Logf("alert_refresh_perf fixture=%d page_size=%d runs=%d requests=%d bytes=%d decoded_rows=%d median=%s p95=%s", total, DefaultAlertListLimit, samples, requestCount, responseBytes, decodedRows, durationPercentile(durations, 50), durationPercentile(durations, 95))
+		})
+	}
+}
+
+func alertCatalogPageBytes(total, offset int) int {
+	end := offset + cardPageSize
+	if end > total {
+		end = total
+	}
+	return len(alertPaginatedPage(offset, end, total))
+}
+
 func TestListAlertsBoundedLargeCatalogLatencyAndAllocations(t *testing.T) {
 	if !performanceEvidenceEnabled() {
 		runListAlertsBoundedLargeCatalogRoutine(t)
