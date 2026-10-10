@@ -679,6 +679,111 @@ func TestTasksAttachmentsDownloadDefaultNameSanitizesWindowsNames(t *testing.T) 
 	}
 }
 
+func TestTasksAttachmentsDownloadDefaultNameCollisions(t *testing.T) {
+	previousJSON := jsonMode
+	jsonMode = false
+	t.Cleanup(func() { jsonMode = previousJSON })
+
+	payload := []byte("downloaded attachment")
+	for _, tc := range []struct {
+		name       string
+		setup      func(string) error
+		checkEntry func(*testing.T, string)
+	}{
+		{
+			name: "regular file",
+			setup: func(path string) error {
+				return os.WriteFile(path, []byte("existing file"), 0o600)
+			},
+			checkEntry: func(t *testing.T, path string) {
+				got, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("reading preserved regular file: %v", err)
+				}
+				if string(got) != "existing file" {
+					t.Fatalf("existing file changed to %q", got)
+				}
+			},
+		},
+		{
+			name: "dangling symlink",
+			setup: func(path string) error {
+				return os.Symlink("missing-attachment-target", path)
+			},
+			checkEntry: func(t *testing.T, path string) {
+				info, err := os.Lstat(path)
+				if err != nil {
+					t.Fatalf("checking preserved symlink: %v", err)
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("existing entry mode = %v, want symlink", info.Mode())
+				}
+				target, err := os.Readlink(path)
+				if err != nil {
+					t.Fatalf("reading preserved symlink: %v", err)
+				}
+				if target != "missing-attachment-target" {
+					t.Fatalf("symlink target changed to %q", target)
+				}
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("symlink target unexpectedly exists: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			oldWD, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := os.Chdir(oldWD); err != nil {
+					t.Errorf("restoring working directory: %v", err)
+				}
+			})
+			if err := tc.setup("report.pdf"); err != nil {
+				if tc.name == "dangling symlink" {
+					t.Skipf("creating symlink is unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/attachments/att-1" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				_, _ = w.Write(payload)
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := downloadTaskAttachmentResult(t.Context(), c, "p1", client.Task{ID: "t-1", Title: "task"}, client.Attachment{ID: "att-1", FileName: "report.pdf"}, "")
+			if err != nil {
+				t.Fatalf("downloading attachment after name collision: %v", err)
+			}
+
+			tc.checkEntry(t, "report.pdf")
+			got, err := os.ReadFile("report (1).pdf")
+			if err != nil {
+				t.Fatalf("reading numbered download: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("numbered download = %q, want %q", got, payload)
+			}
+			if !strings.Contains(result, "report (1).pdf") {
+				t.Fatalf("download result = %q, want numbered filename", result)
+			}
+		})
+	}
+}
+
 func TestTasksAttachmentsDownloadDefaultNameCollisionDoesNotOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	oldWD, err := os.Getwd()
