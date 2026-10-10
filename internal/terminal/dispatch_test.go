@@ -5873,6 +5873,7 @@ func TestScheduleAddFastRepeatTypes(t *testing.T) {
 		{"/schedule add Refactor 2026-09-01T10:00 hours", "repeat_type=hours", "repeat_interval=1", ""},
 		{"/schedule add Refactor 2026-09-01T10:00 hours 4", "repeat_type=hours", "repeat_interval=4", ""},
 		{"/schedule add Refactor 2026-09-01T10:00 HoUrLy", "repeat_type=hours", "repeat_interval=1", ""},
+		{"/schedule add Refactor 2026-09-01T10:00 hourly 3", "repeat_type=hours", "repeat_interval=3", ""},
 		{"/schedule add Refactor 2026-09-01T10:00 daily clear-context true", "repeat_type=daily", "repeat_interval=1", "clear_context_on_start=true"},
 		{"/schedule add Refactor 2026-09-01T10:00 daily clear-context false", "repeat_type=daily", "repeat_interval=1", "clear_context_on_start=false"},
 	}

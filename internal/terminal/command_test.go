@@ -424,6 +424,7 @@ func TestRegistryCompletionAtEveryDepth(t *testing.T) {
 		{input: `/task show "Fix login" rev`, want: `/tasks show "Fix login" review `},
 		{input: `/tasks show "Fix login" dif`, want: `/tasks show "Fix login" diff `},
 		{input: `/schedule add Daily report 2026-01-20T09:00 mon`, want: `/schedule add Daily report 2026-01-20T09:00 monthly `},
+		{input: `/schedule add Daily report 2026-01-20T09:00 hourl`, want: `/schedule add Daily report 2026-01-20T09:00 hourly `},
 		{input: `/schedules add "Daily report" 2026-01-20T09:00 wee`, want: `/schedule add "Daily report" 2026-01-20T09:00 weekly `},
 		{input: "/workers limit 0", want: "/workers limit 0 "},
 		{input: "/task attachments rem extra", want: "/tasks attachments remove extra"},
@@ -2131,7 +2132,7 @@ func TestScheduleEditHelpAndCompletionMetadata(t *testing.T) {
 		t.Fatal("schedule command missing")
 	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"schedule add <task>", "clear-context <true|false>", "schedule edit <id>", "run-at", "once|daily|weekly|monthly|hourly|seconds|minutes|hours", "schedule edit a1b2c3"} {
+	for _, want := range []string{"schedule add <task>", "hourly|seconds|minutes|hours [interval]", "clear-context <true|false>", "schedule edit <id>", "run-at", "once|daily|weekly|monthly|hourly|seconds|minutes|hours", "schedule edit a1b2c3"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("help missing %q:\n%s", want, help)
 		}
@@ -2140,9 +2141,9 @@ func TestScheduleEditHelpAndCompletionMetadata(t *testing.T) {
 		after []string
 		want  string
 	}{
+		{after: []string{"add", "Refactor", "2026-01-20T09:00"}, want: "hourly"},
 		{after: []string{"add", "Refactor", "2026-01-20T09:00"}, want: "clear-context"},
-		{after: []string{"add", "Refactor", "2026-01-20T09:00", "clear-context"}, want: "true"},
-		{after: []string{"edit", "s1"}, want: "run-at"},
+		{after: []string{"add", "Refactor", "2026-01-20T09:00", "clear-context"}, want: "true"}, {after: []string{"edit", "s1"}, want: "run-at"},
 		{after: []string{"edit", "s1", "repeat"}, want: "hourly"},
 		{after: []string{"edit", "s1", "clear-context"}, want: "false"},
 	} {

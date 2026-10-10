@@ -1787,6 +1787,22 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleHelpDocumentsHourlyAddRepeat(t *testing.T) {
+	c, err := client.New("http://127.0.0.1:1") // nothing listening
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"help", "schedule"}, false, false); err != nil {
+		t.Fatalf("schedule help failed: %v", err)
+	}
+	for _, want := range []string{"schedule add <task>", "hourly|seconds|minutes|hours [interval]"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("schedule CLI help missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestCLICommandScopePolicyPreservesPreflightBehavior(t *testing.T) {
 	tests := []struct {
 		name             string
