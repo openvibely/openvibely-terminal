@@ -263,6 +263,91 @@ func taskDeletionDisplayName(task client.Task) string {
 	return fmt.Sprintf("%s (%s)", label, id)
 }
 
+func resolveTaskWorktreeAction(m Model, c *client.Client, projectID, ref, action, strategy string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := m.commandContext(cmdTimeout)
+		defer cancel()
+		task, err := resolveTask(ctx, c, projectID, ref)
+		return taskWorktreeActionTargetMsg{
+			projectID: projectID,
+			task:      task,
+			action:    action,
+			strategy:  strategy,
+			err:       err,
+		}
+	}
+}
+
+func confirmTaskWorktreeAction(m Model, projectID string, task client.Task, action, strategy string) (Model, tea.Cmd) {
+	taskID := task.ID
+	display := taskDeletionDisplayName(task)
+	label := strings.ToLower(action)
+	if action == "merge" {
+		switch strategy {
+		case "merge":
+			label = "merge commit"
+		case "ff":
+			label = "fast-forward merge"
+		case "squash":
+			label = "squash merge"
+		}
+	}
+	cmd := m.run("Task worktree", cmdTimeout, func(ctx context.Context) (string, error) {
+		result, err := m.client.ApplyTaskWorktreeActionForProject(ctx, taskID, projectID, action, strategy)
+		if jsonMode {
+			body, marshalErr := marshalJSON(result)
+			if marshalErr != nil {
+				return "", marshalErr
+			}
+			return body, err
+		}
+		return renderTaskWorktreeActionResult(result), err
+	})
+	return confirmOr(m,
+		fmt.Sprintf("%s task %q and change project branch? Type 'yes' to confirm or Esc to cancel.", titleFor(label), display),
+		fmt.Sprintf("use --force to confirm %s for task %q", label, display),
+		cmd)
+}
+
+func renderTaskWorktreeActionResult(result client.TaskWorktreeActionResult) string {
+	message := sanitizeAutomationDetailText(firstNonEmpty(result.Message, result.Status))
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s: %s", result.Action, result.Status, message)
+	if result.Strategy != "" {
+		fmt.Fprintf(&b, " (strategy: %s)", sanitizeAutomationDetailText(result.Strategy))
+	}
+	if result.Worktree != nil {
+		fmt.Fprintf(&b, "\nBranch: %s\nTarget: %s\nIntegration: %s",
+			sanitizeAutomationDetailText(firstNonEmpty(result.Worktree.Branch, "none")),
+			sanitizeAutomationDetailText(firstNonEmpty(result.Worktree.TargetBranch, "not set")),
+			sanitizeAutomationDetailText(firstNonEmpty(result.Worktree.IntegrationStatus, "unknown")))
+	} else {
+		b.WriteString("\nBranch state: unavailable")
+	}
+	return b.String()
+}
+
+func renderTaskWorktree(task client.Task, info client.TaskWorktreeInfo) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(task.Title, task.ID)))
+	fmt.Fprintf(&b, "id %s · project %s\n", sanitizeAutomationDetailText(task.ID), sanitizeAutomationDetailText(info.ProjectID))
+	fmt.Fprintf(&b, "Branch: %s\nTarget: %s\nIntegration: %s\n",
+		sanitizeAutomationDetailText(firstNonEmpty(info.Branch, "none")),
+		sanitizeAutomationDetailText(firstNonEmpty(info.TargetBranch, "not set")),
+		sanitizeAutomationDetailText(firstNonEmpty(info.IntegrationStatus, "unknown")))
+	b.WriteString(dimStyle.Render("/tasks merge <merge|ff|squash> <task> · /tasks rebase <task>"))
+	return b.String()
+}
+
+func applyTaskWorktreeInfo(task *client.Task, info client.TaskWorktreeInfo) {
+	if task == nil {
+		return
+	}
+	task.WorktreeBranch = info.Branch
+	task.MergeTargetBranch = info.TargetBranch
+	task.IntegrationStatus = info.IntegrationStatus
+}
+
 // taskDetailTabJSON is the stable JSON representation of an explicitly selected
 // task detail tab. The task card remains the output for an unqualified show.
 type taskDetailTabJSON struct {
@@ -891,19 +976,20 @@ func taskAttachmentSubAction(alias string) (string, bool) {
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "reviews", "lifecycle", "logs"}
+	actions := []string{"list", "open", "show", "worktree", "merge", "rebase", "reviews", "lifecycle", "logs"}
 	actions = append(actions, taskAttachmentTopLevelActions()...)
 	actions = append(actions, taskThreadInputTopLevelActions()...)
 	actions = append(actions, "new", "swarm", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear")
 	completions := append(append(taskThreadInputCompletions(), taskAttachmentCompletions()...), []commandCompletion{
 		{after: []string{"goal"}, values: []string{"pause", "resume"}},
+		{after: []string{"merge"}, values: []string{"merge", "ff", "squash"}},
 		{after: []string{"reviews"}, values: []string{"list", "add"}},
 		{after: []string{"move", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"backlog", "active", "completed"}},
 		{after: []string{"clear"}, values: []string{"backlog", "completed"}},
 		{after: []string{"show", "**"}, partialAfter: completionAfterQuotedOperand, values: taskDetailCompletionValues()},
 	}...)
 	selectorPaths := append([][]string{
-		{"open"}, {"show"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
+		{"open"}, {"show"}, {"worktree"}, {"merge", "**"}, {"rebase"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
 		{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
 		{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
 	}, append(taskThreadInputSelectorPaths(), taskAttachmentSelectorPaths()...)...)
@@ -912,6 +998,9 @@ func tasksCommand() command {
 		"tasks open <task>                          enter the task's thread",
 		"omit <task> on task-reference actions, including goal, goal pause, and goal resume → interactive selector",
 		"tasks show <task> [tab]                    " + detailTabUsageList(),
+		"tasks worktree <task>                       inspect branch, target, and integration state",
+		"tasks merge <merge|ff|squash> <task>        integrate through the backend (confirm in TUI; CLI requires --force)",
+		"tasks rebase <task>                         rebase the task branch onto its target (confirm in TUI; CLI requires --force)",
 		"tasks reviews [list] <task>                list inline review comments",
 		"tasks reviews add <task> <file>:<line> <comment>",
 	}
@@ -940,6 +1029,9 @@ func tasksCommand() command {
 		{action: "steer", args: "<task> | <message>", description: "steer the active response"},
 		{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
 		{action: "goal resume", args: "<task>", description: "resume a paused goal"},
+		{action: "worktree", args: "<task>", description: "inspect the task branch and integration state"},
+		{action: "merge", args: "<merge|ff|squash> <task>", description: "integrate a task branch after confirmation"},
+		{action: "rebase", args: "<task>", description: "rebase a task branch onto its target after confirmation"},
 		{action: "reviews add", args: "<task> <file>:<line> <comment>"},
 		{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
 		{action: "swarm", args: "[options] <title> | <prompt>", description: "create an autonomous swarm parent"},
@@ -954,6 +1046,9 @@ func tasksCommand() command {
 		`tasks goal pause "Fix login bug"`,
 		`tasks goal resume "Fix login bug"`,
 		`tasks show "Fix login bug" review`,
+		`tasks worktree "Fix login bug"`,
+		`tasks merge squash "Fix login bug"`,
+		`tasks rebase "Fix login bug"`,
 		`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
 		`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
 		`tasks attachments download "Fix login bug" request.txt --output ./request.txt`,
@@ -1049,6 +1144,46 @@ func tasksCommand() command {
 						body:      body,
 					}
 				}
+
+			case "worktree":
+				if ref == "" {
+					return taskSelector(m, "usage: /tasks worktree <id|title>", "tasks worktree", false)
+				}
+				return m, m.run("Task worktree", cmdTimeout, func(ctx context.Context) (string, error) {
+					t, err := resolveTaskForModel(m, ctx, c, pid, ref)
+					if err != nil {
+						return "", err
+					}
+					info, err := c.GetTaskWorktreeInfoForProject(ctx, t.ID, pid)
+					if err != nil {
+						return "", err
+					}
+					applyTaskWorktreeInfo(&t, info)
+					if jsonMode {
+						return marshalJSON(t)
+					}
+					return renderTaskWorktree(t, info), nil
+				})
+
+			case "merge":
+				if len(rest) == 0 {
+					return m, errCmd("usage: /tasks merge <merge|ff|squash> <id|title>")
+				}
+				strategy := strings.ToLower(strings.TrimSpace(rest[0]))
+				if strategy != "merge" && strategy != "ff" && strategy != "squash" {
+					return m, errCmd("invalid merge strategy " + sanitizeAutomationDetailText(strategy) + "; supported strategies: merge, ff, squash")
+				}
+				target := strings.Join(rest[1:], " ")
+				if target == "" {
+					return taskSelector(m, "usage: /tasks merge <merge|ff|squash> <id|title>", "tasks merge "+strategy, false)
+				}
+				return m, resolveTaskWorktreeAction(m, c, pid, target, "merge", strategy)
+
+			case "rebase":
+				if ref == "" {
+					return taskSelector(m, "usage: /tasks rebase <id|title>", "tasks rebase", false)
+				}
+				return m, resolveTaskWorktreeAction(m, c, pid, ref, "rebase", "")
 
 			case "show":
 				showRest := append([]string(nil), rest...)

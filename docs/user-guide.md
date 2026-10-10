@@ -634,6 +634,31 @@ tab name, and selected tab data, for example `{"task":{"id":"…"},"tab":"change
 For the `review` tab, `data` is the array of review comments. A tab load failure
 returns a command error and does not emit human-rendered text as JSON.
 
+### Task branch integration
+
+Inspect a task's backend-owned worktree state with `/tasks worktree <ref>`:
+
+```text
+/tasks worktree "Refactor API"
+/tasks merge merge "Refactor API"       # merge commit
+/tasks merge ff "Refactor API"           # fast-forward only
+/tasks merge squash "Refactor API"       # squash merge
+/tasks rebase "Refactor API"             # rebase onto the task's target
+
+openvibely-terminal -project demo tasks worktree "Refactor API"
+openvibely-terminal -project demo tasks merge squash "Refactor API" --force
+openvibely-terminal -project demo tasks rebase "Refactor API" --force
+```
+
+The worktree view reports the task branch, target branch, and integration status.
+Merge actions support `merge`, `ff`, and `squash`; rebase is a separate action.
+The TUI asks for a typed `yes` confirmation before an integration action. CLI
+mutations require the global `--force` flag. Both surfaces resolve the task from
+the selected project's task catalog, then send the project ID with the request.
+The backend owns project validation, eligibility checks, and Git operations. The
+terminal refreshes and reports branch state after the operation, including when
+the backend rejects an ineligible action or encounters conflicts.
+
 ### Task review comments
 
 Review comments are inline notes attached to a task's code review view by file

@@ -203,6 +203,16 @@ type taskDeleteTargetMsg struct {
 	err               error
 }
 
+type taskWorktreeActionTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	task              client.Task
+	action            string
+	strategy          string
+	err               error
+}
+
 type webhookMutationTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
