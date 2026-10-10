@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
@@ -620,6 +622,157 @@ func TestOutboundTargetsPlainAddListAndShowUseCanonicalDestination(t *testing.T)
 	if shown.Destination != canonical.Destination {
 		t.Fatalf("show target = %#v, want canonical destination %q", shown, canonical.Destination)
 	}
+}
+
+func TestOutboundTargetShowAndTestDirectAndSelectorParity(t *testing.T) {
+	target := client.OutboundTarget{
+		ID: "target-a", ProjectID: "p1", Platform: "slack", TargetKind: "channel",
+		Name: "ops", Destination: "C123", TargetID: "C123", ThreadID: "42", Home: true,
+		DefaultSubject: "Deploy",
+	}
+	other := client.OutboundTarget{
+		ID: "target-b", ProjectID: "p1", Platform: "email", TargetKind: "email",
+		Name: "billing", Destination: "billing@example.com", TargetID: "billing@example.com",
+	}
+
+	cases := []struct {
+		name   string
+		action string
+		json   bool
+		result string
+	}{
+		{name: "plain show", action: "show"},
+		{name: "JSON show", action: "show", json: true},
+		{name: "plain test sent", action: "test", result: "sent"},
+		{name: "JSON test sent", action: "test", json: true, result: "sent"},
+		{name: "plain test failed", action: "test", result: "failed"},
+		{name: "JSON test failed", action: "test", json: true, result: "failed"},
+		{name: "plain test request error", action: "test", result: "error"},
+		{name: "JSON test request error", action: "test", json: true, result: "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousJSON := jsonMode
+			jsonMode = tc.json
+			t.Cleanup(func() { jsonMode = previousJSON })
+
+			m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{target, other}, false))
+				case r.Method == http.MethodPost && r.URL.Path == "/channels/outbound-targets/target-a/test":
+					w.Header().Set("Content-Type", "text/html")
+					switch tc.result {
+					case "sent":
+						_, _ = io.WriteString(w, `<span class="text-success">Sent</span>`)
+					case "failed":
+						_, _ = io.WriteString(w, `<span class="text-error">Failed</span>`)
+					case "error":
+						http.Error(w, "must-not-leak provider detail", http.StatusBadGateway)
+					}
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					http.NotFound(w, r)
+				}
+			})
+
+			directModel, directCmd := runOutboundTargets(m, []string{tc.action, target.ID})
+			directMsg := outboundTargetResult(t, directCmd)
+
+			_, selectorCmd := outboundTargetSelector(m, tc.action)
+			selectorResult := selectorCmd()
+			selectorMsg, ok := selectorResult.(selectorActiveMsg)
+			if !ok {
+				t.Fatalf("selector command returned %T, want selectorActiveMsg", selectorResult)
+			}
+			var selected selectorItem
+			for _, item := range selectorMsg.items {
+				if item.ref == target.ID {
+					selected = item
+					break
+				}
+			}
+			if selected.dispatch == nil {
+				t.Fatalf("selected item for %q has no direct action", target.ID)
+			}
+			selectedModel, selectedCmd := selected.dispatch(m)
+			selectedMsg := outboundTargetResult(t, selectedCmd)
+
+			if directMsg.err == nil && selectedMsg.err == nil {
+				if directMsg.body != selectedMsg.body {
+					t.Fatalf("direct output = %q, selected output = %q", directMsg.body, selectedMsg.body)
+				}
+			} else if directMsg.err == nil || selectedMsg.err == nil || directMsg.err.Error() != selectedMsg.err.Error() {
+				t.Fatalf("direct error = %v, selected error = %v", directMsg.err, selectedMsg.err)
+			}
+
+			if tc.action == "show" {
+				if tc.json {
+					var got client.OutboundTarget
+					if err := json.Unmarshal([]byte(directMsg.body), &got); err != nil {
+						t.Fatalf("show JSON = %q: %v", directMsg.body, err)
+					}
+					want := target
+					want.ID, want.ProjectID, want.TargetID = "", "", ""
+					if !reflect.DeepEqual(got, want) {
+						t.Fatalf("show JSON target = %#v, want %#v", got, want)
+					}
+				} else if directMsg.body != renderOutboundTargets([]client.OutboundTarget{target}) {
+					t.Fatalf("plain show = %q, want %q", directMsg.body, renderOutboundTargets([]client.OutboundTarget{target}))
+				}
+				return
+			}
+
+			if tc.result == "error" {
+				if directMsg.err == nil || !strings.Contains(directMsg.err.Error(), "502") {
+					t.Fatalf("direct test error = %v, want propagated 502 request error", directMsg.err)
+				}
+				for name, pair := range map[string]struct {
+					model Model
+					msg   resultMsg
+				}{
+					"direct":   {model: directModel, msg: directMsg},
+					"selected": {model: selectedModel, msg: selectedMsg},
+				} {
+					updated, _ := pair.model.Update(pair.msg)
+					out := stripANSI(transcript(updated.(Model)))
+					if !strings.Contains(out, "502") || strings.Contains(out, "must-not-leak provider detail") {
+						t.Errorf("%s request error was not safely shown to the user:\n%s", name, out)
+					}
+				}
+				return
+			}
+
+			if tc.json {
+				var got outboundTargetTestJSON
+				if err := json.Unmarshal([]byte(directMsg.body), &got); err != nil {
+					t.Fatalf("test JSON = %q: %v", directMsg.body, err)
+				}
+				if got.Status != tc.result {
+					t.Fatalf("test JSON status = %q, want %q", got.Status, tc.result)
+				}
+			} else {
+				want := fmt.Sprintf("outbound target test for %q: %s", target.Name, tc.result)
+				if directMsg.body != want {
+					t.Fatalf("plain test = %q, want %q", directMsg.body, want)
+				}
+			}
+		})
+	}
+}
+
+func outboundTargetResult(t *testing.T, cmd tea.Cmd) resultMsg {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("outbound target command is nil")
+	}
+	msg := cmd()
+	result, ok := msg.(resultMsg)
+	if !ok {
+		t.Fatalf("outbound target command returned %T, want resultMsg", msg)
+	}
+	return result
 }
 
 func TestOutboundTargetsAmbiguousNormalizedRefreshDoesNotEmitUnconfirmedAdd(t *testing.T) {

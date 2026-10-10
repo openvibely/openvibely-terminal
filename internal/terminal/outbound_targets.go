@@ -342,6 +342,21 @@ func outboundTargetTestOutput(target client.OutboundTarget, sent bool) (string, 
 	return fmt.Sprintf("outbound target test for %q: %s", outboundTargetName(target), status), nil
 }
 
+func outboundTargetShowOutput(target client.OutboundTarget) (string, error) {
+	if jsonMode {
+		return marshalJSON(target)
+	}
+	return renderOutboundTargets([]client.OutboundTarget{target}), nil
+}
+
+func outboundTargetTest(ctx context.Context, c *client.Client, projectID string, target client.OutboundTarget) (string, error) {
+	sent, err := c.TestOutboundTarget(ctx, projectID, target.ID)
+	if err != nil {
+		return "", err
+	}
+	return outboundTargetTestOutput(target, sent)
+}
+
 func outboundTargetMutationStatus(action string, target client.OutboundTarget) string {
 	verb := ""
 	switch action {
@@ -471,18 +486,11 @@ func outboundTargetSelector(m Model, action string) (Model, tea.Cmd) {
 						switch action {
 						case "show":
 							return m, m.run("Channels", cmdTimeout, func(context.Context) (string, error) {
-								if jsonMode {
-									return marshalJSON(target)
-								}
-								return renderOutboundTargets([]client.OutboundTarget{target}), nil
+								return outboundTargetShowOutput(target)
 							})
 						case "test":
 							return m, m.run("Channels", cmdTimeout, func(ctx context.Context) (string, error) {
-								sent, err := c.TestOutboundTarget(ctx, projectID, target.ID)
-								if err != nil {
-									return "", err
-								}
-								return outboundTargetTestOutput(target, sent)
+								return outboundTargetTest(ctx, c, projectID, target)
 							})
 						case "remove":
 							return confirmOutboundTargetRemoval(m, projectID, target)
@@ -727,16 +735,9 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 				return "", err
 			}
 			if action == "show" {
-				if jsonMode {
-					return marshalJSON(target)
-				}
-				return renderOutboundTargets([]client.OutboundTarget{target}), nil
+				return outboundTargetShowOutput(target)
 			}
-			sent, err := c.TestOutboundTarget(ctx, projectID, target.ID)
-			if err != nil {
-				return "", err
-			}
-			return outboundTargetTestOutput(target, sent)
+			return outboundTargetTest(ctx, c, projectID, target)
 		})
 	}
 	if action == "remove" {
