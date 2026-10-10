@@ -1307,4 +1307,40 @@ func TestCLITaskAttachmentsDeleteRequiresForceAndRefreshes(t *testing.T) {
 			t.Fatalf("CLI delete did not print refreshed list:\n%s", out.String())
 		}
 	})
+
+	t.Run("JSON includes task ID on every remaining attachment", func(t *testing.T) {
+		const refreshed = `<div id="attachment-list" data-project-id="p1">
+				<div class="attachment-row"><div><p class="text-sm font-medium">trace.json</p><p class="text-xs">2.0 KB</p></div><button hx-delete="/attachments/att-2?project_id=p1"></button></div>
+				<div class="attachment-row"><div><p class="text-sm font-medium">notes.md</p><p class="text-xs">4 B</p></div><button hx-delete="/attachments/att-3?project_id=p1"></button></div>
+			</div>`
+		c, rec := cliServer(t, map[string]string{
+			"/api/projects":      cliProjects,
+			"/tasks":             attachmentTaskBoardHTML,
+			"/tasks/t-1":         attachmentRowsHTML,
+			"/attachments/att-1": refreshed,
+		})
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor", "att-1"}, true, true); err != nil {
+			t.Fatalf("CLI JSON attachment delete failed: %v", err)
+		}
+		if !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") {
+			t.Fatalf("JSON delete request was missing project scope:\n%s", strings.Join(rec.urls, "\n"))
+		}
+		var remaining []client.Attachment
+		if err := json.Unmarshal(out.Bytes(), &remaining); err != nil {
+			t.Fatalf("decoding JSON delete result %q: %v", out.String(), err)
+		}
+		want := []client.Attachment{
+			{ID: "att-2", TaskID: "t-1", FileName: "trace.json", FileSize: 2048},
+			{ID: "att-3", TaskID: "t-1", FileName: "notes.md", FileSize: 4},
+		}
+		if len(remaining) != len(want) {
+			t.Fatalf("JSON delete result = %+v, want %d remaining rows", remaining, len(want))
+		}
+		for i := range want {
+			if remaining[i] != want[i] {
+				t.Errorf("remaining[%d] = %+v, want %+v", i, remaining[i], want[i])
+			}
+		}
+	})
 }

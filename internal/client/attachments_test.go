@@ -616,6 +616,45 @@ func TestDeleteTaskAttachmentUsesStableIDProjectScopeAndParsesRefresh(t *testing
 	}
 }
 
+func TestDeleteTaskAttachmentForTaskPreservesTaskIDAndProjectScope(t *testing.T) {
+	var gotProject string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/attachments/att-1" {
+			t.Errorf("request = %s %s, want DELETE /attachments/att-1", r.Method, r.URL.Path)
+		}
+		gotProject = r.URL.Query().Get("project_id")
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(attachmentListMarkup("p1",
+			attachmentRowMarkup("att-2", "p1", "remaining.txt", "7 B")+
+				attachmentRowMarkup("att-3", "p1", "notes.md", "4 B"))))
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := c.DeleteTaskAttachmentForTask(context.Background(), "task-1", "att-1", "p1")
+	if err != nil {
+		t.Fatalf("DeleteTaskAttachmentForTask: %v", err)
+	}
+	if gotProject != "p1" {
+		t.Errorf("delete project scope = %q, want p1", gotProject)
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("remaining attachments = %+v, want both refreshed rows", remaining)
+	}
+	want := []Attachment{
+		{ID: "att-2", TaskID: "task-1", FileName: "remaining.txt", FileSize: 7},
+		{ID: "att-3", TaskID: "task-1", FileName: "notes.md", FileSize: 4},
+	}
+	for i := range want {
+		if remaining[i] != want[i] {
+			t.Errorf("remaining[%d] = %+v, want %+v", i, remaining[i], want[i])
+		}
+	}
+}
+
 func TestDownloadTaskAttachmentStreamsBackendBytesAndProjectScope(t *testing.T) {
 	payload := []byte(strings.Repeat("0123456789abcdef", 8192))
 	var gotMethod, gotPath, gotProject, gotAccept string
@@ -714,7 +753,7 @@ func TestTaskAttachmentOperationsRejectCrossProjectResponsesAndErrors(t *testing
 		}))
 		defer srv.Close()
 		c, _ := New(srv.URL)
-		if _, err := c.DeleteTaskAttachment(context.Background(), "att-1", "p1"); err == nil || !strings.Contains(err.Error(), "not selected project") {
+		if _, err := c.DeleteTaskAttachmentForTask(context.Background(), "task-1", "att-1", "p1"); err == nil || !strings.Contains(err.Error(), "not selected project") {
 			t.Fatalf("cross-project delete response error = %v, want selected-project rejection", err)
 		}
 	})
