@@ -5142,6 +5142,33 @@ func TestChatStreamWordBoundaryAppendMatchesCanonicalWrapping(t *testing.T) {
 	}
 }
 
+func TestChatStreamWideWordBoundaryAppendMatchesCanonicalWrapping(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.log = nil
+	m.chatStreamLogIndex = -1
+	m.transcript.Width = 8 // six columns of wrapped assistant body
+	m.refreshTranscript()
+
+	var response strings.Builder
+	for _, chunk := range []string{"1234 ", "界abcd"} {
+		response.WriteString(chunk)
+		m.updateChatStreamOutput(chunk)
+		m.flushChatStreamOutput()
+
+		if got := string(m.chatStreamBuffer[:m.chatStreamRenderedOffset]); got != response.String() {
+			t.Fatalf("rendered response after %q = %q, want %q", chunk, got, response.String())
+		}
+		assertChatStreamLinesMatchCanonical(t, &m)
+		assertTranscriptMatchesFullRefresh(t, &m)
+	}
+	if got, want := m.chatStreamWrappedLines, []string{"1234", "界abcd"}; !slices.Equal(got, want) {
+		t.Fatalf("wide word wrapped into incorrect display rows: got %q, want %q", got, want)
+	}
+	if !m.chatStreamFastWrap {
+		t.Fatal("wide word wrapping unexpectedly left the appendable stream path")
+	}
+}
+
 func TestChatStreamASCIIWrapSegmentsMatchLipgloss(t *testing.T) {
 	for _, text := range []string{
 		"abc def ghi",

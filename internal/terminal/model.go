@@ -243,6 +243,7 @@ type Model struct {
 	chatStreamWrappedLines     []string
 	chatStreamWrapBaseLines    []string
 	chatStreamWrapWord         []byte
+	chatStreamWrapWordWidth    int
 	chatStreamWrapSpace        []byte
 	chatStreamWrapColumn       int
 	chatStreamStableLineCount  int
@@ -1120,6 +1121,7 @@ func (m *Model) resetChatStreamOutput() {
 	m.chatStreamWrappedLines = nil
 	m.chatStreamWrapBaseLines = nil
 	m.chatStreamWrapWord = nil
+	m.chatStreamWrapWordWidth = 0
 	m.chatStreamWrapSpace = nil
 	m.chatStreamWrapColumn = 0
 	m.chatStreamStableLineCount = 0
@@ -1217,6 +1219,7 @@ func (m *Model) flushChatStreamOutput() {
 		m.chatStreamWrappedLines = []string{""}
 		m.chatStreamWrapBaseLines = []string{""}
 		m.chatStreamWrapWord = nil
+		m.chatStreamWrapWordWidth = 0
 		m.chatStreamWrapSpace = nil
 		m.chatStreamWrapColumn = 0
 		m.chatStreamStableLineCount = 1
@@ -1252,6 +1255,7 @@ func (m *Model) flushChatStreamOutput() {
 			m.chatStreamHardOnly = false
 			m.chatStreamWrapBaseLines = []string{""}
 			m.chatStreamWrapWord = nil
+			m.chatStreamWrapWordWidth = 0
 			m.chatStreamWrapSpace = nil
 			m.chatStreamWrapColumn = 0
 			appendChatStreamWrapBytes(m, m.chatStreamBuffer[:renderEnd], width-2)
@@ -1422,9 +1426,10 @@ func appendChatStreamWrapBytes(m *Model, delta []byte, limit int) {
 			return
 		}
 		addSpace()
-		m.chatStreamWrapColumn += len(m.chatStreamWrapWord)
+		m.chatStreamWrapColumn += m.chatStreamWrapWordWidth
 		appendBase(m.chatStreamWrapWord)
 		m.chatStreamWrapWord = m.chatStreamWrapWord[:0]
+		m.chatStreamWrapWordWidth = 0
 	}
 	addNewline := func() {
 		m.chatStreamWrapBaseLines = append(m.chatStreamWrapBaseLines, "")
@@ -1432,28 +1437,38 @@ func appendChatStreamWrapBytes(m *Model, delta []byte, limit int) {
 		m.chatStreamWrapSpace = m.chatStreamWrapSpace[:0]
 	}
 
-	for _, b := range delta {
-		if b == ' ' {
+	for i := 0; i < len(delta); {
+		r, size := utf8.DecodeRune(delta[i:])
+		text := delta[i : i+size]
+		if r == ' ' {
 			addWord()
-			m.chatStreamWrapSpace = append(m.chatStreamWrapSpace, b)
+			m.chatStreamWrapSpace = append(m.chatStreamWrapSpace, text...)
+			i += size
 			continue
 		}
-		if b == '-' {
+		runeWidth := 1
+		if r >= utf8.RuneSelf {
+			runeWidth = ansi.StringWidth(string(text))
+		}
+		if r == '-' {
 			addSpace()
-			if m.chatStreamWrapColumn+len(m.chatStreamWrapWord)+1 <= limit {
+			if m.chatStreamWrapColumn+m.chatStreamWrapWordWidth+runeWidth <= limit {
 				addWord()
-				appendBase([]byte{b})
-				m.chatStreamWrapColumn++
+				appendBase(text)
+				m.chatStreamWrapColumn += runeWidth
+				i += size
 				continue
 			}
 		}
-		if len(m.chatStreamWrapWord)+1 > limit {
+		if m.chatStreamWrapWordWidth+runeWidth > limit {
 			addWord()
 		}
-		m.chatStreamWrapWord = append(m.chatStreamWrapWord, b)
-		if m.chatStreamWrapColumn+len(m.chatStreamWrapWord)+len(m.chatStreamWrapSpace) > limit {
+		m.chatStreamWrapWord = append(m.chatStreamWrapWord, text...)
+		m.chatStreamWrapWordWidth += runeWidth
+		if m.chatStreamWrapColumn+m.chatStreamWrapWordWidth+len(m.chatStreamWrapSpace) > limit {
 			addNewline()
 		}
+		i += size
 	}
 }
 
@@ -1483,7 +1498,7 @@ func chatStreamWrapSnapshot(m *Model, changedLine, limit int) []string {
 	if len(word) > 0 {
 		column += len(space)
 		appendLocal(space)
-		column += len(word)
+		column += m.chatStreamWrapWordWidth
 		appendLocal(word)
 	}
 	return lines
@@ -1590,6 +1605,7 @@ func (m *Model) updateChatStreamSnapshot(snapshot string) {
 	m.chatStreamWrappedLines = nil
 	m.chatStreamWrapBaseLines = nil
 	m.chatStreamWrapWord = nil
+	m.chatStreamWrapWordWidth = 0
 	m.chatStreamWrapSpace = nil
 	m.chatStreamWrapColumn = 0
 	m.chatStreamStableLineCount = 0
@@ -4152,6 +4168,7 @@ func (m *Model) refreshTranscript() {
 		m.chatStreamWrappedLines = nil
 		m.chatStreamWrapBaseLines = nil
 		m.chatStreamWrapWord = nil
+		m.chatStreamWrapWordWidth = 0
 		m.chatStreamWrapSpace = nil
 		m.chatStreamStableLineCount = 0
 		m.chatStreamHardOnly = false
