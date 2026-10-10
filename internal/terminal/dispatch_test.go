@@ -2691,8 +2691,8 @@ func TestAlertsDeleteResolvesTypedTargetBeforeConfirmation(t *testing.T) {
 		}
 		ts.setList(replacementAlert)
 		m = runLine(t, m, "yes")
-		if *ts.listRequests != 1 || len(*ts.deletes) != 1 || (*ts.deletes)[0] != "/alerts/a-original" {
-			t.Fatalf("confirmed delete rebound after list changed: lists=%d deletes=%v", *ts.listRequests, *ts.deletes)
+		if *ts.listRequests != 2 || len(*ts.deletes) != 1 || (*ts.deletes)[0] != "/alerts/a-original" {
+			t.Fatalf("confirmed delete did not use captured ID and bounded refresh: lists=%d deletes=%v", *ts.listRequests, *ts.deletes)
 		}
 	})
 }
@@ -2780,7 +2780,11 @@ func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
 			gets++
-			_, _ = io.WriteString(w, initialAlerts)
+			if deletes > 0 {
+				_, _ = io.WriteString(w, refreshedAlerts)
+			} else {
+				_, _ = io.WriteString(w, initialAlerts)
+			}
 		case r.Method == http.MethodDelete && r.URL.Path == "/alerts/a-1":
 			deletes++
 			if r.URL.Query().Get("project_id") != "p1" || r.Header.Get("HX-Request") != "true" {
@@ -2823,8 +2827,8 @@ func TestAlertsDeleteConfirmationResolutionFailureAndRefresh(t *testing.T) {
 	if deletes != 1 {
 		t.Fatalf("confirmed delete count = %d, want 1", deletes)
 	}
-	if gets != beforeSuccessGets+1 {
-		t.Fatalf("successful delete made %d list GETs, want one reference-resolution GET and no post-delete GET", gets-beforeSuccessGets)
+	if gets != beforeSuccessGets+2 {
+		t.Fatalf("successful delete made %d list GETs, want one reference-resolution GET and one bounded refresh", gets-beforeSuccessGets)
 	}
 	plain = stripANSI(transcript(m))
 	if !strings.Contains(plain, "delete: Build failed") || !strings.Contains(plain, "Remaining alert") || strings.Contains(plain, "delete: Build failed\n\nAlerts\n3 unread") {

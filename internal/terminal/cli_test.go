@@ -9334,6 +9334,317 @@ func TestCLIAlertActionJSONRefreshFailureReturnsStatusOnly(t *testing.T) {
 	}
 }
 
+func TestCLIAlertJSONMutationRefreshKeepsCompleteHistory(t *testing.T) {
+	var lists int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodPost && r.URL.Path == "/alerts/read-all":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+			lists++
+			start := 0
+			if r.URL.Query().Get("card_page") == "1" {
+				start, _ = strconv.Atoi(r.URL.Query().Get("offset"))
+				if start != 50 {
+					t.Errorf("JSON continuation offset = %d, want 50", start)
+				}
+			}
+			end := start + 50
+			if end > 51 {
+				end = 51
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(end < 51))
+			w.Header().Set("X-OpenVibely-Card-Page-Total", "51")
+			_, _ = io.WriteString(w, cliAlertMutationPage(start, end, 51))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"alerts", "read-all"}, false, true); err != nil {
+		t.Fatalf("JSON read-all: %v\n%s", err, out.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &raw); err != nil {
+		t.Fatalf("mutation JSON invalid: %v\n%s", err, out.String())
+	}
+	if wrapped, ok := raw["data"]; ok {
+		if err := json.Unmarshal(wrapped, &raw); err != nil {
+			t.Fatalf("wrapped mutation JSON invalid: %v\n%s", err, out.String())
+		}
+	}
+	var alerts []client.Alert
+	if err := json.Unmarshal(raw["alerts"], &alerts); err != nil {
+		t.Fatalf("mutation alerts invalid: %v\n%s", err, out.String())
+	}
+	lastID := ""
+	if len(alerts) > 0 {
+		lastID = alerts[len(alerts)-1].ID
+	}
+	if len(alerts) != 51 || lastID != "alert-0050" || lists != 2 {
+		t.Fatalf("JSON refresh returned %d alerts, last ID=%q, requests=%d; want complete 51-alert history in two pages", len(alerts), lastID, lists)
+	}
+}
+
+func TestCLIAlertHumanReadAllUsesBoundedRefresh(t *testing.T) {
+	for _, total := range []int{0, 49, 50, 51} {
+		t.Run(fmt.Sprintf("history_%d", total), func(t *testing.T) {
+			var mutationDone bool
+			var refreshGets int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodPost && r.URL.Path == "/alerts/read-all":
+					mutationDone = true
+					w.WriteHeader(http.StatusNoContent)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("alert request lost project scope: %s", r.URL.RequestURI())
+					}
+					if mutationDone {
+						refreshGets++
+					}
+					start, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+					end := start + 50
+					if end > total {
+						end = total
+					}
+					w.Header().Set("Content-Type", "text/html")
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(end < total))
+					w.Header().Set("X-OpenVibely-Card-Page-Total", strconv.Itoa(total))
+					_, _ = io.WriteString(w, cliAlertMutationPage(start, end, total))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"alerts", "read-all"}, false, false); err != nil {
+				t.Fatalf("RunCLI: %v\n%s", err, out.String())
+			}
+			plain := stripANSI(out.String())
+			if !strings.Contains(plain, "marked all read") {
+				t.Fatalf("successful mutation status missing:\n%s", plain)
+			}
+			if refreshGets != 1 {
+				t.Fatalf("post-mutation alert GETs = %d, want exactly one for %d alerts", refreshGets, total)
+			}
+			if total > 50 {
+				for _, want := range []string{"showing first 50 alerts of 51", "alerts list --all"} {
+					if !strings.Contains(plain, want) {
+						t.Fatalf("bounded output missing %q:\n%s", want, plain)
+					}
+				}
+				if strings.Contains(plain, "Alert 0050") {
+					t.Fatalf("bounded refresh rendered alert beyond limit:\n%s", plain)
+				}
+			} else if strings.Contains(plain, "more available") {
+				t.Fatalf("complete history of %d alerts unexpectedly showed continuation:\n%s", total, plain)
+			}
+			if total == 0 && !strings.Contains(plain, "no alerts") {
+				t.Fatalf("empty refresh output omitted empty state:\n%s", plain)
+			}
+		})
+	}
+}
+
+func TestCLIAlertHumanSingleActionsUseBoundedRefresh(t *testing.T) {
+	actions := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "read", method: http.MethodPost, path: "/alerts/alert-0000/read"},
+		{name: "approve", method: http.MethodPost, path: "/alerts/alert-0000/approve"},
+		{name: "reject", method: http.MethodPost, path: "/alerts/alert-0000/reject"},
+		{name: "dismiss", method: http.MethodPost, path: "/alerts/alert-0000/dismiss"},
+		{name: "delete", method: http.MethodDelete, path: "/alerts/alert-0000"},
+	}
+	for _, action := range actions {
+		t.Run(action.name, func(t *testing.T) {
+			mutationDone := false
+			var initialGets, refreshGets int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == action.method && r.URL.Path == action.path:
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("mutation lost project scope: %s", r.URL.RequestURI())
+					}
+					mutationDone = true
+					w.WriteHeader(http.StatusNoContent)
+				case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("alert request lost project scope: %s", r.URL.RequestURI())
+					}
+					if mutationDone {
+						refreshGets++
+					} else {
+						initialGets++
+					}
+					start, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+					end := start + 50
+					if end > 51 {
+						end = 51
+					}
+					w.Header().Set("Content-Type", "text/html")
+					w.Header().Set("X-OpenVibely-Card-Page-Has-More", strconv.FormatBool(end < 51))
+					w.Header().Set("X-OpenVibely-Card-Page-Total", "51")
+					_, _ = io.WriteString(w, cliAlertMutationPage(start, end, 51))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			args := []string{"alerts", action.name, "Alert 0000"}
+			if err := RunCLI(c, &out, "demo", args, action.name == "delete", false); err != nil {
+				t.Fatalf("RunCLI: %v\n%s", err, out.String())
+			}
+			plain := stripANSI(out.String())
+			if !strings.Contains(plain, action.name+": Alert 0000") {
+				t.Fatalf("successful mutation status missing:\n%s", plain)
+			}
+			if refreshGets != 1 {
+				t.Fatalf("post-mutation alert GETs = %d, want one (initial GETs=%d)", refreshGets, initialGets)
+			}
+			if !strings.Contains(plain, "showing first 50 alerts of 51") || !strings.Contains(plain, "alerts list --all") {
+				t.Fatalf("bounded refresh omitted pagination guidance:\n%s", plain)
+			}
+		})
+	}
+}
+
+func TestCLIAlertHumanMutationFailureAndRefreshFailure(t *testing.T) {
+	t.Run("mutation failure does not refresh or report success", func(t *testing.T) {
+		var lists int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodPost && r.URL.Path == "/alerts/read-all":
+				http.Error(w, "mutation rejected", http.StatusInternalServerError)
+			case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+				lists++
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, cliAlertMutationPage(0, 0, 0))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "demo", []string{"alerts", "read-all"}, false, false)
+		if err == nil {
+			t.Fatalf("failed mutation unexpectedly succeeded")
+		}
+		if lists != 0 || strings.Contains(stripANSI(out.String()), "marked all read") {
+			t.Fatalf("failed mutation refreshed or reported success: lists=%d output=%q", lists, out.String())
+		}
+	})
+
+	t.Run("single mutation failure does not refresh or report success", func(t *testing.T) {
+		var lists int
+		const alertHTML = `<div data-alert-id="a-1" data-alert-scroll-anchor="a-1"><p class="font-semibold">Build failed</p></div>`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+				lists++
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, alertHTML)
+			case r.Method == http.MethodPost && r.URL.Path == "/alerts/a-1/read":
+				http.Error(w, "mutation rejected", http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		err = RunCLI(c, &out, "demo", []string{"alerts", "read", "Build failed"}, false, false)
+		if err == nil {
+			t.Fatal("failed single-alert mutation unexpectedly succeeded")
+		}
+		if lists != 1 || strings.Contains(stripANSI(out.String()), "read: Build failed") {
+			t.Fatalf("failed single-alert mutation refreshed or reported success: lists=%d output=%q", lists, out.String())
+		}
+	})
+
+	t.Run("refresh failure preserves success", func(t *testing.T) {
+		var lists int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodPost && r.URL.Path == "/alerts/read-all":
+				w.WriteHeader(http.StatusNoContent)
+			case r.Method == http.MethodGet && r.URL.Path == "/alerts":
+				lists++
+				http.Error(w, "temporary refresh failure", http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer srv.Close()
+		c, err := client.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"alerts", "read-all"}, false, false); err != nil {
+			t.Fatalf("successful mutation should survive best-effort refresh failure: %v\n%s", err, out.String())
+		}
+		if !strings.Contains(stripANSI(out.String()), "marked all read") || lists != 1 {
+			t.Fatalf("refresh failure result = %q, refresh GETs=%d", out.String(), lists)
+		}
+	})
+}
+
+func cliAlertMutationPage(start, end, total int) string {
+	var body strings.Builder
+	fmt.Fprintf(&body, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-page-size="50" data-card-pagination-total="%d" data-card-pagination-has-more="%t">`, total, end < total)
+	for i := start; i < end; i++ {
+		fmt.Fprintf(&body, `<div data-alert-id="alert-%04d" data-alert-scroll-anchor="alert-%04d"><p class="font-semibold">Alert %04d</p></div>`, i, i, i)
+	}
+	body.WriteString(`</div>`)
+	return body.String()
+}
+
 func TestCLIAlertBulkCommandsForceJSONAndResolution(t *testing.T) {
 	const alertsHTML = `<div data-alert-id="a-one" data-alert-scroll-anchor="a-one"><p class="font-semibold">One</p></div>
 		<div data-alert-id="a-two" data-alert-scroll-anchor="a-two"><p class="font-semibold">Two alert</p></div>`

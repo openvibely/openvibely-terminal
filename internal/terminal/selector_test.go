@@ -1685,7 +1685,7 @@ func TestPickerActionsUseSelectedResourceWithoutResolutionFetch(t *testing.T) {
 			listPath:      "/alerts",
 			destructive:   true,
 			wantOutput:    "delete: Add retry logic",
-			wantListCalls: 1,
+			wantListCalls: 2,
 		},
 		{
 			name:       "schedule toggle",
@@ -1885,11 +1885,11 @@ func TestAlertPickerAndTypedActionsHaveEquivalentResolvedOutput(t *testing.T) {
 				t.Fatalf("action status missing from output:\n%s", typedOutput)
 			}
 			if action.action == "delete" {
-				if !strings.Contains(typedOutput, "Remaining alert") {
-					t.Fatalf("delete did not render its DELETE response:\n%s", typedOutput)
+				if !strings.Contains(typedOutput, "Add retry logic") {
+					t.Fatalf("delete refresh did not render the bounded list response:\n%s", typedOutput)
 				}
-				if got := selectorCallCount(pickerRec, http.MethodGet, "/alerts"); got != 1 {
-					t.Fatalf("picker delete list calls = %d, want only its initial selection fetch:\n%s", got, pickerRec.all())
+				if got := selectorCallCount(pickerRec, http.MethodGet, "/alerts"); got != 2 {
+					t.Fatalf("picker delete list calls = %d, want selection and bounded refresh:\n%s", got, pickerRec.all())
 				}
 			} else if got := selectorCallCount(pickerRec, http.MethodGet, "/alerts"); got != 2 {
 				t.Fatalf("picker %s list calls = %d, want selection and refresh only:\n%s", action.action, got, pickerRec.all())
