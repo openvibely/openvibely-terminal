@@ -2428,7 +2428,7 @@ func attachmentDownloadPath(outputPath string, attachment client.Attachment) (st
 	}
 	name := safeAttachmentDownloadName(firstNonEmpty(attachment.FileName, attachment.ID, "attachment"))
 	path := name
-	if _, err := os.Stat(path); err != nil {
+	if _, err := os.Lstat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return path, nil
 		}
@@ -2438,7 +2438,7 @@ func attachmentDownloadPath(outputPath string, attachment client.Attachment) (st
 	base := strings.TrimSuffix(name, ext)
 	for i := 1; i < 10000; i++ {
 		candidate := fmt.Sprintf("%s (%d)%s", base, i, ext)
-		if _, err := os.Stat(candidate); err != nil {
+		if _, err := os.Lstat(candidate); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return candidate, nil
 			}
