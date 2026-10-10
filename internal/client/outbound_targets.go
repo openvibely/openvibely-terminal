@@ -198,55 +198,11 @@ func parseCanonicalSavedOutboundTarget(root *html.Node, projectID string) (Outbo
 	if id == "" {
 		return OutboundTarget{}, errors.New("outbound target save response has an empty target ID")
 	}
-	platform, err := requiredOutboundTargetField(wrapper, "target_platform")
+	target, err := convertOutboundTargetFields(wrapper, id, projectID, "outbound target save response")
 	if err != nil {
 		return OutboundTarget{}, err
 	}
-	kind, err := requiredOutboundTargetField(wrapper, "target_kind")
-	if err != nil {
-		return OutboundTarget{}, err
-	}
-	name, err := requiredOutboundTargetField(wrapper, "target_name")
-	if err != nil {
-		return OutboundTarget{}, err
-	}
-	destination, err := requiredOutboundTargetField(wrapper, "target_target_id")
-	if err != nil {
-		return OutboundTarget{}, err
-	}
-	threadID, err := requiredOutboundTargetField(wrapper, "target_thread_id")
-	if err != nil {
-		return OutboundTarget{}, err
-	}
-	home, err := requiredOutboundTargetField(wrapper, "target_is_home")
-	if err != nil {
-		return OutboundTarget{}, err
-	}
-	subject, err := requiredOutboundTargetField(wrapper, "target_default_subject")
-	if err != nil {
-		return OutboundTarget{}, err
-	}
-	isHome, err := strconv.ParseBool(home)
-	if err != nil {
-		return OutboundTarget{}, errors.New("outbound target save response has invalid home state")
-	}
-	platform = strings.ToLower(strings.TrimSpace(platform))
-	kind = strings.ToLower(strings.TrimSpace(kind))
-	name = strings.TrimSpace(name)
-	destination = strings.TrimSpace(destination)
-	threadID = strings.TrimSpace(threadID)
-	subject = strings.TrimSpace(subject)
-	if platform == "" || kind == "" || destination == "" {
-		return OutboundTarget{}, errors.New("outbound target save response is missing required fields")
-	}
-	if !IsSupportedOutboundTargetPlatform(platform) {
-		return OutboundTarget{}, errors.New("outbound target save response has unsupported platform")
-	}
-	return OutboundTarget{
-		ID: id, ProjectID: projectID, Platform: platform, TargetKind: kind, Name: name,
-		Destination: destination, TargetID: destination, ThreadID: threadID,
-		Home: isHome, DefaultSubject: subject,
-	}, nil
+	return target, nil
 }
 
 // TestOutboundTarget tests one saved destination and returns the backend's
@@ -394,69 +350,77 @@ func parseOutboundTargetsPage(root *html.Node, projectID string) (OutboundTarget
 		if strings.TrimSpace(rowID) != id {
 			return page, fmt.Errorf("outbound target %q has mismatched row ID", safeOutboundTargetText(id))
 		}
-		platform, err := requiredOutboundTargetField(group, "target_platform")
+		target, err := convertOutboundTargetFields(group, id, projectID, fmt.Sprintf("outbound target %q", safeOutboundTargetText(id)))
 		if err != nil {
 			return page, err
 		}
-		kind, err := requiredOutboundTargetField(group, "target_kind")
-		if err != nil {
-			return page, err
-		}
-		destination, err := requiredOutboundTargetField(group, "target_target_id")
-		if err != nil {
-			return page, err
-		}
-		threadID, err := requiredOutboundTargetField(group, "target_thread_id")
-		if err != nil {
-			return page, err
-		}
-		home, err := requiredOutboundTargetField(group, "target_is_home")
-		if err != nil {
-			return page, err
-		}
-		subject, err := requiredOutboundTargetField(group, "target_default_subject")
-		if err != nil {
-			return page, err
-		}
-		name, err := requiredOutboundTargetField(group, "target_name")
-		if err != nil {
-			return page, err
-		}
-		isHome, parseErr := strconv.ParseBool(home)
-		if parseErr != nil {
-			return page, fmt.Errorf("outbound target %q has invalid home state", safeOutboundTargetText(id))
-		}
-		platform = strings.ToLower(strings.TrimSpace(platform))
-		kind = strings.ToLower(strings.TrimSpace(kind))
-		name = strings.TrimSpace(name)
-		destination = strings.TrimSpace(destination)
-		threadID = strings.TrimSpace(threadID)
-		subject = strings.TrimSpace(subject)
-		if platform == "" || kind == "" || destination == "" {
-			return page, fmt.Errorf("outbound target %q is missing required fields", safeOutboundTargetText(id))
-		}
-		if !IsSupportedOutboundTargetPlatform(platform) {
-			return page, fmt.Errorf("outbound target %q has unsupported platform", safeOutboundTargetText(id))
-		}
-		nameKey := platform + "\x00" + strings.ToLower(name)
-		if name != "" {
+		nameKey := target.Platform + "\x00" + strings.ToLower(target.Name)
+		if target.Name != "" {
 			if _, exists := seenNames[nameKey]; exists {
 				return page, errors.New("outbound target response has duplicate target names")
 			}
 			seenNames[nameKey] = struct{}{}
 		}
-		destinationKey := platform + "\x00" + kind + "\x00" + destination + "\x00" + threadID
+		destinationKey := target.Platform + "\x00" + target.TargetKind + "\x00" + target.Destination + "\x00" + target.ThreadID
 		if _, exists := seenDestinations[destinationKey]; exists {
 			return page, errors.New("outbound target response has duplicate destinations")
 		}
 		seenDestinations[destinationKey] = struct{}{}
-		page.Targets = append(page.Targets, OutboundTarget{
-			ID: id, ProjectID: projectID, Platform: platform, TargetKind: kind,
-			Name: name, Destination: destination, TargetID: destination,
-			ThreadID: threadID, Home: isHome, DefaultSubject: subject,
-		})
+		page.Targets = append(page.Targets, target)
 	}
 	return page, nil
+}
+
+func convertOutboundTargetFields(fields *html.Node, id, projectID, label string) (OutboundTarget, error) {
+	platform, err := requiredOutboundTargetField(fields, "target_platform")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	kind, err := requiredOutboundTargetField(fields, "target_kind")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	name, err := requiredOutboundTargetField(fields, "target_name")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	destination, err := requiredOutboundTargetField(fields, "target_target_id")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	threadID, err := requiredOutboundTargetField(fields, "target_thread_id")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	home, err := requiredOutboundTargetField(fields, "target_is_home")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	subject, err := requiredOutboundTargetField(fields, "target_default_subject")
+	if err != nil {
+		return OutboundTarget{}, err
+	}
+	isHome, err := strconv.ParseBool(home)
+	if err != nil {
+		return OutboundTarget{}, fmt.Errorf("%s has invalid home state", label)
+	}
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	name = strings.TrimSpace(name)
+	destination = strings.TrimSpace(destination)
+	threadID = strings.TrimSpace(threadID)
+	subject = strings.TrimSpace(subject)
+	if platform == "" || kind == "" || destination == "" {
+		return OutboundTarget{}, fmt.Errorf("%s is missing required fields", label)
+	}
+	if !IsSupportedOutboundTargetPlatform(platform) {
+		return OutboundTarget{}, fmt.Errorf("%s has unsupported platform", label)
+	}
+	return OutboundTarget{
+		ID: strings.TrimSpace(id), ProjectID: projectID, Platform: platform, TargetKind: kind,
+		Name: name, Destination: destination, TargetID: destination, ThreadID: threadID,
+		Home: isHome, DefaultSubject: subject,
+	}, nil
 }
 
 func requiredOutboundTargetField(group *html.Node, name string) (string, error) {
