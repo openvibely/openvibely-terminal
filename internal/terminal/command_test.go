@@ -1333,7 +1333,7 @@ func TestAlertsShowHelpAndCompletion(t *testing.T) {
 	help := renderCommandHelp(*cmd)
 	for _, want := range []string{
 		"/alerts list [filter] --decision-state <state> [--processing-state <state>]",
-		"decision states: pending, approved, rejected, dismissed",
+		"decision states: pending, approved, rejected, dismissed, not_required (not required)",
 		"processing states: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed",
 		"/alerts show <id|title>",
 		"inspect full alert context",
@@ -1473,9 +1473,20 @@ func TestParseAlertListArgs(t *testing.T) {
 			wantAll:  true,
 		},
 		{
+			name:       "not required decision state separate argument",
+			args:       []string{"--decision-state", "not_required"},
+			wantFilter: client.AlertListFilter{DecisionState: "not_required"},
+		},
+		{
+			name:       "not required decision state equals argument with combined filters",
+			args:       []string{"deploy", "--decision-state=not_required", "--processing-state", "unclaimed"},
+			wantFilter: client.AlertListFilter{DecisionState: "not_required", ProcessingState: "unclaimed"},
+			wantText:   "deploy",
+		},
+		{
 			name:    "invalid decision state",
-			args:    []string{"--decision-state", "not_required"},
-			wantErr: "valid values: pending, approved, rejected, dismissed",
+			args:    []string{"--decision-state", "invalid"},
+			wantErr: "valid values: pending, approved, rejected, dismissed, not_required (not required)",
 		},
 		{
 			name:    "missing processing state",
@@ -1500,7 +1511,7 @@ func TestParseAlertListArgs(t *testing.T) {
 			}
 		})
 	}
-	for _, state := range []string{"pending", "approved", "rejected", "dismissed"} {
+	for _, state := range []string{"pending", "approved", "rejected", "dismissed", "not_required"} {
 		t.Run("accepted decision state "+state, func(t *testing.T) {
 			filter, text, all, err := parseAlertListArgs([]string{"--decision-state", state})
 			if err != nil {

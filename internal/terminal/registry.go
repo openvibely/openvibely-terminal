@@ -3415,8 +3415,10 @@ func matchAlertActionRef(alerts []client.Alert, ref string) (client.Alert, error
 }
 
 var validAlertDecisionStates = map[string]struct{}{
-	"pending": {}, "approved": {}, "rejected": {}, "dismissed": {},
+	"pending": {}, "approved": {}, "rejected": {}, "dismissed": {}, "not_required": {},
 }
+
+const alertDecisionStateValues = "pending, approved, rejected, dismissed, not_required (not required)"
 
 var validAlertProcessingStates = map[string]struct{}{
 	"not_applicable": {}, "unclaimed": {}, "claimed": {},
@@ -3456,7 +3458,7 @@ func parseAlertListArgs(args []string) (client.AlertListFilter, string, bool, er
 		switch name {
 		case "--decision-state":
 			if _, ok := validAlertDecisionStates[value]; !ok {
-				return client.AlertListFilter{}, "", false, fmt.Errorf("invalid %s %q; valid values: pending, approved, rejected, dismissed", name, value)
+				return client.AlertListFilter{}, "", false, fmt.Errorf("invalid %s %q; valid values: %s", name, value, alertDecisionStateValues)
 			}
 			filter.DecisionState = value
 		case "--processing-state":
@@ -3583,7 +3585,7 @@ func alertsCommand() command {
 			"alerts [filter]                            list first alert page with optional free-text matching",
 			"alerts list [filter] --decision-state <state> [--processing-state <state>]",
 			"alerts list --all                          retrieve and render full alert history",
-			"  decision states: pending, approved, rejected, dismissed",
+			"  decision states: " + alertDecisionStateValues,
 			"  processing states: not_applicable, unclaimed, claimed, implementation_task_linked, completed, failed",
 			"alerts show <alert>                         inspect full body and metadata",
 			"alerts read|approve|reject|dismiss <alert>",

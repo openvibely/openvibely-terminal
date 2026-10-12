@@ -10241,8 +10241,8 @@ func TestAlertsWorkflowStatusFilters(t *testing.T) {
 			http.NotFound(w, r)
 		})
 		m.selectedID = "p-filter"
-		m = runLine(t, m, "/alerts list --decision-state not_required")
-		if out := stripANSI(transcript(m)); !strings.Contains(out, "valid values: pending, approved, rejected, dismissed") {
+		m = runLine(t, m, "/alerts list --decision-state invalid")
+		if out := stripANSI(transcript(m)); !strings.Contains(out, "valid values: pending, approved, rejected, dismissed, not_required (not required)") {
 			t.Fatalf("invalid predicate output = %s", out)
 		}
 		if requests != 0 {
