@@ -9886,6 +9886,63 @@ func TestCLIAlertsDeleteResolutionAndBackendErrors(t *testing.T) {
 	})
 }
 
+func TestCLIAlertsNotRequiredDecisionStateFilter(t *testing.T) {
+	tests := []struct {
+		name              string
+		args              []string
+		wantProcessing    string
+		wantNoBackendText bool
+	}{
+		{
+			name: "separate argument form",
+			args: []string{"alerts", "list", "--decision-state", "not_required"},
+		},
+		{
+			name:              "equals form with text and processing filters",
+			args:              []string{"alerts", "list", "deploy", "--decision-state=not_required", "--processing-state", "unclaimed"},
+			wantProcessing:    "unclaimed",
+			wantNoBackendText: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case "/alerts":
+					requests++
+					q := r.URL.Query()
+					if q.Get("project_id") != "p1" || q.Get("decision_state") != "not_required" || q.Get("processing_state") != tt.wantProcessing {
+						t.Errorf("filtered request = %s", r.URL.RequestURI())
+					}
+					if tt.wantNoBackendText && q.Get("text") != "" {
+						t.Errorf("free text was sent to backend: %s", r.URL.RequestURI())
+					}
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-alert-id]" data-card-pagination-key="data-alert-id" data-card-pagination-has-more="false"></div>`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tt.args, false, false); err != nil {
+				t.Fatalf("RunCLI %v: %v", tt.args, err)
+			}
+			if requests != 1 {
+				t.Fatalf("backend requests = %d, want 1", requests)
+			}
+		})
+	}
+}
+
 func TestCLIAlertsWorkflowStatusFilterOutput(t *testing.T) {
 	t.Run("plain output includes later filtered page", func(t *testing.T) {
 		requests := 0
