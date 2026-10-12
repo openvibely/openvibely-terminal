@@ -63,21 +63,13 @@ func (c *Client) LoadAutomationDefinition(ctx context.Context, projectID, automa
 }
 
 func parseAutomationDefinition(root *html.Node, projectID, automationID string) (*AutomationDefinition, error) {
-	builder := findByID(root, "automation-builder")
-	if builder == nil {
-		return nil, fmt.Errorf("automation builder: malformed response")
-	}
-	yaml, err := automationBuilderYAML(builder)
+	yaml, action, err := automationBuilderDefinition(root)
 	if err != nil {
 		return nil, err
 	}
 	// The web builder's design-form action is the authoritative identity and
 	// project-scope evidence. Never substitute caller-supplied IDs when it is
 	// absent: a stale or malformed fragment must fail closed before export/save.
-	action, err := automationBuilderAction(builder)
-	if err != nil {
-		return nil, err
-	}
 	wantPath := "/automations/" + url.PathEscape(automationID) + "/builder"
 	if action.Path != wantPath || action.Query().Get("project_id") != projectID {
 		return nil, fmt.Errorf("automation builder: response scope does not match selected automation")
@@ -86,15 +78,7 @@ func parseAutomationDefinition(root *html.Node, projectID, automationID string) 
 }
 
 func parseCreatedAutomationDefinition(root *html.Node, projectID string) (*AutomationDefinition, error) {
-	builder := findByID(root, "automation-builder")
-	if builder == nil {
-		return nil, fmt.Errorf("automation builder: malformed response")
-	}
-	yaml, err := automationBuilderYAML(builder)
-	if err != nil {
-		return nil, err
-	}
-	action, err := automationBuilderAction(builder)
+	yaml, action, err := automationBuilderDefinition(root)
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +94,25 @@ func parseCreatedAutomationDefinition(root *html.Node, projectID string) (*Autom
 		return nil, fmt.Errorf("automation builder: created automation identity unavailable")
 	}
 	return &AutomationDefinition{AutomationID: automationID, ProjectID: projectID, YAML: yaml}, nil
+}
+
+// automationBuilderDefinition extracts the common, authoritative builder
+// content. Callers retain their distinct identity checks after this shared
+// parsing step.
+func automationBuilderDefinition(root *html.Node) (string, *url.URL, error) {
+	builder := findByID(root, "automation-builder")
+	if builder == nil {
+		return "", nil, fmt.Errorf("automation builder: malformed response")
+	}
+	yaml, err := automationBuilderYAML(builder)
+	if err != nil {
+		return "", nil, err
+	}
+	action, err := automationBuilderAction(builder)
+	if err != nil {
+		return "", nil, err
+	}
+	return yaml, action, nil
 }
 
 func automationBuilderYAML(builder *html.Node) (string, error) {

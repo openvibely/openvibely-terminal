@@ -8,7 +8,94 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"golang.org/x/net/html"
 )
+
+func TestAutomationDefinitionParsersShareBuilderExtraction(t *testing.T) {
+	root, err := html.Parse(strings.NewReader(`<div id="automation-builder"><form id="automation-design-form" action="/automations/au-new/builder?project_id=p1"></form><textarea name="automation_yaml">schema_version: 1
+name: Keep &amp; edit
+</textarea></div>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := parseCreatedAutomationDefinition(root, "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := parseAutomationDefinition(root, "p1", "au-new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &AutomationDefinition{
+		AutomationID: "au-new",
+		ProjectID:    "p1",
+		YAML:         "schema_version: 1\nname: Keep & edit\n",
+	}
+	if *created != *want || *loaded != *want {
+		t.Fatalf("created = %+v, loaded = %+v, want both %+v", created, loaded, want)
+	}
+}
+
+func TestAutomationDefinitionParsersShareBuilderExtractionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "missing builder", body: `<div><textarea name="automation_yaml">valid</textarea></div>`, wantErr: "malformed response"},
+		{name: "missing textarea", body: `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-1/builder?project_id=p1"></form></div>`, wantErr: "definition unavailable"},
+		{name: "missing form action", body: `<div id="automation-builder"><form id="automation-design-form"></form><textarea name="automation_yaml">valid</textarea></div>`, wantErr: "authoritative target unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := html.Parse(strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parseCreatedAutomationDefinition(root, "p1"); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("create parse error = %v, want containing %q", err, tc.wantErr)
+			}
+			if _, err := parseAutomationDefinition(root, "p1", "au-1"); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("load parse error = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseCreatedAutomationDefinitionValidatesProjectAndDerivesIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		projectID string
+		action    string
+		wantErr   string
+		wantID    string
+	}{
+		{name: "derives identity", projectID: "p1", action: "/automations/au-created/builder?project_id=p1", wantID: "au-created"},
+		{name: "rejects foreign project", projectID: "p1", action: "/automations/au-created/builder?project_id=p2", wantErr: "selected project"},
+		{name: "rejects unavailable identity", projectID: "p1", action: "/automations/builder?project_id=p1", wantErr: "identity unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := html.Parse(strings.NewReader(`<div id="automation-builder"><form id="automation-design-form" action="` + tc.action + `"></form><textarea name="automation_yaml">valid</textarea></div>`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, err := parseCreatedAutomationDefinition(root, tc.projectID)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if definition.AutomationID != tc.wantID || definition.ProjectID != tc.projectID {
+				t.Fatalf("definition = %+v", definition)
+			}
+		})
+	}
+}
 
 func TestLoadAutomationDefinitionUsesScopedBuilderContract(t *testing.T) {
 	var gotQuery url.Values
@@ -293,6 +380,23 @@ func TestUpdateAutomationDefinitionParseFailureDoesNotSave(t *testing.T) {
 	c, _ := New(s.URL)
 	err := c.UpdateAutomationDefinition(context.Background(), "p1", "au-1", "invalid")
 	if err == nil || !strings.Contains(err.Error(), "YAML did not parse") {
+		t.Fatalf("error = %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want preview only", requests)
+	}
+}
+
+func TestUpdateAutomationDefinitionIdentityMismatchDoesNotSave(t *testing.T) {
+	requests := 0
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_, _ = w.Write([]byte(`<div id="automation-builder"><form id="automation-design-form" action="/automations/au-other/builder?project_id=p1"></form><textarea name="automation_yaml">preview</textarea></div>`))
+	}))
+	defer s.Close()
+	c, _ := New(s.URL)
+	err := c.UpdateAutomationDefinition(context.Background(), "p1", "au-1", "edited")
+	if err == nil || !strings.Contains(err.Error(), "response scope does not match selected automation") {
 		t.Fatalf("error = %v", err)
 	}
 	if requests != 1 {
