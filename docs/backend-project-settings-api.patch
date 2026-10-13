@@ -1,0 +1,1173 @@
+diff --git a/docs/docs.go b/docs/docs.go
+index 3a6a36a7..0da11818 100644
+--- a/docs/docs.go
++++ b/docs/docs.go
+@@ -1136,6 +1136,101 @@ const docTemplate = `{
+                 }
+             }
+         },
++        "/api/projects/{id}/settings": {
++            "get": {
++                "description": "Get the authoritative editable settings and server-owned edit metadata for one project.",
++                "produces": [
++                    "application/json"
++                ],
++                "tags": [
++                    "projects"
++                ],
++                "summary": "Get project settings",
++                "parameters": [
++                    {
++                        "type": "string",
++                        "description": "Project ID",
++                        "name": "id",
++                        "in": "path",
++                        "required": true
++                    }
++                ],
++                "responses": {
++                    "200": {
++                        "description": "OK",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ProjectSettingsResponse"
++                        }
++                    },
++                    "404": {
++                        "description": "Not Found",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    },
++                    "500": {
++                        "description": "Internal Server Error",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    }
++                }
++            },
++            "put": {
++                "description": "Validate and persist the complete project settings resource using the same safeguards as the browser settings form.",
++                "consumes": [
++                    "application/json"
++                ],
++                "produces": [
++                    "application/json"
++                ],
++                "tags": [
++                    "projects"
++                ],
++                "summary": "Update project settings",
++                "parameters": [
++                    {
++                        "type": "string",
++                        "description": "Project ID",
++                        "name": "id",
++                        "in": "path",
++                        "required": true
++                    },
++                    {
++                        "description": "Editable project settings",
++                        "name": "settings",
++                        "in": "body",
++                        "required": true,
++                        "schema": {
++                            "$ref": "#/definitions/handler.ProjectSettingsUpdateSchema"
++                        }
++                    }
++                ],
++                "responses": {
++                    "204": {
++                        "description": "Project settings updated"
++                    },
++                    "400": {
++                        "description": "Bad Request",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    },
++                    "404": {
++                        "description": "Not Found",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    },
++                    "500": {
++                        "description": "Internal Server Error",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    }
++                }
++            }
++        },
+         "/api/schedules/{id}/toggle": {
+             "post": {
+                 "description": "Pauses a running schedule or resumes a paused one. When re-enabling, NextRun is recomputed if stale.",
+@@ -1904,6 +1999,93 @@ const docTemplate = `{
+                 }
+             }
+         },
++        "handler.ProjectSettingsAgentOption": {
++            "type": "object",
++            "properties": {
++                "id": {
++                    "type": "string"
++                },
++                "name": {
++                    "type": "string"
++                }
++            }
++        },
++        "handler.ProjectSettingsResponse": {
++            "type": "object",
++            "properties": {
++                "available_agents": {
++                    "type": "array",
++                    "items": {
++                        "$ref": "#/definitions/handler.ProjectSettingsAgentOption"
++                    }
++                },
++                "default_agent_id": {
++                    "type": "string"
++                },
++                "default_agent_name": {
++                    "type": "string"
++                },
++                "description": {
++                    "type": "string"
++                },
++                "github_url": {
++                    "type": "string"
++                },
++                "id": {
++                    "type": "string"
++                },
++                "local_repository_paths_enabled": {
++                    "type": "boolean"
++                },
++                "max_workers": {
++                    "type": "integer"
++                },
++                "name": {
++                    "type": "string"
++                },
++                "repository_path": {
++                    "type": "string"
++                },
++                "repository_source": {
++                    "type": "string"
++                }
++            }
++        },
++        "handler.ProjectSettingsUpdateSchema": {
++            "type": "object",
++            "required": [
++                "default_agent_id",
++                "description",
++                "github_url",
++                "max_workers",
++                "name",
++                "repository_path",
++                "repository_source"
++            ],
++            "properties": {
++                "default_agent_id": {
++                    "type": "string"
++                },
++                "description": {
++                    "type": "string"
++                },
++                "github_url": {
++                    "type": "string"
++                },
++                "max_workers": {
++                    "type": "integer"
++                },
++                "name": {
++                    "type": "string"
++                },
++                "repository_path": {
++                    "type": "string"
++                },
++                "repository_source": {
++                    "type": "string"
++                }
++            }
++        },
+         "handler.ProjectsListResponse": {
+             "type": "object",
+             "properties": {
+diff --git a/docs/swagger.json b/docs/swagger.json
+index 69d4ba9e..d4f2effd 100644
+--- a/docs/swagger.json
++++ b/docs/swagger.json
+@@ -1134,6 +1134,101 @@
+                 }
+             }
+         },
++        "/api/projects/{id}/settings": {
++            "get": {
++                "description": "Get the authoritative editable settings and server-owned edit metadata for one project.",
++                "produces": [
++                    "application/json"
++                ],
++                "tags": [
++                    "projects"
++                ],
++                "summary": "Get project settings",
++                "parameters": [
++                    {
++                        "type": "string",
++                        "description": "Project ID",
++                        "name": "id",
++                        "in": "path",
++                        "required": true
++                    }
++                ],
++                "responses": {
++                    "200": {
++                        "description": "OK",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ProjectSettingsResponse"
++                        }
++                    },
++                    "404": {
++                        "description": "Not Found",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    },
++                    "500": {
++                        "description": "Internal Server Error",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    }
++                }
++            },
++            "put": {
++                "description": "Validate and persist the complete project settings resource using the same safeguards as the browser settings form.",
++                "consumes": [
++                    "application/json"
++                ],
++                "produces": [
++                    "application/json"
++                ],
++                "tags": [
++                    "projects"
++                ],
++                "summary": "Update project settings",
++                "parameters": [
++                    {
++                        "type": "string",
++                        "description": "Project ID",
++                        "name": "id",
++                        "in": "path",
++                        "required": true
++                    },
++                    {
++                        "description": "Editable project settings",
++                        "name": "settings",
++                        "in": "body",
++                        "required": true,
++                        "schema": {
++                            "$ref": "#/definitions/handler.ProjectSettingsUpdateSchema"
++                        }
++                    }
++                ],
++                "responses": {
++                    "204": {
++                        "description": "Project settings updated"
++                    },
++                    "400": {
++                        "description": "Bad Request",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    },
++                    "404": {
++                        "description": "Not Found",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    },
++                    "500": {
++                        "description": "Internal Server Error",
++                        "schema": {
++                            "$ref": "#/definitions/handler.ErrorResponse"
++                        }
++                    }
++                }
++            }
++        },
+         "/api/schedules/{id}/toggle": {
+             "post": {
+                 "description": "Pauses a running schedule or resumes a paused one. When re-enabling, NextRun is recomputed if stale.",
+@@ -1902,6 +1997,93 @@
+                 }
+             }
+         },
++        "handler.ProjectSettingsAgentOption": {
++            "type": "object",
++            "properties": {
++                "id": {
++                    "type": "string"
++                },
++                "name": {
++                    "type": "string"
++                }
++            }
++        },
++        "handler.ProjectSettingsResponse": {
++            "type": "object",
++            "properties": {
++                "available_agents": {
++                    "type": "array",
++                    "items": {
++                        "$ref": "#/definitions/handler.ProjectSettingsAgentOption"
++                    }
++                },
++                "default_agent_id": {
++                    "type": "string"
++                },
++                "default_agent_name": {
++                    "type": "string"
++                },
++                "description": {
++                    "type": "string"
++                },
++                "github_url": {
++                    "type": "string"
++                },
++                "id": {
++                    "type": "string"
++                },
++                "local_repository_paths_enabled": {
++                    "type": "boolean"
++                },
++                "max_workers": {
++                    "type": "integer"
++                },
++                "name": {
++                    "type": "string"
++                },
++                "repository_path": {
++                    "type": "string"
++                },
++                "repository_source": {
++                    "type": "string"
++                }
++            }
++        },
++        "handler.ProjectSettingsUpdateSchema": {
++            "type": "object",
++            "required": [
++                "default_agent_id",
++                "description",
++                "github_url",
++                "max_workers",
++                "name",
++                "repository_path",
++                "repository_source"
++            ],
++            "properties": {
++                "default_agent_id": {
++                    "type": "string"
++                },
++                "description": {
++                    "type": "string"
++                },
++                "github_url": {
++                    "type": "string"
++                },
++                "max_workers": {
++                    "type": "integer"
++                },
++                "name": {
++                    "type": "string"
++                },
++                "repository_path": {
++                    "type": "string"
++                },
++                "repository_source": {
++                    "type": "string"
++                }
++            }
++        },
+         "handler.ProjectsListResponse": {
+             "type": "object",
+             "properties": {
+diff --git a/docs/swagger.yaml b/docs/swagger.yaml
+index 6ed20589..2893fc26 100644
+--- a/docs/swagger.yaml
++++ b/docs/swagger.yaml
+@@ -116,6 +116,65 @@ definitions:
+         example: /Users/user/projects/myproject
+         type: string
+     type: object
++  handler.ProjectSettingsAgentOption:
++    properties:
++      id:
++        type: string
++      name:
++        type: string
++    type: object
++  handler.ProjectSettingsResponse:
++    properties:
++      available_agents:
++        items:
++          $ref: '#/definitions/handler.ProjectSettingsAgentOption'
++        type: array
++      default_agent_id:
++        type: string
++      default_agent_name:
++        type: string
++      description:
++        type: string
++      github_url:
++        type: string
++      id:
++        type: string
++      local_repository_paths_enabled:
++        type: boolean
++      max_workers:
++        type: integer
++      name:
++        type: string
++      repository_path:
++        type: string
++      repository_source:
++        type: string
++    type: object
++  handler.ProjectSettingsUpdateSchema:
++    properties:
++      default_agent_id:
++        type: string
++      description:
++        type: string
++      github_url:
++        type: string
++      max_workers:
++        type: integer
++      name:
++        type: string
++      repository_path:
++        type: string
++      repository_source:
++        type: string
++    required:
++    - default_agent_id
++    - description
++    - github_url
++    - max_workers
++    - name
++    - repository_path
++    - repository_source
++    type: object
+   handler.ProjectsListResponse:
+     properties:
+       projects:
+@@ -2545,6 +2604,71 @@ paths:
+       summary: List all projects
+       tags:
+       - projects
++  /api/projects/{id}/settings:
++    get:
++      description: Get the authoritative editable settings and server-owned edit metadata
++        for one project.
++      parameters:
++      - description: Project ID
++        in: path
++        name: id
++        required: true
++        type: string
++      produces:
++      - application/json
++      responses:
++        "200":
++          description: OK
++          schema:
++            $ref: '#/definitions/handler.ProjectSettingsResponse'
++        "404":
++          description: Not Found
++          schema:
++            $ref: '#/definitions/handler.ErrorResponse'
++        "500":
++          description: Internal Server Error
++          schema:
++            $ref: '#/definitions/handler.ErrorResponse'
++      summary: Get project settings
++      tags:
++      - projects
++    put:
++      consumes:
++      - application/json
++      description: Validate and persist the complete project settings resource using
++        the same safeguards as the browser settings form.
++      parameters:
++      - description: Project ID
++        in: path
++        name: id
++        required: true
++        type: string
++      - description: Editable project settings
++        in: body
++        name: settings
++        required: true
++        schema:
++          $ref: '#/definitions/handler.ProjectSettingsUpdateSchema'
++      produces:
++      - application/json
++      responses:
++        "204":
++          description: Project settings updated
++        "400":
++          description: Bad Request
++          schema:
++            $ref: '#/definitions/handler.ErrorResponse'
++        "404":
++          description: Not Found
++          schema:
++            $ref: '#/definitions/handler.ErrorResponse'
++        "500":
++          description: Internal Server Error
++          schema:
++            $ref: '#/definitions/handler.ErrorResponse'
++      summary: Update project settings
++      tags:
++      - projects
+   /api/schedules/{id}/toggle:
+     post:
+       description: Pauses a running schedule or resumes a paused one. When re-enabling,
+diff --git a/internal/handler/api_project_handler.go b/internal/handler/api_project_handler.go
+index f16fa005..e2fe7d94 100644
+--- a/internal/handler/api_project_handler.go
++++ b/internal/handler/api_project_handler.go
+@@ -1,7 +1,12 @@
+ package handler
+ 
+ import (
++	"encoding/json"
++	"fmt"
++	"io"
+ 	"net/http"
++	"strconv"
++	"strings"
+ 
+ 	"github.com/labstack/echo/v4"
+ 	"github.com/openvibely/openvibely/internal/applog"
+@@ -48,6 +53,220 @@ func (h *Handler) APIGetProjects(c echo.Context) error {
+ 	return writeAPIProjectsResponse(c, projectResponsesFromAPIItems(projects))
+ }
+ 
++// ProjectSettingsAgentOption is the safe agent selector projection exposed to clients.
++type ProjectSettingsAgentOption struct {
++	ID   string `json:"id"`
++	Name string `json:"name"`
++}
++
++// ProjectSettingsResponse is the editable project settings resource plus server-owned metadata.
++type ProjectSettingsResponse struct {
++	ID                          string                       `json:"id"`
++	Name                        string                       `json:"name"`
++	Description                 string                       `json:"description"`
++	RepositorySource            string                       `json:"repository_source"`
++	RepositoryPath              string                       `json:"repository_path"`
++	GitHubURL                   string                       `json:"github_url"`
++	DefaultAgentID              string                       `json:"default_agent_id"`
++	DefaultAgentName            string                       `json:"default_agent_name,omitempty"`
++	MaxWorkers                  *int                         `json:"max_workers"`
++	LocalRepositoryPathsEnabled bool                         `json:"local_repository_paths_enabled"`
++	AvailableAgents             []ProjectSettingsAgentOption `json:"available_agents"`
++}
++
++// ProjectSettingsUpdateRequest is the complete editable settings payload.
++// Read-only metadata is intentionally excluded from updates.
++type ProjectSettingsUpdateRequest struct {
++	Name             *string         `json:"name"`
++	Description      *string         `json:"description"`
++	RepositorySource *string         `json:"repository_source"`
++	RepositoryPath   *string         `json:"repository_path"`
++	GitHubURL        *string         `json:"github_url"`
++	DefaultAgentID   *string         `json:"default_agent_id"`
++	MaxWorkers       json.RawMessage `json:"max_workers"`
++}
++
++// ProjectSettingsUpdateSchema documents the complete editable settings payload.
++type ProjectSettingsUpdateSchema struct {
++	Name             string `json:"name" binding:"required"`
++	Description      string `json:"description" binding:"required"`
++	RepositorySource string `json:"repository_source" binding:"required"`
++	RepositoryPath   string `json:"repository_path" binding:"required"`
++	GitHubURL        string `json:"github_url" binding:"required"`
++	DefaultAgentID   string `json:"default_agent_id" binding:"required"`
++	MaxWorkers       *int   `json:"max_workers" binding:"required"`
++}
++
++// APIGetProjectSettings godoc
++// @Summary Get project settings
++// @Description Get the authoritative editable settings and server-owned edit metadata for one project.
++// @Tags projects
++// @Produce json
++// @Param id path string true "Project ID"
++// @Success 200 {object} ProjectSettingsResponse
++// @Failure 404 {object} ErrorResponse
++// @Failure 500 {object} ErrorResponse
++// @Router /api/projects/{id}/settings [get]
++func (h *Handler) APIGetProjectSettings(c echo.Context) error {
++	projectID := c.Param("id")
++	project, err := h.projectSvc.GetByID(c.Request().Context(), projectID)
++	if err != nil {
++		applog.Infof("[handler] APIGetProjectSettings fetch error id=%s: %v", projectID, err)
++		return c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to fetch project settings"})
++	}
++	if project == nil {
++		return c.JSON(http.StatusNotFound, ErrorResponse{Error: "project not found"})
++	}
++	if h.llmConfigRepo == nil {
++		return c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to fetch available agents"})
++	}
++	agents, err := h.llmConfigRepo.ListChatSelectionOptions(c.Request().Context())
++	if err != nil {
++		applog.Infof("[handler] APIGetProjectSettings agent options error id=%s: %v", projectID, err)
++		return c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to fetch available agents"})
++	}
++
++	source := "local"
++	if strings.TrimSpace(project.RepoURL) != "" {
++		source = "github"
++	}
++	response := ProjectSettingsResponse{
++		ID:                          project.ID,
++		Name:                        project.Name,
++		Description:                 project.Description,
++		RepositorySource:            source,
++		RepositoryPath:              project.RepoPath,
++		GitHubURL:                   project.RepoURL,
++		MaxWorkers:                  project.MaxWorkers,
++		LocalRepositoryPathsEnabled: h.isLocalRepoPathEnabled(),
++		AvailableAgents:             make([]ProjectSettingsAgentOption, 0, len(agents)),
++	}
++	if project.DefaultAgentConfigID != nil {
++		response.DefaultAgentID = *project.DefaultAgentConfigID
++	}
++	for _, agent := range agents {
++		response.AvailableAgents = append(response.AvailableAgents, ProjectSettingsAgentOption{ID: agent.ID, Name: agent.Name})
++		if agent.ID == response.DefaultAgentID {
++			response.DefaultAgentName = agent.Name
++		}
++	}
++	return c.JSON(http.StatusOK, response)
++}
++
++// APIUpdateProjectSettings godoc
++// @Summary Update project settings
++// @Description Validate and persist the complete project settings resource using the same safeguards as the browser settings form.
++// @Tags projects
++// @Accept json
++// @Produce json
++// @Param id path string true "Project ID"
++// @Param settings body ProjectSettingsUpdateSchema true "Editable project settings"
++// @Success 204 "Project settings updated"
++// @Failure 400 {object} ErrorResponse
++// @Failure 404 {object} ErrorResponse
++// @Failure 500 {object} ErrorResponse
++// @Router /api/projects/{id}/settings [put]
++func (h *Handler) APIUpdateProjectSettings(c echo.Context) error {
++	projectID := c.Param("id")
++	project, err := h.projectSvc.GetByID(c.Request().Context(), projectID)
++	if err != nil {
++		applog.Infof("[handler] APIUpdateProjectSettings fetch error id=%s: %v", projectID, err)
++		return c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to fetch project settings"})
++	}
++	if project == nil {
++		return c.JSON(http.StatusNotFound, ErrorResponse{Error: "project not found"})
++	}
++	globalMaxWorkers, err := h.configuredGlobalWorkerLimit(c.Request().Context())
++	if err != nil {
++		return c.JSON(http.StatusInternalServerError, ErrorResponse{Error: "failed to read global worker limit"})
++	}
++	settings, err := decodeProjectSettingsUpdate(c, projectSettingsUpdateOptions{
++		LocalRepoPathEnabled: h.isLocalRepoPathEnabled(),
++		GitHubSvc:            h.githubSvc,
++		CurrentProject:       project,
++		GlobalMaxWorkers:     globalMaxWorkers,
++	})
++	if err != nil {
++		return c.JSON(http.StatusBadRequest, ErrorResponse{Error: err.Error()})
++	}
++	cloneFailure, err := h.persistProjectSettings(c.Request().Context(), project, settings)
++	if err != nil {
++		message := err.Error()
++		if cloneFailure {
++			message = fmt.Sprintf("failed to clone GitHub repository: %v", err)
++		}
++		applog.Infof("[handler] APIUpdateProjectSettings persist error id=%s: %v", projectID, err)
++		return c.JSON(http.StatusBadRequest, ErrorResponse{Error: message})
++	}
++	if h.workerSvc != nil {
++		h.workerSvc.ReconcilePendingTasks(c.Request().Context())
++		h.workerSvc.DispatchNext()
++	}
++	return c.NoContent(http.StatusNoContent)
++}
++
++const maxProjectSettingsRequestBytes = 1 << 20
++
++type projectSettingsUpdateOptions = projectFormSettingsOptions
++
++func decodeProjectSettingsUpdate(c echo.Context, opts projectSettingsUpdateOptions) (projectFormSettings, error) {
++	request := c.Request()
++	request.Body = http.MaxBytesReader(c.Response(), request.Body, maxProjectSettingsRequestBytes)
++	decoder := json.NewDecoder(request.Body)
++	decoder.DisallowUnknownFields()
++	var payload ProjectSettingsUpdateRequest
++	if err := decoder.Decode(&payload); err != nil {
++		return projectFormSettings{}, fmt.Errorf("invalid project settings JSON: %w", err)
++	}
++	var trailing any
++	if err := decoder.Decode(&trailing); err != io.EOF {
++		if err == nil {
++			err = fmt.Errorf("multiple JSON values")
++		}
++		return projectFormSettings{}, fmt.Errorf("invalid project settings JSON: %w", err)
++	}
++	for _, field := range []struct {
++		name  string
++		value *string
++	}{
++		{"name", payload.Name}, {"description", payload.Description},
++		{"repository_source", payload.RepositorySource}, {"repository_path", payload.RepositoryPath},
++		{"github_url", payload.GitHubURL}, {"default_agent_id", payload.DefaultAgentID},
++	} {
++		if field.value == nil {
++			return projectFormSettings{}, fmt.Errorf("project settings field %s is required", field.name)
++		}
++	}
++	if len(payload.MaxWorkers) == 0 {
++		return projectFormSettings{}, fmt.Errorf("project settings field max_workers is required")
++	}
++	repositorySource := strings.ToLower(strings.TrimSpace(*payload.RepositorySource))
++	if repositorySource != "local" && repositorySource != "github" {
++		return projectFormSettings{}, fmt.Errorf("repository_source must be local or github")
++	}
++	var maxWorkers *int
++	if string(payload.MaxWorkers) != "null" {
++		var value int
++		if err := json.Unmarshal(payload.MaxWorkers, &value); err != nil {
++			return projectFormSettings{}, fmt.Errorf("max_workers must be an integer or null")
++		}
++		maxWorkers = &value
++	}
++	maxWorkersValue := ""
++	if maxWorkers != nil {
++		maxWorkersValue = strconv.Itoa(*maxWorkers)
++	}
++	return parseProjectSettingsValues(projectSettingsValues{
++		Name:                 *payload.Name,
++		Description:          *payload.Description,
++		RepositorySource:     *payload.RepositorySource,
++		RepositoryPath:       *payload.RepositoryPath,
++		GitHubURL:            *payload.GitHubURL,
++		DefaultAgentConfigID: *payload.DefaultAgentID,
++		MaxWorkers:           maxWorkersValue,
++	}, opts)
++}
++
+ func projectResponsesFromAPIItems(projects []models.ProjectAPIItem) []ProjectResponse {
+ 	var projectResponses []ProjectResponse
+ 	for _, p := range projects {
+diff --git a/internal/handler/api_project_settings_test.go b/internal/handler/api_project_settings_test.go
+new file mode 100644
+index 00000000..932587a2
+--- /dev/null
++++ b/internal/handler/api_project_settings_test.go
+@@ -0,0 +1,208 @@
++package handler
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/openvibely/openvibely/internal/models"
++	"github.com/openvibely/openvibely/internal/testutil"
++)
++
++func TestAPIProjectSettingsReadAndUpdateJSONContract(t *testing.T) {
++	t.Setenv("OPENVIBELY_ENABLE_LOCAL_REPO_PATH", "true")
++	db := testutil.NewTestDB(t)
++	h, e, agentRepo := setupTestHandlerForDB(t, db)
++	ctx := context.Background()
++
++	agent := createAgent(t, agentRepo, func(agent *models.LLMConfig) {
++		agent.Name = "Settings Agent"
++	})
++	workers := 3
++	project := &models.Project{
++		Name: "Settings Project", Description: "before", RepoPath: t.TempDir(),
++		DefaultAgentConfigID: &agent.ID, MaxWorkers: &workers,
++	}
++	if err := h.projectSvc.Create(ctx, project); err != nil {
++		t.Fatalf("create project: %v", err)
++	}
++
++	read := func() ProjectSettingsResponse {
++		t.Helper()
++		recorder := httptest.NewRecorder()
++		e.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/settings", nil))
++		if recorder.Code != http.StatusOK {
++			t.Fatalf("GET settings = %d: %s", recorder.Code, recorder.Body.String())
++		}
++		var got ProjectSettingsResponse
++		if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
++			t.Fatalf("decode GET settings: %v", err)
++		}
++		return got
++	}
++
++	before := read()
++	if before.ID != project.ID || before.Name != project.Name || before.Description != "before" || before.RepositorySource != "local" || before.RepositoryPath != project.RepoPath {
++		t.Fatalf("initial settings = %+v", before)
++	}
++	if before.DefaultAgentID != agent.ID || before.DefaultAgentName != agent.Name || before.MaxWorkers == nil || *before.MaxWorkers != workers {
++		t.Fatalf("initial agent/worker settings = %+v", before)
++	}
++	if !before.LocalRepositoryPathsEnabled {
++		t.Fatalf("local repository setting was not returned: %+v", before)
++	}
++	var foundAgent bool
++	for _, option := range before.AvailableAgents {
++		if option == (ProjectSettingsAgentOption{ID: agent.ID, Name: agent.Name}) {
++			foundAgent = true
++		}
++	}
++	if !foundAgent {
++		t.Fatalf("available agents omitted selected agent: %+v", before.AvailableAgents)
++	}
++
++	payload := map[string]any{
++		"name": "Updated Project", "description": "after", "repository_source": "local",
++		"repository_path": "/tmp/updated managed path", "github_url": "",
++		"default_agent_id": "", "max_workers": 5,
++	}
++	body, err := json.Marshal(payload)
++	if err != nil {
++		t.Fatal(err)
++	}
++	recorder := httptest.NewRecorder()
++	request := httptest.NewRequest(http.MethodPut, "/api/projects/"+project.ID+"/settings", strings.NewReader(string(body)))
++	request.Header.Set("Content-Type", "application/json")
++	e.ServeHTTP(recorder, request)
++	if recorder.Code != http.StatusNoContent {
++		t.Fatalf("PUT settings = %d: %s", recorder.Code, recorder.Body.String())
++	}
++
++	persisted, err := h.projectSvc.GetByID(ctx, project.ID)
++	if err != nil {
++		t.Fatalf("load persisted project: %v", err)
++	}
++	if persisted.Name != payload["name"] || persisted.Description != payload["description"] || persisted.RepoPath != payload["repository_path"] || persisted.RepoURL != "" {
++		t.Fatalf("persisted project = %+v", persisted)
++	}
++	if persisted.DefaultAgentConfigID != nil || persisted.MaxWorkers == nil || *persisted.MaxWorkers != 5 {
++		t.Fatalf("persisted agent/worker settings = %+v", persisted)
++	}
++	after := read()
++	if after.Name != payload["name"] || after.Description != payload["description"] || after.RepositoryPath != payload["repository_path"] || after.DefaultAgentID != "" || after.MaxWorkers == nil || *after.MaxWorkers != 5 {
++		t.Fatalf("authoritative settings after PUT = %+v", after)
++	}
++}
++
++func TestAPIProjectSettingsUpdateRejectsInvalidAndUnsafeSettings(t *testing.T) {
++	t.Setenv("OPENVIBELY_ENABLE_LOCAL_REPO_PATH", "false")
++	h, e, _ := setupTestHandler(t)
++	ctx := context.Background()
++	disabled := false
++	h.localRepoPathEnabled = &disabled
++	h.githubSvc = &fakeGitHubService{recloneFn: func(_ context.Context, _, _, repoURL string) (string, string, error) {
++		return "/managed/remote", repoURL, nil
++	}}
++
++	for _, tc := range []struct {
++		name    string
++		mutate  func(map[string]any)
++		wantErr string
++	}{
++		{name: "blank name", mutate: func(payload map[string]any) { payload["name"] = "  " }, wantErr: "Project name is required"},
++		{name: "negative worker limit", mutate: func(payload map[string]any) { payload["max_workers"] = -1 }, wantErr: "0 or a positive whole number"},
++		{name: "local paths disabled", mutate: func(payload map[string]any) {
++			payload["repository_source"] = "local"
++			payload["repository_path"] = "/tmp/not-allowed"
++		}, wantErr: "Local repository paths are disabled"},
++		{name: "invalid repository source", mutate: func(payload map[string]any) { payload["repository_source"] = "browser" }, wantErr: "repository_source must be local or github"},
++		{name: "unknown field", mutate: func(payload map[string]any) { payload["browser_only"] = "ignored" }, wantErr: "unknown field"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			project := &models.Project{Name: "Remote Project " + tc.name, RepoPath: "/managed/remote", RepoURL: "https://github.com/acme/remote"}
++			if err := h.projectSvc.Create(ctx, project); err != nil {
++				t.Fatalf("create project: %v", err)
++			}
++			payload := map[string]any{
++				"name": project.Name, "description": "", "repository_source": "github",
++				"repository_path": project.RepoPath, "github_url": project.RepoURL,
++				"default_agent_id": "", "max_workers": nil,
++			}
++			tc.mutate(payload)
++			body, err := json.Marshal(payload)
++			if err != nil {
++				t.Fatal(err)
++			}
++			recorder := httptest.NewRecorder()
++			request := httptest.NewRequest(http.MethodPut, "/api/projects/"+project.ID+"/settings", strings.NewReader(string(body)))
++			request.Header.Set("Content-Type", "application/json")
++			e.ServeHTTP(recorder, request)
++			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.wantErr) {
++				t.Fatalf("PUT settings = %d %s, want 400 with %q", recorder.Code, recorder.Body.String(), tc.wantErr)
++			}
++			persisted, err := h.projectSvc.GetByID(ctx, project.ID)
++			if err != nil {
++				t.Fatalf("load project after rejected update: %v", err)
++			}
++			if persisted.Name != project.Name || persisted.RepoPath != project.RepoPath || persisted.RepoURL != project.RepoURL {
++				t.Fatalf("rejected update mutated project: %+v", persisted)
++			}
++		})
++	}
++}
++
++func TestAPIProjectSettingsUpdateReclonesChangedRepositoryAndReturnsManagedPath(t *testing.T) {
++	t.Setenv("OPENVIBELY_ENABLE_LOCAL_REPO_PATH", "false")
++	h, e, _ := setupTestHandler(t)
++	ctx := context.Background()
++	project := &models.Project{
++		Name: "GitHub Project", RepoPath: "/managed/old", RepoURL: "https://github.com/acme/old",
++	}
++	if err := h.projectSvc.Create(ctx, project); err != nil {
++		t.Fatalf("create project: %v", err)
++	}
++	calls := 0
++	h.githubSvc = &fakeGitHubService{recloneFn: func(_ context.Context, projectID, currentPath, repoURL string) (string, string, error) {
++		calls++
++		if projectID != project.ID || currentPath != "/managed/old" || repoURL != "https://github.com/acme/new" {
++			t.Fatalf("reclone arguments = %q %q %q", projectID, currentPath, repoURL)
++		}
++		return "/managed/new-checkout", "https://github.com/acme/new", nil
++	}}
++	payload := map[string]any{
++		"name": project.Name, "description": "", "repository_source": "github",
++		"repository_path": project.RepoPath, "github_url": "https://github.com/acme/new",
++		"default_agent_id": "", "max_workers": nil,
++	}
++	body, err := json.Marshal(payload)
++	if err != nil {
++		t.Fatal(err)
++	}
++	recorder := httptest.NewRecorder()
++	request := httptest.NewRequest(http.MethodPut, "/api/projects/"+project.ID+"/settings", strings.NewReader(string(body)))
++	request.Header.Set("Content-Type", "application/json")
++	e.ServeHTTP(recorder, request)
++	if recorder.Code != http.StatusNoContent || calls != 1 {
++		t.Fatalf("PUT settings = %d %s; reclone calls = %d", recorder.Code, recorder.Body.String(), calls)
++	}
++	persisted, err := h.projectSvc.GetByID(ctx, project.ID)
++	if err != nil {
++		t.Fatalf("load project after reclone: %v", err)
++	}
++	if persisted.RepoPath != "/managed/new-checkout" || persisted.RepoURL != "https://github.com/acme/new" {
++		t.Fatalf("persisted GitHub repository = path %q URL %q", persisted.RepoPath, persisted.RepoURL)
++	}
++
++	readRecorder := httptest.NewRecorder()
++	e.ServeHTTP(readRecorder, httptest.NewRequest(http.MethodGet, "/api/projects/"+project.ID+"/settings", nil))
++	var refreshed ProjectSettingsResponse
++	if err := json.Unmarshal(readRecorder.Body.Bytes(), &refreshed); err != nil {
++		t.Fatalf("decode refreshed settings: %v", err)
++	}
++	if readRecorder.Code != http.StatusOK || refreshed.RepositoryPath != "/managed/new-checkout" {
++		t.Fatalf("GET after reclone = %d %+v", readRecorder.Code, refreshed)
++	}
++}
+diff --git a/internal/handler/handler.go b/internal/handler/handler.go
+index 8f177617..db8961b7 100644
+--- a/internal/handler/handler.go
++++ b/internal/handler/handler.go
+@@ -1067,6 +1067,8 @@ func (h *Handler) RegisterRoutes(e *echo.Echo) {
+ 
+ 	// API endpoints (for Chrome extension)
+ 	e.GET("/api/projects", h.APIGetProjects)
++	e.GET("/api/projects/:id/settings", h.APIGetProjectSettings)
++	e.PUT("/api/projects/:id/settings", h.APIUpdateProjectSettings)
+ 	e.POST("/api/chat/message", h.APIChatMessage)
+ 	e.GET("/api/chat/message/:id", h.APIChatMessageStatus)
+ 	e.DELETE("/chat/history", h.ClearChat)
+diff --git a/internal/handler/project_handler.go b/internal/handler/project_handler.go
+index 9d4eb63b..7f51868f 100644
+--- a/internal/handler/project_handler.go
++++ b/internal/handler/project_handler.go
+@@ -104,13 +104,35 @@ type projectFormSettingsOptions struct {
+ 	GlobalMaxWorkers     int
+ }
+ 
++type projectSettingsValues struct {
++	Name                 string
++	Description          string
++	RepositorySource     string
++	RepositoryPath       string
++	GitHubURL            string
++	DefaultAgentConfigID string
++	MaxWorkers           string
++}
++
+ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (projectFormSettings, error) {
++	return parseProjectSettingsValues(projectSettingsValues{
++		Name:                 c.FormValue("name"),
++		Description:          c.FormValue("description"),
++		RepositorySource:     c.FormValue("repo_source"),
++		RepositoryPath:       c.FormValue("repo_path"),
++		GitHubURL:            c.FormValue("repo_url"),
++		DefaultAgentConfigID: c.FormValue("default_agent_config_id"),
++		MaxWorkers:           c.FormValue("max_workers"),
++	}, opts)
++}
++
++func parseProjectSettingsValues(values projectSettingsValues, opts projectFormSettingsOptions) (projectFormSettings, error) {
+ 	settings := projectFormSettings{
+-		Name:        strings.TrimSpace(c.FormValue("name")),
+-		Description: c.FormValue("description"),
+-		RepoSource:  normalizeRepoSource(c.FormValue("repo_source"), c.FormValue("repo_url")),
+-		RepoPath:    normalizeRepoPathInput(c.FormValue("repo_path")),
+-		RepoURL:     strings.TrimSpace(c.FormValue("repo_url")),
++		Name:        strings.TrimSpace(values.Name),
++		Description: values.Description,
++		RepoSource:  normalizeRepoSource(values.RepositorySource, values.GitHubURL),
++		RepoPath:    normalizeRepoPathInput(values.RepositoryPath),
++		RepoURL:     strings.TrimSpace(values.GitHubURL),
+ 	}
+ 	if settings.Name == "" {
+ 		return settings, errors.New("Project name is required")
+@@ -127,10 +149,10 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
+ 			return settings, errors.New("GitHub integration is not configured")
+ 		}
+ 	}
+-	if agentID := c.FormValue("default_agent_config_id"); agentID != "" {
+-		settings.DefaultAgentConfigID = &agentID
++	if values.DefaultAgentConfigID != "" {
++		settings.DefaultAgentConfigID = &values.DefaultAgentConfigID
+ 	}
+-	maxWorkers, err := parseNonNegativeWorkerLimit(c.FormValue("max_workers"))
++	maxWorkers, err := parseNonNegativeWorkerLimit(values.MaxWorkers)
+ 	if err != nil {
+ 		return settings, err
+ 	}
+@@ -401,41 +423,13 @@ func (h *Handler) CreateProject(c echo.Context) error {
+ 	return c.Redirect(http.StatusSeeOther, redirectURL)
+ }
+ 
+-func (h *Handler) UpdateProject(c echo.Context) error {
+-	projectID := c.Param("id")
+-	applog.Infof("[handler] UpdateProject id=%s", projectID)
+-
+-	p, err := h.projectSvc.GetByID(c.Request().Context(), projectID)
+-	if err != nil {
+-		applog.Infof("[handler] UpdateProject fetch error: %v", err)
+-		return err
+-	}
+-	if p == nil {
+-		applog.Infof("[handler] UpdateProject not found id=%s", projectID)
+-		return echo.NewHTTPError(http.StatusNotFound, "project not found")
+-	}
+-
+-	localRepoPathEnabled := h.isLocalRepoPathEnabled()
+-	globalMaxWorkers, err := h.configuredGlobalWorkerLimit(c.Request().Context())
+-	if err != nil {
+-		return h.projectErrorResponse(c, http.StatusInternalServerError, "failed to read global worker limit")
+-	}
++func (h *Handler) persistProjectSettings(ctx context.Context, p *models.Project, settings projectFormSettings) (bool, error) {
+ 	currentRepoPath := p.RepoPath
+-	settings, err := parseProjectFormSettings(c, projectFormSettingsOptions{
+-		LocalRepoPathEnabled: localRepoPathEnabled,
+-		GitHubSvc:            h.githubSvc,
+-		CurrentProject:       p,
+-		GlobalMaxWorkers:     globalMaxWorkers,
+-	})
+-	if err != nil {
+-		return h.projectErrorResponse(c, http.StatusBadRequest, err.Error())
+-	}
+-
+ 	recloneGitHubRepo := settings.RepoSource == "github"
+ 	if recloneGitHubRepo {
+ 		submittedRepo, err := service.ParseGitHubRepoURL(settings.RepoURL)
+ 		if err != nil {
+-			return h.projectGitHubCloneErrorResponse(c, http.StatusBadRequest, err)
++			return true, err
+ 		}
+ 		if p.RepoURL != "" {
+ 			if currentRepo, err := service.ParseGitHubRepoURL(p.RepoURL); err == nil {
+@@ -449,9 +443,9 @@ func (h *Handler) UpdateProject(c echo.Context) error {
+ 	p.DefaultAgentConfigID = settings.DefaultAgentConfigID
+ 	p.MaxWorkers = settings.MaxWorkers
+ 	if recloneGitHubRepo {
+-		reclonedPath, normalizedURL, err := h.githubSvc.RecloneProjectRepo(c.Request().Context(), p.ID, currentRepoPath, settings.RepoURL)
++		reclonedPath, normalizedURL, err := h.githubSvc.RecloneProjectRepo(ctx, p.ID, currentRepoPath, settings.RepoURL)
+ 		if err != nil {
+-			return h.projectGitHubCloneErrorResponse(c, http.StatusBadRequest, err)
++			return true, err
+ 		}
+ 		p.RepoPath = reclonedPath
+ 		p.RepoURL = normalizedURL
+@@ -466,9 +460,48 @@ func (h *Handler) UpdateProject(c echo.Context) error {
+ 		p.RepoPath = settings.RepoPath
+ 		p.RepoURL = ""
+ 	}
+-	applog.Infof("[handler] UpdateProject id=%s name=%q repo_source=%q repo_path=%q repo_url=%q default_agent=%v max_workers=%v local_repo_path_enabled=%v legacy_local_project=%v", projectID, p.Name, settings.RepoSource, p.RepoPath, p.RepoURL, p.DefaultAgentConfigID, p.MaxWorkers, localRepoPathEnabled, settings.PreserveLegacyLocalProject)
++	applog.Infof("[handler] UpdateProject id=%s name=%q repo_source=%q repo_path=%q repo_url=%q default_agent=%v max_workers=%v local_repo_path_enabled=%v legacy_local_project=%v", p.ID, p.Name, settings.RepoSource, p.RepoPath, p.RepoURL, p.DefaultAgentConfigID, p.MaxWorkers, h.isLocalRepoPathEnabled(), settings.PreserveLegacyLocalProject)
+ 
+-	if err := h.projectSvc.Update(c.Request().Context(), p); err != nil {
++	if err := h.projectSvc.Update(ctx, p); err != nil {
++		return false, err
++	}
++	return false, nil
++}
++
++func (h *Handler) UpdateProject(c echo.Context) error {
++	projectID := c.Param("id")
++	applog.Infof("[handler] UpdateProject id=%s", projectID)
++
++	p, err := h.projectSvc.GetByID(c.Request().Context(), projectID)
++	if err != nil {
++		applog.Infof("[handler] UpdateProject fetch error: %v", err)
++		return err
++	}
++	if p == nil {
++		applog.Infof("[handler] UpdateProject not found id=%s", projectID)
++		return echo.NewHTTPError(http.StatusNotFound, "project not found")
++	}
++
++	localRepoPathEnabled := h.isLocalRepoPathEnabled()
++	globalMaxWorkers, err := h.configuredGlobalWorkerLimit(c.Request().Context())
++	if err != nil {
++		return h.projectErrorResponse(c, http.StatusInternalServerError, "failed to read global worker limit")
++	}
++	settings, err := parseProjectFormSettings(c, projectFormSettingsOptions{
++		LocalRepoPathEnabled: localRepoPathEnabled,
++		GitHubSvc:            h.githubSvc,
++		CurrentProject:       p,
++		GlobalMaxWorkers:     globalMaxWorkers,
++	})
++	if err != nil {
++		return h.projectErrorResponse(c, http.StatusBadRequest, err.Error())
++	}
++
++	cloneFailure, err := h.persistProjectSettings(c.Request().Context(), p, settings)
++	if err != nil {
++		if cloneFailure {
++			return h.projectGitHubCloneErrorResponse(c, http.StatusBadRequest, err)
++		}
+ 		applog.Infof("[handler] UpdateProject error: %v", err)
+ 		if isHTMX(c) {
+ 			return h.projectErrorResponse(c, http.StatusBadRequest, err.Error())
