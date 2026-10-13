@@ -12623,6 +12623,55 @@ func TestRunCLIEventsRetriesTemporaryTransportFailure(t *testing.T) {
 	}
 }
 
+func TestRunCLIEventsReconnectsAfterServerClosedStream(t *testing.T) {
+	c, err := client.New("http://localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts, waits int
+	openStream := func(_ context.Context, projectID string) (<-chan client.Event, <-chan error) {
+		if projectID != "selected" {
+			t.Errorf("stream project = %q, want selected", projectID)
+		}
+		attempts++
+		events := make(chan client.Event, 1)
+		errs := make(chan error, 1)
+		if attempts == 1 {
+			events <- client.Event{Name: "chat_new_message", Data: json.RawMessage(`{"type":"chat_new_message","message":"before close"}`)}
+			errs <- client.ErrEventStreamClosed
+		} else {
+			events <- client.Event{Name: "chat_new_message", Data: json.RawMessage(`{"type":"chat_new_message","message":"after reconnect"}`)}
+		}
+		close(events)
+		close(errs)
+		return events, errs
+	}
+	var out bytes.Buffer
+	err = runCLIEventsWithRetryWait(context.Background(), c, &out, "selected", true, openStream, func(context.Context, int) bool {
+		waits++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("runCLIEvents() error = %v", err)
+	}
+	if attempts != 2 || waits != 1 {
+		t.Fatalf("stream attempts=%d retry waits=%d, want 2 and 1", attempts, waits)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("output lines = %d, want 2 without duplicates: %q", len(lines), out.String())
+	}
+	for i, wantMessage := range []string{"before close", "after reconnect"} {
+		var record cliEventRecord
+		if err := json.Unmarshal([]byte(lines[i]), &record); err != nil {
+			t.Fatalf("invalid JSON event line: %v", err)
+		}
+		if record.Message != wantMessage {
+			t.Errorf("event %d message = %q, want %q", i, record.Message, wantMessage)
+		}
+	}
+}
+
 func TestRunCLIEventsCancellationDuringBackoffDoesNotReconnect(t *testing.T) {
 	c, err := client.New("http://localhost")
 	if err != nil {
