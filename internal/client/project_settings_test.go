@@ -4,45 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"testing"
-
-	"golang.org/x/net/html"
 )
 
-const projectSettingsHTML = `<dialog id="edit_project_modal" data-local-repo-path-enabled="true"><form hx-put="/projects/p1">
-<input name="name" value="Old Project">
-<textarea name="description">old description</textarea>
-<select name="repo_source"><option value="local">Local</option><option value="github" selected>GitHub</option></select>
-<input name="repo_path" value="/managed/old">
-<input name="repo_url" value="https://github.com/acme/old repo">
-<select name="default_agent_config_id"><option value="">Global</option><option value="agent-1" selected>Builder (openai/gpt)</option><option value="agent-2">Reviewer</option></select>
-<input name="max_workers" value="4">
-</form></dialog>`
+const projectSettingsJSON = `{"id":"p1","name":"Old Project","description":"old description","repository_source":"github","repository_path":"/managed/old","github_url":"https://github.com/acme/old repo","default_agent_id":"agent-1","default_agent_name":"Builder","max_workers":4,"local_repository_paths_enabled":true,"available_agents":[{"id":"agent-1","name":"Builder"},{"id":"agent-2","name":"Reviewer"}]}`
 
-func TestProjectSettingsPreservesRawControlWhitespace(t *testing.T) {
-	markup := strings.Replace(projectSettingsHTML, `value="Old Project"`, `value="  Old Project  "`, 1)
-	markup = strings.Replace(markup, `<textarea name="description">old description</textarea>`, `<textarea name="description">  old description  </textarea>`, 1)
-	root, err := html.Parse(strings.NewReader(markup))
-	if err != nil {
-		t.Fatal(err)
-	}
-	settings, _, err := parseProjectSettings(root, "p1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if settings.Name != "  Old Project  " || settings.Description != "  old description  " {
-		t.Fatalf("settings name=%q description=%q; want original whitespace", settings.Name, settings.Description)
-	}
-}
-
-func TestGetProjectSettingsParsesAuthoritativeEditForm(t *testing.T) {
+func TestGetProjectSettingsReadsStableJSONContract(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/projects/p1/edit" || r.Header.Get("HX-Request") != "true" {
-			t.Fatalf("request = %s %s HX=%q", r.Method, r.URL.Path, r.Header.Get("HX-Request"))
+		if r.Method != http.MethodGet || r.URL.Path != "/api/projects/p1/settings" || r.Header.Get("Accept") != "application/json" {
+			t.Fatalf("request = %s %s Accept=%q", r.Method, r.URL.Path, r.Header.Get("Accept"))
 		}
-		_, _ = w.Write([]byte(projectSettingsHTML))
+		_, _ = w.Write([]byte(projectSettingsJSON))
 	}))
 	got, err := c.GetProjectSettings(context.Background(), "p1")
 	if err != nil {
@@ -51,52 +24,37 @@ func TestGetProjectSettingsParsesAuthoritativeEditForm(t *testing.T) {
 	if got.ID != "p1" || got.Name != "Old Project" || got.Description != "old description" || got.RepositorySource != "github" || got.RepositoryPath != "/managed/old" || got.GitHubURL != "https://github.com/acme/old repo" || got.DefaultAgentID != "agent-1" || got.DefaultAgentName != "Builder" || got.MaxWorkers == nil || *got.MaxWorkers != 4 || !got.LocalRepositoryPathsEnabled {
 		t.Fatalf("settings = %#v", got)
 	}
-	if len(got.AvailableAgents) != 2 || got.AvailableAgents[1].ID != "agent-2" {
+	if len(got.AvailableAgents) != 2 || got.AvailableAgents[1] != (ProjectAgentOption{ID: "agent-2", Name: "Reviewer"}) {
 		t.Fatalf("agents = %#v", got.AvailableAgents)
 	}
 }
 
-func TestGetProjectSettingsRejectsForeignOrIncompleteAuthoritativeForm(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		html string
-		want string
+func TestGetProjectSettingsUsesAvailableAgentNameWhenDisplayNameIsOmitted(t *testing.T) {
+	body := strings.Replace(projectSettingsJSON, `"default_agent_name":"Builder",`, "", 1)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+	got, err := c.GetProjectSettings(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DefaultAgentName != "Builder" {
+		t.Fatalf("default agent name = %q, want agent option name", got.DefaultAgentName)
+	}
+}
+
+func TestGetProjectSettingsRejectsInvalidOrIncompleteContract(t *testing.T) {
+	cases := []struct {
+		name, body, want string
 	}{
-		{
-			name: "foreign form",
-			html: strings.Replace(projectSettingsHTML, `hx-put="/projects/p1"`, `hx-put="/projects/p2"`, 1),
-			want: "requested project",
-		},
-		{
-			name: "missing description",
-			html: strings.Replace(projectSettingsHTML, `<textarea name="description">old description</textarea>`, ``, 1),
-			want: "description",
-		},
-		{
-			name: "duplicate description",
-			html: strings.Replace(projectSettingsHTML, `<textarea name="description">old description</textarea>`, `<textarea name="description">old description</textarea><textarea name="description">stale</textarea>`, 1),
-			want: "duplicate field description",
-		},
-		{
-			name: "missing worker limit",
-			html: strings.Replace(projectSettingsHTML, `<input name="max_workers" value="4">`, ``, 1),
-			want: "max_workers",
-		},
-		{
-			name: "repo source select without selected option",
-			html: strings.Replace(projectSettingsHTML, `<option value="github" selected>GitHub</option>`, `<option value="github">GitHub</option>`, 1),
-			want: "repo_source",
-		},
-		{
-			name: "default agent select without selected option",
-			html: strings.Replace(projectSettingsHTML, `<option value="agent-1" selected>Builder (openai/gpt)</option>`, `<option value="agent-1">Builder (openai/gpt)</option>`, 1),
-			want: "default_agent_config_id",
-		},
-	} {
+		{name: "missing field", body: `{"id":"p1","name":"Alpha"}`, want: "description"},
+		{name: "wrong project", body: strings.Replace(projectSettingsJSON, `"id":"p1"`, `"id":"p2"`, 1), want: "returned project ID"},
+		{name: "empty name", body: strings.Replace(projectSettingsJSON, `"name":"Old Project"`, `"name":"  "`, 1), want: "settings name"},
+		{name: "invalid source", body: strings.Replace(projectSettingsJSON, `"repository_source":"github"`, `"repository_source":"svn"`, 1), want: "invalid repository source"},
+		{name: "negative workers", body: strings.Replace(projectSettingsJSON, `"max_workers":4`, `"max_workers":-1`, 1), want: "invalid max_workers"},
+		{name: "invalid json", body: `{`, want: "decoding"},
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(tc.html))
-			}))
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
 			if _, err := c.GetProjectSettings(context.Background(), "p1"); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
@@ -104,140 +62,82 @@ func TestGetProjectSettingsRejectsForeignOrIncompleteAuthoritativeForm(t *testin
 	}
 }
 
-func TestGetProjectSettingsDoesNotGuessUnselectedProjectSelects(t *testing.T) {
+func TestGetProjectSettingsPreservesExplicitZeroAndNullWorkerLimit(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		html  string
-		field string
-		check func(*ProjectSettings) bool
+		name string
+		body string
+		want *int
 	}{
-		{
-			name:  "repo source",
-			html:  strings.Replace(projectSettingsHTML, `<option value="github" selected>GitHub</option>`, `<option value="github">GitHub</option>`, 1),
-			field: "repo_source",
-			check: func(settings *ProjectSettings) bool {
-				return settings != nil && settings.RepositorySource == "local"
-			},
-		},
-		{
-			name:  "default agent",
-			html:  strings.Replace(projectSettingsHTML, `<option value="agent-1" selected>Builder (openai/gpt)</option>`, `<option value="agent-1">Builder (openai/gpt)</option>`, 1),
-			field: "default_agent_config_id",
-			check: func(settings *ProjectSettings) bool {
-				return settings != nil && settings.DefaultAgentID == "" && settings.DefaultAgentName == ""
-			},
-		},
+		{name: "zero", body: strings.Replace(projectSettingsJSON, `"max_workers":4`, `"max_workers":0`, 1), want: intPointer(0)},
+		{name: "inherit", body: strings.Replace(projectSettingsJSON, `"max_workers":4`, `"max_workers":null`, 1)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(tc.html))
-			}))
-			got, err := c.GetProjectSettings(context.Background(), "p1")
-			if err == nil || !strings.Contains(err.Error(), tc.field) {
-				t.Fatalf("error = %v, want %s", err, tc.field)
-			}
-			if tc.check(got) {
-				t.Fatalf("settings guessed malformed %s select: %#v", tc.field, got)
-			}
-		})
-	}
-}
-
-func TestGetProjectSettingsHydratesOmittedGitHubPathFromProjectList(t *testing.T) {
-	html := strings.Replace(projectSettingsHTML, `<input name="repo_path" value="/managed/old">`, ``, 1)
-	html = strings.Replace(html, `data-local-repo-path-enabled="true"`, `data-local-repo-path-enabled="false"`, 1)
-	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/projects/p1/edit":
-			_, _ = w.Write([]byte(html))
-		case "/api/projects":
-			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"Old Project","path":"/managed/hydrated"}]}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	got, err := c.GetProjectSettings(context.Background(), "p1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.RepositoryPath != "/managed/hydrated" {
-		t.Fatalf("repository path = %q", got.RepositoryPath)
-	}
-}
-
-func TestGetProjectSettingsPreservesParenthesesInAgentNames(t *testing.T) {
-	html := strings.Replace(projectSettingsHTML, `Builder (openai/gpt)`, `Builder (fast) (openai/gpt)`, 1)
-	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(html))
-	}))
-	got, err := c.GetProjectSettings(context.Background(), "p1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.DefaultAgentName != "Builder (fast)" || got.AvailableAgents[0].Name != "Builder (fast)" {
-		t.Fatalf("agents = %#v default=%q", got.AvailableAgents, got.DefaultAgentName)
-	}
-}
-
-func TestProjectSettingsMaxWorkersRoundTripDistinguishesZeroAndEmpty(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		value    string
-		want     *int
-		wantForm string
-	}{
-		{name: "explicit zero", value: "0", want: intPointer(0), wantForm: "0"},
-		{name: "empty inherits", value: "", want: nil, wantForm: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			html := strings.Replace(projectSettingsHTML, `value="4"`, `value="`+tc.value+`"`, 1)
-			var submitted url.Values
-			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method {
-				case http.MethodGet:
-					_, _ = w.Write([]byte(html))
-				case http.MethodPut:
-					if err := r.ParseForm(); err != nil {
-						t.Fatalf("parse form: %v", err)
-					}
-					submitted = r.PostForm
-					w.WriteHeader(http.StatusNoContent)
-				default:
-					http.NotFound(w, r)
-				}
-			}))
-
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
 			got, err := c.GetProjectSettings(context.Background(), "p1")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.want == nil {
-				if got.MaxWorkers != nil {
-					t.Fatalf("max workers = %v, want nil", *got.MaxWorkers)
-				}
-			} else if got.MaxWorkers == nil || *got.MaxWorkers != *tc.want {
-				t.Fatalf("max workers = %v, want %d", got.MaxWorkers, *tc.want)
-			}
-			if err := c.UpdateProjectSettings(context.Background(), *got); err != nil {
-				t.Fatal(err)
-			}
-			if submitted.Get("max_workers") != tc.wantForm {
-				t.Fatalf("submitted max_workers = %q, want %q", submitted.Get("max_workers"), tc.wantForm)
+			if tc.want == nil && got.MaxWorkers != nil || tc.want != nil && (got.MaxWorkers == nil || *got.MaxWorkers != *tc.want) {
+				t.Fatalf("max_workers = %v, want %v", got.MaxWorkers, tc.want)
 			}
 		})
 	}
 }
 
+func TestUpdateProjectSettingsSendsEditableJSONAndSurfacesValidationErrors(t *testing.T) {
+	settings := ProjectSettings{ID: "p /1", Name: "Renamed", Description: "", RepositorySource: "local", RepositoryPath: `\\server\share\repo with spaces`, DefaultAgentID: "", MaxWorkers: intPointer(0), LocalRepositoryPathsEnabled: true, AvailableAgents: []ProjectAgentOption{{ID: "ignored", Name: "metadata"}}}
+	var got map[string]json.RawMessage
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.EscapedPath() != "/api/projects/p%20%2F1/settings" {
+			t.Fatalf("request = %s %s (%s)", r.Method, r.URL.Path, r.URL.EscapedPath())
+		}
+		if r.Header.Get("Content-Type") != "application/json" || r.Header.Get("Accept") != "application/json" || r.Header.Get("HX-Request") != "" {
+			t.Fatalf("headers = %#v", r.Header)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	if err := c.UpdateProjectSettings(context.Background(), settings); err != nil {
+		t.Fatal(err)
+	}
+	var decoded projectSettingsUpdateRequest
+	body, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Name != "Renamed" || decoded.Description != "" || decoded.RepositorySource != "local" || decoded.RepositoryPath != settings.RepositoryPath || decoded.GitHubURL != "" || decoded.DefaultAgentID != "" || decoded.MaxWorkers == nil || *decoded.MaxWorkers != 0 {
+		t.Fatalf("request = %#v", decoded)
+	}
+	for _, readonly := range []string{"id", "local_repository_paths_enabled", "available_agents", "default_agent_name"} {
+		if _, ok := got[readonly]; ok {
+			t.Errorf("update sent read-only field %q", readonly)
+		}
+	}
+
+	c = newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"repository path is not allowed"}`))
+	}))
+	if err := c.UpdateProjectSettings(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "repository path is not allowed") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
 func TestProjectSettingsJSONPreservesExplicitZeroAndNull(t *testing.T) {
-	zero, err := json.Marshal(ProjectSettings{MaxWorkers: intPointer(0)})
+	zero, err := json.Marshal(projectSettingsUpdateRequest{MaxWorkers: intPointer(0)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(zero), `"max_workers":0`) {
 		t.Fatalf("explicit zero JSON = %s", zero)
 	}
-
-	nilValue, err := json.Marshal(ProjectSettings{})
+	nilValue, err := json.Marshal(projectSettingsUpdateRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,44 +145,34 @@ func TestProjectSettingsJSONPreservesExplicitZeroAndNull(t *testing.T) {
 		t.Fatalf("nil max workers JSON = %s", nilValue)
 	}
 }
-func TestUpdateProjectSettingsSendsFullAuthoritativeFormAndSurfacesToast(t *testing.T) {
-	settings := ProjectSettings{ID: "p /1", Name: "Renamed", Description: "", RepositorySource: "local", RepositoryPath: `\\server\share\repo with spaces`, GitHubURL: "", DefaultAgentID: "", MaxWorkers: intPointer(0)}
-	var got url.Values
-	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut || r.URL.EscapedPath() != "/projects/p%20%2F1" {
-			t.Fatalf("request = %s %s (%s)", r.Method, r.URL.Path, r.URL.EscapedPath())
-		}
-		_ = r.ParseForm()
-		got = r.PostForm
-		w.Header().Set("HX-Refresh", "true")
-		w.WriteHeader(http.StatusOK)
-	}))
-	if err := c.UpdateProjectSettings(context.Background(), settings); err != nil {
-		t.Fatal(err)
-	}
-	for key, want := range map[string]string{"name": "Renamed", "description": "", "repo_source": "local", "repo_path": `\\server\share\repo with spaces`, "repo_url": "", "default_agent_config_id": "", "max_workers": "0"} {
-		if got.Get(key) != want {
-			t.Errorf("%s = %q, want %q", key, got.Get(key), want)
-		}
-	}
 
-	c = newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"failed to clone GitHub repository: denied","status":"failed"}}`)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	if err := c.UpdateProjectSettings(context.Background(), settings); err == nil || !strings.Contains(err.Error(), "failed to clone") {
-		t.Fatalf("error = %v", err)
+func TestProjectSettingsRemoteAuthRedirectRetainsTypedGuidance(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPut} {
+		t.Run(method, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Location", "/login?next=/api/projects/p1/settings")
+				w.WriteHeader(http.StatusFound)
+			}))
+			var err error
+			if method == http.MethodGet {
+				_, err = c.GetProjectSettings(context.Background(), "p1")
+			} else {
+				err = c.UpdateProjectSettings(context.Background(), ProjectSettings{ID: "p1"})
+			}
+			if err == nil || !IsAuthRequired(err) {
+				t.Fatalf("error = %v, want typed auth", err)
+			}
+		})
 	}
 }
 
-func TestProjectSettingsAuthRedirectKeepsTypedGuidance(t *testing.T) {
-	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "/login?next=/projects/p1/edit")
-		w.WriteHeader(http.StatusFound)
-	}))
-	_, err := c.GetProjectSettings(context.Background(), "p1")
-	if err == nil || !IsAuthRequired(err) {
-		t.Fatalf("error = %v, want typed auth", err)
+func TestProjectSettingsRejectsEmptyProjectID(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("unexpected request") }))
+	if _, err := c.GetProjectSettings(context.Background(), " "); err == nil || !strings.Contains(err.Error(), "project ID is required") {
+		t.Fatalf("GET error = %v", err)
+	}
+	if err := c.UpdateProjectSettings(context.Background(), ProjectSettings{}); err == nil || !strings.Contains(err.Error(), "project ID is required") {
+		t.Fatalf("PUT error = %v", err)
 	}
 }
 

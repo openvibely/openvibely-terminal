@@ -1,0 +1,51 @@
+# Project settings JSON API contract
+
+The terminal client consumes a backend JSON resource at `/api/projects/{id}/settings`. The existing browser routes remain available to the web application; the terminal does not request or submit their HTML.
+
+## Read settings
+
+`GET /api/projects/{id}/settings` returns one JSON object:
+
+```json
+{
+  "id": "abc123",
+  "name": "My Project",
+  "description": "Project notes",
+  "repository_source": "github",
+  "repository_path": "/managed/checkouts/abc123",
+  "github_url": "https://github.com/acme/project",
+  "default_agent_id": "agent-config-id",
+  "default_agent_name": "Builder",
+  "max_workers": 4,
+  "local_repository_paths_enabled": true,
+  "available_agents": [
+    { "id": "agent-config-id", "name": "Builder" }
+  ]
+}
+```
+
+`default_agent_name` is the display name for the selected default agent (or may be omitted when `default_agent_id` is empty); when omitted for a selected agent, the terminal resolves the name from `available_agents`. `max_workers` is an integer or `null` when the project inherits the global limit. `available_agents` may be empty. Repository paths and URLs may be empty when they do not apply to the selected source. `local_repository_paths_enabled` is server/environment metadata and must be computed by the backend.
+
+## Update settings
+
+`PUT /api/projects/{id}/settings` accepts the full editable settings object. The project ID is taken from the URL; read-only fields are omitted:
+
+```json
+{
+  "name": "My Project",
+  "description": "Project notes",
+  "repository_source": "github",
+  "repository_path": "/managed/checkouts/abc123",
+  "github_url": "https://github.com/acme/project",
+  "default_agent_id": "agent-config-id",
+  "max_workers": 4
+}
+```
+
+A `null` `max_workers` means inherit the global limit; `0` means no project worker limit. Return a JSON error with an appropriate non-2xx status for invalid settings, missing projects, and authorization failures. On success, return any 2xx status. The terminal then performs a separate GET and displays that authoritative persisted resource.
+
+The backend implementation must use the same project settings parsing, validation, authorization, repository replacement/reclone safeguards, local-path restrictions, and persistence path as the existing browser update route. In particular, it must not create a second, weaker settings mutation path. The API response's repository path must reflect the persisted/managed checkout after an update.
+
+## Backend integration location
+
+This terminal checkout is `openvibely-terminal`. The backend source tree is a separate repository at `/Users/dubee/go/src/github.com/openvibely/openvibely`; its current project API handler is `internal/handler/api_project_handler.go`, route registration is in `internal/handler/handler.go`, and its public contract is `docs/swagger.yaml`. That repository is outside this task's writable worktree. The terminal implementation and tests here are ready for those two routes and the corresponding Swagger definitions.
