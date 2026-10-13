@@ -3804,7 +3804,7 @@ func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
 		return true
 	}
 	var taskEvent client.TaskEvent
-	if json.Unmarshal(ev.Data, &taskEvent) != nil || taskEvent.TaskID != m.threadID || taskEvent.ProjectID != m.selectedID {
+	if json.Unmarshal(ev.Data, &taskEvent) != nil || strings.TrimSpace(taskEvent.TaskID) != m.threadID || strings.TrimSpace(taskEvent.ProjectID) != m.selectedID {
 		return true
 	}
 	if m.pendingMsgID == "" {
