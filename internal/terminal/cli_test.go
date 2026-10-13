@@ -2411,59 +2411,63 @@ func TestCLIStatusMultipleProjectsIsGlobalAndUnambiguous(t *testing.T) {
 
 func TestCLIStatusWorkerCapacityShowsGlobalAndSelectedProjectScopes(t *testing.T) {
 	cases := []struct {
-		name       string
-		projectRef string
-		global     string
-		projects   string
-		want       []string
-		unwanted   []string
+		name            string
+		projectRef      string
+		global          string
+		projectCapacity string
+		want            []string
+		unwanted        []string
 	}{
 		{
-			name:       "selected project at cap while global has room",
-			projectRef: "demo",
-			global:     `{"total_running":1,"max_workers":4,"queue_size":2,"available_slots":3}`,
-			projects:   `[{"id":"p1","name":"demo","running":2,"queue_size":1,"max_workers":2}]`,
-			want:       []string{"Global · 1 running / 4 max, 2 queued, 3 free · Active", "Project · 2 running / 2 max, 1 queued · At capacity"},
+			name:            "selected project at cap while global has room",
+			projectRef:      "demo",
+			global:          `{"total_running":1,"max_workers":4,"queue_size":2,"available_slots":3}`,
+			projectCapacity: `{"id":"p1","name":"demo","running":2,"queue_size":1,"max_workers":2}`,
+			want:            []string{"Global · 1 running / 4 max, 2 queued, 3 free · Active", "Project · 2 running / 2 max, 1 queued · At capacity"},
 		},
 		{
-			name:       "global full while selected project has room",
-			projectRef: "demo",
-			global:     `{"total_running":4,"max_workers":4,"queue_size":3,"available_slots":0}`,
-			projects:   `[{"id":"p1","name":"demo","running":1,"queue_size":2,"max_workers":3}]`,
-			want:       []string{"Global · 4 running / 4 max, 3 queued, 0 free · At capacity", "Project · 1 running / 3 max, 2 queued · Active"},
+			name:            "global full while selected project has room",
+			projectRef:      "demo",
+			global:          `{"total_running":4,"max_workers":4,"queue_size":3,"available_slots":0}`,
+			projectCapacity: `{"id":"p1","name":"demo","running":1,"queue_size":2,"max_workers":3}`,
+			want:            []string{"Global · 4 running / 4 max, 3 queued, 0 free · At capacity", "Project · 1 running / 3 max, 2 queued · Active"},
 		},
 		{
-			name:       "inherited project limit",
-			projectRef: "demo",
-			global:     `{"total_running":1,"max_workers":0,"queue_size":0}`,
-			projects:   `[{"id":"p1","name":"demo","running":1,"queue_size":0}]`,
-			want:       []string{"Global · 1 running / Unlimited, 0 queued · Active", "Project · 1 running, 0 queued, No limit · Active"},
-			unwanted:   []string{"Project · 1 running / 0 max", "Project · 1 running · At capacity"},
+			name:            "inherited project limit",
+			projectRef:      "demo",
+			global:          `{"total_running":1,"max_workers":0,"queue_size":0}`,
+			projectCapacity: `{"id":"p1","name":"demo","running":1,"queue_size":0}`,
+			want:            []string{"Global · 1 running / Unlimited, 0 queued · Active", "Project · 1 running, 0 queued, No limit · Active"},
+			unwanted:        []string{"Project · 1 running / 0 max", "Project · 1 running · At capacity"},
 		},
 		{
-			name:       "zero project limit means no limit",
-			projectRef: "demo",
-			global:     `{"total_running":0,"max_workers":4,"available_slots":4}`,
-			projects:   `[{"id":"p1","name":"demo","running":0,"max_workers":0}]`,
-			want:       []string{"Project · 0 running, 0 queued, No limit · Idle"},
+			name:            "zero project limit means no limit",
+			projectRef:      "demo",
+			global:          `{"total_running":0,"max_workers":4,"available_slots":4}`,
+			projectCapacity: `{"id":"p1","name":"demo","running":0,"max_workers":0}`,
+			want:            []string{"Project · 0 running, 0 queued, No limit · Idle"},
 		},
 		{
-			name:       "project selection picks matching capacity row",
-			projectRef: "other",
-			global:     `{"total_running":1,"max_workers":4,"available_slots":3}`,
-			projects:   `[{"id":"p1","name":"demo","running":2,"max_workers":2},{"id":"p2","name":"other","running":1,"queue_size":3,"max_workers":4}]`,
-			want:       []string{"other", "Project · 1 running / 4 max, 3 queued · Active"},
-			unwanted:   []string{"Project · 2 running / 2 max", "At capacity"},
+			name:            "project selection picks matching capacity row",
+			projectRef:      "other",
+			global:          `{"total_running":1,"max_workers":4,"available_slots":3}`,
+			projectCapacity: `{"id":"p2","name":"other","running":1,"queue_size":3,"max_workers":4}`,
+			want:            []string{"other", "Project · 1 running / 4 max, 3 queued · Active"},
+			unwanted:        []string{"Project · 2 running / 2 max", "At capacity"},
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			projectID := "p1"
+			if tc.projectRef == "other" {
+				projectID = "p2"
+			}
 			c, rec := cliServer(t, map[string]string{
-				"/api/projects":          cliProjects,
-				"/api/capacity/global":   tc.global,
-				"/api/capacity/projects": tc.projects,
-				"/auth/me":               `{"authenticated":false}`,
+				"/api/projects":                       cliProjects,
+				"/api/capacity/global":                tc.global,
+				"/api/capacity/projects/" + projectID: tc.projectCapacity,
+				"/auth/me":                            `{"authenticated":false}`,
 			})
 			var out bytes.Buffer
 			if err := RunCLI(c, &out, tc.projectRef, []string{"status"}, false, false); err != nil {
@@ -2480,8 +2484,8 @@ func TestCLIStatusWorkerCapacityShowsGlobalAndSelectedProjectScopes(t *testing.T
 					t.Errorf("status contains %q:\n%s", unwanted, got)
 				}
 			}
-			if got := rec.count("GET", "/api/capacity/projects"); got != 1 {
-				t.Errorf("selected-project status made %d capacity lookups, want 1:\n%s", got, rec.all())
+			if got := rec.count("GET", "/api/capacity/projects/"+projectID); got != 1 {
+				t.Errorf("selected-project status made %d scoped capacity lookups, want 1:\n%s", got, rec.all())
 			}
 		})
 	}
@@ -2496,7 +2500,7 @@ func TestCLIStatusProjectCapacityFailurePreservesGlobalCapacity(t *testing.T) {
 			_, _ = io.WriteString(w, cliProjects)
 		case "/api/capacity/global":
 			_, _ = io.WriteString(w, `{"total_running":4,"max_workers":4,"available_slots":0}`)
-		case "/api/capacity/projects":
+		case "/api/capacity/projects/p1":
 			http.Error(w, "project capacity offline", http.StatusServiceUnavailable)
 		case "/auth/me":
 			_, _ = io.WriteString(w, `{"authenticated":false}`)
@@ -2521,8 +2525,47 @@ func TestCLIStatusProjectCapacityFailurePreservesGlobalCapacity(t *testing.T) {
 			t.Errorf("status missing %q:\n%s", want, got)
 		}
 	}
-	if rec.count("GET", "/api/capacity/projects") != 1 {
+	if rec.count("GET", "/api/capacity/projects/p1") != 1 {
 		t.Fatalf("project capacity failure made an unexpected request count:\n%s", rec.all())
+	}
+}
+
+func TestCLIStatusMissingProjectCapacityPreservesGlobalCapacity(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.recordURL(r.Method, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects":
+			_, _ = io.WriteString(w, cliProjects)
+		case "/api/capacity/global":
+			_, _ = io.WriteString(w, `{"total_running":2,"max_workers":4,"available_slots":2}`)
+		case "/api/capacity/projects/p1":
+			http.Error(w, `{"error":"project not found"}`, http.StatusNotFound)
+		case "/auth/me":
+			_, _ = io.WriteString(w, `{"authenticated":false}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"status"}, false, false); err != nil {
+		t.Fatalf("status failed on missing project capacity: %v", err)
+	}
+	got := strings.ToLower(stripANSI(out.String()))
+	for _, want := range []string{"global · 2 running / 4 max", "project capacity unavailable", "partial failure"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+	if rec.count("GET", "/api/capacity/projects/p1") != 1 {
+		t.Fatalf("missing project capacity request count:\n%s", rec.all())
 	}
 }
 
@@ -2543,14 +2586,16 @@ func TestCLIStatusWithoutSelectedProjectSkipsProjectCapacityLookup(t *testing.T)
 	if strings.Contains(got, "project workers") {
 		t.Fatalf("unselected status rendered project capacity:\n%s", got)
 	}
-	if rec.count("GET", "/api/capacity/projects") != 0 {
-		t.Fatalf("unselected status made a project capacity lookup:\n%s", rec.all())
+	for _, request := range rec.urlsSnapshot() {
+		if strings.HasPrefix(request, "GET /api/capacity/projects/") {
+			t.Fatalf("unselected status made a selected-project capacity request %q", request)
+		}
 	}
 }
 
 func TestInteractiveStatusRefreshesSelectedProjectCapacity(t *testing.T) {
 	c, rec := cliServer(t, map[string]string{
-		"/api/capacity/projects":    `[{"id":"p1","name":"demo","running":2,"queue_size":1,"max_workers":2},{"id":"p2","name":"other","running":0,"max_workers":0}]`,
+		"/api/capacity/projects/p1": `{"id":"p1","name":"demo","running":2,"queue_size":1,"max_workers":2}`,
 		"/api/alerts/pending-count": `{"count":1}`,
 		"/api/tasks/status-counts":  `{"active_tasks":2,"queued_tasks":1}`,
 	})
@@ -2568,8 +2613,8 @@ func TestInteractiveStatusRefreshesSelectedProjectCapacity(t *testing.T) {
 			t.Errorf("interactive status missing %q:\n%s", want, got)
 		}
 	}
-	if rec.count("GET", "/api/capacity/projects") != 1 {
-		t.Fatalf("interactive /status made %d project capacity lookups:\n%s", rec.count("GET", "/api/capacity/projects"), rec.all())
+	if rec.count("GET", "/api/capacity/projects/p1") != 1 {
+		t.Fatalf("interactive /status made %d selected-project capacity lookups:\n%s", rec.count("GET", "/api/capacity/projects/p1"), rec.all())
 	}
 }
 
@@ -2599,8 +2644,10 @@ func TestCLIStatusZeroProjectsSkipsScopedCounts(t *testing.T) {
 			t.Errorf("zero-project status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
 	}
-	if rec.count("GET", "/api/capacity/projects") != 0 {
-		t.Fatalf("zero-project status made a per-project capacity request:\n%s", rec.all())
+	for _, request := range rec.urlsSnapshot() {
+		if strings.HasPrefix(request, "GET /api/capacity/projects/") {
+			t.Fatalf("zero-project status made a selected-project capacity request %q", request)
+		}
 	}
 	if rec.count("GET", "/alerts") != 0 || rec.count("GET", "/tasks") != 0 {
 		t.Fatalf("zero-project status made scoped requests:\n%s", rec.all())
@@ -3048,7 +3095,7 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 		"/api/projects":             cliProjects,
 		"/api/alerts/pending-count": alertsJSON,
 		"/api/tasks/status-counts":  tasksJSON,
-		"/api/capacity/projects":    `[{"id":"p1","name":"demo","running":1,"queue_size":0,"max_workers":4}]`,
+		"/api/capacity/projects/p1": `{"id":"p1","name":"demo","running":1,"queue_size":0,"max_workers":4}`,
 	})
 
 	var out bytes.Buffer
@@ -3076,13 +3123,13 @@ func TestCLIStatusRendersPrefetchedCounts(t *testing.T) {
 	if !rec.saw("GET", "/api/tasks/status-counts") {
 		t.Errorf("expected compact task-count fetch during CLI status:\n%s", rec.all())
 	}
-	if !rec.saw("GET", "/api/capacity/projects") {
+	if !rec.saw("GET", "/api/capacity/projects/p1") {
 		t.Errorf("expected selected-project capacity fetch during CLI status:\n%s", rec.all())
 	}
 	if rec.saw("GET", "/alerts") || rec.saw("GET", "/tasks") {
 		t.Errorf("CLI status fetched a full collection:\n%s", rec.all())
 	}
-	for _, path := range []string{"/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
+	for _, path := range []string{"/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("CLI status made %d GET requests to %s, want exactly 1:\n%s", got, path, rec.all())
 		}
@@ -3142,7 +3189,7 @@ func TestCLIStatusAuthFailurePreservesSuccessfulOverlappedCounts(t *testing.T) {
 			t.Errorf("status output missing %q:\n%s", want, got)
 		}
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -3176,7 +3223,7 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 			case "/auth/me":
 				_, _ = io.WriteString(w, `{"authenticated":true,"username":"operator"}`)
 			}
-		case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
+		case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1":
 			mu.Lock()
 			if !projectCompleted {
 				scopedStartedEarly = true
@@ -3188,7 +3235,7 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 			} else if r.URL.Path == "/api/tasks/status-counts" {
 				_, _ = io.WriteString(w, `{"active_tasks":0,"queued_tasks":0}`)
 			} else {
-				_, _ = io.WriteString(w, `[{"id":"p1","name":"demo","running":0,"max_workers":2}]`)
+				_, _ = io.WriteString(w, `{"id":"p1","name":"demo","running":0,"max_workers":2}`)
 			}
 		default:
 			http.NotFound(w, r)
@@ -3232,7 +3279,7 @@ func TestCLIStatusStartsGlobalChecksWithProjectDiscoveryBeforeScopedCounts(t *te
 	if early {
 		t.Fatal("project-scoped counts started before project selection completed")
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -3263,8 +3310,8 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 			} else {
 				_, _ = io.WriteString(w, `{"total_running":1,"max_workers":4,"available_slots":3}`)
 			}
-		case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
-			if r.URL.Path != "/api/capacity/projects" && r.URL.RawQuery != "project_id=p1" {
+		case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1":
+			if r.URL.Path != "/api/capacity/projects/p1" && r.URL.RawQuery != "project_id=p1" {
 				t.Errorf("%s query = %q, want exact selected project_id", r.URL.Path, r.URL.RawQuery)
 			}
 			countsStarted <- r.URL.Path
@@ -3275,7 +3322,7 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 			case "/api/tasks/status-counts":
 				_, _ = io.WriteString(w, `{"active_tasks":3,"queued_tasks":1}`)
 			default:
-				_, _ = io.WriteString(w, `[{"id":"p1","name":"demo","running":1,"max_workers":2}]`)
+				_, _ = io.WriteString(w, `{"id":"p1","name":"demo","running":1,"max_workers":2}`)
 			}
 		default:
 			http.NotFound(w, r)
@@ -3330,7 +3377,7 @@ func TestCLIStatusStartsCountsAfterProjectBeforeGlobalChecksFinish(t *testing.T)
 	case <-time.After(time.Second):
 		t.Fatal("status did not complete after releasing global checks")
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -3347,7 +3394,7 @@ func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t 
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
+		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1":
 			if strings.HasPrefix(r.URL.Path, "/api/alerts/") || strings.HasPrefix(r.URL.Path, "/api/tasks/") {
 				if got := r.URL.RawQuery; got != "project_id=p1" {
 					t.Errorf("%s query = %q, want exact selected project_id", r.URL.Path, got)
@@ -3399,7 +3446,7 @@ func TestCLIStatusCancellationAfterProjectSelectionCancelsEveryStartedRequest(t 
 			t.Fatalf("not every started request observed cancellation: %v", canceledSeen)
 		}
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("canceled status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -3416,7 +3463,7 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
+		case "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1":
 			started <- r.URL.Path
 			<-r.Context().Done()
 			canceled <- r.URL.Path
@@ -3462,7 +3509,7 @@ func TestCLIStatusDeadlineAfterProjectSelectionCancelsEveryStartedRequest(t *tes
 			t.Fatalf("not every started request observed deadline cancellation: %v", canceledSeen)
 		}
 	}
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1"} {
 		if got := rec.count("GET", path); got != 1 {
 			t.Errorf("deadline status made %d GET requests to %s, want 1:\n%s", got, path, rec.all())
 		}
@@ -3508,7 +3555,7 @@ func TestCLIStatusLatencyOverlapsBalancedAndSlowDiscovery(t *testing.T) {
 				switch r.URL.Path {
 				case "/api/projects":
 					delay = tc.project
-				case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects":
+				case "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1":
 					delay = tc.counts
 				}
 				time.Sleep(delay)
@@ -3598,7 +3645,7 @@ func TestCLIStatusUsesTwoDelayedRequestWaves(t *testing.T) {
 	slices.Sort(durations)
 	median := durations[len(durations)/2]
 
-	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects"} {
+	for _, path := range []string{"/api/projects", "/api/capacity/global", "/auth/me", "/api/alerts/pending-count", "/api/tasks/status-counts", "/api/capacity/projects/p1"} {
 		if got := rec.count("GET", path); got != runs {
 			t.Errorf("delayed status made %d GET requests to %s, want %d:\n%s", got, path, runs, rec.all())
 		}
