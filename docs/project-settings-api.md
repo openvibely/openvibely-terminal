@@ -24,7 +24,7 @@ The terminal client consumes a backend JSON resource at `/api/projects/{id}/sett
 }
 ```
 
-`default_agent_name` is the display name for the selected default agent (or may be omitted when `default_agent_id` is empty); when omitted for a selected agent, the terminal resolves the name from `available_agents`. `max_workers` is an integer or `null` when the project inherits the global limit. `available_agents` may be empty. Repository paths and URLs may be empty when they do not apply to the selected source. `local_repository_paths_enabled` is server/environment metadata and must be computed by the backend.
+`default_agent_name` is the display name for the selected default agent (or may be omitted when `default_agent_id` is empty); when omitted for a selected agent, the terminal resolves the name from `available_agents`. `max_workers` is an integer or `null` when the project inherits the global limit. The backend persists explicit `0` separately from `null`: zero means no project-specific worker cap, while null clears the project override. Both values permit work up to the global worker limit. `available_agents` may be empty. Repository paths and URLs may be empty when they do not apply to the selected source. `local_repository_paths_enabled` is server/environment metadata and must be computed by the backend.
 
 ## Update settings
 
@@ -48,4 +48,4 @@ The backend implementation must use the same project settings parsing, validatio
 
 ## Backend integration delivery
 
-The backend is a separate repository from this terminal task worktree, so its source changes are delivered as the apply-ready patch [`backend-project-settings-api.patch`](backend-project-settings-api.patch). The patch is based on backend commit `9cbd053d532966a506d04572d34aea5afd706ab0`; apply it from the backend repository root with `git apply /path/to/backend-project-settings-api.patch`. It includes the handlers, route registration, shared browser/API settings validation and persistence path, regression tests, and generated Swagger documentation. The backend checkout used to build and test the patch was left unchanged.
+The backend is a separate repository from this terminal task worktree, so its source changes are delivered as the apply-ready patch [`backend-project-settings-api.patch`](backend-project-settings-api.patch). The patch is based on backend commit `9cbd053d532966a506d04572d34aea5afd706ab0`; apply it from the backend repository root with `git apply /path/to/backend-project-settings-api.patch`. It includes the handlers, route registration, shared browser/API settings validation and persistence path, regression tests, and generated Swagger documentation, including nullable `max_workers` schemas and distinct persisted values for `0` and `null`. The backend checkout used to build and test the patch was left unchanged.

@@ -1,5 +1,5 @@
 diff --git a/docs/docs.go b/docs/docs.go
-index 3a6a36a7..0da11818 100644
+index 3a6a36a7..8320ec29 100644
 --- a/docs/docs.go
 +++ b/docs/docs.go
 @@ -1136,6 +1136,101 @@ const docTemplate = `{
@@ -104,7 +104,7 @@ index 3a6a36a7..0da11818 100644
          "/api/schedules/{id}/toggle": {
              "post": {
                  "description": "Pauses a running schedule or resumes a paused one. When re-enabling, NextRun is recomputed if stale.",
-@@ -1904,6 +1999,93 @@ const docTemplate = `{
+@@ -1904,6 +1999,95 @@ const docTemplate = `{
                  }
              }
          },
@@ -147,7 +147,8 @@ index 3a6a36a7..0da11818 100644
 +                    "type": "boolean"
 +                },
 +                "max_workers": {
-+                    "type": "integer"
++                    "type": "integer",
++                    "x-nullable": true
 +                },
 +                "name": {
 +                    "type": "string"
@@ -182,7 +183,8 @@ index 3a6a36a7..0da11818 100644
 +                    "type": "string"
 +                },
 +                "max_workers": {
-+                    "type": "integer"
++                    "type": "integer",
++                    "x-nullable": true
 +                },
 +                "name": {
 +                    "type": "string"
@@ -199,7 +201,7 @@ index 3a6a36a7..0da11818 100644
              "type": "object",
              "properties": {
 diff --git a/docs/swagger.json b/docs/swagger.json
-index 69d4ba9e..d4f2effd 100644
+index 69d4ba9e..b2b7458d 100644
 --- a/docs/swagger.json
 +++ b/docs/swagger.json
 @@ -1134,6 +1134,101 @@
@@ -304,7 +306,7 @@ index 69d4ba9e..d4f2effd 100644
          "/api/schedules/{id}/toggle": {
              "post": {
                  "description": "Pauses a running schedule or resumes a paused one. When re-enabling, NextRun is recomputed if stale.",
-@@ -1902,6 +1997,93 @@
+@@ -1902,6 +1997,95 @@
                  }
              }
          },
@@ -347,7 +349,8 @@ index 69d4ba9e..d4f2effd 100644
 +                    "type": "boolean"
 +                },
 +                "max_workers": {
-+                    "type": "integer"
++                    "type": "integer",
++                    "x-nullable": true
 +                },
 +                "name": {
 +                    "type": "string"
@@ -382,7 +385,8 @@ index 69d4ba9e..d4f2effd 100644
 +                    "type": "string"
 +                },
 +                "max_workers": {
-+                    "type": "integer"
++                    "type": "integer",
++                    "x-nullable": true
 +                },
 +                "name": {
 +                    "type": "string"
@@ -399,10 +403,10 @@ index 69d4ba9e..d4f2effd 100644
              "type": "object",
              "properties": {
 diff --git a/docs/swagger.yaml b/docs/swagger.yaml
-index 6ed20589..2893fc26 100644
+index 6ed20589..b0909121 100644
 --- a/docs/swagger.yaml
 +++ b/docs/swagger.yaml
-@@ -116,6 +116,65 @@ definitions:
+@@ -116,6 +116,67 @@ definitions:
          example: /Users/user/projects/myproject
          type: string
      type: object
@@ -433,6 +437,7 @@ index 6ed20589..2893fc26 100644
 +        type: boolean
 +      max_workers:
 +        type: integer
++        x-nullable: true
 +      name:
 +        type: string
 +      repository_path:
@@ -450,6 +455,7 @@ index 6ed20589..2893fc26 100644
 +        type: string
 +      max_workers:
 +        type: integer
++        x-nullable: true
 +      name:
 +        type: string
 +      repository_path:
@@ -468,7 +474,7 @@ index 6ed20589..2893fc26 100644
    handler.ProjectsListResponse:
      properties:
        projects:
-@@ -2545,6 +2604,71 @@ paths:
+@@ -2545,6 +2606,71 @@ paths:
        summary: List all projects
        tags:
        - projects
@@ -541,7 +547,7 @@ index 6ed20589..2893fc26 100644
      post:
        description: Pauses a running schedule or resumes a paused one. When re-enabling,
 diff --git a/internal/handler/api_project_handler.go b/internal/handler/api_project_handler.go
-index f16fa005..e2fe7d94 100644
+index f16fa005..3de5596f 100644
 --- a/internal/handler/api_project_handler.go
 +++ b/internal/handler/api_project_handler.go
 @@ -1,7 +1,12 @@
@@ -577,7 +583,7 @@ index f16fa005..e2fe7d94 100644
 +	GitHubURL                   string                       `json:"github_url"`
 +	DefaultAgentID              string                       `json:"default_agent_id"`
 +	DefaultAgentName            string                       `json:"default_agent_name,omitempty"`
-+	MaxWorkers                  *int                         `json:"max_workers"`
++	MaxWorkers                  *int                         `json:"max_workers" extensions:"x-nullable"`
 +	LocalRepositoryPathsEnabled bool                         `json:"local_repository_paths_enabled"`
 +	AvailableAgents             []ProjectSettingsAgentOption `json:"available_agents"`
 +}
@@ -602,7 +608,7 @@ index f16fa005..e2fe7d94 100644
 +	RepositoryPath   string `json:"repository_path" binding:"required"`
 +	GitHubURL        string `json:"github_url" binding:"required"`
 +	DefaultAgentID   string `json:"default_agent_id" binding:"required"`
-+	MaxWorkers       *int   `json:"max_workers" binding:"required"`
++	MaxWorkers       *int   `json:"max_workers" binding:"required" extensions:"x-nullable"`
 +}
 +
 +// APIGetProjectSettings godoc
@@ -780,10 +786,10 @@ index f16fa005..e2fe7d94 100644
  	for _, p := range projects {
 diff --git a/internal/handler/api_project_settings_test.go b/internal/handler/api_project_settings_test.go
 new file mode 100644
-index 00000000..932587a2
+index 00000000..1430aa8a
 --- /dev/null
 +++ b/internal/handler/api_project_settings_test.go
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,255 @@
 +package handler
 +
 +import (
@@ -880,6 +886,53 @@ index 00000000..932587a2
 +	after := read()
 +	if after.Name != payload["name"] || after.Description != payload["description"] || after.RepositoryPath != payload["repository_path"] || after.DefaultAgentID != "" || after.MaxWorkers == nil || *after.MaxWorkers != 5 {
 +		t.Fatalf("authoritative settings after PUT = %+v", after)
++	}
++
++	for _, workerLimit := range []struct {
++		name string
++		max  any
++		want *int
++	}{
++		{name: "explicit zero", max: 0, want: intPointer(0)},
++		{name: "inherit", max: nil},
++	} {
++		t.Run(workerLimit.name, func(t *testing.T) {
++			update := map[string]any{
++				"name": "Updated Project", "description": "after", "repository_source": "local",
++				"repository_path": "/tmp/updated managed path", "github_url": "",
++				"default_agent_id": "", "max_workers": workerLimit.max,
++			}
++			updateBody, err := json.Marshal(update)
++			if err != nil {
++				t.Fatal(err)
++			}
++			updateRecorder := httptest.NewRecorder()
++			updateRequest := httptest.NewRequest(http.MethodPut, "/api/projects/"+project.ID+"/settings", strings.NewReader(string(updateBody)))
++			updateRequest.Header.Set("Content-Type", "application/json")
++			e.ServeHTTP(updateRecorder, updateRequest)
++			if updateRecorder.Code != http.StatusNoContent {
++				t.Fatalf("PUT worker limit = %d: %s", updateRecorder.Code, updateRecorder.Body.String())
++			}
++			persisted, err := h.projectSvc.GetByID(ctx, project.ID)
++			if err != nil {
++				t.Fatalf("load project after worker-limit update: %v", err)
++			}
++			if workerLimit.want == nil {
++				if persisted.MaxWorkers != nil {
++					t.Fatalf("persisted max_workers = %v, want null", persisted.MaxWorkers)
++				}
++			} else if persisted.MaxWorkers == nil || *persisted.MaxWorkers != *workerLimit.want {
++				t.Fatalf("persisted max_workers = %v, want %d", persisted.MaxWorkers, *workerLimit.want)
++			}
++			refreshed := read()
++			if workerLimit.want == nil {
++				if refreshed.MaxWorkers != nil {
++					t.Fatalf("response max_workers = %v, want null", refreshed.MaxWorkers)
++				}
++			} else if refreshed.MaxWorkers == nil || *refreshed.MaxWorkers != *workerLimit.want {
++				t.Fatalf("response max_workers = %v, want %d", refreshed.MaxWorkers, *workerLimit.want)
++			}
++		})
 +	}
 +}
 +
@@ -1006,10 +1059,18 @@ index 8f177617..db8961b7 100644
  	e.GET("/api/chat/message/:id", h.APIChatMessageStatus)
  	e.DELETE("/chat/history", h.ClearChat)
 diff --git a/internal/handler/project_handler.go b/internal/handler/project_handler.go
-index 9d4eb63b..7f51868f 100644
+index 9d4eb63b..27271178 100644
 --- a/internal/handler/project_handler.go
 +++ b/internal/handler/project_handler.go
-@@ -104,13 +104,35 @@ type projectFormSettingsOptions struct {
+@@ -27,7 +27,6 @@ const (
+ 	githubPATNotConfiguredErrorFragment = "github personal access token is not configured"
+ 	githubPATSetupLinkURL               = "/channels"
+ 	githubPATSetupLinkText              = "Open Channels"
+-	projectMaxWorkersMin                = 1
+ 	projectCleanupWarningParam          = "project_cleanup_warning"
+ )
+ 
+@@ -104,13 +103,35 @@ type projectFormSettingsOptions struct {
  	GlobalMaxWorkers     int
  }
  
@@ -1050,7 +1111,7 @@ index 9d4eb63b..7f51868f 100644
  	}
  	if settings.Name == "" {
  		return settings, errors.New("Project name is required")
-@@ -127,10 +149,10 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
+@@ -127,14 +148,14 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
  			return settings, errors.New("GitHub integration is not configured")
  		}
  	}
@@ -1064,7 +1125,12 @@ index 9d4eb63b..7f51868f 100644
  	if err != nil {
  		return settings, err
  	}
-@@ -401,41 +423,13 @@ func (h *Handler) CreateProject(c echo.Context) error {
+-	if maxWorkers >= projectMaxWorkersMin {
++	if strings.TrimSpace(values.MaxWorkers) != "" {
+ 		if opts.GlobalMaxWorkers > 0 && maxWorkers > opts.GlobalMaxWorkers {
+ 			return settings, fmt.Errorf("Max concurrent workers cannot exceed the global worker limit of %d", opts.GlobalMaxWorkers)
+ 		}
+@@ -401,41 +422,13 @@ func (h *Handler) CreateProject(c echo.Context) error {
  	return c.Redirect(http.StatusSeeOther, redirectURL)
  }
  
@@ -1108,7 +1174,7 @@ index 9d4eb63b..7f51868f 100644
  		}
  		if p.RepoURL != "" {
  			if currentRepo, err := service.ParseGitHubRepoURL(p.RepoURL); err == nil {
-@@ -449,9 +443,9 @@ func (h *Handler) UpdateProject(c echo.Context) error {
+@@ -449,9 +442,9 @@ func (h *Handler) UpdateProject(c echo.Context) error {
  	p.DefaultAgentConfigID = settings.DefaultAgentConfigID
  	p.MaxWorkers = settings.MaxWorkers
  	if recloneGitHubRepo {
@@ -1120,7 +1186,7 @@ index 9d4eb63b..7f51868f 100644
  		}
  		p.RepoPath = reclonedPath
  		p.RepoURL = normalizedURL
-@@ -466,9 +460,48 @@ func (h *Handler) UpdateProject(c echo.Context) error {
+@@ -466,9 +459,48 @@ func (h *Handler) UpdateProject(c echo.Context) error {
  		p.RepoPath = settings.RepoPath
  		p.RepoURL = ""
  	}
@@ -1171,3 +1237,113 @@ index 9d4eb63b..7f51868f 100644
  		applog.Infof("[handler] UpdateProject error: %v", err)
  		if isHTMX(c) {
  			return h.projectErrorResponse(c, http.StatusBadRequest, err.Error())
+diff --git a/internal/handler/project_handler_test.go b/internal/handler/project_handler_test.go
+index 61c604d7..e364c65a 100644
+--- a/internal/handler/project_handler_test.go
++++ b/internal/handler/project_handler_test.go
+@@ -776,7 +776,7 @@ func TestParseProjectFormSettings_ValidatesMaxWorkersContract(t *testing.T) {
+ 	}{
+ 		{name: "omitted clears", includeField: false},
+ 		{name: "empty clears", value: "", includeField: true},
+-		{name: "zero clears", value: "0", includeField: true},
++		{name: "zero saves explicit no-limit", value: "0", includeField: true, want: intPointer(0)},
+ 		{name: "minimum saves", value: "1", includeField: true, want: intPointer(1)},
+ 		{name: "high finite saves", value: "25", includeField: true, want: intPointer(25)},
+ 		{name: "trimmed finite saves", value: " 5 ", includeField: true, want: intPointer(5)},
+diff --git a/internal/handler/project_settings_test.go b/internal/handler/project_settings_test.go
+index 047048d6..3e9d3b8a 100644
+--- a/internal/handler/project_settings_test.go
++++ b/internal/handler/project_settings_test.go
+@@ -259,13 +259,13 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
+ 		}
+ 	})
+ 
+-	// Test 4: Set max_workers to 0 (should clear it, not set to 0)
++	// Verify max_workers=0 persists as an explicit no-project-limit value.
+ 	t.Run("SetMaxWorkersToZero", func(t *testing.T) {
+ 		form := url.Values{}
+ 		form.Set("name", "Updated Project")
+ 		form.Set("description", "Updated description")
+ 		form.Set("repo_path", "/tmp/updated")
+-		form.Set("max_workers", "0") // 0 should clear the limit
++		form.Set("max_workers", "0") // Preserve the explicit no-project-limit value.
+ 
+ 		req := httptest.NewRequest(http.MethodPut, "/projects/"+project.ID, strings.NewReader(form.Encode()))
+ 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+@@ -279,14 +279,14 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
+ 			t.Fatalf("UpdateProject failed: %v", err)
+ 		}
+ 
+-		// Verify max_workers is nil (no limit)
++		// Verify max_workers preserves explicit zero (no project-specific cap).
+ 		updated, err := projectRepo.GetByID(ctx, project.ID)
+ 		if err != nil {
+ 			t.Fatalf("failed to get updated project: %v", err)
+ 		}
+ 
+-		if updated.MaxWorkers != nil {
+-			t.Errorf("expected max_workers to be nil when set to 0, got %d", *updated.MaxWorkers)
++		if updated.MaxWorkers == nil || *updated.MaxWorkers != 0 {
++			t.Errorf("expected max_workers to preserve explicit zero, got %v", updated.MaxWorkers)
+ 		}
+ 	})
+ }
+diff --git a/internal/service/project_repo_persistence_test.go b/internal/service/project_repo_persistence_test.go
+index 49c0549d..96a8fd18 100644
+--- a/internal/service/project_repo_persistence_test.go
++++ b/internal/service/project_repo_persistence_test.go
+@@ -605,7 +605,7 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
+ 	}
+ 
+ 	zero := 0
+-	zeroProject := &models.Project{Name: "Inherited Limit", MaxWorkers: &zero}
++	zeroProject := &models.Project{Name: "Explicit No Project Cap", MaxWorkers: &zero}
+ 	if err := svc.Create(ctx, zeroProject); err != nil {
+ 		t.Fatalf("Create with zero project limit: %v", err)
+ 	}
+@@ -613,23 +613,23 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatalf("GetByID zero project: %v", err)
+ 	}
+-	if storedZero.MaxWorkers != nil {
+-		t.Fatalf("zero project limit persisted as %v, want nil", storedZero.MaxWorkers)
++	if storedZero.MaxWorkers == nil || *storedZero.MaxWorkers != 0 {
++		t.Fatalf("zero project limit persisted as %v, want explicit zero", storedZero.MaxWorkers)
+ 	}
+ 	requestedZero := *storedZero
+ 	requestedZero.MaxWorkers = &zero
+ 	if err := svc.Update(ctx, &requestedZero); err != nil {
+-		t.Fatalf("Update with requested zero against inherited project cap: %v", err)
++		t.Fatalf("Update with requested zero against explicit zero project cap: %v", err)
+ 	}
+ 	updatedZero, err := projectRepo.GetByID(ctx, zeroProject.ID)
+ 	if err != nil {
+ 		t.Fatalf("GetByID after requested zero update: %v", err)
+ 	}
+-	if updatedZero.MaxWorkers != nil {
+-		t.Fatalf("requested zero project limit persisted as %v, want nil", updatedZero.MaxWorkers)
++	if updatedZero.MaxWorkers == nil || *updatedZero.MaxWorkers != 0 {
++		t.Fatalf("requested zero project limit persisted as %v, want explicit zero", updatedZero.MaxWorkers)
+ 	}
+-	if requestedZero.MaxWorkers != nil {
+-		t.Fatalf("requested zero project limit normalized to %v, want nil", requestedZero.MaxWorkers)
++	if requestedZero.MaxWorkers == nil || *requestedZero.MaxWorkers != 0 {
++		t.Fatalf("requested zero project limit changed to %v, want explicit zero", requestedZero.MaxWorkers)
+ 	}
+ 
+ 	if err := workerRepo.SetMaxWorkers(ctx, 10); err != nil {
+diff --git a/internal/service/project_service.go b/internal/service/project_service.go
+index f419444f..a538eab4 100644
+--- a/internal/service/project_service.go
++++ b/internal/service/project_service.go
+@@ -140,10 +140,6 @@ func (s *ProjectService) Update(ctx context.Context, p *models.Project) error {
+ }
+ 
+ func (s *ProjectService) validateProjectWorkerLimit(ctx context.Context, p *models.Project, allowUnchanged bool) error {
+-	if p.MaxWorkers != nil && *p.MaxWorkers == 0 {
+-		p.MaxWorkers = nil
+-	}
+-
+ 	globalMaxWorkers := 0
+ 	if s.workerRepo != nil {
+ 		var err error
