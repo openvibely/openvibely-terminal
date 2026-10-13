@@ -741,6 +741,11 @@ func TestPostAckTaskEventsRequireExecutionIdentity(t *testing.T) {
 			payload:   `{"project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
 		},
 		{
+			name:      "completion with whitespace-padded project identity",
+			eventName: "message",
+			payload:   `{"type":"chat_response_done","project_id":" project-A ","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
 			name:      "completion with stale execution",
 			eventName: "chat_response_done",
 			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","exec_id":"exec-old","completed_output":"stale completion"}`,
