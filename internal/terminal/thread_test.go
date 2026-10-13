@@ -716,6 +716,40 @@ func TestPostAckTaskEventsRequireExecutionIdentity(t *testing.T) {
 			eventName: "chat_new_message",
 			payload:   `{"project_id":"project-A","task_id":"t-1","message":"uncorrelated duplicate"}`,
 		},
+		{
+			name:      "canonical completion",
+			eventName: "chat_response_done",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:      "aliased completion",
+			eventName: "task_update",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:      "generic completion frame",
+			eventName: "message",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:    "unnamed completion",
+			payload: `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:      "canonical completion without payload type",
+			eventName: "chat_response_done",
+			payload:   `{"project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:      "completion with stale execution",
+			eventName: "chat_response_done",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","exec_id":"exec-old","completed_output":"stale completion"}`,
+		},
+		{
+			name:      "completion with unrelated pending input and current execution",
+			eventName: "chat_response_done",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","exec_id":"exec-1","pending_input_id":"input-old","completed_output":"stale completion"}`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -765,25 +799,18 @@ func TestPostAckTaskEventsRequireExecutionIdentity(t *testing.T) {
 
 			sseEvents <- client.Event{Name: "sentinel"}
 			updated, cmd = m.Update(sseEventMsg{generation: 19, event: client.Event{
-				Name: "task_status_changed",
-				Data: json.RawMessage(`{"type":"task_status_changed","project_id":"project-A","task_id":"t-1","exec_id":"exec-1","status":"completed"}`),
+				Name: "task_update",
+				Data: json.RawMessage(`{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","exec_id":"exec-1","status":"completed","completed_output":"verified answer"}`),
 			}})
 			m = updated.(Model)
-			if cmd == nil || m.threadStatus != "completed" {
-				t.Fatalf("correlated lifecycle event was suppressed after identity-less event: cmd=%t status=%q", cmd != nil, m.threadStatus)
+			if cmd == nil || m.hasPendingChat() || m.busy {
+				t.Fatalf("identified aliased completion did not settle current reply: cmd=%t pending=%t busy=%t", cmd != nil, m.hasPendingChat(), m.busy)
 			}
-			batch, ok := cmd().(tea.BatchMsg)
-			if !ok {
-				t.Fatal("correlated lifecycle event did not schedule the authoritative status request")
+			if m.threadStatus != "running" || !strings.Contains(transcript(m), "verified answer") || strings.Contains(transcript(m), "stale completion") {
+				t.Fatalf("identified aliased completion produced wrong thread transcript/state: status=%q transcript=%q", m.threadStatus, transcript(m))
 			}
-			for _, sub := range batch {
-				if msg, ok := sub().(chatStatusMsg); ok {
-					updated, _ = m.Update(msg)
-					m = updated.(Model)
-				}
-			}
-			if m.hasPendingChat() || m.busy {
-				t.Fatalf("correlated lifecycle completion did not settle current reply: pending=%t busy=%t", m.hasPendingChat(), m.busy)
+			if got := rec.count("GET", "/api/chat/message/exec-1"); got != 0 {
+				t.Fatalf("inline identified completion made %d unnecessary status requests", got)
 			}
 		})
 	}
@@ -809,6 +836,39 @@ func TestTaskEventPromotesExecutionOnlyFromMatchingPendingInput(t *testing.T) {
 	m = updated.(Model)
 	if cmd == nil || m.pendingMsgExecutionID != "exec-promoted" || m.threadStatus != "running" {
 		t.Fatalf("matching queued event did not promote current turn: cmd=%t execution=%q status=%q", cmd != nil, m.pendingMsgExecutionID, m.threadStatus)
+	}
+}
+
+func TestChatCompletionPromotesExecutionFromMatchingPendingInput(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{})
+	m.selectedID = "project-A"
+	m.threadID = "t-1"
+	m.threadStatus = "running"
+	m.pendingMsgTaskID = "t-1"
+	m.pendingMsgThreadRequestID = m.threadOpenRequestID
+	m.pendingMsgID = "input-1"
+	m.pendingMsgProjectID = "project-A"
+	m.pendingMsgProjectGeneration = m.projectGeneration
+	m.chatSubmissionPending = true
+	m.chatSubmissionID = 23
+	m.busy = true
+	m.sseGeneration = 20
+	m.sseEvents = make(chan client.Event)
+	m.sseErrs = make(chan error)
+
+	updated, cmd := m.Update(sseEventMsg{generation: 20, event: client.Event{
+		Name: "task_update",
+		Data: json.RawMessage(`{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","pending_input_id":"input-1","exec_id":"exec-promoted","completed_output":"queued reply"}`),
+	}})
+	m = updated.(Model)
+	if cmd == nil || m.hasPendingChat() || m.busy {
+		t.Fatalf("completion tied to the queued input did not settle its promoted execution: cmd=%t pending=%t busy=%t", cmd != nil, m.hasPendingChat(), m.busy)
+	}
+	if !strings.Contains(transcript(m), "queued reply") || m.threadStatus != "running" {
+		t.Fatalf("promoted completion produced wrong transcript/state: status=%q transcript=%q", m.threadStatus, transcript(m))
+	}
+	if got := rec.count("GET", "/api/chat/message/input-1"); got != 0 {
+		t.Fatalf("inline promoted completion made %d status requests", got)
 	}
 }
 

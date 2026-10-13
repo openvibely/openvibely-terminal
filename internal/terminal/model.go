@@ -3160,7 +3160,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// /events entry is appended before a queued first assistant render, the
 		// transcript order is reversed. Flush only completions that can settle this
 		// chat; malformed, unrelated, and foreign events retain existing behavior.
-		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
+		eventType := sseEventType(msg.event)
+		m.promotePendingTaskEventExecution(msg.event)
+		if eventType == "chat_response_done" && m.pendingMsgID != "" {
 			var completion client.ChatEvent
 			if json.Unmarshal(msg.event.Data, &completion) == nil &&
 				m.matchesPendingChatExecution(completion.ExecID) &&
@@ -3172,7 +3174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if refresh := m.handleOpenThreadSSE(msg.event); refresh != nil {
 			return m, tea.Batch(m.waitForCurrentSSE(msg.generation), refresh)
 		}
-		if msg.event.Name == "chat_response_done" && m.pendingMsgID != "" {
+		if eventType == "chat_response_done" && m.pendingMsgID != "" {
 			var ce client.ChatEvent
 			if err := json.Unmarshal(msg.event.Data, &ce); err != nil || !m.matchesPendingChatExecution(ce.ExecID) {
 				// A project stream carries completions for multiple chats. An
@@ -3781,6 +3783,18 @@ func (m *Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {
 	}, sessionGenerationOf(*m), projectGenerationOf(*m))
 }
 
+func sseEventType(ev client.Event) string {
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(ev.Data, &payload) == nil {
+		if eventType := strings.TrimSpace(payload.Type); eventType != "" {
+			return eventType
+		}
+	}
+	return strings.TrimSpace(ev.Name)
+}
+
 // acceptsOpenThreadTaskEventIdentity rejects delayed events from another
 // execution of the currently open task before they can reach either the task
 // transcript or the generic /events display. A matching pending-input identity
@@ -3801,13 +3815,14 @@ func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
 	}
 	if taskEvent.ExecID == "" && taskEvent.PendingInputID == "" {
 		// Once a task follow-up has been acknowledged, identity-less lifecycle and
-		// mirrored chat events cannot be attributed to that turn. Reject them before
-		// either the open-thread handler or generic /events display can mutate output.
-		eventType := strings.TrimSpace(taskEvent.Type)
-		if eventType == "" {
-			eventType = strings.TrimSpace(ev.Name)
+		// mirrored chat events cannot be attributed to that turn. An identity-less
+		// completion is just as unsafe, even when its frame name is an alias or empty.
+		switch sseEventType(ev) {
+		case "task_status_changed", "chat_new_message", "chat_response_done":
+			return false
+		default:
+			return true
 		}
-		return eventType != "task_status_changed" && eventType != "chat_new_message"
 	}
 	if taskEvent.PendingInputID != "" && taskEvent.PendingInputID != m.pendingMsgID {
 		return false
@@ -3820,11 +3835,35 @@ func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
 	return m.pendingMsgExecutionID == "" && taskEvent.PendingInputID == m.pendingMsgID
 }
 
+func (m *Model) promotePendingTaskEventExecution(ev client.Event) {
+	if m.threadID == "" || m.pendingMsgTaskID != m.threadID || m.pendingMsgID == "" || m.pendingMsgExecutionID != "" {
+		return
+	}
+	eventType := sseEventType(ev)
+	switch eventType {
+	case "task_status_changed", "chat_new_message", "chat_response_done":
+	default:
+		return
+	}
+	var taskEvent client.TaskEvent
+	if json.Unmarshal(ev.Data, &taskEvent) != nil || taskEvent.TaskID != m.threadID || taskEvent.ProjectID != m.selectedID ||
+		taskEvent.PendingInputID != m.pendingMsgID || taskEvent.ExecID == "" {
+		return
+	}
+	m.pendingMsgExecutionID = taskEvent.ExecID
+}
+
 // handleOpenThreadSSE mirrors the web task view's live behavior for the one task
 // currently in follow-up context. Project and stream ownership have already
 // been checked by Update; task identity and running state are checked here.
 func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	if m.threadID == "" || m.threadStatus != "running" {
+		return nil
+	}
+	// Completion events use the project-chat correlation path below. Classify
+	// from the payload so aliases and unnamed frames cannot enter task lifecycle
+	// handling or append a mirrored chat message.
+	if sseEventType(ev) == "chat_response_done" {
 		return nil
 	}
 
@@ -3869,11 +3908,6 @@ func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 		return m.refreshTaskThread(m.threadID, m.selectedID, status)
 	}
 
-	// chat_response_done has separate project-chat correlation semantics below;
-	// task status events provide the terminal task-thread refresh.
-	if ev.Name == "chat_response_done" {
-		return nil
-	}
 	var chatEvent client.ChatEvent
 	if json.Unmarshal(ev.Data, &chatEvent) == nil && chatEvent.TaskID == m.threadID &&
 		chatEvent.ProjectID != "" && chatEvent.ProjectID == m.selectedID {
