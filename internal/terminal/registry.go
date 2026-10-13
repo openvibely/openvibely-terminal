@@ -5352,6 +5352,20 @@ type modelAddSpec struct {
 	DefaultMaxTokensSet bool
 }
 
+var supportedModelAddProviders = []string{"anthropic", "openai", "ollama", "openai_compatible"}
+
+func modelAddProviderChoices() []string {
+	return append([]string(nil), supportedModelAddProviders...)
+}
+
+func modelAddProviderPrompt() string {
+	return "Provider (" + strings.Join(supportedModelAddProviders, "/") + ")"
+}
+
+func modelAddProviderList() string {
+	return strings.Join(supportedModelAddProviders, ", ")
+}
+
 type modelAddOutput struct {
 	Status           string            `json:"status"`
 	Models           []client.LLMModel `json:"models,omitempty"`
@@ -5365,12 +5379,12 @@ func modelAddOptionNames() []string {
 
 func normalizeModelAddProvider(value string) (string, error) {
 	provider := strings.ToLower(strings.TrimSpace(value))
-	switch provider {
-	case "anthropic", "openai", "ollama", "openai_compatible":
-		return provider, nil
-	default:
-		return "", errors.New("provider must be anthropic, openai, ollama, or openai_compatible")
+	for _, supported := range supportedModelAddProviders {
+		if provider == supported {
+			return provider, nil
+		}
 	}
+	return "", fmt.Errorf("provider must be one of: %s", modelAddProviderList())
 }
 
 func validateOllamaEndpoint(value string) (string, error) {
@@ -6006,7 +6020,7 @@ type modelWizardState struct {
 
 func modelWizardSteps(provider string) []modelWizardStep {
 	steps := []modelWizardStep{
-		{field: "provider", label: "Provider (anthropic/openai/ollama/openai_compatible)", placeholder: "openai"},
+		{field: "provider", label: modelAddProviderPrompt(), placeholder: "openai"},
 		{field: "name", label: "Configuration name", placeholder: "My Model"},
 		{field: "model", label: "Model ID", placeholder: "gpt-4o"},
 	}
@@ -6030,7 +6044,7 @@ func modelWizardSteps(provider string) []modelWizardStep {
 
 func (m Model) beginModelWizard() (Model, tea.Cmd) {
 	m.modelWizard = &modelWizardState{
-		steps:              []modelWizardStep{{field: "provider", label: "Provider (anthropic/openai/ollama/openai_compatible)", placeholder: "openai"}},
+		steps:              []modelWizardStep{{field: "provider", label: modelAddProviderPrompt(), placeholder: "openai"}},
 		restorePrompt:      m.input.Prompt,
 		restorePlaceholder: m.input.Placeholder,
 	}
@@ -6196,7 +6210,7 @@ func modelsCommand() command {
 		fmt.Sprintf("models [filter]                            list configured models (plain output shows first %d matches)", client.DefaultModelListLimit),
 		"models add                                  guided provider setup with masked API-key input",
 		"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
-		"  providers: anthropic, openai, ollama, openai_compatible; API keys require piped --api-key-stdin",
+		fmt.Sprintf("  providers: %s; API keys require piped --api-key-stdin", modelAddProviderList()),
 		"  options: --api-key-stdin | --oauth | --endpoint <http(s)://base-url> | --default-max-tokens <n>",
 		"models edit <model> [options]               safely update explicit fields of an existing model",
 	}, append(modelEditOptionsUsageLines(),
@@ -6236,7 +6250,7 @@ func modelsCommand() command {
 		args:    "[name]",
 		actions: actions,
 		completions: []commandCompletion{
-			{after: []string{"add"}, values: []string{"anthropic", "openai", "ollama", "openai_compatible"}},
+			{after: []string{"add"}, values: modelAddProviderChoices()},
 			{after: []string{"add", "*", "*", "**"}, values: modelAddOptionNames()},
 			{after: []string{"edit", "**"}, partialAfter: completionAfterQuotedOperand, values: modelEditOptionNames()},
 		},

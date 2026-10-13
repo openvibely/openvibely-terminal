@@ -7659,7 +7659,7 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 		}
 		m := New(c)
 		m = runLine(t, m, "/models add")
-		if !strings.Contains(m.input.Prompt, "Provider (anthropic/openai/ollama/openai_compatible)") {
+		if !strings.Contains(m.input.Prompt, modelAddProviderPrompt()) {
 			t.Fatalf("provider prompt did not mention compatible providers: %q", m.input.Prompt)
 		}
 		m = runLine(t, m, "openai_compatible")
