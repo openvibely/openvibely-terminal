@@ -12447,6 +12447,292 @@ func TestRunCLIEventsJSONPreservesScopeAndBurstOrder(t *testing.T) {
 	}
 }
 
+func TestRunCLIEventsReconnectsAfterInterruptedStreamWithoutDuplicatingOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		jsonOutput bool
+	}{
+		{name: "plain"},
+		{name: "JSON", jsonOutput: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var requests []string
+			secondStarted := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/events/live" {
+					http.NotFound(w, r)
+					return
+				}
+				mu.Lock()
+				requests = append(requests, r.URL.RequestURI())
+				attempt := len(requests)
+				mu.Unlock()
+				if r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				if attempt == 1 {
+					conn, _, hijackErr := w.(http.Hijacker).Hijack()
+					if hijackErr != nil {
+						t.Errorf("hijack event stream: %v", hijackErr)
+						return
+					}
+					payload := `event: task_status_changed` + "\n" + `data: {"type":"task_status_changed","project_id":"p1","task_id":"first","status":"running"}` + "\n\n"
+					_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", len(payload), payload)
+					_ = conn.Close() // Omit the terminal chunk to simulate an interrupted response.
+					return
+				}
+				_, _ = io.WriteString(w, `event: task_status_changed
+data: {"type":"task_status_changed","project_id":"p1","task_id":"second","status":"completed"}`+"\n\n")
+				w.(http.Flusher).Flush()
+				close(secondStarted)
+				<-r.Context().Done()
+			}))
+			defer srv.Close()
+
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			writer := &cliEventWriter{lines: make(chan string, 4)}
+			retries := 0
+			done := make(chan error, 1)
+			go func() {
+				done <- runCLIEventsWithRetryWait(ctx, c, writer, "p1", tc.jsonOutput, c.StreamEvents, func(ctx context.Context, _ int) bool {
+					retries++
+					select {
+					case <-ctx.Done():
+						return false
+					default:
+						return true
+					}
+				})
+			}()
+
+			lines := make([]string, 0, 2)
+			for len(lines) < 2 {
+				select {
+				case line := <-writer.lines:
+					lines = append(lines, line)
+				case <-time.After(2 * time.Second):
+					cancel()
+					t.Fatalf("received %d event lines, want 2", len(lines))
+				}
+			}
+			select {
+			case <-secondStarted:
+			case <-time.After(time.Second):
+				cancel()
+				t.Fatal("replacement stream did not remain connected")
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("runCLIEvents() error = %v", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("runCLIEvents() did not stop after cancellation")
+			}
+
+			mu.Lock()
+			gotRequests := append([]string(nil), requests...)
+			mu.Unlock()
+			if len(gotRequests) != 2 || gotRequests[0] != "/events/live?project_id=p1" || gotRequests[1] != gotRequests[0] {
+				t.Fatalf("event requests = %v, want two requests scoped to p1", gotRequests)
+			}
+			if retries != 1 {
+				t.Fatalf("retry waits = %d, want 1", retries)
+			}
+			joined := strings.Join(lines, "")
+			if strings.Contains(joined, "reconnect") || strings.Contains(joined, "retry") {
+				t.Fatalf("output contains reconnect diagnostics: %q", joined)
+			}
+			if tc.jsonOutput {
+				if len(lines) != 2 {
+					t.Fatalf("JSON output lines = %d, want 2: %q", len(lines), joined)
+				}
+			} else if strings.Count(joined, "first") != 1 || strings.Count(joined, "second") != 1 {
+				t.Fatalf("plain output duplicates or misses events: %q", joined)
+			}
+			for i, taskID := range []string{"first", "second"} {
+				if tc.jsonOutput {
+					var record cliEventRecord
+					if err := json.Unmarshal([]byte(strings.TrimSpace(lines[i])), &record); err != nil {
+						t.Fatalf("invalid JSON line %q: %v", lines[i], err)
+					}
+					if record.ProjectID != "p1" || record.TaskID != taskID {
+						t.Errorf("JSON event = %#v, want project p1 task %s", record, taskID)
+					}
+				} else if !strings.Contains(lines[i], `task_id="`+taskID+`"`) {
+					t.Errorf("plain event line %q does not contain task %q", lines[i], taskID)
+				}
+			}
+		})
+	}
+}
+
+func TestRunCLIEventsRetriesTemporaryTransportFailure(t *testing.T) {
+	c, err := client.New("http://localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts, waits int
+	openStream := func(_ context.Context, projectID string) (<-chan client.Event, <-chan error) {
+		if projectID != "selected" {
+			t.Errorf("stream project = %q, want selected", projectID)
+		}
+		attempts++
+		events := make(chan client.Event, 1)
+		errs := make(chan error, 1)
+		if attempts == 1 {
+			events <- client.Event{Name: "chat_new_message", Data: json.RawMessage(`{"type":"chat_new_message","message":"before"}`)}
+			errs <- context.DeadlineExceeded
+		} else {
+			events <- client.Event{Name: "chat_new_message", Data: json.RawMessage(`{"type":"chat_new_message","message":"after"}`)}
+		}
+		close(events)
+		close(errs)
+		return events, errs
+	}
+	var out bytes.Buffer
+	err = runCLIEventsWithRetryWait(context.Background(), c, &out, "selected", true, openStream, func(context.Context, int) bool {
+		waits++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("runCLIEvents() error = %v", err)
+	}
+	if attempts != 2 || waits != 1 {
+		t.Fatalf("stream attempts=%d retry waits=%d, want 2 and 1", attempts, waits)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("output lines = %d, want 2: %q", len(lines), out.String())
+	}
+	for i, wantMessage := range []string{"before", "after"} {
+		var record cliEventRecord
+		if err := json.Unmarshal([]byte(lines[i]), &record); err != nil {
+			t.Fatalf("invalid JSON event line: %v", err)
+		}
+		if record.Message != wantMessage {
+			t.Errorf("event %d message = %q, want %q", i, record.Message, wantMessage)
+		}
+	}
+}
+
+func TestRunCLIEventsCancellationDuringBackoffDoesNotReconnect(t *testing.T) {
+	c, err := client.New("http://localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var attempts int
+	openStream := func(context.Context, string) (<-chan client.Event, <-chan error) {
+		attempts++
+		events := make(chan client.Event)
+		errs := make(chan error, 1)
+		errs <- context.DeadlineExceeded
+		close(events)
+		close(errs)
+		return events, errs
+	}
+	waiting := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runCLIEventsWithRetryWait(ctx, c, io.Discard, "p1", false, openStream, func(ctx context.Context, _ int) bool {
+			close(waiting)
+			<-ctx.Done()
+			return false
+		})
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(time.Second):
+		t.Fatal("retry backoff did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runCLIEvents() cancellation error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runCLIEvents() did not stop during retry backoff")
+	}
+	if attempts != 1 {
+		t.Fatalf("stream attempts = %d after backoff cancellation, want 1", attempts)
+	}
+}
+
+func TestRunCLIEventsStopsOnAuthInvalidServerURLAndOtherErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "authentication", err: client.ErrAuthRequired, want: "login"},
+		{name: "invalid server URL", err: client.ErrInvalidServerURL, want: "server URL"},
+		{name: "other failure", err: errors.New("event stream returned status 500"), want: "live events: event stream returned status 500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := client.New("http://localhost")
+			if err != nil {
+				t.Fatal(err)
+			}
+			attempts, waits := 0, 0
+			openStream := func(context.Context, string) (<-chan client.Event, <-chan error) {
+				attempts++
+				events := make(chan client.Event)
+				errs := make(chan error, 1)
+				errs <- tc.err
+				close(events)
+				close(errs)
+				return events, errs
+			}
+			err = runCLIEventsWithRetryWait(context.Background(), c, io.Discard, "p1", false, openStream, func(context.Context, int) bool {
+				waits++
+				return true
+			})
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.want)) {
+				t.Fatalf("error = %v, want actionable %q guidance", err, tc.want)
+			}
+			if attempts != 1 || waits != 0 {
+				t.Fatalf("stream attempts=%d retry waits=%d, want 1 and 0", attempts, waits)
+			}
+		})
+	}
+}
+
+func TestRunCLIEventsCleanEOFDoesNotReconnect(t *testing.T) {
+	c, err := client.New("http://localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, waits := 0, 0
+	openStream := func(context.Context, string) (<-chan client.Event, <-chan error) {
+		attempts++
+		events := make(chan client.Event)
+		errs := make(chan error)
+		close(events)
+		close(errs)
+		return events, errs
+	}
+	err = runCLIEventsWithRetryWait(context.Background(), c, io.Discard, "p1", false, openStream, func(context.Context, int) bool {
+		waits++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("clean EOF error = %v", err)
+	}
+	if attempts != 1 || waits != 0 {
+		t.Fatalf("stream attempts=%d retry waits=%d, want 1 and 0", attempts, waits)
+	}
+}
+
 func TestRunCLIEventsCancellationClosesStreamQuietly(t *testing.T) {
 	started := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
