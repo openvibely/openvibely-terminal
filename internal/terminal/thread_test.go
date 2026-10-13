@@ -821,6 +821,68 @@ func TestPostAckTaskEventsRequireExecutionIdentity(t *testing.T) {
 	}
 }
 
+func TestIdentitylessCompletionForOpenTaskWithoutPendingReplyIsIgnored(t *testing.T) {
+	cases := []struct {
+		name      string
+		eventName string
+		payload   string
+	}{
+		{
+			name:      "canonical frame",
+			eventName: "chat_response_done",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:      "aliased frame",
+			eventName: "task_update",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:      "generic frame",
+			eventName: "message",
+			payload:   `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+		{
+			name:    "unnamed frame",
+			payload: `{"type":"chat_response_done","project_id":"project-A","task_id":"t-1","completed_output":"stale completion"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{})
+			m.selectedID = "project-A"
+			m.threadID = "t-1"
+			m.threadStatus = "running"
+			m.showEvents = true
+			m.sseGeneration = 29
+			sseEvents := make(chan client.Event, 1)
+			m.sseEvents = sseEvents
+			m.sseErrs = make(chan error)
+			sseEvents <- client.Event{Name: "sentinel"}
+			before := transcript(m)
+
+			updated, cmd := m.Update(sseEventMsg{generation: 29, event: client.Event{
+				Name: tc.eventName,
+				Data: json.RawMessage(tc.payload),
+			}})
+			m = updated.(Model)
+			if cmd == nil {
+				t.Fatal("ignored completion did not re-arm the current SSE stream")
+			}
+			if _, ok := cmd().(sseEventMsg); !ok {
+				t.Fatal("ignored completion left the current SSE stream unusable")
+			}
+			if m.threadStatus != "running" || transcript(m) != before || m.hasPendingChat() {
+				t.Fatalf("identity-less completion mutated open task state: status=%q transcript=%q pending=%t", m.threadStatus, transcript(m), m.hasPendingChat())
+			}
+			if got := rec.count("GET", "/api/chat/message/exec-1"); got != 0 {
+				t.Fatalf("identity-less completion triggered %d chat status requests", got)
+			}
+		})
+	}
+}
+
 func TestTaskEventPromotesExecutionOnlyFromMatchingPendingInput(t *testing.T) {
 	m := pendingChatStreamTestModel(t)
 	m.pendingMsgID = "input-1"
