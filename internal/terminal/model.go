@@ -3800,6 +3800,16 @@ func sseEventType(ev client.Event) string {
 // transcript or the generic /events display. A matching pending-input identity
 // authorizes a newly promoted execution ID from a queued follow-up.
 func (m Model) acceptsOpenThreadTaskEventIdentity(ev client.Event) bool {
+	if m.threadID != "" && sseEventType(ev) == "chat_response_done" {
+		var completion client.TaskEvent
+		if json.Unmarshal(ev.Data, &completion) == nil && strings.TrimSpace(completion.TaskID) == m.threadID &&
+			strings.TrimSpace(completion.ProjectID) == m.selectedID && strings.TrimSpace(completion.ExecID) == "" &&
+			strings.TrimSpace(completion.PendingInputID) == "" {
+			// Identity-less completions for the open task are unsafe even when no
+			// reply is pending: the generic /events view must not display stale output.
+			return false
+		}
+	}
 	if m.threadID == "" || m.pendingMsgTaskID != m.threadID {
 		return true
 	}
