@@ -1363,7 +1363,7 @@ func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Wri
 		if ctx.Err() != nil {
 			return nil
 		}
-		if terminalErr == nil || errors.Is(terminalErr, io.EOF) || errors.Is(terminalErr, client.ErrEventStreamClosed) {
+		if terminalErr == nil || errors.Is(terminalErr, io.EOF) {
 			return nil
 		}
 		if client.IsAuthRequired(terminalErr) {
@@ -1372,7 +1372,7 @@ func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Wri
 		if client.IsInvalidServerURL(terminalErr) {
 			return errors.New(InvalidServerURLMessage(c.BaseURL()))
 		}
-		if !client.IsTransportError(terminalErr) && !errors.Is(terminalErr, io.ErrUnexpectedEOF) {
+		if !client.IsTransportError(terminalErr) && !errors.Is(terminalErr, io.ErrUnexpectedEOF) && !errors.Is(terminalErr, client.ErrEventStreamClosed) {
 			return fmt.Errorf("live events: %w", terminalErr)
 		}
 
