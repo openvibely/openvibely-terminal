@@ -18,10 +18,13 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -1372,7 +1375,7 @@ func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Wri
 		if client.IsInvalidServerURL(terminalErr) {
 			return errors.New(InvalidServerURLMessage(c.BaseURL()))
 		}
-		if !client.IsTransportError(terminalErr) && !errors.Is(terminalErr, io.ErrUnexpectedEOF) && !errors.Is(terminalErr, client.ErrEventStreamClosed) {
+		if !isRetryableCLIEventTransportError(terminalErr) && !errors.Is(terminalErr, io.ErrUnexpectedEOF) && !errors.Is(terminalErr, client.ErrEventStreamClosed) {
 			return fmt.Errorf("live events: %w", terminalErr)
 		}
 
@@ -1381,6 +1384,31 @@ func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Wri
 			return cliContextResult(ctx)
 		}
 	}
+}
+
+func isRetryableCLIEventTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Certificate verification failures are permanent until the server or its
+	// trust configuration changes, even if a wrapped error implements net.Error.
+	var certificateVerificationErr *tls.CertificateVerificationError
+	var unknownAuthorityErr x509.UnknownAuthorityError
+	var hostnameErr x509.HostnameError
+	var certificateInvalidErr x509.CertificateInvalidError
+	if errors.As(err, &certificateVerificationErr) ||
+		errors.As(err, &unknownAuthorityErr) ||
+		errors.As(err, &hostnameErr) ||
+		errors.As(err, &certificateInvalidErr) {
+		return false
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary())
 }
 
 const cliEventRetryInitial = time.Second

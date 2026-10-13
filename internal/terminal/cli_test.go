@@ -3,6 +3,8 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12574,6 +12576,16 @@ data: {"type":"task_status_changed","project_id":"p1","task_id":"second","status
 	}
 }
 
+type cliEventTestNetError struct {
+	message   string
+	timeout   bool
+	temporary bool
+}
+
+func (err cliEventTestNetError) Error() string   { return err.message }
+func (err cliEventTestNetError) Timeout() bool   { return err.timeout }
+func (err cliEventTestNetError) Temporary() bool { return err.temporary }
+
 func TestRunCLIEventsRetriesTemporaryTransportFailure(t *testing.T) {
 	c, err := client.New("http://localhost")
 	if err != nil {
@@ -12620,6 +12632,35 @@ func TestRunCLIEventsRetriesTemporaryTransportFailure(t *testing.T) {
 		if record.Message != wantMessage {
 			t.Errorf("event %d message = %q, want %q", i, record.Message, wantMessage)
 		}
+	}
+}
+
+func TestRunCLIEventsRetriesTemporaryNetError(t *testing.T) {
+	c, err := client.New("http://localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts, waits := 0, 0
+	openStream := func(context.Context, string) (<-chan client.Event, <-chan error) {
+		attempts++
+		events := make(chan client.Event)
+		errs := make(chan error, 1)
+		if attempts == 1 {
+			errs <- cliEventTestNetError{message: "temporary network failure", temporary: true}
+		}
+		close(events)
+		close(errs)
+		return events, errs
+	}
+	err = runCLIEventsWithRetryWait(context.Background(), c, io.Discard, "p1", false, openStream, func(context.Context, int) bool {
+		waits++
+		return true
+	})
+	if err != nil {
+		t.Fatalf("runCLIEvents() error = %v", err)
+	}
+	if attempts != 2 || waits != 1 {
+		t.Fatalf("stream attempts=%d retry waits=%d, want 2 and 1", attempts, waits)
 	}
 }
 
@@ -12718,6 +12759,10 @@ func TestRunCLIEventsCancellationDuringBackoffDoesNotReconnect(t *testing.T) {
 }
 
 func TestRunCLIEventsStopsOnAuthInvalidServerURLAndOtherErrors(t *testing.T) {
+	permanentNetErr := cliEventTestNetError{message: "permanent network failure"}
+	if !client.IsTransportError(permanentNetErr) {
+		t.Fatal("test error is not classified as a transport error")
+	}
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -12726,6 +12771,15 @@ func TestRunCLIEventsStopsOnAuthInvalidServerURLAndOtherErrors(t *testing.T) {
 		{name: "authentication", err: client.ErrAuthRequired, want: "login"},
 		{name: "invalid server URL", err: client.ErrInvalidServerURL, want: "server URL"},
 		{name: "other failure", err: errors.New("event stream returned status 500"), want: "live events: event stream returned status 500"},
+		{name: "permanent net.Error", err: permanentNetErr, want: "live events: permanent network failure"},
+		{
+			name: "TLS certificate verification",
+			err: &url.Error{
+				Op: "Get", URL: "https://service.example/events/live",
+				Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}},
+			},
+			want: "live events:",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, err := client.New("http://localhost")
