@@ -46,6 +46,6 @@ A `null` `max_workers` means inherit the global limit; `0` means no project work
 
 The backend implementation must use the same project settings parsing, validation, authorization, repository replacement/reclone safeguards, local-path restrictions, and persistence path as the existing browser update route. In particular, it must not create a second, weaker settings mutation path. The API response's repository path must reflect the persisted/managed checkout after an update.
 
-## Backend integration location
+## Backend integration delivery
 
-This terminal checkout is `openvibely-terminal`. The backend source tree is a separate repository at `/Users/dubee/go/src/github.com/openvibely/openvibely`; its current project API handler is `internal/handler/api_project_handler.go`, route registration is in `internal/handler/handler.go`, and its public contract is `docs/swagger.yaml`. That repository is outside this task's writable worktree. The terminal implementation and tests here are ready for those two routes and the corresponding Swagger definitions.
+The backend is a separate repository from this terminal task worktree, so its source changes are delivered as the apply-ready patch [`backend-project-settings-api.patch`](backend-project-settings-api.patch). The patch is based on backend commit `9cbd053d532966a506d04572d34aea5afd706ab0`; apply it from the backend repository root with `git apply /path/to/backend-project-settings-api.patch`. It includes the handlers, route registration, shared browser/API settings validation and persistence path, regression tests, and generated Swagger documentation. The backend checkout used to build and test the patch was left unchanged.
