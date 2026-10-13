@@ -541,6 +541,14 @@ func (m Model) fetchStatusCounts() tea.Cmd {
 // capacity. Project capacity is best-effort and remains independent of the
 // global capacity used as the health check.
 func (m Model) fetchStatusSnapshot(renderStatus bool, includeProjectCapacity bool) tea.Cmd {
+	return m.fetchStatusSnapshotWithCapacityLoader(renderStatus, includeProjectCapacity, func(ctx context.Context, projectID string) (*client.ProjectCapacity, error) {
+		return m.client.GetProjectCapacity(ctx, projectID)
+	})
+}
+
+// fetchStatusSnapshotWithCapacityLoader keeps the status fetch fan-out shared
+// while allowing the performance harness to compare capacity endpoint strategies.
+func (m Model) fetchStatusSnapshotWithCapacityLoader(renderStatus bool, includeProjectCapacity bool, loadProjectCapacity func(context.Context, string) (*client.ProjectCapacity, error)) tea.Cmd {
 	if m.selectedID == "" {
 		return nil
 	}
@@ -586,13 +594,10 @@ func (m Model) fetchStatusSnapshot(renderStatus bool, includeProjectCapacity boo
 		if includeProjectCapacity {
 			go func() {
 				defer wg.Done()
-				var capacities []client.ProjectCapacity
-				capacities, projectCapErr = c.GetProjectCapacities(ctx)
-				if projectCapErr == nil {
-					projectCap = findProjectCapacity(capacities, pid)
-					if projectCap == nil {
-						projectCapErr = fmt.Errorf("selected project capacity was not returned")
-					}
+				projectCap, projectCapErr = loadProjectCapacity(ctx, pid)
+				if projectCapErr == nil && (projectCap == nil || projectCap.ID != pid) {
+					projectCap = nil
+					projectCapErr = fmt.Errorf("selected project capacity was not returned")
 				}
 			}()
 		}

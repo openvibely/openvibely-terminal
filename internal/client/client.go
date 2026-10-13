@@ -583,6 +583,20 @@ func (c *Client) GetProjectCapacities(ctx context.Context) ([]ProjectCapacity, e
 	return out, nil
 }
 
+// GetProjectCapacity fetches worker capacity for a single project.
+func (c *Client) GetProjectCapacity(ctx context.Context, projectID string) (*ProjectCapacity, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("project ID is required")
+	}
+	var out ProjectCapacity
+	path := "/api/capacity/projects/" + url.PathEscape(projectID)
+	if err := c.getJSON(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SendChatMessage submits a chat message for async processing and returns
 // the accepted message ID for polling via GetChatStatus.
 func (c *Client) SendChatMessage(ctx context.Context, projectID, message string) (*ChatAccepted, error) {
