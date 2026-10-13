@@ -592,6 +592,22 @@ func (c *Client) postJSON(ctx context.Context, path string, body, out any) error
 	return c.doJSONMutationRequest(http.MethodPost, path, req, out)
 }
 
+// putJSON issues a JSON PUT and decodes a JSON response into out when non-nil.
+// Non-2xx statuses retain the API and authentication error classifications.
+func (c *Client) putJSON(ctx context.Context, path string, body, out any) error {
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := c.newRequest(ctx, http.MethodPut, path, bytes.NewReader(buf))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	return c.doJSONMutationRequest(http.MethodPut, path, req, out)
+}
+
 func (c *Client) doJSONMutationRequest(method, path string, req *http.Request, out any) error {
 	resp, err := c.http.Do(req)
 	if err != nil {

@@ -342,11 +342,11 @@ func TestRunProjectEditGlobalFlagShapedNameAfterBoundary(t *testing.T) {
 				switch {
 				case r.URL.Path == "/api/projects":
 					_, _ = fmt.Fprintf(w, `{"projects":[{"id":"p1","name":%q,"path":"/tmp/repo"}]}`, projectName)
-				case r.Method == http.MethodGet && r.URL.Path == "/projects/p1/edit":
-					_, _ = fmt.Fprintf(w, `<dialog id="edit_project_modal" data-local-repo-path-enabled="true"><form hx-put="/projects/p1"><input name="name" value=%q><textarea name="description">old</textarea><select name="repo_source"><option value="local" selected>Local</option></select><input name="repo_path" value="/tmp/repo"><input name="repo_url" value=""><select name="default_agent_config_id"><option value="" selected>Global</option></select><input name="max_workers" value=""></form></dialog>`, projectName)
-				case r.Method == http.MethodPut && r.URL.Path == "/projects/p1":
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects/p1/settings":
+					_, _ = fmt.Fprintf(w, `{"id":"p1","name":%q,"description":"old","repository_source":"local","repository_path":"/tmp/repo","github_url":"","default_agent_id":"","max_workers":null,"local_repository_paths_enabled":true,"available_agents":[]}`, projectName)
+				case r.Method == http.MethodPut && r.URL.Path == "/api/projects/p1/settings":
 					puts++
-					w.Header().Set("HX-Refresh", "true")
+					w.WriteHeader(http.StatusNoContent)
 				default:
 					http.NotFound(w, r)
 				}
