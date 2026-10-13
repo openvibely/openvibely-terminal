@@ -1282,12 +1282,17 @@ func scanCLIJSONNumber(raw []byte, pos int) (int, bool) {
 	return pos, pos > start
 }
 
-// runCLIEvents consumes exactly one project-scoped stream. eventsOn is the
-// normalized result of parseCLIEventsAction; argument validation belongs to
-// RunCLIContext. EOF is a clean foreground termination; transport and
-// authentication failures remain nonzero and use the same safe recovery text
-// as other CLI operations.
+// runCLIEvents monitors one selected project's event stream until cancellation or
+// a clean EOF. Transport failures and unexpected server-side stream closures are
+// retried with cancellation-aware backoff.
 func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectID string, eventsOn bool, jsonOutput bool) error {
+	return runCLIEventsWithRetryWait(ctx, c, out, projectID, jsonOutput, c.StreamEvents, waitCLIEventRetry)
+}
+
+type cliEventStreamFunc func(context.Context, string) (<-chan client.Event, <-chan error)
+type cliEventRetryWaitFunc func(context.Context, int) bool
+
+func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Writer, projectID string, jsonOutput bool, openStream cliEventStreamFunc, waitRetry cliEventRetryWaitFunc) error {
 	if strings.TrimSpace(projectID) == "" {
 		return errors.New("no project selected — use -project <name|id> and choose a project with live events")
 	}
@@ -1298,73 +1303,105 @@ func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectI
 		return nil
 	}
 
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	events, errs := c.StreamEvents(streamCtx, projectID)
-	var terminalErr error
-	for events != nil || errs != nil {
+	retryAttempt := 0
+	for {
 		if ctx.Err() != nil {
-			cancel()
-			drainCLIEventChannels(events, errs)
 			return nil
 		}
-		select {
-		case <-ctx.Done():
-			cancel()
-			drainCLIEventChannels(events, errs)
-			return nil
-		case ev, ok := <-events:
-			if !ok {
-				events = nil
-				continue
-			}
-			line, include, formatErr := formatCLIEventBytes(ev, projectID, jsonOutput)
-			if formatErr != nil {
-				cancel()
-				drainCLIEventChannels(events, errs)
-				return formatErr
-			}
-			if !include {
-				continue
-			}
-			if _, writeErr := out.Write(line); writeErr != nil {
-				cancel()
-				drainCLIEventChannels(events, errs)
-				return fmt.Errorf("writing live event output: %w", writeErr)
-			}
-			if _, writeErr := io.WriteString(out, "\n"); writeErr != nil {
-				cancel()
-				drainCLIEventChannels(events, errs)
-				return fmt.Errorf("writing live event output: %w", writeErr)
-			}
-		case streamErr, ok := <-errs:
-			if !ok {
-				errs = nil
-				continue
-			}
-			errs = nil
-			if streamErr != nil {
-				terminalErr = streamErr
-			}
-		}
-	}
 
-	if ctx.Err() != nil {
-		return nil
+		streamCtx, cancel := context.WithCancel(ctx)
+		events, errs := openStream(streamCtx, projectID)
+		var terminalErr error
+		var outputErr error
+		for events != nil || errs != nil {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return nil
+			case ev, ok := <-events:
+				if !ok {
+					events = nil
+					continue
+				}
+				line, include, formatErr := formatCLIEventBytes(ev, projectID, jsonOutput)
+				if formatErr != nil {
+					outputErr = formatErr
+					cancel()
+					break
+				}
+				if !include {
+					continue
+				}
+				if _, writeErr := out.Write(line); writeErr != nil {
+					outputErr = fmt.Errorf("writing live event output: %w", writeErr)
+					cancel()
+					break
+				}
+				if _, writeErr := io.WriteString(out, "\n"); writeErr != nil {
+					outputErr = fmt.Errorf("writing live event output: %w", writeErr)
+					cancel()
+					break
+				}
+			case streamErr, ok := <-errs:
+				if !ok {
+					errs = nil
+					continue
+				}
+				errs = nil
+				if streamErr != nil {
+					terminalErr = streamErr
+				}
+			}
+			if outputErr != nil {
+				break
+			}
+		}
+		cancel()
+		if outputErr != nil {
+			return outputErr
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if terminalErr == nil || errors.Is(terminalErr, io.EOF) || errors.Is(terminalErr, client.ErrEventStreamClosed) {
+			return nil
+		}
+		if client.IsAuthRequired(terminalErr) {
+			return errors.New(authRecoveryMessage(c.BaseURL()))
+		}
+		if client.IsInvalidServerURL(terminalErr) {
+			return errors.New(InvalidServerURLMessage(c.BaseURL()))
+		}
+		if !client.IsTransportError(terminalErr) && !errors.Is(terminalErr, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("live events: %w", terminalErr)
+		}
+
+		retryAttempt++
+		if !waitRetry(ctx, retryAttempt) {
+			return cliContextResult(ctx)
+		}
 	}
-	if terminalErr == nil || errors.Is(terminalErr, client.ErrEventStreamClosed) {
-		return nil
+}
+
+const cliEventRetryInitial = time.Second
+const cliEventRetryMaximum = 30 * time.Second
+
+func waitCLIEventRetry(ctx context.Context, attempt int) bool {
+	delay := cliEventRetryInitial
+	for i := 1; i < attempt && delay < cliEventRetryMaximum; i++ {
+		delay *= 2
 	}
-	if client.IsAuthRequired(terminalErr) {
-		return errors.New(authRecoveryMessage(c.BaseURL()))
+	if delay > cliEventRetryMaximum {
+		delay = cliEventRetryMaximum
 	}
-	if client.IsInvalidServerURL(terminalErr) {
-		return errors.New(InvalidServerURLMessage(c.BaseURL()))
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
-	if client.IsTransportError(terminalErr) {
-		return errors.New(OfflineRecoveryMessage(c.BaseURL(), terminalErr))
-	}
-	return fmt.Errorf("live events: %w", terminalErr)
 }
 
 func parseCLIEventsAction(args []string) (bool, error) {
@@ -1381,21 +1418,6 @@ func parseCLIEventsAction(args []string) (bool, error) {
 		return false, nil
 	default:
 		return false, errors.New("usage: events [on|off]")
-	}
-}
-
-func drainCLIEventChannels(events <-chan client.Event, errs <-chan error) {
-	for events != nil || errs != nil {
-		select {
-		case _, ok := <-events:
-			if !ok {
-				events = nil
-			}
-		case _, ok := <-errs:
-			if !ok {
-				errs = nil
-			}
-		}
 	}
 }
 
