@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
@@ -2452,6 +2454,76 @@ func TestModelsEditOptionGuidanceMatchesParserOptions(t *testing.T) {
 	}
 	if !strings.Contains(help, "  options: --api-key-stdin | --oauth | --endpoint <http(s)://base-url> | --default-max-tokens <n>") {
 		t.Fatalf("models add guidance changed unexpectedly:\n%s", help)
+	}
+}
+
+func TestModelProviderChoicesStayConsistentAcrossSetupSurfaces(t *testing.T) {
+	wantProviders := []string{"anthropic", "openai", "ollama", "openai_compatible"}
+	if got := modelAddProviderChoices(); !slices.Equal(got, wantProviders) {
+		t.Fatalf("model provider choices = %v, want %v", got, wantProviders)
+	}
+
+	cmd := lookupCommand("models")
+	if cmd == nil {
+		t.Fatal("models command missing")
+	}
+	help := renderCommandHelp(*cmd)
+	completion := registryCompletionValues("models", "add")
+	wizardPrompt := modelAddProviderPrompt()
+	c, err := client.New("http://localhost")
+	if err != nil {
+		t.Fatalf("create test client: %v", err)
+	}
+	for _, provider := range wantProviders {
+		t.Run(provider, func(t *testing.T) {
+			if _, err := normalizeModelAddProvider(provider); err != nil {
+				t.Errorf("provider normalization rejected supported provider: %v", err)
+			}
+			if !strings.Contains(help, provider) {
+				t.Errorf("models help does not list %q", provider)
+			}
+			if !slices.Contains(completion, provider) {
+				t.Errorf("models add completion does not list %q: %v", provider, completion)
+			}
+			m := New(c)
+			m, _ = m.beginModelWizard()
+			if m.input.Prompt != wizardPrompt+": " || !strings.Contains(wizardPrompt, provider) {
+				t.Errorf("guided setup prompt %q does not offer %q", m.input.Prompt, provider)
+			}
+			m.input.SetValue(provider)
+			updated, _ := m.handleModelWizardKey(tea.KeyMsg{Type: tea.KeyEnter})
+			m = updated.(Model)
+			if m.modelWizard == nil || m.modelWizard.spec.Provider != provider || m.modelWizard.index != 1 {
+				t.Errorf("guided setup rejected %q: wizard=%#v", provider, m.modelWizard)
+			}
+
+			args := []string{provider, "Example", "example-model"}
+			switch provider {
+			case "anthropic", "openai":
+				args = append(args, "--oauth")
+			case "openai_compatible":
+				args = append(args, "--endpoint", "http://localhost:8000/v1", "--default-max-tokens", "4096")
+			}
+			if _, err := parseModelAddArgs(args); err != nil {
+				t.Errorf("parseModelAddArgs rejected supported provider: %v", err)
+			}
+		})
+	}
+
+	unknown := "not_a_provider"
+	if _, err := normalizeModelAddProvider(unknown); err == nil {
+		t.Fatalf("unknown provider %q was accepted", unknown)
+	} else {
+		for _, provider := range wantProviders {
+			if !strings.Contains(err.Error(), provider) {
+				t.Errorf("unknown provider error %q omits supported provider %q", err, provider)
+			}
+		}
+	}
+	if _, err := parseModelAddArgs([]string{unknown, "Example", "example-model"}); err == nil {
+		t.Fatalf("parseModelAddArgs accepted unknown provider %q", unknown)
+	} else if !strings.Contains(err.Error(), modelAddProviderList()) {
+		t.Errorf("unknown provider parse error %q does not list supported providers %q", err, modelAddProviderList())
 	}
 }
 
