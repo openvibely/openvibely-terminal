@@ -1285,17 +1285,23 @@ func scanCLIJSONNumber(raw []byte, pos int) (int, bool) {
 	return pos, pos > start
 }
 
-// runCLIEvents monitors one selected project's event stream until cancellation or
-// a clean EOF. Transport failures and unexpected server-side stream closures are
-// retried with cancellation-aware backoff.
+// runCLIEvents monitors one selected project's event stream until cancellation
+// or server closure. The one-shot CLI command does not reconnect.
 func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectID string, eventsOn bool, jsonOutput bool) error {
-	return runCLIEventsWithRetryWait(ctx, c, out, projectID, jsonOutput, c.StreamEvents, waitCLIEventRetry)
+	if !eventsOn {
+		return errors.New(cliEventsOffMessage)
+	}
+	return runCLIEventsWithRetryPolicy(ctx, c, out, projectID, jsonOutput, c.StreamEvents, waitCLIEventRetry, false)
 }
 
 type cliEventStreamFunc func(context.Context, string) (<-chan client.Event, <-chan error)
 type cliEventRetryWaitFunc func(context.Context, int) bool
 
 func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Writer, projectID string, jsonOutput bool, openStream cliEventStreamFunc, waitRetry cliEventRetryWaitFunc) error {
+	return runCLIEventsWithRetryPolicy(ctx, c, out, projectID, jsonOutput, openStream, waitRetry, true)
+}
+
+func runCLIEventsWithRetryPolicy(ctx context.Context, c *client.Client, out io.Writer, projectID string, jsonOutput bool, openStream cliEventStreamFunc, waitRetry cliEventRetryWaitFunc, reconnect bool) error {
 	if strings.TrimSpace(projectID) == "" {
 		return errors.New("no project selected — use -project <name|id> and choose a project with live events")
 	}
@@ -1369,6 +1375,9 @@ func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Wri
 		if terminalErr == nil || errors.Is(terminalErr, io.EOF) {
 			return nil
 		}
+		if !reconnect && errors.Is(terminalErr, client.ErrEventStreamClosed) {
+			return nil
+		}
 		if client.IsAuthRequired(terminalErr) {
 			return errors.New(authRecoveryMessage(c.BaseURL()))
 		}
@@ -1376,6 +1385,9 @@ func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Wri
 			return errors.New(InvalidServerURLMessage(c.BaseURL()))
 		}
 		if !isRetryableCLIEventTransportError(terminalErr) && !errors.Is(terminalErr, io.ErrUnexpectedEOF) && !errors.Is(terminalErr, client.ErrEventStreamClosed) {
+			return fmt.Errorf("live events: %w", terminalErr)
+		}
+		if !reconnect {
 			return fmt.Errorf("live events: %w", terminalErr)
 		}
 
