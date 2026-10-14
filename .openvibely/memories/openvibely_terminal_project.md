@@ -21,7 +21,7 @@ Go terminal client built with Bubble Tea, Bubbles, and Lipgloss. It is separate 
 - Destructive interactive actions require `⚠ Type 'yes' to confirm or Esc to cancel`; headless destructive actions require `--force`/`-f`.
 - Live backend integration is opt-in. Runtime checks require a fresh build so stale binaries cannot hide source changes.
 - Validate Go changes with focused tests, formatting, build, vet, ordinary full tests, and diff checks. Use targeted race tests for concurrency-sensitive work or explicit acceptance criteria. Exact-`HEAD` evidence belongs in durable Git notes.
-- The module declares Go `1.27.1`; GitHub Actions uses `go-version-file: go.mod`. There is no `toolchain` directive or alternate Go-version configuration.
+- The module declares Go `1.27.2`; GitHub Actions uses `go-version-file: go.mod`. There is no `toolchain` directive or alternate Go-version configuration.
 - Release/install support is Unix-oriented through local `make build` and Ubuntu-only CI; there are no release artifacts, release workflow, or discoverable platform-specific installation paths.
 
 ## Backend And Client Contracts
