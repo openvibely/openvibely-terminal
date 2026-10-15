@@ -860,18 +860,16 @@ func memoryTitleFromFile(handle string) string {
 
 func readIndexedMemory(ctx context.Context, root string, entry memoryIndexEntry) (Memory, string, []string, error) {
 	base := Memory{File: entry.File, Title: entry.Title, Summary: entry.Summary, Snippet: "", Body: ""}
+	if err := contextErr(ctx); err != nil {
+		return base, "", nil, err
+	}
 	if _, err := safeMemoryPath(root, entry.File); err != nil {
 		return base, "", []string{memoryFileUnsafeWarning(entry.File)}, errors.New("memory: indexed file reference is unsafe")
 	}
 	data, err := readMemoryTarget(ctx, root, entry.File, maxMemoryFileBytes)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return base, "", nil, err
-		}
-		if errors.Is(err, errMemoryPathUnsafe) || errors.Is(err, errMemoryFileChanged) {
-			return base, "", []string{memoryFileUnsafeWarning(entry.File)}, errors.New("memory: unable to read indexed memory file")
-		}
-		return base, "", []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
+		warnings, readErr := indexedMemoryReadFailure(entry.File, err)
+		return base, "", warnings, readErr
 	}
 	memory, content, warnings := parseMemoryDocument(entry, string(data))
 	return memory, content, warnings, nil
@@ -885,13 +883,8 @@ func readIndexedMemoryForSearchCached(ctx context.Context, root string, entry me
 	base := Memory{File: entry.File, Title: entry.Title, Summary: entry.Summary, Snippet: "", Body: ""}
 	file, info, err := openMemoryTargetForRead(ctx, root, entry.File)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return base, false, nil, err
-		}
-		if errors.Is(err, errMemoryPathUnsafe) || errors.Is(err, errMemoryFileChanged) {
-			return base, false, []string{memoryFileUnsafeWarning(entry.File)}, errors.New("memory: unable to read indexed memory file")
-		}
-		return base, false, []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
+		warnings, readErr := indexedMemoryReadFailure(entry.File, err)
+		return base, false, warnings, readErr
 	}
 	defer file.Close()
 	memorySearchIOStats.addOpen()
@@ -902,10 +895,8 @@ func readIndexedMemoryForSearchCached(ctx context.Context, root string, entry me
 
 	memory, bodyMatch, warnings, err := scanMemorySearchDocument(ctx, file, info, maxMemoryFileBytes, entry, lowerQuery, metadataMatch)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return base, false, nil, err
-		}
-		return base, false, []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
+		warnings, readErr := indexedMemoryReadFailure(entry.File, err)
+		return base, false, warnings, readErr
 	}
 	if after, statErr := file.Stat(); statErr == nil {
 		cache.store(key, info, after, memory, bodyMatch, warnings)
@@ -1847,6 +1838,16 @@ func memoryFileReadWarning(handle string, err error) string {
 	return sanitizeMemoryWarning(warning)
 }
 
+func indexedMemoryReadFailure(handle string, err error) ([]string, error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil, err
+	}
+	if errors.Is(err, errMemoryPathUnsafe) || errors.Is(err, errMemoryFileChanged) {
+		return []string{memoryFileUnsafeWarning(handle)}, errors.New("memory: unable to read indexed memory file")
+	}
+	return []string{memoryFileReadWarning(handle, err)}, errors.New("memory: unable to read indexed memory file")
+}
+
 func parseMemoryDocument(entry memoryIndexEntry, raw string) (Memory, string, []string) {
 	raw = strings.ToValidUTF8(strings.ReplaceAll(raw, "\r\n", "\n"), "\uFFFD")
 	metadata, content, warnings := parseMemoryFrontMatter(raw)
@@ -2276,6 +2277,10 @@ func evalMemoryPathLenient(value string) (string, error) {
 }
 
 func openMemoryTargetForRead(ctx context.Context, root, handle string) (*os.File, os.FileInfo, error) {
+	return openMemoryTargetForReadWithOpener(ctx, root, handle, openMemoryFile)
+}
+
+func openMemoryTargetForReadWithOpener(ctx context.Context, root, handle string, opener func(string) (*os.File, error)) (*os.File, os.FileInfo, error) {
 	if err := contextErr(ctx); err != nil {
 		return nil, nil, err
 	}
@@ -2299,7 +2304,14 @@ func openMemoryTargetForRead(ctx context.Context, root, handle string) (*os.File
 	if checkedPath != filePath {
 		return nil, nil, errMemoryFileChanged
 	}
-	file, err := openMemoryFile(filePath)
+	return openAndVerifyMemoryFile(ctx, filePath, info, opener)
+}
+
+func openAndVerifyMemoryFile(ctx context.Context, filePath string, expectedInfo os.FileInfo, opener func(string) (*os.File, error)) (*os.File, os.FileInfo, error) {
+	if err := contextErr(ctx); err != nil {
+		return nil, nil, err
+	}
+	file, err := opener(filePath)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2312,7 +2324,7 @@ func openMemoryTargetForRead(ctx context.Context, root, handle string) (*os.File
 		file.Close()
 		return nil, nil, errMemoryFileNotRegular
 	}
-	if !os.SameFile(info, openedInfo) {
+	if !os.SameFile(expectedInfo, openedInfo) {
 		file.Close()
 		return nil, nil, errMemoryFileChanged
 	}
@@ -2320,51 +2332,24 @@ func openMemoryTargetForRead(ctx context.Context, root, handle string) (*os.File
 }
 
 func readMemoryTarget(ctx context.Context, root, handle string, maxBytes int64) ([]byte, error) {
-	if err := contextErr(ctx); err != nil {
-		return nil, err
-	}
-	filePath, err := safeMemoryTarget(root, handle)
-	if err != nil {
-		return nil, errMemoryPathUnsafe
-	}
-	info, err := os.Stat(filePath)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, errMemoryFileNotRegular
-	}
-	// Re-check the trust boundary after the path stat. If the memory directory
-	// was replaced while it was being inspected, do not open the replacement.
-	checkedPath, err := safeMemoryTarget(root, handle)
-	if err != nil {
-		return nil, errMemoryPathUnsafe
-	}
-	if checkedPath != filePath {
-		return nil, errMemoryFileChanged
-	}
-	return readMemoryFile(ctx, filePath, info, maxBytes)
-}
-
-func readMemoryFile(ctx context.Context, filePath string, expectedInfo os.FileInfo, maxBytes int64) ([]byte, error) {
-	if err := contextErr(ctx); err != nil {
-		return nil, err
-	}
-	file, err := openMemoryFile(filePath)
+	file, _, err := openMemoryTargetForRead(ctx, root, handle)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	openedInfo, err := file.Stat()
+	return readOpenedMemoryFile(ctx, file, maxBytes)
+}
+
+func readMemoryFile(ctx context.Context, filePath string, expectedInfo os.FileInfo, maxBytes int64) ([]byte, error) {
+	file, _, err := openAndVerifyMemoryFile(ctx, filePath, expectedInfo, openMemoryFile)
 	if err != nil {
 		return nil, err
 	}
-	if !openedInfo.Mode().IsRegular() {
-		return nil, errMemoryFileNotRegular
-	}
-	if !os.SameFile(expectedInfo, openedInfo) {
-		return nil, errMemoryFileChanged
-	}
+	defer file.Close()
+	return readOpenedMemoryFile(ctx, file, maxBytes)
+}
+
+func readOpenedMemoryFile(ctx context.Context, file *os.File, maxBytes int64) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return nil, err

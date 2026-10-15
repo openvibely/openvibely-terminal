@@ -102,4 +102,23 @@ func TestMemoryRejectsFIFOWithoutBlocking(t *testing.T) {
 	if len(document.Warnings) != 1 || !strings.Contains(document.Warnings[0], "not a regular file") {
 		t.Fatalf("FIFO topic warnings = %#v", document.Warnings)
 	}
+
+	searchDone := make(chan struct{})
+	var search MemorySearch
+	var searchErr error
+	go func() {
+		search, searchErr = (&Client{}).SearchMemories(context.Background(), Project{Path: repo}, "pipe")
+		close(searchDone)
+	}()
+	select {
+	case <-searchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SearchMemories blocked while reading a FIFO topic")
+	}
+	if searchErr != nil {
+		t.Fatalf("FIFO topic search error = %v", searchErr)
+	}
+	if len(search.Warnings) != 1 || !strings.Contains(search.Warnings[0], "not a regular file") {
+		t.Fatalf("FIFO topic search warnings = %#v", search.Warnings)
+	}
 }
