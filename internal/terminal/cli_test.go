@@ -12448,7 +12448,8 @@ func TestRunCLIEventsJSONPreservesScopeAndBurstOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := runCLIEvents(context.Background(), c, &out, "p1", true, true); err != nil {
+	// This test checks one finite burst; production reconnects after stream closure.
+	if err := runCLIEventsWithRetryWait(context.Background(), c, &out, "p1", true, c.StreamEvents, func(context.Context, int) bool { return false }); err != nil {
 		t.Fatalf("runCLIEvents() error = %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -13000,6 +13001,31 @@ func BenchmarkFormatCLIEventRecognizedPlain(b *testing.B) {
 	}
 }
 
+// finiteCLIEventWriter cancels the foreground monitor after the expected
+// burst has been written, rather than waiting for a reconnecting stream to end.
+type finiteCLIEventWriter struct {
+	out       io.Writer
+	cancel    context.CancelFunc
+	remaining int
+}
+
+func (w *finiteCLIEventWriter) Write(p []byte) (int, error) {
+	n, err := w.out.Write(p)
+	w.remaining -= bytes.Count(p[:n], []byte("\n"))
+	if w.remaining <= 0 {
+		w.cancel()
+	}
+	return n, err
+}
+
+func runFiniteCLIEvents(t *testing.T, c *client.Client, out io.Writer, project string, args []string, jsonOutput bool, lines int) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	writer := &finiteCLIEventWriter{out: out, cancel: cancel, remaining: lines}
+	return RunCLIContext(ctx, c, writer, project, args, false, jsonOutput)
+}
+
 func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 	var mu sync.Mutex
 	var eventRequests []string
@@ -13034,7 +13060,7 @@ func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunCLI(c, writer, "Demo Project", []string{"events", "on"}, false, false); err != nil {
+	if err := runFiniteCLIEvents(t, c, writer, "Demo Project", []string{"events", "on"}, false, 2); err != nil {
 		t.Fatalf("events on failed: %v", err)
 	}
 
@@ -13092,7 +13118,7 @@ func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T)
 				t.Fatal(err)
 			}
 			var out bytes.Buffer
-			if err := RunCLI(c, &out, "demo", []string{"events", "on"}, false, tc.jsonOutput); err != nil {
+			if err := runFiniteCLIEvents(t, c, &out, "demo", []string{"events", "on"}, tc.jsonOutput, 2); err != nil {
 				t.Fatalf("events on failed: %v", err)
 			}
 
@@ -13151,7 +13177,7 @@ func TestCLIEventsJSONEmitsValidStableLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"events", "on"}, false, true); err != nil {
+	if err := runFiniteCLIEvents(t, c, &out, "demo", []string{"events", "on"}, true, 1); err != nil {
 		t.Fatalf("JSON events on failed: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -13365,7 +13391,7 @@ func TestCLIEventsUsesAuthenticatedCookieSession(t *testing.T) {
 		t.Fatalf("login: %v", err)
 	}
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "private", []string{"events", "on"}, false, false); err != nil {
+	if err := runFiniteCLIEvents(t, c, &out, "private", []string{"events", "on"}, false, 1); err != nil {
 		t.Fatalf("authenticated events stream failed: %v", err)
 	}
 	if !strings.Contains(out.String(), "authenticated") {
@@ -13395,7 +13421,7 @@ func TestCLIBareEventsResolvesExplicitProjectID(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "p2", []string{"events"}, false, false); err != nil {
+	if err := runFiniteCLIEvents(t, c, &out, "p2", []string{"events"}, false, 1); err != nil {
 		t.Fatalf("bare events failed: %v", err)
 	}
 	if eventRequest != "/events/live?project_id=p2" {

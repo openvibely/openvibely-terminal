@@ -1769,6 +1769,7 @@ var cliCommandPolicies = map[string]cliCommandPolicy{
 	"quit":     cliNoBackendPolicy(),
 	"clear":    cliNoBackendPolicy(),
 	"login":    cliNoBackendPolicy(),
+	"server":   cliNoBackendPolicy(),
 	"setup":    cliNoBackendPolicy(),
 	"project":  {backendRequired: true, projectScopeMode: cliProjectScopeNever},
 	"projects": {backendRequired: true, projectScopeMode: cliProjectScopeNever, skipProjectLoadActions: cliActionSet("create", "github-create"), helpGlobalActions: []string{"list", "create", "show", "edit", "delete"}},

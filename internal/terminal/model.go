@@ -161,6 +161,7 @@ type Model struct {
 	connInvalidServerURL      bool // connErr came from malformed configured server URL
 	connReachableError        bool // connErr came from a responding but unhealthy backend
 	statusProjectsUnavailable bool // one-shot status could not list projects; global rows remain useful
+	serverSwitchRequestID     uint64
 	capacity                  *client.GlobalCapacity
 	projectCapacity           *client.ProjectCapacity
 	projectCapUnavailable     bool
@@ -966,47 +967,53 @@ func (m *Model) cancelWebhookBulkLookup() {
 func (m *Model) setActiveProject(project client.Project) bool {
 	changed := m.selectedID != project.ID
 	if changed {
-		m.cancelWebhookBulkLookup()
-		// Preserve accepted bytes before project invalidation makes a queued
-		// cadence render stale and resets the old project's stream state.
-		m.flushChatStreamOutput()
-		m.advanceProjectGeneration()
-		m.invalidateChatStream()
-		m.resetChatPoll()
-		m.resetChatStreamOutput()
-		m.pendingMsgID = ""
-		m.pendingMsgExecutionID = ""
-		m.pendingMsgProjectID = ""
-		m.pendingMsgProjectGeneration = 0
-		m.pendingMsgTaskID = ""
-		m.pendingMsgThreadRequestID = 0
-		m.chatSubmissionPending = false
-		m.busy = false
-		m.invalidatePersonalityBulkLookup()
-		m.invalidateWorkersLive()
-		m.pendingConfirmation = nil
-		m.clearSkillEditor()
-		m.clearAutomationEdit()
-		if m.selectorActive {
-			*m = m.clearSelector()
-		}
-		*m = (*m).clearReviewPrefill()
-		m.threadID, m.threadTitle, m.threadStatus = "", "", ""
-		m.threadReplyPendingRequestID = 0
-		m.pendingAlertCount = 0
-		m.activeTaskCount = 0
-		m.queuedTaskCount = 0
-		m.failedTaskCount = 0
-		m.projectCapacity = nil
-		m.projectCapUnavailable = false
-		m.alertsCountUnavailable = false
-		m.tasksCountUnavailable = false
-		m.input.Placeholder = defaultPlaceholder
-		m.invalidateSSE()
+		m.resetProjectScopedState()
 	}
 	m.selectedID = project.ID
 	m.selectedName = project.Name
 	return changed
+}
+
+// resetProjectScopedState invalidates chat, thread, selector, editor, count,
+// and stream state owned by the current project context.
+func (m *Model) resetProjectScopedState() {
+	m.cancelWebhookBulkLookup()
+	// Preserve accepted bytes before project invalidation makes a queued
+	// cadence render stale and resets the old project's stream state.
+	m.flushChatStreamOutput()
+	m.advanceProjectGeneration()
+	m.invalidateChatStream()
+	m.resetChatPoll()
+	m.resetChatStreamOutput()
+	m.pendingMsgID = ""
+	m.pendingMsgExecutionID = ""
+	m.pendingMsgProjectID = ""
+	m.pendingMsgProjectGeneration = 0
+	m.pendingMsgTaskID = ""
+	m.pendingMsgThreadRequestID = 0
+	m.chatSubmissionPending = false
+	m.busy = false
+	m.invalidatePersonalityBulkLookup()
+	m.invalidateWorkersLive()
+	m.pendingConfirmation = nil
+	m.clearSkillEditor()
+	m.clearAutomationEdit()
+	if m.selectorActive {
+		*m = m.clearSelector()
+	}
+	*m = (*m).clearReviewPrefill()
+	m.threadID, m.threadTitle, m.threadStatus = "", "", ""
+	m.threadReplyPendingRequestID = 0
+	m.pendingAlertCount = 0
+	m.activeTaskCount = 0
+	m.queuedTaskCount = 0
+	m.failedTaskCount = 0
+	m.projectCapacity = nil
+	m.projectCapUnavailable = false
+	m.alertsCountUnavailable = false
+	m.tasksCountUnavailable = false
+	m.input.Placeholder = defaultPlaceholder
+	m.invalidateSSE()
 }
 
 func (m *Model) acceptsConnectionResponse(generation int) bool {
@@ -2307,6 +2314,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case serverSwitchMsg:
+		return m.handleServerSwitch(msg)
 	case statusCountsMsg:
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 			return m, nil // stale status counts from an older session or project
@@ -3819,7 +3828,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	commandInput := isSlashCommandInput(text)
 	displayText := text
 	if commandInput {
-		displayText = redactModelCommandSecrets(redactChannelCommandSecrets(text))
+		displayText = redactServerCommandSecrets(redactModelCommandSecrets(redactChannelCommandSecrets(text)))
 		displayText = sanitizeAutomationDetailText(displayText)
 	}
 	m.pushHistory(displayText)

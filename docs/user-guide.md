@@ -352,6 +352,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/project <name\|id>` | | select the active project by exact name/ID, unique prefix, or unique name substring |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
 | `/setup` | | read-only backend installation, startup, health, and remote-connection guidance |
+| `/server [url] [--login]` | `connect` | show the backend URL; `/server <url>` checks another local or remote server, then switches to it, reloads projects, and clears the previous backend's transcript, thread, selections, and live stream; failures keep the current connection; `--login` switches to a protected server and opens `/login` |
 | `/login` | `signin`, `auth` | enter username and masked password; retry the session without restarting |
 | `/events` | `stream`, `log` | interactive `on` / `off` display toggle; one-shot `events on` foreground monitor |
 | `/clear` | | clear the transcript |

@@ -53,6 +53,7 @@ func init() {
 		projectsCommand(),
 		statusCommand(),
 		setupCommand(),
+		serverCommand(),
 		loginCommand(),
 		eventsCommand(),
 		chatCommand(),
