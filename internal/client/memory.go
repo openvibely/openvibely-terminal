@@ -170,7 +170,10 @@ func (c *Client) SearchMemories(ctx context.Context, project Project, query stri
 			return result, fmt.Errorf("%w; %v", errMemoryBackendUnsupported, fallbackErr)
 		}
 	}
-	return searchLocalMemories(ctx, project, query)
+	if c == nil {
+		return searchLocalMemories(ctx, project, query)
+	}
+	return searchLocalMemoriesCached(ctx, project, query, &c.memorySearchCache)
 }
 
 func listLocalMemories(ctx context.Context, project Project) (MemoryList, error) {
@@ -223,6 +226,10 @@ func showLocalMemory(ctx context.Context, project Project, reference string) (Me
 }
 
 func searchLocalMemories(ctx context.Context, project Project, query string) (MemorySearch, error) {
+	return searchLocalMemoriesCached(ctx, project, query, nil)
+}
+
+func searchLocalMemoriesCached(ctx context.Context, project Project, query string, cache *memorySearchCache) (MemorySearch, error) {
 	query = strings.TrimSpace(query)
 	result := MemorySearch{
 		Query:    query,
@@ -247,7 +254,7 @@ func searchLocalMemories(ctx context.Context, project Project, query string) (Me
 			strings.Contains(strings.ToLower(entry.Title), lowerQuery) ||
 			strings.Contains(strings.ToLower(entry.Summary), lowerQuery)
 
-		memory, bodyMatch, fileWarnings, readErr := readIndexedMemoryForSearch(ctx, root, entry, lowerQueryBytes, metadataMatch)
+		memory, bodyMatch, fileWarnings, readErr := readIndexedMemoryForSearchCached(ctx, root, entry, lowerQueryBytes, metadataMatch, cache, project.ID)
 		for _, warning := range fileWarnings {
 			appendMemoryWarning(&result.Warnings, warning)
 		}
@@ -871,6 +878,10 @@ func readIndexedMemory(ctx context.Context, root string, entry memoryIndexEntry)
 }
 
 func readIndexedMemoryForSearch(ctx context.Context, root string, entry memoryIndexEntry, lowerQuery []byte, metadataMatch bool) (Memory, bool, []string, error) {
+	return readIndexedMemoryForSearchCached(ctx, root, entry, lowerQuery, metadataMatch, nil, "")
+}
+
+func readIndexedMemoryForSearchCached(ctx context.Context, root string, entry memoryIndexEntry, lowerQuery []byte, metadataMatch bool, cache *memorySearchCache, projectID string) (Memory, bool, []string, error) {
 	base := Memory{File: entry.File, Title: entry.Title, Summary: entry.Summary, Snippet: "", Body: ""}
 	file, info, err := openMemoryTargetForRead(ctx, root, entry.File)
 	if err != nil {
@@ -883,6 +894,11 @@ func readIndexedMemoryForSearch(ctx context.Context, root string, entry memoryIn
 		return base, false, []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
 	}
 	defer file.Close()
+	memorySearchIOStats.addOpen()
+	key := memorySearchCacheKey{root: root, project: projectID, entry: entry, query: string(lowerQuery), metadataMatch: metadataMatch}
+	if hit, ok := cache.lookup(key, info); ok {
+		return hit.memory, hit.match, append([]string(nil), hit.warnings...), nil
+	}
 
 	memory, bodyMatch, warnings, err := scanMemorySearchDocument(ctx, file, info, maxMemoryFileBytes, entry, lowerQuery, metadataMatch)
 	if err != nil {
@@ -890,6 +906,9 @@ func readIndexedMemoryForSearch(ctx context.Context, root string, entry memoryIn
 			return base, false, nil, err
 		}
 		return base, false, []string{memoryFileReadWarning(entry.File, err)}, errors.New("memory: unable to read indexed memory file")
+	}
+	if after, statErr := file.Stat(); statErr == nil {
+		cache.store(key, info, after, memory, bodyMatch, warnings)
 	}
 	return memory, bodyMatch, warnings, nil
 }
@@ -908,6 +927,7 @@ func scanMemorySearchDocument(ctx context.Context, file *os.File, info os.FileIn
 		chunk, err := reader.ReadSlice('\n')
 		if len(chunk) > 0 {
 			readBytes += int64(len(chunk))
+			memorySearchIOStats.addBytes(len(chunk))
 			if readBytes > maxBytes {
 				return Memory{}, false, nil, errMemoryFileTooLarge
 			}
