@@ -880,6 +880,41 @@ func TestMemorySearchPreservesEightMiBReadBound(t *testing.T) {
 	}
 }
 
+func TestMemoryOversizedNoteIsRejectedOnReadAndSearch(t *testing.T) {
+	repo := t.TempDir()
+	writeProjectMemory(t, repo, "- [Too Large](too-large.md)\n", map[string]string{
+		"too-large.md": strings.Repeat("x", maxMemoryFileBytes+1),
+	})
+	root := filepath.Join(repo, projectMemoryDirectory)
+	if _, err := readMemoryTarget(context.Background(), root, "too-large.md", maxMemoryFileBytes); !errors.Is(err, errMemoryFileTooLarge) {
+		t.Fatalf("oversized read error = %v, want %v", err, errMemoryFileTooLarge)
+	}
+
+	document, err := (&Client{}).ShowMemory(context.Background(), Project{Path: repo}, "too-large.md")
+	if err == nil || !strings.Contains(err.Error(), "unable to read indexed memory file") {
+		t.Fatalf("oversized ShowMemory error = %v, want indexed read error", err)
+	}
+	if len(document.Warnings) != 1 || document.Warnings[0] != `memory file "too-large.md" could not be read` {
+		t.Fatalf("oversized show warnings = %#v", document.Warnings)
+	}
+	showJSON, err := json.Marshal(document)
+	if err != nil || !strings.Contains(string(showJSON), `"warnings":["memory file \"too-large.md\" could not be read"]`) {
+		t.Fatalf("oversized show JSON = %s, err=%v", showJSON, err)
+	}
+
+	search, err := (&Client{}).SearchMemories(context.Background(), Project{Path: repo}, "too large")
+	if err != nil {
+		t.Fatalf("oversized SearchMemories: %v", err)
+	}
+	if len(search.Warnings) != 1 || search.Warnings[0] != `memory file "too-large.md" could not be read` {
+		t.Fatalf("oversized search warnings = %#v", search.Warnings)
+	}
+	searchJSON, err := json.Marshal(search)
+	if err != nil || !strings.Contains(string(searchJSON), `"warnings":["memory file \"too-large.md\" could not be read"]`) {
+		t.Fatalf("oversized search JSON = %s, err=%v", searchJSON, err)
+	}
+}
+
 func TestMemorySearchHonorsCancellation(t *testing.T) {
 	repo := t.TempDir()
 	writeProjectMemory(t, repo, "- [Known](known.md)\n", map[string]string{"known.md": "known"})
@@ -892,6 +927,16 @@ func TestMemorySearchHonorsCancellation(t *testing.T) {
 	}
 	if result.Memories == nil || result.Warnings == nil {
 		t.Fatalf("canceled result collections must remain non-nil: %#v", result)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("canceled search warnings = %#v, want none", result.Warnings)
+	}
+	document, showErr := (&Client{}).ShowMemory(ctx, Project{Path: repo}, "known.md")
+	if !errors.Is(showErr, context.Canceled) {
+		t.Fatalf("canceled ShowMemory error = %v, want context cancellation", showErr)
+	}
+	if len(document.Warnings) != 0 {
+		t.Fatalf("canceled show warnings = %#v, want none", document.Warnings)
 	}
 }
 
@@ -1202,6 +1247,45 @@ func TestReadMemoryFileRejectsReplacementAfterValidation(t *testing.T) {
 	}
 }
 
+func TestOpenMemoryTargetRejectsReplacementAfterValidation(t *testing.T) {
+	repo := t.TempDir()
+	root := filepath.Join(repo, projectMemoryDirectory)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("MkdirAll memory root: %v", err)
+	}
+	filePath := filepath.Join(root, "note.md")
+	replacementPath := filepath.Join(root, "replacement.md")
+	if err := os.WriteFile(filePath, []byte("original"), 0o644); err != nil {
+		t.Fatalf("WriteFile original: %v", err)
+	}
+	if err := os.WriteFile(replacementPath, []byte("replacement"), 0o644); err != nil {
+		t.Fatalf("WriteFile replacement: %v", err)
+	}
+
+	file, _, err := openMemoryTargetForReadWithOpener(context.Background(), root, "note.md", func(name string) (*os.File, error) {
+		if removeErr := os.Remove(filePath); removeErr != nil {
+			return nil, removeErr
+		}
+		if renameErr := os.Rename(replacementPath, filePath); renameErr != nil {
+			return nil, renameErr
+		}
+		return openMemoryFile(name)
+	})
+	if file != nil {
+		file.Close()
+	}
+	if !errors.Is(err, errMemoryFileChanged) {
+		t.Fatalf("replacement-after-validation error = %v, want %v", err, errMemoryFileChanged)
+	}
+	warnings, readErr := indexedMemoryReadFailure("note.md", err)
+	if readErr == nil || readErr.Error() != "memory: unable to read indexed memory file" {
+		t.Fatalf("replacement indexed read error = %v", readErr)
+	}
+	if len(warnings) != 1 || warnings[0] != `memory file "note.md" has an unsafe path` {
+		t.Fatalf("replacement warnings = %#v", warnings)
+	}
+}
+
 func TestMemoryRejectsNonRegularIndexedFiles(t *testing.T) {
 	repo := t.TempDir()
 	writeProjectMemory(t, repo, "- [Directory](directory.md)\n", nil)
@@ -1226,6 +1310,13 @@ func TestMemoryRejectsNonRegularIndexedFiles(t *testing.T) {
 	}
 	if document.Available {
 		t.Fatal("non-regular show must be marked unavailable")
+	}
+	search, err := client.SearchMemories(context.Background(), Project{Path: repo}, "directory")
+	if err != nil {
+		t.Fatalf("non-regular SearchMemories: %v", err)
+	}
+	if len(search.Warnings) != 1 || !strings.Contains(search.Warnings[0], "not a regular file") {
+		t.Fatalf("non-regular search warnings = %#v", search.Warnings)
 	}
 }
 
