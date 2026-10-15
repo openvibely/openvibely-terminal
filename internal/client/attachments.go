@@ -126,7 +126,7 @@ func (c *Client) addTaskAttachments(ctx context.Context, taskID, projectID strin
 
 	requestedNames := make([]string, 0, len(filePaths))
 	for _, path := range filePaths {
-		requestedNames = append(requestedNames, filepath.Base(strings.TrimSpace(path)))
+		requestedNames = append(requestedNames, filepath.Base(path))
 	}
 
 	before := snapshot
@@ -350,9 +350,8 @@ func newAttachmentMultipartBody(paths []string) (*attachmentMultipartBody, error
 		fileInfos: make([]os.FileInfo, len(paths)),
 		closeDone: make(chan struct{}),
 	}
-	for i, rawPath := range paths {
-		path := strings.TrimSpace(rawPath)
-		if path == "" {
+	for i, path := range paths {
+		if strings.TrimSpace(path) == "" {
 			return nil, fmt.Errorf("attachment file path is required")
 		}
 		body.paths[i] = path
@@ -848,21 +847,41 @@ func attachmentRow(control, list *html.Node) *html.Node {
 	return control
 }
 
+// attachmentFilenameText preserves whitespace belonging to the filename.
+func attachmentFilenameText(n *html.Node) string {
+	var text strings.Builder
+	var visit func(*html.Node)
+	visit = func(node *html.Node) {
+		if node.Type == html.TextNode {
+			text.WriteString(node.Data)
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			visit(child)
+		}
+	}
+	visit(n)
+	return text.String()
+}
+
 func parseAttachmentRow(row *html.Node, id, taskID string) Attachment {
-	fileName := firstNonEmptyAttr(row,
-		"data-attachment-filename", "data-file-name", "data-filename")
+	var fileName string
+	for _, key := range []string{"data-attachment-filename", "data-file-name", "data-filename"} {
+		if fileName = attr(row, key); fileName != "" {
+			break
+		}
+	}
 	if fileName == "" {
 		if name := findNode(row, func(e *html.Node) bool {
 			return e.Data == "p" && strings.Contains(attr(e, "class"), "font-medium")
 		}); name != nil {
-			fileName = strings.TrimSpace(NodeText(name))
+			fileName = attachmentFilenameText(name)
 		}
 	}
 	if fileName == "" {
 		if name := findNode(row, func(e *html.Node) bool {
 			return e.Data == "p" && !strings.Contains(attr(e, "class"), "text-xs")
 		}); name != nil {
-			fileName = strings.TrimSpace(NodeText(name))
+			fileName = attachmentFilenameText(name)
 		}
 	}
 
