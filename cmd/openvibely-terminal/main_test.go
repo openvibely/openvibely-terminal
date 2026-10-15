@@ -518,3 +518,55 @@ func TestLoginWithConfiguredCredentialsSkipsEmptyConfiguration(t *testing.T) {
 		t.Fatal("empty credential configuration made a login request")
 	}
 }
+
+func TestServerFlagOverridesEnvironmentForCLI(t *testing.T) {
+	var envHits, flagHits atomic.Int32
+	handler := func(hits *atomic.Int32) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		}
+	}
+	envSrv := httptest.NewServer(handler(&envHits))
+	defer envSrv.Close()
+	flagSrv := httptest.NewServer(handler(&flagHits))
+	defer flagSrv.Close()
+	t.Setenv("OPENVIBELY_SERVER_URL", envSrv.URL)
+	t.Setenv("OPENVIBELY_AUTH_USERNAME", "")
+	t.Setenv("OPENVIBELY_AUTH_PASSWORD", "")
+
+	oldArgs, oldCommandLine, oldStdout := os.Args, flag.CommandLine, os.Stdout
+	defer func() {
+		os.Args, flag.CommandLine, os.Stdout = oldArgs, oldCommandLine, oldStdout
+	}()
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devNull.Close()
+	os.Stdout = devNull
+
+	for _, tc := range []struct {
+		args          []string
+		wantEnv, want int32
+	}{
+		{args: []string{"projects", "list"}, wantEnv: 1},
+		{args: []string{"-server", flagSrv.URL, "projects", "list"}, want: 1},
+	} {
+		envHits.Store(0)
+		flagHits.Store(0)
+		flag.CommandLine = flag.NewFlagSet("openvibely-terminal", flag.ContinueOnError)
+		flag.CommandLine.SetOutput(io.Discard)
+		os.Args = append([]string{"openvibely-terminal"}, tc.args...)
+		if err := run(); err != nil {
+			t.Fatalf("run %v: %v", tc.args, err)
+		}
+		if envHits.Load() < tc.wantEnv || (tc.wantEnv == 0 && envHits.Load() != 0) {
+			t.Errorf("%v: env server hits = %d", tc.args, envHits.Load())
+		}
+		if flagHits.Load() < tc.want || (tc.want == 0 && flagHits.Load() != 0) {
+			t.Errorf("%v: flag server hits = %d", tc.args, flagHits.Load())
+		}
+	}
+}

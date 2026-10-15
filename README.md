@@ -114,6 +114,7 @@ Common commands include:
 | `/analytics` | View usage and execution statistics |
 | `/pulse` | View the upcoming-work briefing; `openvibely-terminal -project <project> --json pulse` emits structured running, queued, blocked, scheduled, and summary fields for scripts |
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
+| `/server [url]` | Show the backend URL, or switch local/remote servers without restarting |
 | `/help <command>` | Show complete command syntax |
 
 Use `help workers` for worker-capacity options. `/workers` and `/workers show` render one stable snapshot for scripts; `/workers watch` starts a live terminal view that refreshes global, project, and dedicated model worker values every 3 seconds and stops on Esc. Headless scripts can keep the stable snapshot path:
@@ -309,6 +310,27 @@ Flags override environment variables.
 | `-user` | `OPENVIBELY_AUTH_USERNAME` | — |
 | `-pass` | `OPENVIBELY_AUTH_PASSWORD` | — |
 | `-project` | `OPENVIBELY_PROJECT` | The only project, when exactly one exists |
+
+`-server` / `OPENVIBELY_SERVER_URL` choose the backend at startup. In the TUI,
+`/server` shows the current backend and `/server <url>` switches to another
+local or remote server without restarting:
+
+```text
+/server
+/server https://openvibely.example.com
+/server http://localhost:3001
+/server https://protected.example.com --login
+```
+
+The new URL is checked (health, session, and project list) before the current
+connection is replaced. On success, projects reload and the transcript, task
+thread, selections, pending chat, and live event stream from the previous
+backend are cleared, even when both servers use the same project IDs. A
+malformed, unreachable, or unhealthy URL leaves the current connection in
+place. A server that requires sign-in is only switched to with `--login`, which
+opens the masked `/login` form. URLs with credentials, queries, or fragments
+are rejected and never echoed. One-shot CLI runs keep using `-server` or
+`OPENVIBELY_SERVER_URL`.
 
 Prefer `/login` for interactive authentication and environment variables from a
 secret manager for headless use. Literal passwords in command-line arguments may
