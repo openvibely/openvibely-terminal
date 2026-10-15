@@ -132,6 +132,13 @@ func refreshAndRender[T any](status string, list func() ([]T, error), render fun
 	return status + "\n\n" + render(items, ""), nil
 }
 
+func taskMutationAndRender(status string, mutation client.TaskBoardMutation, list func() ([]client.Task, error)) (string, error) {
+	if mutation.HasBoard {
+		return status + "\n\n" + renderBoard(mutation.Tasks, ""), nil
+	}
+	return refreshAndRender(status, list, renderBoard)
+}
+
 // actAndReloadText consolidates the "act, then reload a preformatted text
 // page" sequence. If the reload fails after a successful action, the error is
 // swallowed and only the status line is returned.
@@ -243,12 +250,12 @@ func confirmTaskDeletion(m Model, projectID string, task client.Task) (Model, te
 	display := taskDeletionDisplayName(task)
 	c := m.client
 	cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-		if err := c.DeleteTaskForProject(ctx, taskID, projectID); err != nil {
+		mutation, err := c.DeleteTaskForProjectWithBoard(ctx, taskID, projectID)
+		if err != nil {
 			return "", err
 		}
-		return refreshAndRender("delete: "+firstNonEmpty(task.Title, task.ID),
-			func() ([]client.Task, error) { return c.ListTasks(ctx, projectID) },
-			renderBoard)
+		return taskMutationAndRender("delete: "+firstNonEmpty(task.Title, task.ID), mutation,
+			func() ([]client.Task, error) { return c.ListTasks(ctx, projectID) })
 	})
 	return confirmOr(m,
 		fmt.Sprintf("Delete task %q? %s", display, confirmCancelInstruction),
@@ -1391,12 +1398,12 @@ func tasksCommand() command {
 					if form.Prompt == "" {
 						form.Prompt = title
 					}
-					if err := c.CreateTask(ctx, pid, form); err != nil {
+					mutation, err := c.CreateTaskWithBoard(ctx, pid, form)
+					if err != nil {
 						return "", err
 					}
-					return refreshAndRender("created "+title,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender("created "+title, mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 
 			case "swarm":
@@ -1433,12 +1440,12 @@ func tasksCommand() command {
 						prompt = t.Prompt
 					}
 					form := client.TaskForm{Title: title, Prompt: prompt, Category: t.Category}
-					if err := c.UpdateTaskForProject(ctx, t.ID, pid, form); err != nil {
+					mutation, err := c.UpdateTaskForProjectWithBoard(ctx, t.ID, pid, form)
+					if err != nil {
 						return "", err
 					}
-					return refreshAndRender("updated "+title,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender("updated "+title, mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 
 			case "order":
@@ -1458,12 +1465,12 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.ReorderTaskForProject(ctx, t.ID, pid, pos); err != nil {
+					mutation, err := c.ReorderTaskForProjectWithBoard(ctx, t.ID, pid, pos)
+					if err != nil {
 						return "", err
 					}
-					return refreshAndRender(fmt.Sprintf("moved %s to position %d", t.Title, pos),
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender(fmt.Sprintf("moved %s to position %d", t.Title, pos), mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 
 			case "run", "stop", "delete":
@@ -1481,18 +1488,18 @@ func tasksCommand() command {
 					if err := ctx.Err(); err != nil {
 						return "", err
 					}
+					var mutation client.TaskBoardMutation
 					switch action {
 					case "run":
-						err = c.RunTaskForProject(ctx, t.ID, pid)
+						mutation, err = c.RunTaskForProjectWithBoard(ctx, t.ID, pid)
 					case "stop":
-						err = c.CancelTaskForProject(ctx, t.ID, pid)
+						mutation, err = c.CancelTaskForProjectWithBoard(ctx, t.ID, pid)
 					}
 					if err != nil {
 						return "", err
 					}
-					return refreshAndRender(action+": "+t.Title,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender(action+": "+t.Title, mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 				return m, cmd
 
@@ -1525,12 +1532,12 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
-					if err := c.MoveTaskForProject(ctx, t.ID, pid, category); err != nil {
+					mutation, err := c.MoveTaskForProjectWithBoard(ctx, t.ID, pid, category)
+					if err != nil {
 						return "", err
 					}
-					return refreshAndRender(t.Title+" → "+category,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender(t.Title+" → "+category, mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 
 			case "goal":
@@ -1620,22 +1627,22 @@ func tasksCommand() command {
 
 			case "activate":
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					if err := c.ActivateBacklog(ctx, pid); err != nil {
+					mutation, err := c.ActivateBacklogWithBoard(ctx, pid)
+					if err != nil {
 						return "", err
 					}
-					return refreshAndRender("activated the backlog",
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender("activated the backlog", mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 
 			case "sweep":
 				return m, m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					if err := c.SweepCompletedTasks(ctx, pid); err != nil {
+					mutation, err := c.SweepCompletedTasksWithBoard(ctx, pid)
+					if err != nil {
 						return "", err
 					}
-					return refreshAndRender("swept finished tasks",
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender("swept finished tasks", mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 
 			case "clear":
@@ -1651,19 +1658,21 @@ func tasksCommand() command {
 					return m, errCmd("clear which column? backlog or completed")
 				}
 				cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					var err error
+					var (
+						mutation client.TaskBoardMutation
+						err      error
+					)
 					switch column {
 					case "backlog":
-						err = c.ClearBacklogTasks(ctx, pid)
+						mutation, err = c.ClearBacklogTasksWithBoard(ctx, pid)
 					case "completed":
-						err = c.ClearCompletedTasks(ctx, pid)
+						mutation, err = c.ClearCompletedTasksWithBoard(ctx, pid)
 					}
 					if err != nil {
 						return "", err
 					}
-					return refreshAndRender("cleared "+column,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) },
-						renderBoard)
+					return taskMutationAndRender("cleared "+column, mutation,
+						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
 				})
 				return confirmOr(m,
 					fmt.Sprintf("Clear all %s tasks? %s", column, confirmCancelInstruction),
