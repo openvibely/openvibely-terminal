@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -9034,8 +9035,76 @@ func personalityBulkDeleteResult(ctx context.Context, c *client.Client, projectI
 	return status + "\n\n" + renderPersonalities(remaining, ""), nil
 }
 
+func personalityEditDetailForCatalog(ctx context.Context, c *client.Client, projectID string, catalog client.Personality) (client.Personality, error) {
+	if catalog.Key == "" {
+		return client.Personality{}, fmt.Errorf("base personality cannot be edited")
+	}
+	detail, err := c.GetCustomPersonality(ctx, projectID, catalog.Key)
+	if err != nil {
+		return client.Personality{}, err
+	}
+	if detail.Key != "" && detail.Key != catalog.Key {
+		return client.Personality{}, fmt.Errorf("personality edit identity changed while loading")
+	}
+	detail.Key = catalog.Key
+	detail.IsPreset = catalog.IsPreset
+	detail.HasCustom = catalog.HasCustom
+	detail.Active = catalog.Active
+	if detail.ID == "" {
+		detail.ID = catalog.ID
+	}
+	if detail.Name == "" {
+		detail.Name = catalog.Name
+	}
+	if detail.SystemPromptPreview == "" {
+		detail.SystemPromptPreview = catalog.SystemPromptPreview
+	}
+	return *detail, nil
+}
+
+func personalityEditDetail(ctx context.Context, c *client.Client, projectID, ref string) (client.Personality, error) {
+	catalog, err := resolvePersonality(ctx, c, projectID, ref)
+	if err != nil {
+		return client.Personality{}, err
+	}
+	return personalityEditDetailForCatalog(ctx, c, projectID, catalog)
+}
+
+func startPersonalityInteractiveEdit(m Model, projectID string, load func(context.Context) (client.Personality, error)) (Model, tea.Cmd) {
+	m.ensureInteractiveModels()
+	m.clearPersonalityEditor()
+	m.personalityEditRequestID++
+	requestID := m.personalityEditRequestID
+	m.personalityEditLoading = true
+	m.busy = true
+	m.input.Blur()
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+	m.personalityEditCancel = cancel
+	cmd := func() tea.Msg {
+		defer cancel()
+		personality, err := load(ctx)
+		return personalityEditLoadedMsg{projectID: projectID, requestID: requestID, personality: personality, err: err}
+	}
+	return m, withMessageGeneration(cmd, sessionGenerationOf(m), projectGenerationOf(m))
+}
+
+func beginPersonalityInteractiveEdit(m Model, c *client.Client, projectID, ref string) (Model, tea.Cmd) {
+	return startPersonalityInteractiveEdit(m, projectID, func(ctx context.Context) (client.Personality, error) {
+		return personalityEditDetail(ctx, c, projectID, ref)
+	})
+}
+
+func beginPersonalityInteractiveEditResolved(m Model, c *client.Client, projectID string, catalog client.Personality) (Model, tea.Cmd) {
+	return startPersonalityInteractiveEdit(m, projectID, func(ctx context.Context) (client.Personality, error) {
+		return personalityEditDetailForCatalog(ctx, c, projectID, catalog)
+	})
+}
+
 func personalitySelector(m Model, usage, command, action string, prefill bool) (Model, tea.Cmd) {
 	c, pid := m.client, m.selectedID
+	if action == "edit" {
+		prefill = false
+	}
 	prefillSuffix := ""
 	if prefill {
 		prefillSuffix = " | "
@@ -9071,6 +9140,8 @@ func personalitySelector(m Model, usage, command, action string, prefill bool) (
 						switch action {
 						case "show":
 							return m, personalityShowCommand(c, pid, personality)
+						case "edit":
+							return beginPersonalityInteractiveEditResolved(m, c, pid, personality)
 						case "set":
 							return m, personalitySetCommand(c, pid, personality)
 						case "delete":
@@ -9161,6 +9232,75 @@ func personalityDeleteCommand(c *client.Client, projectID string, personality cl
 	})
 }
 
+func validatePersonalityCLIArgs(args []string) error {
+	actions := []string{"list", "show", "add", "edit", "set", "delete", "delete-bulk"}
+	action, rest := splitAction(actions, args)
+	switch action {
+	case "edit":
+		prefix, path, found, err := personalityFileOption(rest)
+		if err != nil || !found || strings.TrimSpace(prefix) == "" || strings.Contains(prefix, "|") {
+			return errors.New(commandUsage("personality", "edit"))
+		}
+		if _, err := readPersonalityPromptFile(path); err != nil {
+			return err
+		}
+	case "add":
+		if strings.Contains(strings.Join(rest, " "), "|") {
+			return nil // preserve the legacy inline prompt, including literal option-like text
+		}
+		prefix, path, found, err := personalityFileOption(rest)
+		if err != nil {
+			return err
+		}
+		if found {
+			if _, _, err := parsePersonalityAddFilePrefix(prefix); err != nil {
+				return fmt.Errorf("%s: %w", commandUsage("personality", "add"), err)
+			}
+			if _, err := readPersonalityPromptFile(path); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func finishPersonalityUpdate(updated, current client.Personality, name, description, prompt string) client.Personality {
+	if updated.ID == "" {
+		updated.ID = current.ID
+	}
+	if updated.Key == "" {
+		updated.Key = current.Key
+	}
+	if updated.Name == "" {
+		updated.Name = name
+	}
+	if updated.Description == "" && description != "" {
+		updated.Description = description
+	}
+	if updated.SystemPrompt == "" {
+		updated.SystemPrompt = prompt
+	}
+	if updated.SystemPromptPreview == "" {
+		updated.SystemPromptPreview = current.SystemPromptPreview
+	}
+	updated.IsPreset = current.IsPreset
+	updated.HasCustom = true
+	updated.Active = current.Active
+	return updated
+}
+
+func updatePersonalityPrompt(ctx context.Context, c *client.Client, projectID, ref, prompt string) (client.Personality, error) {
+	current, err := personalityEditDetail(ctx, c, projectID, ref)
+	if err != nil {
+		return client.Personality{}, err
+	}
+	updated, err := c.UpdateCustomPersonality(ctx, projectID, current.Key, current.Name, current.Description, prompt)
+	if err != nil {
+		return client.Personality{}, err
+	}
+	return finishPersonalityUpdate(*updated, current, current.Name, current.Description, prompt), nil
+}
+
 func personalityCommand() command {
 	actions := []string{"list", "show", "add", "edit", "set", "delete", "delete-bulk"}
 	return command{
@@ -9175,6 +9315,9 @@ func personalityCommand() command {
 			"personality show <key|name>                 show the full system prompt",
 			"personality add <name> | <system prompt>   create a custom personality",
 			"personality add <name> | description=<description> | <system prompt>",
+			"personality add <name> [description=<description>] --file <path>",
+			"personality edit <key|name>                 TUI multiline editor",
+			"personality edit <key|name> --file <path>   replace only the system prompt",
 			"personality edit <key|name> | <name> | <description> | <system prompt>",
 			"personality set <key|name>                  activate a personality",
 			"personality delete <key|name>               delete a custom or reset an override",
@@ -9183,16 +9326,22 @@ func personalityCommand() command {
 		},
 		actionUsages: []commandActionUsage{
 			{action: "show", args: "<key|name>"},
-			{action: "add", args: `<name> | <system prompt> [or: <name> | description=<description> | <system prompt>]`},
-			{action: "edit", args: "<key|name> | <name> | <description> | <system prompt>"},
+			{action: "add", args: `<name> [description=<description>] --file <path>`, description: "create from exact file contents"},
+			{action: "add", args: `<name> | <system prompt> [or: <name> | description=<description> | <system prompt>]`, description: "create from inline text"},
+			{action: "edit", args: `<key|name> --file <path>`, description: "replace only the prompt; CLI requires file, TUI opens editor when omitted"},
+			{action: "edit", args: `<key|name> | <name> | <description> | <system prompt>`, description: "TUI compatibility form updates all fields"},
 			{action: "set", args: "<key|name>"},
 			{action: "delete", args: "<key|name>"},
 			{action: "delete-bulk", args: "<key|name>..."},
 		},
+		validateArgs: validatePersonalityCLIArgs,
 		examples: []string{
 			`personality list`,
 			`personality add "Release Coach" | Keep advice practical and focused on shipping safely.`,
-			`personality add "Release Coach" | description=safe release guidance | Keep advice practical, focused, and safe for production releases.`,
+			`personality add "Release Coach" | description=safe release guidance | Keep advice safe for production releases.`,
+			`personality add "Release Coach" --file coach.md`,
+			`personality add "Release Coach" description=safe release guidance --file coach.md`,
+			`personality edit release_coach --file coach.md`,
 			`personality edit release_coach | Release Coach | pragmatic release guidance | Keep advice practical, focused, and safe for production releases.`,
 			`personality set release_coach`,
 			`personality delete release_coach`,
@@ -9240,7 +9389,23 @@ func personalityCommand() command {
 					return personalityShowResult(ctx, c, pid, personality)
 				})
 			case "add":
-				name, description, prompt, err := parsePersonalityAdd(ref)
+				prefix, filePath, fromFile := ref, "", false
+				var err error
+				if !strings.Contains(ref, "|") {
+					prefix, filePath, fromFile, err = personalityFileOption(rest)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+				}
+				var name, description, prompt string
+				if fromFile {
+					name, description, err = parsePersonalityAddFilePrefix(prefix)
+					if err == nil {
+						prompt, err = readPersonalityPromptFile(filePath)
+					}
+				} else {
+					name, description, prompt, err = parsePersonalityAdd(ref)
+				}
 				if err != nil {
 					return m, errCmd(commandUsage("personality", "add") + ": " + err.Error())
 				}
@@ -9258,37 +9423,68 @@ func personalityCommand() command {
 						renderPersonalities)
 				})
 			case "edit":
-				if strings.TrimSpace(ref) == "" {
+				if len(rest) == 0 || strings.TrimSpace(ref) == "" {
 					return personalitySelector(m, commandUsage("personality", "edit"), "personality edit", "edit", true)
 				}
-				parts := strings.SplitN(ref, "|", 4)
-				if len(parts) != 4 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[3]) == "" {
+				if strings.Contains(ref, "|") {
+					if cliMode {
+						return m, errCmd(commandUsage("personality", "edit"))
+					}
+					parts := strings.SplitN(ref, "|", 4)
+					if len(parts) != 4 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[3]) == "" {
+						return m, errCmd(commandUsage("personality", "edit"))
+					}
+					ref2 := strings.TrimSpace(parts[0])
+					name := strings.TrimSpace(parts[1])
+					description := strings.TrimSpace(parts[2])
+					prompt := strings.TrimSpace(parts[3])
+					return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+						personality, err := resolvePersonality(ctx, c, pid, ref2)
+						if err != nil {
+							return "", err
+						}
+						if personality.Key == "" {
+							return "", fmt.Errorf("base personality cannot be edited")
+						}
+						updated, err := c.UpdateCustomPersonality(ctx, pid, personality.Key, name, description, prompt)
+						if err != nil {
+							return "", err
+						}
+						updatedRecord := finishPersonalityUpdate(*updated, personality, name, description, prompt)
+						if jsonMode {
+							return marshalJSON(updatedRecord)
+						}
+						return "updated personality " + personality.Key, nil
+					})
+				}
+				prefix, filePath, fromFile, err := personalityFileOption(rest)
+				if err != nil {
+					return m, errCmd(err.Error())
+				}
+				if fromFile {
+					ref2 := strings.TrimSpace(prefix)
+					if ref2 == "" {
+						return m, errCmd(commandUsage("personality", "edit"))
+					}
+					prompt, err := readPersonalityPromptFile(filePath)
+					if err != nil {
+						return m, errCmd(err.Error())
+					}
+					return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
+						updated, err := updatePersonalityPrompt(ctx, c, pid, ref2, prompt)
+						if err != nil {
+							return "", err
+						}
+						if jsonMode {
+							return marshalJSON(updated)
+						}
+						return "updated personality " + updated.Key, nil
+					})
+				}
+				if cliMode {
 					return m, errCmd(commandUsage("personality", "edit"))
 				}
-				ref2 := strings.TrimSpace(parts[0])
-				name := strings.TrimSpace(parts[1])
-				description := strings.TrimSpace(parts[2])
-				prompt := strings.TrimSpace(parts[3])
-				return m, run("Personality", cmdTimeout, func(ctx context.Context) (string, error) {
-					personality, err := resolvePersonality(ctx, c, pid, ref2)
-					if err != nil {
-						return "", err
-					}
-					if personality.Key == "" {
-						return "", fmt.Errorf("base personality cannot be edited")
-					}
-					updated, err := c.UpdateCustomPersonality(ctx, pid, personality.Key, name, description, prompt)
-					if err != nil {
-						return "", err
-					}
-					updated.IsPreset = personality.IsPreset
-					updated.HasCustom = true
-					updated.Active = personality.Active
-					if jsonMode {
-						return marshalJSON(updated)
-					}
-					return "updated personality " + personality.Key, nil
-				})
+				return beginPersonalityInteractiveEdit(m, c, pid, ref)
 			case "set":
 				if ref == "" {
 					return personalitySelector(m, commandUsage("personality", "set"), "personality set", "set", false)
@@ -11296,6 +11492,91 @@ func matchProject(projects []client.Project, ref string) (client.Project, error)
 // errCmd reports a usage error in the transcript.
 func errCmd(msg string) tea.Cmd {
 	return func() tea.Msg { return resultMsg{err: fmt.Errorf("%s", msg)} }
+}
+
+func personalityFileOption(args []string) (prefix string, path string, found bool, err error) {
+	for i, arg := range args {
+		if arg == "--file" {
+			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || i+2 != len(args) {
+				return "", "", true, fmt.Errorf("--file requires exactly one prompt file path")
+			}
+			return strings.Join(args[:i], " "), args[i+1], true, nil
+		}
+		if strings.HasPrefix(arg, "--file=") {
+			path = strings.TrimSpace(strings.TrimPrefix(arg, "--file="))
+			if path == "" || i+1 != len(args) {
+				return "", "", true, fmt.Errorf("--file requires exactly one prompt file path")
+			}
+			return strings.Join(args[:i], " "), path, true, nil
+		}
+	}
+	return strings.Join(args, " "), "", false, nil
+}
+
+func parsePersonalityAddFilePrefix(prefix string) (name, description string, err error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return "", "", fmt.Errorf("name is required")
+	}
+	if i := strings.Index(prefix, "|"); i >= 0 {
+		name = strings.TrimSpace(prefix[:i])
+		tail := strings.TrimSpace(prefix[i+1:])
+		if !strings.HasPrefix(strings.ToLower(tail), "description=") {
+			return "", "", fmt.Errorf("file form accepts <name> [description=<description>] before --file")
+		}
+		description = strings.TrimSpace(tail[len("description="):])
+	} else {
+		lower := strings.ToLower(prefix)
+		for i := 0; i+len("description=") <= len(prefix); i++ {
+			if lower[i:i+len("description=")] != "description=" || i == 0 || !unicode.IsSpace(rune(prefix[i-1])) {
+				continue
+			}
+			name = strings.TrimSpace(prefix[:i])
+			description = strings.TrimSpace(prefix[i+len("description="):])
+			break
+		}
+		if name == "" && description == "" {
+			name = prefix
+		}
+	}
+	if name == "" {
+		return "", "", fmt.Errorf("name is required")
+	}
+	if strings.Contains(strings.ToLower(prefix), "description=") && description == "" {
+		return "", "", fmt.Errorf("description= requires a non-empty description")
+	}
+	return name, description, nil
+}
+
+const maxPersonalityPromptFileBytes = 1 << 20
+
+func readPersonalityPromptFile(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("reading personality prompt file %q: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", fmt.Errorf("reading personality prompt file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("personality prompt file %q must be a regular file", path)
+	}
+	if info.Size() > maxPersonalityPromptFileBytes {
+		return "", fmt.Errorf("personality prompt file %q exceeds %d bytes", path, maxPersonalityPromptFileBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxPersonalityPromptFileBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("reading personality prompt file %q: %w", path, err)
+	}
+	if len(data) > maxPersonalityPromptFileBytes {
+		return "", fmt.Errorf("personality prompt file %q exceeds %d bytes", path, maxPersonalityPromptFileBytes)
+	}
+	if !utf8.Valid(data) {
+		return "", fmt.Errorf("personality prompt file %q is not valid UTF-8", path)
+	}
+	return string(data), nil
 }
 
 // parsePersonalityAdd parses the two unambiguous add forms:

@@ -806,6 +806,34 @@ func TestPersonalitySelectorSetUsesResolvedItemWithoutSecondCatalogLookup(t *tes
 	}
 }
 
+func TestPersonalityEditSelectorOpensPrefilledEditor(t *testing.T) {
+	const prompt = "# Reviewer\n\nReview changes in clear steps.\n"
+	m, rec := dispatchModel(t, map[string]string{
+		"/personality":                 selPersonalitiesHTML,
+		"/personality/custom/reviewer": `{"id":"cp1","key":"reviewer","name":"Reviewer","description":"reviews code","system_prompt":"# Reviewer\n\nReview changes in clear steps.\n"}`,
+	})
+	m = runLine(t, m, "/personality edit")
+	if !m.selectorActive {
+		t.Fatalf("personality edit without a reference did not open selector:\n%s", transcript(m))
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.personalityEditActive || m.selectorActive {
+		t.Fatalf("selector choice did not open editor: active=%v selector=%v", m.personalityEditActive, m.selectorActive)
+	}
+	if got := m.personalityEditor.Value(); got != prompt {
+		t.Fatalf("selector editor prefill = %q, want %q", got, prompt)
+	}
+	if got := rec.count(http.MethodGet, "/personality"); got != 1 {
+		t.Fatalf("selector edit made %d catalog requests, want one:\n%s", got, rec.all())
+	}
+	if got := rec.count(http.MethodGet, "/personality/custom/reviewer"); got != 1 {
+		t.Fatalf("selector edit detail requests = %d, want one:\n%s", got, rec.all())
+	}
+	if got := rec.count(http.MethodPut, "/personality/custom/reviewer"); got != 0 {
+		t.Fatalf("opening selected editor made %d PUT requests", got)
+	}
+}
+
 func TestPersonalitySelectorsExcludeBaseForEditAndDelete(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="" data-personality-name="Base" data-personality-description="standard"

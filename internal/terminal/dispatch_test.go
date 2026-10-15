@@ -6009,6 +6009,132 @@ func TestResolvePersonalityReferenceTiers(t *testing.T) {
 	}
 }
 
+func savePersonalityEditor(t *testing.T, m Model) Model {
+	t.Helper()
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("saving personality editor returned no command")
+	}
+	msg := cmd()
+	next, followUp := m.Update(msg)
+	m = next.(Model)
+	if followUp != nil {
+		t.Fatal("personality editor save unexpectedly returned a follow-up command")
+	}
+	return m
+}
+
+func TestPersonalityEditorPreservesPromptLinesAndCancelsStaleWork(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="release_coach">
+		<div data-personality-key="release_coach" data-personality-name="Release Coach" data-personality-description="safe releases"
+			data-personality-is-preset="false" data-personality-has-custom="true" data-personality-active="true"></div>
+	</div>`
+	initialPrompt := "# Release Coach\n\nUse short sections.\nPreserve exact formatting.\n"
+	var putBodies []map[string]any
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, catalog)
+		case r.Method == http.MethodGet && r.URL.Path == "/personality/custom/release_coach":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(client.Personality{ID: "cp1", Key: "release_coach", Name: "Release Coach", Description: "safe releases", SystemPrompt: initialPrompt})
+		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/release_coach":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode personality edit: %v", err)
+			}
+			mu.Lock()
+			putBodies = append(putBodies, body)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(client.Personality{
+				ID: "cp1", Key: "release_coach", Name: body["name"].(string), Description: body["description"].(string),
+				SystemPrompt: body["system_prompt"].(string), HasCustom: true, Active: true,
+			})
+		default:
+			t.Errorf("unexpected personality request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	resized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
+	m = resized.(Model)
+	m.selectedID, m.selectedName = "p1", "demo"
+
+	m = runLine(t, m, "/personality edit release_coach")
+	if !m.personalityEditActive || m.personalityEditLoading {
+		t.Fatalf("personality edit did not open after loading: active=%v loading=%v", m.personalityEditActive, m.personalityEditLoading)
+	}
+	if got := m.personalityEditor.Value(); got != initialPrompt {
+		t.Fatalf("editor prefill = %q, want exact multiline prompt %q", got, initialPrompt)
+	}
+	updatedPrompt := "# Updated Coach\n\nFirst paragraph.\n\nSecond paragraph with | intact.\n"
+	m.personalityEditor.SetValue(updatedPrompt)
+	m = savePersonalityEditor(t, m)
+	if m.personalityEditActive {
+		t.Fatal("personality editor remained active after save")
+	}
+	if len(putBodies) != 1 {
+		t.Fatalf("PUT bodies = %d, want one", len(putBodies))
+	}
+	if putBodies[0]["name"] != "Release Coach" || putBodies[0]["description"] != "safe releases" || putBodies[0]["system_prompt"] != updatedPrompt {
+		t.Fatalf("editor PUT body = %#v, want preserved name/description and exact prompt", putBodies[0])
+	}
+
+	// Esc before Ctrl+S closes the editor without sending a PUT.
+	m = runLine(t, m, "/personality edit release_coach")
+	m.personalityEditor.SetValue("unsaved replacement prompt")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.personalityEditActive || len(putBodies) != 1 {
+		t.Fatalf("cancel mutated or left editor active: active=%v PUTs=%d", m.personalityEditActive, len(putBodies))
+	}
+
+	// A detail response queued before Esc must not reopen a canceled editor.
+	m, loadCmd := typeLine(t, m, "/personality edit release_coach")
+	if loadCmd == nil || !m.personalityEditLoading {
+		t.Fatal("edit did not start an async detail load")
+	}
+	staleLoad := loadCmd()
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	next, _ = m.Update(staleLoad)
+	m = next.(Model)
+	if m.personalityEditActive || m.personalityEditLoading {
+		t.Fatal("stale detail response reopened the canceled editor")
+	}
+
+	// A save response queued before Esc must not append a success or mutate editor state.
+	m = runLine(t, m, "/personality edit release_coach")
+	m.personalityEditor.SetValue("Save response will be stale.\n")
+	next, saveCmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = next.(Model)
+	if saveCmd == nil {
+		t.Fatal("save did not return an async command")
+	}
+	staleSave := saveCmd()
+	before := len(m.log)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	canceledLogLen := len(m.log)
+	next, _ = m.Update(staleSave)
+	m = next.(Model)
+	if m.personalityEditActive || len(m.log) != canceledLogLen || len(m.log) <= before {
+		t.Fatalf("stale save response changed canceled editor state or transcript: active=%v log=%d before-cancel=%d", m.personalityEditActive, len(m.log), before)
+	}
+	if len(putBodies) != 2 {
+		t.Fatalf("PUT bodies after stale save = %d, want the submitted save only", len(putBodies))
+	}
+}
+
 func TestPersonalityDirectActionsRejectBaseEntry(t *testing.T) {
 	const personalitiesHTML = `<div id="personality-section" data-selected-personality="">
 		<div data-personality-key="" data-personality-name="Base" data-personality-is-preset="true"></div>
@@ -6051,6 +6177,34 @@ func TestPersonalityDirectActionsRejectBaseEntry(t *testing.T) {
 			}
 			if strings.Contains(rec.all(), tc.mutationVerb+" /personality/custom") {
 				t.Fatalf("Base %s reached a mutation route:\n%s", tc.name, rec.all())
+			}
+		})
+	}
+}
+
+func TestPersonalityBaseEditorAndFileAreRejected(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="" data-personality-name="Base" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+	</div>`
+	promptPath := filepath.Join(t.TempDir(), "base.md")
+	if err := os.WriteFile(promptPath, []byte("A prompt file that is long enough."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{name: "editor", line: "/personality edit Base"},
+		{name: "file", line: "/personality edit Base --file " + promptPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/personality": catalog})
+			m = runLine(t, m, tc.line)
+			if !strings.Contains(transcript(m), "base personality cannot be edited") {
+				t.Fatalf("Base %s error missing:\n%s", tc.name, transcript(m))
+			}
+			if strings.Contains(rec.all(), http.MethodPut+" /personality/custom/") {
+				t.Fatalf("Base %s reached a PUT route:\n%s", tc.name, rec.all())
 			}
 		})
 	}
@@ -6300,8 +6454,8 @@ func TestPersonalityPipeCharactersArePreservedInAddAndEditPrompts(t *testing.T) 
 		<div data-personality-key="pipe_personality" data-personality-name="Pipe Personality" data-personality-description="test"
 			data-personality-preview="prompt" data-personality-is-preset="false" data-personality-has-custom="true"></div>
 	</div>`
-	addPrompt := "You are precise | preserve this literal marker while helping users."
-	editPrompt := "Use calm guidance | keep this marker exactly in the saved prompt."
+	addPrompt := "You are precise | preserve this literal marker, including --file coach.md, while helping users."
+	editPrompt := "Use calm guidance | keep this marker and literal --file coach.md exactly in the saved prompt."
 	var addBody, editBody map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

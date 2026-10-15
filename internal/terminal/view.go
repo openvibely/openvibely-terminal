@@ -62,6 +62,22 @@ func (m Model) View() string {
 		b.WriteString(helpStyle.Render(hint))
 		return b.String()
 	}
+	if m.personalityEditLoading {
+		b.WriteString(sectionStyle.Render("Loading personality…") + "\n")
+		b.WriteString(helpStyle.Render("Esc cancel"))
+		return b.String()
+	}
+	if m.personalityEditActive {
+		title := "Edit personality: " + firstNonEmpty(m.personalityEditPersonality.Name, m.personalityEditPersonality.Key)
+		b.WriteString(sectionStyle.Render(title) + "\n")
+		b.WriteString(m.personalityEditor.View() + "\n")
+		hint := "Ctrl+S save · Esc cancel"
+		if m.personalityEditSaving {
+			hint = "saving personality… · Esc cancel"
+		}
+		b.WriteString(helpStyle.Render(hint))
+		return b.String()
+	}
 	if m.automationEditActive {
 		title := "Edit automation: " + sanitizeAutomationDetailText(firstNonEmpty(m.automationEditName, m.automationEditID))
 		b.WriteString(sectionStyle.Render(title) + "\n")

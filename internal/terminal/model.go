@@ -115,6 +115,18 @@ type Model struct {
 	skillEditorOriginal    string
 	skillEditorRequestID   uint64
 
+	// personalityEditor holds the complete system prompt only while an
+	// interactive personality edit session is active.
+	personalityEditor          *textarea.Model
+	personalityEditActive      bool
+	personalityEditLoading     bool
+	personalityEditSaving      bool
+	personalityEditCancel      context.CancelFunc
+	personalityEditProjectID   string
+	personalityEditPersonality client.Personality
+	personalityEditOriginal    string
+	personalityEditRequestID   uint64
+
 	// automationEditor holds the complete authoritative YAML only while an
 	// interactive edit session is active. It is never appended to the transcript.
 	automationEditor           *textarea.Model
@@ -350,6 +362,9 @@ func New(c *client.Client) Model {
 	skillEditor := textarea.New()
 	skillEditor.Placeholder = "Complete skill body"
 	skillEditor.MaxHeight = 0
+	personalityEditor := textarea.New()
+	personalityEditor.Placeholder = "Complete system prompt"
+	personalityEditor.MaxHeight = 0
 
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
@@ -361,6 +376,7 @@ func New(c *client.Client) Model {
 		input:              &ti,
 		automationEditor:   &editor,
 		skillEditor:        &skillEditor,
+		personalityEditor:  &personalityEditor,
 		spin:               sp,
 		transcript:         &vp,
 		sseBackoff:         time.Second,
@@ -410,6 +426,12 @@ func (m *Model) ensureInteractiveModels() {
 		editor.CharLimit = maxAutomationDefinitionEditorBytes
 		editor.ShowLineNumbers = true
 		m.automationEditor = &editor
+	}
+	if m.personalityEditor == nil {
+		editor := textarea.New()
+		editor.Placeholder = "Complete system prompt"
+		editor.MaxHeight = 0
+		m.personalityEditor = &editor
 	}
 }
 
@@ -922,6 +944,28 @@ func (m *Model) clearSkillEditor() {
 	m.busy = false
 }
 
+func (m *Model) clearPersonalityEditor() {
+	if m.personalityEditCancel != nil {
+		m.personalityEditCancel()
+		m.personalityEditCancel = nil
+	}
+	m.personalityEditRequestID++
+	m.personalityEditActive = false
+	m.personalityEditLoading = false
+	m.personalityEditSaving = false
+	m.personalityEditProjectID = ""
+	m.personalityEditPersonality = client.Personality{}
+	m.personalityEditOriginal = ""
+	if m.personalityEditor != nil {
+		m.personalityEditor.SetValue("")
+		m.personalityEditor.Blur()
+	}
+	if m.input != nil {
+		m.input.Focus()
+	}
+	m.busy = false
+}
+
 func (m *Model) clearAutomationEdit() {
 	if m.automationEditCancel != nil {
 		m.automationEditCancel()
@@ -997,6 +1041,7 @@ func (m *Model) resetProjectScopedState() {
 	m.invalidateWorkersLive()
 	m.pendingConfirmation = nil
 	m.clearSkillEditor()
+	m.clearPersonalityEditor()
 	m.clearAutomationEdit()
 	if m.selectorActive {
 		*m = m.clearSelector()
@@ -2016,6 +2061,14 @@ func tagMessage(msg tea.Msg, sessionGeneration, projectGeneration uint64) tea.Ms
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
 		return typed
+	case personalityEditLoadedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
+	case personalityEditSavedMsg:
+		typed.sessionGeneration = sessionGeneration
+		typed.projectGeneration = projectGeneration
+		return typed
 	case automationEditLoadedMsg:
 		typed.sessionGeneration = sessionGeneration
 		typed.projectGeneration = projectGeneration
@@ -2119,6 +2172,7 @@ func (m Model) scheduleReconnect(generation int) tea.Cmd {
 // Cleanup releases all model-owned background work; called on shutdown.
 func (m *Model) Cleanup() {
 	m.clearSkillEditor()
+	m.clearPersonalityEditor()
 	m.clearAutomationEdit()
 	m.invalidatePersonalityBulkLookup()
 	m.invalidateWorkersLive()
@@ -2213,6 +2267,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			verb = "created"
 		}
 		m.append(entry{role: "result", head: "Skills", text: verb + " skill " + name})
+		return m, nil
+
+	case personalityEditLoadedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			!m.personalityEditLoading || msg.projectID != m.selectedID || msg.requestID != m.personalityEditRequestID {
+			return m, nil
+		}
+		m.busy = false
+		m.personalityEditLoading = false
+		if msg.err != nil {
+			m.clearPersonalityEditor()
+			m.resize()
+			m.handleCompletedRequestError(msg.err)
+			return m, nil
+		}
+		if msg.personality.Key == "" || msg.personality.SystemPrompt == "" {
+			m.clearPersonalityEditor()
+			m.resize()
+			m.append(entry{role: "error", text: "personality editor: loaded custom personality is incomplete"})
+			return m, nil
+		}
+		if m.personalityEditCancel != nil {
+			m.personalityEditCancel()
+			m.personalityEditCancel = nil
+		}
+		m.personalityEditActive = true
+		m.personalityEditSaving = false
+		m.personalityEditProjectID = msg.projectID
+		m.personalityEditPersonality = msg.personality
+		m.personalityEditOriginal = msg.personality.SystemPrompt
+		m.personalityEditor.SetValue(msg.personality.SystemPrompt)
+		m.personalityEditor.Focus()
+		m.input.Blur()
+		m.resize()
+		return m, nil
+
+	case personalityEditSavedMsg:
+		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) ||
+			!m.personalityEditActive || msg.projectID != m.selectedID || msg.projectID != m.personalityEditProjectID ||
+			msg.requestID != m.personalityEditRequestID || msg.key != m.personalityEditPersonality.Key {
+			return m, nil
+		}
+		m.busy = false
+		m.personalityEditSaving = false
+		if m.personalityEditCancel != nil {
+			m.personalityEditCancel()
+			m.personalityEditCancel = nil
+		}
+		if msg.err != nil {
+			m.personalityEditor.Focus()
+			m.handleCompletedRequestError(msg.err)
+			return m, nil
+		}
+		key := msg.key
+		m.clearPersonalityEditor()
+		m.resize()
+		m.append(entry{role: "result", head: "Personality", text: "updated personality " + key})
 		return m, nil
 
 	case automationEditLoadedMsg:
@@ -3567,6 +3678,59 @@ func (m Model) handleSkillEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) handlePersonalityEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quitting = true
+		m.clearPersonalityEditor()
+		m.Cleanup()
+		return m, tea.Quit
+	case tea.KeyEsc:
+		if m.personalityEditLoading {
+			m.clearPersonalityEditor()
+			m.resize()
+			m.append(entry{role: "system", text: "personality edit cancelled"})
+			return m, nil
+		}
+		m.clearPersonalityEditor()
+		m.resize()
+		m.append(entry{role: "system", text: "personality edit cancelled"})
+		return m, nil
+	case tea.KeyCtrlS:
+		if !m.personalityEditActive || m.personalityEditSaving {
+			return m, nil
+		}
+		prompt := m.personalityEditor.Value()
+		if prompt == m.personalityEditOriginal {
+			m.clearPersonalityEditor()
+			m.resize()
+			m.append(entry{role: "system", text: "personality edit cancelled: prompt unchanged"})
+			return m, nil
+		}
+		personality := m.personalityEditPersonality
+		projectID := m.personalityEditProjectID
+		requestID := m.personalityEditRequestID
+		ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+		m.personalityEditCancel = cancel
+		m.personalityEditSaving = true
+		m.busy = true
+		m.personalityEditor.Blur()
+		cmd := func() tea.Msg {
+			defer cancel()
+			_, err := m.client.UpdateCustomPersonality(ctx, projectID, personality.Key, personality.Name, personality.Description, prompt)
+			return personalityEditSavedMsg{projectID: projectID, requestID: requestID, key: personality.Key, err: err}
+		}
+		return m, withMessageGeneration(cmd, sessionGenerationOf(m), projectGenerationOf(m))
+	}
+	if m.personalityEditLoading || m.personalityEditSaving {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	editor, cmd := m.personalityEditor.Update(msg)
+	*m.personalityEditor = editor
+	return m, cmd
+}
+
 func (m Model) handleAutomationEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -3628,6 +3792,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.skillEditorActive {
 		return m.handleSkillEditorKey(msg)
+	}
+	if m.personalityEditActive || m.personalityEditLoading {
+		return m.handlePersonalityEditKey(msg)
 	}
 	if m.automationEditActive {
 		return m.handleAutomationEditKey(msg)
@@ -4289,7 +4456,7 @@ func (m *Model) evictOldestTranscriptBlock(block string) bool {
 func (m Model) transcriptHeight() int {
 	// Normal layout reserves 5 rows (header + blank + input/menu + help + margin).
 	reserve := 5
-	if m.skillEditorActive || m.automationEditActive {
+	if m.skillEditorActive || m.personalityEditActive || m.personalityEditLoading || m.automationEditActive {
 		reserve = 18
 	} else if m.selectorActive {
 		// The selector takes up to 12 rows (title + filter + 8 items + overflow +
@@ -4320,6 +4487,8 @@ func (m *Model) resize() {
 		editorHeight = 3
 	}
 	m.automationEditor.SetHeight(editorHeight)
+	m.personalityEditor.SetWidth(editorWidth)
+	m.personalityEditor.SetHeight(editorHeight)
 	m.skillEditor.SetWidth(editorWidth)
 	m.skillEditor.SetHeight(editorHeight)
 	m.refreshTranscript()
@@ -4725,6 +4894,7 @@ func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
 	if !wasRequired {
 		m.advanceSessionGeneration()
 		m.clearSkillEditor()
+		m.clearPersonalityEditor()
 		m.clearAutomationEdit()
 		m.invalidateWorkersLive()
 		m.invalidateSSE()

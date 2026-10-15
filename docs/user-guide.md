@@ -1039,15 +1039,47 @@ fetch a complete system prompt:
 /personality show release_coach
 /personality add "Release Coach" | Keep release advice practical and safe.
 /personality add "Release Coach" | description=safe release guidance | Keep advice practical and safe for production.
+/personality add "Release Coach" --file coach.md
+/personality add "Release Coach" description=safe release guidance --file coach.md
+/personality edit release_coach
 /personality edit release_coach | Release Coach | updated description | Keep every release reversible and observable.
 /personality set release_coach
 /personality delete release_coach
 /personality delete-bulk old_one "Old Two"
 ```
 
-The add form without a description is `<name> | <system prompt>`; every character after the first separator, including literal `|` characters and a prompt beginning with `description:`, remains part of the prompt. To provide the optional description, use the explicit `description=<description> | <system prompt>` form. The `description=` marker is case-insensitive and reserved for the marked form; it must include non-empty description and prompt fields, and malformed marked fields are rejected before any backend mutation. Editing a built-in creates or updates its backend override. Deleting that built-in resets it to the built-in default, while deleting a custom entry removes it; both operations require the normal TUI
-confirmation or `--force` in CLI mode. Add `--json` to list/show and supported
-mutation commands for machine-readable records.
+In the TUI, `/personality edit <key|name>` loads the current name and description
+and opens the complete multiline system prompt in the editor. Press `Ctrl+S` to
+save or `Esc` to cancel; canceling sends no update. Running `/personality edit`
+opens a selector and choosing an entry starts the same editor flow. The existing
+four-part pipe form remains available in the TUI and updates name, description,
+and prompt together:
+`/personality edit <key|name> | <name> | <description> | <system prompt>`.
+
+For one-shot CLI use, `personality edit <key|name> --file <path>` replaces only
+the prompt and preserves the current name and description. CLI edit requires
+`--file`; it does not accept the TUI editor or the legacy pipe form. `--json`
+emits the updated personality record, including its existing metadata.
+
+The add form without a description is `<name> | <system prompt>`; every
+character after the first separator, including literal `|` characters and a
+prompt beginning with `description:`, remains part of the prompt. To provide the
+optional description inline, use the explicit
+`description=<description> | <system prompt>` form. File creation accepts
+`personality add <name> --file <path>` or
+`personality add <name> description=<description> --file <path>`. File contents
+are sent as the system prompt without trimming, preserving newlines. Missing,
+non-regular, oversized, and non-UTF-8 files are rejected before a backend
+request.
+
+The `description=` marker is case-insensitive and reserved for the marked inline
+form; it must include non-empty description and prompt fields, and malformed
+marked fields are rejected before any backend mutation. Base remains uneditable;
+other editable built-ins can create or update backend overrides. Deleting a
+built-in resets it to the built-in default, while deleting a custom entry removes
+it; both operations require the normal TUI confirmation or
+`--force` in CLI mode. Add `--json` to list/show and supported mutation commands
+for machine-readable records.
 
 `delete-bulk <key|name>...` resolves every reference in the selected project before
 making exactly one guarded bulk request. Only inactive, non-preset custom entries
