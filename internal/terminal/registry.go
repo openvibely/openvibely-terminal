@@ -6971,7 +6971,7 @@ func redactModelCommandSecrets(commandLine string) string {
 	for i := 0; i < len(tokens); i++ {
 		value := tokens[i].value
 		name, _, hasAssignment := strings.Cut(strings.ToLower(value), "=")
-		if modelSensitiveOption(name) {
+		if modelSensitiveOption(normalizeModelOptionName(name)) {
 			// Model add does not accept inline sensitive assignments. Do not render
 			// a malformed assignment's remaining tokens: they may be pasted
 			// credentials before local validation rejects the command.
@@ -6986,7 +6986,7 @@ func redactModelCommandSecrets(commandLine string) string {
 				// be another sensitive option's operand. The parser will reject
 				// either malformed sequence, so redact its entire tail rather than
 				// risking a later pasted credential in the rendered command.
-				if tokens[i+1].value == "" || modelSensitiveOption(nextName) {
+				if tokens[i+1].value == "" || modelSensitiveOption(normalizeModelOptionName(nextName)) {
 					return "/models " + action + " <redacted sensitive options>"
 				}
 				if i+2 < len(tokens) {
@@ -7003,6 +7003,10 @@ func redactModelCommandSecrets(commandLine string) string {
 		parts = append(parts, value)
 	}
 	return strings.Join(parts, " ")
+}
+
+func normalizeModelOptionName(name string) string {
+	return strings.NewReplacer(`"`, "", "'", "").Replace(name)
 }
 
 func modelSensitiveOption(name string) bool {
