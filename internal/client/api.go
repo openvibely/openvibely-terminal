@@ -569,43 +569,43 @@ func (c *Client) ToggleSchedule(ctx context.Context, projectID, id string) (*Sch
 // postJSON issues a POST (optionally with a JSON body) and decodes a JSON
 // response into out when out is non-nil. Non-2xx statuses become errors.
 func (c *Client) postJSON(ctx context.Context, path string, body, out any) error {
-	var rdr *bytes.Reader
-	if body != nil {
-		buf, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		rdr = bytes.NewReader(buf)
-	} else {
-		rdr = bytes.NewReader(nil)
-	}
-
-	req, err := c.newRequest(ctx, http.MethodPost, path, rdr)
+	req, err := c.newJSONMutationRequest(ctx, http.MethodPost, path, body, body != nil)
 	if err != nil {
 		return err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Accept", "application/json")
-
 	return c.doJSONMutationRequest(http.MethodPost, path, req, out)
 }
 
 // putJSON issues a JSON PUT and decodes a JSON response into out when non-nil.
 // Non-2xx statuses retain the API and authentication error classifications.
 func (c *Client) putJSON(ctx context.Context, path string, body, out any) error {
-	buf, err := json.Marshal(body)
+	req, err := c.newJSONMutationRequest(ctx, http.MethodPut, path, body, true)
 	if err != nil {
 		return err
 	}
-	req, err := c.newRequest(ctx, http.MethodPut, path, bytes.NewReader(buf))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
 	return c.doJSONMutationRequest(http.MethodPut, path, req, out)
+}
+
+// newJSONMutationRequest builds a request that accepts JSON. encodeBody controls
+// whether to JSON-encode body (including nil) and set Content-Type.
+func (c *Client) newJSONMutationRequest(ctx context.Context, method, path string, body any, encodeBody bool) (*http.Request, error) {
+	var payload []byte
+	if encodeBody {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		payload = buf
+	}
+	req, err := c.newRequest(ctx, method, path, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	if encodeBody {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+	return req, nil
 }
 
 func (c *Client) doJSONMutationRequest(method, path string, req *http.Request, out any) error {

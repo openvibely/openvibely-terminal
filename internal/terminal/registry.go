@@ -218,7 +218,7 @@ func confirmScheduleDeletion(m Model, projectID string, schedule client.Schedule
 			func() ([]client.ScheduleEntry, string, error) { return c.GetSchedule(ctx, projectID) })
 	})
 	return confirmOr(m,
-		fmt.Sprintf("Delete schedule %q? Type 'yes' to confirm or Esc to cancel.", displayID),
+		fmt.Sprintf("Delete schedule %q? %s", displayID, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm deletion of schedule %q", displayID),
 		cmd)
 }
@@ -249,7 +249,7 @@ func confirmTaskDeletion(m Model, projectID string, task client.Task) (Model, te
 			renderBoard)
 	})
 	return confirmOr(m,
-		fmt.Sprintf("Delete task %q? Type 'yes' to confirm or Esc to cancel.", display),
+		fmt.Sprintf("Delete task %q? %s", display, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm deletion of task %q", display),
 		cmd)
 }
@@ -304,7 +304,7 @@ func confirmTaskWorktreeAction(m Model, projectID string, task client.Task, acti
 		return renderTaskWorktreeActionResult(result), err
 	})
 	return confirmOr(m,
-		fmt.Sprintf("%s task %q and change project branch? Type 'yes' to confirm or Esc to cancel.", titleFor(label), display),
+		fmt.Sprintf("%s task %q and change project branch? %s", titleFor(label), display, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm %s for task %q", label, display),
 		cmd)
 }
@@ -710,7 +710,7 @@ func taskThreadInputConfirmation(action string, task client.Task, input client.T
 	label := sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))
 	inputID := sanitizeAutomationDetailText(input.ID)
 	if action == "cancel" {
-		return fmt.Sprintf("Cancel %s %s for task %q? Type 'yes' to confirm or Esc to cancel.", kind, inputID, label), fmt.Sprintf("use --force to confirm cancelling %s %s", kind, inputID)
+		return fmt.Sprintf("Cancel %s %s for task %q? %s", kind, inputID, label, confirmCancelInstruction), fmt.Sprintf("use --force to confirm cancelling %s %s", kind, inputID)
 	}
 	return "", ""
 }
@@ -1664,7 +1664,7 @@ func tasksCommand() command {
 						renderBoard)
 				})
 				return confirmOr(m,
-					fmt.Sprintf("Clear all %s tasks? Type 'yes' to confirm or Esc to cancel.", column),
+					fmt.Sprintf("Clear all %s tasks? %s", column, confirmCancelInstruction),
 					fmt.Sprintf("use --force to confirm clearing the %s column", column),
 					cmd)
 			}
@@ -2567,7 +2567,7 @@ func confirmTaskAttachmentDeletion(m Model, projectID string, task client.Task, 
 
 func confirmTaskAttachmentDeletionWithLabels(m Model, attachmentLabel, taskLabel string, cmd tea.Cmd) (Model, tea.Cmd) {
 	return confirmOr(m,
-		fmt.Sprintf("Delete attachment %q from task %q? Type 'yes' to confirm or Esc to cancel.", attachmentLabel, taskLabel),
+		fmt.Sprintf("Delete attachment %q from task %q? %s", attachmentLabel, taskLabel, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm deletion of attachment %q", attachmentLabel),
 		cmd)
 }
@@ -3365,14 +3365,14 @@ func alertActionDisplayName(alert client.Alert) string {
 	return "(unknown alert)"
 }
 
-const destructiveBulkDeleteConfirmationSuffix = "Type 'yes' to confirm or Esc to cancel."
+const confirmCancelInstruction = "Type 'yes' to confirm or Esc to cancel."
 
 func bulkDeleteConfirmationPrompt(count int, singularNoun, pluralNoun string, targets []string) string {
 	noun := pluralNoun
 	if count == 1 {
 		noun = singularNoun
 	}
-	return fmt.Sprintf("Delete %d selected %s: %s? %s", count, noun, strings.Join(targets, ", "), destructiveBulkDeleteConfirmationSuffix)
+	return fmt.Sprintf("Delete %d selected %s: %s? %s", count, noun, strings.Join(targets, ", "), confirmCancelInstruction)
 }
 
 // alertBulkDeleteConfirmation names every resolved target so an interactive
@@ -3713,7 +3713,7 @@ func alertsCommand() command {
 					return "deleted all alerts", nil
 				})
 				return confirmOr(m,
-					"Delete ALL alerts? Type 'yes' to confirm or Esc to cancel.",
+					"Delete ALL alerts? "+confirmCancelInstruction,
 					"use --force to confirm deleting all alerts",
 					cmd)
 			default:
@@ -3742,7 +3742,7 @@ func alertsCommand() command {
 										if action == "delete" {
 											display := alertActionDisplayName(a)
 											return confirmOr(m,
-												fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", display),
+												fmt.Sprintf("Delete alert %q? %s", display, confirmCancelInstruction),
 												fmt.Sprintf("use --force to confirm deletion of alert %q", display),
 												cmd)
 										}
@@ -3770,7 +3770,7 @@ func alertsCommand() command {
 				if action == "delete" {
 					display := sanitizeAlertDisplayText(ref)
 					return confirmOr(m,
-						fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", display),
+						fmt.Sprintf("Delete alert %q? %s", display, confirmCancelInstruction),
 						fmt.Sprintf("use --force to confirm deletion of alert %q", display),
 						cmd)
 				}
@@ -4144,7 +4144,7 @@ func skillsCommand() command {
 				})
 				if action == "delete" {
 					return confirmOr(m,
-						fmt.Sprintf("Delete skill %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("Delete skill %q? %s", ref, confirmCancelInstruction),
 						fmt.Sprintf("use --force to confirm deletion of skill %q", ref),
 						cmd)
 				}
@@ -4495,7 +4495,7 @@ func confirmAgentDeletion(m Model, projectID string, agent client.AgentDef) (Mod
 			renderAgents)
 	})
 	return confirmOr(m,
-		fmt.Sprintf("Delete agent %q? Type 'yes' to confirm or Esc to cancel.", name),
+		fmt.Sprintf("Delete agent %q? %s", name, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm deletion of agent %q", name),
 		cmd)
 }
@@ -4834,7 +4834,7 @@ func agentsPluginMarketplacesCommand(m Model, c *client.Client, args []string) (
 			return c.DeleteAgentPluginMarketplace(ctx, name)
 		})
 		return confirmOr(m,
-			fmt.Sprintf("Remove marketplace %q? Type 'yes' to confirm or Esc to cancel.", sanitizeAutomationDetailText(name)),
+			fmt.Sprintf("Remove marketplace %q? %s", sanitizeAutomationDetailText(name), confirmCancelInstruction),
 			fmt.Sprintf("use --force to confirm removal of marketplace %q", sanitizeAutomationDetailText(name)),
 			cmd)
 	case "reset":
@@ -4845,7 +4845,7 @@ func agentsPluginMarketplacesCommand(m Model, c *client.Client, args []string) (
 			return c.ResetAgentPluginMarketplaces(ctx)
 		})
 		return confirmOr(m,
-			"Reset default plugin marketplaces? Type 'yes' to confirm or Esc to cancel.",
+			"Reset default plugin marketplaces? "+confirmCancelInstruction,
 			"use --force to confirm resetting default plugin marketplaces",
 			cmd)
 	default:
@@ -4946,7 +4946,7 @@ func agentsPluginUninstallCommand(m Model, c *client.Client, args []string) (Mod
 		return agentPluginMutationResponse(ctx, c, status, nil, status+" (saved; refresh failed)")
 	})
 	return confirmOr(m,
-		fmt.Sprintf("Uninstall plugin %q? This removes local plugin files. Type 'yes' to confirm or Esc to cancel.", sanitizeAutomationDetailText(pluginID)),
+		fmt.Sprintf("Uninstall plugin %q? This removes local plugin files. %s", sanitizeAutomationDetailText(pluginID), confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm uninstalling plugin %q", sanitizeAutomationDetailText(pluginID)),
 		cmd)
 }
@@ -6393,7 +6393,7 @@ func modelsCommand() command {
 										})
 										if action == "delete" {
 											return confirmOr(m,
-												fmt.Sprintf("Delete model %q? Type 'yes' to confirm or Esc to cancel.", mo.ID),
+												fmt.Sprintf("Delete model %q? %s", mo.ID, confirmCancelInstruction),
 												fmt.Sprintf("use --force to confirm deletion of model %q", mo.ID),
 												cmd)
 										}
@@ -6419,7 +6419,7 @@ func modelsCommand() command {
 				})
 				if action == "delete" {
 					return confirmOr(m,
-						fmt.Sprintf("Delete model %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("Delete model %q? %s", ref, confirmCancelInstruction),
 						fmt.Sprintf("use --force to confirm deletion of model %q", ref),
 						cmd)
 				}
@@ -7872,7 +7872,7 @@ func confirmChannelAccessRemoval(m Model, projectID, provider string, user clien
 		return channelAccessMutationResult(ctx, m.client, projectID, provider, "remove", user)
 	})
 	return confirmOr(m,
-		fmt.Sprintf("Remove %s access for %q? Type 'yes' to confirm or Esc to cancel.", channelAccessTitle(provider), label),
+		fmt.Sprintf("Remove %s access for %q? %s", channelAccessTitle(provider), label, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm removal of %s access for %q", channelAccessTitle(provider), label),
 		cmd)
 }
@@ -8205,10 +8205,10 @@ func channelsCommand() command {
 				return completeChannelMutation(ctx, c, pid, displayStatus)
 			})
 			if action == "remove" {
-				return confirmOr(m, fmt.Sprintf("Remove channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name), fmt.Sprintf("use --force to confirm removal of channel %q", ch.Name), runAction)
+				return confirmOr(m, fmt.Sprintf("Remove channel %q? %s", ch.Name, confirmCancelInstruction), fmt.Sprintf("use --force to confirm removal of channel %q", ch.Name), runAction)
 			}
 			if action == "disconnect" {
-				return confirmOr(m, fmt.Sprintf("Disconnect channel %q? Type 'yes' to confirm or Esc to cancel.", ch.Name), fmt.Sprintf("use --force to confirm disconnect of channel %q", ch.Name), runAction)
+				return confirmOr(m, fmt.Sprintf("Disconnect channel %q? %s", ch.Name, confirmCancelInstruction), fmt.Sprintf("use --force to confirm disconnect of channel %q", ch.Name), runAction)
 			}
 			return m, runAction
 		},
@@ -8581,7 +8581,7 @@ func confirmWebhookMutation(m Model, projectID, action string, webhook client.We
 		}
 	})
 	return confirmOr(m,
-		fmt.Sprintf("%s webhook %q? Type 'yes' to confirm or Esc to cancel.", titleFor(action), name),
+		fmt.Sprintf("%s webhook %q? %s", titleFor(action), name, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm %s of webhook %q", action, name),
 		cmd)
 }
@@ -9075,7 +9075,7 @@ func personalitySelector(m Model, usage, command, action string, prefill bool) (
 						case "delete":
 							cmd := personalityDeleteCommand(c, pid, personality)
 							return confirmOr(m,
-								fmt.Sprintf("Delete personality %q? Type 'yes' to confirm or Esc to cancel.", personality.Name),
+								fmt.Sprintf("Delete personality %q? %s", personality.Name, confirmCancelInstruction),
 								fmt.Sprintf("use --force to confirm deletion of personality %q", personality.Name),
 								cmd)
 						}
@@ -9326,7 +9326,7 @@ func personalityCommand() command {
 					return personalityDeleteResult(ctx, c, pid, personality)
 				})
 				return confirmOr(m,
-					fmt.Sprintf("Delete personality %q? Type 'yes' to confirm or Esc to cancel.", ref),
+					fmt.Sprintf("Delete personality %q? %s", ref, confirmCancelInstruction),
 					fmt.Sprintf("use --force to confirm deletion of personality %q", ref),
 					cmd)
 			}
@@ -9776,7 +9776,7 @@ func automationsCommand() command {
 									})
 									if action == "delete" {
 										return confirmOr(m,
-											fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", automation.ID),
+											fmt.Sprintf("Delete automation %q? %s", automation.ID, confirmCancelInstruction),
 											fmt.Sprintf("use --force to confirm deletion of automation %q", automation.ID),
 											cmd)
 									}
@@ -9794,7 +9794,7 @@ func automationsCommand() command {
 				})
 				if action == "delete" {
 					return confirmOr(m,
-						fmt.Sprintf("Delete automation %q? Type 'yes' to confirm or Esc to cancel.", ref),
+						fmt.Sprintf("Delete automation %q? %s", ref, confirmCancelInstruction),
 						fmt.Sprintf("use --force to confirm deletion of automation %q", ref),
 						cmd)
 				}
@@ -10363,7 +10363,7 @@ func projectsCommand() command {
 					}
 				}
 				return confirmOr(m,
-					fmt.Sprintf("Delete project %q and its backend-owned data? Type 'yes' to confirm or Esc to cancel.", projectName),
+					fmt.Sprintf("Delete project %q and its backend-owned data? %s", projectName, confirmCancelInstruction),
 					fmt.Sprintf("use --force to confirm deletion of project %q and its backend-owned data", projectName),
 					deleteCmd)
 			}

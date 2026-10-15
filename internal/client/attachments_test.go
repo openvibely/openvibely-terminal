@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/html"
 )
 
 func attachmentListMarkup(projectID string, rows string) string {
@@ -940,4 +942,120 @@ func sameStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func uploadCapturingServer(t *testing.T, rowName string) (*httptest.Server, *[]string, map[string]string) {
+	t.Helper()
+	var names []string
+	contents := map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+			return
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		for _, header := range r.MultipartForm.File["files"] {
+			file, err := header.Open()
+			if err != nil {
+				t.Fatalf("open multipart file: %v", err)
+			}
+			data, _ := io.ReadAll(file)
+			_ = file.Close()
+			names = append(names, header.Filename)
+			contents[header.Filename] = string(data)
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(attachmentListMarkup("p1", `<div class="attachment-row" data-attachment-filename="`+rowName+`"><p class="font-medium">`+rowName+`</p><p class="text-xs">9 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div>`)))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &names, contents
+}
+
+func TestAddTaskAttachmentsUsesExactWhitespaceEdgedPath(t *testing.T) {
+	dir := t.TempDir()
+	trimmedPath := filepath.Join(dir, "release-notes")
+	spacedPath := filepath.Join(dir, "release-notes ")
+	if err := os.WriteFile(trimmedPath, []byte("WRONG FILE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(spacedPath, []byte("spaced v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, names, contents := uploadCapturingServer(t, "release-notes ")
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddTaskAttachmentsForTask(context.Background(), Task{ID: "t-1", ProjectID: "p1", Attachments: []Attachment{}}, "p1", []string{spacedPath}); err != nil {
+		t.Fatalf("AddTaskAttachmentsForTask: %v", err)
+	}
+	if len(*names) != 1 || (*names)[0] != "release-notes " {
+		t.Fatalf("multipart filenames = %q, want [\"release-notes \"]", *names)
+	}
+	if got := contents["release-notes "]; got != "spaced v2" {
+		t.Fatalf("uploaded contents = %q, want bytes of the whitespace-edged file", got)
+	}
+}
+
+func TestAddTaskAttachmentsUploadsWhenOnlyWhitespaceEdgedFileExists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, " notes.txt ")
+	if err := os.WriteFile(path, []byte("only file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv, names, contents := uploadCapturingServer(t, " notes.txt ")
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AddTaskAttachmentsForTask(context.Background(), Task{ID: "t-1", ProjectID: "p1", Attachments: []Attachment{}}, "p1", []string{path}); err != nil {
+		t.Fatalf("AddTaskAttachmentsForTask: %v", err)
+	}
+	if len(*names) != 1 || (*names)[0] != " notes.txt " || contents[" notes.txt "] != "only file" {
+		t.Fatalf("multipart = %q %v, want exact whitespace-edged basename and bytes", *names, contents)
+	}
+}
+
+func TestAttachmentMultipartBodyRejectsEmptyAndBlankPaths(t *testing.T) {
+	for _, path := range []string{"", "   "} {
+		_, err := newAttachmentMultipartBody([]string{path})
+		if err == nil || !strings.Contains(err.Error(), "attachment file path is required") {
+			t.Fatalf("path %q error = %v, want required-path error", path, err)
+		}
+	}
+}
+
+func TestMatchUploadedAttachmentsKeepsWhitespaceDistinct(t *testing.T) {
+	after := []Attachment{{ID: "plain", FileName: "release-notes"}, {ID: "spaced", FileName: "release-notes "}}
+	uploaded, missing := matchUploadedAttachments(nil, after, []string{"release-notes "})
+	if len(missing) != 0 || len(uploaded) != 1 || uploaded[0].ID != "spaced" {
+		t.Fatalf("uploaded = %v, missing = %q", uploaded, missing)
+	}
+	uploaded, missing = matchUploadedAttachments(nil, after[:1], []string{"release-notes "})
+	if len(uploaded) != 0 || len(missing) != 1 {
+		t.Fatalf("trimmed name matched: uploaded = %v, missing = %q", uploaded, missing)
+	}
+}
+
+func TestParseAttachmentRowPreservesFilenameWhitespace(t *testing.T) {
+	for _, markup := range []string{
+		`<div data-attachment-filename=" notes.txt "></div>`,
+		`<div data-file-name=" notes.txt "></div>`,
+		`<div data-filename=" notes.txt "></div>`,
+		`<div><p class="font-medium"> notes.txt </p></div>`,
+		`<div><p> notes.txt </p></div>`,
+	} {
+		root, err := html.Parse(strings.NewReader(markup))
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := findNode(root, func(n *html.Node) bool { return n.Data == "div" })
+		if got := parseAttachmentRow(row, "id", "task").FileName; got != " notes.txt " {
+			t.Fatalf("filename = %q for %s", got, markup)
+		}
+	}
 }

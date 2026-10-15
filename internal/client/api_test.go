@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"runtime"
 	"sort"
@@ -392,6 +393,161 @@ func TestPostJSONServerError(t *testing.T) {
 	}
 	if !contains(err.Error(), "mutation service not available") {
 		t.Errorf("error = %v", err)
+	}
+}
+
+type capturedJSONMutation struct {
+	method, path, rawQuery, contentType, accept string
+	body                                        []byte
+}
+
+func newCapturingJSONMutationClient(t *testing.T, status int, response string, got *capturedJSONMutation) *Client {
+	t.Helper()
+	return newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		*got = capturedJSONMutation{
+			method:      r.Method,
+			path:        r.URL.Path,
+			rawQuery:    r.URL.RawQuery,
+			contentType: r.Header.Get("Content-Type"),
+			accept:      r.Header.Get("Accept"),
+			body:        body,
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(response))
+	}))
+}
+
+func TestPostJSONWithoutBodySendsEmptyPayloadWithoutContentType(t *testing.T) {
+	var got capturedJSONMutation
+	c := newCapturingJSONMutationClient(t, http.StatusOK, `{"ok":true}`, &got)
+
+	var out struct{ OK bool }
+	if err := c.postJSON(context.Background(), "/test-mutation", nil, &out); err != nil {
+		t.Fatalf("postJSON: %v", err)
+	}
+	if !out.OK {
+		t.Errorf("response not decoded: %+v", out)
+	}
+	if got.method != http.MethodPost || got.path != "/test-mutation" {
+		t.Errorf("request = %s %s", got.method, got.path)
+	}
+	if len(got.body) != 0 {
+		t.Errorf("body = %q, want empty", got.body)
+	}
+	if got.contentType != "" {
+		t.Errorf("Content-Type = %q, want omitted", got.contentType)
+	}
+	if got.accept != "application/json" {
+		t.Errorf("Accept = %q, want application/json", got.accept)
+	}
+}
+
+func TestJSONMutationsWithBodySendJSONHeadersAndPayload(t *testing.T) {
+	payload := map[string]any{"name": "demo", "count": 2}
+	for _, tc := range []struct {
+		method string
+		call   func(*Client, any) error
+	}{
+		{http.MethodPost, func(c *Client, out any) error {
+			return c.postJSON(context.Background(), "/test-mutation", payload, out)
+		}},
+		{http.MethodPut, func(c *Client, out any) error {
+			return c.putJSON(context.Background(), "/test-mutation", payload, out)
+		}},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			var got capturedJSONMutation
+			c := newCapturingJSONMutationClient(t, http.StatusOK, `{"id":"x1"}`, &got)
+			var out struct{ ID string }
+			if err := tc.call(c, &out); err != nil {
+				t.Fatalf("%s: %v", tc.method, err)
+			}
+			if out.ID != "x1" {
+				t.Errorf("response not decoded: %+v", out)
+			}
+			if got.method != tc.method || got.path != "/test-mutation" {
+				t.Errorf("request = %s %s", got.method, got.path)
+			}
+			if want, _ := json.Marshal(payload); string(got.body) != string(want) {
+				t.Errorf("body = %s, want %s", got.body, want)
+			}
+			if got.contentType != "application/json" || got.accept != "application/json" {
+				t.Errorf("Content-Type = %q, Accept = %q", got.contentType, got.accept)
+			}
+		})
+	}
+}
+
+func TestPutJSONNilBodySendsJSONNull(t *testing.T) {
+	var got capturedJSONMutation
+	c := newCapturingJSONMutationClient(t, http.StatusNoContent, "", &got)
+	if err := c.putJSON(context.Background(), "/test-mutation", nil, nil); err != nil {
+		t.Fatalf("putJSON: %v", err)
+	}
+	if string(got.body) != "null" || got.contentType != "application/json" || got.accept != "application/json" {
+		t.Errorf("body = %q, Content-Type = %q, Accept = %q", got.body, got.contentType, got.accept)
+	}
+}
+
+func TestJSONMutationErrorClassificationsPreserved(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		t.Run(method, func(t *testing.T) {
+			call := func(c *Client) error {
+				if method == http.MethodPut {
+					return c.putJSON(context.Background(), "/test-mutation", map[string]string{"a": "b"}, nil)
+				}
+				return c.postJSON(context.Background(), "/test-mutation", nil, nil)
+			}
+
+			var got capturedJSONMutation
+			c := newCapturingJSONMutationClient(t, http.StatusUnauthorized, ``, &got)
+			if err := call(c); err == nil || !IsAuthRequired(err) {
+				t.Errorf("401 error = %v, want authentication-required", err)
+			}
+
+			c = newCapturingJSONMutationClient(t, http.StatusUnprocessableEntity, `{"error":"invalid settings"}`, &got)
+			err := call(c)
+			if err == nil || IsAuthRequired(err) || !contains(err.Error(), "invalid settings") {
+				t.Errorf("422 error = %v, want ordinary API error", err)
+			}
+		})
+	}
+}
+
+func TestToggleScheduleAndUpdateProjectSettingsKeepRoutes(t *testing.T) {
+	var got capturedJSONMutation
+	c := newCapturingJSONMutationClient(t, http.StatusOK, `{"id":"s 1","enabled":true}`, &got)
+	sched, err := c.ToggleSchedule(context.Background(), "p1", "s 1")
+	if err != nil {
+		t.Fatalf("ToggleSchedule: %v", err)
+	}
+	if !sched.Enabled || sched.ID != "s 1" {
+		t.Errorf("schedule = %+v", sched)
+	}
+	if got.method != http.MethodPost || got.path != "/api/schedules/s 1/toggle" || got.rawQuery != "project_id=p1" {
+		t.Errorf("toggle request = %s %s?%s", got.method, got.path, got.rawQuery)
+	}
+	if len(got.body) != 0 || got.contentType != "" || got.accept != "application/json" {
+		t.Errorf("toggle body = %q, Content-Type = %q, Accept = %q", got.body, got.contentType, got.accept)
+	}
+
+	c = newCapturingJSONMutationClient(t, http.StatusOK, `{}`, &got)
+	if err := c.UpdateProjectSettings(context.Background(), ProjectSettings{ID: "p1", Name: "Demo"}); err != nil {
+		t.Fatalf("UpdateProjectSettings: %v", err)
+	}
+	if got.method != http.MethodPut || got.path != "/api/projects/p1/settings" {
+		t.Errorf("settings request = %s %s", got.method, got.path)
+	}
+	if got.contentType != "application/json" || got.accept != "application/json" {
+		t.Errorf("settings Content-Type = %q, Accept = %q", got.contentType, got.accept)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(got.body, &sent); err != nil || sent["name"] != "Demo" {
+		t.Errorf("settings body = %s (err %v)", got.body, err)
 	}
 }
 

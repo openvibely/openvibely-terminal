@@ -1449,3 +1449,56 @@ func TestCLITaskAttachmentsDeleteRequiresForceAndRefreshes(t *testing.T) {
 		}
 	})
 }
+
+func TestTasksAttachmentsAddPreservesQuotedWhitespaceEdgedPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "release-notes"), []byte("WRONG FILE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spacedPath := filepath.Join(dir, "release-notes ")
+	if err := os.WriteFile(spacedPath, []byte("spaced v2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotName, gotContents string
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(compactTaskCatalogForTest(attachmentTaskBoardHTML)))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		switch {
+		case r.URL.Path == "/tasks":
+			_, _ = w.Write([]byte(attachmentTaskBoardHTML))
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/attachments":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Errorf("ParseMultipartForm: %v", err)
+				return
+			}
+			for _, header := range r.MultipartForm.File["files"] {
+				file, err := header.Open()
+				if err != nil {
+					t.Errorf("open multipart file: %v", err)
+					return
+				}
+				var buf bytes.Buffer
+				_, _ = buf.ReadFrom(file)
+				_ = file.Close()
+				gotName, gotContents = header.Filename, buf.String()
+			}
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"><div class="attachment-row" data-attachment-filename="release-notes "><p class="font-medium">release-notes </p><p class="text-xs">9 B</p><button hx-delete="/attachments/att-9?project_id=p1"></button></div></div>`))
+		default:
+			_, _ = w.Write([]byte(`<div id="attachment-list" data-project-id="p1"></div>`))
+		}
+	})
+
+	m = runLine(t, m, `/tasks attachments add "Refactor the API" "`+spacedPath+`"`)
+
+	if gotName != "release-notes " || gotContents != "spaced v2" {
+		t.Fatalf("uploaded %q with contents %q, want exact whitespace-edged file", gotName, gotContents)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "uploaded 1 attachment(s)") {
+		t.Fatalf("upload did not report success:\n%s", out)
+	}
+}
