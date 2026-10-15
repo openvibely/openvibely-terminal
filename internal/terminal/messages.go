@@ -107,8 +107,29 @@ type chatStatusMsg struct {
 	// this field records a promoted execution for SSE correlation.
 	resolvedMessageID string
 	projectID         string
-	status            *client.ChatStatus
-	err               error
+	// pollGeneration is non-zero only for responses to the recurring fallback
+	// poll chain, so they can release that chain's single outstanding slot.
+	pollGeneration uint64
+	status         *client.ChatStatus
+	err            error
+}
+
+// chatPollTickMsg fires when the fallback poll interval elapses. The status
+// request is only issued if no healthy output stream owns liveness.
+type chatPollTickMsg struct {
+	pollGeneration uint64
+}
+
+type chatStreamConnectedMsg struct {
+	generation   int
+	submissionID uint64
+	projectID    string
+	execID       string
+}
+
+type chatStreamWatchdogMsg struct {
+	id       uint64
+	activity uint64
 }
 
 type chatStreamEventMsg struct {

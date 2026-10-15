@@ -4933,7 +4933,8 @@ func TestChatStreamLargeUpdateAdvancesReconnectOffset(t *testing.T) {
 			m.chatStreamCancel()
 		}
 	}()
-	if _, ok := reconnectCmd().(chatStreamEventMsg); !ok {
+	batch := reconnectCmd().(tea.BatchMsg)
+	if _, ok := batch[0]().(chatStreamEventMsg); !ok {
 		t.Fatal("reconnected stream did not deliver its terminal frame")
 	}
 	select {

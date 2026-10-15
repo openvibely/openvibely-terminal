@@ -298,8 +298,16 @@ type ExecutionEvent struct {
 // offset is the number of UTF-8 bytes already received and lets reconnects ask
 // the backend to replay only missing durable output.
 func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int) (<-chan ChatOutputEvent, <-chan error) {
+	events, errCh, _ := c.StreamChatOutputWithConnect(ctx, execID, offset)
+	return events, errCh
+}
+
+// StreamChatOutputWithConnect is StreamChatOutput plus a channel that is closed
+// once the server has accepted the stream with a 200 response.
+func (c *Client) StreamChatOutputWithConnect(ctx context.Context, execID string, offset int) (<-chan ChatOutputEvent, <-chan error, <-chan struct{}) {
 	events := make(chan ChatOutputEvent, 32)
 	errCh := make(chan error, 1)
+	connected := make(chan struct{})
 
 	go func() {
 		defer close(events)
@@ -318,6 +326,7 @@ func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int
 			return
 		}
 		defer resp.Body.Close()
+		close(connected)
 
 		err = scanSSEFrames(resp.Body, sseDataLineChatOutput, func(frame rawSSEFrame) bool {
 			event := ChatOutputEvent{
@@ -336,7 +345,7 @@ func (c *Client) StreamChatOutput(ctx context.Context, execID string, offset int
 		}
 	}()
 
-	return events, errCh
+	return events, errCh, connected
 }
 
 // StreamExecution adapts the shared chat-output transport for headless callers,
