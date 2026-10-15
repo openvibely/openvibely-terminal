@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -336,6 +337,60 @@ func (c *Client) ListTasks(ctx context.Context, projectID string) ([]Task, error
 		return nil, err
 	}
 	return parseTaskCards(root, projectID), nil
+}
+
+// TaskBoardMutation contains the board returned by an HTMX task mutation.
+// HasBoard distinguishes an authoritative empty board from an empty response
+// or a different fragment, both of which require a ListTasks fallback.
+type TaskBoardMutation struct {
+	Tasks    []Task
+	HasBoard bool
+}
+
+func (c *Client) mutateTaskBoard(ctx context.Context, method, path string, form url.Values, projectID string) (TaskBoardMutation, error) {
+	resp, err := c.doFormResponse(ctx, method, path, form)
+	if err != nil {
+		return TaskBoardMutation{}, err
+	}
+	defer drainAndClose(resp.Body)
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return TaskBoardMutation{}, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return TaskBoardMutation{}, nil
+	}
+	root, err := html.Parse(bytes.NewReader(body))
+	if err != nil {
+		return TaskBoardMutation{}, err
+	}
+	if !hasKanbanBoardContainer(root) {
+		return TaskBoardMutation{}, nil
+	}
+	tasks := parseTaskCards(root, projectID)
+	if tasks == nil {
+		tasks = make([]Task, 0)
+	}
+	return TaskBoardMutation{Tasks: tasks, HasBoard: true}, nil
+}
+
+func hasKanbanBoardContainer(root *html.Node) bool {
+	return findNode(root, func(n *html.Node) bool {
+		id := strings.ToLower(attr(n, "id"))
+		if id == "task-board" || id == "tasks-board" || id == "kanban-board" {
+			return true
+		}
+		if hasHTMLAttr(n, "data-task-board") || hasHTMLAttr(n, "data-kanban-board") {
+			return true
+		}
+		for _, class := range strings.Fields(strings.ToLower(attr(n, "class"))) {
+			if class == "kanban" || class == "kanban-board" || class == "task-board" {
+				return true
+			}
+		}
+		return false
+	}) != nil
 }
 
 // ListTaskReferences fetches the complete compact task catalog for one project.
@@ -1246,6 +1301,12 @@ func (c *Client) CreateTask(ctx context.Context, projectID string, form TaskForm
 	return c.doForm(ctx, http.MethodPost, "/tasks"+query("project_id", projectID), form.values())
 }
 
+// CreateTaskWithBoard creates a task and returns a kanban board included in the
+// mutation response, when the server returned one.
+func (c *Client) CreateTaskWithBoard(ctx context.Context, projectID string, form TaskForm) (TaskBoardMutation, error) {
+	return c.mutateTaskBoard(ctx, http.MethodPost, "/tasks"+query("project_id", projectID), form.values(), projectID)
+}
+
 // CreateSwarmTask creates an autonomous swarm parent task and returns the parent
 // parsed from the refreshed board fragment when the backend includes it.
 func (c *Client) CreateSwarmTask(ctx context.Context, projectID string, form SwarmTaskForm) (Task, error) {
@@ -1282,6 +1343,15 @@ func (c *Client) UpdateTaskForProject(ctx context.Context, taskID, projectID str
 	return c.doForm(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), form.updateValues())
 }
 
+// UpdateTaskForProjectWithBoard updates a task and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) UpdateTaskForProjectWithBoard(ctx context.Context, taskID, projectID string, form TaskForm) (TaskBoardMutation, error) {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return TaskBoardMutation{}, err
+	}
+	return c.mutateTaskBoard(ctx, http.MethodPut, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), form.updateValues(), projectID)
+}
+
 // DeleteTask removes a task.
 func (c *Client) DeleteTask(ctx context.Context, taskID string) error {
 	return c.doForm(ctx, http.MethodDelete, "/tasks/"+url.PathEscape(taskID), nil)
@@ -1293,6 +1363,15 @@ func (c *Client) DeleteTaskForProject(ctx context.Context, taskID, projectID str
 		return err
 	}
 	return c.doForm(ctx, http.MethodDelete, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), nil)
+}
+
+// DeleteTaskForProjectWithBoard deletes a task and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) DeleteTaskForProjectWithBoard(ctx context.Context, taskID, projectID string) (TaskBoardMutation, error) {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return TaskBoardMutation{}, err
+	}
+	return c.mutateTaskBoard(ctx, http.MethodDelete, "/tasks/"+url.PathEscape(taskID)+query("project_id", projectID), nil, projectID)
 }
 
 // RunTask (re-)submits a task for execution.
@@ -1308,6 +1387,15 @@ func (c *Client) RunTaskForProject(ctx context.Context, taskID, projectID string
 	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/run"+query("project_id", projectID), nil)
 }
 
+// RunTaskForProjectWithBoard submits a task and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) RunTaskForProjectWithBoard(ctx context.Context, taskID, projectID string) (TaskBoardMutation, error) {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return TaskBoardMutation{}, err
+	}
+	return c.mutateTaskBoard(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/run"+query("project_id", projectID), nil, projectID)
+}
+
 // CancelTask stops a queued/running task.
 func (c *Client) CancelTask(ctx context.Context, taskID string) error {
 	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/cancel", nil)
@@ -1319,6 +1407,15 @@ func (c *Client) CancelTaskForProject(ctx context.Context, taskID, projectID str
 		return err
 	}
 	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/cancel"+query("project_id", projectID), nil)
+}
+
+// CancelTaskForProjectWithBoard cancels a task and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) CancelTaskForProjectWithBoard(ctx context.Context, taskID, projectID string) (TaskBoardMutation, error) {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return TaskBoardMutation{}, err
+	}
+	return c.mutateTaskBoard(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/cancel"+query("project_id", projectID), nil, projectID)
 }
 
 // MoveTask moves a task between kanban columns (drag & drop equivalent).
@@ -1338,6 +1435,17 @@ func (c *Client) MoveTaskForProject(ctx context.Context, taskID, projectID, cate
 	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/category"+query("project_id", projectID), v)
 }
 
+// MoveTaskForProjectWithBoard moves a task and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) MoveTaskForProjectWithBoard(ctx context.Context, taskID, projectID, category string) (TaskBoardMutation, error) {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return TaskBoardMutation{}, err
+	}
+	v := url.Values{}
+	v.Set("category", category)
+	return c.mutateTaskBoard(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/category"+query("project_id", projectID), v, projectID)
+}
+
 // ReorderTask moves a task to a new position within its column.
 func (c *Client) ReorderTask(ctx context.Context, taskID string, position int) error {
 	v := url.Values{}
@@ -1353,6 +1461,17 @@ func (c *Client) ReorderTaskForProject(ctx context.Context, taskID, projectID st
 	v := url.Values{}
 	v.Set("position", strconv.Itoa(position))
 	return c.doForm(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/reorder"+query("project_id", projectID), v)
+}
+
+// ReorderTaskForProjectWithBoard reorders a task and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) ReorderTaskForProjectWithBoard(ctx context.Context, taskID, projectID string, position int) (TaskBoardMutation, error) {
+	if err := requireTaskMutationProjectID(projectID); err != nil {
+		return TaskBoardMutation{}, err
+	}
+	v := url.Values{}
+	v.Set("position", strconv.Itoa(position))
+	return c.mutateTaskBoard(ctx, http.MethodPatch, "/tasks/"+url.PathEscape(taskID)+"/reorder"+query("project_id", projectID), v, projectID)
 }
 
 func requireTaskMutationProjectID(projectID string) error {
@@ -1885,9 +2004,21 @@ func (c *Client) SweepCompletedTasks(ctx context.Context, projectID string) erro
 	return c.doForm(ctx, http.MethodPost, "/tasks/move-completed"+query("project_id", projectID), nil)
 }
 
+// SweepCompletedTasksWithBoard moves completed tasks and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) SweepCompletedTasksWithBoard(ctx context.Context, projectID string) (TaskBoardMutation, error) {
+	return c.mutateTaskBoard(ctx, http.MethodPost, "/tasks/move-completed"+query("project_id", projectID), nil, projectID)
+}
+
 // ClearCompletedTasks deletes every completed task.
 func (c *Client) ClearCompletedTasks(ctx context.Context, projectID string) error {
 	return c.doForm(ctx, http.MethodDelete, "/tasks/completed"+query("project_id", projectID), nil)
+}
+
+// ClearCompletedTasksWithBoard clears completed tasks and returns a kanban
+// board included in the mutation response, when present.
+func (c *Client) ClearCompletedTasksWithBoard(ctx context.Context, projectID string) (TaskBoardMutation, error) {
+	return c.mutateTaskBoard(ctx, http.MethodDelete, "/tasks/completed"+query("project_id", projectID), nil, projectID)
 }
 
 // ClearBacklogTasks deletes every backlog task.
@@ -1895,7 +2026,19 @@ func (c *Client) ClearBacklogTasks(ctx context.Context, projectID string) error 
 	return c.doForm(ctx, http.MethodDelete, "/tasks/backlog"+query("project_id", projectID), nil)
 }
 
+// ClearBacklogTasksWithBoard clears backlog tasks and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) ClearBacklogTasksWithBoard(ctx context.Context, projectID string) (TaskBoardMutation, error) {
+	return c.mutateTaskBoard(ctx, http.MethodDelete, "/tasks/backlog"+query("project_id", projectID), nil, projectID)
+}
+
 // ActivateBacklog moves every backlog task to active (starting execution).
 func (c *Client) ActivateBacklog(ctx context.Context, projectID string) error {
 	return c.doForm(ctx, http.MethodPost, "/tasks/backlog/activate"+query("project_id", projectID), nil)
+}
+
+// ActivateBacklogWithBoard activates backlog tasks and returns a kanban board
+// included in the mutation response, when present.
+func (c *Client) ActivateBacklogWithBoard(ctx context.Context, projectID string) (TaskBoardMutation, error) {
+	return c.mutateTaskBoard(ctx, http.MethodPost, "/tasks/backlog/activate"+query("project_id", projectID), nil, projectID)
 }
