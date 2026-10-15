@@ -674,7 +674,7 @@ func setupConfirmationMessage(check setupCheckResult, opts setupOptions) string 
 	}
 	b.WriteString("start process `")
 	b.WriteString(sanitizeAutomationDetailText(check.Start.Display))
-	b.WriteString("`; poll local backend health; no credentials sent; no projects created; server URL unchanged. Type 'yes' to confirm or Esc to cancel.")
+	b.WriteString("`; poll local backend health; no credentials sent; no projects created; server URL unchanged. " + confirmCancelInstruction)
 	return b.String()
 }
 

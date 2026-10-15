@@ -556,7 +556,7 @@ func confirmOutboundTargetRemoval(m Model, projectID string, target client.Outbo
 		return outboundTargetMutationOutput(ctx, m.client, projectID, "remove", "removed outbound target "+label, currentTarget)
 	})
 	return confirmOr(m,
-		fmt.Sprintf("Remove outbound target %q? Type 'yes' to confirm or Esc to cancel.", label),
+		fmt.Sprintf("Remove outbound target %q? %s", label, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm removal of outbound target %q", label), cmd)
 }
 
