@@ -42,8 +42,14 @@ import (
 )
 
 const (
+	chatPollInterval = 1500 * time.Millisecond
+	// chatStreamWatchdogInterval bounds how long a connected but silent output
+	// stream may go without an authoritative status check.
+	chatStreamWatchdogInterval = 30 * time.Second
+)
+
+const (
 	refreshInterval          = 30 * time.Second
-	chatPollInterval         = 1500 * time.Millisecond
 	chatStreamRenderInterval = 33 * time.Millisecond
 	maxTranscript            = 500
 	maxHistory               = 200
@@ -235,6 +241,12 @@ type Model struct {
 	chatStreamEvents           <-chan client.ChatOutputEvent
 	chatStreamErrs             <-chan error
 	chatStreamWaitCmd          tea.Cmd
+	chatStreamConnected        <-chan struct{}
+	chatStreamHealthy          bool
+	chatStreamActivity         uint64
+	chatStreamWatchdogID       uint64
+	chatPollGeneration         uint64
+	chatPollPending            bool
 	chatStreamExecID           string
 	chatStreamOffset           int
 	chatStreamOutput           string
@@ -959,6 +971,7 @@ func (m *Model) setActiveProject(project client.Project) bool {
 		m.flushChatStreamOutput()
 		m.advanceProjectGeneration()
 		m.invalidateChatStream()
+		m.resetChatPoll()
 		m.resetChatStreamOutput()
 		m.pendingMsgID = ""
 		m.pendingMsgExecutionID = ""
@@ -1113,9 +1126,58 @@ func (m *Model) invalidateChatStream() {
 	m.chatStreamEvents = nil
 	m.chatStreamErrs = nil
 	m.chatStreamWaitCmd = nil
+	m.chatStreamConnected = nil
+	m.chatStreamHealthy = false
+	m.chatStreamWatchdogID++
 	m.chatStreamExecID = ""
 	m.chatStreamRenderQueued = false
 	m.chatStreamGeneration++
+}
+
+// resetChatPoll abandons the fallback poll chain so a later arm starts a fresh
+// one. Responses from the abandoned chain are ignored.
+func (m *Model) resetChatPoll() {
+	m.chatPollGeneration++
+	m.chatPollPending = false
+}
+
+// armChatPoll schedules the next fallback status poll. Polling is the liveness
+// source only while the reply is queued or no healthy output stream exists;
+// at most one poll tick or request is outstanding at a time.
+func (m *Model) armChatPoll() tea.Cmd {
+	if m.pendingMsgID == "" || m.chatPollPending {
+		return nil
+	}
+	if m.chatStreamHealthy && m.pendingMsgExecutionID != "" {
+		return nil
+	}
+	if m.chatPollGeneration == 0 {
+		m.chatPollGeneration++
+	}
+	m.chatPollPending = true
+	generation := m.chatPollGeneration
+	return tea.Tick(chatPollInterval, func(time.Time) tea.Msg {
+		return chatPollTickMsg{pollGeneration: generation}
+	})
+}
+
+// markChatStreamHealthy records that the current output stream is delivering
+// and returns a watchdog when the stream transitions into the healthy state.
+func (m *Model) markChatStreamHealthy() tea.Cmd {
+	m.chatStreamActivity++
+	if m.chatStreamHealthy {
+		return nil
+	}
+	m.chatStreamHealthy = true
+	return m.scheduleChatStreamWatchdog()
+}
+
+func (m *Model) scheduleChatStreamWatchdog() tea.Cmd {
+	m.chatStreamWatchdogID++
+	id, activity := m.chatStreamWatchdogID, m.chatStreamActivity
+	return tea.Tick(chatStreamWatchdogInterval, func(time.Time) tea.Msg {
+		return chatStreamWatchdogMsg{id: id, activity: activity}
+	})
 }
 
 func (m *Model) resetChatStreamOutput() {
@@ -1146,6 +1208,7 @@ func (m *Model) clearPendingChat() {
 		m.materializeChatStreamOutput()
 	}
 	m.invalidateChatStream()
+	m.resetChatPoll()
 	if m.pendingMsgTaskID != "" {
 		m.threadReplyPendingRequestID = 0
 	}
@@ -1687,7 +1750,7 @@ func (m Model) sendChat(projectID, message string, submissionIDs ...uint64) tea.
 	}
 }
 
-func (m Model) doChatStatus(messageID, projectID string, projectGeneration uint64) tea.Msg {
+func (m Model) doChatStatus(messageID, projectID string, projectGeneration uint64) chatStatusMsg {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	status, err := m.client.GetChatStatus(ctx, messageID)
@@ -1705,12 +1768,6 @@ func (m Model) doChatStatus(messageID, projectID string, projectGeneration uint6
 		status:            status,
 		err:               err,
 	}
-}
-
-func (m Model) pollChat(messageID, projectID string, projectGeneration uint64) tea.Cmd {
-	return tea.Tick(chatPollInterval, func(time.Time) tea.Msg {
-		return m.doChatStatus(messageID, projectID, projectGeneration)
-	})
 }
 
 // fetchChatStatus issues an immediate (no-tick) GetChatStatus call.
@@ -1732,11 +1789,21 @@ func (m *Model) connectChatStream(execID string, offset int) tea.Cmd {
 	m.chatStreamCancel = cancel
 	m.chatStreamExecID = execID
 	generation := m.chatStreamGeneration
-	events, errs := m.client.StreamChatOutput(ctx, execID, offset)
+	events, errs, connected := m.client.StreamChatOutputWithConnect(ctx, execID, offset)
 	m.chatStreamEvents = events
 	m.chatStreamErrs = errs
+	m.chatStreamConnected = connected
 	m.chatStreamWaitCmd = m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, execID, events, errs)
-	return m.chatStreamWaitCmd
+	connectedMsg := chatStreamConnectedMsg{generation: generation, submissionID: m.chatSubmissionID, projectID: m.pendingMsgProjectID, execID: execID}
+	waitConnected := func() tea.Msg {
+		select {
+		case <-connected:
+			return connectedMsg
+		case <-ctx.Done():
+			return nil
+		}
+	}
+	return tea.Batch(m.chatStreamWaitCmd, waitConnected)
 }
 
 func (m Model) waitForChatStream(generation int, submissionID uint64, projectID, execID string, events <-chan client.ChatOutputEvent, errs <-chan error) tea.Cmd {
@@ -2879,14 +2946,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.accepted.Queued {
 			m.append(entry{role: "system", text: "queued behind an active chat turn…"})
-			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+			return m, m.armChatPoll()
 		}
 		return m, tea.Batch(
-			m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration),
+			m.armChatPoll(),
 			m.connectChatStream(m.pendingMsgID, 0),
 		)
 
+	case chatPollTickMsg:
+		if msg.pollGeneration != m.chatPollGeneration || !m.chatPollPending {
+			return m, nil
+		}
+		if m.pendingMsgID == "" || !m.pendingChatScopeCurrent() || (m.chatStreamHealthy && m.pendingMsgExecutionID != "") {
+			// A healthy stream owns liveness; the chain parks until the stream
+			// disconnects, fails, or its watchdog expires.
+			m.chatPollPending = false
+			return m, nil
+		}
+		poll := m
+		messageID, projectID, projectGeneration := m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration
+		return m, func() tea.Msg {
+			status := poll.doChatStatus(messageID, projectID, projectGeneration)
+			status.pollGeneration = msg.pollGeneration
+			return status
+		}
+
 	case chatStatusMsg:
+		if msg.pollGeneration != 0 && msg.pollGeneration != m.chatPollGeneration {
+			return m, nil
+		}
 		if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) || !m.pendingChatScopeCurrent() {
 			return m, nil // stale chat status from an older session or project
 		}
@@ -2902,17 +2990,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.messageID != "" && msg.messageID != m.pendingMsgID {
 			return m, nil // status for a different message cannot settle this chat
 		}
+		if msg.pollGeneration != 0 {
+			m.chatPollPending = false
+		}
 		promoted := false
 		if msg.resolvedMessageID != "" && msg.resolvedMessageID != m.pendingMsgID {
 			if m.pendingMsgExecutionID != "" && msg.resolvedMessageID != m.pendingMsgExecutionID {
-				return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+				return m, m.armChatPoll()
 			}
 			// A queued input is polled by its stable input ID, but the status
 			// response switches to the execution ID once the input is applied.
 			// Record that authoritative alias so the promoted SSE completion can
 			// settle the same chat without weakening epoch/project guards above.
+			promoted = m.pendingMsgExecutionID != msg.resolvedMessageID
 			m.pendingMsgExecutionID = msg.resolvedMessageID
-			promoted = true
 		}
 		if msg.err != nil {
 			if m.handleAuthError(msg.err) {
@@ -2921,12 +3012,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.handleTransportError(msg.err) {
 				m.busy = false
-				return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+				return m, m.armChatPoll()
 			}
-			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration) // transient; keep polling
+			return m, m.armChatPoll() // transient; keep polling
 		}
 		if msg.status == nil {
-			return m, m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
+			return m, m.armChatPoll()
 		}
 		if m.chatStreamCancel == nil {
 			m.updateChatStreamSnapshot(msg.status.Response)
@@ -2936,6 +3027,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.completeChat(msg.status.Response, msg.status.TaskIDs)
 			return m, nil
 		case "failed", "cancelled":
+			m.updateChatStreamSnapshot(msg.status.Response)
 			m.flushChatStreamOutput()
 			m.clearPendingChat()
 			m.busy = false
@@ -2946,11 +3038,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(entry{role: "error", text: text})
 			return m, nil
 		default:
-			poll := m.pollChat(m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration)
 			if promoted || (m.pendingMsgExecutionID != "" && m.chatStreamCancel == nil) {
-				return m, tea.Batch(poll, m.connectChatStream(m.pendingMsgExecutionID, m.chatStreamOffset))
+				stream := m.connectChatStream(m.pendingMsgExecutionID, m.chatStreamOffset)
+				return m, tea.Batch(m.armChatPoll(), stream)
 			}
-			return m, poll
+			return m, m.armChatPoll()
 		}
 
 	case chatStreamEventMsg:
@@ -2959,20 +3051,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.event.Name {
 		case "":
+			watchdog := m.markChatStreamHealthy()
 			m.updateChatStreamOutput(msg.event.Data)
 			wait := m.waitForCurrentChatStream(msg.generation)
-			if render := m.scheduleChatStreamRender(); render != nil {
-				return m, tea.Batch(wait, render)
-			}
-			return m, wait
+			return m, tea.Batch(wait, m.scheduleChatStreamRender(), watchdog)
 		case "done", "error":
 			m.flushChatStreamOutput()
 			m.materializeChatStreamText()
 			m.invalidateChatStream()
+			m.resetChatPoll()
 			return m, m.fetchChatStatus(m.pendingMsgID)
 		default:
-			return m, m.waitForCurrentChatStream(msg.generation)
+			watchdog := m.markChatStreamHealthy()
+			return m, tea.Batch(m.waitForCurrentChatStream(msg.generation), watchdog)
 		}
+
+	case chatStreamConnectedMsg:
+		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || !m.pendingChatScopeCurrent() {
+			return m, nil
+		}
+		return m, m.markChatStreamHealthy()
+
+	case chatStreamWatchdogMsg:
+		if msg.id != m.chatStreamWatchdogID || !m.chatStreamHealthy || m.pendingMsgID == "" {
+			return m, nil
+		}
+		if msg.activity != m.chatStreamActivity {
+			return m, m.scheduleChatStreamWatchdog()
+		}
+		// The stream is connected but silent. Hand liveness back to the bounded
+		// fallback poll until the stream proves itself again.
+		m.flushChatStreamOutput()
+		m.invalidateChatStream()
+		m.resetChatPoll()
+		return m, m.fetchChatStatus(m.pendingMsgID)
 
 	case chatStreamRenderMsg:
 		if msg.generation != m.chatStreamGeneration || msg.renderGeneration != m.chatStreamRenderGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || !m.pendingChatScopeCurrent() {
@@ -2993,7 +3105,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushChatStreamOutput()
 		m.invalidateChatStream()
 		m.chatStreamExecID = execID
-		return m, m.scheduleChatStreamReconnect(m.chatStreamGeneration)
+		return m, tea.Batch(m.scheduleChatStreamReconnect(m.chatStreamGeneration), m.armChatPoll())
 
 	case chatStreamReconnectMsg:
 		if msg.generation != m.chatStreamGeneration || msg.submissionID != m.chatSubmissionID || msg.projectID != m.selectedID || !m.matchesPendingChatExecution(msg.execID) || !m.pendingChatScopeCurrent() || m.authRequired || m.loginActive {
@@ -3264,6 +3376,7 @@ func (m Model) beginLogin() (Model, tea.Cmd) {
 		m.clearPendingChat()
 	} else {
 		m.invalidateChatStream()
+		m.resetChatPoll()
 	}
 	m.advanceSessionGeneration()
 	m.invalidateConnectionChecks()
@@ -4587,6 +4700,7 @@ func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
 		m.clearPendingChat()
 	} else if m.pendingMsgID != "" {
 		m.invalidateChatStream()
+		m.resetChatPoll()
 	}
 	// An accepted auth failure starts a new session epoch. This invalidates
 	// project, command, chat, selector, and thread results launched before the
