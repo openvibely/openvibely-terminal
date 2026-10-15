@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/openvibely/openvibely-terminal/internal/client"
@@ -362,5 +364,92 @@ func TestRedactServerCommandSecrets(t *testing.T) {
 	}
 	if got := redactServerCommandSecrets("/tasks a@b"); got != "/tasks a@b" {
 		t.Fatalf("non-server command changed: %q", got)
+	}
+}
+
+func TestServerQuotedSecretsNeverReachTranscriptOrHistory(t *testing.T) {
+	for _, root := range []string{`"/server"`, `'/connect'`, `/"server"`, `/con'nect'`, `"/ser"ver`} {
+		for _, operand := range []string{
+			`https://user:userinfo-secret@example.com/x?token=query-secret#fragment-secret`,
+			`"https://user:userinfo-secret@example.com/x?token=query-secret#fragment-secret"`,
+			`'https://example.com/?token=query-secret#fragment-secret'`,
+			`"https://user:userinfo-secret@example.com/?token=query-secret#fragment-secret`,
+		} {
+			t.Run(root+operand, func(t *testing.T) {
+				m := newTestModel(t)
+				original := m.client
+				m = runLine(t, m, root+" "+operand)
+				output := transcript(m) + strings.Join(m.history, "\n") + m.View()
+				for _, secret := range []string{"userinfo-secret", "query-secret", "fragment-secret"} {
+					if strings.Contains(output, secret) {
+						t.Fatalf("secret reached displayed/stored output: %s", output)
+					}
+				}
+				if m.client != original {
+					t.Fatal("invalid URL replaced the current client")
+				}
+			})
+		}
+	}
+}
+
+func TestDelayedServerSwitchClearsCredentialWizards(t *testing.T) {
+	for _, protected := range []bool{false, true} {
+		for _, wizard := range []string{"channel", "model", "model-edit"} {
+			t.Run(fmt.Sprintf("%s/protected=%v", wizard, protected), func(t *testing.T) {
+				local := newSwitchBackend(t, `{"projects":[{"id":"shared","name":"local"}]}`, "local", false)
+				remote := newSwitchBackend(t, `{"projects":[{"id":"shared","name":"remote"}]}`, "remote", protected)
+				m := connectedSwitchModel(t, local, []client.Project{{ID: "shared", Name: "local"}})
+				prompt := m.input.Prompt
+				line := "/server " + remote.srv.URL
+				if protected {
+					line += " --login"
+				}
+				m, probe := typeLine(t, m, line)
+				if probe == nil {
+					t.Fatal("missing pending probe")
+				}
+				// Open a wizard while the probe response is outstanding.
+				switch wizard {
+				case "channel":
+					m, _ = m.beginChannelWizard("add", client.Channel{Type: "telegram", Name: "old channel"})
+					m.channelWizard.form.Set("token", "saved-credential-secret")
+				case "model":
+					m, _ = m.beginModelWizard()
+					m.modelWizard.spec.APIKey = "saved-credential-secret"
+				case "model-edit":
+					m, _ = m.beginModelEditAPIKeyPrompt(modelEditSpec{})
+				}
+				m.input.SetValue("unsubmitted-credential-secret")
+				next, _ := m.Update(probe())
+				m = next.(Model)
+				defer m.Cleanup()
+				if m.client.BaseURL() != remote.srv.URL || m.channelWizard != nil || m.modelWizard != nil || m.modelEditWizard != nil {
+					t.Fatal("server installation retained an old credential wizard")
+				}
+				if m.input.Value() != "" || m.input.EchoMode != textinput.EchoNormal {
+					t.Fatal("server installation retained credential input or masking")
+				}
+				if !protected && m.input.Prompt != prompt {
+					t.Fatalf("prompt was not restored: %q", m.input.Prompt)
+				}
+				if protected && !m.loginActive {
+					t.Fatal("new backend login was not opened")
+				}
+				remote.reset()
+				local.reset()
+				next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				m = next.(Model)
+				if cmd != nil {
+					m = drain(m, cmd)
+				}
+				if len(remote.snapshot()) != 0 || len(local.snapshot()) != 0 {
+					t.Fatal("Enter submitted old wizard data after switching")
+				}
+				if strings.Contains(transcript(m)+strings.Join(m.history, "\n")+m.View(), "credential-secret") {
+					t.Fatal("old credential leaked into new session")
+				}
+			})
+		}
 	}
 }
