@@ -175,6 +175,7 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 
+	memorySearchCache        memorySearchCache
 	memoryMu                 sync.RWMutex
 	memoryBackendUnsupported bool
 

@@ -2784,7 +2784,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		display := alertActionDisplayName(alert)
 		return confirmOr(m,
-			fmt.Sprintf("Delete alert %q? Type 'yes' to confirm or Esc to cancel.", display),
+			fmt.Sprintf("Delete alert %q? %s", display, confirmCancelInstruction),
 			fmt.Sprintf("use --force to confirm deletion of alert %q", display),
 			cmd)
 
