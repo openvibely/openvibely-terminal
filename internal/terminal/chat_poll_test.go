@@ -269,3 +269,86 @@ func TestQueuedChatPollsUntilPromotion(t *testing.T) {
 		t.Fatalf("reads=%d", reads.Load())
 	}
 }
+
+func TestRepeatedChatReconnectsCannotSuppressFallback(t *testing.T) {
+	for _, terminal := range []string{"completed", "failed", "cancelled"} {
+		for _, snapshot := range []string{"", "partial reply"} {
+			t.Run(terminal+"/"+snapshot, func(t *testing.T) {
+				var reads atomic.Int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if strings.Contains(r.URL.Path, "/events/chat/") {
+						w.Header().Set("Content-Type", "text/event-stream")
+						w.(http.Flusher).Flush()
+						<-r.Context().Done()
+						return
+					}
+					n := reads.Add(1)
+					if n == 2 {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
+					}
+					status := "processing"
+					if n == 4 {
+						status = terminal
+					}
+					_ = json.NewEncoder(w).Encode(client.ChatStatus{MessageID: "exec-1", Status: status, Response: snapshot})
+				}))
+				defer srv.Close()
+				m := pendingChatStreamTestModel(t)
+				m.client, _ = client.New(srv.URL)
+				defer func() { m.invalidateChatStream() }()
+				pollTestConnect(t, &m)
+				m.updateChatStreamOutput("partial reply")
+				for cycle := 0; cycle < 4; cycle++ {
+					// Deliver disconnect and successful reconnect before the 1.5s
+					// poll tick, reproducing a stream that repeatedly closes at 2s.
+					pollTestUpdate(&m, chatStreamDisconnectedMsg{generation: m.chatStreamGeneration, submissionID: m.chatSubmissionID, projectID: m.selectedID, execID: m.pendingMsgID})
+					pollTestConnect(t, &m)
+					if !m.chatStreamHealthy || !m.chatPollPending {
+						t.Fatal("reconnect lost health or pending fallback")
+					}
+					cmd := pollTestUpdate(&m, chatPollTickMsg{pollGeneration: m.chatPollGeneration})
+					if cmd == nil {
+						t.Fatal("successful reconnect suppressed required status check")
+					}
+					pollTestUpdate(&m, cmd())
+					if cycle < 3 && !m.busy {
+						t.Fatal("nonterminal status settled chat")
+					}
+					if cycle == 0 && (m.chatPollPending || m.armChatPoll() != nil) {
+						t.Fatal("healthy stream continued polling after successful check")
+					}
+					if cycle == 1 && !m.chatPollPending {
+						t.Fatal("failed status check did not schedule retry")
+					}
+				}
+				if reads.Load() != 4 || m.busy || m.pendingMsgID != "" || !strings.Contains(transcript(m), "agent::partial reply") {
+					t.Fatalf("reconnect fallback lost completion/output: reads=%d transcript=%s", reads.Load(), transcript(m))
+				}
+			})
+		}
+	}
+}
+
+func TestChatDisconnectDuringStatusRequestPreservesNextCheck(t *testing.T) {
+	m := pendingChatStreamTestModel(t)
+	m.armChatPoll()
+	if cmd := pollTestUpdate(&m, chatPollTickMsg{pollGeneration: m.chatPollGeneration}); cmd == nil {
+		t.Fatal("missing initial status request")
+	}
+	pollTestUpdate(&m, chatStreamDisconnectedMsg{generation: m.chatStreamGeneration, submissionID: m.chatSubmissionID, projectID: m.selectedID, execID: m.pendingMsgID})
+	m.markChatStreamHealthy()
+	// Represent the reconnect attempt without starting network commands.
+	m.chatStreamCancel = func() {}
+	pollTestUpdate(&m, chatStatusMsg{pollGeneration: m.chatPollGeneration, status: &client.ChatStatus{Status: "processing"}})
+	if !m.chatPollRequired || !m.chatPollPending {
+		t.Fatal("in-flight response lost the disconnect-triggered check")
+	}
+	if cmd := pollTestUpdate(&m, chatPollTickMsg{pollGeneration: m.chatPollGeneration}); cmd == nil {
+		t.Fatal("healthy reconnect suppressed the next check")
+	}
+	m.resetChatPoll()
+	if m.chatPollRequired || m.chatPollPending {
+		t.Fatal("poll reset retained disconnect state")
+	}
+}

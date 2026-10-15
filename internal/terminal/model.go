@@ -247,6 +247,7 @@ type Model struct {
 	chatStreamWatchdogID       uint64
 	chatPollGeneration         uint64
 	chatPollPending            bool
+	chatPollRequired           bool // disconnect-triggered check survives reconnect
 	chatStreamExecID           string
 	chatStreamOffset           int
 	chatStreamOutput           string
@@ -1139,16 +1140,17 @@ func (m *Model) invalidateChatStream() {
 func (m *Model) resetChatPoll() {
 	m.chatPollGeneration++
 	m.chatPollPending = false
+	m.chatPollRequired = false
 }
 
 // armChatPoll schedules the next fallback status poll. Polling is the liveness
-// source only while the reply is queued or no healthy output stream exists;
+// source while queued, without a healthy stream, or after a disconnect;
 // at most one poll tick or request is outstanding at a time.
 func (m *Model) armChatPoll() tea.Cmd {
 	if m.pendingMsgID == "" || m.chatPollPending {
 		return nil
 	}
-	if m.chatStreamHealthy && m.pendingMsgExecutionID != "" {
+	if m.chatStreamHealthy && m.pendingMsgExecutionID != "" && !m.chatPollRequired {
 		return nil
 	}
 	if m.chatPollGeneration == 0 {
@@ -2957,12 +2959,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.pollGeneration != m.chatPollGeneration || !m.chatPollPending {
 			return m, nil
 		}
-		if m.pendingMsgID == "" || !m.pendingChatScopeCurrent() || (m.chatStreamHealthy && m.pendingMsgExecutionID != "") {
+		if m.pendingMsgID == "" || !m.pendingChatScopeCurrent() || (m.chatStreamHealthy && m.pendingMsgExecutionID != "" && !m.chatPollRequired) {
 			// A healthy stream owns liveness; the chain parks until the stream
 			// disconnects, fails, or its watchdog expires.
 			m.chatPollPending = false
 			return m, nil
 		}
+		// Consume the required check at dispatch so a later disconnect can
+		// request another check even while this request is in flight.
+		m.chatPollRequired = false
 		poll := m
 		messageID, projectID, projectGeneration := m.pendingMsgID, m.pendingMsgProjectID, m.pendingMsgProjectGeneration
 		return m, func() tea.Msg {
@@ -3006,6 +3011,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingMsgExecutionID = msg.resolvedMessageID
 		}
 		if msg.err != nil {
+			m.chatPollRequired = true
 			if m.handleAuthError(msg.err) {
 				m.busy = false
 				return m, nil
@@ -3017,6 +3023,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.armChatPoll() // transient; keep polling
 		}
 		if msg.status == nil {
+			m.chatPollRequired = true
 			return m, m.armChatPoll()
 		}
 		if m.chatStreamCancel == nil {
@@ -3105,6 +3112,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flushChatStreamOutput()
 		m.invalidateChatStream()
 		m.chatStreamExecID = execID
+		m.chatPollRequired = true
 		return m, tea.Batch(m.scheduleChatStreamReconnect(m.chatStreamGeneration), m.armChatPoll())
 
 	case chatStreamReconnectMsg:
