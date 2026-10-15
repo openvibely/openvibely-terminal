@@ -2406,6 +2406,17 @@ func TestTasksNewEmptyTitleFromPipeInput(t *testing.T) {
 			t.Errorf("expected CreateTask call, calls:\n%s", rec.all())
 		}
 	})
+
+	t.Run("apostrophes in title and prompt are preserved", func(t *testing.T) {
+		m, rec := dispatchModel(t, nil)
+		m = runLine(t, m, "/tasks new Fix the user's login | Don't break sessions")
+		if !rec.saw("POST", "/tasks") {
+			t.Fatalf("expected CreateTask call, calls:\n%s", rec.all())
+		}
+		if !rec.sawForm("title=Fix+the+user%27s+login") || !rec.sawForm("prompt=Don%27t+break+sessions") {
+			t.Fatalf("task title or prompt lost apostrophes: %v", rec.formsSnapshot())
+		}
+	})
 }
 
 func TestSkillsAddEmptyNameFromPipeInput(t *testing.T) {
@@ -4268,6 +4279,47 @@ func TestTaskGoalLifecycleUsesScopedRoutesAndKeepsPauseAsObjective(t *testing.T)
 			}
 			if out := transcript(m); !strings.Contains(out, tc.wantOut) {
 				t.Fatalf("output missing %q:\n%s", tc.wantOut, out)
+			}
+		})
+	}
+}
+
+func TestTaskReplyAndGoalPreserveApostrophesInMessageText(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		line     string
+		endpoint string
+		query    string
+		form     string
+	}{
+		{
+			name:     "reply",
+			line:     "/tasks reply Refactor | don't touch the API",
+			endpoint: "POST /tasks/t-1/thread",
+			form:     "message=don%27t+touch+the+API",
+		},
+		{
+			name:     "goal",
+			line:     "/tasks goal Refactor | it's done",
+			endpoint: "POST /tasks/t-1/goal",
+			query:    "project_id=p1",
+			form:     "objective=it%27s+done",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": taskBoardHTML})
+			m = runLine(t, m, tc.line)
+			if !strings.Contains(rec.all(), tc.endpoint) {
+				t.Fatalf("request missing %q: %v", tc.endpoint, rec.all())
+			}
+			if tc.query != "" && !rec.sawQuery(tc.query) {
+				t.Fatalf("request missing query %q: %v", tc.query, rec.urlsSnapshot())
+			}
+			if !rec.sawForm(tc.form) {
+				t.Fatalf("submitted text lost its apostrophe: %v", rec.formsSnapshot())
+			}
+			if out := strings.ToLower(transcript(m)); strings.Contains(out, "parse error") || strings.Contains(out, "usage:") {
+				t.Fatalf("command did not dispatch cleanly:\n%s", out)
 			}
 		})
 	}
@@ -8215,27 +8267,26 @@ func TestModelsInteractiveAddValidatesOllamaAndBackendErrorsWithoutLeaks(t *test
 		}
 	})
 
-	t.Run("malformed embedded-quote option API key is redacted", func(t *testing.T) {
+	t.Run("literal embedded-quote option API key is redacted", func(t *testing.T) {
 		for _, tc := range []struct {
-			name      string
-			option    string
-			quoteName string
+			name   string
+			option string
 		}{
-			{name: "API key double quote", option: `--api-key"`, quoteName: "double"},
-			{name: "API key stdin double quote", option: `--api-key-stdin"`, quoteName: "double"},
-			{name: "API key single quote", option: `--api-key'`, quoteName: "single"},
-			{name: "API key stdin single quote", option: `--api-key-stdin'`, quoteName: "single"},
-			{name: "API key embedded double quote", option: `--api"-key`, quoteName: "double"},
-			{name: "API key stdin embedded double quote", option: `--api"-key-stdin`, quoteName: "double"},
-			{name: "API key embedded single quote", option: `--api'-key`, quoteName: "single"},
-			{name: "API key stdin embedded single quote", option: `--api'-key-stdin`, quoteName: "single"},
+			{name: "API key double quote", option: `--api-key"`},
+			{name: "API key stdin double quote", option: `--api-key-stdin"`},
+			{name: "API key single quote", option: `--api-key'`},
+			{name: "API key stdin single quote", option: `--api-key-stdin'`},
+			{name: "API key embedded double quote", option: `--api"-key`},
+			{name: "API key stdin embedded double quote", option: `--api"-key-stdin`},
+			{name: "API key embedded single quote", option: `--api'-key`},
+			{name: "API key stdin embedded single quote", option: `--api'-key-stdin`},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				secret := "embedded-quote-model-secret-" + strings.ReplaceAll(tc.name, " ", "-")
 				m, rec := dispatchModel(t, nil)
 				m = runLine(t, m, "/models add openai OpenAI gpt-4o "+tc.option+"="+secret)
-				if !strings.Contains(transcript(m), "unmatched "+tc.quoteName+" quote") {
-					t.Fatalf("malformed command did not report its parse error:\n%s", transcript(m))
+				if !strings.Contains(transcript(m), "unsupported models add option") {
+					t.Fatalf("literal quote in an already-started option did not report local rejection:\n%s", transcript(m))
 				}
 				if strings.Contains(m.View(), secret) || strings.Contains(transcript(m), secret) {
 					t.Fatalf("malformed embedded-quote option exposed the API key:\n%s", transcript(m))

@@ -543,29 +543,27 @@ func (m Model) selectorDispatch(command string, prefill bool, prefillSuffix stri
 // formatSelectorArgument renders one reference so it can be embedded in an
 // interactive command line and recovered as the same single argument.
 func formatSelectorArgument(ref string) string {
-	if ref != "" && strings.IndexFunc(ref, func(r rune) bool {
-		return unicode.IsSpace(r) || r == '\'' || r == '"'
-	}) < 0 {
+	if ref != "" && strings.IndexFunc(ref, unicode.IsSpace) < 0 && ref[0] != '\'' && ref[0] != '"' {
 		return ref
+	}
+
+	quote := '\''
+	if strings.ContainsRune(ref, '\'') {
+		quote = '"'
 	}
 
 	var quoted strings.Builder
 	quoted.Grow(len(ref) + 2)
-	quoted.WriteByte('"')
+	quoted.WriteRune(quote)
 	for _, r := range ref {
-		if r == '"' {
-			// A quote of the active delimiter is represented by closing the
-			// double-quoted segment, placing a literal quote in a single-quoted
-			// segment, and reopening the double-quoted segment. This preserves
-			// the tokenizer's literal backslash behavior inside quotes.
-			quoted.WriteByte('"')
-			quoted.WriteString(`'"'`)
-			quoted.WriteByte('"')
-			continue
+		if r == quote {
+			// The tokenizer treats a doubled active delimiter inside a quoted
+			// token as one literal delimiter.
+			quoted.WriteRune(quote)
 		}
 		quoted.WriteRune(r)
 	}
-	quoted.WriteByte('"')
+	quoted.WriteRune(quote)
 	return quoted.String()
 }
 

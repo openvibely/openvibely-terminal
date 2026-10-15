@@ -368,7 +368,7 @@ func TestRedactServerCommandSecrets(t *testing.T) {
 }
 
 func TestServerQuotedSecretsNeverReachTranscriptOrHistory(t *testing.T) {
-	for _, root := range []string{`"/server"`, `'/connect'`, `/"server"`, `/con'nect'`, `"/ser"ver`} {
+	for _, root := range []string{`"/server"`, `'/connect'`, `/"server"`, `"/ser"ver`} {
 		for _, operand := range []string{
 			`https://user:userinfo-secret@example.com/x?token=query-secret#fragment-secret`,
 			`"https://user:userinfo-secret@example.com/x?token=query-secret#fragment-secret"`,

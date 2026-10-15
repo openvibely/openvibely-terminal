@@ -75,9 +75,24 @@ func TestTokenizeCommandGroupsQuotedArguments(t *testing.T) {
 			want: []string{"tasks", "attachments", "delete", "Fix login bug", "monthly report.pdf"},
 		},
 		{
-			name: "adjacent quoted text",
-			line: `/tasks show "Fix login"' bug' attachments`,
-			want: []string{"tasks", "show", "Fix login bug", "attachments"},
+			name: "quoted token followed by apostrophe word",
+			line: `/tasks show 'Fix login' don't`,
+			want: []string{"tasks", "show", "Fix login", "don't"},
+		},
+		{
+			name: "contractions and possessives",
+			line: `/tasks new Fix the user's login | Don't break sessions`,
+			want: []string{"tasks", "new", "Fix", "the", "user's", "login", "|", "Don't", "break", "sessions"},
+		},
+		{
+			name: "two apostrophes in free text",
+			line: `/tasks reply Refactor | don't break user's sessions`,
+			want: []string{"tasks", "reply", "Refactor", "|", "don't", "break", "user's", "sessions"},
+		},
+		{
+			name: "double quote inside a token",
+			line: `/tasks show 5" screen`,
+			want: []string{"tasks", "show", `5"`, "screen"},
 		},
 		{
 			name: "empty quoted argument",
@@ -118,7 +133,9 @@ func TestSelectorArgumentFormattingRoundTripsThroughCommandTokenizer(t *testing.
 		"plain-id",
 		"name with spaces",
 		"apostrophe's.md",
+		"don't break user's API",
 		`double"quote.md`,
+		`5" screen`,
 		`both ' and ".md`,
 		`path with back\slash.md`,
 		`path ending with backslash\`,
@@ -164,14 +181,24 @@ func TestInteractiveStatusAliasesValidateOperands(t *testing.T) {
 }
 
 func TestRunCommandRejectsUnmatchedQuotesBeforeDispatch(t *testing.T) {
-	m := newTestModel(t)
-	m.selectedID = "p1"
-	next, cmd := m.runCommand(`/tasks attachments add "Fix login bug`)
-	if cmd != nil {
-		t.Fatal("unmatched quote must not return a dispatch command")
-	}
-	if out := transcript(next.(Model)); !strings.Contains(out, "parse error: unmatched double quote") {
-		t.Fatalf("unmatched quote error missing from transcript:\n%s", out)
+	for _, tc := range []struct {
+		line string
+		want string
+	}{
+		{line: `/tasks attachments add "Fix login bug`, want: "unmatched double quote"},
+		{line: `/tasks show 'Fix login bug`, want: "unmatched single quote"},
+	} {
+		t.Run(tc.want, func(t *testing.T) {
+			m := newTestModel(t)
+			m.selectedID = "p1"
+			next, cmd := m.runCommand(tc.line)
+			if cmd != nil {
+				t.Fatal("unmatched quote must not return a dispatch command")
+			}
+			if out := transcript(next.(Model)); !strings.Contains(out, "parse error: "+tc.want) {
+				t.Fatalf("unmatched quote error missing from transcript:\n%s", out)
+			}
+		})
 	}
 }
 func TestSplitActionRecognisesKnownActions(t *testing.T) {

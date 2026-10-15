@@ -395,17 +395,28 @@ func tokenizeCommandTokens(line string) ([]commandToken, error) {
 		r := runes[i]
 		if quoted != 0 {
 			if r == quoted {
-				quoted = 0
+				// Doubling the active delimiter inside a quoted token represents
+				// one literal delimiter. This keeps selector-generated arguments
+				// round-trippable without allowing a later quote to start a new
+				// quoted segment in the same token.
+				if i+1 < len(runes) && runes[i+1] == quoted {
+					current.WriteRune(r)
+					i++
+				} else {
+					quoted = 0
+				}
 			} else {
 				current.WriteRune(r)
 			}
 			continue
 		}
 		switch {
-		case r == '\'' || r == '"':
+		case (r == '\'' || r == '"') && !tokenStarted:
 			quoted = r
 			tokenStarted = true
 			tokenQuoted = true
+		case r == '\'' || r == '"':
+			current.WriteRune(r)
 		case unicode.IsSpace(r):
 			flush()
 		default:
