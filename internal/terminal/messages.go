@@ -451,6 +451,24 @@ type skillEditorSavedMsg struct {
 	err               error
 }
 
+type personalityEditLoadedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	requestID         uint64
+	personality       client.Personality
+	err               error
+}
+
+type personalityEditSavedMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	requestID         uint64
+	key               string
+	err               error
+}
+
 type automationEditLoadedMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64

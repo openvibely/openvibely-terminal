@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -984,6 +985,9 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/personality":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality/custom/release_coach":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"This is the existing complete release coach prompt."}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
 			if err := json.NewDecoder(r.Body).Decode(&addBody); err != nil {
 				t.Errorf("decode CLI add body: %v", err)
@@ -1023,11 +1027,16 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := RunCLI(c, &out, "demo", []string{"personality", "edit", "release_coach", "|", "Updated Coach", "|", "updated", "|", "Keep every release reversible and observable."}, false, false); err != nil {
+	editPrompt := "Keep every release reversible and observable.\nInclude useful rollout checks.\n"
+	editPath := filepath.Join(t.TempDir(), "coach.md")
+	if err := os.WriteFile(editPath, []byte(editPrompt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(c, &out, "demo", []string{"personality", "edit", "release_coach", "--file", editPath}, false, false); err != nil {
 		t.Fatalf("CLI personality edit failed: %v", err)
 	}
-	if editBody["name"] != "Updated Coach" || editBody["description"] != "updated" || editBody["system_prompt"] == "" {
-		t.Errorf("CLI edit body = %#v", editBody)
+	if editBody["name"] != "Release Coach" || editBody["description"] != "safe releases" || editBody["system_prompt"] != editPrompt {
+		t.Errorf("CLI edit body = %#v, want only the prompt changed", editBody)
 	}
 
 	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"personality", "delete", "release_coach"}, false, false); err == nil || !strings.Contains(err.Error(), "--force") {
@@ -1046,6 +1055,155 @@ func TestCLIPersonalityCRUDAndForceDelete(t *testing.T) {
 	}
 	if deleted["action"] != "delete" || deleted["key"] != "release_coach" || deleteRequests != 1 {
 		t.Fatalf("delete result = %#v, requests=%d", deleted, deleteRequests)
+	}
+}
+
+func TestCLIPersonalityFileFormsAndValidation(t *testing.T) {
+	var addBodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("decode file add body: %v", err)
+			}
+			addBodies = append(addBodies, payload)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"coach","name":"Coach","description":"safe releases","system_prompt":"Created prompt content is long enough."}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	promptOne := "# Coach\n\nKeep every step observable.\n"
+	promptTwo := "# Release Coach\n\nKeep changes reversible.\n"
+	pathOne := filepath.Join(t.TempDir(), "coach.md")
+	pathTwo := filepath.Join(t.TempDir(), "release coach.md")
+	if err := os.WriteFile(pathOne, []byte(promptOne), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pathTwo, []byte(promptTwo), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args       []string
+		wantName   string
+		wantDesc   string
+		wantPrompt string
+	}{
+		{args: []string{"personality", "add", "Coach", "--file", pathOne}, wantName: "Coach", wantPrompt: promptOne},
+		{args: []string{"personality", "add", "Coach", "description=safe releases", "--file", pathTwo}, wantName: "Coach", wantDesc: "safe releases", wantPrompt: promptTwo},
+	} {
+		if err := RunCLI(c, &bytes.Buffer{}, "demo", tc.args, false, true); err != nil {
+			t.Fatalf("file personality add failed: %v", err)
+		}
+	}
+	if len(addBodies) != 2 {
+		t.Fatalf("file add requests = %d, want two", len(addBodies))
+	}
+	for i, tc := range []struct {
+		name, description, prompt string
+	}{{"Coach", "", promptOne}, {"Coach", "safe releases", promptTwo}} {
+		if addBodies[i]["name"] != tc.name || addBodies[i]["description"] != tc.description || addBodies[i]["system_prompt"] != tc.prompt {
+			t.Errorf("file add body %d = %#v, want name/description and exact prompt", i, addBodies[i])
+		}
+	}
+
+	var requests atomic.Int32
+	noRequestServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(cliProjects))
+	}))
+	t.Cleanup(noRequestServer.Close)
+	noRequestClient, err := client.New(noRequestServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing.md")
+	directory := t.TempDir()
+	oversized := filepath.Join(t.TempDir(), "large.md")
+	invalidUTF8 := filepath.Join(t.TempDir(), "invalid.md")
+	if err := os.WriteFile(oversized, bytes.Repeat([]byte("x"), maxPersonalityPromptFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(invalidUTF8, []byte{0xff, 0xfe, 'x'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "missing", path: missing},
+		{name: "directory", path: directory},
+		{name: "oversized", path: oversized},
+		{name: "non-UTF-8", path: invalidUTF8},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := RunCLI(noRequestClient, &bytes.Buffer{}, "demo", []string{"personality", "add", "Coach", "--file", tc.path}, false, false); err == nil {
+				t.Fatal("invalid prompt file unexpectedly succeeded")
+			}
+			if err := RunCLI(noRequestClient, &bytes.Buffer{}, "demo", []string{"personality", "edit", "coach", "--file", tc.path}, false, false); err == nil {
+				t.Fatal("invalid edit prompt file unexpectedly succeeded")
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"personality", "edit", "coach"},
+		{"personality", "edit", "coach", "|", "Coach", "|", "description", "|", "A prompt that used to be accepted."},
+	} {
+		if err := RunCLI(noRequestClient, &bytes.Buffer{}, "demo", args, false, false); err == nil || !strings.Contains(err.Error(), "usage: personality edit") {
+			t.Errorf("CLI edit args %q error = %v, want usage", args, err)
+		}
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("invalid CLI personality commands made %d requests", got)
+	}
+}
+
+func TestCLIPersonalityBaseFileEditIsRejected(t *testing.T) {
+	const catalog = `<div id="personality-section" data-selected-personality="">
+		<div data-personality-key="" data-personality-name="Base" data-personality-is-preset="true" data-personality-has-custom="false"></div>
+	</div>`
+	var puts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(cliProjects))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(w, catalog)
+		case r.Method == http.MethodPut:
+			puts++
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptPath := filepath.Join(t.TempDir(), "base.md")
+	if err := os.WriteFile(promptPath, []byte("Valid prompt content for Base."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", []string{"personality", "edit", "Base", "--file", promptPath}, false, false); err == nil || !strings.Contains(err.Error(), "base personality cannot be edited") {
+		t.Fatalf("Base file edit error = %v", err)
+	}
+	if puts != 0 {
+		t.Fatalf("Base file edit made %d PUT requests", puts)
 	}
 }
 
@@ -1456,6 +1614,7 @@ func TestCLIEditingActivePersonalityPreservesActiveJSON(t *testing.T) {
 			data-personality-preview="Keep releases safe..." data-personality-is-preset="false" data-personality-has-custom="true"></div>
 	</div>`
 	var putRequests int
+	var updatePayload map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
@@ -1464,10 +1623,16 @@ func TestCLIEditingActivePersonalityPreservesActiveJSON(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/personality":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality/custom/release_coach":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"Current full prompt that is long enough."}`)
 		case r.Method == http.MethodPut && r.URL.Path == "/personality/custom/release_coach":
 			putRequests++
+			if err := json.NewDecoder(r.Body).Decode(&updatePayload); err != nil {
+				t.Errorf("decode personality update: %v", err)
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"updated","system_prompt":"Updated prompt that is long enough."}`)
+			_, _ = fmt.Fprint(w, `{"id":"cp1","key":"release_coach","name":"Release Coach","description":"safe releases","system_prompt":"Updated prompt that is long enough.\nAnd keeps its line break."}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -1479,8 +1644,13 @@ func TestCLIEditingActivePersonalityPreservesActiveJSON(t *testing.T) {
 	}
 
 	var out bytes.Buffer
+	promptPath := filepath.Join(t.TempDir(), "coach.md")
+	const replacementPrompt = "Updated prompt that is long enough.\nAnd keeps its line break."
+	if err := os.WriteFile(promptPath, []byte(replacementPrompt), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := RunCLI(c, &out, "demo", []string{
-		"personality", "edit", "release_coach", "|", "Release Coach", "|", "updated", "|", "Updated prompt that is long enough.",
+		"personality", "edit", "release_coach", "--file", promptPath,
 	}, false, true); err != nil {
 		t.Fatalf("JSON personality edit failed: %v", err)
 	}
@@ -1491,8 +1661,11 @@ func TestCLIEditingActivePersonalityPreservesActiveJSON(t *testing.T) {
 	if putRequests != 1 {
 		t.Fatalf("PUT requests = %d, want 1", putRequests)
 	}
-	if got.Key != "release_coach" || !got.Active {
-		t.Fatalf("edited active personality = %+v, want key release_coach and active=true", got)
+	if updatePayload["name"] != "Release Coach" || updatePayload["description"] != "safe releases" || updatePayload["system_prompt"] != replacementPrompt {
+		t.Fatalf("JSON file edit request = %#v, want prompt only with metadata preserved", updatePayload)
+	}
+	if got.Key != "release_coach" || !got.Active || !got.HasCustom || got.Name != "Release Coach" || got.Description != "safe releases" || got.SystemPrompt != replacementPrompt {
+		t.Fatalf("edited active personality = %+v, want preserved metadata and prompt %q", got, replacementPrompt)
 	}
 }
 
@@ -1514,6 +1687,9 @@ func TestCLIPersonalityFailuresAndReferenceSafety(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/personality":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = w.Write([]byte(personalitiesHTML))
+		case r.Method == http.MethodGet && r.URL.Path == "/personality/custom/known":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"known-id","key":"known","name":"Known","description":"known","system_prompt":"Existing prompt that is long enough."}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/personality/custom":
 			posts++
 			w.WriteHeader(http.StatusUnprocessableEntity)
@@ -1562,7 +1738,17 @@ func TestCLIPersonalityFailuresAndReferenceSafety(t *testing.T) {
 		t.Fatal("ambiguous set mutated the active personality")
 	}
 
-	if err := RunCLI(c, &out, "demo", []string{"personality", "edit", "known", "|", "Updated", "|", "updated", "|", "A valid prompt that is long enough"}, false, false); err == nil || !strings.Contains(err.Error(), "personality update failed") {
+	if err := RunCLI(c, &out, "demo", []string{"personality", "edit", "known", "|", "Updated", "|", "updated", "|", "A valid prompt that is long enough"}, false, false); err == nil || !strings.Contains(err.Error(), "usage: personality edit") {
+		t.Fatalf("CLI legacy edit usage error = %v", err)
+	}
+	if puts != 0 {
+		t.Fatalf("legacy CLI edit made %d PUT requests", puts)
+	}
+	promptPath := filepath.Join(t.TempDir(), "known.md")
+	if err := os.WriteFile(promptPath, []byte("A valid prompt that is long enough."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunCLI(c, &out, "demo", []string{"personality", "edit", "known", "--file", promptPath}, false, false); err == nil || !strings.Contains(err.Error(), "personality update failed") {
 		t.Fatalf("CLI backend edit error = %v", err)
 	}
 	if puts != 1 || strings.Contains(out.String(), "updated personality") {

@@ -76,10 +76,21 @@ openvibely-terminal -project demo tasks goal pause refactor
 openvibely-terminal -project demo tasks steer refactor '|' "stop and use the new interface"
 openvibely-terminal -project demo chat "summarize the current project"
 openvibely-terminal -project demo automations create --file automation.yaml
+openvibely-terminal -project demo personality add "Release Coach" --file coach.md
+openvibely-terminal -project demo personality add "Release Coach" description=safe releases --file coach.md
+openvibely-terminal -project demo personality edit release_coach --file coach.md
 openvibely-terminal --force projects delete demo
 openvibely-terminal -project demo --force personality delete-bulk old_one "Old Two"
 openvibely-terminal --json -project demo automations list
 ```
+
+`/personality edit <key>` opens a multiline TUI editor prefilled with the current
+system prompt; `Ctrl+S` saves and `Esc` cancels. The TUI also keeps the existing
+four-field pipe edit form. CLI edits use `personality edit <key> --file <path>`
+to replace only the prompt, preserving name and description. Add personalities
+from exact prompt file contents with `personality add <name> --file <path>`; add
+`description=<text>` before `--file` to set a description. `--json` on a file edit
+emits the updated personality record.
 
 Project-scoped commands automatically use the backend's only project. When the
 backend has multiple projects, select one with `-project <name|id>`. Use
