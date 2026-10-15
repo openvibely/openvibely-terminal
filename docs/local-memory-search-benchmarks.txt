@@ -1,0 +1,120 @@
+Full-scan warm baseline
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/warm-18    	       1	2613959541 ns/op	       100.0 opened/query	  85676500 p50-ns/query	  97778125 p95-ns/query	   6553600 read-B/query	2478755008 B/op	38675088 allocs/op
+BenchmarkSearchMemoriesCorpus/100x1024KiB/warm-18  	       1	33111591917 ns/op	       100.0 opened/query	1101052125 p50-ns/query	1180282625 p95-ns/query	 104857600 read-B/query	35225862664 B/op	602729629 allocs/op
+BenchmarkSearchMemoriesCorpus/1000x64KiB/warm-18   	       1	23266286042 ns/op	      1000 opened/query	 759828959 p50-ns/query	 890671083 p95-ns/query	  65536000 read-B/query	24775582752 B/op	386598124 allocs/op
+BenchmarkSearchMemoriesCorpus/1000x1024KiB/warm-18 	       1	300651080375 ns/op	      1000 opened/query	9995586875 p50-ns/query	10618906334 p95-ns/query	1048576000 read-B/query	352249517568 B/op	6027145125 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	408.022s
+
+Cached cold and warm matrix
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	       1	  85739458 ns/op	       100.0 opened/query	  85739208 p50-ns/query	  85739208 p95-ns/query	   6553600 read-B/query	84695584 B/op	 1325875 allocs/op
+BenchmarkSearchMemoriesCorpus/100x64KiB/warm-18    	       1	 244592791 ns/op	       100.0 opened/query	   7985625 p50-ns/query	   9012541 p95-ns/query	         0 read-B/query	90696112 B/op	  889511 allocs/op
+BenchmarkSearchMemoriesCorpus/100x1024KiB/cold-18  	       1	1150430875 ns/op	       100.0 opened/query	1150430375 p50-ns/query	1150430375 p95-ns/query	 104857600 read-B/query	1206358008 B/op	20664886 allocs/op
+BenchmarkSearchMemoriesCorpus/100x1024KiB/warm-18  	       1	 302997292 ns/op	       100.0 opened/query	   8803292 p50-ns/query	  13920667 p95-ns/query	         0 read-B/query	91182720 B/op	  889510 allocs/op
+BenchmarkSearchMemoriesCorpus/1000x64KiB/cold-18   	       1	 808654375 ns/op	      1000 opened/query	 808653917 p50-ns/query	 808653917 p95-ns/query	  65536000 read-B/query	846851240 B/op	13253626 allocs/op
+BenchmarkSearchMemoriesCorpus/1000x64KiB/warm-18   	       1	4000381667 ns/op	      1000 opened/query	 125314459 p50-ns/query	 188442459 p95-ns/query	         0 read-B/query	898308896 B/op	 8747144 allocs/op
+BenchmarkSearchMemoriesCorpus/1000x1024KiB/cold-18 	       1	12241581291 ns/op	      1000 opened/query	12241580958 p50-ns/query	12241580958 p95-ns/query	1048576000 read-B/query	12063503408 B/op	206644038 allocs/op
+BenchmarkSearchMemoriesCorpus/1000x1024KiB/warm-18 	       1	2670355958 ns/op	      1000 opened/query	  86231541 p50-ns/query	 105372209 p95-ns/query	         0 read-B/query	903120928 B/op	 8747148 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	71.650s
+
+Five paired cold baseline runs
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  73978256 ns/op	       100.0 opened/query	  74080708 p50-ns/query	  80912083 p95-ns/query	   6553600 read-B/query	82630721 B/op	 1289161 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.607s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  75246514 ns/op	       100.0 opened/query	  75122125 p50-ns/query	  78361416 p95-ns/query	   6553600 read-B/query	82630596 B/op	 1289161 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.665s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  73473511 ns/op	       100.0 opened/query	  73786042 p50-ns/query	  75771125 p95-ns/query	   6553600 read-B/query	82630456 B/op	 1289161 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.608s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  79530807 ns/op	       100.0 opened/query	  75077042 p50-ns/query	 104610250 p95-ns/query	   6553600 read-B/query	82631294 B/op	 1289166 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.816s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  73382783 ns/op	       100.0 opened/query	  73570541 p50-ns/query	  75337750 p95-ns/query	   6553600 read-B/query	82630554 B/op	 1289161 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.600s
+
+Five paired cold cached runs
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  73992640 ns/op	       100.0 opened/query	  74097000 p50-ns/query	  76377292 p95-ns/query	   6553600 read-B/query	82709641 B/op	 1290173 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.677s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  75437425 ns/op	       100.0 opened/query	  74854208 p50-ns/query	  83753625 p95-ns/query	   6553600 read-B/query	82709387 B/op	 1290172 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.667s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  73179325 ns/op	       100.0 opened/query	  73324542 p50-ns/query	  75763041 p95-ns/query	   6553600 read-B/query	82709342 B/op	 1290172 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.586s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  74551483 ns/op	       100.0 opened/query	  74353416 p50-ns/query	  77272208 p95-ns/query	   6553600 read-B/query	82709727 B/op	 1290172 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.640s
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  74179592 ns/op	       100.0 opened/query	  74294625 p50-ns/query	  76537708 p95-ns/query	   6553600 read-B/query	82709521 B/op	 1290172 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.630s
+
+Initial noisy cold baseline
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  80003089 ns/op	       100.0 opened/query	  78358583 p50-ns/query	  94548041 p95-ns/query	   6553600 read-B/query	82624113 B/op	 1289161 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.806s
+
+Initial noisy cold cached run
+goos: darwin
+goarch: arm64
+pkg: github.com/openvibely/openvibely-terminal/internal/client
+cpu: Apple M5 Pro
+BenchmarkSearchMemoriesCorpus/100x64KiB/cold-18    	      30	  85467312 ns/op	       100.0 opened/query	  83987042 p50-ns/query	 105135292 p95-ns/query	   6553600 read-B/query	82709347 B/op	 1290172 allocs/op
+PASS
+ok  	github.com/openvibely/openvibely-terminal/internal/client	4.971s
+
