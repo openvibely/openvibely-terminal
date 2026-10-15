@@ -2373,6 +2373,7 @@ func renderScheduleInspection(entry client.ScheduleEntry, task *client.Task) str
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(safe(entry.Text), "Schedule")))
 	fmt.Fprintf(&b, "Schedule ID: %s\n", firstNonEmpty(safe(entry.ScheduleID), "(unknown)"))
+	fmt.Fprintf(&b, "Status: %s\n", entry.Status())
 	if entry.TaskID == "" {
 		b.WriteString("Bound task unavailable\n")
 		return strings.TrimSpace(b.String())
@@ -2411,9 +2412,9 @@ func renderScheduleLimited(entries []client.ScheduleEntry, summary string, limit
 	if limit > 0 && len(entries) > limit {
 		shown = entries[:limit]
 	}
-	rows := [][]string{{"SCHEDULE", "TASK", "WHEN"}}
+	rows := [][]string{{"SCHEDULE", "TASK", "STATUS", "WHEN"}}
 	for _, e := range shown {
-		rows = append(rows, []string{shortID(e.ScheduleID), shortID(e.TaskID), truncate(e.Text, 60)})
+		rows = append(rows, []string{shortID(e.ScheduleID), shortID(e.TaskID), e.Status(), truncate(e.Text, 60)})
 	}
 	out := table(rows)
 	if len(shown) < len(entries) {

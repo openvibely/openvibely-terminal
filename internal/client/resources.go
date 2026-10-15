@@ -2197,9 +2197,64 @@ type ScheduleEntry struct {
 	Text               string     `json:"text"`
 	NextRun            *time.Time `json:"next_run,omitempty"`
 	Disabled           bool       `json:"-"`
-	disabledKnown      bool
-	NextRunPrecise     bool `json:"-"`
-	NextRunExactSource bool `json:"-"`
+	DisabledKnown      bool       `json:"-"`
+	NextRunPrecise     bool       `json:"-"`
+	NextRunExactSource bool       `json:"-"`
+}
+
+// Schedule enabled-state values exposed by ScheduleEntry.Status.
+const (
+	ScheduleStatusEnabled = "enabled"
+	ScheduleStatusPaused  = "paused"
+	ScheduleStatusUnknown = "unknown"
+)
+
+// Status reports the schedule's enabled state. It never assumes enabled when
+// the backend did not render the state.
+func (e ScheduleEntry) Status() string {
+	switch {
+	case !e.DisabledKnown:
+		return ScheduleStatusUnknown
+	case e.Disabled:
+		return ScheduleStatusPaused
+	default:
+		return ScheduleStatusEnabled
+	}
+}
+
+type scheduleEntryJSON struct {
+	TaskID     string     `json:"task_id"`
+	ScheduleID string     `json:"schedule_id"`
+	Text       string     `json:"text"`
+	NextRun    *time.Time `json:"next_run,omitempty"`
+	Status     string     `json:"status"`
+	Enabled    *bool      `json:"enabled"`
+}
+
+func (e ScheduleEntry) MarshalJSON() ([]byte, error) {
+	out := scheduleEntryJSON{TaskID: e.TaskID, ScheduleID: e.ScheduleID, Text: e.Text, NextRun: e.NextRun, Status: e.Status()}
+	if e.DisabledKnown {
+		enabled := !e.Disabled
+		out.Enabled = &enabled
+	}
+	return json.Marshal(out)
+}
+
+func (e *ScheduleEntry) UnmarshalJSON(data []byte) error {
+	var in scheduleEntryJSON
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	*e = ScheduleEntry{TaskID: in.TaskID, ScheduleID: in.ScheduleID, Text: in.Text, NextRun: in.NextRun}
+	switch {
+	case in.Enabled != nil:
+		e.Disabled, e.DisabledKnown = !*in.Enabled, true
+	case in.Status == ScheduleStatusEnabled:
+		e.DisabledKnown = true
+	case in.Status == ScheduleStatusPaused:
+		e.Disabled, e.DisabledKnown = true, true
+	}
+	return nil
 }
 
 // ScheduleConfig is the editable state of one existing schedule.
@@ -2374,9 +2429,9 @@ func mergeScheduleEntry(current, candidate ScheduleEntry) ScheduleEntry {
 			current.NextRunExactSource = candidate.NextRunExactSource
 		}
 	}
-	if candidate.disabledKnown {
+	if candidate.DisabledKnown {
 		current.Disabled = candidate.Disabled
-		current.disabledKnown = true
+		current.DisabledKnown = true
 	}
 	return current
 }
@@ -2462,7 +2517,7 @@ func (c *Client) getTaskSchedules(ctx context.Context, projectID, taskID, taskTi
 		entry := ScheduleEntry{TaskID: taskID, ScheduleID: scheduleID, Name: name, Text: text}
 		if enabled := findNode(card, func(n *html.Node) bool { return hasHTMLAttr(n, "data-schedule-enabled") }); enabled != nil {
 			entry.Disabled = strings.EqualFold(strings.TrimSpace(attr(enabled, "data-schedule-enabled")), "false")
-			entry.disabledKnown = true
+			entry.DisabledKnown = true
 		}
 		if nextRun, ok := parseTaskScheduleNextRun(card); ok {
 			entry.NextRun = cloneTime(nextRun)
@@ -2518,7 +2573,7 @@ func (c *Client) getScheduleWeekEntries(ctx context.Context, projectID string, w
 			NextRunExactSource: nextRunExactSource,
 		}
 		if _, ok := card.attrs["data-schedule-enabled"]; ok {
-			entry.disabledKnown = true
+			entry.DisabledKnown = true
 		}
 		out = append(out, entry)
 	}

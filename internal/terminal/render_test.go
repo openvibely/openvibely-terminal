@@ -2982,7 +2982,7 @@ func TestRenderScheduleInspectionIsTerminalSafe(t *testing.T) {
 			t.Fatalf("schedule inspection retained terminal control %q: %q", forbidden, plain)
 		}
 	}
-	if strings.Count(plain, "\n") != 5 {
+	if strings.Count(plain, "\n") != 6 {
 		t.Fatalf("backend fields changed schedule output line structure: %q", plain)
 	}
 	if !strings.Contains(plain, "/tasks open task -id") {
