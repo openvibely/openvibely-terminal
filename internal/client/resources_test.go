@@ -7286,3 +7286,73 @@ func TestBuildPulseProjectionSkipsDisabledSchedules(t *testing.T) {
 		t.Fatalf("pulse summary = %+v, want only enabled schedule counted", got.TaskSummary)
 	}
 }
+
+func TestGetScheduleMergePreservesKnownEnabledState(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/schedule":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div id="schedule-content">
+				<div data-task-id="t1" data-schedule-id="cal-paused" data-schedule-enabled="false"><div class="font-semibold">Calendar paused</div></div>
+				<div data-task-id="t1" data-schedule-id="task-paused"><div class="font-semibold">Task paused</div></div>
+				<div data-task-id="t1" data-schedule-id="unknown"><div class="font-semibold">Unknown</div></div>
+			</div>`)
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t1","project_id":"p1","title":"Report"}]}`)
+		case "/tasks/t1":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, `<div id="task-detail-content">
+				<div id="schedule-card-cal-paused"><div data-schedule-id="cal-paused"><span>Daily</span></div></div>
+				<div id="schedule-card-task-paused"><div data-schedule-id="task-paused" data-schedule-enabled="false"><span>Daily</span></div></div>
+				<div id="schedule-card-unknown"><div data-schedule-id="unknown"><span>Daily</span></div></div>
+				<div id="schedule-card-task-on"><div data-schedule-id="task-on" data-schedule-enabled="true"><span>Daily</span></div></div>
+			</div>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := c.GetSchedule(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct{ id, status string }{
+		{"cal-paused", ScheduleStatusPaused},
+		{"task-paused", ScheduleStatusPaused},
+		{"unknown", ScheduleStatusUnknown},
+		{"task-on", ScheduleStatusEnabled},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("entries = %+v", entries)
+	}
+	for i, w := range want {
+		if entries[i].ScheduleID != w.id || entries[i].Status() != w.status {
+			t.Errorf("entry %d = %s/%s, want %s/%s", i, entries[i].ScheduleID, entries[i].Status(), w.id, w.status)
+		}
+	}
+}
+
+func TestScheduleEntryJSONRoundTripsStatus(t *testing.T) {
+	for _, entry := range []ScheduleEntry{
+		{ScheduleID: "on", DisabledKnown: true},
+		{ScheduleID: "off", Disabled: true, DisabledKnown: true},
+		{ScheduleID: "unk"},
+	} {
+		data, err := json.Marshal(entry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got ScheduleEntry
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Status() != entry.Status() {
+			t.Errorf("%s round trip %s -> %s (%s)", entry.ScheduleID, entry.Status(), got.Status(), data)
+		}
+	}
+}
