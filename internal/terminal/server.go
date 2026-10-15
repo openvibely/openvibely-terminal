@@ -182,6 +182,14 @@ func (m Model) handleServerSwitch(msg serverSwitchMsg) (Model, tea.Cmd) {
 // belongs to the previous backend, including state keyed by project ID, since
 // another server may reuse the same IDs for unrelated projects.
 func (m Model) installServer(c *client.Client) Model {
+	// A probe can finish while a credential prompt opened on the old
+	// backend is active. Drop both its saved values and its input buffer
+	// before installing the new client.
+	m.resetChannelWizard()
+	m.resetModelWizard()
+	m.resetModelEditWizard()
+	m.input.SetValue("")
+	m.menu = nil
 	m.resetProjectScopedState()
 	m.clearPendingChat()
 	m.advanceSessionGeneration()
@@ -239,7 +247,20 @@ func invalidServerSwitchMessage(currentBaseURL string) string {
 // redactServerCommandSecrets strips URL userinfo, query, and fragment from
 // /server arguments before the line is echoed or stored in history.
 func redactServerCommandSecrets(commandLine string) string {
-	fields := strings.Fields(commandLine)
+	fields, err := tokenizeCommand(commandLine)
+	if err != nil {
+		// Malformed quotes are reported only after submit records the line.
+		// Recognize the root conservatively and suppress all operands rather
+		// than attempting to recover a possibly secret-bearing URL.
+		fallback := strings.Fields(strings.NewReplacer(`"`, "", "'", "").Replace(commandLine))
+		if len(fallback) > 0 {
+			root := strings.ToLower(strings.TrimLeft(fallback[0], "/"))
+			if root == "server" || root == "connect" {
+				return "/" + root + " <redacted invalid arguments>"
+			}
+		}
+		return commandLine
+	}
 	if len(fields) < 2 {
 		return commandLine
 	}
