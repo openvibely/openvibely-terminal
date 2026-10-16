@@ -14908,6 +14908,49 @@ func TestTasksReviewsAddLocationShapedCommentTokenRemainsComment(t *testing.T) {
 	}
 }
 
+func TestTasksReviewsAddAmbiguousCommentTextDoesNotOverrideLocation(t *testing.T) {
+	board := strings.Replace(taskBoardHTML, "Refactor the API", "Fix login", 1)
+	addedReview := strings.Replace(taskReviewHTML, "internal/client/tasks.go", "internal/auth.go", 1)
+	m, rec := dispatchModel(t, map[string]string{
+		"/tasks":             board,
+		"/tasks/t-1/reviews": addedReview,
+	})
+	m = runLine(t, m, `/tasks reviews add "Fix login" internal/auth.go:42 The ambiguous behavior is described in traces.go:9 above`)
+
+	if got := rec.count("POST", "/tasks/t-1/reviews"); got != 1 {
+		t.Fatalf("expected exactly one review comment for Fix login, got %d; calls:\n%s", got, rec.all())
+	}
+	wantForm := "POST /tasks/t-1/reviews?comment_text=The+ambiguous+behavior+is+described+in+traces.go%3A9+above&file_path=internal%2Fauth.go&line_number=42&line_type=new"
+	if !rec.sawForm(wantForm) {
+		t.Fatalf("review comment used the wrong task, location, or remaining text; want %q; forms: %v", wantForm, rec.forms)
+	}
+	if out := stripANSI(transcript(m)); !strings.Contains(out, "added review comment on internal/auth.go:42 for Fix login") {
+		t.Fatalf("review confirmation did not identify Fix login and its location:\n%s", out)
+	}
+}
+
+func TestResolveReviewLocationLaterAmbiguityOverridesValidPrefix(t *testing.T) {
+	const ambiguousLongTitle = "Fix login internal/auth.go:42 The ambiguous behavior is described in"
+	tasks := []client.Task{
+		{ID: "t-short", Title: "Fix login"},
+		{ID: "t-long-a", Title: ambiguousLongTitle},
+		{ID: "t-long-b", Title: ambiguousLongTitle},
+	}
+	args := []string{"Fix", "login", "internal/auth.go:42", "The", "ambiguous", "behavior", "is", "described", "in", "traces.go:9", "above"}
+
+	shortTask, shortLocation, err := resolveReviewLocation(tasks, args[:4])
+	if err != nil {
+		t.Fatalf("short task/location candidate should resolve: %v", err)
+	}
+	if shortTask.ID != "t-short" || shortLocation.filePath != "internal/auth.go" || shortLocation.lineNumber != 42 {
+		t.Fatalf("short candidate = task %q at %s:%d, want t-short at internal/auth.go:42", shortTask.ID, shortLocation.filePath, shortLocation.lineNumber)
+	}
+
+	if _, _, err := resolveReviewLocation(tasks, args); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("later genuinely ambiguous candidate error = %v, want ambiguity to block the shorter candidate", err)
+	}
+}
+
 func TestTasksReviewsAddAmbiguousPrefixDoesNotMutate(t *testing.T) {
 	const ambiguousTasks = `<div>
 	  <div data-task-id="t-1" data-task-status="pending" data-task-category="backlog">
