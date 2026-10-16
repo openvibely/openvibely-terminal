@@ -1978,7 +1978,7 @@ func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
 		{name: "frequent", args: []string{"analytics", "frequent"}, want: []string{"/api/analytics/most-frequent-tasks"}},
 		{name: "failures", args: []string{"analytics", "failures"}, want: []string{"/api/analytics/failed-task-patterns"}},
 		{name: "skills", args: []string{"analytics", "skills"}, want: []string{"/api/analytics/skills"}},
-		{name: "trends", args: []string{"analytics", "trends"}, want: []string{"/api/analytics/avg-execution-time-by-task"}},
+		{name: "task-times", args: []string{"analytics", "task-times"}, want: []string{"/api/analytics/avg-execution-time-by-task"}},
 		{name: "stats alias", args: []string{"stats", "usage"}, want: []string{"/api/analytics/usage"}},
 	}
 	for _, tc := range cases {
