@@ -270,24 +270,23 @@ func (f TaskForm) values() url.Values {
 }
 
 func (f TaskForm) updateValues() url.Values {
+	return sharedTaskValues(f.Title, f.Prompt, f.Category)
+}
+
+func sharedTaskValues(title, prompt, category string) url.Values {
 	v := url.Values{}
-	v.Set("title", f.Title)
-	v.Set("prompt", f.Prompt)
-	if f.Category != "" {
-		v.Set("category", f.Category)
+	v.Set("title", title)
+	v.Set("prompt", prompt)
+	if category != "" {
+		v.Set("category", category)
 	}
 	return v
 }
 
 func (f SwarmTaskForm) values() url.Values {
-	v := url.Values{}
+	v := sharedTaskValues(f.Title, f.Prompt, f.Category)
 	v.Set("swarm_mode", "true")
-	v.Set("title", f.Title)
-	v.Set("prompt", f.Prompt)
 	v.Set("goal", f.Goal)
-	if f.Category != "" {
-		v.Set("category", f.Category)
-	}
 	if f.Priority != 0 {
 		v.Set("priority", strconv.Itoa(f.Priority))
 	}

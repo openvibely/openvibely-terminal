@@ -985,6 +985,53 @@ func TestCreateTaskPostsPriorityAndTagDefaults(t *testing.T) {
 	}
 }
 
+func TestTaskFormsOmitEmptyCategory(t *testing.T) {
+	type request struct {
+		form url.Values
+	}
+	var requests []request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm() error = %v", err)
+		}
+		requests = append(requests, request{form: r.PostForm.Clone()})
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<div data-task-id="swarm-parent" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-parent" title="Swarm">Swarm</a></div>`))
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	ctx := context.Background()
+	if err := c.CreateTask(ctx, "p1", TaskForm{Title: "Create", Prompt: "create prompt"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UpdateTaskForProject(ctx, "t1", "p1", TaskForm{Title: "Edit", Prompt: "edit prompt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateSwarmTask(ctx, "p1", SwarmTaskForm{Title: "Swarm", Prompt: "swarm prompt"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(requests) != 3 {
+		t.Fatalf("got %d requests, want 3", len(requests))
+	}
+	for i, want := range []struct{ title, prompt string }{
+		{"Create", "create prompt"},
+		{"Edit", "edit prompt"},
+		{"Swarm", "swarm prompt"},
+	} {
+		if got := requests[i].form.Get("title"); got != want.title {
+			t.Errorf("request %d title = %q, want %q", i, got, want.title)
+		}
+		if got := requests[i].form.Get("prompt"); got != want.prompt {
+			t.Errorf("request %d prompt = %q, want %q", i, got, want.prompt)
+		}
+		if _, ok := requests[i].form["category"]; ok {
+			t.Errorf("request %d submitted empty category: %#v", i, requests[i].form["category"])
+		}
+	}
+}
+
 func TestCreateSwarmTaskPostsFormAndParsesParent(t *testing.T) {
 	var form url.Values
 	var rawQuery string
