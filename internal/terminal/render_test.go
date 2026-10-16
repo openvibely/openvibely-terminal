@@ -3711,7 +3711,7 @@ func TestRenderAnalyticsEmptyStates(t *testing.T) {
 	}{
 		{
 			name:   "rates",
-			title:  "Success / failure",
+			title:  "Success / failure · " + recentRatesWindowLabel,
 			render: func() string { return renderRates(nil) },
 		},
 		{

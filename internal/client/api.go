@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"time"
 )
 
 // --- Analytics (/api/analytics/*) ---
@@ -154,9 +155,34 @@ func analyticsSlice[T any](ctx context.Context, c *Client, segment, projectID st
 	return out, err
 }
 
-// GetSuccessFailureRates fetches execution success/failure rates.
+const successFailureRatesRecentDays = 28
+
+// GetSuccessFailureRates fetches daily success/failure rates for the recent
+// 28-day window. The backend applies these bounds before returning the rows;
+// the window spans at most 30 local calendar-day buckets, including DST shifts.
 func (c *Client) GetSuccessFailureRates(ctx context.Context, projectID string) ([]SuccessFailureRate, error) {
-	return analyticsSlice[SuccessFailureRate](ctx, c, "success-failure-rates", projectID, 0, false)
+	to := time.Now().UTC()
+	from := to.AddDate(0, 0, -successFailureRatesRecentDays)
+	return c.GetSuccessFailureRatesWithDateRange(ctx, projectID, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+}
+
+// GetSuccessFailureRatesFullHistory fetches every daily period for a project.
+func (c *Client) GetSuccessFailureRatesFullHistory(ctx context.Context, projectID string) ([]SuccessFailureRate, error) {
+	return c.GetSuccessFailureRatesWithDateRange(ctx, projectID, "", "")
+}
+
+// GetSuccessFailureRatesWithDateRange fetches daily success/failure rates in
+// the backend's half-open [dateFrom,dateTo) interval. Empty bounds are omitted.
+func (c *Client) GetSuccessFailureRatesWithDateRange(ctx context.Context, projectID, dateFrom, dateTo string) ([]SuccessFailureRate, error) {
+	var out []SuccessFailureRate
+	endpoint := "/api/analytics/success-failure-rates" + query(
+		"project_id", projectID,
+		"group_by", "day",
+		"date_from", dateFrom,
+		"date_to", dateTo,
+	)
+	err := c.getJSON(ctx, endpoint, &out)
+	return out, err
 }
 
 // GetAvgExecutionTimeByTask fetches the complete per-task average execution-time history.

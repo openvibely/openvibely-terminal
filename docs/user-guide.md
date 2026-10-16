@@ -1121,14 +1121,18 @@ failures, and backend errors retain the normal non-zero command behavior.
 
 ### Analytics
 
-`/analytics` renders everything; a section name narrows it. Charts are drawn as
-ASCII bars — usage by model with cost and share, success/failure gauges per
+`/analytics` renders every section; a section name narrows it. Charts are drawn
+as ASCII bars — usage by model with cost and share, success/failure gauges per
 period, average execution time by agent and by task, the backend-ranked top 12
 most frequent tasks, recurring failure patterns, and skill usage with
-follow-through rates. The default `analytics frequent` view requests at most
-12 ranked rows from the backend, so its response and rendered output are
-bounded. The client’s explicit full-history method requests `limit=0` and
-remains available for complete-data callers; it is not silently truncated.
+follow-through rates. Success/failure rates default to the recent 28-day window,
+which returns at most 30 daily periods. The output and help identify this
+window. Use `/analytics rates full` for all history, or
+`/analytics rates from 2026-01-01 to 2026-02-01` for a custom date range; the
+end date is exclusive. Dates accept `YYYY-MM-DD` or RFC3339. The rates endpoint
+filters `date_from` and `date_to` in the backend query before it serializes the
+response, and orders periods ascending. The default `analytics frequent` view
+also requests at most 12 ranked rows from the backend.
 
 ## CLI mode
 
@@ -1298,7 +1302,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `GET /api/capacity/global`, `GET /api/capacity/projects`, `GET /api/capacity/models` (compatibility fallback for workers watch) |
-| Analytics | `/api/analytics/usage`, `success-failure-rates`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
+| Analytics | `/api/analytics/usage`, `success-failure-rates?group_by=day&date_from=…&date_to=…` (terminal defaults to the recent 28-day window; omit bounds for full history), `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
 | Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1`; exact `data-schedule-next-run` values are preferred, and schedule-tab detail is read only when a card needs exact `Next:` timing |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
