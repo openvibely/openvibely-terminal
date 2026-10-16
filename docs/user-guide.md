@@ -347,7 +347,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/grades` | | `show`, `run` |
 | `/insights` | `suggestions` | `show`, `analyze` |
 | `/automations` | `automation` | `list`, `show`, `open`, `create`, `edit`, `run`, `pause`, `resume`, `delete` |
-| `/analytics` | `stats` | `usage`, `rates`, `agents`, `frequent`, `failures`, `skills`, `trends` |
+| `/analytics` | `stats` | `usage`, `rates`, `agents`, `task-times`, `frequent`, `failures`, `skills` |
 | `/projects` | | `list`, `show <project>`, `create <name> <path>`, `edit <project> [options]`, `delete <project>` |
 | `/project <name\|id>` | | select the active project by exact name/ID, unique prefix, or unique name substring |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
