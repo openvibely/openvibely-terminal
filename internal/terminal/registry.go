@@ -2444,10 +2444,8 @@ func taskAttachmentsAddCommand(m Model, c *client.Client, projectID string, args
 		if err != nil {
 			return "", err
 		}
-		if jsonMode {
-			return marshalJSON(attachments)
-		}
-		return fmt.Sprintf("uploaded %d attachment(s) to %s\n\n%s", len(filePaths), firstNonEmpty(task.Title, task.ID), renderTaskAttachments(attachments)), nil
+		status := fmt.Sprintf("uploaded %d attachment(s) to %s", len(filePaths), firstNonEmpty(task.Title, task.ID))
+		return renderTaskAttachmentsResult(attachments, status)
 	})
 }
 
@@ -2784,10 +2782,7 @@ func taskAttachmentsListCommand(m Model, c *client.Client, projectID string, arg
 		if err != nil {
 			return "", err
 		}
-		if jsonMode {
-			return marshalJSON(attachments)
-		}
-		return renderTaskAttachments(attachments), nil
+		return renderTaskAttachmentsResult(attachments, "")
 	})
 }
 
@@ -2812,10 +2807,18 @@ func deleteTaskAttachmentResult(ctx context.Context, c *client.Client, projectID
 	if err != nil {
 		return "", err
 	}
+	status := fmt.Sprintf("deleted attachment %q from %s", attachment.FileName, firstNonEmpty(task.Title, task.ID))
+	return renderTaskAttachmentsResult(remaining, status)
+}
+
+func renderTaskAttachmentsResult(attachments []client.Attachment, status string) (string, error) {
 	if jsonMode {
-		return marshalJSON(remaining)
+		return marshalJSON(attachments)
 	}
-	return fmt.Sprintf("deleted attachment %q from %s\n\n%s", attachment.FileName, firstNonEmpty(task.Title, task.ID), renderTaskAttachments(remaining)), nil
+	if status == "" {
+		return renderTaskAttachments(attachments), nil
+	}
+	return status + "\n\n" + renderTaskAttachments(attachments), nil
 }
 
 // resolveTaskWithOperands finds the longest task-reference prefix that matches

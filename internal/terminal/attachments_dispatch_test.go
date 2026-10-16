@@ -1363,6 +1363,97 @@ func TestCLITaskAttachmentsAddUsesProjectAndPrintsRefresh(t *testing.T) {
 	}
 }
 
+func TestCLITaskAttachmentsAddJSONReturnsAttachmentArray(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "request.txt")
+	if err := os.WriteFile(path, []byte("request body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":          cliProjects,
+		"/tasks":                 attachmentTaskBoardHTML,
+		"/tasks/t-1/attachments": attachmentRowsHTML,
+	})
+
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "add", "Refactor", path}, false, true); err != nil {
+		t.Fatalf("CLI JSON attachment add failed: %v", err)
+	}
+	if !rec.sawQuery("POST /tasks/t-1/attachments?project_id=p1") {
+		t.Fatalf("JSON upload request was missing project scope:\n%s", strings.Join(rec.urls, "\n"))
+	}
+	var attachments []client.Attachment
+	if err := json.Unmarshal(out.Bytes(), &attachments); err != nil {
+		t.Fatalf("decoding JSON add result %q: %v", out.String(), err)
+	}
+	want := []client.Attachment{
+		{ID: "att-1", TaskID: "t-1", FileName: "request.txt", FileSize: 11},
+		{ID: "att-2", TaskID: "t-1", FileName: "trace.json", FileSize: 2048},
+	}
+	if len(attachments) != len(want) {
+		t.Fatalf("JSON add result = %+v, want %d refreshed rows", attachments, len(want))
+	}
+	for i := range want {
+		if attachments[i] != want[i] {
+			t.Errorf("attachments[%d] = %+v, want %+v", i, attachments[i], want[i])
+		}
+	}
+}
+
+func TestCLITaskAttachmentsListPresentationModes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		json bool
+	}{
+		{name: "readable"},
+		{name: "JSON", json: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects": cliProjects,
+				"/tasks":        attachmentTaskBoardHTML,
+				"/tasks/t-1":    attachmentRowsHTML,
+			})
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "list", "Refactor"}, false, tc.json); err != nil {
+				t.Fatalf("CLI attachment list failed: %v", err)
+			}
+			if !rec.sawQuery("GET /tasks/t-1?project_id=p1") {
+				t.Fatalf("attachment list request was missing project scope:\n%s", strings.Join(rec.urls, "\n"))
+			}
+			if tc.json {
+				var attachments []client.Attachment
+				if err := json.Unmarshal(out.Bytes(), &attachments); err != nil {
+					t.Fatalf("decoding JSON list result %q: %v", out.String(), err)
+				}
+				want := []client.Attachment{
+					{ID: "att-1", TaskID: "t-1", FileName: "request.txt", FileSize: 11},
+					{ID: "att-2", TaskID: "t-1", FileName: "trace.json", FileSize: 2048},
+				}
+				if len(attachments) != len(want) {
+					t.Fatalf("JSON list result = %+v, want %d rows", attachments, len(want))
+				}
+				for i := range want {
+					if attachments[i] != want[i] {
+						t.Errorf("attachments[%d] = %+v, want %+v", i, attachments[i], want[i])
+					}
+				}
+				return
+			}
+			for _, want := range []string{"ID", "FILE", "SIZE", "request.txt", "trace.json", "11 B", "2.0 KB"} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("readable list output missing %q:\n%s", want, out.String())
+				}
+			}
+			for _, unexpected := range []string{"uploaded", "deleted attachment"} {
+				if strings.Contains(out.String(), unexpected) {
+					t.Errorf("readable list output unexpectedly contains %q:\n%s", unexpected, out.String())
+				}
+			}
+		})
+	}
+}
+
 func TestCLITaskAttachmentsDeleteRequiresForceAndRefreshes(t *testing.T) {
 	t.Run("without force", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{
