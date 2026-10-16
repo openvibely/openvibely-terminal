@@ -1960,8 +1960,6 @@ func resolveReviewLocation(tasks []client.Task, args []string) (client.Task, rev
 	bestIndex := -1
 	var bestAmbiguous error
 	bestAmbiguousIndex := -1
-	var bestOtherErr error
-	bestOtherErrIndex := -1
 	for _, location := range candidates {
 		ref := strings.Join(args[:location.index], " ")
 		task, err := matchRef(tasks, ref,
@@ -1975,17 +1973,19 @@ func resolveReviewLocation(tasks []client.Task, args []string) (client.Task, rev
 			}
 			continue
 		}
-		if strings.Contains(err.Error(), "ambiguous") {
-			if location.index > bestAmbiguousIndex {
-				bestAmbiguous = err
-				bestAmbiguousIndex = location.index
-			}
+		if isMatchRefNotFound(err) {
+			// The not-found message includes the candidate reference, which may
+			// contain arbitrary user text such as "ambiguous". Skip it by type.
 			continue
 		}
-		if location.index > bestOtherErrIndex {
-			bestOtherErr = err
-			bestOtherErrIndex = location.index
+		// Keep non-not-found errors as blockers. In particular, a longer,
+		// genuinely ambiguous reference must not silently fall back to a
+		// shorter task prefix.
+		if location.index > bestAmbiguousIndex {
+			bestAmbiguous = err
+			bestAmbiguousIndex = location.index
 		}
+		continue
 	}
 
 	if bestAmbiguousIndex > bestIndex {
@@ -1996,9 +1996,6 @@ func resolveReviewLocation(tasks []client.Task, args []string) (client.Task, rev
 	}
 	if bestAmbiguous != nil {
 		return zero, empty, bestAmbiguous
-	}
-	if bestOtherErr != nil {
-		return zero, empty, bestOtherErr
 	}
 	return zero, empty, fmt.Errorf("nothing matches a task reference")
 }
