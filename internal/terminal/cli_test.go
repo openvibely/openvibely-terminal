@@ -1872,6 +1872,80 @@ func TestCLIAnalyticsRejectsUnknownAndSurplusOperandsBeforeRequests(t *testing.T
 	}
 }
 
+func TestCLIAnalyticsRatesWindows(t *testing.T) {
+	body, err := json.Marshal([]client.SuccessFailureRate{{Period: "2026-09-01", SuccessCount: 2, FailureCount: 1, TotalCount: 3, SuccessRate: 66.7}})
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	bodies := map[string]string{
+		"/api/projects":                              cliProjects,
+		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
+		"/api/analytics/success-failure-rates":       string(body),
+		"/api/analytics/avg-execution-time-by-agent": `[]`,
+		"/api/analytics/avg-execution-time-by-task":  `[]`,
+		"/api/analytics/most-frequent-tasks":         `[]`,
+		"/api/analytics/failed-task-patterns":        `[]`,
+		"/api/analytics/skills":                      `{}`,
+	}
+	cases := []struct {
+		name       string
+		args       []string
+		wantFrom   string
+		wantTo     string
+		wantWindow string
+	}{
+		{name: "default rates", args: []string{"analytics", "rates"}, wantWindow: recentRatesWindowLabel},
+		{name: "all sections default rates", args: []string{"analytics"}, wantWindow: recentRatesWindowLabel},
+		{name: "full history", args: []string{"analytics", "rates", "full"}, wantWindow: "all history"},
+		{name: "date range", args: []string{"analytics", "rates", "from", "2026-01-01", "to", "2026-02-01"}, wantFrom: "2026-01-01", wantTo: "2026-02-01", wantWindow: "from 2026-01-01 to 2026-02-01 (end exclusive)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, rec := cliServer(t, bodies)
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, false, false); err != nil {
+				t.Fatalf("RunCLI: %v", err)
+			}
+			if got := stripANSI(out.String()); !strings.Contains(got, tc.wantWindow) || !strings.Contains(got, "2026-09-01") {
+				t.Fatalf("CLI output missing rate window or fixture row:\n%s", got)
+			}
+			var ratesURL *url.URL
+			for _, recorded := range rec.urlsSnapshot() {
+				method, target, ok := strings.Cut(recorded, " ")
+				if !ok || method != http.MethodGet {
+					continue
+				}
+				parsed, err := url.ParseRequestURI(target)
+				if err == nil && parsed.Path == "/api/analytics/success-failure-rates" {
+					ratesURL = parsed
+					break
+				}
+			}
+			if ratesURL == nil {
+				t.Fatalf("rates request missing from %v", rec.urlsSnapshot())
+			}
+			query := ratesURL.Query()
+			if query.Get("project_id") != "p1" || query.Get("group_by") != "day" {
+				t.Fatalf("rates query lost project scope or daily grouping: %v", query)
+			}
+			if query.Get("date_from") != tc.wantFrom || query.Get("date_to") != tc.wantTo {
+				if tc.wantWindow == recentRatesWindowLabel {
+					from, fromErr := time.Parse(time.RFC3339Nano, query.Get("date_from"))
+					to, toErr := time.Parse(time.RFC3339Nano, query.Get("date_to"))
+					if fromErr != nil || toErr != nil || to.Sub(from) != 28*24*time.Hour {
+						t.Fatalf("default rate bounds = %q/%q, want a 28-day range", query.Get("date_from"), query.Get("date_to"))
+					}
+				} else {
+					t.Fatalf("rates date bounds = %q/%q, want %q/%q", query.Get("date_from"), query.Get("date_to"), tc.wantFrom, tc.wantTo)
+				}
+			}
+			if query.Get("limit") != "" {
+				t.Fatalf("rates request used unsupported limit parameter: %v", query)
+			}
+		})
+	}
+}
+
 func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
 	bodies := map[string]string{
 		"/api/projects":                              cliProjects,

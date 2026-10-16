@@ -4178,10 +4178,41 @@ func renderCommandHelp(c command) string {
 
 // --- analytics ---
 
+const recentRatesWindowLabel = "last 28 days (up to 30 daily periods)"
+
+type ratesWindowKind uint8
+
+const (
+	ratesWindowRecent ratesWindowKind = iota
+	ratesWindowFull
+	ratesWindowRange
+)
+
+type ratesWindow struct {
+	kind ratesWindowKind
+	from string
+	to   string
+}
+
+func (w ratesWindow) label() string {
+	switch w.kind {
+	case ratesWindowFull:
+		return "all history"
+	case ratesWindowRange:
+		if w.to == "" {
+			return "from " + w.from + " onward"
+		}
+		return "from " + w.from + " to " + w.to + " (end exclusive)"
+	default:
+		return recentRatesWindowLabel
+	}
+}
+
 type analyticsSection struct {
 	name             string
 	usageDescription string
 	load             func(context.Context, *client.Client, string) (string, error)
+	loadRates        func(context.Context, *client.Client, string, ratesWindow) (string, error)
 }
 
 var analyticsSections = []analyticsSection{
@@ -4198,14 +4229,8 @@ var analyticsSections = []analyticsSection{
 	},
 	{
 		name:             "rates",
-		usageDescription: "success/failure rates",
-		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
-			r, err := c.GetSuccessFailureRates(ctx, projectID)
-			if err != nil {
-				return "", err
-			}
-			return renderRates(r), nil
-		},
+		usageDescription: "last 28 days (up to 30 daily periods); rates full or rates from <start> [to <end>] (end exclusive)",
+		loadRates:        loadRatesSection,
 	},
 	{
 		name:             "agents",
@@ -4286,6 +4311,10 @@ func loadAnalytics(ctx context.Context, c *client.Client, projectID, section str
 }
 
 func loadAnalyticsSections(ctx context.Context, c *client.Client, projectID, section string, sections []analyticsSection) (string, error) {
+	return loadAnalyticsSectionsWithRatesWindow(ctx, c, projectID, section, ratesWindow{kind: ratesWindowRecent}, sections)
+}
+
+func loadAnalyticsSectionsWithRatesWindow(ctx context.Context, c *client.Client, projectID, section string, window ratesWindow, sections []analyticsSection) (string, error) {
 	want := func(name string) bool { return section == "" || section == name }
 
 	type slot struct {
@@ -4308,6 +4337,10 @@ func loadAnalyticsSections(ctx context.Context, c *client.Client, projectID, sec
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if section.loadRates != nil {
+				slots[i].out, slots[i].err = section.loadRates(ctx, c, projectID, window)
+				return
+			}
 			slots[i].out, slots[i].err = section.load(ctx, c, projectID)
 		}()
 	}
@@ -4384,12 +4417,36 @@ func renderAnalyticsNoData(title string) string {
 	return sectionStyle.Render(title) + "\n  " + dimStyle.Render("no data")
 }
 
+func loadRatesSection(ctx context.Context, c *client.Client, projectID string, window ratesWindow) (string, error) {
+	var (
+		rates []client.SuccessFailureRate
+		err   error
+	)
+	switch window.kind {
+	case ratesWindowFull:
+		rates, err = c.GetSuccessFailureRatesFullHistory(ctx, projectID)
+	case ratesWindowRange:
+		rates, err = c.GetSuccessFailureRatesWithDateRange(ctx, projectID, window.from, window.to)
+	default:
+		rates, err = c.GetSuccessFailureRates(ctx, projectID)
+	}
+	if err != nil {
+		return "", err
+	}
+	return renderRatesForWindow(rates, window.label()), nil
+}
+
 func renderRates(rates []client.SuccessFailureRate) string {
+	return renderRatesForWindow(rates, recentRatesWindowLabel)
+}
+
+func renderRatesForWindow(rates []client.SuccessFailureRate, windowLabel string) string {
+	title := "Success / failure · " + windowLabel
 	if len(rates) == 0 {
-		return renderAnalyticsNoData("Success / failure")
+		return renderAnalyticsNoData(title)
 	}
 	var b strings.Builder
-	b.WriteString(sectionStyle.Render("Success / failure by period") + "\n")
+	b.WriteString(sectionStyle.Render("Success / failure by period · "+windowLabel) + "\n")
 	for _, r := range rates {
 		ok := 0
 		if r.TotalCount > 0 {

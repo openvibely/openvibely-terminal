@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"runtime"
@@ -168,6 +169,387 @@ func TestLoadAnalyticsSingleSectionErrorSurfaced(t *testing.T) {
 	_, err := loadAnalytics(context.Background(), c, "", "usage")
 	if err == nil {
 		t.Fatal("expected error for failing named section, got nil")
+	}
+}
+
+func TestAnalyticsRatesFailurePropagates(t *testing.T) {
+	c := newAnalyticsTestClient(t, map[string]bool{"/api/analytics/success-failure-rates": true})
+	if _, err := loadAnalytics(context.Background(), c, "rates-project", "rates"); err == nil {
+		t.Fatal("expected rates endpoint error to propagate")
+	}
+}
+
+func TestAnalyticsRatesDefaultFullAndRangeWindows(t *testing.T) {
+	history := ratesAnalyticsFixture(5000)
+	c, observations := newRatesAnalyticsTestClient(t, history)
+	fullBody, err := json.Marshal(history)
+	if err != nil {
+		t.Fatalf("marshal full fixture: %v", err)
+	}
+
+	defaultOutput, err := loadAnalytics(context.Background(), c, "rates-project", "rates")
+	if err != nil {
+		t.Fatalf("load default rates: %v", err)
+	}
+	defaultObservation := lastRatesObservation(t, observations())
+	if defaultObservation.query.Get("project_id") != "rates-project" || defaultObservation.query.Get("group_by") != "day" {
+		t.Fatalf("default rates query lost scope or daily grouping: %v", defaultObservation.query)
+	}
+	if defaultObservation.query.Get("date_from") == "" || defaultObservation.query.Get("date_to") == "" {
+		t.Fatalf("default rates query lacks server-side date bounds: %v", defaultObservation.query)
+	}
+	if defaultObservation.query.Get("limit") != "" {
+		t.Fatalf("rates query used unsupported limit parameter: %v", defaultObservation.query)
+	}
+	if defaultObservation.rows > 30 {
+		t.Fatalf("default server response had %d rows, want at most 30", defaultObservation.rows)
+	}
+	if defaultObservation.bytes*100 >= len(fullBody)*5 {
+		t.Fatalf("default response bytes = %d, want at most 5%% of full history %d", defaultObservation.bytes, len(fullBody))
+	}
+	if !strings.Contains(stripANSI(defaultOutput), recentRatesWindowLabel) {
+		t.Fatalf("default output does not identify its window:\n%s", stripANSI(defaultOutput))
+	}
+
+	fullOutput, err := loadAnalyticsSectionsWithRatesWindow(context.Background(), c, "rates-project", "rates", ratesWindow{kind: ratesWindowFull}, analyticsSections)
+	if err != nil {
+		t.Fatalf("load full rates: %v", err)
+	}
+	fullObservation := lastRatesObservation(t, observations())
+	if fullObservation.query.Get("date_from") != "" || fullObservation.query.Get("date_to") != "" || fullObservation.rows != len(history) {
+		t.Fatalf("full history query/response = %v / %d rows, want no bounds / %d", fullObservation.query, fullObservation.rows, len(history))
+	}
+	if !strings.Contains(stripANSI(fullOutput), "all history") || !strings.Contains(stripANSI(fullOutput), history[0].Period) {
+		t.Fatalf("full history output does not identify/include complete history:\n%s", stripANSI(fullOutput))
+	}
+
+	end := time.Now().UTC().Truncate(24 * time.Hour)
+	from := end.AddDate(0, 0, -30).Format("2006-01-02")
+	to := end.Format("2006-01-02")
+	rangeOutput, err := loadAnalyticsSectionsWithRatesWindow(context.Background(), c, "rates-project", "rates", ratesWindow{kind: ratesWindowRange, from: from, to: to}, analyticsSections)
+	if err != nil {
+		t.Fatalf("load range rates: %v", err)
+	}
+	rangeObservation := lastRatesObservation(t, observations())
+	if rangeObservation.query.Get("date_from") != from || rangeObservation.query.Get("date_to") != to || rangeObservation.rows != 30 {
+		t.Fatalf("range query/response = %v / %d rows, want [%s,%s) / 30", rangeObservation.query, rangeObservation.rows, from, to)
+	}
+	if !strings.Contains(stripANSI(rangeOutput), "from "+from+" to "+to+" (end exclusive)") {
+		t.Fatalf("range output does not identify its window:\n%s", stripANSI(rangeOutput))
+	}
+
+	wideFrom := end.AddDate(0, 0, -40).Format("2006-01-02")
+	wideOutput, err := loadAnalyticsSectionsWithRatesWindow(context.Background(), c, "rates-project", "rates", ratesWindow{kind: ratesWindowRange, from: wideFrom, to: to}, analyticsSections)
+	if err != nil {
+		t.Fatalf("load wide date range: %v", err)
+	}
+	wideObservation := lastRatesObservation(t, observations())
+	if wideObservation.query.Get("date_from") != wideFrom || wideObservation.query.Get("date_to") != to || wideObservation.rows != 40 {
+		t.Fatalf("wide range query/response = %v / %d rows, want [%s,%s) / 40", wideObservation.query, wideObservation.rows, wideFrom, to)
+	}
+	if !strings.Contains(stripANSI(wideOutput), "from "+wideFrom+" to "+to+" (end exclusive)") {
+		t.Fatalf("wide range output does not identify its window:\n%s", stripANSI(wideOutput))
+	}
+
+	allOutput, err := loadAnalytics(context.Background(), c, "rates-project", "")
+	if err != nil {
+		t.Fatalf("load all analytics: %v", err)
+	}
+	allObservation := lastRatesObservation(t, observations())
+	if allObservation.query.Get("date_from") == "" || allObservation.rows > 30 {
+		t.Fatalf("all-sections rates request was not bounded: %v / %d rows", allObservation.query, allObservation.rows)
+	}
+	if !strings.Contains(stripANSI(allOutput), recentRatesWindowLabel) {
+		t.Fatalf("all analytics output does not identify rates window:\n%s", stripANSI(allOutput))
+	}
+}
+
+func TestRatesAnalyticsDefaultBoundAcrossFixtureSizes(t *testing.T) {
+	for _, size := range []int{0, 1, 30, 31, 5000} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			c, observations := newRatesAnalyticsTestClient(t, ratesAnalyticsFixture(size))
+			items, err := c.GetSuccessFailureRates(context.Background(), "fixture-project")
+			if err != nil {
+				t.Fatalf("GetSuccessFailureRates: %v", err)
+			}
+			observation := lastRatesObservation(t, observations())
+			if len(items) != observation.rows || len(items) > 30 {
+				t.Fatalf("decoded rows = %d, server sent %d, want <= 30", len(items), observation.rows)
+			}
+			for i := 1; i < len(items); i++ {
+				if items[i-1].Period >= items[i].Period {
+					t.Fatalf("periods are not in deterministic ascending order: %q then %q", items[i-1].Period, items[i].Period)
+				}
+			}
+			if size == 0 && len(items) != 0 {
+				t.Fatalf("empty history decoded %d rows", len(items))
+			}
+			if size == 1 && len(items) != 1 {
+				t.Fatalf("single-period history decoded %d rows, want 1", len(items))
+			}
+		})
+	}
+}
+
+func TestAnalyticsRatesArgumentValidationAndHelp(t *testing.T) {
+	cmd := analyticsCommand()
+	for _, args := range [][]string{
+		{"rates", "full"},
+		{"rates", "from", "2026-01-01"},
+		{"rates", "from", "2026-01-01T00:00:00Z", "to", "2026-02-01"},
+	} {
+		if err := cmd.validateArgs(args); err != nil {
+			t.Errorf("valid args %v rejected: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"rates", "full", "extra"},
+		{"rates", "from", "bad-date"},
+		{"rates", "from", "2026-02-01", "to", "2026-01-01"},
+		{"usage", "full"},
+	} {
+		if err := cmd.validateArgs(args); err == nil {
+			t.Errorf("invalid args %v accepted", args)
+		}
+	}
+	help := stripANSI(renderCommandHelp(cmd))
+	for _, want := range []string{"last 28 days", "up to 30 daily periods", "rates full", "rates from <start> [to <end>]", "end exclusive"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("analytics help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func ratesAnalyticsFixture(count int) []client.SuccessFailureRate {
+	if count == 0 {
+		return []client.SuccessFailureRate{}
+	}
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	first := today.AddDate(0, 0, -(count - 1))
+	rates := make([]client.SuccessFailureRate, 0, count)
+	for i := 0; i < count; i++ {
+		period := first.AddDate(0, 0, i)
+		rates = append(rates, client.SuccessFailureRate{
+			Period: period.Format("2006-01-02"), SuccessCount: i % 17, FailureCount: i % 5,
+			TotalCount: i%17 + i%5, SuccessRate: float64(i%17) * 3.25,
+		})
+	}
+	return rates
+}
+
+type ratesResponseObservation struct {
+	query url.Values
+	bytes int
+	rows  int
+}
+
+func newRatesAnalyticsTestClient(t *testing.T, history []client.SuccessFailureRate) (*client.Client, func() []ratesResponseObservation) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []ratesResponseObservation
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/success-failure-rates" {
+			switch r.URL.Path {
+			case "/api/analytics/usage":
+				_, _ = w.Write([]byte(`{"totals":{"call_count":1}}`))
+			case "/api/analytics/avg-execution-time-by-agent", "/api/analytics/avg-execution-time-by-task", "/api/analytics/most-frequent-tasks", "/api/analytics/failed-task-patterns":
+				_, _ = w.Write([]byte(`[]`))
+			case "/api/analytics/skills":
+				_, _ = w.Write([]byte(`{}`))
+			default:
+				http.NotFound(w, r)
+			}
+			return
+		}
+		rows := history
+		if dateFrom := r.URL.Query().Get("date_from"); dateFrom != "" {
+			from, err := parseRatesTestTime(dateFrom)
+			if err != nil {
+				t.Errorf("parse date_from %q: %v", dateFrom, err)
+				http.Error(w, "bad date_from", http.StatusBadRequest)
+				return
+			}
+			to := time.Time{}
+			if dateTo := r.URL.Query().Get("date_to"); dateTo != "" {
+				to, err = parseRatesTestTime(dateTo)
+				if err != nil {
+					t.Errorf("parse date_to %q: %v", dateTo, err)
+					http.Error(w, "bad date_to", http.StatusBadRequest)
+					return
+				}
+			}
+			filtered := make([]client.SuccessFailureRate, 0, 30)
+			for _, row := range history {
+				period, err := time.Parse("2006-01-02", row.Period)
+				if err != nil {
+					t.Errorf("invalid fixture period %q: %v", row.Period, err)
+					continue
+				}
+				if period.Before(from) || (!to.IsZero() && !period.Before(to)) {
+					continue
+				}
+				filtered = append(filtered, row)
+			}
+			rows = filtered
+		}
+		body, err := json.Marshal(rows)
+		if err != nil {
+			t.Errorf("marshal analytics response: %v", err)
+			http.Error(w, "marshal error", http.StatusInternalServerError)
+			return
+		}
+		mu.Lock()
+		seen = append(seen, ratesResponseObservation{query: r.URL.Query(), bytes: len(body), rows: len(rows)})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	return c, func() []ratesResponseObservation {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]ratesResponseObservation(nil), seen...)
+	}
+}
+
+func parseRatesTestTime(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return parsed.UTC(), nil
+	}
+	if parsed, err := time.Parse("2006-01-02", value); err == nil {
+		return parsed.UTC(), nil
+	}
+	return time.Time{}, fmt.Errorf("unsupported datetime")
+}
+
+func lastRatesObservation(t *testing.T, observations []ratesResponseObservation) ratesResponseObservation {
+	t.Helper()
+	if len(observations) == 0 {
+		t.Fatal("no rates request was observed")
+	}
+	return observations[len(observations)-1]
+}
+
+func TestRatesAnalyticsPerformanceEvidence(t *testing.T) {
+	if os.Getenv("OPENVIBELY_ANALYTICS_PERF_EVIDENCE") != "1" {
+		t.Skip("set OPENVIBELY_ANALYTICS_PERF_EVIDENCE=1 to run the 5,000-period request-to-render evidence harness")
+	}
+	const fixtureSize = 5000
+	const runs = 40
+	history := ratesAnalyticsFixture(fixtureSize)
+	fullBody, err := json.Marshal(history)
+	if err != nil {
+		t.Fatalf("marshal full fixture: %v", err)
+	}
+	bounded := history
+	if len(bounded) > 30 {
+		bounded = bounded[len(bounded)-30:]
+	}
+	boundedBody, err := json.Marshal(bounded)
+	if err != nil {
+		t.Fatalf("marshal bounded fixture: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/success-failure-rates" || r.URL.Query().Get("project_id") != "perf-project" || r.URL.Query().Get("group_by") != "day" {
+			http.Error(w, "unexpected rates request", http.StatusBadRequest)
+			return
+		}
+		body := fullBody
+		if r.URL.Query().Get("date_from") != "" && r.URL.Query().Get("date_to") != "" {
+			// Represents the backend's SQL date-bound path: only matching grouped
+			// rows are serialized, so discarded history never crosses the wire.
+			body = boundedBody
+		} else if r.URL.Query().Get("date_from") != "" || r.URL.Query().Get("date_to") != "" {
+			http.Error(w, "incomplete date bounds", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	run := func(isOptimized bool) (int, time.Duration, error) {
+		started := time.Now()
+		var (
+			items []client.SuccessFailureRate
+			err   error
+		)
+		if isOptimized {
+			items, err = c.GetSuccessFailureRates(context.Background(), "perf-project")
+		} else {
+			items, err = c.GetSuccessFailureRatesFullHistory(context.Background(), "perf-project")
+		}
+		if err != nil {
+			return 0, 0, err
+		}
+		label := recentRatesWindowLabel
+		if !isOptimized {
+			label = "all history"
+		}
+		_ = renderRatesForWindow(items, label)
+		return len(items), time.Since(started), nil
+	}
+
+	for _, optimized := range []bool{false, true} {
+		if _, _, err := run(optimized); err != nil {
+			t.Fatalf("warmup optimized=%t: %v", optimized, err)
+		}
+	}
+	optimizedDurations := make([]time.Duration, 0, runs)
+	baselineDurations := make([]time.Duration, 0, runs)
+	for i := 0; i < runs; i++ {
+		rows, elapsed, err := run(false)
+		if err != nil {
+			t.Fatalf("baseline run %d: %v", i+1, err)
+		}
+		if rows != fixtureSize {
+			t.Fatalf("baseline decoded rows = %d, want %d", rows, fixtureSize)
+		}
+		baselineDurations = append(baselineDurations, elapsed)
+
+		rows, elapsed, err = run(true)
+		if err != nil {
+			t.Fatalf("optimized run %d: %v", i+1, err)
+		}
+		if rows != len(bounded) || rows > 30 {
+			t.Fatalf("optimized decoded rows = %d, want %d and at most 30", rows, len(bounded))
+		}
+		optimizedDurations = append(optimizedDurations, elapsed)
+	}
+
+	baselineAllocBytes, baselineAllocCount := measureFrequentAnalyticsAllocations(runs, func() {
+		if _, _, err := run(false); err != nil {
+			panic(err)
+		}
+	})
+	optimizedAllocBytes, optimizedAllocCount := measureFrequentAnalyticsAllocations(runs, func() {
+		if _, _, err := run(true); err != nil {
+			panic(err)
+		}
+	})
+	baselineP50, baselineP95 := frequentAnalyticsPercentiles(baselineDurations)
+	optimizedP50, optimizedP95 := frequentAnalyticsPercentiles(optimizedDurations)
+	responseReduction := 100 * (1 - float64(len(boundedBody))/float64(len(fullBody)))
+	allocReduction := 100 * (1 - optimizedAllocBytes/baselineAllocBytes)
+	t.Logf("rates_analytics_perf fixture_periods=%d runs=%d baseline_response_bytes=%d optimized_response_bytes=%d baseline_decoded_rows=%d optimized_decoded_rows=%d baseline_p50=%s optimized_p50=%s baseline_p95=%s optimized_p95=%s baseline_alloc_bytes_per_op=%.0f optimized_alloc_bytes_per_op=%.0f baseline_allocs_per_op=%.1f optimized_allocs_per_op=%.1f response_reduction=%.2f%% allocation_reduction=%.2f%%", fixtureSize, runs, len(fullBody), len(boundedBody), fixtureSize, len(bounded), baselineP50, optimizedP50, baselineP95, optimizedP95, baselineAllocBytes, optimizedAllocBytes, baselineAllocCount, optimizedAllocCount, responseReduction, allocReduction)
+
+	if responseReduction < 95 {
+		t.Fatalf("response byte reduction = %.2f%%, want at least 95%%", responseReduction)
+	}
+	if allocReduction < 95 {
+		t.Fatalf("allocated byte reduction = %.2f%%, want at least 95%%", allocReduction)
+	}
+	if optimizedP95*2 >= baselineP95 {
+		t.Fatalf("optimized p95 = %s, want at least 50%% below baseline p95 %s", optimizedP95, baselineP95)
 	}
 }
 

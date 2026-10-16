@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestProjectQueryAcrossJSONLifecycleAndHTMLCalls(t *testing.T) {
@@ -13,7 +14,6 @@ func TestProjectQueryAcrossJSONLifecycleAndHTMLCalls(t *testing.T) {
 
 	wantRequests := []string{
 		"GET /api/analytics/usage?" + encodedProject,
-		"GET /api/analytics/success-failure-rates?" + encodedProject,
 		"GET /api/tasks/task%2Fone/lifecycle-executions?" + encodedProject,
 		"GET /api/lifecycle-executions/exec%2Fone/events?" + encodedProject,
 		"GET /tasks?" + encodedProject,
@@ -24,8 +24,13 @@ func TestProjectQueryAcrossJSONLifecycleAndHTMLCalls(t *testing.T) {
 		"POST /tasks/move-completed?" + encodedProject,
 	}
 	var gotRequests []string
+	var rateRequest *http.Request
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotRequests = append(gotRequests, r.Method+" "+r.URL.RequestURI())
+		if r.URL.Path == "/api/analytics/success-failure-rates" {
+			rateRequest = r.Clone(r.Context())
+		} else {
+			gotRequests = append(gotRequests, r.Method+" "+r.URL.RequestURI())
+		}
 		switch r.URL.Path {
 		case "/api/analytics/usage":
 			_, _ = w.Write([]byte(`{}`))
@@ -81,6 +86,29 @@ func TestProjectQueryAcrossJSONLifecycleAndHTMLCalls(t *testing.T) {
 
 	if fmt.Sprint(gotRequests) != fmt.Sprint(wantRequests) {
 		t.Fatalf("requests = %q, want %q", gotRequests, wantRequests)
+	}
+	if rateRequest == nil {
+		t.Fatal("missing success/failure rates request")
+	}
+	if got := rateRequest.URL.Query().Get("project_id"); got != projectID {
+		t.Fatalf("rates project_id = %q, want %q", got, projectID)
+	}
+	if got := rateRequest.URL.Query().Get("group_by"); got != "day" {
+		t.Fatalf("rates group_by = %q, want day", got)
+	}
+	from, err := time.Parse(time.RFC3339Nano, rateRequest.URL.Query().Get("date_from"))
+	if err != nil {
+		t.Fatalf("rates date_from: %v", err)
+	}
+	to, err := time.Parse(time.RFC3339Nano, rateRequest.URL.Query().Get("date_to"))
+	if err != nil {
+		t.Fatalf("rates date_to: %v", err)
+	}
+	if to.Sub(from) != 28*24*time.Hour {
+		t.Fatalf("rates range = %s, want 28 days", to.Sub(from))
+	}
+	if got := rateRequest.URL.Query().Get("limit"); got != "" {
+		t.Fatalf("rates request sent unsupported limit=%q", got)
 	}
 }
 

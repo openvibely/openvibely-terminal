@@ -10284,15 +10284,71 @@ func readAutomationDefinitionFile(path string) (string, error) {
 
 // --- analytics ---
 
-func validateAnalyticsArgs(actions, args []string) error {
+func parseAnalyticsDate(value string) (time.Time, error) {
+	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
+		return parsed, nil
+	}
+	if parsed, err := time.Parse("2006-01-02", value); err == nil {
+		return parsed, nil
+	}
+	return time.Time{}, fmt.Errorf("%q must be YYYY-MM-DD or RFC3339", value)
+}
+
+func parseAnalyticsArgs(actions, args []string) (string, ratesWindow, error) {
+	defaultWindow := ratesWindow{kind: ratesWindowRecent}
 	if len(args) == 0 {
-		return nil
+		return "", defaultWindow, nil
 	}
-	action, rest := splitAction(actions, args)
-	if action != "" && len(rest) == 0 {
-		return nil
+	action, operands := splitAction(actions, args)
+	if action == "" {
+		return "", defaultWindow, analyticsUsageError(actions)
 	}
-	return fmt.Errorf("usage: %sanalytics [%s]", cmdPrefix, strings.Join(actions, "|"))
+	if action != "rates" {
+		if len(operands) == 0 {
+			return action, defaultWindow, nil
+		}
+		return "", defaultWindow, analyticsUsageError(actions)
+	}
+
+	switch {
+	case len(operands) == 0:
+		return action, defaultWindow, nil
+	case len(operands) == 1 && strings.EqualFold(operands[0], "full"):
+		return action, ratesWindow{kind: ratesWindowFull}, nil
+	case len(operands) == 2 && strings.EqualFold(operands[0], "from"):
+		if _, err := parseAnalyticsDate(operands[1]); err != nil {
+			return "", defaultWindow, fmt.Errorf("%w\n%s", err, analyticsRatesUsage())
+		}
+		return action, ratesWindow{kind: ratesWindowRange, from: operands[1]}, nil
+	case len(operands) == 4 && strings.EqualFold(operands[0], "from") && strings.EqualFold(operands[2], "to"):
+		from, err := parseAnalyticsDate(operands[1])
+		if err != nil {
+			return "", defaultWindow, fmt.Errorf("%w\n%s", err, analyticsRatesUsage())
+		}
+		to, err := parseAnalyticsDate(operands[3])
+		if err != nil {
+			return "", defaultWindow, fmt.Errorf("%w\n%s", err, analyticsRatesUsage())
+		}
+		if !to.After(from) {
+			return "", defaultWindow, fmt.Errorf("rates end date must be later than start date\n%s", analyticsRatesUsage())
+		}
+		return action, ratesWindow{kind: ratesWindowRange, from: operands[1], to: operands[3]}, nil
+	default:
+		return "", defaultWindow, analyticsUsageError(actions)
+	}
+}
+
+func analyticsRatesUsage() string {
+	return "usage: analytics rates [full|from <YYYY-MM-DD|RFC3339> [to <YYYY-MM-DD|RFC3339>]] (to is exclusive)"
+}
+
+func analyticsUsageError(actions []string) error {
+	return fmt.Errorf("usage: %sanalytics [%s]\n%s", cmdPrefix, strings.Join(actions, "|"), analyticsRatesUsage())
+}
+
+func validateAnalyticsArgs(actions, args []string) error {
+	_, _, err := parseAnalyticsArgs(actions, args)
+	return err
 }
 
 func analyticsCommand() command {
@@ -10322,10 +10378,13 @@ func analyticsCommandForSections(sections []analyticsSection) command {
 			if err := validateAnalyticsArgs(actions, args); err != nil {
 				return m, errCmd(err.Error())
 			}
-			action, _ := splitAction(actions, args)
+			action, window, err := parseAnalyticsArgs(actions, args)
+			if err != nil {
+				return m, errCmd(err.Error())
+			}
 			c, pid := m.client, m.selectedID
 			return m, run("Analytics", cmdTimeout, func(ctx context.Context) (string, error) {
-				return loadAnalyticsSections(ctx, c, pid, action, sections)
+				return loadAnalyticsSectionsWithRatesWindow(ctx, c, pid, action, window, sections)
 			})
 		},
 	}

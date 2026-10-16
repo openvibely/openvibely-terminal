@@ -976,8 +976,26 @@ func TestGetSuccessFailureRates(t *testing.T) {
 		if got := r.URL.Query().Get("project_id"); got != "p1" {
 			t.Errorf("project_id = %q", got)
 		}
+		if got := r.URL.Query().Get("group_by"); got != "day" {
+			t.Errorf("group_by = %q, want day", got)
+		}
+		dateFrom, err := time.Parse(time.RFC3339Nano, r.URL.Query().Get("date_from"))
+		if err != nil {
+			t.Errorf("invalid date_from %q: %v", r.URL.Query().Get("date_from"), err)
+		}
+		dateTo, err := time.Parse(time.RFC3339Nano, r.URL.Query().Get("date_to"))
+		if err != nil {
+			t.Errorf("invalid date_to %q: %v", r.URL.Query().Get("date_to"), err)
+		}
+		if got := dateTo.Sub(dateFrom); got != 28*24*time.Hour {
+			t.Errorf("date range duration = %s, want 28 days", got)
+		}
+		if got := r.URL.Query().Get("limit"); got != "" {
+			t.Errorf("unexpected unsupported limit query parameter %q", got)
+		}
 		json.NewEncoder(w).Encode([]SuccessFailureRate{
-			{Period: "2024-01", SuccessCount: 8, FailureCount: 2, TotalCount: 10, SuccessRate: 0.8},
+			{Period: "2024-01-01", SuccessCount: 8, FailureCount: 2, TotalCount: 10, SuccessRate: 80},
+			{Period: "2024-01-02", SuccessCount: 5, FailureCount: 0, TotalCount: 5, SuccessRate: 100},
 		})
 	}))
 
@@ -985,8 +1003,69 @@ func TestGetSuccessFailureRates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSuccessFailureRates: %v", err)
 	}
-	if len(items) != 1 || items[0].Period != "2024-01" || items[0].SuccessRate != 0.8 {
-		t.Errorf("unexpected items: %+v", items)
+	if len(items) != 2 || items[0].Period != "2024-01-01" || items[1].Period != "2024-01-02" || items[0].SuccessRate != 80 {
+		t.Errorf("unexpected ordered items: %+v", items)
+	}
+}
+
+func TestGetSuccessFailureRatesFullHistoryAndDateRange(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*Client) ([]SuccessFailureRate, error)
+		from string
+		to   string
+	}{
+		{
+			name: "full history",
+			call: func(c *Client) ([]SuccessFailureRate, error) {
+				return c.GetSuccessFailureRatesFullHistory(context.Background(), "p2")
+			},
+		},
+		{
+			name: "date range",
+			call: func(c *Client) ([]SuccessFailureRate, error) {
+				return c.GetSuccessFailureRatesWithDateRange(context.Background(), "p2", "2020-01-01", "2020-02-01")
+			},
+			from: "2020-01-01",
+			to:   "2020-02-01",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("project_id") != "p2" {
+					t.Errorf("project_id = %q, want p2", r.URL.Query().Get("project_id"))
+				}
+				if r.URL.Query().Get("date_from") != tc.from || r.URL.Query().Get("date_to") != tc.to {
+					t.Errorf("date bounds = %q/%q, want %q/%q", r.URL.Query().Get("date_from"), r.URL.Query().Get("date_to"), tc.from, tc.to)
+				}
+				if r.URL.Query().Get("group_by") != "day" {
+					t.Errorf("group_by = %q, want day", r.URL.Query().Get("group_by"))
+				}
+				if r.URL.Query().Get("limit") != "" {
+					t.Errorf("unsupported limit parameter was sent: %q", r.URL.Query().Get("limit"))
+				}
+				json.NewEncoder(w).Encode([]SuccessFailureRate{
+					{Period: "2019-12-31"}, {Period: "2020-01-01"}, {Period: "2020-02-01"},
+				})
+			}))
+			items, err := tc.call(c)
+			if err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			if len(items) != 3 || items[0].Period != "2019-12-31" || items[2].Period != "2020-02-01" {
+				t.Fatalf("full/range history was truncated or reordered: %+v", items)
+			}
+		})
+	}
+}
+
+func TestGetSuccessFailureRatesPropagatesError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "analytics unavailable", http.StatusInternalServerError)
+	}))
+	if _, err := c.GetSuccessFailureRates(context.Background(), "p1"); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("GetSuccessFailureRates error = %v, want propagated HTTP 500", err)
 	}
 }
 

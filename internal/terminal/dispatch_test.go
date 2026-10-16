@@ -3051,6 +3051,75 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 	}
 }
 
+func TestAnalyticsInteractiveRatesWindowsAndScope(t *testing.T) {
+	bodies := map[string]string{
+		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
+		"/api/analytics/success-failure-rates":       `[{"period":"2026-09-01","successCount":2,"failureCount":1,"totalCount":3,"successRate":66.7}]`,
+		"/api/analytics/avg-execution-time-by-agent": `[]`,
+		"/api/analytics/avg-execution-time-by-task":  `[]`,
+		"/api/analytics/most-frequent-tasks":         `[]`,
+		"/api/analytics/failed-task-patterns":        `[]`,
+		"/api/analytics/skills":                      `{}`,
+	}
+	cases := []struct {
+		name       string
+		line       string
+		wantFrom   string
+		wantTo     string
+		wantWindow string
+	}{
+		{name: "default rates", line: "/analytics rates", wantWindow: recentRatesWindowLabel},
+		{name: "all sections default rates", line: "/analytics", wantWindow: recentRatesWindowLabel},
+		{name: "full history", line: "/analytics rates full", wantWindow: "all history"},
+		{name: "date range", line: "/analytics rates from 2026-01-01 to 2026-02-01", wantFrom: "2026-01-01", wantTo: "2026-02-01", wantWindow: "from 2026-01-01 to 2026-02-01 (end exclusive)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, bodies)
+			m.selectedID = "selected-project"
+			m = runLine(t, m, tc.line)
+			out := stripANSI(transcript(m))
+			if !strings.Contains(out, tc.wantWindow) || !strings.Contains(out, "2026-09-01") {
+				t.Fatalf("interactive output missing rates window or row:\n%s", out)
+			}
+			var rateQuery url.Values
+			for _, recorded := range rec.urlsSnapshot() {
+				parts := strings.SplitN(recorded, " ", 2)
+				if len(parts) != 2 {
+					t.Fatalf("malformed request %q", recorded)
+				}
+				parsed, err := url.Parse(parts[1])
+				if err != nil {
+					t.Fatalf("parse request %q: %v", recorded, err)
+				}
+				if parsed.Path == "/api/analytics/success-failure-rates" {
+					rateQuery = parsed.Query()
+				}
+			}
+			if rateQuery == nil {
+				t.Fatalf("rates request missing: %v", rec.urlsSnapshot())
+			}
+			if rateQuery.Get("project_id") != "selected-project" || rateQuery.Get("group_by") != "day" {
+				t.Fatalf("rates request lost project scope or daily grouping: %v", rateQuery)
+			}
+			if rateQuery.Get("date_from") != tc.wantFrom || rateQuery.Get("date_to") != tc.wantTo {
+				if tc.wantWindow == recentRatesWindowLabel {
+					from, fromErr := time.Parse(time.RFC3339Nano, rateQuery.Get("date_from"))
+					to, toErr := time.Parse(time.RFC3339Nano, rateQuery.Get("date_to"))
+					if fromErr != nil || toErr != nil || to.Sub(from) != 28*24*time.Hour {
+						t.Fatalf("default bounds = %q/%q, want 28 days", rateQuery.Get("date_from"), rateQuery.Get("date_to"))
+					}
+				} else if rateQuery.Get("date_from") != tc.wantFrom || rateQuery.Get("date_to") != tc.wantTo {
+					t.Fatalf("rate bounds = %q/%q, want %q/%q", rateQuery.Get("date_from"), rateQuery.Get("date_to"), tc.wantFrom, tc.wantTo)
+				}
+			}
+			if rateQuery.Get("limit") != "" {
+				t.Fatalf("rates request sent unsupported limit parameter: %v", rateQuery)
+			}
+		})
+	}
+}
+
 func TestAnalyticsUsageDispatchRendersProviderLimitsAndScope(t *testing.T) {
 	const secret = "sk-analytics-account-detail"
 	m, rec := dispatchModel(t, map[string]string{
