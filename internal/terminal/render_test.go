@@ -2863,8 +2863,33 @@ func TestRenderAutomationsShowsStatesAndFilters(t *testing.T) {
 	if got := stripANSI(renderAutomations(automations, "missing")); !strings.Contains(got, "no automations match missing") {
 		t.Errorf("filtered empty state = %q", got)
 	}
-	if got := stripANSI(renderAutomations(nil, "")); !strings.Contains(got, "automations create --file <yaml>") {
-		t.Errorf("empty state = %q", got)
+	if got := stripANSI(renderAutomations(nil, "")); !strings.Contains(got, "/automations create --file <yaml>") {
+		t.Errorf("TUI empty state = %q", got)
+	}
+}
+
+func TestRenderAutomationsEmptyStateUsesSurfaceCommandPrefix(t *testing.T) {
+	previous := cmdPrefix
+	t.Cleanup(func() { cmdPrefix = previous })
+
+	for _, tc := range []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{name: "interactive TUI", prefix: "/", want: "/automations create --file <yaml>"},
+		{name: "one-shot CLI", prefix: "", want: "automations create --file <yaml>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmdPrefix = tc.prefix
+			got := stripANSI(renderAutomations(nil, ""))
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("empty state missing command %q: %s", tc.want, got)
+			}
+			if tc.prefix == "" && strings.Contains(got, "/automations create") {
+				t.Fatalf("CLI empty state contains an interactive slash command: %s", got)
+			}
+		})
 	}
 }
 

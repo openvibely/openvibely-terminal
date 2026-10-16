@@ -6705,6 +6705,24 @@ name: Created sweep
 	})
 }
 
+func TestCLIAutomationsEmptyListShowsSlashFreeCreateCommand(t *testing.T) {
+	c, _ := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/automations":  `<div></div>`,
+	})
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"automations"}, false, false); err != nil {
+		t.Fatalf("empty automation list failed: %v\n%s", err, out.String())
+	}
+	plain := stripANSI(out.String())
+	if !strings.Contains(plain, "automations create --file <yaml>") {
+		t.Fatalf("CLI empty state omitted bare create command:\n%s", plain)
+	}
+	if strings.Contains(plain, "/automations create") {
+		t.Fatalf("CLI empty state showed an interactive slash command:\n%s", plain)
+	}
+}
+
 func TestCLIAutomationsCreateValidationFailureDoesNotPersistAgain(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "automation.yaml")
 	if err := os.WriteFile(path, []byte("not: supported\n"), 0o600); err != nil {

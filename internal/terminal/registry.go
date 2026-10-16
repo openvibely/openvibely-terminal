@@ -10095,7 +10095,7 @@ func automationsCommand() command {
 						return m, errCmd(commandUsage("automations", "edit"))
 					}
 					return selectorOr(m, commandUsage("automations", "edit"),
-						selectorFor("Automations", "automations edit", automationEmptyStateHint, false,
+						selectorFor("Automations", "automations edit", automationEmptyStateHint(), false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
 									return beginAutomationInteractiveEdit(m, c, pid, automation)
@@ -10148,7 +10148,7 @@ func automationsCommand() command {
 					usage := commandUsage("automations", action)
 					return selectorOr(m, usage,
 						selectorFor("Automations", "automations "+action,
-							automationEmptyStateHint, false,
+							automationEmptyStateHint(), false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
 									cmd := run("Automation", cmdTimeout, func(ctx context.Context) (string, error) {
@@ -10166,7 +10166,7 @@ func automationsCommand() command {
 				if ref == "" {
 					return selectorOr(m, fmt.Sprintf("usage: %sautomations %s <automation>", cmdPrefix, action),
 						selectorFor("Automations", "automations "+action,
-							automationEmptyStateHint, false,
+							automationEmptyStateHint(), false,
 							func(ctx context.Context) ([]selectorItem, error) {
 								return automationSelectorItems(ctx, c, pid, func(m Model, automation client.Automation) (Model, tea.Cmd) {
 									cmd := run("Automations", cmdTimeout, func(ctx context.Context) (string, error) {

@@ -2134,6 +2134,12 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 		t.Errorf("automation edit option completion = %q", got)
 	}
 
+	cmdPrefix = ""
+	cliHelp := renderCommandHelp(*cmd)
+	if !strings.Contains(cliHelp, "automations create --file automation.yaml") || strings.Contains(cliHelp, "/automations create") {
+		t.Errorf("one-shot CLI help should show slash-free examples:\n%s", cliHelp)
+	}
+
 	_, source, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed while locating docs/user-guide.md")

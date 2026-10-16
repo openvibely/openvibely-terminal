@@ -2384,11 +2384,16 @@ func TestSelectorEmptyListShowsHint(t *testing.T) {
 // state shown by each page identical to the hint emitted by its ref-less
 // selector. The automation cases cover both selector branches.
 func TestResourceEmptyStateHintsMatchPageAndSelectors(t *testing.T) {
+	previousPrefix := cmdPrefix
+	cmdPrefix = "/"
+	t.Cleanup(func() { cmdPrefix = previousPrefix })
+
 	cases := []struct {
-		name    string
-		command string
-		page    string
-		bodies  map[string]string
+		name     string
+		command  string
+		page     string
+		wantHint string
+		bodies   map[string]string
 	}{
 		{
 			name:    "tasks",
@@ -2415,14 +2420,28 @@ func TestResourceEmptyStateHintsMatchPageAndSelectors(t *testing.T) {
 			page:    stripANSI(renderSkills(nil, "")),
 		},
 		{
-			name:    "automations show",
-			command: "/automations show",
-			page:    stripANSI(renderAutomations(nil, "")),
+			name:     "automations page",
+			command:  "/automations",
+			page:     stripANSI(renderAutomations(nil, "")),
+			wantHint: "/automations create --file <yaml>",
 		},
 		{
-			name:    "automations mutation",
-			command: "/automations pause",
-			page:    stripANSI(renderAutomations(nil, "")),
+			name:     "automations show selector",
+			command:  "/automations show",
+			page:     stripANSI(renderAutomations(nil, "")),
+			wantHint: "/automations create --file <yaml>",
+		},
+		{
+			name:     "automations edit selector",
+			command:  "/automations edit",
+			page:     stripANSI(renderAutomations(nil, "")),
+			wantHint: "/automations create --file <yaml>",
+		},
+		{
+			name:     "automations mutation selector",
+			command:  "/automations pause",
+			page:     stripANSI(renderAutomations(nil, "")),
+			wantHint: "/automations create --file <yaml>",
 		},
 	}
 
@@ -2434,8 +2453,12 @@ func TestResourceEmptyStateHintsMatchPageAndSelectors(t *testing.T) {
 			if m.selectorActive {
 				t.Fatalf("empty selector should not remain active:\n%s", transcript(m))
 			}
-			if got := stripANSI(transcript(m)); !strings.Contains(got, tc.page) {
+			got := stripANSI(transcript(m))
+			if !strings.Contains(got, tc.page) {
 				t.Fatalf("selector empty-state guidance does not match page output\npage: %q\nselector transcript: %q", tc.page, got)
+			}
+			if tc.wantHint != "" && !strings.Contains(got, tc.wantHint) {
+				t.Fatalf("empty state missing runnable TUI command %q:\n%s", tc.wantHint, got)
 			}
 		})
 	}

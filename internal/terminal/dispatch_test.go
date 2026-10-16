@@ -9361,6 +9361,35 @@ func TestAutomationsListUsesStructuredRowsWithNoArguments(t *testing.T) {
 	}
 }
 
+func TestTypingAutomationEmptyStateCreateCommandDispatchesAsTUICommand(t *testing.T) {
+	const createdBuilder = `<div id="automation-builder"><form id="automation-design-form" action="/automations/au-created/builder?project_id=p1"></form><textarea name="automation_yaml">schema_version: 1
+name: Created sweep
+</textarea></div>`
+	m, rec := dispatchModel(t, map[string]string{
+		"GET /automations":          `<div></div>`,
+		"POST /automations/builder": createdBuilder,
+	})
+	m = runLine(t, m, "/automations")
+	if got := stripANSI(transcript(m)); !strings.Contains(got, "/automations create --file <yaml>") {
+		t.Fatalf("empty TUI page omitted runnable create command:\n%s", got)
+	}
+
+	path := filepath.Join(t.TempDir(), "automation.yaml")
+	if err := os.WriteFile(path, []byte("schema_version: 1\nname: Created sweep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m = runLine(t, m, "/automations create --file "+path)
+	if got := stripANSI(transcript(m)); !strings.Contains(got, "created automation au-created") {
+		t.Fatalf("typed TUI command did not reach automation create action:\n%s", got)
+	}
+	if !rec.sawQuery(http.MethodPost + " /automations/builder?project_id=p1") {
+		t.Fatalf("typed TUI command did not post to the automation builder:\n%s", rec.all())
+	}
+	if strings.Contains(rec.all(), "POST /chat") {
+		t.Fatalf("typed slash command was submitted as chat text:\n%s", rec.all())
+	}
+}
+
 func TestAutomationsListFiltersStructuredRows(t *testing.T) {
 	automationsHTML := "<div>" +
 		automationCardHTML("au-1", "Native SDLC", "active") +
