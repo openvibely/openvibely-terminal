@@ -263,6 +263,70 @@ func confirmTaskDeletion(m Model, projectID string, task client.Task) (Model, te
 		cmd)
 }
 
+func resolveTaskReviewSubmission(m Model, c *client.Client, projectID, ref string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := m.commandContext(cmdTimeout)
+		defer cancel()
+		task, err := resolveTaskForModel(m, ctx, c, projectID, ref)
+		if err != nil {
+			return taskReviewSubmitTargetMsg{projectID: projectID, err: err}
+		}
+		reviews, err := c.ListTaskReviewsForProject(ctx, task.ID, projectID)
+		if err != nil {
+			return taskReviewSubmitTargetMsg{projectID: projectID, task: task, err: err}
+		}
+		if len(reviews) == 0 {
+			return taskReviewSubmitTargetMsg{
+				projectID: projectID,
+				task:      task,
+				err:       fmt.Errorf("task %q has no draft review comments to submit", sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))),
+			}
+		}
+		return taskReviewSubmitTargetMsg{projectID: projectID, task: task, draftCount: len(reviews)}
+	}
+}
+
+func confirmTaskReviewSubmission(m Model, projectID string, task client.Task, draftCount int) (Model, tea.Cmd) {
+	taskID := task.ID
+	display := taskDeletionDisplayName(task)
+	c := m.client
+	cmd := m.run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
+		drafts, err := c.ListTaskReviewsForProject(ctx, taskID, projectID)
+		if err != nil {
+			return "", err
+		}
+		if len(drafts) == 0 {
+			return "", fmt.Errorf("task %q has no draft review comments to submit", sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID)))
+		}
+		if err := c.SubmitTaskReviewCommentsForProject(ctx, taskID, projectID); err != nil {
+			return "", err
+		}
+		remaining, err := c.ListTaskReviewsForProject(ctx, taskID, projectID)
+		if err != nil {
+			return "", err
+		}
+		if len(remaining) > 0 {
+			return "", fmt.Errorf("backend accepted the task-thread follow-up, but %d draft review comments remain", len(remaining))
+		}
+		cleared := len(drafts)
+		thread := taskReviewThreadPath(taskID)
+		if jsonMode {
+			return marshalJSON(taskReviewMutationJSON{
+				Status:            "submitted",
+				TaskID:            taskID,
+				SubmittedComments: cleared,
+				CommentsCleared:   cleared,
+				TaskThread:        thread,
+			})
+		}
+		return fmt.Sprintf("submitted and cleared %d draft review comments; follow-up queued in task thread: %s", cleared, thread), nil
+	})
+	return confirmOr(m,
+		fmt.Sprintf("Submit %d draft review comments for %q? %s", draftCount, display, confirmCancelInstruction),
+		fmt.Sprintf("use --force to confirm submission of draft review comments for %q", display),
+		cmd)
+}
+
 func taskDeletionDisplayName(task client.Task) string {
 	label := sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID))
 	id := sanitizeAutomationDetailText(task.ID)
@@ -405,6 +469,20 @@ func taskReviewsOutput(ctx context.Context, t client.Task, fetch func(context.Co
 		return marshalJSON(reviews)
 	}
 	return renderTaskReviews(t, reviews), nil
+}
+
+type taskReviewMutationJSON struct {
+	Status            string                  `json:"status"`
+	TaskID            string                  `json:"task_id"`
+	CommentID         string                  `json:"comment_id,omitempty"`
+	SubmittedComments int                     `json:"submitted_comments,omitempty"`
+	CommentsCleared   int                     `json:"comments_cleared,omitempty"`
+	TaskThread        string                  `json:"task_thread,omitempty"`
+	RemainingComments *[]client.ReviewComment `json:"remaining_comments,omitempty"`
+}
+
+func taskReviewThreadPath(taskID string) string {
+	return "/tasks/" + url.PathEscape(taskID) + "/thread"
 }
 
 // marshalJSON marshals v to a JSON string. When jsonMode is false it is never
@@ -992,13 +1070,13 @@ func tasksCommand() command {
 	completions := append(append(taskThreadInputCompletions(), taskAttachmentCompletions()...), []commandCompletion{
 		{after: []string{"goal"}, values: []string{"pause", "resume"}},
 		{after: []string{"merge"}, values: []string{"merge", "ff", "squash"}},
-		{after: []string{"reviews"}, values: []string{"list", "add"}},
+		{after: []string{"reviews"}, values: []string{"list", "add", "remove", "submit"}},
 		{after: []string{"move", "**"}, partialAfter: completionAfterQuotedOperand, values: []string{"backlog", "active", "completed"}},
 		{after: []string{"clear"}, values: []string{"backlog", "completed"}},
 		{after: []string{"show", "**"}, partialAfter: completionAfterQuotedOperand, values: taskDetailCompletionValues()},
 	}...)
 	selectorPaths := append([][]string{
-		{"open"}, {"show"}, {"worktree"}, {"merge", "**"}, {"rebase"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"},
+		{"open"}, {"show"}, {"worktree"}, {"merge", "**"}, {"rebase"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"}, {"reviews", "remove"}, {"reviews", "submit"},
 		{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
 		{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
 	}, append(taskThreadInputSelectorPaths(), taskAttachmentSelectorPaths()...)...)
@@ -1012,6 +1090,8 @@ func tasksCommand() command {
 		"tasks rebase <task>                         rebase the task branch onto its target (confirm in TUI; CLI requires --force)",
 		"tasks reviews [list] <task>                list inline review comments",
 		"tasks reviews add <task> <file>:<line> <comment>",
+		"tasks reviews remove <task> <comment-id|file:line> remove one draft comment",
+		"tasks reviews submit <task>                submit all drafts to the task thread (confirm in TUI; CLI requires --force)",
 	}
 	usage = append(usage, taskAttachmentUsageLines()...)
 	usage = append(usage, []string{
@@ -1042,6 +1122,8 @@ func tasksCommand() command {
 		{action: "merge", args: "<merge|ff|squash> <task>", description: "integrate a task branch after confirmation"},
 		{action: "rebase", args: "<task>", description: "rebase a task branch onto its target after confirmation"},
 		{action: "reviews add", args: "<task> <file>:<line> <comment>"},
+		{action: "reviews remove", args: "<task> <comment-id|file:line>", description: "remove one uniquely matched draft comment"},
+		{action: "reviews submit", args: "<task>", description: "submit all drafts as a task-thread follow-up (TUI confirmation; CLI --force)"},
 		{action: "new", args: "<title> [| <prompt>]", description: "create a task"},
 		{action: "swarm", args: "[options] <title> | <prompt>", description: "create an autonomous swarm parent"},
 		{action: "edit", args: "<task> | <title> [| <prompt>]", description: "edit title/prompt"},
@@ -1059,6 +1141,9 @@ func tasksCommand() command {
 		`tasks merge squash "Fix login bug"`,
 		`tasks rebase "Fix login bug"`,
 		`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
+		`tasks reviews remove "Fix login bug" review-comment-id`,
+		`tasks reviews submit "Fix login bug"`,
+		`openvibely-terminal --project demo --force tasks reviews submit "Fix login bug"`,
 		`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
 		`tasks attachments download "Fix login bug" request.txt --output ./request.txt`,
 		`tasks attachments delete "Fix login bug" request.txt`,
@@ -1327,8 +1412,8 @@ func tasksCommand() command {
 				reviewRest := rest
 				if strings.EqualFold(reviewRest[0], "list") {
 					reviewRest = reviewRest[1:]
-				} else if strings.EqualFold(reviewRest[0], "add") {
-					reviewAction = "add"
+				} else if strings.EqualFold(reviewRest[0], "add") || strings.EqualFold(reviewRest[0], "remove") || strings.EqualFold(reviewRest[0], "submit") {
+					reviewAction = strings.ToLower(reviewRest[0])
 					reviewRest = reviewRest[1:]
 				}
 				switch reviewAction {
@@ -1377,6 +1462,59 @@ func tasksCommand() command {
 						}
 						return fmt.Sprintf("added review comment on %s:%d for %s\n\n%s", sanitizeAutomationDetailText(location.filePath), location.lineNumber, sanitizeAutomationDetailText(firstNonEmpty(t.Title, shortID(t.ID))), renderTaskReviews(t, reviews)), nil
 					})
+				case "remove":
+					if len(reviewRest) == 0 {
+						return taskSelectorWithSuffix(m, commandUsage("tasks", "reviews remove"), "tasks reviews remove", " ")
+					}
+					if len(reviewRest) < 2 {
+						return m, errCmd(commandUsage("tasks", "reviews remove"))
+					}
+					commentRef := reviewRest[len(reviewRest)-1]
+					taskRef := strings.Join(reviewRest[:len(reviewRest)-1], " ")
+					return m, m.run("Task Reviews", cmdTimeout, func(ctx context.Context) (string, error) {
+						t, err := resolveTaskForModel(m, ctx, c, pid, taskRef)
+						if err != nil {
+							return "", err
+						}
+						reviews, err := c.ListTaskReviewsForProject(ctx, t.ID, pid)
+						if err != nil {
+							return "", err
+						}
+						if len(reviews) == 0 {
+							return "", fmt.Errorf("task %q has no draft review comments", sanitizeAutomationDetailText(firstNonEmpty(t.Title, t.ID)))
+						}
+						comment, err := resolveReviewComment(reviews, commentRef)
+						if err != nil {
+							return "", err
+						}
+						if strings.TrimSpace(comment.ID) == "" {
+							return "", fmt.Errorf("review comment at %s:%d has no ID and cannot be removed", sanitizeAutomationDetailText(comment.FilePath), comment.LineNumber)
+						}
+						if err := c.DeleteTaskReviewCommentForProject(ctx, comment.ID, pid); err != nil {
+							return "", err
+						}
+						remaining, err := c.ListTaskReviewsForProject(ctx, t.ID, pid)
+						if err != nil {
+							return "", err
+						}
+						for _, review := range remaining {
+							if strings.EqualFold(review.ID, comment.ID) {
+								return "", fmt.Errorf("backend accepted removal, but review comment %q is still present", sanitizeAutomationDetailText(comment.ID))
+							}
+						}
+						if jsonMode {
+							if remaining == nil {
+								remaining = []client.ReviewComment{}
+							}
+							return marshalJSON(taskReviewMutationJSON{Status: "removed", TaskID: t.ID, CommentID: comment.ID, RemainingComments: &remaining})
+						}
+						return fmt.Sprintf("removed draft review comment %s from %s", sanitizeAutomationDetailText(comment.ID), sanitizeAutomationDetailText(firstNonEmpty(t.Title, shortID(t.ID)))), nil
+					})
+				case "submit":
+					if len(reviewRest) == 0 {
+						return taskSelector(m, "usage: /tasks reviews submit <task>", "tasks reviews submit", false)
+					}
+					return m, resolveTaskReviewSubmission(m, c, pid, strings.Join(reviewRest, " "))
 				}
 
 			case "lifecycle", "logs":
@@ -1893,6 +2031,56 @@ func addedReviewComment(reviews []client.ReviewComment, form client.ReviewCommen
 		LineType:    form.LineType,
 		CommentText: form.CommentText,
 	}
+}
+
+func resolveReviewComment(reviews []client.ReviewComment, ref string) (client.ReviewComment, error) {
+	var zero client.ReviewComment
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return zero, fmt.Errorf("missing review comment reference; use a comment ID or file:line")
+	}
+	matches := func(predicate func(client.ReviewComment) bool) []client.ReviewComment {
+		var found []client.ReviewComment
+		for _, review := range reviews {
+			if predicate(review) {
+				found = append(found, review)
+			}
+		}
+		return found
+	}
+	choose := func(found []client.ReviewComment) (client.ReviewComment, error) {
+		if len(found) == 1 {
+			return found[0], nil
+		}
+		if len(found) > 1 {
+			ids := make([]string, 0, len(found))
+			for _, review := range found {
+				ids = append(ids, sanitizeAutomationDetailText(firstNonEmpty(review.ID, review.FilePath+":"+strconv.Itoa(review.LineNumber))))
+			}
+			return zero, fmt.Errorf("review comment reference %q is ambiguous; use a unique comment ID (%s)", sanitizeAutomationDetailText(ref), strings.Join(ids, ", "))
+		}
+		return zero, nil
+	}
+
+	found := matches(func(review client.ReviewComment) bool { return strings.EqualFold(strings.TrimSpace(review.ID), ref) })
+	if len(found) > 0 {
+		return choose(found)
+	}
+	if filePath, lineNumber, ok := parseReviewLocation(ref); ok {
+		found = matches(func(review client.ReviewComment) bool {
+			return review.LineNumber == lineNumber && strings.EqualFold(strings.TrimSpace(review.FilePath), filePath)
+		})
+		if len(found) > 0 {
+			return choose(found)
+		}
+	}
+	found = matches(func(review client.ReviewComment) bool {
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(review.ID)), strings.ToLower(ref))
+	})
+	if len(found) > 0 {
+		return choose(found)
+	}
+	return zero, fmt.Errorf("nothing matches review comment %q; use a comment ID or file:line", sanitizeAutomationDetailText(ref))
 }
 
 func isCanonicalFullTaskID(ref string) bool {

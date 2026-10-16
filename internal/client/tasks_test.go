@@ -1595,7 +1595,7 @@ func TestTaskReviewProjectMethodsScopeAndEncode(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Fatal(err)
 		}
-		if r.Method == http.MethodPost {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/reviews") {
 			gotForm = r.PostForm
 		}
 		w.Header().Set("Content-Type", "text/html")
@@ -1610,10 +1610,18 @@ func TestTaskReviewProjectMethodsScopeAndEncode(t *testing.T) {
 	if _, err := c.AddTaskReviewCommentForProject(ctx, "task/one", projectID, form); err != nil {
 		t.Fatalf("AddTaskReviewCommentForProject: %v", err)
 	}
+	if err := c.DeleteTaskReviewCommentForProject(ctx, "comment/one", projectID); err != nil {
+		t.Fatalf("DeleteTaskReviewCommentForProject: %v", err)
+	}
+	if err := c.SubmitTaskReviewCommentsForProject(ctx, "task/one", projectID); err != nil {
+		t.Fatalf("SubmitTaskReviewCommentsForProject: %v", err)
+	}
 
 	want := []string{
 		"GET /tasks/task%2Fone/reviews?" + wantQuery,
 		"POST /tasks/task%2Fone/reviews?" + wantQuery,
+		"DELETE /reviews/comment%2Fone?" + wantQuery,
+		"POST /tasks/task%2Fone/reviews/submit?" + wantQuery,
 	}
 	if fmt.Sprint(requests) != fmt.Sprint(want) {
 		t.Fatalf("requests = %q, want %q", requests, want)
@@ -1644,6 +1652,12 @@ func TestTaskReviewProjectMethodsRejectEmptyProjectBeforeHTTP(t *testing.T) {
 		{name: "add", call: func() error {
 			_, err := c.AddTaskReviewCommentForProject(ctx, "task", "", ReviewCommentForm{})
 			return err
+		}},
+		{name: "delete", call: func() error {
+			return c.DeleteTaskReviewCommentForProject(ctx, "comment", " ")
+		}},
+		{name: "submit", call: func() error {
+			return c.SubmitTaskReviewCommentsForProject(ctx, "task", "")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

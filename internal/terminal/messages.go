@@ -234,6 +234,15 @@ type taskWorktreeActionTargetMsg struct {
 	err               error
 }
 
+type taskReviewSubmitTargetMsg struct {
+	sessionGeneration uint64
+	projectGeneration uint64
+	projectID         string
+	task              client.Task
+	draftCount        int
+	err               error
+}
+
 type webhookMutationTargetMsg struct {
 	sessionGeneration uint64
 	projectGeneration uint64
