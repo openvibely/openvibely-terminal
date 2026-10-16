@@ -30,8 +30,11 @@ const (
 	attachmentEmptyStateHint = "no attachments yet — /tasks attachments add <task> <file> uploads one"
 	scheduleEmptyStateHint   = "nothing scheduled — /schedule add <task> <2006-01-02T15:04> daily"
 	skillEmptyStateHint      = "no skills yet — /skills add <name> creates one"
-	automationEmptyStateHint = "no automations yet — create one with automations create --file <yaml> or via the web UI"
 )
+
+func automationEmptyStateHint() string {
+	return "no automations yet — run " + cmdPrefix + "automations create --file <yaml> or use the web UI"
+}
 
 // View renders header, transcript, command menu and input.
 func (m Model) View() string {
@@ -2469,7 +2472,7 @@ func renderAutomations(automations []client.Automation, filter string) string {
 		if filter != "" {
 			return dimStyle.Render("no automations match " + filter)
 		}
-		return dimStyle.Render(automationEmptyStateHint)
+		return dimStyle.Render(automationEmptyStateHint())
 	}
 	return table(rows) + "\n\n" +
 		dimStyle.Render("/automations show <id|name> · /automations open <id|name> (alias) · /automations edit <id|name>") + "\n" +
