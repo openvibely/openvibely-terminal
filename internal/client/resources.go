@@ -4487,15 +4487,30 @@ func (c *Client) GetPulseProjection(ctx context.Context, projectID string) (*Pul
 	if err != nil {
 		return nil, err
 	}
-	schedules, _, err := c.getScheduleWeekOccurrences(ctx, projectID, 0)
-	if err != nil {
-		return nil, err
+	type scheduleWeekResult struct {
+		entries []ScheduleEntry
+		err     error
 	}
-	nextWeek, _, err := c.getScheduleWeekOccurrences(ctx, projectID, 1)
-	if err != nil {
-		return nil, err
+	currentWeekCh := make(chan scheduleWeekResult, 1)
+	nextWeekCh := make(chan scheduleWeekResult, 1)
+	go func() {
+		entries, _, err := c.getScheduleWeekOccurrences(ctx, projectID, 0)
+		currentWeekCh <- scheduleWeekResult{entries: entries, err: err}
+	}()
+	go func() {
+		entries, _, err := c.getScheduleWeekOccurrences(ctx, projectID, 1)
+		nextWeekCh <- scheduleWeekResult{entries: entries, err: err}
+	}()
+
+	currentWeek := <-currentWeekCh
+	nextWeek := <-nextWeekCh
+	if currentWeek.err != nil {
+		return nil, currentWeek.err
 	}
-	schedules = append(schedules, nextWeek...)
+	if nextWeek.err != nil {
+		return nil, nextWeek.err
+	}
+	schedules := append(currentWeek.entries, nextWeek.entries...)
 	if err := c.enrichPulseScheduleNextRuns(ctx, projectID, schedules); err != nil {
 		return nil, err
 	}

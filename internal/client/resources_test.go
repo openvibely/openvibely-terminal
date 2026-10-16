@@ -6798,6 +6798,7 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	tomorrowDate := tomorrow.Format("2006-01-02")
 	scheduleOneNextRun := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 10, 45, 30, 0, time.Local)
 	nextWeekDate := now.AddDate(0, 0, daysUntilNextSunday).Format("2006-01-02")
+	var scheduleMu sync.Mutex
 	sawScheduleWeeks := map[string]bool{}
 	var sawCatalog bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6823,7 +6824,9 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 				t.Fatalf("schedule request = %s %s", r.Method, r.URL.RequestURI())
 			}
 			week := r.URL.Query().Get("week")
+			scheduleMu.Lock()
 			sawScheduleWeeks[week] = true
+			scheduleMu.Unlock()
 			w.Header().Set("Content-Type", "text/html")
 			if week == "1" {
 				_, _ = io.WriteString(w, `<div id="schedule-content"><div data-date="`+nextWeekDate+`" data-hour="10"><div data-task-id="sched-2" data-schedule-id="schedule-2" data-schedule-enabled="true"><div class="font-semibold">Next week work</div><div class="opacity-60 leading-tight">10:00 AM</div></div></div></div>`)
@@ -6844,8 +6847,11 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPulseProjection: %v", err)
 	}
-	if !sawCatalog || !sawScheduleWeeks[""] || !sawScheduleWeeks["1"] {
-		t.Fatalf("missing deterministic reads: catalog=%v scheduleWeeks=%v", sawCatalog, sawScheduleWeeks)
+	scheduleMu.Lock()
+	sawCurrentWeek, sawNextWeek := sawScheduleWeeks[""], sawScheduleWeeks["1"]
+	scheduleMu.Unlock()
+	if !sawCatalog || !sawCurrentWeek || !sawNextWeek {
+		t.Fatalf("missing deterministic reads: catalog=%v currentWeek=%v nextWeek=%v", sawCatalog, sawCurrentWeek, sawNextWeek)
 	}
 	if got.ProjectID != "p1" || !got.OK || got.LookaheadDays != 7 {
 		t.Fatalf("pulse projection identity = %+v", got)
@@ -7156,6 +7162,311 @@ func TestGetPulseProjectionSurfacesDeterministicReadFailures(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "catalog unavailable") {
 		t.Fatalf("GetPulseProjection error = %v, want catalog failure", err)
 	}
+}
+
+func TestGetPulseProjectionFetchesScheduleWeeksConcurrentlyInStableOrder(t *testing.T) {
+	runAt := time.Now().UTC().Add(3 * time.Hour).Truncate(time.Second)
+	bothWeeksStarted := make(chan struct{})
+	var mu sync.Mutex
+	catalogServed := false
+	scheduleRequests := 0
+	inFlight := 0
+	peakInFlight := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			if r.Method != http.MethodGet || r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("catalog request = %s %s", r.Method, r.URL.RequestURI())
+			}
+			mu.Lock()
+			catalogServed = true
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"current-task","project_id":"p1","title":"Current","category":"scheduled","status":"pending"},{"id":"next-task","project_id":"p1","title":"Next","category":"scheduled","status":"pending"}]}`)
+		case "/schedule":
+			if r.Method != http.MethodGet || r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("schedule request = %s %s", r.Method, r.URL.RequestURI())
+			}
+			week := r.URL.Query().Get("week")
+			mu.Lock()
+			if !catalogServed {
+				t.Errorf("schedule week %q started before catalog response", week)
+			}
+			scheduleRequests++
+			inFlight++
+			if inFlight > peakInFlight {
+				peakInFlight = inFlight
+			}
+			if scheduleRequests == 2 {
+				close(bothWeeksStarted)
+			}
+			mu.Unlock()
+
+			select {
+			case <-bothWeeksStarted:
+			case <-time.After(2 * time.Second):
+				t.Errorf("schedule week %q did not overlap its peer request", week)
+			}
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+
+			scheduleID, taskID := "current-schedule", "current-task"
+			if week == "1" {
+				scheduleID, taskID = "next-schedule", "next-task"
+			} else if week != "" {
+				t.Errorf("unexpected schedule week query %q", week)
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprintf(w, `<div id="schedule-content"><div data-task-id="%s" data-schedule-id="%s" data-schedule-next-run="%s" data-schedule-enabled="true"><div class="font-semibold">%s</div></div></div>`, taskID, scheduleID, runAt.Format(time.RFC3339Nano), taskID)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c, err := New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.GetPulseProjection(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetPulseProjection: %v", err)
+	}
+	mu.Lock()
+	gotPeak, gotScheduleRequests := peakInFlight, scheduleRequests
+	mu.Unlock()
+	if gotPeak != 2 || gotScheduleRequests != 2 {
+		t.Fatalf("schedule overlap = peak %d, requests %d; want two overlapping requests", gotPeak, gotScheduleRequests)
+	}
+	if len(got.ScheduledTasks) != 2 || got.ScheduledTasks[0].ScheduleID != "current-schedule" || got.ScheduledTasks[1].ScheduleID != "next-schedule" {
+		t.Fatalf("scheduled task order = %+v, want current week then next week", got.ScheduledTasks)
+	}
+	for _, task := range got.ScheduledTasks {
+		if task.NextRun == nil || !task.NextRun.Equal(runAt) {
+			t.Fatalf("schedule %q next_run = %v, want precise timestamp %s", task.ScheduleID, task.NextRun, runAt.Format(time.RFC3339Nano))
+		}
+	}
+}
+
+func TestGetPulseProjectionScheduleFailuresAreDeterministic(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		currentStatus int
+		nextStatus    int
+		currentDelay  time.Duration
+		wantErrorText string
+	}{
+		{name: "current failure wins when both fail", currentStatus: http.StatusBadGateway, nextStatus: http.StatusServiceUnavailable, currentDelay: 25 * time.Millisecond, wantErrorText: "current schedule unavailable"},
+		{name: "next failure is returned when current succeeds", currentStatus: http.StatusOK, nextStatus: http.StatusBadGateway, wantErrorText: "next schedule unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/tasks/reference-catalog":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"tasks":[]}`)
+				case "/schedule":
+					if r.URL.Query().Get("week") == "1" {
+						if tc.nextStatus != http.StatusOK {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(tc.nextStatus)
+							_, _ = io.WriteString(w, `{"error":"next schedule unavailable"}`)
+							return
+						}
+						_, _ = io.WriteString(w, `<div id="schedule-content"></div>`)
+						return
+					}
+					if tc.currentDelay > 0 {
+						time.Sleep(tc.currentDelay)
+					}
+					if tc.currentStatus != http.StatusOK {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(tc.currentStatus)
+						_, _ = io.WriteString(w, `{"error":"current schedule unavailable"}`)
+						return
+					}
+					_, _ = io.WriteString(w, `<div id="schedule-content"></div>`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			c, err := New(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = c.GetPulseProjection(context.Background(), "p1")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrorText) {
+				t.Fatalf("GetPulseProjection error = %v, want %q", err, tc.wantErrorText)
+			}
+		})
+	}
+}
+
+func TestGetPulseProjectionCancellationStopsBothScheduleReads(t *testing.T) {
+	bothWeeksStarted := make(chan struct{})
+	cancelledRequests := make(chan struct{}, 2)
+	var mu sync.Mutex
+	scheduleRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tasks":[]}`)
+		case "/schedule":
+			mu.Lock()
+			scheduleRequests++
+			if scheduleRequests == 2 {
+				close(bothWeeksStarted)
+			}
+			mu.Unlock()
+			<-r.Context().Done()
+			cancelledRequests <- struct{}{}
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c, err := New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.GetPulseProjection(ctx, "p1")
+		result <- err
+	}()
+	select {
+	case <-bothWeeksStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("both schedule requests did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("GetPulseProjection succeeded after cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetPulseProjection did not return after cancellation")
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-cancelledRequests:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("schedule request %d did not observe cancellation", i+1)
+		}
+	}
+}
+
+func TestGetPulseProjectionConcurrentScheduleLatency(t *testing.T) {
+	const runs = 10
+	const responseDelay = 100 * time.Millisecond
+	runAt := time.Now().UTC().Add(3 * time.Hour).Truncate(time.Second)
+	catalogBody := `{"tasks":[{"id":"current-task","project_id":"p1","title":"Current","category":"scheduled","status":"pending"},{"id":"next-task","project_id":"p1","title":"Next","category":"scheduled","status":"pending"}]}`
+	currentBody := fmt.Sprintf(`<div id="schedule-content"><div data-task-id="current-task" data-schedule-id="current-schedule" data-schedule-next-run="%s" data-schedule-enabled="true"></div></div>`, runAt.Format(time.RFC3339Nano))
+	nextBody := fmt.Sprintf(`<div id="schedule-content"><div data-task-id="next-task" data-schedule-id="next-schedule" data-schedule-next-run="%s" data-schedule-enabled="true"></div></div>`, runAt.Format(time.RFC3339Nano))
+	var mu sync.Mutex
+	requestCounts := map[string]int{}
+	responseBytes := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Path
+		body := ""
+		switch r.URL.Path {
+		case "/api/tasks/reference-catalog":
+			if r.Method != http.MethodGet || r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("catalog request = %s %s", r.Method, r.URL.RequestURI())
+			}
+			body = catalogBody
+		case "/schedule":
+			if r.Method != http.MethodGet || r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("schedule request = %s %s", r.Method, r.URL.RequestURI())
+			}
+			switch r.URL.Query().Get("week") {
+			case "":
+				key = "/schedule?week=0"
+				body = currentBody
+			case "1":
+				key = "/schedule?week=1"
+				body = nextBody
+			default:
+				t.Errorf("unexpected schedule query %s", r.URL.RequestURI())
+			}
+		default:
+			if strings.HasPrefix(r.URL.Path, "/tasks/") {
+				t.Errorf("unexpected follow-on task detail read %s", r.URL.RequestURI())
+			} else {
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			}
+			http.NotFound(w, r)
+			return
+		}
+		mu.Lock()
+		requestCounts[key]++
+		mu.Unlock()
+		time.Sleep(responseDelay)
+		w.Header().Set("Content-Type", "text/html")
+		if r.URL.Path == "/api/tasks/reference-catalog" {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		written, err := io.WriteString(w, body)
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+		mu.Lock()
+		responseBytes += written
+		mu.Unlock()
+	}))
+	defer server.Close()
+	c, err := New(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	latencies := make([]time.Duration, 0, runs)
+	for i := 0; i < runs; i++ {
+		started := time.Now()
+		got, err := c.GetPulseProjection(context.Background(), "p1")
+		latencies = append(latencies, time.Since(started))
+		if err != nil {
+			t.Fatalf("run %d GetPulseProjection: %v", i+1, err)
+		}
+		if len(got.ScheduledTasks) != 2 || got.ScheduledTasks[0].ScheduleID != "current-schedule" || got.ScheduledTasks[1].ScheduleID != "next-schedule" {
+			t.Fatalf("run %d scheduled tasks = %+v, want exact current then next entries", i+1, got.ScheduledTasks)
+		}
+		for _, task := range got.ScheduledTasks {
+			if task.NextRun == nil || !task.NextRun.Equal(runAt) {
+				t.Fatalf("run %d schedule %q next_run = %v, want %s", i+1, task.ScheduleID, task.NextRun, runAt.Format(time.RFC3339Nano))
+			}
+		}
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	p50 := (latencies[runs/2-1] + latencies[runs/2]) / 2
+	mu.Lock()
+	counts := map[string]int{}
+	for key, count := range requestCounts {
+		counts[key] = count
+	}
+	bytes := responseBytes
+	mu.Unlock()
+	if counts["/api/tasks/reference-catalog"] != runs || counts["/schedule?week=0"] != runs || counts["/schedule?week=1"] != runs {
+		t.Fatalf("request counts = %v, want %d catalog and %d per schedule week", counts, runs, runs)
+	}
+	if bytes == 0 {
+		t.Fatal("measured response bytes = 0")
+	}
+	if p50 > 225*time.Millisecond {
+		t.Fatalf("p50 projection latency = %s, want <= 225ms for 100ms responses", p50)
+	}
+	t.Logf("runs=%d request_counts=%v response_bytes=%d p50_latency=%s fixed_response_delay=%s", runs, counts, bytes, p50, responseDelay)
 }
 
 func TestBuildPulseProjectionFiltersKnownSchedulesBeyondLookahead(t *testing.T) {
