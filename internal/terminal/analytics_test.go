@@ -78,6 +78,54 @@ func TestAnalyticsCommandActionsUseSharedSections(t *testing.T) {
 	}
 }
 
+func TestAnalyticsTaskTimesHelpMatchesRenderedMetric(t *testing.T) {
+	var taskTimesSection *analyticsSection
+	for i := range analyticsSections {
+		if analyticsSections[i].name == "task-times" {
+			taskTimesSection = &analyticsSections[i]
+			break
+		}
+	}
+	if taskTimesSection == nil {
+		t.Fatal("analytics sections do not define task-times")
+	}
+	if taskTimesSection.usageDescription != "average execution time by task" {
+		t.Fatalf("task-times description = %q, want average execution time by task", taskTimesSection.usageDescription)
+	}
+
+	cmd := analyticsCommand()
+	help := strings.Join(strings.Fields(stripANSI(renderCommandHelp(cmd))), " ")
+	wantHelp := "analytics task-times average execution time by task"
+	if !strings.Contains(help, wantHelp) {
+		t.Fatalf("generated analytics help missing %q:\n%s", wantHelp, help)
+	}
+	if strings.Contains(help, "trends") {
+		t.Fatalf("generated analytics help still describes task execution times as trends:\n%s", help)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/avg-execution-time-by-task" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]client.AvgExecutionTime{{ID: "task-1", Name: "Build report", AvgMs: 1250, Count: 4}})
+	}))
+	t.Cleanup(srv.Close)
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+
+	out, err := loadAnalytics(context.Background(), c, "project-1", "task-times")
+	if err != nil {
+		t.Fatalf("loadAnalytics task-times: %v", err)
+	}
+	wantOutput := renderExecTimes("Avg execution time by task", []client.AvgExecutionTime{{ID: "task-1", Name: "Build report", AvgMs: 1250, Count: 4}})
+	if out != wantOutput || !strings.Contains(out, "Avg execution time by task") || !strings.Contains(out, "Build report") || !strings.Contains(out, "1.2s") {
+		t.Fatalf("task-times output does not match the described average execution-time metric:\n got: %s\nwant: %s", out, wantOutput)
+	}
+}
+
 func TestAnalyticsSectionDefinitionDrivesCommandAndLoading(t *testing.T) {
 	sections := []analyticsSection{
 		{
@@ -657,9 +705,9 @@ func TestLoadAnalyticsRendersIndependentAgentAndTaskExecutionTimes(t *testing.T)
 	}
 
 	wantTask := renderExecTimes("Avg execution time by task", tasks)
-	taskOut, err := loadAnalytics(context.Background(), c, "project-1", "trends")
+	taskOut, err := loadAnalytics(context.Background(), c, "project-1", "task-times")
 	if err != nil {
-		t.Fatalf("loadAnalytics trends: %v", err)
+		t.Fatalf("loadAnalytics task-times: %v", err)
 	}
 	if taskOut != wantTask {
 		t.Fatalf("bounded task output changed visible rows\n got: %s\nwant: %s", taskOut, wantTask)
@@ -710,7 +758,7 @@ func TestLoadAnalyticsPreservesExecutionTimeSectionErrorSemantics(t *testing.T) 
 		title   string
 	}{
 		{section: "agents", path: "/api/analytics/avg-execution-time-by-agent", title: "Avg execution time by agent"},
-		{section: "trends", path: "/api/analytics/avg-execution-time-by-task", title: "Avg execution time by task"},
+		{section: "task-times", path: "/api/analytics/avg-execution-time-by-task", title: "Avg execution time by task"},
 		{section: "frequent", path: "/api/analytics/most-frequent-tasks", title: "Most frequent tasks"},
 		{section: "failures", path: "/api/analytics/failed-task-patterns", title: "Failure patterns"},
 	}

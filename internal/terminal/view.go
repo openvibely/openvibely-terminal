@@ -4244,8 +4244,8 @@ var analyticsSections = []analyticsSection{
 		},
 	},
 	{
-		name:             "trends",
-		usageDescription: "usage trends over time",
+		name:             "task-times",
+		usageDescription: "average execution time by task",
 		load: func(ctx context.Context, c *client.Client, projectID string) (string, error) {
 			t, err := c.GetAvgExecutionTimeByTaskWithLimit(ctx, projectID, maxExecTimeRows)
 			if err != nil {

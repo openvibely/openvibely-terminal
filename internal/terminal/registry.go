@@ -10550,7 +10550,7 @@ func analyticsCommandForSections(sections []analyticsSection) command {
 		aliases:      []string{"stats"},
 		actions:      actions,
 		validateArgs: func(args []string) error { return validateAnalyticsArgs(actions, args) },
-		desc:         "usage, cost, success rates and trends",
+		desc:         "usage, cost, success rates, execution times, task patterns and skill activity",
 		usage:        analyticsUsageLines(sections),
 		examples: []string{
 			`analytics`,

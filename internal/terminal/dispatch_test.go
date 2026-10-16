@@ -2918,7 +2918,7 @@ func TestAnalyticsInteractiveRequiresProjectBeforeDispatch(t *testing.T) {
 		"/analytics frequent",
 		"/analytics failures",
 		"/analytics skills",
-		"/analytics trends",
+		"/analytics task-times",
 	}
 	for _, line := range lines {
 		t.Run(strings.TrimPrefix(line, "/"), func(t *testing.T) {
@@ -3009,7 +3009,7 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 		{line: "/analytics frequent", paths: []string{"/api/analytics/most-frequent-tasks"}},
 		{line: "/analytics failures", paths: []string{"/api/analytics/failed-task-patterns"}},
 		{line: "/analytics skills", paths: []string{"/api/analytics/skills"}},
-		{line: "/analytics trends", paths: []string{"/api/analytics/avg-execution-time-by-task"}},
+		{line: "/analytics task-times", paths: []string{"/api/analytics/avg-execution-time-by-task"}},
 		{line: "/stats usage", paths: []string{"/api/analytics/usage"}},
 	}
 
