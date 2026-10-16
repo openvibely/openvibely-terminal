@@ -1296,6 +1296,31 @@ func (c *Client) addTaskReviewComment(ctx context.Context, taskID, projectID str
 	return parseReviewComments(root, taskID), nil
 }
 
+// DeleteTaskReviewCommentForProject removes one draft review comment in the selected project.
+func (c *Client) DeleteTaskReviewCommentForProject(ctx context.Context, commentID, projectID string) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Errorf("project ID is required for task reviews")
+	}
+	if strings.TrimSpace(commentID) == "" {
+		return fmt.Errorf("review comment ID is required")
+	}
+	return c.doForm(ctx, http.MethodDelete, "/reviews/"+url.PathEscape(commentID)+query("project_id", projectID), nil)
+}
+
+// SubmitTaskReviewCommentsForProject queues every draft review comment as one task-thread follow-up.
+// A nil error means the backend accepted the follow-up and cleared the submitted drafts.
+func (c *Client) SubmitTaskReviewCommentsForProject(ctx context.Context, taskID, projectID string) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return fmt.Errorf("project ID is required for task reviews")
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return fmt.Errorf("task ID is required for task review submission")
+	}
+	return c.doForm(ctx, http.MethodPost, "/tasks/"+url.PathEscape(taskID)+"/reviews/submit"+query("project_id", projectID), nil)
+}
+
 // CreateTask creates a task. Category "active" submits it immediately.
 func (c *Client) CreateTask(ctx context.Context, projectID string, form TaskForm) error {
 	return c.doForm(ctx, http.MethodPost, "/tasks"+query("project_id", projectID), form.values())
