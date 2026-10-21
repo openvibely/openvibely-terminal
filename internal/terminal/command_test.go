@@ -1315,6 +1315,18 @@ func TestRenderTaskDetailClearedGoalOverridesStaleReference(t *testing.T) {
 	}
 }
 
+func TestRenderTaskDetailFallsBackToCatalogGoalStateWhenDetailConfirmsGoal(t *testing.T) {
+	task := client.Task{ID: "t1", Title: "Refactor", Category: "active", Status: "running", GoalState: "paused"}
+	detail := &client.TaskDetail{Task: client.Task{ID: "t1", Status: "running", Badges: []string{"Goal"}}}
+	out := stripANSI(renderTaskDetail(task, detail, ""))
+	if !strings.Contains(out, "[goal: paused]") {
+		t.Fatalf("detail should fall back to the catalog goal state:\n%s", out)
+	}
+	if !strings.Contains(out, "running") {
+		t.Fatalf("task execution status missing:\n%s", out)
+	}
+}
+
 func TestRenderTaskDetailShowsChainingStateInBothViews(t *testing.T) {
 	task := client.Task{ID: "t1", Title: "Refactor", Category: "active"}
 	cases := []struct {

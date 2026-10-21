@@ -472,9 +472,12 @@ type taskReferenceCatalogEntry struct {
 }
 
 func normalizeTaskGoalState(state string) string {
-	switch strings.ToLower(strings.TrimSpace(state)) {
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	switch normalized {
 	case "active", "paused", "achieved", "blocked", "failed":
-		return strings.ToLower(strings.TrimSpace(state))
+		return normalized
+	case "paused (stopped by user)":
+		return "paused"
 	default:
 		// Cleared and unknown states do not describe a current goal.
 		return ""
