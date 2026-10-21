@@ -38,6 +38,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Validate vet/test workflow behavior
+        run: bash .github/workflows/test_workflow.sh
+
       - name: Run vet and all tests with coverage
         shell: bash
         env:
