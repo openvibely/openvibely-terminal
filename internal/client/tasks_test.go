@@ -1080,8 +1080,14 @@ func TestTaskFormsOmitEmptyCategory(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Errorf("ParseForm() error = %v", err)
 		}
-		requests = append(requests, request{form: r.PostForm.Clone()})
+		if r.Method != http.MethodGet {
+			requests = append(requests, request{form: r.PostForm.Clone()})
+		}
 		w.Header().Set("Content-Type", "text/html")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`<div class="kanban"></div>`))
+			return
+		}
 		_, _ = w.Write([]byte(`<div data-task-id="swarm-parent" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-parent" title="Swarm">Swarm</a></div>`))
 	}))
 	defer srv.Close()
@@ -1125,10 +1131,14 @@ func TestCreateSwarmTaskPostsFormAndParsesParent(t *testing.T) {
 		if r.URL.Path != "/tasks" {
 			t.Errorf("path = %s, want /tasks", r.URL.Path)
 		}
+		w.Header().Set("Content-Type", "text/html")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`<div class="kanban"></div>`))
+			return
+		}
 		rawQuery = r.URL.RawQuery
 		_ = r.ParseForm()
 		form = r.PostForm
-		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<div data-task-id="swarm-parent" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-parent" title="Swarm Ship">Swarm Ship</a></div>`))
 	}))
 	defer srv.Close()
@@ -1158,6 +1168,60 @@ func TestCreateSwarmTaskPostsFormAndParsesParent(t *testing.T) {
 	}
 	if parent.ID != "swarm-parent" || parent.ProjectID != "p1" || parent.Title != "Swarm Ship" {
 		t.Fatalf("parent = %#v", parent)
+	}
+}
+
+func TestCreateSwarmTaskSelectsNewSameTitleParentFromFullBoard(t *testing.T) {
+	const oldCard = `<div data-task-id="old-swarm" data-task-status="pending" data-task-category="backlog"><a href="/tasks/old-swarm" title="Same title">Same title</a></div>`
+	const newCard = `<div data-task-id="new-swarm" data-task-status="pending" data-task-category="backlog"><a href="/tasks/new-swarm" title="Same title">Same title</a></div>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `<div class="kanban">`+oldCard+`</div>`)
+			return
+		}
+		_, _ = io.WriteString(w, `<div class="kanban">`+oldCard+newCard+`</div>`)
+	}))
+	defer srv.Close()
+
+	c, _ := New(srv.URL)
+	parent, err := c.CreateSwarmTask(context.Background(), "p1", SwarmTaskForm{Title: "Same title", Prompt: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parent.ID != "new-swarm" || parent.Title != "Same title" {
+		t.Fatalf("parent = %#v, want newly created new-swarm", parent)
+	}
+}
+
+func TestCreateSwarmTaskRejectsAmbiguousBoardIdentity(t *testing.T) {
+	const oldCard = `<div data-task-id="old-swarm" data-task-status="pending" data-task-category="backlog"><a href="/tasks/old-swarm" title="Same title">Same title</a></div>`
+	const matchingCard = `<div data-task-id="new-swarm-%d" data-task-status="pending" data-task-category="backlog"><a href="/tasks/new-swarm-%d" title="Same title">Same title</a></div>`
+	for _, tc := range []struct {
+		name  string
+		cards string
+		want  string
+	}{
+		{name: "no new matching task", cards: oldCard, want: "found 0"},
+		{name: "multiple new matching tasks", cards: oldCard + fmt.Sprintf(matchingCard, 1, 1) + fmt.Sprintf(matchingCard, 2, 2), want: "found 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				if r.Method == http.MethodGet {
+					_, _ = io.WriteString(w, `<div class="kanban">`+oldCard+`</div>`)
+					return
+				}
+				_, _ = io.WriteString(w, `<div class="kanban">`+tc.cards+`</div>`)
+			}))
+			defer srv.Close()
+
+			c, _ := New(srv.URL)
+			_, err := c.CreateSwarmTask(context.Background(), "p1", SwarmTaskForm{Title: "Same title", Prompt: "work"})
+			if err == nil || !strings.Contains(err.Error(), "could not uniquely identify created swarm parent") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want explicit identity error containing %q", err, tc.want)
+			}
+		})
 	}
 }
 

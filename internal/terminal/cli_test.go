@@ -94,7 +94,11 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 		rec.mu.Lock()
 		rec.forms = append(rec.forms, r.Method+" "+r.URL.Path+"?"+r.PostForm.Encode())
 		rec.mu.Unlock()
-		if body, ok := bodies[r.URL.Path]; ok {
+		body, ok := bodies[r.Method+" "+r.URL.Path]
+		if !ok {
+			body, ok = bodies[r.URL.Path]
+		}
+		if ok {
 			if strings.HasPrefix(strings.TrimSpace(body), "{") ||
 				strings.HasPrefix(strings.TrimSpace(body), "[") {
 				w.Header().Set("Content-Type", "application/json")
@@ -105,7 +109,11 @@ func cliServer(t *testing.T, bodies map[string]string) (*client.Client, *recorde
 			return
 		}
 		if r.URL.Path == "/api/tasks/reference-catalog" {
-			if board, ok := bodies["/tasks"]; ok {
+			board, ok := bodies["GET /tasks"]
+			if !ok {
+				board, ok = bodies["/tasks"]
+			}
+			if ok {
 				w.Header().Set("Content-Type", "application/json")
 				projectID := r.URL.Query().Get("project_id")
 				_, _ = w.Write([]byte(compactTaskCatalogForProjectTest(board, projectID)))
@@ -9320,10 +9328,13 @@ func TestCLIJSONScopedSingleEntryKeepsDataShape(t *testing.T) {
 }
 
 func TestCLIJSONTasksSwarmCreate(t *testing.T) {
-	const board = `<div data-task-id="swarm-json" data-task-status="queued" data-task-category="active"><a href="/tasks/swarm-json" title="Coordinate release">Coordinate release</a></div>`
+	const oldCard = `<div data-task-id="swarm-json-old" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-json-old" title="Coordinate release">Coordinate release</a></div>`
+	const oldBoard = `<div class="kanban">` + oldCard + `</div>`
+	const mutationBoard = `<div class="kanban">` + oldCard + `<div data-task-id="swarm-json" data-task-status="queued" data-task-category="active"><a href="/tasks/swarm-json" title="Coordinate release">Coordinate release</a></div></div>`
 	c, rec := cliServer(t, map[string]string{
 		"/api/projects": cliProjects,
-		"/tasks":        board,
+		"GET /tasks":    oldBoard,
+		"POST /tasks":   mutationBoard,
 	})
 
 	const secret = "json-swarm-prompt-secret"

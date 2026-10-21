@@ -1358,27 +1358,62 @@ func (c *Client) CreateTaskWithBoard(ctx context.Context, projectID string, form
 	return c.mutateTaskBoard(ctx, http.MethodPost, "/tasks"+query("project_id", projectID), form.values(), projectID)
 }
 
-// CreateSwarmTask creates an autonomous swarm parent task and returns the parent
-// parsed from the refreshed board fragment when the backend includes it.
+// CreateSwarmTask creates an autonomous swarm parent task and returns its
+// identity from the mutation response or the uniquely identified board change.
 func (c *Client) CreateSwarmTask(ctx context.Context, projectID string, form SwarmTaskForm) (Task, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return Task{}, fmt.Errorf("project ID is required for swarm task creation")
 	}
+	before, err := c.ListTasks(ctx, projectID)
+	if err != nil {
+		return Task{}, fmt.Errorf("snapshot tasks before swarm creation: %w", err)
+	}
+	beforeIDs := make(map[string]struct{}, len(before))
+	for _, task := range before {
+		beforeIDs[task.ID] = struct{}{}
+	}
+
 	root, err := c.doFormHTML(ctx, http.MethodPost, "/tasks"+query("project_id", projectID), form.values())
 	if err != nil {
 		return Task{}, err
 	}
-	tasks := parseTaskCards(root, projectID)
-	for _, task := range tasks {
-		if strings.EqualFold(strings.TrimSpace(task.Title), strings.TrimSpace(form.Title)) {
+	responseTasks := parseTaskCards(root, projectID)
+	if hasKanbanBoardContainer(root) || len(responseTasks) > 1 {
+		return uniqueNewSwarmParent(responseTasks, beforeIDs, form.Title)
+	}
+	if len(responseTasks) == 1 {
+		task := responseTasks[0]
+		_, existedBefore := beforeIDs[task.ID]
+		if !existedBefore && strings.EqualFold(strings.TrimSpace(task.Title), strings.TrimSpace(form.Title)) {
 			return task, nil
 		}
 	}
-	if len(tasks) == 1 {
-		return tasks[0], nil
+
+	// Empty or non-task mutation responses do not carry an identity. Resolve
+	// against a fresh board and require exactly one matching ID absent before
+	// the mutation rather than falling back to title order.
+	after, err := c.ListTasks(ctx, projectID)
+	if err != nil {
+		return Task{}, fmt.Errorf("identify created swarm parent: %w", err)
 	}
-	return Task{ProjectID: projectID, Title: form.Title, Prompt: form.Prompt, Category: form.Category}, nil
+	return uniqueNewSwarmParent(after, beforeIDs, form.Title)
+}
+
+func uniqueNewSwarmParent(tasks []Task, beforeIDs map[string]struct{}, title string) (Task, error) {
+	var matches []Task
+	for _, task := range tasks {
+		if _, existedBefore := beforeIDs[task.ID]; existedBefore {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(task.Title), strings.TrimSpace(title)) {
+			matches = append(matches, task)
+		}
+	}
+	if len(matches) != 1 {
+		return Task{}, fmt.Errorf("could not uniquely identify created swarm parent: expected exactly one newly created task matching the requested title, found %d", len(matches))
+	}
+	return matches[0], nil
 }
 
 // UpdateTask updates a task's editable fields.
