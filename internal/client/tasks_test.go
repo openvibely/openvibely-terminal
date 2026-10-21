@@ -569,12 +569,14 @@ func TestTaskDetailGoalStateSeparatesLifecycleFromExecutionStatus(t *testing.T) 
 	for _, tc := range []struct {
 		name      string
 		goalState string
+		wantState string
 		value     string
 		wantBadge bool
 	}{
-		{name: "active", goalState: "active", value: "Finish the release", wantBadge: true},
-		{name: "paused", goalState: "paused", value: "Finish the release", wantBadge: true},
-		{name: "no goal", value: ""},
+		{name: "active", goalState: "active", wantState: "active", value: "Finish the release", wantBadge: true},
+		{name: "paused", goalState: "paused", wantState: "paused", value: "Finish the release", wantBadge: true},
+		{name: "paused after stopping task", goalState: "Paused (stopped by user)", wantState: "paused", value: "Finish the release", wantBadge: true},
+		{name: "no goal", wantState: "", value: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			markup := `<div id="task-detail-content" data-task-id="t-1" data-project-id="p1"><div data-task-status="running"></div><div id="task-goal-panel"><button data-detail-editor="goal" data-goal-status="` + tc.goalState + `" data-value="` + tc.value + `"></button></div></div>`
@@ -584,8 +586,8 @@ func TestTaskDetailGoalStateSeparatesLifecycleFromExecutionStatus(t *testing.T) 
 			}
 			task := Task{ID: "t-1", ProjectID: "p1"}
 			populateExactTaskMetadata(root, &task)
-			if task.GoalState != tc.goalState {
-				t.Errorf("goal state = %q, want %q", task.GoalState, tc.goalState)
+			if task.GoalState != tc.wantState {
+				t.Errorf("goal state = %q, want %q", task.GoalState, tc.wantState)
 			}
 			if task.Status != "running" {
 				t.Errorf("execution status = %q, want running", task.Status)

@@ -636,6 +636,15 @@ func withoutGoalBadge(badges []string) []string {
 	return filtered
 }
 
+func hasGoalBadge(badges []string) bool {
+	for _, badge := range badges {
+		if strings.EqualFold(strings.TrimSpace(badge), "goal") {
+			return true
+		}
+	}
+	return false
+}
+
 func renderGoalState(state string) string {
 	state = strings.ToLower(strings.TrimSpace(state))
 	if state == "" {
@@ -682,6 +691,13 @@ func renderTaskDetail(t client.Task, d *client.TaskDetail, tab string) string {
 	goalState := t.GoalState
 	if strings.TrimSpace(d.Task.ID) != "" {
 		goalState = d.Task.GoalState
+		// A detail page that confirms a current goal is authoritative for whether
+		// one exists, but the catalog can still provide its canonical state if the
+		// detail page has an unrecognized display label. An absent Goal badge keeps
+		// a cleared goal from inheriting stale catalog state.
+		if goalState == "" && hasGoalBadge(d.Task.Badges) {
+			goalState = t.GoalState
+		}
 	}
 	goalMarker := renderGoalState(goalState)
 	if goalMarker != "" {
