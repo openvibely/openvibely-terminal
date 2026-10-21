@@ -2413,6 +2413,9 @@ func TestRuntimeUsageMatchesCanonicalHelpSyntax(t *testing.T) {
 			"tasks swarm [options] <title> | <prompt>",
 			"planner",
 			"backlog swarm parent",
+			"tasks pull-request",
+			"create or reuse",
+			"--json",
 		} {
 			if !strings.Contains(string(body), want) {
 				t.Errorf("%s missing %q", path, want)
@@ -2744,9 +2747,13 @@ func TestTasksHelpDocumentsReviewSupport(t *testing.T) {
 		t.Fatal("tasks command missing")
 	}
 	help := renderCommandHelp(*cmd)
-	for _, want := range []string{"tasks show <task> [tab]", detailTabUsageList(), "review", "tasks reviews add <task> <file>:<line> <comment>", "tasks lifecycle <task> [execution]", "tasks logs <task> [execution]", "tasks lifecycle \"Fix login bug\"", "tasks reviews add \"Fix login bug\" internal/auth.go:42 Handle token refresh errors"} {
+	for _, want := range []string{"tasks show <task> [tab]", detailTabUsageList(), "review", "tasks reviews add <task> <file>:<line> <comment>", "tasks lifecycle <task> [execution]", "tasks logs <task> [execution]", "tasks pull-request <task>", "create or reuse a pull request through the backend", "tasks lifecycle \"Fix login bug\"", "tasks reviews add \"Fix login bug\" internal/auth.go:42 Handle token refresh errors"} {
 		if !strings.Contains(help, want) {
 			t.Errorf("tasks help missing %q:\n%s", want, help)
 		}
+	}
+	completion := registryCompletionValues("tasks")
+	if !containsString(completion, "pull-request") {
+		t.Errorf("task action completion missing %q: %v", "pull-request", completion)
 	}
 }

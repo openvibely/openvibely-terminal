@@ -8,19 +8,38 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/html"
 )
 
+// TaskPullRequestInfo describes a pull request recorded for a task. The HTML
+// task Changes fragment exposes the persisted PR link; its presence confirms
+// that the backend has a recorded PR, but does not claim a live GitHub state.
+type TaskPullRequestInfo struct {
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+	State  string `json:"state"` // recorded
+}
+
+// TaskPullRequestResult reports a task pull request created or reused by the
+// backend-owned worktree endpoint.
+type TaskPullRequestResult struct {
+	Number int    `json:"number"`
+	URL    string `json:"url"`
+	Status string `json:"status"` // created | reused
+}
+
 // TaskWorktreeInfo is the project-scoped branch integration snapshot returned
-// by the backend's task worktree panel.
+// by the backend's task worktree panel, with any recorded pull request link.
 type TaskWorktreeInfo struct {
-	TaskID            string `json:"task_id"`
-	ProjectID         string `json:"project_id"`
-	Branch            string `json:"branch,omitempty"`
-	TargetBranch      string `json:"target_branch,omitempty"`
-	IntegrationStatus string `json:"integration_status"`
+	TaskID            string               `json:"task_id"`
+	ProjectID         string               `json:"project_id"`
+	Branch            string               `json:"branch,omitempty"`
+	TargetBranch      string               `json:"target_branch,omitempty"`
+	IntegrationStatus string               `json:"integration_status"`
+	PullRequest       *TaskPullRequestInfo `json:"pull_request,omitempty"`
 }
 
 // TaskWorktreeActionResult describes the backend's merge or rebase result and
@@ -95,7 +114,152 @@ func (c *Client) GetTaskWorktreeInfoForProject(ctx context.Context, taskID, proj
 		return TaskWorktreeInfo{}, err
 	}
 	info := parseTaskWorktreeInfo(root, taskID, projectID)
+	changes, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/changes"+query("project_id", projectID))
+	if err != nil {
+		return TaskWorktreeInfo{}, fmt.Errorf("load task pull request state: %w", err)
+	}
+	info.PullRequest = parseTaskPullRequestInfo(changes)
 	return info, nil
+}
+
+func parseTaskPullRequestInfo(root *html.Node) *TaskPullRequestInfo {
+	for _, node := range findAll(root, func(node *html.Node) bool {
+		return node.Type == html.ElementNode && node.Data == "a" && strings.HasPrefix(strings.TrimSpace(NodeText(node)), "View PR #")
+	}) {
+		label := strings.TrimSpace(NodeText(node))
+		number, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(label, "View PR #")))
+		if err != nil || number < 1 {
+			continue
+		}
+		link, err := url.Parse(strings.TrimSpace(attr(node, "href")))
+		if err != nil || (link.Scheme != "https" && link.Scheme != "http") || link.Host == "" || link.User != nil {
+			continue
+		}
+		state := strings.TrimSpace(attr(node, "data-pr-state"))
+		if state == "" {
+			state = strings.TrimSpace(attr(node, "data-pull-request-state"))
+		}
+		if state == "" {
+			state = "recorded"
+		}
+		return &TaskPullRequestInfo{Number: number, URL: link.String(), State: state}
+	}
+	return nil
+}
+
+// CreateTaskPullRequestForProject asks the backend to publish or reuse a task
+// worktree pull request. The server owns repository validation and GitHub API
+// access; the client only submits the selected project scope and validates the
+// successful HTMX toast and refreshed PR link.
+func (c *Client) CreateTaskPullRequestForProject(ctx context.Context, taskID, projectID string) (TaskPullRequestResult, error) {
+	taskID = strings.TrimSpace(taskID)
+	projectID = strings.TrimSpace(projectID)
+	if taskID == "" {
+		return TaskPullRequestResult{}, fmt.Errorf("task ID is required for pull request creation")
+	}
+	if projectID == "" {
+		return TaskPullRequestResult{}, fmt.Errorf("project ID is required for pull request creation")
+	}
+	if _, err := c.resolveTaskReferenceForProject(ctx, taskID, projectID); err != nil {
+		return TaskPullRequestResult{}, err
+	}
+
+	path := "/tasks/" + url.PathEscape(taskID) + "/worktree/pull-request" + query("project_id", projectID)
+	req, err := c.newRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return TaskPullRequestResult{}, err
+	}
+	req.Header.Set("HX-Request", "true")
+	req.Header.Set("Accept", "text/html, application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return TaskPullRequestResult{}, fmt.Errorf("POST %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if isAuthResponse(resp) {
+		return TaskPullRequestResult{}, newAuthRequiredError(http.MethodPost, path, resp)
+	}
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if readErr != nil {
+		return TaskPullRequestResult{}, fmt.Errorf("read task pull request response: %w", readErr)
+	}
+	toastStatus, toastMessage, toastErr := taskPullRequestToast(resp.Header.Get("HX-Trigger"))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if toastErr == nil && toastMessage != "" {
+			return TaskPullRequestResult{}, fmt.Errorf("create task pull request: %s", toastMessage)
+		}
+		return TaskPullRequestResult{}, &HTTPStatusError{StatusCode: resp.StatusCode, Message: strings.TrimSpace(string(body))}
+	}
+	if toastErr != nil {
+		return TaskPullRequestResult{}, fmt.Errorf("create task pull request: backend returned no valid success notification: %w", toastErr)
+	}
+	if !strings.EqualFold(toastStatus, "success") {
+		if toastMessage == "" {
+			toastMessage = "backend did not confirm pull request creation"
+		}
+		return TaskPullRequestResult{}, fmt.Errorf("create task pull request: %s", toastMessage)
+	}
+
+	status, number, err := parseTaskPullRequestOutcome(toastMessage)
+	if err != nil {
+		return TaskPullRequestResult{}, err
+	}
+	changes, err := html.Parse(strings.NewReader(string(body)))
+	if err != nil {
+		return TaskPullRequestResult{}, fmt.Errorf("parse refreshed task changes: %w", err)
+	}
+	pullRequest := parseTaskPullRequestInfo(changes)
+	if pullRequest == nil {
+		return TaskPullRequestResult{}, fmt.Errorf("backend confirmed pull request #%d, but the refreshed task changes did not include its link", number)
+	}
+	if pullRequest.Number != number {
+		return TaskPullRequestResult{}, fmt.Errorf("backend confirmed pull request #%d, but the refreshed task changes linked pull request #%d", number, pullRequest.Number)
+	}
+	return TaskPullRequestResult{Number: number, URL: pullRequest.URL, Status: status}, nil
+}
+
+func taskPullRequestToast(raw string) (status, message string, err error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "", "", fmt.Errorf("invalid HTMX notification")
+	}
+	rawToast, ok := payload["openvibelyToast"]
+	if !ok {
+		return "", "", fmt.Errorf("missing openvibelyToast notification")
+	}
+	var toast struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rawToast, &toast); err != nil {
+		return "", "", fmt.Errorf("invalid openvibelyToast notification")
+	}
+	return strings.TrimSpace(toast.Status), strings.TrimSpace(toast.Message), nil
+}
+
+func parseTaskPullRequestOutcome(message string) (status string, number int, err error) {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.HasPrefix(lower, "github pr created (#"):
+		status = "created"
+	case strings.HasPrefix(lower, "github pr already exists (#"), strings.HasPrefix(lower, "github pr reused (#"):
+		status = "reused"
+	default:
+		return "", 0, fmt.Errorf("create task pull request: backend returned an unrecognized success notification %q", message)
+	}
+	message = strings.TrimSpace(message)
+	end := strings.LastIndex(message, ")")
+	hash := strings.LastIndex(message, "#")
+	if hash < 0 || end <= hash {
+		return "", 0, fmt.Errorf("create task pull request: backend returned an invalid pull request number")
+	}
+	numberText := strings.TrimSpace(message[hash+1 : end])
+	number, err = strconv.Atoi(numberText)
+	if err != nil || number < 1 {
+		return "", 0, fmt.Errorf("create task pull request: backend returned an invalid pull request number")
+	}
+	return status, number, nil
 }
 
 func (c *Client) resolveTaskReferenceForProject(ctx context.Context, taskID, projectID string) (Task, error) {

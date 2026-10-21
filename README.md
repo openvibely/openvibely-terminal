@@ -54,6 +54,8 @@ summarize the current project
 /tasks goal pause refactor
 /tasks goal resume refactor
 /tasks steer refactor | stop and use the new interface
+/tasks worktree refactor
+/tasks pull-request refactor
 /automations show "Nightly sweep"
 /automations create --file automation.yaml
 /personality delete-bulk old_one "Old Two"
@@ -70,6 +72,9 @@ For one-shot CLI use, omit the leading slash:
 ```bash
 openvibely-terminal tasks
 openvibely-terminal -project demo tasks show refactor review
+openvibely-terminal -project demo tasks worktree refactor
+openvibely-terminal -project demo tasks pull-request refactor
+openvibely-terminal -project demo --json tasks pull-request refactor
 openvibely-terminal -project demo tasks reviews refactor
 openvibely-terminal -project demo tasks swarm --category active "Coordinate release" '|' "Split validation across workers"
 openvibely-terminal -project demo tasks goal pause refactor
@@ -113,7 +118,7 @@ Common commands include:
 
 | Command | Purpose |
 |---|---|
-| `/tasks` | Inspect and manage tasks, threads, inline review comments, and completion goals. See the task-goal lifecycle examples below. |
+| `/tasks` | Inspect and manage tasks, threads, inline review comments, completion goals, worktrees, and task pull requests. See the task-goal lifecycle examples below. |
 | `/alerts` | Review alerts, including selected bulk read/delete actions |
 | `/skills` | Manage reusable skills; `skills always <skill>` and `skills load <skill>` are equivalent names for automatic loading |
 | `/automations` | Inspect, edit, and control automations |
@@ -127,6 +132,8 @@ Common commands include:
 | `/status`, `/setup`, `/login` | Check and recover connectivity |
 | `/server [url]` | Show the backend URL, or switch local/remote servers without restarting |
 | `/help <command>` | Show complete command syntax |
+
+Use `/tasks pull-request <ref>` or `openvibely-terminal -project <project> tasks pull-request <ref>` to ask the backend to create or reuse a task branch pull request. The command reports its number, URL, and created/reused status; add `--json` for structured output. `/tasks worktree <ref>` includes any PR link recorded for the task.
 
 Use `help workers` for worker-capacity options. `/workers` and `/workers show` render one stable snapshot for scripts; `/workers watch` starts a live terminal view that refreshes global, project, and dedicated model worker values every 3 seconds and stops on Esc. Headless scripts can keep the stable snapshot path:
 

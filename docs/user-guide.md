@@ -658,21 +658,25 @@ returns a command error and does not emit human-rendered text as JSON.
 
 ### Task branch integration
 
-Inspect a task's backend-owned worktree state with `/tasks worktree <ref>`:
+Inspect a task's backend-owned worktree state with `/tasks worktree <ref>` and create or reuse its GitHub pull request with `/tasks pull-request <ref>`:
 
 ```text
 /tasks worktree "Refactor API"
+/tasks pull-request "Refactor API"
 /tasks merge merge "Refactor API"       # merge commit
 /tasks merge ff "Refactor API"           # fast-forward only
 /tasks merge squash "Refactor API"       # squash merge
 /tasks rebase "Refactor API"             # rebase onto the task's target
 
 openvibely-terminal -project demo tasks worktree "Refactor API"
+openvibely-terminal -project demo tasks pull-request "Refactor API"
+openvibely-terminal -project demo --json tasks pull-request "Refactor API"
 openvibely-terminal -project demo tasks merge squash "Refactor API" --force
 openvibely-terminal -project demo tasks rebase "Refactor API" --force
 ```
 
-The worktree view reports the task branch, target branch, and integration status.
+The worktree view reports the task branch, target branch, integration status, and any recorded pull request state and URL. The PR state is `recorded`: the task Changes panel confirms the backend has a stored PR link, but does not provide live GitHub open or closed status. `tasks pull-request <ref>` asks the backend to create or reuse the PR for the task branch; plain output reports its number, URL, and whether it was created or reused. `--json` emits the same fields as `number`, `url`, and `status`. Repeating the command reports the existing PR as reused. The terminal sends the selected project to the backend, which validates repository configuration, branch ownership, GitHub integration, and PR reuse. It does not publish the branch or call GitHub directly.
+
 Merge actions support `merge`, `ff`, and `squash`; rebase is a separate action.
 The TUI asks for a typed `yes` confirmation before an integration action. CLI
 mutations require the global `--force` flag. Both surfaces resolve the task from
