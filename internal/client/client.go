@@ -476,8 +476,14 @@ func (c *Client) GetTaskStatusCounts(ctx context.Context, projectID string) (*Ta
 // CreateProject creates a local-path project through the backend's public
 // project form route. The HTMX redirect contains the backend-assigned project
 // ID, so project state remains owned by the backend rather than this client.
-func (c *Client) CreateProject(ctx context.Context, name, path string) (*Project, error) {
-	return c.createProject(ctx, name, "local", path)
+// Pass createDirectory=true to ask the backend to create the local checkout
+// directory. When omitted or false, the request keeps its existing form shape.
+func (c *Client) CreateProject(ctx context.Context, name, path string, createDirectory ...bool) (*Project, error) {
+	if len(createDirectory) > 1 {
+		return nil, fmt.Errorf("CreateProject accepts at most one create-directory option")
+	}
+	createDir := len(createDirectory) == 1 && createDirectory[0]
+	return c.createProject(ctx, name, "local", path, createDir)
 }
 
 // CreateGitHubProject creates a GitHub-backed project through the backend's
@@ -485,10 +491,10 @@ func (c *Client) CreateProject(ctx context.Context, name, path string) (*Project
 // authentication; the client only submits the repository URL and reads the
 // backend-assigned project ID from the redirect.
 func (c *Client) CreateGitHubProject(ctx context.Context, name, repoURL string) (*Project, error) {
-	return c.createProject(ctx, name, "github", repoURL)
+	return c.createProject(ctx, name, "github", repoURL, false)
 }
 
-func (c *Client) createProject(ctx context.Context, name, source, location string) (*Project, error) {
+func (c *Client) createProject(ctx context.Context, name, source, location string, createDirectory bool) (*Project, error) {
 	name = strings.TrimSpace(name)
 	location = strings.TrimSpace(location)
 	if name == "" {
@@ -508,6 +514,9 @@ func (c *Client) createProject(ctx context.Context, name, source, location strin
 		form.Set("repo_url", location)
 	} else {
 		form.Set("repo_path", location)
+		if createDirectory {
+			form.Set("create_directory", "true")
+		}
 	}
 
 	resp, err := c.doProjectFormResponse(ctx, http.MethodPost, "/projects", form)

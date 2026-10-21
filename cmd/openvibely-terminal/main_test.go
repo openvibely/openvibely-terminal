@@ -53,7 +53,7 @@ func TestParseInterspersedFlags(t *testing.T) {
 		{name: "outer boundary preserves force project name", args: []string{"--", "projects", "edit", "--force", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "--force", "|", "--description", "changed"}},
 		{name: "outer boundary preserves project flag project name", args: []string{"--", "projects", "edit", "--project", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "--project", "|", "--description", "changed"}},
 		{name: "project edit reference separator", args: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}},
-		{name: "unknown global", args: []string{"--unknown", "chat", "hello"}, wantErr: "flag provided but not defined"},
+		{name: "local project directory option after pipe path", args: []string{"projects", "create", "My", "Project", "|", `C:\Users\me\new repo`, "--create-directory"}, wantArgs: []string{"projects", "create", "My", "Project", "|", `C:\Users\me\new repo`, "--create-directory"}}, {name: "unknown global", args: []string{"--unknown", "chat", "hello"}, wantErr: "flag provided but not defined"},
 		{name: "malformed global", args: []string{"--=value", "chat", "hello"}, wantErr: "bad flag syntax"},
 	}
 

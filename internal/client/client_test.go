@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -315,6 +317,9 @@ func TestCreateProject(t *testing.T) {
 		if got, want := r.FormValue("repo_path"), `/Users/dev/terminal project`; got != want {
 			t.Errorf("repo_path = %q, want %q", got, want)
 		}
+		if _, present := r.PostForm["create_directory"]; present {
+			t.Errorf("default CreateProject request unexpectedly included create_directory: %v", r.PostForm["create_directory"])
+		}
 		w.Header().Set("HX-Redirect", "/tasks?project_id=created-1")
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -325,6 +330,108 @@ func TestCreateProject(t *testing.T) {
 	}
 	if project.ID != "created-1" || project.Name != "Terminal Project" || project.Path != "/Users/dev/terminal project" {
 		t.Fatalf("unexpected project: %+v", project)
+	}
+}
+
+func TestCreateProjectCreateDirectoryDelegatesFilesystemWorkToBackend(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing checkout")
+	if err := os.MkdirAll(existing, 0o755); err != nil {
+		t.Fatalf("create existing fixture directory: %v", err)
+	}
+	blocker := filepath.Join(root, "regular file")
+	if err := os.WriteFile(blocker, []byte("file"), 0o600); err != nil {
+		t.Fatalf("create filesystem error fixture: %v", err)
+	}
+
+	createdProjects := make(map[string]bool)
+	requests := 0
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodPost || r.URL.Path != "/projects" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		name, repoPath := r.FormValue("name"), r.FormValue("repo_path")
+		if r.FormValue("create_directory") != "true" {
+			if _, present := r.PostForm["create_directory"]; present {
+				t.Errorf("disabled CreateProject request included create_directory: %v", r.PostForm["create_directory"])
+			}
+		}
+		_, recordCreated := createdProjects[name]
+		if !recordCreated {
+			createdProjects[name] = true
+		}
+		if r.FormValue("create_directory") == "true" {
+			cleanPath := filepath.Clean(repoPath)
+			if !filepath.IsAbs(cleanPath) || strings.Contains(cleanPath, "..") {
+				delete(createdProjects, name)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"repository path must be absolute and safe"}`)
+				return
+			}
+			if err := os.MkdirAll(cleanPath, 0o755); err != nil {
+				delete(createdProjects, name)
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, `{"error":"failed to create directory"}`)
+				return
+			}
+		}
+		w.Header().Set("Location", "/tasks?project_id=created-"+strings.ReplaceAll(name, " ", "-"))
+		w.WriteHeader(http.StatusFound)
+	}))
+
+	missing := filepath.Join(root, "new repositories", "nested project")
+	withoutOption := filepath.Join(root, "leave missing")
+	cases := []struct {
+		name            string
+		path            string
+		createDirectory bool
+		wantError       bool
+		wantExists      bool
+	}{
+		{name: "New Nested Project", path: missing, createDirectory: true, wantExists: true},
+		{name: "Existing Project", path: existing, createDirectory: true, wantExists: true},
+		{name: "No Create Option", path: withoutOption, wantExists: false},
+		{name: "Relative Project", path: "relative/repository", createDirectory: true, wantError: true},
+		{name: "Unsafe Path Segment", path: filepath.Join(root, "unsafe..segment"), createDirectory: true, wantError: true},
+		{name: "Filesystem Error", path: filepath.Join(blocker, "child"), createDirectory: true, wantError: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var project *Project
+			var err error
+			if tc.createDirectory {
+				project, err = c.CreateProject(context.Background(), tc.name, tc.path, true)
+			} else {
+				project, err = c.CreateProject(context.Background(), tc.name, tc.path)
+			}
+			if tc.wantError {
+				if err == nil || project != nil {
+					t.Fatalf("CreateProject() = %+v, %v; want backend error without project", project, err)
+				}
+				if createdProjects[tc.name] {
+					t.Fatalf("failed directory creation left project record %q", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateProject(): %v", err)
+			}
+			if project == nil || project.Name != tc.name {
+				t.Fatalf("created project = %+v, want name %q", project, tc.name)
+			}
+			_, statErr := os.Stat(tc.path)
+			if gotExists := statErr == nil; gotExists != tc.wantExists {
+				t.Errorf("path exists = %t, want %t (stat error: %v)", gotExists, tc.wantExists, statErr)
+			}
+		})
+	}
+	if requests != len(cases) {
+		t.Fatalf("project requests = %d, want %d", requests, len(cases))
 	}
 }
 
@@ -351,6 +458,9 @@ func TestCreateGitHubProjectSendsOnlyGitHubRepositoryFields(t *testing.T) {
 		}
 		if _, present := r.PostForm["repo_path"]; present {
 			t.Errorf("GitHub request unexpectedly included repo_path: %v", r.PostForm["repo_path"])
+		}
+		if _, present := r.PostForm["create_directory"]; present {
+			t.Errorf("GitHub request unexpectedly included create_directory: %v", r.PostForm["create_directory"])
 		}
 		w.Header().Set("Location", "/tasks?project_id=github-project")
 		w.WriteHeader(http.StatusFound)

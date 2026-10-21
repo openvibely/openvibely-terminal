@@ -9000,8 +9000,18 @@ func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
 		if r.FormValue("repo_source") != "local" {
 			t.Errorf("repo_source = %q", r.FormValue("repo_source"))
 		}
-		if r.FormValue("name") == "My Project" && r.FormValue("repo_path") != `C:\Users\me\repo` {
-			t.Errorf("unexpected platform path: %q", r.FormValue("repo_path"))
+		if r.FormValue("name") == "My Project" {
+			if r.FormValue("repo_path") != `C:\Users\me\repo` {
+				t.Errorf("unexpected platform path: %q", r.FormValue("repo_path"))
+			}
+			if got, want := r.FormValue("create_directory"), "true"; got != want {
+				t.Errorf("create_directory = %q, want %q", got, want)
+			}
+		}
+		if r.FormValue("name") == "JSON Project" {
+			if got, want := r.FormValue("create_directory"), "true"; got != want {
+				t.Errorf("JSON create_directory = %q, want %q", got, want)
+			}
 		}
 		id := "created-project"
 		if r.FormValue("name") == "JSON Project" {
@@ -9017,7 +9027,7 @@ func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "", []string{"projects", "create", "My", "Project", "|", `C:\Users\me\repo`}, false, false); err != nil {
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "My", "Project", "|", `C:\Users\me\repo`, "--create-directory"}, false, false); err != nil {
 		t.Fatalf("projects create failed: %v", err)
 	}
 	plain := out.String()
@@ -9031,7 +9041,7 @@ func TestCLICreatesProjectAndSupportsJSON(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := RunCLI(c, &out, "", []string{"projects", "create", "JSON", "Project", "/tmp/json-project"}, false, true); err != nil {
+	if err := RunCLI(c, &out, "", []string{"projects", "create", "JSON", "Project", "/tmp/json-project", "--create-directory"}, false, true); err != nil {
 		t.Fatalf("projects create --json failed: %v", err)
 	}
 	var project client.Project
@@ -9183,6 +9193,14 @@ func TestCLICreateProjectValidationAndBackendFailure(t *testing.T) {
 
 	if err := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "create", "demo", "/tmp/demo"}, false, false); err == nil || !strings.Contains(err.Error(), "backend rejected project") {
 		t.Fatalf("backend failure error = %v", err)
+	}
+
+	githubOptionErr := RunCLI(c, &bytes.Buffer{}, "", []string{"projects", "github-create", "demo", "https://github.com/acme/demo", "--create-directory"}, false, false)
+	if githubOptionErr == nil || !strings.Contains(githubOptionErr.Error(), "--create-directory is only supported by local projects") || !strings.Contains(githubOptionErr.Error(), "projects create <name> <path> --create-directory") {
+		t.Fatalf("GitHub create-directory error = %v, want local-only usage guidance", githubOptionErr)
+	}
+	if got := rec.count(http.MethodPost, "/projects"); got != 1 {
+		t.Fatalf("invalid GitHub option made a project request; POST count=%d, calls:\n%s", got, rec.all())
 	}
 }
 
