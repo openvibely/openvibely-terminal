@@ -2518,9 +2518,9 @@ func (c *Client) getScheduleLegacy(ctx context.Context, projectID string) ([]Sch
 	if err != nil {
 		return nil, "", err
 	}
-	// The task board omits ordinary pending scheduled tasks, so the complete
-	// reference catalog is required to preserve the legacy listing behavior.
-	// Older reference responses may also include attachment metadata.
+	// Retain the legacy task-reference source instead of relying on task-board
+	// rendering. Its response may omit non-visible scheduled tasks and may
+	// include attachment metadata.
 	tasks, err := c.ListTaskReferences(ctx, projectID)
 	if err != nil {
 		return nil, "", err
