@@ -550,7 +550,7 @@ func confirmOutboundTargetRemoval(m Model, projectID string, target client.Outbo
 				remaining = append(remaining, candidate)
 			}
 		}
-		if err := m.client.SaveOutboundTargets(ctx, projectID, remaining, current.ExplicitUnsavedTargetsAllowed); err != nil {
+		if err := m.client.SaveOutboundTargets(ctx, projectID, remaining, current.ExplicitUnsavedTargetsAllowed, current.Revision); err != nil {
 			return "", err
 		}
 		return outboundTargetMutationOutput(ctx, m.client, projectID, "remove", "removed outbound target "+label, currentTarget)
@@ -701,9 +701,9 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 			var savedPage client.OutboundTargetsPage
 			hasSavedPage := false
 			if jsonMode {
-				savedPage, hasSavedPage, err = c.SaveOutboundTargetsWithResult(ctx, projectID, targets, page.ExplicitUnsavedTargetsAllowed)
+				savedPage, hasSavedPage, err = c.SaveOutboundTargetsWithResult(ctx, projectID, targets, page.ExplicitUnsavedTargetsAllowed, page.Revision)
 			} else {
-				err = c.SaveOutboundTargets(ctx, projectID, targets, page.ExplicitUnsavedTargetsAllowed)
+				err = c.SaveOutboundTargets(ctx, projectID, targets, page.ExplicitUnsavedTargetsAllowed, page.Revision)
 			}
 			if err != nil {
 				return "", err
@@ -749,13 +749,13 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 			}
 			page = latest
 			if jsonMode {
-				savedPage, hasSavedPage, err := c.SaveOutboundTargetsWithResult(ctx, projectID, page.Targets, page.ExplicitUnsavedTargetsAllowed)
+				savedPage, hasSavedPage, err := c.SaveOutboundTargetsWithResult(ctx, projectID, page.Targets, page.ExplicitUnsavedTargetsAllowed, page.Revision)
 				if err != nil {
 					return "", err
 				}
 				return outboundTargetMutationOutputWithSavedPage(ctx, c, projectID, "edit", "edited outbound target "+outboundTargetName(updated), updated, page.Targets, savedPage.Targets, hasSavedPage)
 			}
-			if err := c.SaveOutboundTargets(ctx, projectID, page.Targets, page.ExplicitUnsavedTargetsAllowed); err != nil {
+			if err := c.SaveOutboundTargets(ctx, projectID, page.Targets, page.ExplicitUnsavedTargetsAllowed, page.Revision); err != nil {
 				return "", err
 			}
 			return outboundTargetMutationOutputWithSavedPage(ctx, c, projectID, "edit", "edited outbound target "+outboundTargetName(updated), updated, page.Targets, nil, false)
