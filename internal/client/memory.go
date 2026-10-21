@@ -2288,7 +2288,7 @@ func openMemoryTargetForReadWithOpener(ctx context.Context, root, handle string,
 	if err != nil {
 		return nil, nil, errMemoryPathUnsafe
 	}
-	info, err := statMemoryFile(filePath)
+	info, err := statFileIdentity(filePath)
 	if err != nil {
 		return nil, nil, err
 	}

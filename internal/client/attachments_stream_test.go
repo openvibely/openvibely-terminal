@@ -495,9 +495,24 @@ func TestAttachmentMultipartBodyRejectsChangedFile(t *testing.T) {
 		}},
 		{name: "replaced", change: func(t *testing.T, path string) {
 			t.Helper()
+			original, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
 			replacement := path + ".replacement"
 			if err := os.WriteFile(replacement, []byte("swap"), 0o600); err != nil {
 				t.Fatal(err)
+			}
+			// Match size and modification time so only file identity detects the swap.
+			if err := os.Chtimes(replacement, original.ModTime(), original.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			replacementInfo, err := os.Stat(replacement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replacementInfo.Size() != original.Size() || !replacementInfo.ModTime().Equal(original.ModTime()) {
+				t.Fatal("replacement must match original size and modification time")
 			}
 			if err := os.Rename(replacement, path); err != nil {
 				t.Fatal(err)
