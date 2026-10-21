@@ -132,10 +132,10 @@ func refreshAndRender[T any](status string, list func() ([]T, error), render fun
 	return status + "\n\n" + render(items, ""), nil
 }
 
-func taskMutationAndRender(status string, mutation client.TaskBoardMutation, list func() ([]client.Task, error)) (string, error) {
-	if mutation.HasBoard {
-		return status + "\n\n" + renderBoard(mutation.Tasks, ""), nil
-	}
+func taskMutationAndRender(status string, _ client.TaskBoardMutation, list func() ([]client.Task, error)) (string, error) {
+	// The HTMX board fragment and HTML fallback do not carry goal lifecycle
+	// state. Always reload the compact project catalog so mutation output keeps
+	// active and paused goals distinguishable without per-task detail requests.
 	return refreshAndRender(status, list, renderBoard)
 }
 
@@ -266,7 +266,7 @@ func confirmTaskDeletion(m Model, projectID string, task client.Task) (Model, te
 			return "", err
 		}
 		return taskMutationAndRender("delete: "+firstNonEmpty(task.Title, task.ID), mutation,
-			func() ([]client.Task, error) { return c.ListTasks(ctx, projectID) })
+			func() ([]client.Task, error) { return c.ListTaskReferences(ctx, projectID) })
 	})
 	return confirmOr(m,
 		fmt.Sprintf("Delete task %q? %s", display, confirmCancelInstruction),
@@ -1552,7 +1552,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender("created "+title, mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 
 			case "swarm":
@@ -1594,7 +1594,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender("updated "+title, mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 
 			case "order":
@@ -1619,7 +1619,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender(fmt.Sprintf("moved %s to position %d", t.Title, pos), mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 
 			case "run", "stop", "delete":
@@ -1648,7 +1648,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender(action+": "+t.Title, mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 				return m, cmd
 
@@ -1686,7 +1686,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender(t.Title+" → "+category, mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 
 			case "goal":
@@ -1781,7 +1781,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender("activated the backlog", mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 
 			case "sweep":
@@ -1791,7 +1791,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender("swept finished tasks", mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 
 			case "clear":
@@ -1821,7 +1821,7 @@ func tasksCommand() command {
 						return "", err
 					}
 					return taskMutationAndRender("cleared "+column, mutation,
-						func() ([]client.Task, error) { return c.ListTasks(ctx, pid) })
+						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
 				})
 				return confirmOr(m,
 					fmt.Sprintf("Clear all %s tasks? %s", column, confirmCancelInstruction),

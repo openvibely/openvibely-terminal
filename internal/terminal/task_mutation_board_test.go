@@ -60,8 +60,9 @@ func (r *taskMutationRequestRecorder) reset() {
 	r.bytes = 0
 }
 
-func taskMutationServer(t *testing.T, mutationBody string, mutationStatus int, getStatus int, delay time.Duration, rec *taskMutationRequestRecorder) Model {
+func taskMutationServer(t *testing.T, mutationBody string, mutationStatus int, refreshStatus int, delay time.Duration, rec *taskMutationRequestRecorder) Model {
 	t.Helper()
+	catalogReads := 0
 	return newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		if delay > 0 {
 			time.Sleep(delay)
@@ -70,10 +71,14 @@ func taskMutationServer(t *testing.T, mutationBody string, mutationStatus int, g
 		status := http.StatusOK
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			catalogReads++
+			if catalogReads > 1 {
+				status = refreshStatus
+			}
 			body = compactTaskCatalogForProjectTest(mutationBoardFixture, "p1")
 			w.Header().Set("Content-Type", "application/json")
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks":
-			status = getStatus
+			status = refreshStatus
 			body = mutationBoardFixture
 		case r.URL.Path == "/tasks" || strings.HasPrefix(r.URL.Path, "/tasks/") || r.URL.Path == "/tasks/move-completed" || r.URL.Path == "/tasks/completed" || r.URL.Path == "/tasks/backlog" || r.URL.Path == "/tasks/backlog/activate":
 			status = mutationStatus
@@ -94,7 +99,7 @@ func taskMutationServer(t *testing.T, mutationBody string, mutationStatus int, g
 	})
 }
 
-func TestTaskMutationsRenderReturnedBoardWithoutListRequest(t *testing.T) {
+func TestTaskMutationsRefreshCompactReferenceCatalog(t *testing.T) {
 	tests := []struct {
 		name       string
 		line       string
@@ -125,10 +130,14 @@ func TestTaskMutationsRenderReturnedBoardWithoutListRequest(t *testing.T) {
 				t.Fatalf("mutation requests = %d, want 1", got)
 			}
 			if got := rec.count(http.MethodGet, "/tasks"); got != 0 {
-				t.Fatalf("full board GET requests = %d, want 0", got)
+				t.Fatalf("full HTML board GET requests = %d, want 0", got)
 			}
-			if tc.resolution && rec.count(http.MethodGet, "/api/tasks/reference-catalog") != 1 {
-				t.Fatalf("task resolution requests = %d, want 1", rec.count(http.MethodGet, "/api/tasks/reference-catalog"))
+			wantCatalogReads := 1
+			if tc.resolution {
+				wantCatalogReads++
+			}
+			if got := rec.count(http.MethodGet, "/api/tasks/reference-catalog"); got != wantCatalogReads {
+				t.Fatalf("compact catalog GET requests = %d, want %d", got, wantCatalogReads)
 			}
 			out := transcript(m)
 			if !strings.Contains(out, tc.status) || !strings.Contains(out, "Alpha task") || !strings.Contains(out, "Beta task") {
@@ -147,7 +156,7 @@ func TestTaskMutationsRenderReturnedBoardWithoutListRequest(t *testing.T) {
 	}
 }
 
-func TestTaskMutationBoardFallbacks(t *testing.T) {
+func TestTaskMutationRefreshAlwaysUsesCompactCatalog(t *testing.T) {
 	tests := []struct {
 		name   string
 		body   string
@@ -162,8 +171,9 @@ func TestTaskMutationBoardFallbacks(t *testing.T) {
 			rec := &taskMutationRequestRecorder{}
 			m := taskMutationServer(t, tc.body, tc.status, http.StatusOK, 0, rec)
 			m = runLine(t, m, "/tasks new New task")
-			if got := rec.count(http.MethodGet, "/tasks"); got != 1 {
-				t.Fatalf("fallback board GET requests = %d, want 1", got)
+			if got := rec.count(http.MethodGet, "/tasks"); got != 0 || rec.count(http.MethodGet, "/api/tasks/reference-catalog") != 1 {
+				requests, _ := rec.snapshot()
+				t.Fatalf("mutation refresh requests = %+v, want one compact catalog GET and no HTML board GET", requests)
 			}
 			if out := transcript(m); !strings.Contains(out, "created New task") || !strings.Contains(out, "Alpha task") {
 				t.Fatalf("fallback output lost mutation status or board:\n%s", out)
@@ -175,9 +185,9 @@ func TestTaskMutationBoardFallbacks(t *testing.T) {
 		rec := &taskMutationRequestRecorder{}
 		m := taskMutationServer(t, `<div id="task-detail-content"><div id="tab-details">updated</div></div>`, http.StatusOK, http.StatusOK, 0, rec)
 		m = runLine(t, m, "/tasks edit Alpha task | Renamed task")
-		if rec.count(http.MethodPut, "/tasks/t-1") != 1 || rec.count(http.MethodGet, "/tasks") != 1 {
+		if rec.count(http.MethodPut, "/tasks/t-1") != 1 || rec.count(http.MethodGet, "/tasks") != 0 || rec.count(http.MethodGet, "/api/tasks/reference-catalog") != 2 {
 			requests, _ := rec.snapshot()
-			t.Fatalf("edit did not use detail-fragment fallback: %+v", requests)
+			t.Fatalf("edit did not refresh the compact catalog after reference resolution: %+v", requests)
 		}
 		if !strings.Contains(transcript(m), "updated Renamed task") {
 			t.Fatalf("edit success status missing: %s", transcript(m))
@@ -188,9 +198,9 @@ func TestTaskMutationBoardFallbacks(t *testing.T) {
 		rec := &taskMutationRequestRecorder{}
 		m := taskMutationServer(t, `<div id="task-detail-content"><div id="tab-details">running</div></div>`, http.StatusOK, http.StatusOK, 0, rec)
 		m = runLine(t, m, "/tasks run Alpha task")
-		if rec.count(http.MethodPost, "/tasks/t-1/run") != 1 || rec.count(http.MethodGet, "/tasks") != 1 {
+		if rec.count(http.MethodPost, "/tasks/t-1/run") != 1 || rec.count(http.MethodGet, "/tasks") != 0 || rec.count(http.MethodGet, "/api/tasks/reference-catalog") != 2 {
 			requests, _ := rec.snapshot()
-			t.Fatalf("run task did not use detail-fragment fallback: %+v", requests)
+			t.Fatalf("run task did not refresh the compact catalog after reference resolution: %+v", requests)
 		}
 	})
 
@@ -198,37 +208,42 @@ func TestTaskMutationBoardFallbacks(t *testing.T) {
 		rec := &taskMutationRequestRecorder{}
 		m := taskMutationServer(t, `<div id="task-detail-content">activated</div>`, http.StatusOK, http.StatusOK, 0, rec)
 		m = runLine(t, m, "/tasks activate")
-		if rec.count(http.MethodPost, "/tasks/backlog/activate") != 1 || rec.count(http.MethodGet, "/tasks") != 1 {
+		if rec.count(http.MethodPost, "/tasks/backlog/activate") != 1 || rec.count(http.MethodGet, "/tasks") != 0 || rec.count(http.MethodGet, "/api/tasks/reference-catalog") != 1 {
 			requests, _ := rec.snapshot()
-			t.Fatalf("activate did not use fragment fallback: %+v", requests)
+			t.Fatalf("activate did not refresh the compact catalog: %+v", requests)
 		}
 	})
 
-	t.Run("empty board is authoritative", func(t *testing.T) {
+	t.Run("empty board fragment still refreshes catalog", func(t *testing.T) {
 		rec := &taskMutationRequestRecorder{}
 		const emptyBoard = `<div class="kanban"><div class="kanban-columns"><section data-category="backlog"></section><section data-category="active"></section><section data-category="completed"></section></div></div>`
 		m := taskMutationServer(t, emptyBoard, http.StatusOK, http.StatusOK, 0, rec)
 		m = runLine(t, m, "/tasks new New task")
-		if got := rec.count(http.MethodGet, "/tasks"); got != 0 {
-			t.Fatalf("valid empty board caused %d fallback requests", got)
+		if got := rec.count(http.MethodGet, "/tasks"); got != 0 || rec.count(http.MethodGet, "/api/tasks/reference-catalog") != 1 {
+			requests, _ := rec.snapshot()
+			t.Fatalf("empty fragment refresh requests = %+v, want one compact catalog GET", requests)
 		}
-		if !strings.Contains(transcript(m), "created New task") {
-			t.Fatalf("missing mutation status: %s", transcript(m))
+		out := transcript(m)
+		if !strings.Contains(out, "created New task") || !strings.Contains(out, "Alpha task") {
+			t.Fatalf("mutation output did not use the refreshed catalog: %s", out)
 		}
 	})
 
-	t.Run("failed fallback preserves successful mutation", func(t *testing.T) {
+	t.Run("failed catalog refresh preserves successful mutation", func(t *testing.T) {
 		rec := &taskMutationRequestRecorder{}
 		m := taskMutationServer(t, "", http.StatusNoContent, http.StatusInternalServerError, 0, rec)
-		m = runLine(t, m, "/tasks new New task")
+		m = runLine(t, m, "/tasks move Alpha task backlog")
 		out := transcript(m)
-		if !strings.Contains(out, "created New task") || strings.Contains(out, "500") {
-			t.Fatalf("successful mutation result was replaced by fallback failure:\n%s", out)
+		if !strings.Contains(out, "Alpha task → backlog") || strings.Contains(out, "500") {
+			t.Fatalf("successful mutation result was replaced by catalog refresh failure:\n%s", out)
+		}
+		if got := rec.count(http.MethodGet, "/api/tasks/reference-catalog"); got != 2 {
+			t.Fatalf("catalog reads = %d, want resolution plus failed refresh", got)
 		}
 	})
 }
 
-func TestTaskMutationBoardFallbackOutputMatchesReturnedBoard(t *testing.T) {
+func TestTaskMutationRenderUsesCatalogRegardlessOfFragment(t *testing.T) {
 	run := func(response string, status int) string {
 		t.Helper()
 		rec := &taskMutationRequestRecorder{}
