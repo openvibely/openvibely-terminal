@@ -1,6 +1,6 @@
 module github.com/openvibely/openvibely-terminal
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
