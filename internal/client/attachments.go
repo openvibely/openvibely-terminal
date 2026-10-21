@@ -696,32 +696,322 @@ func (c *Client) doMultipartHTML(ctx context.Context, method, path string, body 
 }
 
 func parseAttachmentMutationResponse(root *html.Node, operation, taskID, projectID string) ([]Attachment, error) {
-	if findByID(root, "attachment-list") == nil {
+	if strings.TrimSpace(projectID) == "" {
+		if findByID(root, "attachment-list") == nil {
+			return nil, fmt.Errorf("%s response did not include the attachment list", operation)
+		}
+		return parseTaskAttachments(root, taskID, projectID), nil
+	}
+
+	parsed := scanTaskAttachments(root, taskID, projectID)
+	if !parsed.hasList {
 		return nil, fmt.Errorf("%s response did not include the attachment list", operation)
 	}
-	return parseTaskAttachmentsForProject(root, taskID, projectID)
+	if err := parsed.projectError(projectID); err != nil {
+		return nil, err
+	}
+	return parsed.attachments, nil
 }
 
 func parseTaskAttachmentsForProject(root *html.Node, taskID, projectID string) ([]Attachment, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return parseTaskAttachments(root, taskID, projectID), nil
 	}
-	if actual := taskDetailProjectID(root); actual != "" && actual != projectID {
-		return nil, fmt.Errorf("task attachment response belongs to project %q, not selected project %q", actual, projectID)
+	parsed := scanTaskAttachments(root, taskID, projectID)
+	if err := parsed.projectError(projectID); err != nil {
+		return nil, err
+	}
+	return parsed.attachments, nil
+}
+
+type attachmentScanSummary struct {
+	rowMarker bool
+	fontName  *html.Node
+	fallback  *html.Node
+	size      *html.Node
+}
+
+type attachmentScanFrame struct {
+	node          *html.Node
+	nextChild     *html.Node
+	insideList    bool
+	controlStart  int
+	directControl int
+	controlIndex  int
+	fallbackIndex int
+	summary       attachmentScanSummary
+}
+
+type attachmentControlRecord struct {
+	id         string
+	row        *attachmentRowFields
+	parentNext int
+}
+
+type attachmentFallbackRecord struct {
+	id  string
+	row *attachmentRowFields
+}
+
+type attachmentRowFields struct {
+	fileName  string
+	filePath  string
+	mediaType string
+	fileSize  int64
+}
+
+type attachmentScanResult struct {
+	attachments           []Attachment
+	hasList               bool
+	taskProjectID         string
+	deleteProjectMismatch string
+}
+
+func (r attachmentScanResult) projectError(projectID string) error {
+	if r.taskProjectID != "" && r.taskProjectID != projectID {
+		return fmt.Errorf("task attachment response belongs to project %q, not selected project %q", r.taskProjectID, projectID)
+	}
+	if r.deleteProjectMismatch != "" {
+		return fmt.Errorf("attachment response belongs to project %q, not selected project %q", r.deleteProjectMismatch, projectID)
+	}
+	return nil
+}
+
+// scanTaskAttachments walks the response tree once. The post-order summaries
+// retain the first filename and size fields each row would find, while the
+// control index links controls to their nearest qualifying row without rescans.
+func scanTaskAttachments(root *html.Node, taskID, selectedProjectID string) attachmentScanResult {
+	result := attachmentScanResult{attachments: make([]Attachment, 0)}
+	if root == nil {
+		return result
 	}
 
-	list := findByID(root, "attachment-list")
-	if list == nil {
-		return make([]Attachment, 0), nil
+	var list *html.Node
+	var taskProjectID, projectID string
+	var deleteProjectMismatch string
+	controls := make([]attachmentControlRecord, 0)
+	fallbacks := make([]attachmentFallbackRecord, 0)
+	// nextUnassigned is a disjoint-set skip list: a control is assigned to its
+	// closest row once, and outer rows skip controls already claimed below.
+	nextUnassigned := []int{0}
+	findNext := func(index int) int { return index }
+	findNext = func(index int) int {
+		root := index
+		for nextUnassigned[root] != root {
+			root = nextUnassigned[root]
+		}
+		for nextUnassigned[index] != index {
+			next := nextUnassigned[index]
+			nextUnassigned[index] = root
+			index = next
+		}
+		return root
 	}
-	for _, control := range findAll(list, func(e *html.Node) bool {
-		return attachmentDeleteURL(attr(e, "hx-delete")) != ""
-	}) {
-		if actual := attachmentDeleteProjectID(attr(control, "hx-delete")); actual != "" && actual != projectID {
-			return nil, fmt.Errorf("attachment response belongs to project %q, not selected project %q", actual, projectID)
+	consumeControl := func(index int, row *attachmentRowFields) {
+		controls[index].row = row
+		nextUnassigned[index] = findNext(index + 1)
+	}
+
+	stack := make([]attachmentScanFrame, 0, 32)
+	push := func(node *html.Node, parentIndex int, parentInsideList bool) {
+		frame := attachmentScanFrame{
+			node:          node,
+			nextChild:     node.FirstChild,
+			insideList:    parentInsideList,
+			controlStart:  len(controls),
+			directControl: -1,
+			controlIndex:  -1,
+			fallbackIndex: -1,
+		}
+		if node.Type == html.ElementNode {
+			if value := strings.TrimSpace(attr(node, "data-task-project-id")); value != "" && taskProjectID == "" {
+				taskProjectID = value
+			}
+			if value := strings.TrimSpace(attr(node, "data-project-id")); value != "" && projectID == "" {
+				projectID = value
+			}
+			if list == nil && attr(node, "id") == "attachment-list" {
+				list = node
+			}
+			frame.insideList = frame.insideList || list == node
+		}
+		if frame.insideList && node.Type == html.ElementNode {
+			class := attr(node, "class")
+			frame.summary.rowMarker = strings.Contains(class, "font-medium") || attr(node, "data-attachment-filename") != ""
+			if node.Data == "p" {
+				if strings.Contains(class, "font-medium") {
+					frame.summary.fontName = node
+				}
+				if !strings.Contains(class, "text-xs") {
+					frame.summary.fallback = node
+				}
+				if strings.Contains(class, "text-xs") {
+					frame.summary.size = node
+				}
+			}
+			if raw := attr(node, "hx-delete"); raw != "" {
+				id, controlProject := attachmentDeleteTarget(raw)
+				if id != "" {
+					index := len(controls)
+					if len(nextUnassigned) <= index {
+						nextUnassigned = append(nextUnassigned, index)
+					} else {
+						nextUnassigned[index] = index
+					}
+					if len(nextUnassigned) == index+1 {
+						nextUnassigned = append(nextUnassigned, index+1)
+					}
+					controls = append(controls, attachmentControlRecord{id: id, parentNext: -1})
+					frame.controlIndex = index
+					if parentIndex >= 0 {
+						controls[index].parentNext = stack[parentIndex].directControl
+						stack[parentIndex].directControl = index
+					} else {
+						frame.directControl = index
+					}
+					if strings.TrimSpace(selectedProjectID) != "" && controlProject != "" && controlProject != selectedProjectID && deleteProjectMismatch == "" {
+						deleteProjectMismatch = controlProject
+					}
+				}
+			}
+			if rawID := attr(node, "data-attachment-id"); rawID != "" {
+				id := strings.TrimSpace(rawID)
+				if id != "" {
+					frame.fallbackIndex = len(fallbacks)
+					fallbacks = append(fallbacks, attachmentFallbackRecord{id: id})
+				}
+			}
+		}
+		stack = append(stack, frame)
+	}
+
+	push(root, -1, false)
+	for len(stack) > 0 {
+		frameIndex := len(stack) - 1
+		if child := stack[frameIndex].nextChild; child != nil {
+			stack[frameIndex].nextChild = child.NextSibling
+			push(child, frameIndex, stack[frameIndex].insideList)
+			continue
+		}
+
+		frame := stack[frameIndex]
+		node := frame.node
+		if frame.insideList {
+			if frame.fallbackIndex >= 0 {
+				fallbacks[frame.fallbackIndex].row = attachmentFieldsForRow(node, frame.summary)
+			}
+			if node != list && node.Type == html.ElementNode && node.Data == "div" && frame.summary.rowMarker {
+				var row *attachmentRowFields
+				for index := findNext(frame.controlStart); index < len(controls); index = findNext(index) {
+					if row == nil {
+						row = attachmentFieldsForRow(node, frame.summary)
+					}
+					consumeControl(index, row)
+				}
+			}
+			if frame.directControl >= 0 {
+				var row *attachmentRowFields
+				for index := frame.directControl; index >= 0; index = controls[index].parentNext {
+					if controls[index].row == nil {
+						if row == nil {
+							row = attachmentFieldsForRow(node, frame.summary)
+						}
+						consumeControl(index, row)
+					}
+				}
+			}
+			if frame.controlIndex >= 0 && controls[frame.controlIndex].row == nil && node.Parent == nil {
+				consumeControl(frame.controlIndex, attachmentFieldsForRow(node, frame.summary))
+			}
+		}
+
+		stack = stack[:frameIndex]
+		if len(stack) > 0 && frame.insideList {
+			parent := &stack[len(stack)-1].summary
+			if !parent.rowMarker && frame.summary.rowMarker {
+				parent.rowMarker = true
+			}
+			if parent.fontName == nil {
+				parent.fontName = frame.summary.fontName
+			}
+			if parent.fallback == nil {
+				parent.fallback = frame.summary.fallback
+			}
+			if parent.size == nil {
+				parent.size = frame.summary.size
+			}
 		}
 	}
-	return parseTaskAttachments(root, taskID, projectID), nil
+
+	result.hasList = list != nil
+	result.taskProjectID = taskProjectID
+	if taskProjectID == "" {
+		result.taskProjectID = projectID
+	}
+	result.deleteProjectMismatch = deleteProjectMismatch
+
+	seen := make(map[string]bool, len(controls)+len(fallbacks))
+	for _, control := range controls {
+		if control.row == nil || seen[control.id] {
+			continue
+		}
+		attachment := control.row.attachment(control.id, taskID)
+		if attachment.FileName == "" {
+			continue
+		}
+		seen[control.id] = true
+		result.attachments = append(result.attachments, attachment)
+	}
+	for _, fallback := range fallbacks {
+		if fallback.row == nil || seen[fallback.id] {
+			continue
+		}
+		attachment := fallback.row.attachment(fallback.id, taskID)
+		if attachment.FileName == "" {
+			continue
+		}
+		seen[fallback.id] = true
+		result.attachments = append(result.attachments, attachment)
+	}
+	return result
+}
+
+func attachmentFieldsForRow(row *html.Node, summary attachmentScanSummary) *attachmentRowFields {
+	fileName := ""
+	for _, key := range []string{"data-attachment-filename", "data-file-name", "data-filename"} {
+		if fileName = attr(row, key); fileName != "" {
+			break
+		}
+	}
+	if fileName == "" && summary.fontName != nil {
+		fileName = attachmentFilenameText(summary.fontName)
+	}
+	if fileName == "" && summary.fallback != nil {
+		fileName = attachmentFilenameText(summary.fallback)
+	}
+
+	fileSize := parseAttachmentSize(firstNonEmptyAttr(row,
+		"data-attachment-size", "data-file-size", "data-size"))
+	if fileSize == 0 && summary.size != nil {
+		fileSize = parseAttachmentSize(NodeText(summary.size))
+	}
+	return &attachmentRowFields{
+		fileName:  fileName,
+		filePath:  attr(row, "data-file-path"),
+		mediaType: firstNonEmptyAttr(row, "data-media-type", "data-content-type"),
+		fileSize:  fileSize,
+	}
+}
+
+func (row *attachmentRowFields) attachment(id, taskID string) Attachment {
+	return Attachment{
+		ID:        id,
+		TaskID:    taskID,
+		FileName:  row.fileName,
+		FilePath:  row.filePath,
+		MediaType: row.mediaType,
+		FileSize:  row.fileSize,
+	}
 }
 
 func taskDetailProjectID(root *html.Node) string {
