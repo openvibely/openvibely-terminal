@@ -1306,7 +1306,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1`; exact `data-schedule-next-run` values are preferred, and schedule-tab detail is read only when a card needs exact `Next:` timing |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |
-| Schedules | Project schedule listing reads `GET /api/tasks/reference-catalog?project_id=...` and each task's `GET /tasks/:id?tab=schedules&project_id=...` catalog; `POST /api/schedules/:id/toggle` |
+| Schedules | Project schedule listing prefers the bounded `GET /api/schedules/catalog?project_id=...` contract; older backends fall back to the calendar and task schedule tabs, preferring task-board cards and using the task-reference route when the board is unavailable or empty. Add, edit, toggle, and delete remain project-scoped; toggle uses `POST /api/schedules/:id/toggle`. See [the schedule catalog contract](schedule-catalog-contract.md). |
 | Personality | `POST /personality/custom`, `GET/PUT/DELETE /personality/custom/:key`, `DELETE /personality/custom/bulk` (JSON custom CRUD and guarded bulk deletion); `/personality` remains the scoped HTML list |
 | Auth | `POST /login`, `GET /auth/me` |
 | Events | `GET /events/live` (SSE) |

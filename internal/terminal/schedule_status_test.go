@@ -140,6 +140,131 @@ func TestCLIScheduleShowMatchesListStatus(t *testing.T) {
 	}
 }
 
+func TestCLIScheduleCatalogListsShowsAndRefreshesMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		args         []string
+		force        bool
+		wantCatalogs int
+		wantOutput   string
+		wantMutation string
+		wantTaskTab  bool
+	}{
+		{name: "list", args: []string{"schedule"}, wantCatalogs: 1, wantOutput: "Nightly report"},
+		{name: "show", args: []string{"schedule", "show", "s-1"}, wantCatalogs: 1, wantOutput: "Schedule ID: s-1"},
+		{name: "edit", args: []string{"schedule", "edit", "s-1", "interval", "3"}, wantCatalogs: 2, wantOutput: "Updated report", wantMutation: http.MethodPut + " /schedules/s-1", wantTaskTab: true},
+		{name: "toggle", args: []string{"schedule", "toggle", "s-1"}, wantCatalogs: 2, wantOutput: "paused", wantMutation: http.MethodPost + " /api/schedules/s-1/toggle"},
+		{name: "delete", args: []string{"schedule", "delete", "s-1"}, force: true, wantCatalogs: 2, wantMutation: http.MethodDelete + " /schedules/s-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var requests []string
+			catalogCalls := 0
+			mutated := false
+			enabled := true
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				requests = append(requests, r.Method+" "+r.URL.RequestURI())
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/schedules/catalog":
+					catalogCalls++
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("catalog request lost project scope: %s", r.URL.RequestURI())
+					}
+					w.Header().Set("Content-Type", "application/json")
+					if tc.name == "delete" && mutated {
+						_, _ = io.WriteString(w, `{"project_id":"p1","summary":"No schedules","schedules":[]}`)
+						return
+					}
+					title := "Nightly report"
+					if tc.name == "edit" && mutated {
+						title = "Updated report"
+					}
+					_, _ = io.WriteString(w, `{"project_id":"p1","summary":"Catalog schedule","schedules":[{"schedule_id":"s-1","task_id":"t-1","title":"`+title+`","display_text":"`+title+` — daily","next_run":"2030-04-05T09:30:00.125-07:00","enabled":`+map[bool]string{true: "true", false: "false"}[enabled]+`}]}`)
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("task request lost project scope: %s", r.URL.RequestURI())
+					}
+					w.Header().Set("Content-Type", "text/html")
+					if r.URL.Query().Get("tab") == "schedules" {
+						_, _ = io.WriteString(w, scheduleEditDetailForIDs("p1", "s-1"))
+						return
+					}
+					_, _ = io.WriteString(w, scheduleStatusTaskHTML("t-1"))
+				case r.Method == http.MethodPut && r.URL.Path == "/schedules/s-1":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("edit mutation lost project scope: %s", r.URL.RequestURI())
+					}
+					mutated = true
+				case r.Method == http.MethodPost && r.URL.Path == "/api/schedules/s-1/toggle":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("toggle mutation lost project scope: %s", r.URL.RequestURI())
+					}
+					mutated = true
+					enabled = false
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"s-1","task_id":"t-1","enabled":false,"repeat_type":"daily","run_at":"2030-04-05T09:30:00Z"}`)
+				case r.Method == http.MethodDelete && r.URL.Path == "/schedules/s-1":
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("delete mutation lost project scope: %s", r.URL.RequestURI())
+					}
+					mutated = true
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", tc.args, tc.force, false); err != nil {
+				t.Fatalf("schedule command failed: %v\nrequests:\n%s", err, strings.Join(requests, "\n"))
+			}
+			if tc.wantOutput != "" && !strings.Contains(stripANSI(out.String()), tc.wantOutput) {
+				t.Fatalf("output missing %q:\n%s", tc.wantOutput, out.String())
+			}
+			if catalogCalls != tc.wantCatalogs {
+				t.Fatalf("catalog refreshes = %d, want %d; requests:\n%s", catalogCalls, tc.wantCatalogs, strings.Join(requests, "\n"))
+			}
+			if tc.wantMutation != "" {
+				found := false
+				for _, request := range requests {
+					if strings.HasPrefix(request, tc.wantMutation+"?") {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("missing mutation %q; requests:\n%s", tc.wantMutation, strings.Join(requests, "\n"))
+				}
+			}
+			if tc.wantTaskTab {
+				found := false
+				for _, request := range requests {
+					if strings.HasPrefix(request, "GET /tasks/t-1?") && strings.Contains(request, "tab=schedules") && strings.Contains(request, "project_id=p1") {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("edit did not load its project schedule tab; requests:\n%s", strings.Join(requests, "\n"))
+				}
+			}
+			for _, request := range requests {
+				if strings.Contains(request, "/api/tasks/reference-catalog") || strings.HasPrefix(request, "GET /schedule?") {
+					t.Fatalf("catalog path used legacy schedule listing request %q; all requests:\n%s", request, strings.Join(requests, "\n"))
+				}
+			}
+		})
+	}
+}
+
 func TestCLIScheduleToggleRefreshShowsUpdatedStatus(t *testing.T) {
 	var mu sync.Mutex
 	enabled := true
