@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -197,7 +198,7 @@ func TestOutboundTargetsJSONMutationFailuresDoNotEmitSuccess(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
 					getCalls++
 					w.Header().Set("Content-Type", "text/html")
-					if tc.mode == "malformed-refresh" && getCalls > 1 {
+					if tc.mode == "malformed-refresh" && getCalls > 2 {
 						_, _ = io.WriteString(w, `<div id="outbound-targets-section" data-project-id="p1"></div>`)
 						return
 					}
@@ -322,7 +323,7 @@ func TestOutboundTargetsCLIAddJSONUsesCanonicalRefreshedTarget(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
 			refreshCalls++
 			w.Header().Set("Content-Type", "text/html")
-			if refreshCalls == 1 {
+			if refreshCalls <= 2 {
 				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", nil, false))
 			} else {
 				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{canonical}, false))
@@ -360,8 +361,8 @@ func TestOutboundTargetsCLIAddJSONUsesCanonicalRefreshedTarget(t *testing.T) {
 	if action.Action != "add" || action.Target.Destination != canonical.Destination {
 		t.Fatalf("add action = %#v, want canonical destination %q", action, canonical.Destination)
 	}
-	if saveCalls != 1 || refreshCalls != 2 {
-		t.Fatalf("save/refresh calls = %d/%d, want 1/2", saveCalls, refreshCalls)
+	if saveCalls != 1 || refreshCalls != 3 {
+		t.Fatalf("save/refresh calls = %d/%d, want 1/3 including pre-save refresh", saveCalls, refreshCalls)
 	}
 }
 
@@ -379,7 +380,7 @@ func TestOutboundTargetsCLIAddJSONUsesCanonicalOtherDestination(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
 			refreshCalls++
 			w.Header().Set("Content-Type", "text/html")
-			if refreshCalls == 1 {
+			if refreshCalls <= 2 {
 				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", nil, false))
 			} else {
 				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{canonical}, false))
@@ -409,8 +410,8 @@ func TestOutboundTargetsCLIAddJSONUsesCanonicalOtherDestination(t *testing.T) {
 	if action.Target.Destination != canonical.Destination {
 		t.Fatalf("add action = %#v, want canonical destination %q", action.Target, canonical.Destination)
 	}
-	if refreshCalls != 2 {
-		t.Fatalf("refresh calls = %d, want 2", refreshCalls)
+	if refreshCalls != 3 {
+		t.Fatalf("refresh calls = %d, want 3 including pre-save refresh", refreshCalls)
 	}
 }
 
@@ -496,11 +497,11 @@ func TestOutboundTargetsJSONAddAndEditUseCanonicalSaveResponse(t *testing.T) {
 			if strings.Contains(out.String(), internalID) || strings.Contains(out.String(), "target-edit") || strings.Contains(out.String(), "project_id") || strings.Contains(out.String(), "credential-must-not-leak") || strings.Contains(out.String(), "must-not-leak") {
 				t.Fatalf("JSON exposed internal or credential data: %s", out.String())
 			}
-			if getCalls != 1 || postCalls != 1 {
-				t.Fatalf("requests GET/POST = %d/%d, want 1/1", getCalls, postCalls)
+			if getCalls != 2 || postCalls != 1 {
+				t.Fatalf("requests GET/POST = %d/%d, want 2/1 including pre-save revalidation", getCalls, postCalls)
 			}
-			if getBytes != len(initialBody) || postBytes != len(savedBody) {
-				t.Fatalf("response bytes GET/POST = %d/%d, want %d/%d", getBytes, postBytes, len(initialBody), len(savedBody))
+			if getBytes != 2*len(initialBody) || postBytes != len(savedBody) {
+				t.Fatalf("response bytes GET/POST = %d/%d, want %d/%d", getBytes, postBytes, 2*len(initialBody), len(savedBody))
 			}
 		})
 	}
@@ -544,8 +545,8 @@ func TestOutboundTargetsPlainEditRefreshesCompleteList(t *testing.T) {
 	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "edit", original.ID, "--destination", "PERSON@EXAMPLE.COM"}, false, false); err != nil {
 		t.Fatal(err)
 	}
-	if getCalls != 2 || postCalls != 1 {
-		t.Fatalf("requests GET/POST = %d/%d, want 2/1", getCalls, postCalls)
+	if getCalls != 3 || postCalls != 1 {
+		t.Fatalf("requests GET/POST = %d/%d, want 3/1 including pre-save revalidation", getCalls, postCalls)
 	}
 	for _, value := range []string{"person@example.com", "C123", "ops"} {
 		if !strings.Contains(out.String(), value) {
@@ -592,8 +593,8 @@ func TestOutboundTargetsPlainAddListAndShowUseCanonicalDestination(t *testing.T)
 	if err := RunCLI(c, &plain, "demo", []string{"channels", "targets", "add", "email", "PERSON@EXAMPLE.COM", "--kind", "email"}, false, false); err != nil {
 		t.Fatal(err)
 	}
-	if targetGets != 2 {
-		t.Fatalf("plain add outbound target GETs = %d, want initial plus refreshed list", targetGets)
+	if targetGets != 3 {
+		t.Fatalf("plain add outbound target GETs = %d, want initial, pre-save, and refreshed list", targetGets)
 	}
 	if got := plain.String(); !strings.Contains(got, canonical.Destination) || strings.Contains(got, "PERSON@EXAMPLE.COM") {
 		t.Fatalf("plain add output = %q, want only canonical destination", got)
@@ -820,8 +821,8 @@ func TestOutboundTargetsAmbiguousNormalizedRefreshDoesNotEmitUnconfirmedAdd(t *t
 	if out.Len() != 0 {
 		t.Fatalf("ambiguous persisted add emitted success-shaped JSON: %q", out.String())
 	}
-	if refreshCalls != 2 {
-		t.Fatalf("refresh calls = %d, want 2", refreshCalls)
+	if refreshCalls != 3 {
+		t.Fatalf("refresh calls = %d, want 3 including pre-save refresh", refreshCalls)
 	}
 }
 
@@ -1094,8 +1095,8 @@ func TestOutboundTargetsCLIEditPlatformCanonicalizesAndPreservesFields(t *testin
 	if err := RunCLI(c, &out, "demo", []string{"channels", "targets", "edit", "client", "--platform", "Email"}, false, false); err != nil {
 		t.Fatal(err)
 	}
-	if postCalls != 1 || refreshCalls != 2 {
-		t.Fatalf("post/refresh calls = %d/%d, want 1/2", postCalls, refreshCalls)
+	if postCalls != 1 || refreshCalls != 3 {
+		t.Fatalf("post/refresh calls = %d/%d, want 1/3 including pre-save revalidation", postCalls, refreshCalls)
 	}
 	want := map[string]string{
 		"target_row_id": "target-a", "target_platform": "email", "target_kind": "email", "target_name": "client",
@@ -1120,7 +1121,7 @@ func TestOutboundTargetsMutationRefreshFailureAndTestFailure(t *testing.T) {
 				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", nil, false))
 				return
 			}
-			if getCalls == 2 {
+			if getCalls == 3 {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = io.WriteString(w, `<html><body>backend secret and raw markup</body></html>`)
 				return
@@ -1266,6 +1267,158 @@ func TestOutboundTargetsRemoveConfirmationStaleAndAmbiguous(t *testing.T) {
 	}
 	if !strings.Contains(stripANSI(transcript(m)), "stale") {
 		t.Fatalf("changed stale remove error missing:\n%s", transcript(m))
+	}
+}
+
+func TestOutboundTargetsPreserveIndependentConcurrentChanges(t *testing.T) {
+	original := client.OutboundTarget{ID: "target-a", ProjectID: "p1", Platform: "slack", TargetKind: "channel", Name: "ops", Destination: "C1"}
+	concurrent := client.OutboundTarget{ID: "target-b", ProjectID: "p1", Platform: "email", TargetKind: "email", Name: "client", Destination: "person@example.com"}
+
+	t.Run("stale remove preserves concurrent add", func(t *testing.T) {
+		current := []client.OutboundTarget{original}
+		gets, posts := 0, 0
+		postedIDs := []string(nil)
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+				gets++
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", current, false))
+			case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+				posts++
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("parse remove form: %v", err)
+				}
+				postedIDs = append(postedIDs, r.PostForm["target_row_id"]...)
+				current = []client.OutboundTarget{concurrent}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div>saved</div>`)
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		m = runLine(t, m, "/channels targets remove target-a")
+		if m.pendingConfirmation == nil {
+			t.Fatal("remove did not wait for confirmation")
+		}
+		// Another session adds a destination while confirmation is pending.
+		current = []client.OutboundTarget{original, concurrent}
+		m = runLine(t, m, "yes")
+		if posts != 1 || gets < 3 {
+			t.Fatalf("remove requests = GET %d POST %d, want fresh lookup and one save", gets, posts)
+		}
+		if len(postedIDs) != 1 || postedIDs[0] != concurrent.ID {
+			t.Fatalf("remove replacement IDs = %v, want concurrent target %q preserved", postedIDs, concurrent.ID)
+		}
+	})
+
+	t.Run("stale add carries forward concurrent add", func(t *testing.T) {
+		current := []client.OutboundTarget{original}
+		gets := 0
+		postedDestinations := []string(nil)
+		added := client.OutboundTarget{ID: "target-c", ProjectID: "p1", Platform: "discord", TargetKind: "channel", Name: "review", Destination: "123"}
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+				gets++
+				if gets == 2 {
+					current = []client.OutboundTarget{original, concurrent}
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", current, false))
+			case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("parse add form: %v", err)
+				}
+				postedDestinations = append(postedDestinations, r.PostForm["target_target_id"]...)
+				current = []client.OutboundTarget{original, concurrent, added}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div>saved</div>`)
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		m = runLine(t, m, "/channels targets add discord 123 --kind channel --name review")
+		for _, destination := range []string{original.Destination, concurrent.Destination, added.Destination} {
+			if !slices.Contains(postedDestinations, destination) {
+				t.Fatalf("add replacement destinations %v omitted %q", postedDestinations, destination)
+			}
+		}
+	})
+
+	t.Run("cross-target edit carries forward concurrent edit", func(t *testing.T) {
+		other := client.OutboundTarget{ID: "target-b", ProjectID: "p1", Platform: "slack", TargetKind: "channel", Name: "alerts", Destination: "C2"}
+		changedOther := other
+		changedOther.Name = "alerts-new"
+		changedTarget := original
+		changedTarget.Name = "ops-new"
+		current := []client.OutboundTarget{original, other}
+		gets := 0
+		postedNames := make(map[string]string)
+		m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+				gets++
+				if gets == 2 {
+					current = []client.OutboundTarget{original, changedOther}
+				}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", current, false))
+			case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("parse edit form: %v", err)
+				}
+				ids, names := r.PostForm["target_row_id"], r.PostForm["target_name"]
+				for i, id := range ids {
+					postedNames[id] = names[i]
+				}
+				current = []client.OutboundTarget{changedTarget, changedOther}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div>saved</div>`)
+			default:
+				http.NotFound(w, r)
+			}
+		})
+
+		m = runLine(t, m, "/channels targets edit target-a --name ops-new")
+		if postedNames[original.ID] != changedTarget.Name || postedNames[other.ID] != changedOther.Name {
+			t.Fatalf("edit replacement names = %#v, want both intended and concurrent edits", postedNames)
+		}
+	})
+}
+
+func TestOutboundTargetsRejectSameTargetEditConflict(t *testing.T) {
+	captured := client.OutboundTarget{ID: "target-a", ProjectID: "p1", Platform: "slack", TargetKind: "channel", Name: "ops", Destination: "C1"}
+	newer := captured
+	newer.Name = "ops-newer"
+	current := []client.OutboundTarget{captured}
+	gets, posts := 0, 0
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			gets++
+			if gets == 2 {
+				current = []client.OutboundTarget{newer}
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", current, false))
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			posts++
+			_, _ = io.WriteString(w, `<div>saved</div>`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	m = runLine(t, m, "/channels targets edit target-a --destination C9")
+	if posts != 0 {
+		t.Fatalf("same-target stale edit posted %d replacements", posts)
+	}
+	output := stripANSI(transcript(m))
+	if !strings.Contains(output, "changed while this edit was in progress") || !strings.Contains(output, outboundTargetReloadHint) {
+		t.Fatalf("same-target conflict did not explain reload and retry:\n%s", output)
 	}
 }
 
