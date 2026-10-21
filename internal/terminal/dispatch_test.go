@@ -1558,13 +1558,13 @@ func TestTasksShowNoncanonicalReferencesUseCompactResolution(t *testing.T) {
 	}
 }
 
-func TestTasksRunCanonicalFullIDStillUsesBoard(t *testing.T) {
+func TestTasksRunCanonicalFullIDRefreshesCompactReferences(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
 	board := `<div data-task-id="` + taskID + `" data-task-status="pending" data-task-category="backlog"><a href="/tasks/` + taskID + `" title="Exact task">Exact task</a></div>`
 	m, rec := dispatchModel(t, map[string]string{"/tasks": board})
 	m = runLine(t, m, "/tasks run "+taskID)
-	if rec.count("GET", "/tasks") != 1 || rec.count("GET", "/api/tasks/reference-catalog") != 1 || rec.count("POST", "/tasks/"+taskID+"/run") != 1 {
-		t.Fatalf("non-show action changed behavior:\n%s", rec.all())
+	if rec.count("GET", "/tasks") != 0 || rec.count("GET", "/api/tasks/reference-catalog") != 2 || rec.count("POST", "/tasks/"+taskID+"/run") != 1 {
+		t.Fatalf("run did not use compact references for resolution and refresh:\n%s", rec.all())
 	}
 }
 
@@ -1692,8 +1692,8 @@ func TestTasksDeleteResolvesTypedTargetBeforeConfirmation(t *testing.T) {
 		}
 		ts.setTasks([]client.Task{replacementTask})
 		m = runLine(t, m, "yes")
-		if *ts.refRequests != 1 || len(*ts.deletes) != 1 || (*ts.deletes)[0] != "/tasks/t-original" {
-			t.Fatalf("confirmed delete rebound after list changed: refs=%d deletes=%v", *ts.refRequests, *ts.deletes)
+		if *ts.refRequests != 2 || len(*ts.deletes) != 1 || (*ts.deletes)[0] != "/tasks/t-original" {
+			t.Fatalf("confirmed delete rebound after list changed or skipped refresh: refs=%d deletes=%v", *ts.refRequests, *ts.deletes)
 		}
 	})
 

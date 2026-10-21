@@ -2587,12 +2587,100 @@ func TestCLITaskMutationsStayScopedToSelectedProject(t *testing.T) {
 			if !slices.Contains(urls, wantMutation) {
 				t.Fatalf("missing scoped mutation %q in:\n%s", wantMutation, strings.Join(urls, "\n"))
 			}
-			wantRefresh := "GET /tasks?project_id=p2"
-			if !slices.Contains(urls, wantRefresh) {
-				t.Fatalf("missing scoped refresh %q in:\n%s", wantRefresh, strings.Join(urls, "\n"))
+			wantRefresh := "GET /api/tasks/reference-catalog?project_id=p2"
+			if !slices.Contains(urls, wantRefresh) || rec.count("GET", "/api/tasks/reference-catalog") != 2 {
+				t.Fatalf("missing scoped post-mutation catalog refresh %q in:\n%s", wantRefresh, strings.Join(urls, "\n"))
+			}
+			if rec.count("GET", "/tasks") != 0 {
+				t.Fatalf("ordinary mutation refresh used the HTML task board instead of the compact catalog:\n%s", strings.Join(urls, "\n"))
 			}
 			if tc.wantFormPart != "" && (len(mutationForms) != 1 || !strings.Contains(mutationForms[0], tc.wantFormPart)) {
 				t.Fatalf("mutation forms = %v, want to contain %q", mutationForms, tc.wantFormPart)
+			}
+		})
+	}
+}
+
+func TestCLITaskMutationRefreshUsesCompactCatalogGoalState(t *testing.T) {
+	const staleBoard = `<div id="task-board"><div data-task-id="t-1" data-task-status="running" data-task-category="completed" data-display-order="2">
+		<a href="/tasks/t-1?from=tasks" title="Refactor the API">Refactor the API</a>
+		<p class="line-clamp-2">Keep the project reliable</p>
+		<span class="badge">Goal</span><span class="badge">Sonnet</span>
+	</div></div>`
+
+	for _, tc := range []struct {
+		name               string
+		returnHTMLFragment bool
+	}{
+		{name: "authoritative mutation fragment", returnHTMLFragment: true},
+		{name: "empty mutation response fallback"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var catalogReads, mutationCalls, htmlBoardReads int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case "/api/tasks/reference-catalog":
+					if got := r.URL.Query().Get("project_id"); got != "p1" {
+						t.Errorf("catalog project_id = %q, want p1", got)
+					}
+					catalogReads++
+					state := "active"
+					if catalogReads > 1 {
+						state = "paused"
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"tasks": []client.Task{{
+						ID: "t-1", ProjectID: "p1", Title: "Refactor the API", Prompt: "Keep the project reliable",
+						Category: "completed", Status: "running", GoalState: state, Badges: []string{"Goal", "Sonnet"},
+					}}})
+				case "/tasks/t-1/category":
+					if r.Method != http.MethodPatch || r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("mutation request = %s %s, want scoped PATCH", r.Method, r.URL.RequestURI())
+					}
+					if err := r.ParseForm(); err != nil || r.PostForm.Get("category") != "completed" {
+						t.Errorf("mutation form = %v, parse error %v", r.PostForm, err)
+					}
+					mutationCalls++
+					if tc.returnHTMLFragment {
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = io.WriteString(w, staleBoard)
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+				case "/tasks":
+					htmlBoardReads++
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, staleBoard)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", []string{"tasks", "move", "Refactor", "completed"}, false, false); err != nil {
+				t.Fatalf("task mutation failed: %v\noutput:\n%s", err, out.String())
+			}
+			if catalogReads != 2 || mutationCalls != 1 || htmlBoardReads != 0 {
+				t.Fatalf("catalog reads=%d mutation calls=%d HTML board reads=%d, want 2, 1, and 0", catalogReads, mutationCalls, htmlBoardReads)
+			}
+			text := stripANSI(out.String())
+			for _, want := range []string{"[goal: paused]", "Sonnet", "running"} {
+				if !strings.Contains(text, want) {
+					t.Errorf("refreshed board missing %q:\n%s", want, text)
+				}
+			}
+			for _, unwanted := range []string{"[goal: active]", "[Goal]"} {
+				if strings.Contains(text, unwanted) {
+					t.Errorf("refreshed board contains stale or generic marker %q:\n%s", unwanted, text)
+				}
 			}
 		})
 	}
