@@ -4,6 +4,6 @@ package client
 
 import "os"
 
-func statMemoryFile(name string) (os.FileInfo, error) {
+func statFileIdentity(name string) (os.FileInfo, error) {
 	return os.Stat(name)
 }

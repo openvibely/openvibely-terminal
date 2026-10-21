@@ -317,7 +317,7 @@ var openAttachmentFile = func(path string) (attachmentFile, error) {
 }
 
 var statAttachmentFile = func(path string) (os.FileInfo, error) {
-	return os.Stat(path)
+	return statFileIdentity(path)
 }
 
 type attachmentMultipartBody struct {
