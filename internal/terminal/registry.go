@@ -11482,10 +11482,8 @@ func parseProjectCreateGitHubArgs(args []string) (string, string, bool) {
 	if len(args) == 0 {
 		return "", "", false
 	}
-	joined := strings.TrimSpace(strings.Join(args, " "))
-	if strings.Contains(joined, "|") {
-		name, repoURL := splitPipe(joined)
-		if name == "" || !isAbsoluteProjectRepositoryURL(repoURL) {
+	if name, repoURL, pipeDelimited, valid := parseExplicitProjectCreatePipeArgs(args); pipeDelimited {
+		if !valid || !isAbsoluteProjectRepositoryURL(repoURL) {
 			return "", "", false
 		}
 		return name, repoURL, true
@@ -11511,6 +11509,18 @@ func isAbsoluteProjectRepositoryURL(value string) bool {
 // parseProjectCreateGitHubArgs grammar so local syntax is never reinterpreted.
 func parseProjectCreateArgs(args []string) (string, string, bool) {
 	return parseLocalProjectCreateArgs(args)
+}
+
+// parseExplicitProjectCreatePipeArgs extracts the explicit name | location
+// form shared by local and GitHub project creation. Callers retain validation
+// specific to their location type.
+func parseExplicitProjectCreatePipeArgs(args []string) (name, location string, pipeDelimited, valid bool) {
+	joined := strings.TrimSpace(strings.Join(args, " "))
+	if !strings.Contains(joined, "|") {
+		return "", "", false, false
+	}
+	name, location = splitPipe(joined)
+	return name, location, true, name != "" && location != ""
 }
 
 func parseProjectCreateArgsWithOptions(args []string) (string, string, bool, bool) {
@@ -11545,10 +11555,8 @@ func parseLocalProjectCreateArgs(args []string) (string, string, bool) {
 	if len(args) == 0 {
 		return "", "", false
 	}
-	joined := strings.TrimSpace(strings.Join(args, " "))
-	if strings.Contains(joined, "|") {
-		name, path := splitPipe(joined)
-		if name == "" || path == "" {
+	if name, path, pipeDelimited, valid := parseExplicitProjectCreatePipeArgs(args); pipeDelimited {
+		if !valid {
 			return "", "", false
 		}
 		return name, path, true

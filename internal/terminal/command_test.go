@@ -370,9 +370,15 @@ func TestParseProjectCreateArgs(t *testing.T) {
 		{name: "simple", args: []string{"demo", "/tmp/demo"}, wantName: "demo", wantPath: "/tmp/demo", ok: true},
 		{name: "space-delimited-name", args: []string{"My", "Project", "/tmp/my-project"}, wantName: "My Project", wantPath: "/tmp/my-project", ok: true},
 		{name: "pipe-delimited", args: []string{"My", "Project", "|", `C:\Users\me\my project`}, wantName: "My Project", wantPath: `C:\Users\me\my project`, ok: true},
+		{name: "pipe-delimited-trims-both-sides", args: []string{"  My", "Project  ", "|", "  /tmp/my-project  "}, wantName: "My Project", wantPath: "/tmp/my-project", ok: true},
+		{name: "pipe-delimited-splits-at-first-pipe", args: []string{"My Project | /tmp/demo | literal"}, wantName: "My Project", wantPath: "/tmp/demo | literal", ok: true},
+		{name: "unix-path-inference", args: []string{"My", "Project", "/tmp/my-project"}, wantName: "My Project", wantPath: "/tmp/my-project", ok: true},
+		{name: "windows-path-inference-on-unix", args: []string{"My", "Project", `C:\Users\me\my project`}, wantName: "My Project", wantPath: `C:\Users\me\my project`, ok: true},
 		{name: "missing-name", args: []string{"", "/tmp/demo"}, ok: false},
 		{name: "missing-path", args: []string{"demo"}, ok: false},
+		{name: "empty-pipe-name", args: []string{"|", "/tmp/demo"}, ok: false},
 		{name: "empty-pipe-path", args: []string{"demo", "|"}, ok: false},
+		{name: "whitespace-only-pipe-sides", args: []string{"  |  "}, ok: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -421,6 +427,7 @@ func TestParseProjectCreateGitHubArgs(t *testing.T) {
 		{name: "quoted-name-shape", args: []string{"Quoted, Project", repoURL}, wantName: "Quoted, Project"},
 		{name: "multiword-name", args: []string{"Quoted", "Project", repoURL}, wantName: "Quoted Project"},
 		{name: "pipe-delimited-name", args: []string{"Quoted", "Project", "|", repoURL}, wantName: "Quoted Project"},
+		{name: "pipe-delimited-trims-both-sides", args: []string{"  Quoted", "Project  ", "|", "  " + repoURL + "  "}, wantName: "Quoted Project"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			name, gotURL, ok := parseProjectCreateGitHubArgs(tc.args)
@@ -438,10 +445,39 @@ func TestParseProjectCreateGitHubArgs(t *testing.T) {
 		{"Project", "not-a-url"},
 		{"Project", repoURL, "extra"},
 		{"Project", "|", "not-a-url"},
+		{"|", repoURL},
+		{"Project", "|", "  "},
+		{"Project", "|", "ftp://github.com/acme/repo"},
+		{"Project", "|", "https:///acme/repo"},
+		{"Project", "|", "https://%zz"},
 	} {
 		if _, _, ok := parseProjectCreateGitHubArgs(args); ok {
 			t.Errorf("parseProjectCreateGitHubArgs(%v) accepted malformed GitHub form", args)
 		}
+	}
+}
+
+func TestParseExplicitProjectCreatePipeArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		args         []string
+		wantName     string
+		wantLocation string
+		wantPipe     bool
+		wantValid    bool
+	}{
+		{name: "no pipe", args: []string{"My", "Project", "/tmp/project"}},
+		{name: "trims both sides", args: []string{" My Project ", "|", " /tmp/project "}, wantName: "My Project", wantLocation: "/tmp/project", wantPipe: true, wantValid: true},
+		{name: "first pipe only", args: []string{"My Project | /tmp/project | extra"}, wantName: "My Project", wantLocation: "/tmp/project | extra", wantPipe: true, wantValid: true},
+		{name: "empty name", args: []string{" | /tmp/project"}, wantLocation: "/tmp/project", wantPipe: true},
+		{name: "empty location", args: []string{"My Project | "}, wantName: "My Project", wantPipe: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			name, location, pipeDelimited, valid := parseExplicitProjectCreatePipeArgs(tc.args)
+			if name != tc.wantName || location != tc.wantLocation || pipeDelimited != tc.wantPipe || valid != tc.wantValid {
+				t.Fatalf("parseExplicitProjectCreatePipeArgs(%v) = %q, %q, %v, %v; want %q, %q, %v, %v", tc.args, name, location, pipeDelimited, valid, tc.wantName, tc.wantLocation, tc.wantPipe, tc.wantValid)
+			}
+		})
 	}
 }
 
