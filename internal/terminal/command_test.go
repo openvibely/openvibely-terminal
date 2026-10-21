@@ -1896,6 +1896,47 @@ func TestSkillsHelpDocumentsEquivalentAutomaticLoadingAliases(t *testing.T) {
 	}
 }
 
+func TestSkillsGuideSeparatesTUISlashSyntaxFromShellCommands(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed while locating docs/user-guide.md")
+	}
+	guide, err := os.ReadFile(filepath.Join(filepath.Dir(source), "..", "..", "docs", "user-guide.md"))
+	if err != nil {
+		t.Fatalf("read docs/user-guide.md: %v", err)
+	}
+	guideText := string(guide)
+
+	if want := "In the interactive TUI, use the\nslash command:\n\n```text\n/skills load retry-logic\n```"; !strings.Contains(guideText, want) {
+		t.Fatalf("user guide must label slash syntax as TUI input; missing:\n%s", want)
+	}
+
+	cliIntro := "For one-shot CLI use, omit the leading slash and select the project explicitly:\n\n"
+	cliStart := strings.Index(guideText, cliIntro)
+	if cliStart < 0 {
+		t.Fatalf("user guide is missing the one-shot CLI explanation %q", cliIntro)
+	}
+	cliSection := guideText[cliStart+len(cliIntro):]
+	fenceStart := strings.Index(cliSection, "```bash\n")
+	if fenceStart < 0 {
+		t.Fatal("user guide is missing a Bash fenced block for one-shot skills commands")
+	}
+	cliSection = cliSection[fenceStart+len("```bash\n"):]
+	fenceEnd := strings.Index(cliSection, "\n```")
+	if fenceEnd < 0 {
+		t.Fatal("one-shot skills Bash block is not closed")
+	}
+	commands := strings.Split(cliSection[:fenceEnd], "\n")
+	wantCommands := []string{
+		"openvibely-terminal -project demo skills load retry-logic",
+		"openvibely-terminal -project demo skills add retry-logic --file retry.md",
+		"openvibely-terminal -project demo skills edit retry-logic --file retry.md",
+	}
+	if !slices.Equal(commands, wantCommands) {
+		t.Fatalf("one-shot skills Bash commands = %#v, want only directly invokable CLI commands %#v", commands, wantCommands)
+	}
+}
+
 func TestWorkersHelpRefreshIntervalUsesRuntimeSetting(t *testing.T) {
 	cmd := lookupCommand("workers")
 	if cmd == nil {

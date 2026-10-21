@@ -239,11 +239,16 @@ selected skill's full body in the same editor. Inline bodies remain supported wi
 file with `skills add <name> --file <path>` or `skills edit <skill> --file <path>`.
 
 `/skills always <skill>` and `/skills load <skill>` are equivalent project-scoped
-names for marking a skill for automatic loading. The same syntax is available in
-one-shot mode by omitting the leading slash and selecting the project explicitly:
+names for marking a skill for automatic loading. In the interactive TUI, use the
+slash command:
+
+```text
+/skills load retry-logic
+```
+
+For one-shot CLI use, omit the leading slash and select the project explicitly:
 
 ```bash
-/skills load retry-logic
 openvibely-terminal -project demo skills load retry-logic
 openvibely-terminal -project demo skills add retry-logic --file retry.md
 openvibely-terminal -project demo skills edit retry-logic --file retry.md
