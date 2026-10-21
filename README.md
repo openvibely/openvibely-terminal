@@ -378,5 +378,13 @@ bounded-list or status-latency performance contracts:
 OPENVIBELY_PERF_EVIDENCE=1 go test ./internal/client ./internal/terminal -run 'TestList(Alerts|Automations)BoundedLargeCatalogLatencyAndAllocations|TestCLIStatus(LatencyOverlapsBalancedAndSlowDiscovery|UsesTwoDelayedRequestWaves|DeadlineAfterProjectSelectionCancelsEveryStartedRequest)|TestWebhooksCanonicalIDCatalogPerformanceEvidence|TestRenderLifecycleEventsBackendShapedMeasurements' -count=1 -v
 ```
 
+The filtered skills JSON small-set latency and allocation evidence uses paired
+samples. Its serial-versus-bounded benchmark uses ten fixed repetitions per case:
+
+```bash
+OPENVIBELY_PERF_EVIDENCE=1 go test ./internal/client ./internal/terminal -run '^Test(LoadSkillDetailsSmallSetAllocationEvidence|FilteredSkillsSmallSetLatencyEvidence)$' -count=1 -v
+go test ./internal/terminal -run '^$' -bench '^BenchmarkListSkillsWithFilteredContentSerialVsBounded$' -benchtime=10x -benchmem -count=1 -v
+```
+
 See the [development section](docs/user-guide.md#development) for coverage and
 live-backend test instructions.

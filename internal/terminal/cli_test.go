@@ -409,6 +409,17 @@ func TestCLISkillsJSONFilterMatchesPlainSummaryFields(t *testing.T) {
 		if !slices.Equal(gotHandles, wantHandles) {
 			t.Fatalf("filtered handles = %#v, want %#v; output %s", gotHandles, wantHandles, out.String())
 		}
+		wantJSON, err := json.Marshal([]client.Skill{
+			{Handle: "deploy-runbook", Name: "Runbook", Description: "Ship safely", Scope: "project", Source: "project", Content: "deploy-runbook instructions", Enabled: true},
+			{Handle: "release-plan", Name: "Deploy Planner", Description: "Prepare release notes", Scope: "project", Source: "project", Content: "release-plan instructions", Enabled: true},
+			{Handle: "safety-checks", Name: "Safety Checks", Description: "Validate deploy readiness", Scope: "global", Source: "global", Content: "safety-checks instructions", AlwaysUse: true},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotJSON := strings.TrimSpace(out.String()); gotJSON != string(wantJSON) {
+			t.Fatalf("filtered JSON bytes = %s, want %s", gotJSON, wantJSON)
+		}
 		for _, skill := range skills {
 			if skill.Content == "" {
 				t.Fatalf("filtered skill %q lost full-content schema: %+v", skill.Handle, skill)
@@ -424,6 +435,25 @@ func TestCLISkillsJSONFilterMatchesPlainSummaryFields(t *testing.T) {
 		}
 		if got := rec.count("GET", "/skills/rollback-only/details"); got != 0 {
 			t.Fatalf("nonmatching detail requests = %d, want zero; calls:\n%s", got, rec.all())
+		}
+	})
+
+	t.Run("human-readable filter still lists summaries only", func(t *testing.T) {
+		c, rec := cliFilteredSkillsServer(t)
+		var out bytes.Buffer
+		if err := RunCLI(c, &out, "demo", []string{"skills", "deploy"}, false, false); err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"deploy-runbook", "Prepare release notes", "Validate deploy readiness"} {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("filtered summary output missing %q: %s", want, out.String())
+			}
+		}
+		if strings.Contains(out.String(), "rollback-only") || strings.Contains(out.String(), "Undo a release") {
+			t.Fatalf("human-readable filter included nonmatching skill: %s", out.String())
+		}
+		if got := rec.count("GET", "/skills/deploy-runbook/details") + rec.count("GET", "/skills/release-plan/details") + rec.count("GET", "/skills/safety-checks/details"); got != 0 {
+			t.Fatalf("human-readable filter fetched %d detail bodies; calls:\n%s", got, rec.all())
 		}
 	})
 

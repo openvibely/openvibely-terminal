@@ -829,6 +829,14 @@ func (c *Client) ListSkillsWithContent(ctx context.Context, projectID string) ([
 	if err != nil {
 		return nil, err
 	}
+	return c.LoadSkillDetails(ctx, projectID, skills)
+}
+
+// LoadSkillDetails replaces the supplied skill summaries with their full detail
+// records. The input order is preserved and concurrent detail requests are
+// bounded; callers can pass a filtered catalog to avoid fetching unmatched
+// content.
+func (c *Client) LoadSkillDetails(ctx context.Context, projectID string, skills []Skill) ([]Skill, error) {
 	if len(skills) == 0 {
 		return skills, nil
 	}
