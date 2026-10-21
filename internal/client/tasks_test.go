@@ -607,12 +607,12 @@ func TestTaskDetailGoalStateSeparatesLifecycleFromExecutionStatus(t *testing.T) 
 
 func TestGetTaskParsesSavedChainingConfiguration(t *testing.T) {
 	const taskID = "0123456789abcdef0123456789abcdef"
-	controlMarkup := func(enabled, trigger, category, modelID, modelLabel, override string) string {
+	controlMarkup := func(enabled, trigger, category, modelID, modelLabel, override string, markSelected bool) string {
 		return `<form data-chain-form>
 			<input type="hidden" name="chain_enabled" value="` + enabled + `">
-			<select name="chain_trigger"><option value="on_completion"` + selectedAttribute(trigger == "on_completion") + `>On task completion</option><option value="on_planning_complete"` + selectedAttribute(trigger == "on_planning_complete") + `>On planning complete</option></select>
-			<select name="chain_child_category"><option value=""` + selectedAttribute(category == "") + `>Same as parent</option><option value="active"` + selectedAttribute(category == "active") + `>Active (run immediately)</option><option value="backlog"` + selectedAttribute(category == "backlog") + `>Backlog</option></select>
-			<select name="chain_child_agent_id"><option value="">Use default model</option><option value="` + modelID + `"` + selectedAttribute(modelID != "") + `>` + modelLabel + `</option></select>
+			<select name="chain_trigger"><option value="on_completion"` + selectedAttribute(markSelected && trigger == "on_completion") + `>On task completion</option><option value="on_planning_complete"` + selectedAttribute(markSelected && trigger == "on_planning_complete") + `>On planning complete</option></select>
+			<select name="chain_child_category"><option value=""` + selectedAttribute(markSelected && category == "") + `>Same as parent</option><option value="active"` + selectedAttribute(markSelected && category == "active") + `>Active (run immediately)</option><option value="backlog"` + selectedAttribute(markSelected && category == "backlog") + `>Backlog</option></select>
+			<select name="chain_child_agent_id"><option value="">Use default model</option><option value="` + modelID + `"` + selectedAttribute(markSelected && modelID != "") + `>` + modelLabel + `</option></select>
 			<input type="text" name="chain_child_model" value="` + override + `">
 		</form>`
 	}
@@ -625,6 +625,8 @@ func TestGetTaskParsesSavedChainingConfiguration(t *testing.T) {
 		modelID    string
 		model      string
 		override   string
+		noSelected bool
+		controls   string
 		want       []string
 	}{
 		{
@@ -652,6 +654,16 @@ func TestGetTaskParsesSavedChainingConfiguration(t *testing.T) {
 			enabled: "false", trigger: "on_completion",
 			want: []string{"Follow-up task: disabled", "Trigger: After task completion", "Child category: Same as parent", "Child model: Use default model"},
 		},
+		{
+			name: "configured chain falls back to first options without selected markers", configured: "true",
+			enabled: "false", trigger: "on_planning_complete", category: "backlog", modelID: "model-2", model: "GPT 5", noSelected: true,
+			want: []string{"Follow-up task: disabled", "Trigger: After task completion", "Child category: Same as parent", "Child model: Use default model"},
+		},
+		{
+			name: "configured chain handles missing and empty selects", configured: "true",
+			controls: `<form data-chain-form><input type="hidden" name="chain_enabled" value="false"><select name="chain_child_category"></select></form>`,
+			want:     []string{"Follow-up task: disabled", "Trigger: After task completion", "Child category: Same as parent", "Child model: Use default model"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -661,11 +673,15 @@ func TestGetTaskParsesSavedChainingConfiguration(t *testing.T) {
 				if r.URL.Path != "/tasks/"+taskID || r.URL.Query().Get("project_id") != "p1" {
 					t.Fatalf("unexpected scoped request %s", r.URL.RequestURI())
 				}
+				controls := tc.controls
+				if controls == "" {
+					controls = controlMarkup(tc.enabled, tc.trigger, tc.category, tc.modelID, tc.model, tc.override, !tc.noSelected)
+				}
 				markup := `<div data-task-id="` + taskID + `" data-project-id="p1" data-task-status="running" data-task-category="active">
 					<h2 class="font-bold">Exact task</h2>
 					<div id="tab-chaining"><div id="task-chain-panel" data-configured="` + tc.configured + `">
 						<p data-chain-empty>No follow-up configured. Stale browser empty state.</p>
-						` + controlMarkup(tc.enabled, tc.trigger, tc.category, tc.modelID, tc.model, tc.override) + `
+						` + controls + `
 						<dialog hidden><p>DELETE CONFIRMATION COPY MUST NOT APPEAR</p></dialog>
 					</div></div>
 				</div>`
