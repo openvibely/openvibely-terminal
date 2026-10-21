@@ -1650,7 +1650,8 @@ func TestParseAutomationDetailBuildsRealisticBoundedSecretSafeConfigSummaries(t 
 			<div><dt>Category</dt><dd>scheduled</dd></div><div><dt>Clear Context On Start</dt><dd>true</dd></div><div><dt>Enabled</dt><dd>true</dd></div><div><dt>Goal</dt><dd>TOP-SECRET-GOAL</dd></div><div><dt>Model</dt><dd>Project default</dd></div><div><dt>Priority</dt><dd>2</dd></div><div><dt>Prompt</dt><dd>TOP-SECRET-PROMPT</dd></div><div><dt>Repeat Interval</dt><dd>2</dd></div><div><dt>Repeat Type</dt><dd>daily</dd></div><div><dt>Run At</dt><dd>09:30</dd></div><div><dt>Api Token</dt><dd>TOP-SECRET-TOKEN</dd></div>
 		</dl></section>
 		<section data-automation-live-node-detail="pull-request" data-automation-live-node-id="n2"><h3>Pull request</h3><p>pull-request · open_pull_request</p><span class="badge">action</span><dl>
-			<div><dt>Agent Ref</dt><dd>reviewer</dd></div><div><dt>Model</dt><dd>Project default</dd></div><div><dt>Base</dt><dd>main</dd></div><div><dt>Draft</dt><dd>true</dd></div><div><dt>Prompt</dt><dd>TOP-SECRET-PROMPT</dd></div><div><dt>Api Token</dt><dd>TOP-SECRET-TOKEN</dd></div>
+			<div><dt>Agent Ref</dt><dd>reviewer</dd></div><div><dt>Model</dt><dd>Project default</dd></div><div><dt>Base</dt><dd>main</dd></div><div><dt>Draft</dt><dd>true</dd></div><div><dt>Prompt</dt><dd>TOP-SECRET-PROMPT</dd></div><div><dt>Pull Request Instructions</dt><dd>TOP-SECRET-INSTRUCTIONS</dd></div>
+			<div><dt>Api Token</dt><dd>TOP-SECRET-TOKEN</dd></div><div><dt>API Key</dt><dd>TOP-SECRET-API-KEY</dd></div><div><dt>Password</dt><dd>TOP-SECRET-PASSWORD</dd></div><div><dt>Credentials</dt><dd>TOP-SECRET-CREDENTIALS</dd></div><div><dt>Repository URL</dt><dd>https://example.test/private</dd></div>
 		</dl></section></div>`)
 	if err != nil {
 		t.Fatal(err)
@@ -1658,17 +1659,69 @@ func TestParseAutomationDetailBuildsRealisticBoundedSecretSafeConfigSummaries(t 
 	if len(detail.Nodes) != 2 {
 		t.Fatalf("nodes = %+v", detail.Nodes)
 	}
-	var summaries string
-	for _, node := range detail.Nodes {
-		summaries += node.ConfigSummary + "\n"
+	wantSummaries := []string{
+		"Run At=09:30; Repeat Type=daily; Repeat Interval=2; Enabled=true; Model=Project default; Category=scheduled",
+		"Base=main; Draft=true; Agent Ref=reviewer; Model=Project default; Prompt=configured; Pull Request Instructions=configured",
 	}
-	for _, want := range []string{"Enabled=true", "Run At=09:30", "Repeat Type=daily", "Repeat Interval=2", "Agent Ref=reviewer", "Base=main", "Draft=true", "Prompt=configured"} {
-		if !strings.Contains(summaries, want) {
-			t.Errorf("summaries missing %q: %q", want, summaries)
+	var summaries string
+	for i, node := range detail.Nodes {
+		summaries += node.ConfigSummary + "\n"
+		if node.ConfigSummary != wantSummaries[i] {
+			t.Errorf("node %q summary = %q, want %q", node.Name, node.ConfigSummary, wantSummaries[i])
 		}
 	}
-	if strings.Contains(summaries, "TOP-SECRET") || strings.Contains(strings.ToLower(summaries), "api token") {
-		t.Fatalf("secret leaked in summaries: %q", summaries)
+	for _, secret := range []string{"TOP-SECRET", "api token", "api key", "password", "credentials", "private"} {
+		if strings.Contains(strings.ToLower(summaries), strings.ToLower(secret)) {
+			t.Fatalf("sensitive or unsupported value %q leaked in summaries: %q", secret, summaries)
+		}
+	}
+}
+
+func TestAutomationNodeConfigSummaryUsesDescriptorsForCollectionAndEmission(t *testing.T) {
+	section, err := html.Parse(strings.NewReader(`<section><dl>
+		<div><dt>Early</dt><dd>private instructions</dd></div>
+		<div><dt>Unsupported</dt><dd>must not appear</dd></div>
+		<div><dt>Late</dt><dd>visible</dd></div>
+	</dl></section>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptors := []automationNodeConfigFieldDescriptor{
+		{label: "late"},
+		{label: "early", redact: true},
+	}
+	got := automationNodeConfigSummaryWithDescriptors(section, descriptors)
+	if want := "Late=visible; Early=configured"; got != want {
+		t.Fatalf("summary = %q, want descriptor-controlled collection and order %q", got, want)
+	}
+}
+
+func TestAutomationNodeConfigSummaryTruncatesOrdinaryValuesAndCapsFields(t *testing.T) {
+	section, err := html.Parse(strings.NewReader(`<section><dl>
+		<div><dt>Enabled</dt><dd>true</dd></div>
+		<div><dt>Interval</dt><dd>interval</dd></div>
+		<div><dt>Repeat Interval</dt><dd>repeat-interval</dd></div>
+		<div><dt>Repeat</dt><dd>repeat</dd></div>
+		<div><dt>Repeat Type</dt><dd>daily</dd></div>
+		<div><dt>Time</dt><dd>time</dd></div>
+		<div><dt>Run At</dt><dd>` + strings.Repeat("界", 41) + `</dd></div>
+		<div><dt>Run At</dt><dd>later duplicate</dd></div>
+		<div><dt>Api-Key</dt><dd>TOP-SECRET-API-KEY</dd></div>
+		<div><dt>Access Token</dt><dd>TOP-SECRET-TOKEN</dd></div>
+	</dl></section>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := automationNodeConfigSummary(section)
+	want := "Run At=" + strings.Repeat("界", 39) + "…; Time=time; Repeat Type=daily; Repeat=repeat; Repeat Interval=repeat-interval; Interval=interval"
+	if got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+	if len([]rune(strings.SplitN(got, "; ", 2)[0])) != 47 { // "Run At=" plus 40 value runes
+		t.Fatalf("truncated field rune length = %d, want 47: %q", len([]rune(strings.SplitN(got, "; ", 2)[0])), got)
+	}
+	if strings.Contains(got, "Enabled") || strings.Contains(got, "later duplicate") || strings.Contains(got, "TOP-SECRET") {
+		t.Fatalf("summary exceeded the cap, lost first-seen behavior, or leaked a secret: %q", got)
 	}
 }
 
