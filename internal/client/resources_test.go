@@ -2689,7 +2689,7 @@ func TestGetScheduleIncludesFutureSchedulesAndDeduplicatesRecurringOccurrences(t
 	}
 }
 
-func TestGetScheduleLegacyFallbackUsesAttachmentFreeTaskBoardAndKeepsFutureSchedules(t *testing.T) {
+func TestGetScheduleLegacyFallbackPreservesScheduledTasksOutsideBoard(t *testing.T) {
 	const futureRun = "2037-09-15T16:45:12.125+02:00"
 	counts := make(map[string]int)
 	var countsMu sync.Mutex
@@ -2700,26 +2700,26 @@ func TestGetScheduleLegacyFallbackUsesAttachmentFreeTaskBoardAndKeepsFutureSched
 		if r.URL.Query().Get("project_id") != "p1" {
 			t.Errorf("request %s lost project scope", r.URL.RequestURI())
 		}
-		w.Header().Set("Content-Type", "text/html")
 		switch r.URL.Path {
 		case "/api/schedules/catalog":
 			http.NotFound(w, r)
 		case "/schedule":
+			w.Header().Set("Content-Type", "text/html")
 			_, _ = io.WriteString(w, `<div id="schedule-content">Calendar summary</div>`)
-		case "/tasks":
-			_, _ = io.WriteString(w, `<div id="task-board">
-				<div data-task-id="t-future" data-task-category="active" data-task-status="pending"><a href="/tasks/t-future" title="Future report">Future report</a></div>
-				<div data-task-id="t-empty" data-task-category="active" data-task-status="pending"><a href="/tasks/t-empty" title="No schedule">No schedule</a></div>
-			</div>`)
-		case "/tasks/t-future":
+		case "/api/tasks/reference-catalog":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-hidden","project_id":"p1","title":"Future report","category":"scheduled","status":"pending"},{"id":"t-empty","project_id":"p1","title":"No schedule","category":"active","status":"pending"}]}`)
+		case "/tasks/t-hidden":
 			if r.URL.Query().Get("tab") != "schedules" {
 				t.Errorf("future task request = %s, want schedules tab", r.URL.RequestURI())
 			}
+			w.Header().Set("Content-Type", "text/html")
 			_, _ = io.WriteString(w, `<div id="task-detail-content"><div id="schedule-card-future" data-schedule-id="s-future" data-schedule-enabled="false" data-schedule-next-run="`+futureRun+`"><div class="font-semibold">Future report</div><span>Next: 2037-09-15 4:45 PM</span></div></div>`)
 		case "/tasks/t-empty":
 			if r.URL.Query().Get("tab") != "schedules" {
 				t.Errorf("empty task request = %s, want schedules tab", r.URL.RequestURI())
 			}
+			w.Header().Set("Content-Type", "text/html")
 			_, _ = io.WriteString(w, `<div id="task-detail-content"><div class="empty-state">No schedules</div></div>`)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
@@ -2739,14 +2739,14 @@ func TestGetScheduleLegacyFallbackUsesAttachmentFreeTaskBoardAndKeepsFutureSched
 	if summary != "Calendar summary" || len(entries) != 1 {
 		t.Fatalf("fallback result summary=%q entries=%+v, want one future schedule", summary, entries)
 	}
-	if entries[0].ScheduleID != "s-future" || entries[0].NextRun == nil || entries[0].NextRun.Format(time.RFC3339Nano) != futureRun || entries[0].Status() != ScheduleStatusPaused {
-		t.Fatalf("future fallback entry = %+v, want exact timestamp and paused state", entries[0])
+	if entries[0].TaskID != "t-hidden" || entries[0].ScheduleID != "s-future" || entries[0].NextRun == nil || entries[0].NextRun.Format(time.RFC3339Nano) != futureRun || entries[0].Status() != ScheduleStatusPaused {
+		t.Fatalf("future fallback entry = %+v, want hidden task, exact timestamp, and paused state", entries[0])
 	}
-	if counts["/api/schedules/catalog"] != 1 || counts["/schedule"] != 1 || counts["/tasks"] != 1 || counts["/tasks/t-future"] != 1 || counts["/tasks/t-empty"] != 1 {
+	if counts["/api/schedules/catalog"] != 1 || counts["/schedule"] != 1 || counts["/api/tasks/reference-catalog"] != 1 || counts["/tasks/t-hidden"] != 1 || counts["/tasks/t-empty"] != 1 {
 		t.Fatalf("fallback request counts = %v", counts)
 	}
-	if counts["/api/tasks/reference-catalog"] != 0 {
-		t.Fatalf("fallback downloaded task reference snapshots %d times", counts["/api/tasks/reference-catalog"])
+	if counts["/tasks"] != 0 {
+		t.Fatalf("fallback queried incomplete task board %d times", counts["/tasks"])
 	}
 }
 
