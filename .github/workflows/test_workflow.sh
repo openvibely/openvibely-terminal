@@ -73,7 +73,18 @@ validate_workflow_fields() {
     fail "coverage summary is not success-gated"
 }
 
+workflow_validation_run=$(extract_step_field "$workflow" "Validate vet/test workflow behavior" run 8)
+[[ "$workflow_validation_run" == "bash .github/workflows/test_workflow.sh" ]] ||
+  fail "workflow behavior validation step changed: $workflow_validation_run"
+
 validate_workflow_fields "$workflow"
+
+portable_build_run=$(extract_step_field "$workflow" "Build all Go packages" run 8)
+[[ "$portable_build_run" == "go build ./..." ]] ||
+  fail "portable workflow build command changed: $portable_build_run"
+portable_test_run=$(extract_step_field "$workflow" "Run all Go tests" run 8)
+[[ "$portable_test_run" == "go test ./... -timeout 120s" ]] ||
+  fail "portable workflow test command changed: $portable_test_run"
 
 run_line=$(grep -n '^      - name: Run vet and all tests with coverage$' "$workflow" | cut -d: -f1)
 summary_line=$(grep -n '^      - name: Show coverage summary$' "$workflow" | cut -d: -f1)
@@ -81,9 +92,6 @@ if (( run_line >= summary_line )); then
   fail "coverage summary is not after verification"
 fi
 
-if grep -Eq 'go (vet|test) ./\.\.\.' "$workflow"; then
-  fail "workflow duplicates vet/test command bodies instead of calling the shared script"
-fi
 [[ "$(grep -cF '.github/workflows/vet-test-coverage.sh' "$bench_helper")" -eq 1 ]] ||
   fail "benchmark helper does not call the shared script exactly once"
 if grep -Eq 'go (vet|test) ./\.\.\.' "$bench_helper"; then
@@ -323,8 +331,16 @@ case "${1-}" in
     sleep "${FAKE_TEST_DELAY:-0.01}" &
     child_pid=$!
     printf '%s\n' "$child_pid" >"$log.test-child-pid"
-    wait "$child_pid"
+    child_status=0
+    wait "$child_pid" || child_status=$?
     child_pid=
+    if [[ "${FAKE_TEST_TIMEOUT:-false}" == true && "$child_status" -ne 0 ]]; then
+      printf 'test-timeout-%s\n' "$run_id" >>"$log"
+      exit 1
+    fi
+    if (( child_status != 0 )); then
+      exit "$child_status"
+    fi
     if [[ "${FAKE_EMPTY_COVERAGE:-false}" == true ]]; then
       : >"$profile"
     else
@@ -528,6 +544,91 @@ run_interrupted_shared() {
   assert_stopped "$test_child_pid"
 }
 
+run_test_timeout_shared() {
+  local name=$1
+  local case_dir="$test_root/$name"
+  local log="$case_dir/events.log"
+  local workflow_log="$case_dir/workflow.log"
+  local workflow_pid status=0
+  local test_pid test_child_pid vet_pid vet_child_pid
+  local vet_done timeout_line returned
+
+  make_fixture "$case_dir"
+  (
+    cd "$case_dir"
+    FAKE_LOG="$log" \
+    FAKE_RUN_ID="$name" \
+    FAKE_SOURCE="$case_dir/fixture.go" \
+    FAKE_VET_STATUS=0 \
+    FAKE_TEST_STATUS=0 \
+    FAKE_TEST_TIMEOUT=true \
+    FAKE_UNCACHED=true \
+    FAKE_EXPECT_VET_GOMAXPROCS=1 \
+    FAKE_VET_DELAY=0.5 \
+    FAKE_TEST_DELAY=5 \
+    VTC_MODE=uncached \
+    VTC_GITHUB_ANNOTATIONS=true \
+    PATH="$fake_bin:$original_path" \
+      exec setsid "$shared_script" >"$workflow_log" 2>&1
+  ) &
+  workflow_pid=$!
+
+  for _ in {1..100}; do
+    if [[ -s "$log.vet-pid" && -s "$log.vet-child-pid" &&
+      -s "$log.test-pid" && -s "$log.test-child-pid" ]]; then
+      break
+    fi
+    sleep 0.01
+  done
+  [[ -s "$log.vet-pid" && -s "$log.vet-child-pid" &&
+    -s "$log.test-pid" && -s "$log.test-child-pid" ]] ||
+    fail "$name did not start both children before the test timeout"
+
+  test_pid=$(<"$log.test-pid")
+  test_child_pid=$(<"$log.test-child-pid")
+  vet_pid=$(<"$log.vet-pid")
+  vet_child_pid=$(<"$log.vet-child-pid")
+  kill -TERM "$test_child_pid" 2>/dev/null ||
+    fail "$name could not terminate the timed-out test binary"
+
+  if wait "$workflow_pid"; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 1 ]] ||
+    fail "$name returned $status, expected the wrapper's test-failure status 1"
+  grep -Fq "::error::go test ./... failed with exit code 1" "$workflow_log" ||
+    fail "$name did not report the Go test timeout"
+  grep -Fxq "test-timeout-$name" "$log" ||
+    fail "$name did not observe the simulated Go timeout"
+  vet_done=$(line_for "vet-done-$name" "$log")
+  timeout_line=$(line_for "test-timeout-$name" "$log")
+  [[ -n "$vet_done" ]] ||
+    fail "$name returned before vet completed after the test timeout"
+  [[ -n "$timeout_line" ]] || fail "$name did not observe the test timeout"
+  if (( timeout_line >= vet_done )); then
+    fail "$name did not overlap the timed-out test with vet"
+  fi
+  printf 'runner-returned-%s\n' "$name" >>"$log"
+  returned=$(line_for "runner-returned-$name" "$log")
+  if (( vet_done >= returned )); then
+    fail "$name returned before vet was reaped after the test timeout"
+  fi
+
+  for pid in "$test_pid" "$test_child_pid" "$vet_pid" "$vet_child_pid"; do
+    for _ in {1..100}; do
+      if ! kill -0 "$pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.01
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      fail "$name left process $pid running after the test timeout"
+    fi
+  done
+}
+
 run_benchmark_helper_case() {
   local case_dir="$test_root/benchmark-helper"
   local metrics="$case_dir/metrics"
@@ -578,7 +679,7 @@ run_case default-vet-cap 0 0 0 true default
 run_case empty-coverage 0 0 1 true 1 true
 run_interrupted_shared cancellation TERM 143
 run_interrupted_shared interrupt INT 130
-run_interrupted_shared timeout TERM 143
+run_test_timeout_shared test-child-timeout
 run_benchmark_helper_case
 
 repeated_dir="$test_root/repeated-coverage"
