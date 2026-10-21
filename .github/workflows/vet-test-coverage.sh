@@ -110,40 +110,41 @@ run_timed() {
   fi
 }
 
-start_vet() {
+start_check() {
+  local check_name=$1
+  local runner=$2
+  local pid_variable=$3
+  local -a launch
+
   if [[ -n "$log_dir" ]]; then
     mkdir -p "$log_dir"
-    if command -v setsid >/dev/null 2>&1; then
-      setsid bash -c 'run_timed vet run_vet' >"$log_dir/vet.log" 2>&1 &
+    launch=(bash -c 'run_timed "$1" "$2"' _ "$check_name" "$runner")
+  else
+    launch=(bash -c '"$1"' _ "$runner")
+  fi
+
+  if command -v setsid >/dev/null 2>&1; then
+    if [[ -n "$log_dir" ]]; then
+      setsid "${launch[@]}" >"$log_dir/$check_name.log" 2>&1 &
     else
-      bash -c 'run_timed vet run_vet' >"$log_dir/vet.log" 2>&1 &
+      setsid "${launch[@]}" &
     fi
   else
-    if command -v setsid >/dev/null 2>&1; then
-      setsid bash -c 'run_vet' &
+    if [[ -n "$log_dir" ]]; then
+      "${launch[@]}" >"$log_dir/$check_name.log" 2>&1 &
     else
-      bash -c 'run_vet' &
+      "${launch[@]}" &
     fi
   fi
-  vet_pid=$!
+  printf -v "$pid_variable" '%s' "$!"
+}
+
+start_vet() {
+  start_check vet run_vet vet_pid
 }
 
 start_test() {
-  if [[ -n "$log_dir" ]]; then
-    mkdir -p "$log_dir"
-    if command -v setsid >/dev/null 2>&1; then
-      setsid bash -c 'run_timed test run_test' >"$log_dir/test.log" 2>&1 &
-    else
-      bash -c 'run_timed test run_test' >"$log_dir/test.log" 2>&1 &
-    fi
-  else
-    if command -v setsid >/dev/null 2>&1; then
-      setsid bash -c 'run_test' &
-    else
-      bash -c 'run_test' &
-    fi
-  fi
-  test_pid=$!
+  start_check test run_test test_pid
 }
 
 export -f now_ns write_metric run_vet run_test run_timed

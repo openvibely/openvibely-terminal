@@ -286,6 +286,7 @@ case "${1-}" in
       exit 98
     fi
     printf 'vet-start-%s\n' "$run_id" >>"$log"
+    printf 'vet-output-%s\n' "$run_id"
     printf '%s\n' "$$" >"$log.vet-pid"
     sleep "${FAKE_VET_DELAY:-0.25}" &
     child_pid=$!
@@ -327,6 +328,7 @@ case "${1-}" in
       exit 99
     fi
     printf 'test-start-%s\n' "$run_id" >>"$log"
+    printf 'test-output-%s\n' "$run_id"
     printf '%s\n' "$$" >"$log.test-pid"
     sleep "${FAKE_TEST_DELAY:-0.01}" &
     child_pid=$!
@@ -366,6 +368,10 @@ import sys
 for signum in (signal.SIGINT, signal.SIGTERM):
     signal.signal(signum, signal.SIG_DFL)
 
+if os.environ.get("FAKE_SETSID_LOG"):
+    with open(os.environ["FAKE_SETSID_LOG"], "a", encoding="utf-8") as log:
+        log.write("setsid\n")
+
 try:
     os.setsid()
 except PermissionError:
@@ -377,6 +383,13 @@ except PermissionError:
 os.execvp(sys.argv[1], sys.argv[1:])
 FAKE_SETSID
 chmod +x "$fake_bin/setsid"
+
+no_setsid_bin="$test_root/no-setsid-bin"
+mkdir -p "$no_setsid_bin"
+for tool in bash date mkdir sleep; do
+  ln -s "$(command -v "$tool")" "$no_setsid_bin/$tool"
+done
+ln -s "$fake_bin/go" "$no_setsid_bin/go"
 
 line_for() {
   local event=$1
@@ -392,11 +405,18 @@ run_shared() {
   local uncached=${5:-true}
   local vet_cap=${6:-1}
   local empty_coverage=${7:-false}
+  local logging=${8:-false}
+  local setsid_enabled=${9:-true}
   local status=0
   local log="$case_dir/events.log"
   local workflow_log="$case_dir/workflow-$run_id.log"
+  local setsid_log="$case_dir/setsid-$run_id.log"
+  local launch_path="$fake_bin:$original_path"
+  local log_dir=
   local mode=routine
   [[ "$uncached" == true ]] && mode=uncached
+  [[ "$logging" == true ]] && log_dir="$case_dir/process-logs"
+  [[ "$setsid_enabled" == true ]] || launch_path=$no_setsid_bin
 
   if (
     cd "$case_dir"
@@ -408,12 +428,14 @@ run_shared() {
     FAKE_UNCACHED="$uncached" \
     FAKE_EXPECT_VET_GOMAXPROCS="$vet_cap" \
     FAKE_EMPTY_COVERAGE="$empty_coverage" \
+    FAKE_SETSID_LOG="$setsid_log" \
     FAKE_VET_DELAY=0.25 \
     FAKE_TEST_DELAY=0.01 \
     VTC_MODE="$mode" \
     VTC_VET_GOMAXPROCS="$vet_cap" \
     VTC_GITHUB_ANNOTATIONS=true \
-    PATH="$fake_bin:$original_path" \
+    VTC_LOG_DIR="$log_dir" \
+    PATH="$launch_path" \
       "$shared_script" >"$workflow_log" 2>&1
   ); then
     status=0
@@ -448,6 +470,36 @@ run_shared() {
   if (( test_status != 0 && test_done >= vet_done )); then
     fail "$run_id did not overlap a failing test with vet"
   fi
+
+  local vet_pid test_pid setsid_count=0
+  vet_pid=$(<"$log.vet-pid")
+  test_pid=$(<"$log.test-pid")
+  [[ "$vet_pid" != "$test_pid" ]] || fail "$run_id reused a PID for vet and test"
+  if [[ -s "$setsid_log" ]]; then
+    setsid_count=$(grep -cF setsid "$setsid_log")
+  fi
+  if [[ "$setsid_enabled" == true ]]; then
+    [[ "$setsid_count" -eq 2 ]] || fail "$run_id did not launch both checks through setsid"
+  else
+    [[ "$setsid_count" -eq 0 ]] || fail "$run_id used setsid when it was unavailable"
+  fi
+  if [[ "$logging" == true ]]; then
+    [[ -s "$case_dir/process-logs/vet.log" ]] || fail "$run_id did not create vet.log"
+    [[ -s "$case_dir/process-logs/test.log" ]] || fail "$run_id did not create test.log"
+    grep -Fq "vet-output-$run_id" "$case_dir/process-logs/vet.log" ||
+      fail "$run_id did not keep vet output in vet.log"
+    grep -Fq "test-output-$run_id" "$case_dir/process-logs/test.log" ||
+      fail "$run_id did not keep test output in test.log"
+    ! grep -Fq "test-output-$run_id" "$case_dir/process-logs/vet.log" ||
+      fail "$run_id mixed test output into vet.log"
+    ! grep -Fq "vet-output-$run_id" "$case_dir/process-logs/test.log" ||
+      fail "$run_id mixed vet output into test.log"
+  else
+    grep -Fq "vet-output-$run_id" "$workflow_log" ||
+      fail "$run_id did not preserve unredirected vet output"
+    grep -Fq "test-output-$run_id" "$workflow_log" ||
+      fail "$run_id did not preserve unredirected test output"
+  fi
   RUN_STATUS=$status
 }
 
@@ -469,9 +521,11 @@ run_case() {
   local uncached=${5:-true}
   local vet_cap=${6:-1}
   local empty_coverage=${7:-false}
+  local logging=${8:-false}
+  local setsid_enabled=${9:-true}
   local case_dir="$test_root/$name"
   make_fixture "$case_dir"
-  run_shared "$case_dir" "$name" "$vet_status" "$test_status" "$uncached" "$vet_cap" "$empty_coverage"
+  run_shared "$case_dir" "$name" "$vet_status" "$test_status" "$uncached" "$vet_cap" "$empty_coverage" "$logging" "$setsid_enabled"
   if [[ "$RUN_STATUS" -ne "$expected" ]]; then
     fail "$name returned $RUN_STATUS, expected $expected"
   fi
@@ -507,13 +561,15 @@ run_interrupted_shared() {
   workflow_pid=$!
 
   for _ in {1..100}; do
-    if [[ -s "$log.vet-pid" && -s "$log.test-pid" ]]; then
+    if [[ -s "$log.vet-pid" && -s "$log.test-pid" &&
+      -s "$log.vet-child-pid" && -s "$log.test-child-pid" ]]; then
       break
     fi
     sleep 0.01
   done
-  [[ -s "$log.vet-pid" && -s "$log.test-pid" ]] ||
-    fail "$name did not start both children before interruption"
+  [[ -s "$log.vet-pid" && -s "$log.test-pid" &&
+    -s "$log.vet-child-pid" && -s "$log.test-child-pid" ]] ||
+    fail "$name did not start both checks and their child processes before interruption"
 
   kill -"$signal" "$workflow_pid" 2>/dev/null || fail "$name signal failed"
   if wait "$workflow_pid"; then
@@ -670,8 +726,13 @@ run_benchmark_helper_case() {
 }
 
 run_case clean-success 0 0 0
+run_case logged-with-setsid 0 0 0 true 1 false true true
+run_case logged-without-setsid 0 0 0 true 1 false true false
+run_case unlogged-without-setsid 0 0 0 true 1 false false false
 run_case vet-only-failure 7 0 1
+run_case vet-only-failure-logged-no-setsid 7 0 1 true 1 false true false
 run_case test-only-failure 0 9 1
+run_case test-only-failure-logged-setsid 0 9 1 true 1 false true true
 run_case dual-failure 7 9 1
 run_case routine-cacheable-flags 0 0 0 false
 run_case uncached-flags 0 0 0 true
