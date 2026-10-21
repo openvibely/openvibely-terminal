@@ -2345,6 +2345,28 @@ func TestTasksLifecycleEventBackendError(t *testing.T) {
 	}
 }
 
+func TestTasksSwarmCreateReportsNewSameTitleParent(t *testing.T) {
+	const oldCard = `<div data-task-id="swarm-old" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-old" title="Coordinate release">Coordinate release</a></div>`
+	const oldBoard = `<div class="kanban">` + oldCard + `</div>`
+	const mutationBoard = `<div class="kanban">` + oldCard + `<div data-task-id="swarm-new" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-new" title="Coordinate release">Coordinate release</a></div></div>`
+
+	m, rec := dispatchModel(t, map[string]string{
+		"GET /tasks":  oldBoard,
+		"POST /tasks": mutationBoard,
+	})
+	m = runLine(t, m, `/tasks swarm Coordinate release | Split validation across workers`)
+	out := transcript(m)
+	if !strings.Contains(out, "TASK_ID:swarm-new") || strings.Contains(out, "TASK_ID:swarm-old") {
+		t.Fatalf("swarm create reported the wrong task ID:\n%s", out)
+	}
+	if !rec.sawQuery("POST /tasks?project_id=p1") {
+		t.Fatalf("swarm create was not scoped to the selected project:\n%s", rec.all())
+	}
+	if len(m.log) == 0 || m.log[len(m.log)-1].role != "result" || !strings.Contains(m.log[len(m.log)-1].text, "TASK_ID:swarm-new") {
+		t.Fatalf("terminal result did not propagate the identified parent:\n%s", out)
+	}
+}
+
 func TestTasksSwarmCreateValidationAndOutput(t *testing.T) {
 	const swarmBoard = `<div data-task-id="swarm-parent" data-task-status="pending" data-task-category="backlog"><a href="/tasks/swarm-parent" title="Coordinate release">Coordinate release</a></div>`
 
