@@ -193,14 +193,26 @@ openvibely-terminal -project demo --force channels targets remove ops
 ```
 
 `targets` also accepts `outbound-targets`. Saved target list/show output is
-project-scoped and contains only platform, target kind, name, destination,
-thread/topic, Home state, and default subject; `--json` omits backend IDs and
-secrets and prints `[]` when no targets are saved. Slack and Discord support
-user-DM targets with `--kind user`; Slack channels, Telegram chats/topics,
-Email addresses, Discord channels, and X accounts use the corresponding backend
-forms and normalization. The backend remains authoritative for normalization
-and duplicate validation. Saved and draft tests report only `sent` or `failed`,
-without requiring credentials in the terminal or printing backend HTML.
+project-scoped. JSON includes each canonical `id` alongside platform, target
+kind, name, destination, thread/topic, Home state, and default subject; project
+IDs, credentials, and hidden backend fields remain omitted. Plain output stays
+compact and does not show IDs. JSON list output is `[]` when no targets are
+saved. Slack and Discord support user-DM targets with `--kind user`; Slack
+channels, Telegram chats/topics, Email addresses, Discord channels, and X
+accounts use the corresponding backend forms and normalization. The backend
+remains authoritative for normalization and duplicate validation. Saved and
+draft tests report only `sent` or `failed`, without requiring credentials in the
+terminal or printing backend HTML.
+
+Read an ID from list or show JSON and pass it as the target reference for a
+later edit or remove. IDs let scripts select one destination when different
+platforms use the same mutable name:
+
+```bash
+TARGET_ID=$(openvibely-terminal -project demo --json channels targets list | jq -r '.[] | select(.platform == "email" and .name == "shared") | .id')
+openvibely-terminal -project demo --json channels targets edit "$TARGET_ID" --default-subject Deployments
+openvibely-terminal -project demo --force --json channels targets remove "$TARGET_ID"
+```
 
 `targets policy on|off` reads or changes the selected project's
 explicit-unsaved-target setting. Removing by ID or name resolves only within

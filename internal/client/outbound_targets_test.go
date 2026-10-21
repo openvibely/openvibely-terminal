@@ -65,8 +65,11 @@ func TestGetOutboundTargetsParsesScopedSafeRowsAndPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "target-a") || strings.Contains(string(encoded), "project-2") || strings.Contains(string(encoded), "target_id") {
-		t.Fatalf("safe JSON leaked internal fields: %s", encoded)
+	if !strings.Contains(string(encoded), `"id":"target-a"`) || !strings.Contains(string(encoded), `"id":"target-b"`) {
+		t.Fatalf("safe JSON omitted canonical target IDs: %s", encoded)
+	}
+	if strings.Contains(string(encoded), "project-2") || strings.Contains(string(encoded), `"target_id"`) {
+		t.Fatalf("safe JSON leaked project or backend form fields: %s", encoded)
 	}
 	if wantJSON := `[ {"platform":"slack"}`; strings.HasPrefix(string(encoded), wantJSON) {
 		t.Fatalf("unexpected JSON spacing: %s", encoded)
@@ -85,6 +88,33 @@ func TestOutboundTargetsRequireRevisionForMutationSafety(t *testing.T) {
 	c := htmlServer(t, outboundTargetsFixture)
 	if err := c.SaveOutboundTargets(context.Background(), "project-2", nil, false, ""); err == nil || !strings.Contains(err.Error(), "reload the target list") {
 		t.Fatalf("save without revision error = %v, want reload guidance", err)
+	}
+}
+
+func TestOutboundTargetsJSONKeepsIDsForSameNamedCrossPlatformTargets(t *testing.T) {
+	body := `<div id="outbound-targets-section" data-project-id="project-2" data-revision="rev1"><form><input name="project_id" value="project-2"></form><table><tbody><tr data-outbound-target-draft-key="slack-id"></tr><tr data-outbound-target-draft-key="email-id"></tr></tbody></table><div id="outbound-targets-draft-fields"><div data-outbound-target-draft-key="slack-id"><input name="target_row_id" value="slack-id"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="shared-name"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="email-id"><input name="target_row_id" value="email-id"><input name="target_platform" value="email"><input name="target_kind" value="email"><input name="target_name" value="shared-name"><input name="target_target_id" value="person@example.com"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div></div>`
+	root, err := parseHTML(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := parseOutboundTargetsPage(root, "project-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Targets) != 2 || page.Targets[0].ID != "slack-id" || page.Targets[1].ID != "email-id" {
+		t.Fatalf("targets = %#v, want distinct canonical IDs", page.Targets)
+	}
+	encoded, err := json.Marshal(page.Targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"slack-id", "email-id"} {
+		if !strings.Contains(string(encoded), `"id":"`+id+`"`) {
+			t.Errorf("JSON %s omitted canonical ID: %s", id, encoded)
+		}
+	}
+	if strings.Contains(string(encoded), "project-2") || strings.Contains(string(encoded), `"target_id"`) {
+		t.Fatalf("JSON included private project or backend form fields: %s", encoded)
 	}
 }
 
@@ -490,8 +520,11 @@ func TestSaveOutboundTargetsWithResultParsesCanonicalTargetSafely(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "internal-row") || strings.Contains(string(encoded), "project-2") || strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "target_id\"") {
-		t.Fatalf("canonical save JSON leaked internal or credential data: %s", encoded)
+	if !strings.Contains(string(encoded), `"id":"internal-row"`) {
+		t.Fatalf("canonical save JSON omitted target ID: %s", encoded)
+	}
+	if strings.Contains(string(encoded), "project-2") || strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), `"target_id"`) {
+		t.Fatalf("canonical save JSON leaked project or credential data: %s", encoded)
 	}
 }
 

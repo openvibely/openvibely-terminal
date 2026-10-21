@@ -492,15 +492,13 @@ func TestOutboundTargetsJSONAddAndEditUseCanonicalSaveResponse(t *testing.T) {
 			if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &got); err != nil {
 				t.Fatalf("JSON output = %q: %v", out.String(), err)
 			}
-			internalID := canonical.ID
 			canonical.ProjectID = ""
-			canonical.ID = ""
 			canonical.TargetID = ""
 			if got.Action != tc.action || !reflect.DeepEqual(got.Target, canonical) {
 				t.Fatalf("action result = %#v, want %s %#v", got, tc.action, canonical)
 			}
-			if strings.Contains(out.String(), internalID) || strings.Contains(out.String(), "target-edit") || strings.Contains(out.String(), "project_id") || strings.Contains(out.String(), "credential-must-not-leak") || strings.Contains(out.String(), "must-not-leak") {
-				t.Fatalf("JSON exposed internal or credential data: %s", out.String())
+			if !strings.Contains(out.String(), `"id":"`+canonical.ID+`"`) || strings.Contains(out.String(), "project_id") || strings.Contains(out.String(), "p1") || strings.Contains(out.String(), "credential-must-not-leak") || strings.Contains(out.String(), "must-not-leak") {
+				t.Fatalf("JSON omitted target ID or exposed private data: %s", out.String())
 			}
 			if getCalls != 2 || postCalls != 1 {
 				t.Fatalf("requests GET/POST = %d/%d, want 2/1 including pre-save revalidation", getCalls, postCalls)
@@ -613,8 +611,16 @@ func TestOutboundTargetsPlainAddListAndShowUseCanonicalDestination(t *testing.T)
 	if err := json.Unmarshal([]byte(strings.TrimSpace(list.String())), &listed); err != nil {
 		t.Fatalf("list JSON = %q: %v", list.String(), err)
 	}
-	if len(listed) != 1 || listed[0].Destination != canonical.Destination {
-		t.Fatalf("list targets = %#v, want canonical target", listed)
+	if len(listed) != 1 || listed[0].ID != canonical.ID || listed[0].Destination != canonical.Destination {
+		t.Fatalf("list targets = %#v, want canonical ID and destination", listed)
+	}
+
+	var plainList bytes.Buffer
+	if err := RunCLI(c, &plainList, "demo", []string{"channels", "targets", "list"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plainList.String(), canonical.ID) || !strings.Contains(plainList.String(), canonical.Destination) {
+		t.Fatalf("plain list output should stay compact and omit the ID: %q", plainList.String())
 	}
 
 	var show bytes.Buffer
@@ -625,8 +631,16 @@ func TestOutboundTargetsPlainAddListAndShowUseCanonicalDestination(t *testing.T)
 	if err := json.Unmarshal([]byte(strings.TrimSpace(show.String())), &shown); err != nil {
 		t.Fatalf("show JSON = %q: %v", show.String(), err)
 	}
-	if shown.Destination != canonical.Destination {
-		t.Fatalf("show target = %#v, want canonical destination %q", shown, canonical.Destination)
+	if shown.ID != canonical.ID || shown.Destination != canonical.Destination {
+		t.Fatalf("show target = %#v, want canonical ID and destination %q", shown, canonical.Destination)
+	}
+
+	var plainShow bytes.Buffer
+	if err := RunCLI(c, &plainShow, "demo", []string{"channels", "targets", "show", "person"}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plainShow.String(), canonical.ID) || !strings.Contains(plainShow.String(), canonical.Destination) {
+		t.Fatalf("plain show output should stay compact and omit the ID: %q", plainShow.String())
 	}
 }
 
@@ -720,7 +734,7 @@ func TestOutboundTargetShowAndTestDirectAndSelectorParity(t *testing.T) {
 						t.Fatalf("show JSON = %q: %v", directMsg.body, err)
 					}
 					want := target
-					want.ID, want.ProjectID, want.TargetID = "", "", ""
+					want.ProjectID, want.TargetID = "", ""
 					if !reflect.DeepEqual(got, want) {
 						t.Fatalf("show JSON target = %#v, want %#v", got, want)
 					}
@@ -1488,11 +1502,11 @@ func TestOutboundTargetsCLIJSONAndForceSafety(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(out.String())), &targets); err != nil {
 		t.Fatalf("JSON output = %q: %v", out.String(), err)
 	}
-	if len(targets) != 1 || targets[0].Destination != "123456789" {
+	if len(targets) != 1 || targets[0].ID != "target-a" || targets[0].Destination != "123456789" {
 		t.Fatalf("JSON targets = %#v", targets)
 	}
-	if strings.Contains(out.String(), "target-a") || strings.Contains(out.String(), "project_id") {
-		t.Fatalf("CLI JSON leaked internal target fields: %s", out.String())
+	if !strings.Contains(out.String(), `"id":"target-a"`) || strings.Contains(out.String(), "project_id") || strings.Contains(out.String(), `"target_id"`) {
+		t.Fatalf("CLI JSON omitted target ID or exposed private target fields: %s", out.String())
 	}
 	if !rec.sawQuery("GET /channels/outbound-targets?project_id=p1") {
 		t.Fatalf("CLI list was not project scoped:\n%s", rec.all())
@@ -1506,6 +1520,115 @@ func TestOutboundTargetsCLIJSONAndForceSafety(t *testing.T) {
 	}
 	if rec.saw("POST", "/channels/send-message-explicit-targets") {
 		t.Fatal("unforced CLI remove mutated")
+	}
+}
+
+func TestOutboundTargetsCLIJSONSameNameTargetsCanBeMutatedByID(t *testing.T) {
+	targets := []client.OutboundTarget{
+		{ID: "slack-target-id", ProjectID: "p1", Platform: "slack", TargetKind: "channel", Name: "shared-name", Destination: "C123"},
+		{ID: "email-target-id", ProjectID: "p1", Platform: "email", TargetKind: "email", Name: "shared-name", Destination: "person@example.com"},
+	}
+	postCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", targets, false))
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			postCalls++
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse target mutation: %v", err)
+			}
+			ids := r.PostForm["target_row_id"]
+			if postCalls == 1 {
+				if len(ids) != 2 || ids[0] != "slack-target-id" || ids[1] != "email-target-id" {
+					t.Errorf("edit submitted row IDs = %v", ids)
+				}
+				if got := r.PostForm["target_target_id"]; len(got) != 2 || got[0] != "C123" || got[1] != "updated@example.com" {
+					t.Errorf("edit submitted destinations = %v", got)
+				}
+				targets[1].Destination = "updated@example.com"
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", targets, false))
+				return
+			}
+			if postCalls == 2 {
+				if len(ids) != 1 || ids[0] != "email-target-id" {
+					t.Errorf("remove submitted row IDs = %v, want only the other platform's target", ids)
+				}
+				targets = []client.OutboundTarget{targets[1]}
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div>saved</div>`)
+				return
+			}
+			t.Errorf("unexpected extra outbound target mutation #%d", postCalls)
+			http.Error(w, "unexpected mutation", http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var listedOut bytes.Buffer
+	if err := RunCLI(c, &listedOut, "demo", []string{"channels", "targets", "list"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var listed []client.OutboundTarget
+	if err := json.Unmarshal([]byte(strings.TrimSpace(listedOut.String())), &listed); err != nil {
+		t.Fatalf("list JSON = %q: %v", listedOut.String(), err)
+	}
+	if len(listed) != 2 || listed[0].ID != "slack-target-id" || listed[1].ID != "email-target-id" || listed[0].Name != listed[1].Name {
+		t.Fatalf("same-name list JSON = %#v", listed)
+	}
+	if strings.Contains(listedOut.String(), `"project_id"`) || strings.Contains(listedOut.String(), "p1") {
+		t.Fatalf("list JSON leaked project context: %s", listedOut.String())
+	}
+
+	var ambiguousOut bytes.Buffer
+	err = RunCLI(c, &ambiguousOut, "demo", []string{"channels", "targets", "edit", "shared-name", "--destination", "wrong@example.com"}, false, true)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") || postCalls != 0 {
+		t.Fatalf("name edit error/posts = %v/%d, want ambiguity without mutation", err, postCalls)
+	}
+
+	var editOut bytes.Buffer
+	if err := RunCLI(c, &editOut, "demo", []string{"channels", "targets", "edit", "email-target-id", "--destination", "updated@example.com"}, false, true); err != nil {
+		t.Fatal(err)
+	}
+	var edited outboundTargetActionJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(editOut.String())), &edited); err != nil {
+		t.Fatalf("edit JSON = %q: %v", editOut.String(), err)
+	}
+	if edited.Action != "edit" || edited.Target.ID != "email-target-id" || edited.Target.Platform != "email" || edited.Target.Destination != "updated@example.com" {
+		t.Fatalf("edit result = %#v", edited)
+	}
+	if strings.Contains(editOut.String(), `"project_id"`) || strings.Contains(editOut.String(), "p1") {
+		t.Fatalf("edit JSON leaked project context: %s", editOut.String())
+	}
+
+	var removeOut bytes.Buffer
+	if err := RunCLI(c, &removeOut, "demo", []string{"channels", "targets", "remove", "slack-target-id"}, true, true); err != nil {
+		t.Fatal(err)
+	}
+	var removed outboundTargetActionJSON
+	if err := json.Unmarshal([]byte(strings.TrimSpace(removeOut.String())), &removed); err != nil {
+		t.Fatalf("remove JSON = %q: %v", removeOut.String(), err)
+	}
+	if removed.Action != "remove" || removed.Target.ID != "slack-target-id" || removed.Target.Platform != "slack" {
+		t.Fatalf("remove result = %#v", removed)
+	}
+	if strings.Contains(removeOut.String(), `"project_id"`) || strings.Contains(removeOut.String(), "p1") {
+		t.Fatalf("remove JSON leaked project context: %s", removeOut.String())
+	}
+	if postCalls != 2 || len(targets) != 1 || targets[0].ID != "email-target-id" {
+		t.Fatalf("post calls/final targets = %d/%#v", postCalls, targets)
 	}
 }
 
