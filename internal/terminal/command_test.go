@@ -1269,9 +1269,9 @@ func TestRenderBoardFilters(t *testing.T) {
 }
 
 func TestRenderTaskDetailShowsTabs(t *testing.T) {
-	task := client.Task{ID: "t1", Title: "Refactor", Category: "active"}
+	task := client.Task{ID: "t1", Title: "Refactor", Category: "active", GoalState: "active"}
 	detail := &client.TaskDetail{
-		Task:     client.Task{Status: "running"},
+		Task:     client.Task{ID: "t1", Status: "running", GoalState: "paused"},
 		Details:  "the prompt",
 		Thread:   "agent: working",
 		Changes:  "2 files",
@@ -1290,6 +1290,9 @@ func TestRenderTaskDetailShowsTabs(t *testing.T) {
 	if want := "/tasks show <id> <" + detailTabHintList() + ">"; !strings.Contains(out, want) {
 		t.Errorf("detail hint missing %q:\n%s", want, out)
 	}
+	if !strings.Contains(out, "[goal: paused]") || !strings.Contains(out, "running") {
+		t.Errorf("detail should show paused goal separately from execution status:\n%s", out)
+	}
 
 	only := renderTaskDetail(task, detail, "chat")
 	if !strings.Contains(only, "Thread") || !strings.Contains(only, "agent: working") {
@@ -1297,6 +1300,18 @@ func TestRenderTaskDetailShowsTabs(t *testing.T) {
 	}
 	if strings.Contains(only, "2 files") {
 		t.Errorf("tab view should show one tab only:\n%s", only)
+	}
+}
+
+func TestRenderTaskDetailClearedGoalOverridesStaleReference(t *testing.T) {
+	task := client.Task{ID: "t1", Title: "Refactor", Category: "active", Status: "running", GoalState: "active"}
+	detail := &client.TaskDetail{Task: client.Task{ID: "t1", Status: "running"}}
+	out := stripANSI(renderTaskDetail(task, detail, ""))
+	if strings.Contains(out, "[goal:") {
+		t.Fatalf("cleared detail inherited stale goal state:\n%s", out)
+	}
+	if !strings.Contains(out, "running") {
+		t.Fatalf("task execution status missing:\n%s", out)
 	}
 }
 

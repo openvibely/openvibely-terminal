@@ -594,8 +594,15 @@ func renderBoard(tasks []client.Task, filter string) string {
 			} else {
 				title = truncate(title, 52)
 			}
-			if badges := renderBadges(t.Badges); badges != "" {
-				title += "  " + badges
+			badges := t.Badges
+			if t.GoalState != "" {
+				badges = withoutGoalBadge(badges)
+			}
+			if rendered := renderBadges(badges); rendered != "" {
+				title += "  " + rendered
+			}
+			if marker := renderGoalState(t.GoalState); marker != "" {
+				title += "  " + marker
 			}
 			rows = append(rows, []string{shortID(t.ID), statusMark(t.Status), title})
 		}
@@ -618,6 +625,25 @@ func renderBoard(tasks []client.Task, filter string) string {
 }
 
 // renderBadges renders card badges compactly, dropping noisy ones.
+func withoutGoalBadge(badges []string) []string {
+	filtered := make([]string, 0, len(badges))
+	for _, badge := range badges {
+		if strings.EqualFold(strings.TrimSpace(badge), "goal") {
+			continue
+		}
+		filtered = append(filtered, badge)
+	}
+	return filtered
+}
+
+func renderGoalState(state string) string {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		return ""
+	}
+	return badgeStyle.Render("[goal: " + state + "]")
+}
+
 func renderBadges(badges []string) string {
 	// Badges that are constant across rows carry no information in a list.
 	noise := map[string]bool{
@@ -653,7 +679,15 @@ func renderTaskDetail(t client.Task, d *client.TaskDetail, tab string) string {
 	if title == "" {
 		title = d.Task.Title
 	}
-	fmt.Fprintf(&b, "%s  %s\n", sectionStyle.Render(title), statusMark(firstNonEmpty(d.Task.Status, t.Status)))
+	goalState := t.GoalState
+	if strings.TrimSpace(d.Task.ID) != "" {
+		goalState = d.Task.GoalState
+	}
+	goalMarker := renderGoalState(goalState)
+	if goalMarker != "" {
+		goalMarker = "  " + goalMarker
+	}
+	fmt.Fprintf(&b, "%s  %s%s\n", sectionStyle.Render(title), statusMark(firstNonEmpty(d.Task.Status, t.Status)), goalMarker)
 	fmt.Fprintf(&b, "%s\n\n", dimStyle.Render(fmt.Sprintf("id %s · %s", t.ID, t.Category)))
 
 	if tab != "" {

@@ -30,8 +30,9 @@ type Task struct {
 	ProjectID         string   `json:"project_id"`
 	Title             string   `json:"title"`
 	Prompt            string   `json:"prompt"`
-	Category          string   `json:"category"` // backlog | active | completed | scheduled
-	Status            string   `json:"status"`   // pending | queued | running | completed | failed | cancelled | blocked
+	Category          string   `json:"category"`   // backlog | active | completed | scheduled
+	Status            string   `json:"status"`     // pending | queued | running | completed | failed | cancelled | blocked
+	GoalState         string   `json:"goal_state"` // active | paused | achieved | blocked | failed | empty when no current goal
 	Priority          int      `json:"priority,omitempty"`
 	DisplayOrder      int      `json:"display_order"`
 	Badges            []string `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
@@ -463,10 +464,21 @@ type taskReferenceCatalogEntry struct {
 	Prompt       string          `json:"prompt"`
 	Category     string          `json:"category"`
 	Status       string          `json:"status"`
+	GoalState    string          `json:"goal_state"`
 	Priority     int             `json:"priority,omitempty"`
 	DisplayOrder int             `json:"display_order"`
 	Badges       []string        `json:"badges"`
 	Attachments  json.RawMessage `json:"attachments"`
+}
+
+func normalizeTaskGoalState(state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "active", "paused", "achieved", "blocked", "failed":
+		return strings.ToLower(strings.TrimSpace(state))
+	default:
+		// Cleared and unknown states do not describe a current goal.
+		return ""
+	}
 }
 
 func decodeTaskReferenceEntries(raw json.RawMessage) ([]Task, error) {
@@ -478,7 +490,7 @@ func decodeTaskReferenceEntries(raw json.RawMessage) ([]Task, error) {
 	for _, entry := range entries {
 		task := Task{
 			ID: entry.ID, ProjectID: entry.ProjectID, Title: entry.Title, Prompt: entry.Prompt,
-			Category: entry.Category, Status: entry.Status, Priority: entry.Priority,
+			Category: entry.Category, Status: entry.Status, GoalState: normalizeTaskGoalState(entry.GoalState), Priority: entry.Priority,
 			DisplayOrder: entry.DisplayOrder, Badges: entry.Badges,
 		}
 		var attachments []Attachment
@@ -522,6 +534,7 @@ func parseTaskCards(root *html.Node, projectID string) []Task {
 			Prompt:            cardPrompt(n),
 			Category:          category,
 			Status:            attr(n, "data-task-status"),
+			GoalState:         normalizeTaskGoalState(attr(n, "data-task-goal-state")),
 			DisplayOrder:      order,
 			Badges:            cardBadges(n),
 			WorktreeBranch:    attr(n, "data-task-branch"),
@@ -961,6 +974,7 @@ func populateExactTaskMetadata(root *html.Node, task *Task) {
 	if taskDetailChainEnabled(root) {
 		appendBadge("Chain")
 	}
+	task.GoalState = taskDetailGoalState(root)
 	if taskDetailHasGoal(root) {
 		appendBadge("Goal")
 	}
@@ -1218,9 +1232,32 @@ func nodeHasAttr(node *html.Node, name string) bool {
 	return false
 }
 
+func taskDetailGoalState(root *html.Node) string {
+	panel := findByID(root, "task-goal-panel")
+	if panel == nil {
+		return ""
+	}
+	button := findNode(panel, func(node *html.Node) bool {
+		return attr(node, "data-detail-editor") == "goal"
+	})
+	if button == nil || strings.TrimSpace(attr(button, "data-value")) == "" {
+		return ""
+	}
+	return normalizeTaskGoalState(attr(button, "data-goal-status"))
+}
+
 func taskDetailHasGoal(root *html.Node) bool {
 	panel := findByID(root, "task-goal-panel")
-	return panel != nil && !strings.Contains(strings.ToLower(NodeText(panel)), "no goal set")
+	if panel == nil {
+		return false
+	}
+	button := findNode(panel, func(node *html.Node) bool {
+		return attr(node, "data-detail-editor") == "goal"
+	})
+	if button != nil {
+		return strings.TrimSpace(attr(button, "data-value")) != ""
+	}
+	return !strings.Contains(strings.ToLower(NodeText(panel)), "no goal set")
 }
 
 func taskDetailMetric(root *html.Node, label string) string {
