@@ -53,6 +53,23 @@ func TestParseTaskAttachmentsProjectAwareEmptyAndManyRows(t *testing.T) {
 	})
 }
 
+func TestParseTaskAttachmentsProjectAwareNestedDeleteControlUsesOuterRow(t *testing.T) {
+	markup := `<div data-task-project-id="p1"><div id="attachment-list">
+		<div class="attachment-row" data-file-path="/wrapped" data-media-type="text/plain">
+			<p class="font-medium">wrapped.txt</p><p class="text-xs">7 B</p>
+			<div class="control-wrapper"><span><button hx-delete="/attachments/wrapped?project_id=p1"></button></span></div>
+		</div>
+	</div></div>`
+	got, err := parseAttachmentMarkup(t, markup, "task-1", "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Attachment{{ID: "wrapped", TaskID: "task-1", FileName: "wrapped.txt", FilePath: "/wrapped", MediaType: "text/plain", FileSize: 7}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("attachments = %+v, want %+v", got, want)
+	}
+}
+
 func TestParseTaskAttachmentsProjectAwareDuplicateIDsAndFallbackMarkup(t *testing.T) {
 	markup := `<div data-task-project-id="p1"><div id="attachment-list" data-project-id="p1">
 		<div class="attachment-row" data-file-path="/first" data-content-type="text/plain">
@@ -129,6 +146,7 @@ func TestLegacyAndSinglePassAttachmentParsersAgree(t *testing.T) {
 		`<main data-project-id="p1"><div id="attachment-list"><div class="attachment-row"><p class="font-medium">a.txt</p><p class="text-xs">1 KB</p><button hx-delete="/attachments/a?project_id=p1"></button></div></div></main>`,
 		`<div data-task-project-id="p1"><div id="attachment-list"><div data-attachment-id="a" data-file-name="a.txt" data-file-size="8"></div><div data-attachment-id="b"><p>b.txt</p><p class="text-xs">2 B</p></div></div></div>`,
 		`<div data-project-id="p1"><div id="attachment-list"><section><div><p class="font-medium">nested.txt</p><button hx-delete="/attachments/nested?project_id=p1"></button></div></section></div></div>`,
+		`<div data-project-id="p1"><div id="attachment-list"><section data-file-name="standalone.txt" data-file-path="/standalone"><button hx-delete="/attachments/standalone?project_id=p1"></button></section></div></div>`,
 	}
 	for i, markup := range fixtures {
 		root, err := html.Parse(strings.NewReader(markup))
