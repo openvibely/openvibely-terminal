@@ -2689,7 +2689,7 @@ func TestGetScheduleIncludesFutureSchedulesAndDeduplicatesRecurringOccurrences(t
 	}
 }
 
-func TestGetScheduleLegacyFallbackPreservesScheduledTasksOutsideBoard(t *testing.T) {
+func TestGetScheduleLegacyFallbackUsesTaskReferencesWithoutTaskBoard(t *testing.T) {
 	const futureRun = "2037-09-15T16:45:12.125+02:00"
 	counts := make(map[string]int)
 	var countsMu sync.Mutex
@@ -2708,8 +2708,8 @@ func TestGetScheduleLegacyFallbackPreservesScheduledTasksOutsideBoard(t *testing
 			_, _ = io.WriteString(w, `<div id="schedule-content">Calendar summary</div>`)
 		case "/api/tasks/reference-catalog":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-hidden","project_id":"p1","title":"Future report","category":"scheduled","status":"pending"},{"id":"t-empty","project_id":"p1","title":"No schedule","category":"active","status":"pending"}]}`)
-		case "/tasks/t-hidden":
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-future","project_id":"p1","title":"Future report","category":"active","status":"pending"},{"id":"t-empty","project_id":"p1","title":"No schedule","category":"active","status":"pending"}]}`)
+		case "/tasks/t-future":
 			if r.URL.Query().Get("tab") != "schedules" {
 				t.Errorf("future task request = %s, want schedules tab", r.URL.RequestURI())
 			}
@@ -2739,14 +2739,14 @@ func TestGetScheduleLegacyFallbackPreservesScheduledTasksOutsideBoard(t *testing
 	if summary != "Calendar summary" || len(entries) != 1 {
 		t.Fatalf("fallback result summary=%q entries=%+v, want one future schedule", summary, entries)
 	}
-	if entries[0].TaskID != "t-hidden" || entries[0].ScheduleID != "s-future" || entries[0].NextRun == nil || entries[0].NextRun.Format(time.RFC3339Nano) != futureRun || entries[0].Status() != ScheduleStatusPaused {
-		t.Fatalf("future fallback entry = %+v, want hidden task, exact timestamp, and paused state", entries[0])
+	if entries[0].TaskID != "t-future" || entries[0].ScheduleID != "s-future" || entries[0].NextRun == nil || entries[0].NextRun.Format(time.RFC3339Nano) != futureRun || entries[0].Status() != ScheduleStatusPaused {
+		t.Fatalf("future fallback entry = %+v, want exact timestamp and paused state", entries[0])
 	}
-	if counts["/api/schedules/catalog"] != 1 || counts["/schedule"] != 1 || counts["/api/tasks/reference-catalog"] != 1 || counts["/tasks/t-hidden"] != 1 || counts["/tasks/t-empty"] != 1 {
+	if counts["/api/schedules/catalog"] != 1 || counts["/schedule"] != 1 || counts["/api/tasks/reference-catalog"] != 1 || counts["/tasks/t-future"] != 1 || counts["/tasks/t-empty"] != 1 {
 		t.Fatalf("fallback request counts = %v", counts)
 	}
 	if counts["/tasks"] != 0 {
-		t.Fatalf("fallback queried incomplete task board %d times", counts["/tasks"])
+		t.Fatalf("fallback queried task board %d times", counts["/tasks"])
 	}
 }
 
