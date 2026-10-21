@@ -737,7 +737,6 @@ type attachmentScanFrame struct {
 	insideList    bool
 	controlStart  int
 	directControl int
-	controlIndex  int
 	fallbackIndex int
 	summary       attachmentScanSummary
 }
@@ -745,6 +744,7 @@ type attachmentScanFrame struct {
 type attachmentControlRecord struct {
 	id         string
 	row        *attachmentRowFields
+	fallback   *attachmentRowFields
 	parentNext int
 }
 
@@ -820,7 +820,6 @@ func scanTaskAttachments(root *html.Node, taskID, selectedProjectID string) atta
 			insideList:    parentInsideList,
 			controlStart:  len(controls),
 			directControl: -1,
-			controlIndex:  -1,
 			fallbackIndex: -1,
 		}
 		if node.Type == html.ElementNode {
@@ -862,7 +861,6 @@ func scanTaskAttachments(root *html.Node, taskID, selectedProjectID string) atta
 						nextUnassigned = append(nextUnassigned, index+1)
 					}
 					controls = append(controls, attachmentControlRecord{id: id, parentNext: -1})
-					frame.controlIndex = index
 					if parentIndex >= 0 {
 						controls[index].parentNext = stack[parentIndex].directControl
 						stack[parentIndex].directControl = index
@@ -912,16 +910,13 @@ func scanTaskAttachments(root *html.Node, taskID, selectedProjectID string) atta
 			if frame.directControl >= 0 {
 				var row *attachmentRowFields
 				for index := frame.directControl; index >= 0; index = controls[index].parentNext {
-					if controls[index].row == nil {
+					if controls[index].row == nil && controls[index].fallback == nil {
 						if row == nil {
 							row = attachmentFieldsForRow(node, frame.summary)
 						}
-						consumeControl(index, row)
+						controls[index].fallback = row
 					}
 				}
-			}
-			if frame.controlIndex >= 0 && controls[frame.controlIndex].row == nil && node.Parent == nil {
-				consumeControl(frame.controlIndex, attachmentFieldsForRow(node, frame.summary))
 			}
 		}
 
@@ -949,6 +944,12 @@ func scanTaskAttachments(root *html.Node, taskID, selectedProjectID string) atta
 		result.taskProjectID = projectID
 	}
 	result.deleteProjectMismatch = deleteProjectMismatch
+
+	for index := range controls {
+		if controls[index].row == nil {
+			controls[index].row = controls[index].fallback
+		}
+	}
 
 	seen := make(map[string]bool, len(controls)+len(fallbacks))
 	for _, control := range controls {
