@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -10126,8 +10127,13 @@ func TestAutomationEditExportPreservesCompleteDefinitionWithoutMutation(t *testi
 	if rec.count("POST", "/automations/au-1/builder") != 0 {
 		t.Fatalf("export mutated backend: %s", rec.all())
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("export mode = %v, err=%v", info.Mode().Perm(), err)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows does not expose Unix permission bits through FileMode.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("export mode = %v, want 0600", info.Mode().Perm())
 	}
 }
 

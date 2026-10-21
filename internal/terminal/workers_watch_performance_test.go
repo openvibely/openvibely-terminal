@@ -31,6 +31,7 @@ func workersWatchCapacityHTML(globalRunning, projectRunning, modelRunning int) s
 type workersWatchSessionWriter struct {
 	bytes.Buffer
 	cancel    context.CancelFunc
+	refreshes int
 	changedAt *sync.Map
 	latencies []time.Duration
 }
@@ -54,7 +55,7 @@ func (w *workersWatchSessionWriter) Write(p []byte) (int, error) {
 		if changedAt, ok := w.changedAt.Load(snapshot.Workers[0].Running); ok {
 			w.latencies = append(w.latencies, time.Since(time.Unix(0, changedAt.(int64))))
 		}
-		if w.cancel != nil && bytes.Count(w.Bytes(), []byte("\n")) >= 200 {
+		if w.cancel != nil && bytes.Count(w.Bytes(), []byte("\n")) >= w.refreshes {
 			w.cancel()
 			w.cancel = nil
 		}
@@ -62,23 +63,28 @@ func (w *workersWatchSessionWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func runWorkersWatchSession(t *testing.T, c *client.Client, changedAt *sync.Map) *workersWatchSessionWriter {
+func runWorkersWatchSession(t *testing.T, c *client.Client, changedAt *sync.Map, refreshes int) *workersWatchSessionWriter {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	out := &workersWatchSessionWriter{cancel: cancel, changedAt: changedAt}
+	out := &workersWatchSessionWriter{cancel: cancel, changedAt: changedAt, refreshes: refreshes}
 	if err := runCLIWorkersWatch(ctx, c, out, true); err != nil {
 		t.Fatalf("workers watch returned error after session cancellation: %v", err)
 	}
-	if got := bytes.Count(out.Bytes(), []byte("\n")); got != 200 {
-		t.Fatalf("workers watch displayed %d snapshots, want 200", got)
+	if got := bytes.Count(out.Bytes(), []byte("\n")); got != refreshes {
+		t.Fatalf("workers watch displayed %d snapshots, want %d", got, refreshes)
 	}
 	return out
 }
 
 func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testing.T) {
-	const refreshes = 200 // 600 seconds at the user-visible 3 second refresh interval.
-	const handlerDelay = 2 * time.Millisecond
+	refreshes := 3
+	var handlerDelay time.Duration
+	evidence := performanceEvidenceEnabled()
+	if evidence {
+		refreshes = 200 // 600 seconds at the user-visible 3 second refresh interval.
+		handlerDelay = 2 * time.Millisecond
+	}
 	previousInterval := workersLiveRefreshInterval
 	workersLiveRefreshInterval = time.Millisecond // scale wall time while keeping the real watch loop.
 	t.Cleanup(func() { workersLiveRefreshInterval = previousInterval })
@@ -105,6 +111,7 @@ func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testi
 	}
 
 	var baselineRequests, baselineCapacityRequests, baselineState atomic.Int32
+	var baselineProjects, baselineModels atomic.Int32
 	var baselineChanges sync.Map
 	baselineServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		baselineRequests.Add(1)
@@ -124,8 +131,10 @@ func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testi
 		if r.URL.Path == "/api/capacity/global" {
 			n = int(baselineState.Add(1))
 			baselineChanges.Store(n, time.Now().UnixNano())
+		} else if r.URL.Path == "/api/capacity/projects" {
+			n = int(baselineProjects.Add(1))
 		} else {
-			n = int(baselineState.Load())
+			n = int(baselineModels.Add(1))
 		}
 		time.Sleep(handlerDelay)
 		w.Header().Set("Content-Type", "application/json")
@@ -144,11 +153,11 @@ func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testi
 		t.Fatal(err)
 	}
 
-	optimizedOutput := runWorkersWatchSession(t, optimizedClient, &optimizedChanges)
-	baselineOutput := runWorkersWatchSession(t, baselineClient, &baselineChanges)
+	optimizedOutput := runWorkersWatchSession(t, optimizedClient, &optimizedChanges, refreshes)
+	baselineOutput := runWorkersWatchSession(t, baselineClient, &baselineChanges, refreshes)
 	optimizedP95 := durationPercentile(optimizedOutput.latencies, 0.95)
 	baselineP95 := durationPercentile(baselineOutput.latencies, 0.95)
-	if got := optimizedRequests.Load(); got != refreshes {
+	if got := optimizedRequests.Load(); got != int32(refreshes) {
 		t.Fatalf("combined endpoint requests in ten-minute watch session = %d, want <= %d", got, refreshes)
 	}
 	if got, want := baselineCapacityRequests.Load(), int32(refreshes*3); got != want {
@@ -166,21 +175,26 @@ func TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness(t *testi
 			Workers []workerCapacityRow      `json:"workers"`
 			Models  []modelWorkerCapacityRow `json:"models"`
 		}
-		if err := json.Unmarshal([]byte(lines[len(lines)-1]), &snapshot); err != nil {
-			t.Fatalf("last watch snapshot is invalid JSON: %v", err)
-		}
-		if len(snapshot.Workers) != 2 || snapshot.Workers[1].Name != "Demo" || len(snapshot.Models) != 1 || snapshot.Models[0].Name != "Sonnet" {
-			t.Fatalf("watch omitted project or model details: %+v", snapshot)
+		for i, line := range lines {
+			if err := json.Unmarshal([]byte(line), &snapshot); err != nil {
+				t.Fatalf("watch snapshot is invalid JSON: %v", err)
+			}
+			if len(snapshot.Workers) != 2 || snapshot.Workers[1].Name != "Demo" || len(snapshot.Models) != 1 || snapshot.Models[0].Name != "Sonnet" {
+				t.Fatalf("watch omitted project or model details: %+v", snapshot)
+			}
+			if snapshot.Workers[0].Running != i+1 || snapshot.Workers[1].Running != i+1 || snapshot.Models[0].Running != i+1 {
+				t.Fatalf("snapshot %d has stale capacity: %+v", i+1, snapshot)
+			}
 		}
 	}
-	if optimizedP95 > 3*time.Second {
+	if evidence && optimizedP95 > 3*time.Second {
 		t.Fatalf("changed-snapshot-to-display p95 = %s, want <= 3s", optimizedP95)
 	}
 	const p95MeasurementTolerance = 250 * time.Microsecond
-	if optimizedP95 > baselineP95+p95MeasurementTolerance {
+	if evidence && optimizedP95 > baselineP95+p95MeasurementTolerance {
 		t.Fatalf("optimized changed-snapshot-to-display p95 = %s, materially slower than baseline %s (tolerance %s)", optimizedP95, baselineP95, p95MeasurementTolerance)
 	}
-	t.Logf("10-minute-equivalent CLI watch: optimized requests=%d, legacy capacity requests=%d (total=%d including one capability probe); changed-snapshot-to-display p95 optimized=%s, baseline=%s", optimizedRequests.Load(), baselineCapacityRequests.Load(), baselineRequests.Load(), optimizedP95, baselineP95)
+	t.Logf("CLI watch: optimized requests=%d, legacy capacity requests=%d (total=%d including one capability probe); changed-snapshot-to-display p95 optimized=%s, baseline=%s", optimizedRequests.Load(), baselineCapacityRequests.Load(), baselineRequests.Load(), optimizedP95, baselineP95)
 }
 
 func durationPercentile(values []time.Duration, percentile float64) time.Duration {

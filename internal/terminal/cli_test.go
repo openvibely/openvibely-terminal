@@ -261,7 +261,7 @@ func TestCLISkillBodyFilesPreserveContentsAndReportReadFailures(t *testing.T) {
 	} {
 		before := len(mutations)
 		err := run(args...)
-		if err == nil || !strings.Contains(err.Error(), "reading skill body file") || !strings.Contains(err.Error(), missingPath) {
+		if err == nil || !strings.Contains(err.Error(), "reading skill body file") || !strings.Contains(err.Error(), strconv.Quote(missingPath)) {
 			t.Errorf("run(%q) error = %v, want clear unreadable body file error", args, err)
 		}
 		if len(mutations) != before {

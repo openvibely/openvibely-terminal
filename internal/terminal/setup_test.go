@@ -1387,7 +1387,7 @@ func TestSetupUserGuideParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(guide)
+	text := strings.ReplaceAll(string(guide), "\r\n", "\n")
 	for _, want := range []string{
 		"`/setup`",
 		"`openvibely-terminal setup`",

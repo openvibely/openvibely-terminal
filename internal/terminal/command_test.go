@@ -1944,7 +1944,7 @@ func TestGuideSeparatesTUISlashSyntaxFromShellCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docs/user-guide.md: %v", err)
 	}
-	guideText := string(guide)
+	guideText := strings.ReplaceAll(string(guide), "\r\n", "\n")
 
 	for _, want := range []string{
 		"In the interactive TUI, use the\nslash command:\n\n```text\n/skills load retry-logic\n```\n\nFor one-shot CLI use, omit the leading slash and select the project explicitly:\n\n```bash\nopenvibely-terminal -project demo skills load retry-logic\nopenvibely-terminal -project demo skills add retry-logic --file retry.md\nopenvibely-terminal -project demo skills edit retry-logic --file retry.md\n```",
@@ -2235,7 +2235,7 @@ func TestAutomationsDocumentationMatchesRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docs/user-guide.md: %v", err)
 	}
-	guideText := string(guide)
+	guideText := strings.ReplaceAll(string(guide), "\r\n", "\n")
 	row := "| `/automations` | `automation` | `list`, `show`, `open`, `create`, `edit`, `run`, `pause`, `resume`, `delete` |"
 	if !strings.Contains(guideText, row) {
 		t.Fatalf("user guide automation command row is missing or out of sync:\n%s", row)
