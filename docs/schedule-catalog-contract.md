@@ -7,7 +7,7 @@ GET /api/schedules/catalog?project_id=<selected-project-id>
 Accept: application/json
 ```
 
-The current backend checkout does not register this route. Until the backend implements it, the client falls back to the calendar, the complete task-reference catalog, and each task's schedule tab. The task board is not a complete source because it omits ordinary pending scheduled tasks. Legacy task-reference responses may include attachment metadata, and this fallback still makes one request per task. The 1–3 request listing target and a guarantee against downloading attachment snapshots therefore depend on backend support for this route.
+The current backend checkout does not register this route. Until the backend implements it, the client falls back to the calendar, the task-reference catalog, and each reference-visible task's schedule tab. The task board and current task-reference endpoint omit non-visible scheduled-category tasks, so this legacy fallback cannot enumerate every project's schedules. Legacy task-reference responses may include attachment metadata, and the fallback still makes one request per reference-visible task. Full future-schedule coverage, the 1–3 request listing target, and a guarantee against downloading attachment snapshots therefore depend on backend support for this route. The handler must list schedules directly by project, including schedules whose tasks are not visible on the board.
 
 ## Response
 
