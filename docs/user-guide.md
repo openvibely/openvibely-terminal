@@ -553,14 +553,18 @@ the value returned by the backend and is not rewritten or resolved locally.
 The same GitHub syntax works in one-shot mode (`openvibely-terminal projects github-create ...`); add `--json` for a machine-readable created-project record.
 
 Inspect or update an existing project's backend-owned settings without opening a
-browser:
+browser. In the interactive TUI, use:
 
-```bash
+```text
 /projects show "My Project"
 /projects edit "My Project" --name "Renamed Project" --description "Local checkout"
 /projects edit "Renamed Project" --repository-path "/Users/me/src/repo with spaces"
 /projects edit "Renamed Project" --default-agent Builder --max-workers 4
+```
 
+For one-shot CLI use, run shell commands with the executable name:
+
+```bash
 openvibely-terminal --json projects show "Renamed Project"
 openvibely-terminal projects edit "Renamed Project" --max-workers inherit
 openvibely-terminal projects edit "Release --name Candidate" '|' --description "Local checkout"
