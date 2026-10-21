@@ -29,9 +29,14 @@ func terminalOutboundTargetPolicy(projectID string, allowed bool) string {
 	return `<div id="outbound-targets-section" data-project-id="` + projectID + `"><form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="` + projectID + `"><input type="checkbox" name="enabled" value="true"` + checked + `></form></div>`
 }
 
+func terminalOutboundTargetRevision(targets []client.OutboundTarget) string {
+	return fmt.Sprintf("%x", []byte(fmt.Sprintf("%#v", targets)))
+}
+
 func terminalOutboundTargetPage(projectID string, targets []client.OutboundTarget, allowed bool) string {
 	var b strings.Builder
-	b.WriteString(`<div id="outbound-targets-section" data-project-id="` + projectID + `"><form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="` + projectID + `"><input type="checkbox" name="enabled" value="true"`)
+	revision := terminalOutboundTargetRevision(targets)
+	b.WriteString(`<div id="outbound-targets-section" data-project-id="` + projectID + `" data-revision="` + revision + `"><form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="` + projectID + `"><input type="hidden" name="target_revision" value="` + revision + `"><input type="hidden" name="target_set_present" value="true"><input type="checkbox" name="enabled" value="true"`)
 	if allowed {
 		b.WriteString(` checked`)
 	}
@@ -1419,6 +1424,55 @@ func TestOutboundTargetsRejectSameTargetEditConflict(t *testing.T) {
 	output := stripANSI(transcript(m))
 	if !strings.Contains(output, "changed while this edit was in progress") || !strings.Contains(output, outboundTargetReloadHint) {
 		t.Fatalf("same-target conflict did not explain reload and retry:\n%s", output)
+	}
+}
+
+func TestOutboundTargetsAtomicReadToSaveConflictDoesNotRetry(t *testing.T) {
+	captured := client.OutboundTarget{ID: "target-a", ProjectID: "p1", Platform: "slack", TargetKind: "channel", Name: "ops", Destination: "C1"}
+	newer := captured
+	newer.Name = "ops-concurrent"
+	current := []client.OutboundTarget{captured}
+	gets, posts, accepted := 0, 0, 0
+	m := newModelFromHandler(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+			gets++
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", current, false))
+			if gets == 2 {
+				// The concurrent edit lands after the terminal's final read but
+				// before it submits the revision-checked replacement.
+				current = []client.OutboundTarget{newer}
+			}
+		case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+			posts++
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse conditional edit form: %v", err)
+			}
+			if r.PostForm.Get("target_revision") == terminalOutboundTargetRevision(current) {
+				accepted++
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div>saved</div>`)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("HX-Trigger", "outbound-targets-save-error")
+			_, _ = io.WriteString(w, `<div class="alert alert-error">Outbound targets changed since this form was loaded. Reload the target list before retrying.</div>`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	m = runLine(t, m, "/channels targets edit target-a --destination C9")
+	if gets != 2 || posts != 1 || accepted != 0 {
+		t.Fatalf("requests GET/POST/accepted = %d/%d/%d, want 2/1/0 with no retry", gets, posts, accepted)
+	}
+	if len(current) != 1 || current[0].Name != newer.Name || current[0].Destination != captured.Destination {
+		t.Fatalf("concurrent target was overwritten: %#v", current)
+	}
+	output := stripANSI(transcript(m))
+	if !strings.Contains(output, "changed since this form was loaded") || !strings.Contains(output, "Reload the target list") {
+		t.Fatalf("revision conflict did not give a clear reload path:\n%s", output)
 	}
 }
 
