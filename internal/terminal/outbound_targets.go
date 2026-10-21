@@ -539,10 +539,10 @@ func confirmOutboundTargetRemoval(m Model, projectID string, target client.Outbo
 			}
 		}
 		if !found {
-			return "", errors.New("outbound target reference is stale or does not belong to selected project")
+			return "", outboundTargetConflictError("outbound target reference is stale because the target was removed while awaiting confirmation")
 		}
 		if !outboundTargetsEqual(target, currentTarget) {
-			return "", errors.New("outbound target reference is stale or does not belong to selected project")
+			return "", outboundTargetConflictError("outbound target reference is stale because the target changed while awaiting confirmation")
 		}
 		remaining := make([]client.OutboundTarget, 0, len(current.Targets)-1)
 		for _, candidate := range current.Targets {
@@ -575,6 +575,21 @@ func outboundTargetPolicyOutput(ctx context.Context, c *client.Client, projectID
 		return marshalJSON(outboundTargetPolicyJSON{ExplicitUnsavedTargetsAllowed: allowed})
 	}
 	return status + "\n" + renderOutboundTargetPolicy(allowed), nil
+}
+
+const outboundTargetReloadHint = "reload with `channels targets list` before retrying"
+
+func outboundTargetConflictError(message string) error {
+	return fmt.Errorf("%s; %s", message, outboundTargetReloadHint)
+}
+
+func outboundTargetForProject(targets []client.OutboundTarget, id, projectID string) (client.OutboundTarget, bool) {
+	for _, target := range targets {
+		if target.ID == id && target.ProjectID == projectID {
+			return target, true
+		}
+	}
+	return client.OutboundTarget{}, false
 }
 
 func applyOutboundTargetEdit(target client.OutboundTarget, values map[string]string) client.OutboundTarget {
@@ -674,8 +689,15 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 			if err != nil {
 				return "", err
 			}
+			// Use the latest scoped list for the replacement save. Changes that
+			// arrived after the first read are carried forward with this add.
+			latest, err := c.GetOutboundTargets(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
 			target.ProjectID = projectID
-			targets := append(append([]client.OutboundTarget(nil), page.Targets...), target)
+			targets := append(append([]client.OutboundTarget(nil), latest.Targets...), target)
+			page = latest
 			var savedPage client.OutboundTargetsPage
 			hasSavedPage := false
 			if jsonMode {
@@ -703,13 +725,29 @@ func runOutboundTargets(m Model, args []string) (Model, tea.Cmd) {
 			if err != nil {
 				return "", err
 			}
-			updated := applyOutboundTargetEdit(target, values)
-			for i := range page.Targets {
-				if page.Targets[i].ID == target.ID {
-					page.Targets[i] = updated
+
+			// Re-read before submitting the replacement form. Apply the edit to
+			// the latest list so unrelated additions and edits are retained, but
+			// refuse to replace a row that changed since it was selected.
+			latest, err := c.GetOutboundTargets(ctx, projectID)
+			if err != nil {
+				return "", err
+			}
+			currentTarget, found := outboundTargetForProject(latest.Targets, target.ID, projectID)
+			if !found {
+				return "", outboundTargetConflictError("outbound target was removed while this edit was in progress")
+			}
+			if !outboundTargetsEqual(target, currentTarget) {
+				return "", outboundTargetConflictError("outbound target changed while this edit was in progress")
+			}
+			updated := applyOutboundTargetEdit(currentTarget, values)
+			for i := range latest.Targets {
+				if latest.Targets[i].ID == target.ID {
+					latest.Targets[i] = updated
 					break
 				}
 			}
+			page = latest
 			if jsonMode {
 				savedPage, hasSavedPage, err := c.SaveOutboundTargetsWithResult(ctx, projectID, page.Targets, page.ExplicitUnsavedTargetsAllowed)
 				if err != nil {
