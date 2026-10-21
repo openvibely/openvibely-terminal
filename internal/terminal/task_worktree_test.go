@@ -24,6 +24,8 @@ func TestCLITaskWorktreeInspectAndIntegrationConfirmation(t *testing.T) {
 			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor API","category":"completed","status":"completed"}]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
 			_, _ = io.WriteString(w, cliWorktreePanel("task/refactor", "main", state))
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes":
+			_, _ = io.WriteString(w, `<div id="changes-content"><a href="https://github.com/openvibely/openvibely/pull/42">View PR #42</a></div>`)
 		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/merge":
 			mutations++
 			if err := r.ParseForm(); err != nil {
@@ -57,6 +59,16 @@ func TestCLITaskWorktreeInspectAndIntegrationConfirmation(t *testing.T) {
 	if task.ID != "t-1" || task.WorktreeBranch != "task/refactor" || task.MergeTargetBranch != "main" || task.IntegrationStatus != "pending" {
 		t.Fatalf("worktree task = %+v", task)
 	}
+	if task.PullRequest == nil || task.PullRequest.Number != 42 || task.PullRequest.State != "recorded" || task.PullRequest.URL != "https://github.com/openvibely/openvibely/pull/42" {
+		t.Fatalf("worktree pull request = %+v", task.PullRequest)
+	}
+	var inspectedPlain bytes.Buffer
+	if err := RunCLI(c, &inspectedPlain, "demo", []string{"tasks", "worktree", "Refactor API"}, false, false); err != nil {
+		t.Fatalf("plain tasks worktree: %v", err)
+	}
+	if !strings.Contains(inspectedPlain.String(), "Pull request: recorded (#42) https://github.com/openvibely/openvibely/pull/42") {
+		t.Fatalf("plain worktree output omits recorded PR state/link:\n%s", inspectedPlain.String())
+	}
 
 	var unconfirmed bytes.Buffer
 	err = RunCLI(c, &unconfirmed, "demo", []string{"tasks", "merge", "squash", "Refactor API"}, false, false)
@@ -88,6 +100,8 @@ func TestTUITaskWorktreeMergeRequiresConfirmation(t *testing.T) {
 			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor API","category":"completed","status":"completed"}]}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
 			_, _ = io.WriteString(w, cliWorktreePanel("task/refactor", "main", state))
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes":
+			_, _ = io.WriteString(w, `<div id="changes-content"><a href="https://github.com/openvibely/openvibely/pull/42">View PR #42</a></div>`)
 		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/merge":
 			mutations++
 			if err := r.ParseForm(); err != nil {
@@ -145,6 +159,8 @@ func TestCLITaskWorktreeActionsReportEligibilityAndConflict(t *testing.T) {
 					_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor API","category":"completed","status":"completed"}]}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
 					_, _ = io.WriteString(w, cliWorktreePanel("task/refactor", "main", state))
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes":
+					_, _ = io.WriteString(w, `<div id="changes-content"></div>`)
 				case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/merge":
 					state = tc.state
 					w.WriteHeader(tc.responseStatus)
@@ -163,6 +179,149 @@ func TestCLITaskWorktreeActionsReportEligibilityAndConflict(t *testing.T) {
 			}
 			if !strings.Contains(out.String(), "merge "+tc.wantStatus) || !strings.Contains(out.String(), "Integration: "+tc.state) {
 				t.Fatalf("CLI output omits outcome or current branch state:\n%s\nerror: %v", out.String(), err)
+			}
+		})
+	}
+}
+
+func TestCLITaskPullRequestCreateReuseAndJSONOutput(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+			_, _ = io.WriteString(w, cliProjects)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("reference catalog project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor API","category":"completed","status":"completed"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/pull-request":
+			posts++
+			if r.URL.Query().Get("project_id") != "p1" || r.Header.Get("HX-Request") != "true" {
+				t.Errorf("PR request scope/header = project %q HX %q", r.URL.Query().Get("project_id"), r.Header.Get("HX-Request"))
+			}
+			toast := "GitHub PR created (#42)"
+			if posts > 1 {
+				toast = "GitHub PR already exists (#42)"
+			}
+			w.Header().Set("HX-Trigger", fmt.Sprintf(`{"openvibelyToast":{"message":%q,"status":"success"}}`, toast))
+			_, _ = io.WriteString(w, `<div id="changes-content"><a href="https://github.com/openvibely/openvibely/pull/42">View PR #42</a></div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+
+	var plain bytes.Buffer
+	if err := RunCLI(c, &plain, "demo", []string{"tasks", "pull-request", "Refactor API"}, false, false); err != nil {
+		t.Fatalf("plain tasks pull-request: %v", err)
+	}
+	if !strings.Contains(plain.String(), "pull request created: #42 https://github.com/openvibely/openvibely/pull/42") {
+		t.Fatalf("plain output = %q", plain.String())
+	}
+
+	var machine bytes.Buffer
+	if err := RunCLI(c, &machine, "demo", []string{"tasks", "pull-request", "Refactor API"}, false, true); err != nil {
+		t.Fatalf("JSON tasks pull-request: %v", err)
+	}
+	var result client.TaskPullRequestResult
+	if err := json.Unmarshal(bytes.TrimSpace(machine.Bytes()), &result); err != nil {
+		t.Fatalf("JSON result decode: %v; output=%q", err, machine.String())
+	}
+	if result.Number != 42 || result.URL != "https://github.com/openvibely/openvibely/pull/42" || result.Status != "reused" {
+		t.Fatalf("JSON result = %+v", result)
+	}
+	if posts != 2 {
+		t.Fatalf("PR POST count = %d, want 2", posts)
+	}
+}
+
+func TestTUITaskPullRequestUsesSelectedProjectAndRendersResult(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("reference catalog project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor API"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/pull-request":
+			posts++
+			if r.URL.Query().Get("project_id") != "p1" {
+				t.Errorf("PR project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"GitHub PR created (#42)","status":"success"}}`)
+			_, _ = io.WriteString(w, `<div><a href="https://github.com/openvibely/openvibely/pull/42">View PR #42</a></div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, _ := client.New(srv.URL)
+	m := New(c)
+	m.selectedID, m.selectedName = "p1", "demo"
+	m = runLine(t, m, "/tasks pull-request Refactor API")
+	if posts != 1 || !strings.Contains(transcript(m), "pull request created: #42 https://github.com/openvibely/openvibely/pull/42") {
+		t.Fatalf("TUI PR result: posts=%d transcript=%q", posts, transcript(m))
+	}
+}
+
+func TestCLITaskPullRequestFailuresDoNotWriteSuccessOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		catalog      string
+		statusCode   int
+		toastMessage string
+		toastStatus  string
+		body         string
+		wantError    string
+		wantMutation bool
+	}{
+		{name: "wrong project", catalog: `{"tasks":[{"id":"t-1","project_id":"p2","title":"Foreign task"}]}`, wantError: "invalid task reference catalog response"},
+		{name: "missing repository", catalog: `{"tasks":[{"id":"t-1","project_id":"p1","title":"Task"}]}`, statusCode: http.StatusNoContent, toastMessage: "Project has no repository path configured", toastStatus: "failed", wantError: "repository path configured", wantMutation: true},
+		{name: "missing task branch", catalog: `{"tasks":[{"id":"t-1","project_id":"p1","title":"Task"}]}`, statusCode: http.StatusNoContent, toastMessage: "Task has no worktree branch", toastStatus: "failed", wantError: "no worktree branch", wantMutation: true},
+		{name: "missing GitHub integration", catalog: `{"tasks":[{"id":"t-1","project_id":"p1","title":"Task"}]}`, statusCode: http.StatusNoContent, toastMessage: "GitHub integration is not configured", toastStatus: "failed", wantError: "GitHub integration is not configured", wantMutation: true},
+		{name: "backend failure", catalog: `{"tasks":[{"id":"t-1","project_id":"p1","title":"Task"}]}`, statusCode: http.StatusInternalServerError, body: "backend unavailable", wantError: "500", wantMutation: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+					_, _ = io.WriteString(w, tc.catalog)
+				case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/pull-request":
+					posts++
+					if tc.toastStatus != "" {
+						w.Header().Set("HX-Trigger", fmt.Sprintf(`{"openvibelyToast":{"message":%q,"status":%q}}`, tc.toastMessage, tc.toastStatus))
+					}
+					w.WriteHeader(tc.statusCode)
+					_, _ = io.WriteString(w, tc.body)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			c, _ := client.New(srv.URL)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", []string{"tasks", "pull-request", "Task"}, false, false)
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.wantError)) {
+				t.Fatalf("error = %v, want substring %q", err, tc.wantError)
+			}
+			if strings.Contains(strings.ToLower(out.String()), "pull request created") || strings.Contains(strings.ToLower(out.String()), "pull request reused") {
+				t.Fatalf("failure wrote success output: %q", out.String())
+			}
+			wantPosts := 0
+			if tc.wantMutation {
+				wantPosts = 1
+			}
+			if posts != wantPosts {
+				t.Fatalf("PR POST count = %d, want %d", posts, wantPosts)
 			}
 		})
 	}

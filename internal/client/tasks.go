@@ -26,19 +26,20 @@ import (
 
 // Task is one card on the kanban board.
 type Task struct {
-	ID                string   `json:"id"`
-	ProjectID         string   `json:"project_id"`
-	Title             string   `json:"title"`
-	Prompt            string   `json:"prompt"`
-	Category          string   `json:"category"`   // backlog | active | completed | scheduled
-	Status            string   `json:"status"`     // pending | queued | running | completed | failed | cancelled | blocked
-	GoalState         string   `json:"goal_state"` // active | paused | achieved | blocked | failed | empty when no current goal
-	Priority          int      `json:"priority,omitempty"`
-	DisplayOrder      int      `json:"display_order"`
-	Badges            []string `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
-	WorktreeBranch    string   `json:"worktree_branch,omitempty"`
-	MergeTargetBranch string   `json:"merge_target_branch,omitempty"`
-	IntegrationStatus string   `json:"integration_status,omitempty"`
+	ID                string               `json:"id"`
+	ProjectID         string               `json:"project_id"`
+	Title             string               `json:"title"`
+	Prompt            string               `json:"prompt"`
+	Category          string               `json:"category"`   // backlog | active | completed | scheduled
+	Status            string               `json:"status"`     // pending | queued | running | completed | failed | cancelled | blocked
+	GoalState         string               `json:"goal_state"` // active | paused | achieved | blocked | failed | empty when no current goal
+	Priority          int                  `json:"priority,omitempty"`
+	DisplayOrder      int                  `json:"display_order"`
+	Badges            []string             `json:"badges"` // model, agent, tag, priority, Goal, Chain, Swarm...
+	WorktreeBranch    string               `json:"worktree_branch,omitempty"`
+	MergeTargetBranch string               `json:"merge_target_branch,omitempty"`
+	IntegrationStatus string               `json:"integration_status,omitempty"`
+	PullRequest       *TaskPullRequestInfo `json:"pull_request,omitempty"`
 	// Attachments is a complete pre-upload snapshot when supplied by the task
 	// reference endpoint. Nil means the endpoint did not provide one.
 	Attachments []Attachment `json:"attachments,omitempty"`

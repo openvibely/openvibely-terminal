@@ -34,6 +34,8 @@ func TestTaskWorktreeActionsUseBackendAndSupportedStrategies(t *testing.T) {
 					_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p-1","title":"Implement feature"}]}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
 					_, _ = io.WriteString(w, taskWorktreeHTML("task/feature", "main", mergeStatus))
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes":
+					_, _ = io.WriteString(w, `<div id="changes-content"></div>`)
 				case r.Method == http.MethodPost && r.URL.Path == tc.path:
 					posted = true
 					if r.Header.Get("HX-Request") != "true" {
@@ -213,6 +215,157 @@ func TestGetTaskWorktreeInfoRequiresSelectedProjectOwnership(t *testing.T) {
 	}
 }
 
+func TestCreateTaskPullRequestForProjectCreatesAndReusesBackendPR(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			if r.URL.Query().Get("project_id") != "p-1" {
+				t.Errorf("catalog project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p-1","title":"Implement feature"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/pull-request":
+			posts++
+			if r.URL.Query().Get("project_id") != "p-1" {
+				t.Errorf("mutation project_id = %q", r.URL.Query().Get("project_id"))
+			}
+			if r.Header.Get("HX-Request") != "true" || !strings.Contains(r.Header.Get("Accept"), "text/html") {
+				t.Errorf("mutation headers = HX-Request %q Accept %q", r.Header.Get("HX-Request"), r.Header.Get("Accept"))
+			}
+			if r.Body != http.NoBody {
+				body, _ := io.ReadAll(r.Body)
+				if len(body) != 0 {
+					t.Errorf("mutation body = %q, want empty", body)
+				}
+			}
+			status := "created"
+			if posts > 1 {
+				status = "already exists"
+			}
+			w.Header().Set("HX-Trigger", fmt.Sprintf(`{"openvibelyToast":{"message":"GitHub PR %s (#42)","status":"success"}}`, status))
+			_, _ = io.WriteString(w, `<div id="changes-content"><a href="https://github.example.com/acme/widgets/pull/42">View PR #42</a></div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, wantStatus := range []string{"created", "reused"} {
+		result, err := c.CreateTaskPullRequestForProject(context.Background(), "t-1", "p-1")
+		if err != nil {
+			t.Fatalf("CreateTaskPullRequestForProject: %v", err)
+		}
+		if result.Number != 42 || result.URL != "https://github.example.com/acme/widgets/pull/42" || result.Status != wantStatus {
+			t.Errorf("result = %+v, want number 42, enterprise URL, and status %q", result, wantStatus)
+		}
+	}
+	if posts != 2 {
+		t.Fatalf("POST requests = %d, want 2", posts)
+	}
+}
+
+func TestCreateTaskPullRequestForProjectReportsBackendFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		statusCode   int
+		toastStatus  string
+		toastMessage string
+		body         string
+		wantError    string
+	}{
+		{name: "missing repository configuration", statusCode: http.StatusNoContent, toastStatus: "failed", toastMessage: "Project has no repository path configured", wantError: "Project has no repository path configured"},
+		{name: "missing task branch", statusCode: http.StatusNoContent, toastStatus: "failed", toastMessage: "Task has no worktree branch", wantError: "Task has no worktree branch"},
+		{name: "missing GitHub integration", statusCode: http.StatusNoContent, toastStatus: "failed", toastMessage: "GitHub integration is not configured", wantError: "GitHub integration is not configured"},
+		{name: "failure toast on 2xx", statusCode: http.StatusOK, toastStatus: "failed", toastMessage: "provider unavailable", wantError: "provider unavailable"},
+		{name: "success without refreshed PR link", statusCode: http.StatusOK, toastStatus: "success", toastMessage: "GitHub PR created (#42)", wantError: "did not include its link"},
+		{name: "GitHub service error", statusCode: http.StatusBadRequest, toastStatus: "failed", toastMessage: "Failed to create pull request: provider unavailable", wantError: "provider unavailable"},
+		{name: "HTTP backend error", statusCode: http.StatusInternalServerError, body: "backend failed", wantError: "500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var posts int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/tasks/reference-catalog" {
+					_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p-1","title":"Implement feature"}]}`)
+					return
+				}
+				if r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/pull-request" {
+					posts++
+					if tc.toastStatus != "" {
+						w.Header().Set("HX-Trigger", fmt.Sprintf(`{"openvibelyToast":{"message":%q,"status":%q}}`, tc.toastMessage, tc.toastStatus))
+					}
+					w.WriteHeader(tc.statusCode)
+					_, _ = io.WriteString(w, tc.body)
+					return
+				}
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer srv.Close()
+			c, _ := New(srv.URL)
+			result, err := c.CreateTaskPullRequestForProject(context.Background(), "t-1", "p-1")
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.wantError)) {
+				t.Fatalf("result = %+v error = %v, want error containing %q", result, err, tc.wantError)
+			}
+			if posts != 1 {
+				t.Fatalf("POST requests = %d, want 1", posts)
+			}
+		})
+	}
+}
+
+func TestCreateTaskPullRequestForProjectRejectsWrongProjectBeforeMutation(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tasks/reference-catalog" {
+			_, _ = io.WriteString(w, `{"tasks":[]}`)
+			return
+		}
+		if r.Method == http.MethodPost {
+			posts++
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	_, err := c.CreateTaskPullRequestForProject(context.Background(), "t-foreign", "p-1")
+	if err == nil || !strings.Contains(err.Error(), "not found in selected project") {
+		t.Fatalf("wrong-project error = %v", err)
+	}
+	if posts != 0 {
+		t.Fatalf("wrong-project task sent %d mutations", posts)
+	}
+}
+
+func TestGetTaskWorktreeInfoIncludesRecordedPullRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p-1","title":"Implement feature"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
+			_, _ = io.WriteString(w, taskWorktreeHTML("task/feature", "main", "pending"))
+		case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes":
+			_, _ = io.WriteString(w, `<div><a href="https://github.example.com/acme/widgets/pull/42">View PR #42</a></div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	info, err := c.GetTaskWorktreeInfoForProject(context.Background(), "t-1", "p-1")
+	if err != nil {
+		t.Fatalf("GetTaskWorktreeInfoForProject: %v", err)
+	}
+	if info.PullRequest == nil || info.PullRequest.Number != 42 || info.PullRequest.URL != "https://github.example.com/acme/widgets/pull/42" || info.PullRequest.State != "recorded" {
+		t.Fatalf("pull request info = %+v", info.PullRequest)
+	}
+}
+
 func worktreeActionTestServer(t *testing.T, worktree func(http.ResponseWriter, *http.Request)) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -222,6 +375,10 @@ func worktreeActionTestServer(t *testing.T, worktree func(http.ResponseWriter, *
 		}
 		if r.URL.Path == "/tasks/t-1/worktree" {
 			worktree(w, r)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes" {
+			_, _ = io.WriteString(w, `<div id="changes-content"></div>`)
 			return
 		}
 		if r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/merge" {

@@ -411,6 +411,12 @@ func renderTaskWorktreeActionResult(result client.TaskWorktreeActionResult) stri
 	return b.String()
 }
 
+func renderTaskPullRequestResult(result client.TaskPullRequestResult) string {
+	return fmt.Sprintf("pull request %s: #%d %s",
+		sanitizeAutomationDetailText(result.Status), result.Number,
+		sanitizeAutomationDetailText(result.URL))
+}
+
 func renderTaskWorktree(task client.Task, info client.TaskWorktreeInfo) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", sectionStyle.Render(firstNonEmpty(task.Title, task.ID)))
@@ -419,7 +425,14 @@ func renderTaskWorktree(task client.Task, info client.TaskWorktreeInfo) string {
 		sanitizeAutomationDetailText(firstNonEmpty(info.Branch, "none")),
 		sanitizeAutomationDetailText(firstNonEmpty(info.TargetBranch, "not set")),
 		sanitizeAutomationDetailText(firstNonEmpty(info.IntegrationStatus, "unknown")))
-	b.WriteString(dimStyle.Render("/tasks merge <merge|ff|squash> <task> · /tasks rebase <task>"))
+	if info.PullRequest == nil {
+		b.WriteString("Pull request: none recorded\n")
+	} else {
+		fmt.Fprintf(&b, "Pull request: %s (#%d) %s\n",
+			sanitizeAutomationDetailText(info.PullRequest.State), info.PullRequest.Number,
+			sanitizeAutomationDetailText(info.PullRequest.URL))
+	}
+	b.WriteString(dimStyle.Render("/tasks pull-request <task> · /tasks merge <merge|ff|squash> <task> · /tasks rebase <task>"))
 	return b.String()
 }
 
@@ -430,6 +443,7 @@ func applyTaskWorktreeInfo(task *client.Task, info client.TaskWorktreeInfo) {
 	task.WorktreeBranch = info.Branch
 	task.MergeTargetBranch = info.TargetBranch
 	task.IntegrationStatus = info.IntegrationStatus
+	task.PullRequest = info.PullRequest
 }
 
 // taskDetailTabJSON is the stable JSON representation of an explicitly selected
@@ -1074,7 +1088,7 @@ func taskAttachmentSubAction(alias string) (string, bool) {
 }
 
 func tasksCommand() command {
-	actions := []string{"list", "open", "show", "worktree", "merge", "rebase", "reviews", "lifecycle", "logs"}
+	actions := []string{"list", "open", "show", "worktree", "pull-request", "merge", "rebase", "reviews", "lifecycle", "logs"}
 	actions = append(actions, taskAttachmentTopLevelActions()...)
 	actions = append(actions, taskThreadInputTopLevelActions()...)
 	actions = append(actions, "new", "swarm", "edit", "run", "stop", "delete", "move", "order", "goal", "reply", "steer", "activate", "sweep", "clear")
@@ -1087,7 +1101,7 @@ func tasksCommand() command {
 		{after: []string{"show", "**"}, partialAfter: completionAfterQuotedOperand, values: taskDetailCompletionValues()},
 	}...)
 	selectorPaths := append([][]string{
-		{"open"}, {"show"}, {"worktree"}, {"merge", "**"}, {"rebase"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"}, {"reviews", "remove"}, {"reviews", "submit"},
+		{"open"}, {"show"}, {"worktree"}, {"pull-request"}, {"merge", "**"}, {"rebase"}, {"reviews"}, {"reviews", "list"}, {"reviews", "add"}, {"reviews", "remove"}, {"reviews", "submit"},
 		{"lifecycle"}, {"logs"}, {"edit"}, {"run"}, {"stop"}, {"delete"}, {"move"},
 		{"order"}, {"goal"}, {"goal", "pause"}, {"goal", "resume"}, {"reply"}, {"steer"},
 	}, append(taskThreadInputSelectorPaths(), taskAttachmentSelectorPaths()...)...)
@@ -1096,7 +1110,8 @@ func tasksCommand() command {
 		"tasks open <task>                          enter the task's thread",
 		"omit <task> on task-reference actions, including goal, goal pause, and goal resume → interactive selector",
 		"tasks show <task> [tab]                    " + detailTabUsageList(),
-		"tasks worktree <task>                       inspect branch, target, and integration state",
+		"tasks worktree <task>                       inspect branch, target, integration, and recorded PR state",
+		"tasks pull-request <task>                   create or reuse the task branch pull request",
 		"tasks merge <merge|ff|squash> <task>        integrate through the backend (confirm in TUI; CLI requires --force)",
 		"tasks rebase <task>                         rebase the task branch onto its target (confirm in TUI; CLI requires --force)",
 		"tasks reviews [list] <task>                list inline review comments",
@@ -1129,7 +1144,8 @@ func tasksCommand() command {
 		{action: "steer", args: "<task> | <message>", description: "steer the active response"},
 		{action: "goal pause", args: "<task>", description: "pause a goal without changing its objective"},
 		{action: "goal resume", args: "<task>", description: "resume a paused goal"},
-		{action: "worktree", args: "<task>", description: "inspect the task branch and integration state"},
+		{action: "worktree", args: "<task>", description: "inspect the task branch, integration, and recorded PR"},
+		{action: "pull-request", args: "<task>", description: "create or reuse a pull request through the backend"},
 		{action: "merge", args: "<merge|ff|squash> <task>", description: "integrate a task branch after confirmation"},
 		{action: "rebase", args: "<task>", description: "rebase a task branch onto its target after confirmation"},
 		{action: "reviews add", args: "<task> <file>:<line> <comment>"},
@@ -1149,6 +1165,7 @@ func tasksCommand() command {
 		`tasks goal resume "Fix login bug"`,
 		`tasks show "Fix login bug" review`,
 		`tasks worktree "Fix login bug"`,
+		`tasks pull-request "Fix login bug"`,
 		`tasks merge squash "Fix login bug"`,
 		`tasks rebase "Fix login bug"`,
 		`tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`,
@@ -1268,6 +1285,25 @@ func tasksCommand() command {
 						return marshalJSON(t)
 					}
 					return renderTaskWorktree(t, info), nil
+				})
+
+			case "pull-request":
+				if ref == "" {
+					return taskSelector(m, "usage: /tasks pull-request <id|title>", "tasks pull-request", false)
+				}
+				return m, m.run("Task pull request", cmdTimeout, func(ctx context.Context) (string, error) {
+					t, err := resolveTaskForModel(m, ctx, c, pid, ref)
+					if err != nil {
+						return "", err
+					}
+					result, err := c.CreateTaskPullRequestForProject(ctx, t.ID, pid)
+					if err != nil {
+						return "", err
+					}
+					if jsonMode {
+						return marshalJSON(result)
+					}
+					return renderTaskPullRequestResult(result), nil
 				})
 
 			case "merge":
