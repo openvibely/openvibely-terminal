@@ -2382,8 +2382,9 @@ type scheduleCatalogRecord struct {
 }
 
 // GetSchedule loads the bounded project schedule catalog when the backend
-// exposes it. Older backends fall back to the calendar, full task-reference
-// catalog, and task schedule tabs so schedules on non-board tasks remain visible.
+// exposes it. Older backends fall back to the calendar, task-reference catalog,
+// and task schedule tabs for reference-visible tasks; that legacy catalog may
+// omit scheduled tasks and may include attachment metadata.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {

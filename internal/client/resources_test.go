@@ -2837,6 +2837,26 @@ func TestGetScheduleCatalogRejectsTooManyEntries(t *testing.T) {
 	}
 }
 
+func TestGetScheduleCatalogRejectsOversizedBody(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"project_id":"p1","schedules":[]}`+strings.Repeat(" ", maxScheduleCatalogBytes+1))
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.GetSchedule(context.Background(), "p1"); err == nil || !strings.Contains(err.Error(), "schedule catalog exceeds 8388608 bytes") {
+		t.Fatalf("oversized catalog error = %v, want byte-cap error", err)
+	}
+	if requests != 1 {
+		t.Fatalf("oversized catalog caused %d requests, want no fallback", requests)
+	}
+}
+
 func TestGetScheduleCatalogEmptyProjectAndScopeMismatch(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
