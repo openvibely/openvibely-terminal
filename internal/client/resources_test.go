@@ -2580,6 +2580,8 @@ func TestGetScheduleScrapesEntries(t *testing.T) {
 	</div>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/schedules/catalog", "/tasks":
+			http.NotFound(w, r)
 		case "/schedule":
 			w.Header().Set("Content-Type", "text/html")
 			_, _ = io.WriteString(w, page)
@@ -2638,6 +2640,8 @@ func TestGetScheduleIncludesFutureSchedulesAndDeduplicatesRecurringOccurrences(t
 	var defaultWeekRequests, taskScheduleRequests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/schedules/catalog", "/tasks":
+			http.NotFound(w, r)
 		case "/schedule":
 			defaultWeekRequests++
 			w.Header().Set("Content-Type", "text/html")
@@ -2682,6 +2686,205 @@ func TestGetScheduleIncludesFutureSchedulesAndDeduplicatesRecurringOccurrences(t
 	}
 	if entries[1].Name != "Later week schedule" || entries[1].NextRun == nil || entries[1].NextRun.Format(time.RFC3339) != futureRun {
 		t.Fatalf("future schedule entry = %+v, want next run %s", entries[1], futureRun)
+	}
+}
+
+func TestGetScheduleLegacyFallbackUsesAttachmentFreeTaskBoardAndKeepsFutureSchedules(t *testing.T) {
+	const futureRun = "2037-09-15T16:45:12.125+02:00"
+	counts := make(map[string]int)
+	var countsMu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		countsMu.Lock()
+		counts[r.URL.Path]++
+		countsMu.Unlock()
+		if r.URL.Query().Get("project_id") != "p1" {
+			t.Errorf("request %s lost project scope", r.URL.RequestURI())
+		}
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/api/schedules/catalog":
+			http.NotFound(w, r)
+		case "/schedule":
+			_, _ = io.WriteString(w, `<div id="schedule-content">Calendar summary</div>`)
+		case "/tasks":
+			_, _ = io.WriteString(w, `<div id="task-board">
+				<div data-task-id="t-future" data-task-category="active" data-task-status="pending"><a href="/tasks/t-future" title="Future report">Future report</a></div>
+				<div data-task-id="t-empty" data-task-category="active" data-task-status="pending"><a href="/tasks/t-empty" title="No schedule">No schedule</a></div>
+			</div>`)
+		case "/tasks/t-future":
+			if r.URL.Query().Get("tab") != "schedules" {
+				t.Errorf("future task request = %s, want schedules tab", r.URL.RequestURI())
+			}
+			_, _ = io.WriteString(w, `<div id="task-detail-content"><div id="schedule-card-future" data-schedule-id="s-future" data-schedule-enabled="false" data-schedule-next-run="`+futureRun+`"><div class="font-semibold">Future report</div><span>Next: 2037-09-15 4:45 PM</span></div></div>`)
+		case "/tasks/t-empty":
+			if r.URL.Query().Get("tab") != "schedules" {
+				t.Errorf("empty task request = %s, want schedules tab", r.URL.RequestURI())
+			}
+			_, _ = io.WriteString(w, `<div id="task-detail-content"><div class="empty-state">No schedules</div></div>`)
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, summary, err := c.GetSchedule(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "Calendar summary" || len(entries) != 1 {
+		t.Fatalf("fallback result summary=%q entries=%+v, want one future schedule", summary, entries)
+	}
+	if entries[0].ScheduleID != "s-future" || entries[0].NextRun == nil || entries[0].NextRun.Format(time.RFC3339Nano) != futureRun || entries[0].Status() != ScheduleStatusPaused {
+		t.Fatalf("future fallback entry = %+v, want exact timestamp and paused state", entries[0])
+	}
+	if counts["/api/schedules/catalog"] != 1 || counts["/schedule"] != 1 || counts["/tasks"] != 1 || counts["/tasks/t-future"] != 1 || counts["/tasks/t-empty"] != 1 {
+		t.Fatalf("fallback request counts = %v", counts)
+	}
+	if counts["/api/tasks/reference-catalog"] != 0 {
+		t.Fatalf("fallback downloaded task reference snapshots %d times", counts["/api/tasks/reference-catalog"])
+	}
+}
+
+func TestGetScheduleCatalogIsScopedBoundedAndDeduplicatesOccurrences(t *testing.T) {
+	const selectedProject = "project B&mode=terminal"
+	const firstRun = "2030-04-05T09:30:00.125-07:00"
+	const earlierRun = "2030-04-01T09:30:00.125-07:00"
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Method != http.MethodGet || r.URL.Path != "/api/schedules/catalog" {
+			t.Errorf("unexpected schedule listing request: %s %s", r.Method, r.URL.RequestURI())
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("project_id"); got != selectedProject {
+			t.Errorf("project_id = %q, want %q", got, selectedProject)
+		}
+		if got := r.URL.RawQuery; got != "project_id=project+B%26mode%3Dterminal" {
+			t.Errorf("raw query = %q, want selected project URL encoded", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"project_id":"project B&mode=terminal","summary":"Catalog summary","schedules":[`+
+			`{"project_id":"project B&mode=terminal","schedule_id":"once-future","task_id":"task-once","title":"Future one-time","task_title":"Future one-time task","next_run":"`+firstRun+`","enabled":true,"display_text":"Future one-time — once"},`+
+			`{"schedule_id":"recurring","task_id":"task-repeat","task_title":"Weekly report","next_run":"2030-04-08T09:30:00.125-07:00","enabled":false,"display_text":"Weekly report — weekly"},`+
+			`{"schedule_id":"recurring","task_id":"task-repeat","task_title":"Weekly report","next_run":"`+earlierRun+`","enabled":false,"display_text":"Weekly report — weekly"}`+
+			`]}`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, summary, err := c.GetSchedule(context.Background(), selectedProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("catalog listing requests = %d, want 1", requests)
+	}
+	if summary != "Catalog summary" {
+		t.Fatalf("summary = %q, want catalog summary", summary)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v, want one-time and deduplicated recurring schedule", entries)
+	}
+	if entries[0].ScheduleID != "once-future" || entries[0].TaskID != "task-once" || entries[0].Name != "Future one-time" {
+		t.Fatalf("first entry = %+v, want future one-time schedule in response order", entries[0])
+	}
+	if entries[0].NextRun == nil || entries[0].NextRun.Format(time.RFC3339Nano) != firstRun || entries[0].Status() != ScheduleStatusEnabled {
+		t.Fatalf("future one-time entry = %+v, want exact next run and enabled state", entries[0])
+	}
+	if entries[1].ScheduleID != "recurring" || entries[1].NextRun == nil || entries[1].NextRun.Format(time.RFC3339Nano) != earlierRun || entries[1].Status() != ScheduleStatusPaused {
+		t.Fatalf("recurring entry = %+v, want one row with the earliest exact run and paused state", entries[1])
+	}
+	if entries[1].Text != "Weekly report — weekly" {
+		t.Fatalf("recurring display text = %q", entries[1].Text)
+	}
+}
+
+func TestGetScheduleCatalogRejectsTooManyEntries(t *testing.T) {
+	var body strings.Builder
+	body.WriteString(`{"project_id":"p1","schedules":[`)
+	for i := 0; i <= maxScheduleCatalogEntries; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		fmt.Fprintf(&body, `{"schedule_id":"s-%d","task_id":"t-%d","enabled":true}`, i, i)
+	}
+	body.WriteString(`]}`)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body.String())
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.GetSchedule(context.Background(), "p1"); err == nil || !strings.Contains(err.Error(), "exceeds 10000 entries") {
+		t.Fatalf("oversized catalog error = %v, want 10000-entry cap error", err)
+	}
+	if requests != 1 {
+		t.Fatalf("oversized catalog caused %d requests, want no fallback", requests)
+	}
+}
+
+func TestGetScheduleCatalogEmptyProjectAndScopeMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		wantErr  string
+		wantSize int
+	}{
+		{name: "empty project", body: `{"project_id":"p1","summary":"No schedules","schedules":[]}`, wantSize: 0},
+		{name: "missing schedules array", body: `{"project_id":"p1"}`, wantErr: "schedules must be an array"},
+		{name: "null schedules array", body: `{"project_id":"p1","schedules":null}`, wantErr: "schedules must be an array"},
+		{name: "foreign project", body: `{"project_id":"p2","schedules":[]}`, wantErr: `project "p2" does not match selected project "p1"`},
+		{name: "missing enabled state", body: `{"project_id":"p1","schedules":[{"schedule_id":"s1","task_id":"t1"}]}`, wantErr: "enabled state are required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests++
+				if r.URL.Path != "/api/schedules/catalog" || r.URL.Query().Get("project_id") != "p1" {
+					t.Errorf("request = %s, want project-scoped schedule catalog", r.URL.RequestURI())
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries, summary, err := c.GetSchedule(context.Background(), "p1")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+				}
+				if requests != 1 {
+					t.Fatalf("invalid catalog caused %d requests, want no fallback", requests)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entries == nil || len(entries) != tc.wantSize || summary != "No schedules" {
+				t.Fatalf("empty catalog = entries:%#v summary:%q, want non-nil empty entries and summary", entries, summary)
+			}
+			if requests != 1 {
+				t.Fatalf("empty project requests = %d, want 1", requests)
+			}
+		})
 	}
 }
 

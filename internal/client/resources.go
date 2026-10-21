@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/mail"
 	"net/url"
@@ -2356,17 +2357,174 @@ func scheduleCardRenderedClock(node *html.Node) (int, int, bool) {
 	return 0, 0, false
 }
 
-// GetSchedule returns the project schedule catalog. The calendar only renders
-// occurrences in its selected week, so it cannot serve as a complete schedule
-// list. Keep its summary and first-seen order, then fill the catalog from every
-// task's schedule tab, which contains all of that task's schedules regardless
-// of their next-run date.
+const (
+	maxScheduleCatalogBytes   = 8 << 20
+	maxScheduleCatalogEntries = 10_000
+)
+
+var errScheduleCatalogUnsupported = errors.New("project schedule catalog is not supported")
+
+type scheduleCatalogResponse struct {
+	ProjectID string                   `json:"project_id"`
+	Summary   string                   `json:"summary"`
+	Schedules *[]scheduleCatalogRecord `json:"schedules"`
+}
+
+type scheduleCatalogRecord struct {
+	ProjectID   string     `json:"project_id,omitempty"`
+	ScheduleID  string     `json:"schedule_id"`
+	TaskID      string     `json:"task_id"`
+	Title       string     `json:"title,omitempty"`
+	TaskTitle   string     `json:"task_title,omitempty"`
+	NextRun     *time.Time `json:"next_run"`
+	Enabled     *bool      `json:"enabled"`
+	DisplayText string     `json:"display_text,omitempty"`
+}
+
+// GetSchedule loads the bounded project schedule catalog when the backend
+// exposes it. Older backends fall back to the calendar and task schedule tabs.
+// The fallback prefers the task board, which avoids loading attachment snapshots;
+// it uses the task-reference endpoint when the board is unavailable or empty.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, "", fmt.Errorf("project ID is required for schedules")
+	}
+	entries, summary, err := c.getScheduleCatalog(ctx, projectID)
+	if err == nil {
+		return entries, summary, nil
+	}
+	if !isUnsupportedScheduleCatalog(err) {
+		return nil, "", err
+	}
+	return c.getScheduleLegacy(ctx, projectID)
+}
+
+func (c *Client) getScheduleCatalog(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
+	const endpoint = "/api/schedules/catalog"
+	path := endpoint + query("project_id", projectID)
+	req, err := c.newRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("GET %s: %w", path, err)
+	}
+	defer drainAndClose(resp.Body)
+	if isReadAuthResponse(resp) {
+		return nil, "", newAuthRequiredError(http.MethodGet, path, resp)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", apiError(resp)
+	}
+	mediaType, _, mediaErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if mediaErr != nil || mediaType != "application/json" {
+		return nil, "", errScheduleCatalogUnsupported
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxScheduleCatalogBytes+1))
+	if err != nil {
+		return nil, "", fmt.Errorf("reading %s response: %w", path, err)
+	}
+	if len(body) > maxScheduleCatalogBytes {
+		return nil, "", fmt.Errorf("decoding %s response: schedule catalog exceeds %d bytes", path, maxScheduleCatalogBytes)
+	}
+	var payload scheduleCatalogResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, "", fmt.Errorf("decoding %s response: %w", path, err)
+	}
+	if payload.ProjectID == "" {
+		// Some older servers return a generic JSON page for unknown API routes.
+		// Its lack of a project envelope means no catalog data is trusted.
+		return nil, "", errScheduleCatalogUnsupported
+	}
+	if payload.ProjectID != projectID {
+		return nil, "", fmt.Errorf("invalid schedule catalog response: project %q does not match selected project %q", payload.ProjectID, projectID)
+	}
+	if payload.Schedules == nil {
+		return nil, "", fmt.Errorf("decoding %s response: schedules must be an array", path)
+	}
+	records := *payload.Schedules
+	if len(records) > maxScheduleCatalogEntries {
+		return nil, "", fmt.Errorf("decoding %s response: schedule catalog exceeds %d entries", path, maxScheduleCatalogEntries)
+	}
+	positions := make(map[string]int, len(records))
+	entries := make([]ScheduleEntry, 0, len(records))
+	owners := make(map[string]string, len(records))
+	for _, record := range records {
+		if record.ProjectID != "" && record.ProjectID != projectID {
+			return nil, "", fmt.Errorf("invalid schedule catalog response: schedule %q belongs to project %q", record.ScheduleID, record.ProjectID)
+		}
+		if strings.TrimSpace(record.ScheduleID) == "" || strings.TrimSpace(record.TaskID) == "" || record.Enabled == nil {
+			return nil, "", fmt.Errorf("invalid schedule catalog response: schedule ID, task ID, and enabled state are required")
+		}
+		if owner, ok := owners[record.ScheduleID]; ok && owner != record.TaskID {
+			return nil, "", fmt.Errorf("invalid schedule catalog response: schedule %q has conflicting task IDs", record.ScheduleID)
+		}
+		owners[record.ScheduleID] = record.TaskID
+		name := strings.TrimSpace(record.Title)
+		if name == "" {
+			name = strings.TrimSpace(record.TaskTitle)
+		}
+		if name == "" {
+			name = strings.TrimSpace(record.DisplayText)
+		}
+		text := strings.TrimSpace(record.DisplayText)
+		if text == "" {
+			text = strings.TrimSpace(record.Title)
+		}
+		if text == "" {
+			text = strings.TrimSpace(record.TaskTitle)
+		}
+		entry := ScheduleEntry{
+			TaskID:        record.TaskID,
+			ScheduleID:    record.ScheduleID,
+			Name:          name,
+			Text:          text,
+			Disabled:      !*record.Enabled,
+			DisabledKnown: true,
+		}
+		if record.NextRun != nil {
+			entry.NextRun = cloneTime(*record.NextRun)
+			entry.NextRunPrecise = true
+			entry.NextRunExactSource = true
+		}
+		if position, ok := positions[entry.ScheduleID]; ok {
+			entries[position] = mergeScheduleEntry(entries[position], entry)
+			continue
+		}
+		positions[entry.ScheduleID] = len(entries)
+		entries = append(entries, entry)
+	}
+	return entries, payload.Summary, nil
+}
+
+func isUnsupportedScheduleCatalog(err error) bool {
+	if errors.Is(err, errScheduleCatalogUnsupported) {
+		return true
+	}
+	var statusErr *HTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.StatusCode == http.StatusNotFound ||
+		statusErr.StatusCode == http.StatusMethodNotAllowed ||
+		statusErr.StatusCode == http.StatusNotImplemented
+}
+
+func (c *Client) getScheduleLegacy(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
 	entries, summary, err := c.getScheduleWeek(ctx, projectID, 0)
 	if err != nil {
 		return nil, "", err
 	}
-	tasks, err := c.ListTaskReferences(ctx, projectID)
+	tasks, err := c.ListTasks(ctx, projectID)
+	if (err != nil && isUnsupportedScheduleCatalog(err)) || (err == nil && len(tasks) == 0) {
+		// Retain compatibility with older servers whose task board is unavailable
+		// or behaves like a generic empty page. Older task-reference responses
+		// may include attachment metadata.
+		tasks, err = c.ListTaskReferences(ctx, projectID)
+	}
 	if err != nil {
 		return nil, "", err
 	}

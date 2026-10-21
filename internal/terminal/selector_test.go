@@ -2226,6 +2226,34 @@ func TestAlertPickerLoadsLaterPageInSourceOrder(t *testing.T) {
 	}
 }
 
+func TestScheduleShowPickerUsesProjectScheduleCatalog(t *testing.T) {
+	const catalog = `{"project_id":"p1","summary":"Schedules","schedules":[{"schedule_id":"s-1","task_id":"t-1","title":"Nightly report","display_text":"Nightly report — daily","enabled":true},{"schedule_id":"s-2","task_id":"t-2","title":"Weekly report","display_text":"Weekly report — weekly","enabled":false}]}`
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/schedules/catalog": catalog,
+		"/tasks/t-2":             `<div data-task-id="t-2" data-project-id="p1"><h2 class="font-bold">Weekly report</h2><div data-task-status="pending"></div></div>`,
+	})
+	m = runLine(t, m, "/schedule show")
+	if !m.selectorActive || len(m.selectorItems) != 2 || m.selectorItems[0].ref != "s-1" || m.selectorItems[1].ref != "s-2" {
+		t.Fatalf("catalog-backed schedule picker = active:%t items:%+v\n%s", m.selectorActive, m.selectorItems, transcript(m))
+	}
+	if got := selectorCallCount(rec, http.MethodGet, "/api/schedules/catalog"); got != 1 {
+		t.Fatalf("schedule catalog GETs = %d, want 1; calls:\n%s", got, rec.all())
+	}
+	for _, path := range []string{"/schedule", "/api/tasks/reference-catalog", "/tasks"} {
+		if rec.saw(http.MethodGet, path) {
+			t.Fatalf("catalog-backed picker fetched legacy path %s; calls:\n%s", path, rec.all())
+		}
+	}
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	out := stripANSI(transcript(m))
+	for _, want := range []string{"Weekly report", "Schedule ID: s-2", "Task ID: t-2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("catalog-selected schedule output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestScheduleShowPickerSelectionAndCancellation(t *testing.T) {
 	m, rec := dispatchModel(t, selFixtures())
 	m = runLine(t, m, "/schedule open")
@@ -2246,12 +2274,13 @@ func TestScheduleShowPickerSelectionAndCancellation(t *testing.T) {
 
 	m, rec = dispatchModel(t, selFixtures())
 	m = runLine(t, m, "/schedule show")
+	callsBeforeCancel := len(rec.urlsSnapshot())
 	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.selectorActive {
 		t.Fatal("escape did not cancel schedule selector")
 	}
-	if rec.saw(http.MethodGet, "/tasks") {
-		t.Fatalf("cancelled selector looked up bound task; calls:\n%s", rec.all())
+	if len(rec.urlsSnapshot()) != callsBeforeCancel {
+		t.Fatalf("cancelled selector issued an extra backend request; calls:\n%s", rec.all())
 	}
 	if out := stripANSI(transcript(m)); !strings.Contains(out, "cancelled") {
 		t.Fatalf("cancel output missing:\n%s", out)

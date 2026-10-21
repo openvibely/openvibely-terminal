@@ -2543,6 +2543,8 @@ func TestCLITaskMutationsStayScopedToSelectedProject(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/api/schedules/catalog":
+					w.WriteHeader(http.StatusNotFound)
 				case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
 					if got := r.URL.Query().Get("project_id"); got != "p2" {
 						t.Errorf("reference lookup project_id = %q, want p2", got)
@@ -7265,6 +7267,8 @@ func TestCLIScheduleMutationJSONOutput(t *testing.T) {
 			case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, cliProjects)
+			case r.Method == http.MethodGet && (r.URL.Path == "/api/schedules/catalog" || r.URL.Path == "/tasks"):
+				w.WriteHeader(http.StatusNotFound)
 			case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
 				if r.URL.Query().Get("project_id") != "p1" {
 					http.Error(w, "unscoped task catalog", http.StatusInternalServerError)
