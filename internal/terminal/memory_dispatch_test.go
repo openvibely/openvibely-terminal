@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -244,7 +245,7 @@ func TestMemoryCLIMissingShowReferenceKeepsUsageError(t *testing.T) {
 		}
 		atomic.AddInt32(&projectRequests, 1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"Demo","path":"` + repo + `"}]}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{"projects": []client.Project{{ID: "p1", Name: "Demo", Path: repo}}})
 	}))
 	defer srv.Close()
 	c, err := client.New(srv.URL)
@@ -308,6 +309,9 @@ func TestMemorySelectorOpensIndexedFilesWithQuoteCharacters(t *testing.T) {
 		`both ' " topic.md`,
 	} {
 		t.Run(filename, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.Contains(filename, `"`) {
+				t.Skip("Windows filenames cannot contain double quotes")
+			}
 			repo := t.TempDir()
 			index := "- [Quoted Topic](" + filename + ")\n- [Other Topic](other.md)\n"
 			writeTUIProjectMemory(t, repo, index, map[string]string{
@@ -388,7 +392,7 @@ func TestMemoryCLIUsesSelectedProjectAndEmitsStableJSON(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/projects":
 			atomic.AddInt32(&projectRequests, 1)
-			_, _ = w.Write([]byte(`{"projects":[{"id":"p1","name":"Demo","path":"` + repo + `"}]}`))
+			_ = json.NewEncoder(w).Encode(map[string]any{"projects": []client.Project{{ID: "p1", Name: "Demo", Path: repo}}})
 		case "/api/memory":
 			atomic.AddInt32(&memoryRequests, 1)
 			_, _ = w.Write([]byte(`{}`))

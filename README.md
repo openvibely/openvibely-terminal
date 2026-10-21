@@ -397,6 +397,13 @@ bounded-list or status-latency performance contracts:
 OPENVIBELY_PERF_EVIDENCE=1 go test ./internal/client ./internal/terminal -run 'TestList(Alerts|Automations)BoundedLargeCatalogLatencyAndAllocations|TestCLIStatus(LatencyOverlapsBalancedAndSlowDiscovery|UsesTwoDelayedRequestWaves|DeadlineAfterProjectSelectionCancelsEveryStartedRequest)|TestWebhooksCanonicalIDCatalogPerformanceEvidence|TestRenderLifecycleEventsBackendShapedMeasurements' -count=1 -v
 ```
 
+Workers watch tests check request counts and every displayed snapshot in routine
+runs. Enable the 200-refresh, ten-minute-equivalent latency comparison explicitly:
+
+```bash
+OPENVIBELY_PERF_EVIDENCE=1 go test ./internal/terminal -run '^TestWorkersWatchCombinedSnapshotTenMinuteRequestBudgetAndFreshness$' -count=1 -v
+```
+
 The filtered skills JSON small-set latency and allocation evidence uses paired
 samples. Its serial-versus-bounded benchmark uses ten fixed repetitions per case:
 
