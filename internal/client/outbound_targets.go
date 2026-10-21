@@ -14,10 +14,10 @@ import (
 )
 
 // OutboundTarget is the terminal-safe view of one saved send_message
-// destination. ID and ProjectID are retained for scoped reference resolution
-// but are intentionally omitted from all JSON output.
+// destination. The canonical ID is public for stable JSON references; ProjectID
+// and backend form fields remain private.
 type OutboundTarget struct {
-	ID             string `json:"-"`
+	ID             string `json:"id"`
 	ProjectID      string `json:"-"`
 	Platform       string `json:"platform"`
 	TargetKind     string `json:"target_kind"`
