@@ -524,7 +524,8 @@ enabled:
 
 ```
 /projects create demo /Users/me/src/demo
-/projects create My Project | C:\Users\me\src\my-project
+/projects create demo /Users/me/src/new-project --create-directory
+/projects create My Project | C:\Users\me\src\new-project --create-directory
 ```
 
 For a backend-managed clone, pass a GitHub URL instead:
@@ -535,13 +536,24 @@ openvibely-terminal projects github-create "My GitHub Project" https://github.co
 ```
 
 The local form is `projects create <name> <path>`; the pipe form separates the
-name from the repository path when either contains spaces. The GitHub form is
-`projects github-create <name> <url>`; use `|` before the URL when the project
-name contains spaces. The backend performs the clone and GitHub
-authentication, so this form remains available when local repository paths are
-disabled in the environment. Both forms select the backend-assigned project in
-the TUI, and one-shot CLI output supports plain text and `--json` project
-records.
+name from the repository path when either contains spaces. Append the local-only
+`--create-directory` option as the final token to ask the backend to create a
+missing checkout folder. Quote an entire path that literally ends with that text
+so it remains one operand. The backend remains responsible for validating absolute paths, rejecting
+unsafe path segments, and reporting filesystem errors; failed creation does not
+leave a project record. In one-shot shell commands, quote or escape the pipe so
+the shell passes it as an argument, for example:
+
+```
+openvibely-terminal projects create My Project '|' /Users/me/src/new-project --create-directory
+```
+
+The GitHub form is `projects github-create <name> <url>`; use `|` before the URL when the project name contains spaces. GitHub
+creation rejects `--create-directory` because the backend clones that repository
+itself. The backend performs the clone and GitHub authentication, so this form
+remains available when local repository paths are disabled in the environment.
+Both forms select the backend-assigned project in the TUI, and one-shot CLI
+output supports plain text and `--json` project records.
 
 In `/projects` listings and the interactive `/project` picker, repository path
 ownership follows the configured backend URL: a local backend shows `LOCAL PATH`
@@ -1170,8 +1182,9 @@ openvibely-terminal -project demo tasks show refactor review # inspect task revi
 openvibely-terminal -project demo tasks reviews add refactor internal/auth.go:42 "Handle token refresh errors"
 openvibely-terminal -project demo chat "ship the docs" # ask the agent, print the reply
 openvibely-terminal projects create demo /Users/me/src/demo # local checkout; output includes backend ID
+openvibely-terminal projects create demo /Users/me/src/new-project --create-directory # backend creates missing local folder
 openvibely-terminal projects github-create "GitHub Project" https://github.com/acme/demo # backend-managed GitHub clone
-openvibely-terminal --json projects create demo /Users/me/src/demo # JSON project record
+openvibely-terminal --json projects create demo /Users/me/src/new-project --create-directory # JSON project record
 openvibely-terminal --json projects github-create "GitHub Project" https://github.com/acme/demo # JSON GitHub project record
 openvibely-terminal projects show demo                  # authoritative project settings
 openvibely-terminal projects edit demo --description "Local checkout" --max-workers 4

@@ -10637,9 +10637,11 @@ func projectsCommand() command {
 	usage := []string{
 		"projects [list]                              list projects with running/queued counts",
 		"projects show <project>                     show authoritative project settings",
-		"projects create <name> <path>                create and select a local-path project",
-		"projects create <name> | <path>              use | when the name or path contains spaces",
+		"projects create <name> <path> [--create-directory]  create and select a local-path project",
+		"projects create <name> | <path> [--create-directory]  use | when the name or path contains spaces",
+		"  --create-directory asks the backend to create a missing local checkout folder",
 		"projects github-create <name> <url>           create and select a GitHub-backed project",
+		"  --create-directory is local-only; the backend clones GitHub repositories",
 		"  use | when the project name contains spaces",
 		"  GitHub creation remains available when local repository paths are disabled",
 		"projects edit <project> [options]            update only explicitly supplied settings",
@@ -10661,15 +10663,16 @@ func projectsCommand() command {
 			{action: "delete", args: "<project>", description: "delete a project and its backend-owned data"},
 		},
 		selectorPaths: [][]string{{"show"}, {"edit"}, {"delete"}},
-		completions:   projectEditCompletions(),
+		completions:   projectCompletions(),
 		desc:          "list, show, create, edit, or delete backend-owned projects",
 		usage:         usage,
 		examples: []string{
 			`projects show demo`,
 			`projects create demo /Users/me/src/demo`,
-			`projects create My Project | C:\Users\me\src\my-project`,
+			`projects create demo /Users/me/src/new-project --create-directory`,
+			`projects create My Project '|' C:\Users\me\src\my-project --create-directory`,
 			`projects github-create "My Project" https://github.com/acme/demo`,
-			`projects github-create My Project | https://github.com/acme/demo`,
+			`projects github-create My Project '|' https://github.com/acme/demo`,
 			`projects edit demo --description "Local checkout" --max-workers 4`,
 			`projects edit demo --repository-source github --github-url https://github.com/acme/demo`,
 			`projects delete demo`,
@@ -10683,13 +10686,17 @@ func projectsCommand() command {
 				var spec projectCreateSpec
 				var ok bool
 				if action == "github-create" {
+					if containsProjectCreateDirectoryOption(rest) {
+						return m, errCmd("--create-directory is only supported by local projects; use " + cmdPrefix + "projects create <name> <path> --create-directory.\n" + projectCreateUsage(action))
+					}
 					var name, repoURL string
 					name, repoURL, ok = parseProjectCreateGitHubArgs(rest)
 					spec = projectCreateSpec{name: name, source: "github", location: repoURL}
 				} else {
 					var name, path string
-					name, path, ok = parseProjectCreateArgs(rest)
-					spec = projectCreateSpec{name: name, source: "local", location: path}
+					var createDirectory bool
+					name, path, createDirectory, ok = parseProjectCreateArgsWithOptions(rest)
+					spec = projectCreateSpec{name: name, source: "local", location: path, createDirectory: createDirectory}
 				}
 				if !ok {
 					return m, errCmd(projectCreateUsage(action))
@@ -10709,7 +10716,7 @@ func projectsCommand() command {
 					if spec.source == "github" {
 						project, err = c.CreateGitHubProject(ctx, spec.name, spec.location)
 					} else {
-						project, err = c.CreateProject(ctx, spec.name, spec.location)
+						project, err = c.CreateProject(ctx, spec.name, spec.location, spec.createDirectory)
 					}
 					if err != nil {
 						return projectCreatedMsg{
@@ -10982,6 +10989,14 @@ func projectEditOptionHelpLines() []string {
 	}
 	flush()
 	return lines
+}
+
+func projectCompletions() []commandCompletion {
+	completions := projectEditCompletions()
+	return append(completions, commandCompletion{
+		after:  []string{"create", "*", "**", "*"},
+		values: []string{projectCreateDirectoryOption},
+	})
 }
 
 func projectEditCompletions() []commandCompletion {
@@ -11411,17 +11426,20 @@ func renderProjectSettings(settings client.ProjectSettings) string {
 	return strings.Join(rows, "\n")
 }
 
+const projectCreateDirectoryOption = "--create-directory"
+
 func projectCreateUsage(action string) string {
 	if action == "github-create" {
-		return fmt.Sprintf("usage: %sprojects github-create <name> <url> (or <name> | <url> when the name contains spaces)", cmdPrefix)
+		return fmt.Sprintf("usage: %sprojects github-create <name> <url> (or <name> | <url> when the name contains spaces)\n%s is local-only; use projects create <name> <path> %s", cmdPrefix, projectCreateDirectoryOption, projectCreateDirectoryOption)
 	}
-	return fmt.Sprintf("usage: %sprojects create <name> <path> (or <name> | <path> when either contains spaces)", cmdPrefix)
+	return fmt.Sprintf("usage: %sprojects create <name> <path> [%s] (or <name> | <path> [%s] when either contains spaces)", cmdPrefix, projectCreateDirectoryOption, projectCreateDirectoryOption)
 }
 
 type projectCreateSpec struct {
-	name     string
-	source   string
-	location string
+	name            string
+	source          string
+	location        string
+	createDirectory bool
 }
 
 func parseProjectCreateGitHubArgs(args []string) (string, string, bool) {
@@ -11457,6 +11475,34 @@ func isAbsoluteProjectRepositoryURL(value string) bool {
 // parseProjectCreateGitHubArgs grammar so local syntax is never reinterpreted.
 func parseProjectCreateArgs(args []string) (string, string, bool) {
 	return parseLocalProjectCreateArgs(args)
+}
+
+func parseProjectCreateArgsWithOptions(args []string) (string, string, bool, bool) {
+	if len(args) > 0 && args[len(args)-1] == projectCreateDirectoryOption {
+		count := 0
+		for _, arg := range args {
+			if arg == projectCreateDirectoryOption {
+				count++
+			}
+		}
+		if count > 1 {
+			return "", "", false, false
+		}
+		if name, path, ok := parseLocalProjectCreateArgs(args[:len(args)-1]); ok {
+			return name, path, true, true
+		}
+	}
+	name, path, ok := parseLocalProjectCreateArgs(args)
+	return name, path, false, ok
+}
+
+func containsProjectCreateDirectoryOption(args []string) bool {
+	for _, arg := range args {
+		if arg == projectCreateDirectoryOption {
+			return true
+		}
+	}
+	return false
 }
 
 func parseLocalProjectCreateArgs(args []string) (string, string, bool) {

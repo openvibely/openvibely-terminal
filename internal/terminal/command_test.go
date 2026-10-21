@@ -384,6 +384,33 @@ func TestParseProjectCreateArgs(t *testing.T) {
 	}
 }
 
+func TestParseProjectCreateArgsWithCreateDirectoryOption(t *testing.T) {
+	cases := []struct {
+		name          string
+		args          []string
+		wantName      string
+		wantPath      string
+		wantCreateDir bool
+		wantOK        bool
+	}{
+		{name: "ordinary local path", args: []string{"demo", "/tmp/demo"}, wantName: "demo", wantPath: "/tmp/demo", wantOK: true},
+		{name: "flag after path", args: []string{"demo", "/tmp/new project", projectCreateDirectoryOption}, wantName: "demo", wantPath: "/tmp/new project", wantCreateDir: true, wantOK: true},
+		{name: "pipe syntax with spaces", args: []string{"My", "Project", "|", `C:\Users\me\new project`, projectCreateDirectoryOption}, wantName: "My Project", wantPath: `C:\Users\me\new project`, wantCreateDir: true, wantOK: true},
+		{name: "quoted path ending in option text remains a path", args: []string{"demo", "/tmp/project --create-directory"}, wantName: "demo", wantPath: "/tmp/project --create-directory", wantOK: true},
+		{name: "option text can remain a project name", args: []string{projectCreateDirectoryOption, "/tmp/project"}, wantName: projectCreateDirectoryOption, wantPath: "/tmp/project", wantOK: true},
+		{name: "option token can remain a legacy path", args: []string{"demo", projectCreateDirectoryOption}, wantName: "demo", wantPath: projectCreateDirectoryOption, wantOK: true},
+		{name: "duplicate option rejected", args: []string{"demo", "/tmp/project", projectCreateDirectoryOption, projectCreateDirectoryOption}, wantOK: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, path, createDirectory, ok := parseProjectCreateArgsWithOptions(tc.args)
+			if name != tc.wantName || path != tc.wantPath || createDirectory != tc.wantCreateDir || ok != tc.wantOK {
+				t.Fatalf("parseProjectCreateArgsWithOptions(%v) = %q, %q, %t, %t; want %q, %q, %t, %t", tc.args, name, path, createDirectory, ok, tc.wantName, tc.wantPath, tc.wantCreateDir, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestParseProjectCreateGitHubArgs(t *testing.T) {
 	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
 	for _, tc := range []struct {
@@ -841,16 +868,28 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 		"/projects edit Alpha --name Beta | --repository-source g":                 "/projects edit Alpha --name Beta | --repository-source github ",
 		"/projects edit Alpha --name Beta | --description changed --max-w":         "/projects edit Alpha --name Beta | --description changed --max-workers ",
 		"/projects edit demo --name renamed --max-workers 2 --repository-source g": "/projects edit demo --name renamed --max-workers 2 --repository-source github ",
+		"/projects create demo /tmp/new-project --create-dir":                      "/projects create demo /tmp/new-project --create-directory ",
 	} {
 		if got := completeSlashInput(input, *cmd); got != want {
 			t.Errorf("completion for %q = %q, want %q", input, got, want)
 		}
 	}
 	help := renderCommandHelp(*cmd)
+	createCompletions := registryCompletionValues("projects", "create", "demo", "/tmp/repo")
+	if !containsString(createCompletions, projectCreateDirectoryOption) {
+		t.Errorf("projects create completions missing %q: %v", projectCreateDirectoryOption, createCompletions)
+	}
+	if emptyCreateCompletions := registryCompletionValues("projects", "create"); containsString(emptyCreateCompletions, projectCreateDirectoryOption) {
+		t.Errorf("projects create offered the option before operands: %v", emptyCreateCompletions)
+	}
 	for _, want := range []string{
 		"projects show <project>",
 		"projects create <name> <path>",
+		"[--create-directory]",
+		"--create-directory asks the backend to create a missing local checkout folder",
 		"projects github-create <name> <url>",
+		"--create-directory is local-only; the backend clones GitHub repositories",
+		"projects create demo /Users/me/src/new-project --create-directory",
 		"GitHub creation remains available when local repository paths are disabled",
 		"projects edit <project> [options]", "projects delete <project>",
 		"projects edit <project> | [options]",
@@ -882,8 +921,8 @@ func TestProjectsCreateSettingsCompletionAndHelp(t *testing.T) {
 			"projects delete demo",
 			"openvibely-terminal --force projects delete demo",
 			"projects github-create \"My GitHub Project\" https://github.com/acme/demo",
-			"backend-owned project data",
-		} {
+			"--create-directory",
+			"backend-owned project data"} {
 			if !strings.Contains(string(body), want) {
 				t.Errorf("%s missing %q", path, want)
 			}

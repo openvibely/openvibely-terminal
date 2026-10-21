@@ -621,6 +621,77 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	}
 }
 
+func TestProjectsCreateDirectoryOptionSupportsPipeSyntaxAndSelectsProject(t *testing.T) {
+	requestURI := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/projects":
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got, want := r.FormValue("name"), "Nested Project"; got != want {
+				t.Errorf("name = %q, want %q", got, want)
+			}
+			if got, want := r.FormValue("repo_path"), "/tmp/new repositories/nested checkout"; got != want {
+				t.Errorf("repo_path = %q, want %q", got, want)
+			}
+			if got, want := r.FormValue("create_directory"), "true"; got != want {
+				t.Errorf("create_directory = %q, want %q", got, want)
+			}
+			w.Header().Set("Location", "/tasks?project_id=nested-project")
+			w.WriteHeader(http.StatusFound)
+		case r.Method == http.MethodGet && r.URL.Path == "/events/live":
+			select {
+			case requestURI <- r.URL.RequestURI():
+			default:
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(c)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	m = runLine(t, m, "/projects create Nested Project | /tmp/new repositories/nested checkout --create-directory")
+	defer m.Cleanup()
+	if m.selectedID != "nested-project" || m.selectedName != "Nested Project" {
+		t.Fatalf("created project was not selected: id=%q name=%q", m.selectedID, m.selectedName)
+	}
+	select {
+	case got := <-requestURI:
+		if got != "/events/live?project_id=nested-project" {
+			t.Fatalf("creation SSE request URI = %q, want selected project scope", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for scoped SSE request after project creation")
+	}
+}
+
+func TestProjectsGitHubCreateRejectsLocalDirectoryOption(t *testing.T) {
+	m, rec := dispatchModel(t, nil)
+	m = runLine(t, m, "/projects github-create Demo https://github.com/acme/demo --create-directory")
+	out := transcript(m)
+	if rec.saw("POST", "/projects") {
+		t.Fatalf("local-only option still made a GitHub creation request:\n%s", rec.all())
+	}
+	for _, want := range []string{"--create-directory is only supported by local projects", "projects create <name> <path> --create-directory", "projects github-create"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("GitHub option error missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestProjectsCreateGitHubSelectsCreatedProject(t *testing.T) {
 	const repoURL = "https://github.com/acme/repo.git?ref=release&path=docs%2Fguide#readme"
 	requestURI := make(chan string, 1)
@@ -1038,6 +1109,12 @@ func TestProjectsCreateUsageErrorsDoNotCallBackend(t *testing.T) {
 func TestProjectsCreateReportsBackendFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/projects" {
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("ParseForm: %v", err)
+			}
+			if got, want := r.FormValue("create_directory"), "true"; got != want {
+				t.Errorf("create_directory = %q, want %q", got, want)
+			}
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"error":"project creation rejected"}`))
 			return
@@ -1054,7 +1131,7 @@ func TestProjectsCreateReportsBackendFailure(t *testing.T) {
 	m := New(c)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	m = updated.(Model)
-	m = runLine(t, m, "/projects create demo /tmp/demo")
+	m = runLine(t, m, "/projects create demo /tmp/demo --create-directory")
 	if !strings.Contains(transcript(m), "project creation rejected") {
 		t.Fatalf("backend error missing from transcript:\n%s", transcript(m))
 	}
