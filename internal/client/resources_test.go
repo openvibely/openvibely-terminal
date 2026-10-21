@@ -6244,6 +6244,71 @@ func TestGetSkillDetailUsesScopedRequestAndValidatesIdentity(t *testing.T) {
 	})
 }
 
+func TestLoadSkillDetailsSmallSetAllocationEvidence(t *testing.T) {
+	if os.Getenv("OPENVIBELY_PERF_EVIDENCE") != "1" {
+		t.Skip("set OPENVIBELY_PERF_EVIDENCE=1 to measure small-set client allocations")
+	}
+	c := &Client{
+		baseURL: "http://backend.test",
+		http: &http.Client{Transport: htmlTestRoundTripper(func(r *http.Request) (*http.Response, error) {
+			handle := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/skills/"), "/details")
+			body := fmt.Sprintf(`{"handle":%q,"scope":%q,"content":"body"}`, handle, r.URL.Query().Get("scope"))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Request:    r,
+			}, nil
+		})},
+	}
+
+	for _, skillCount := range []int{0, 1, 5, 10} {
+		t.Run(fmt.Sprintf("skills=%d", skillCount), func(t *testing.T) {
+			summaries := make([]Skill, skillCount)
+			for i := range summaries {
+				summaries[i] = Skill{Handle: fmt.Sprintf("skill-%03d", i), Scope: "project"}
+			}
+			run := func(bounded bool) error {
+				skills := make([]Skill, len(summaries))
+				copy(skills, summaries)
+				if bounded {
+					loaded, err := c.LoadSkillDetails(context.Background(), "p1", skills)
+					if err != nil {
+						return err
+					}
+					skills = loaded
+				} else {
+					for i, skill := range skills {
+						detail, err := c.GetSkillDetail(context.Background(), "p1", skill.Handle, skill.Scope)
+						if err != nil {
+							return err
+						}
+						skills[i] = detail
+					}
+				}
+				_, err := json.Marshal(skills)
+				return err
+			}
+
+			var serialErr, boundedErr error
+			serialAllocs := testing.AllocsPerRun(20, func() {
+				serialErr = run(false)
+			})
+			boundedAllocs := testing.AllocsPerRun(20, func() {
+				boundedErr = run(true)
+			})
+			if serialErr != nil || boundedErr != nil {
+				t.Fatalf("allocation measurement errors: serial=%v bounded=%v", serialErr, boundedErr)
+			}
+			t.Logf("serial-allocs/op=%.1f bounded-allocs/op=%.1f", serialAllocs, boundedAllocs)
+			if boundedAllocs > serialAllocs*1.10 {
+				t.Errorf("bounded allocations %.1f exceed serial allocations %.1f by more than 10%%", boundedAllocs, serialAllocs)
+			}
+		})
+	}
+}
+
 func TestListSkillsWithContentFetchesOnlyResolvedBodiesInOrder(t *testing.T) {
 	var mu sync.Mutex
 	var requests []string

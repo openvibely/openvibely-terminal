@@ -4127,14 +4127,10 @@ func listSkillsWithFilteredContent(ctx context.Context, c *client.Client, projec
 			filtered = append(filtered, skill)
 		}
 	}
-	for i, skill := range filtered {
-		detail, err := c.GetSkillDetail(ctx, projectID, skill.Handle, skill.Scope)
-		if err != nil {
-			return nil, err
-		}
-		filtered[i] = detail
+	if len(filtered) == 0 {
+		return filtered, nil
 	}
-	return filtered, nil
+	return c.LoadSkillDetails(ctx, projectID, filtered)
 }
 
 func skillBodyFileOption(value string) (prefix, path string, found bool, err error) {
