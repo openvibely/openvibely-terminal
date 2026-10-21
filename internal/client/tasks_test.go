@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -93,7 +94,7 @@ func TestListTasksScrapesBoard(t *testing.T) {
 }
 
 func TestListTaskReferencesDecodesCompactProjectCatalog(t *testing.T) {
-	const response = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Fix login bug","prompt":"Investigate the redirect","category":"active","status":"running","display_order":3,"badges":["Goal","Sonnet"],"attachments":[{"id":"att-1","task_id":"t-1","file_name":"notes.txt","file_size":12}]}]}`
+	const response = `{"tasks":[{"id":"t-1","project_id":"p1","title":"Fix login bug","prompt":"Investigate the redirect","category":"active","status":"running","goal_state":"active","display_order":3,"badges":["Goal","Sonnet"],"attachments":[{"id":"att-1","task_id":"t-1","file_name":"notes.txt","file_size":12}]}]}`
 	var boardRequests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/tasks" {
@@ -125,12 +126,41 @@ func TestListTaskReferencesDecodesCompactProjectCatalog(t *testing.T) {
 	if len(tasks) != 1 {
 		t.Fatalf("tasks = %#v, want one task", tasks)
 	}
-	want := Task{ID: "t-1", ProjectID: "p1", Title: "Fix login bug", Prompt: "Investigate the redirect", Category: "active", Status: "running", DisplayOrder: 3, Badges: []string{"Goal", "Sonnet"}, Attachments: []Attachment{{ID: "att-1", TaskID: "t-1", FileName: "notes.txt", FileSize: 12}}}
+	want := Task{ID: "t-1", ProjectID: "p1", Title: "Fix login bug", Prompt: "Investigate the redirect", Category: "active", Status: "running", GoalState: "active", DisplayOrder: 3, Badges: []string{"Goal", "Sonnet"}, Attachments: []Attachment{{ID: "att-1", TaskID: "t-1", FileName: "notes.txt", FileSize: 12}}}
 	if !reflect.DeepEqual(tasks[0], want) {
 		t.Fatalf("task = %#v, want %#v", tasks[0], want)
 	}
 	if boardRequests != 0 {
 		t.Fatalf("board requests = %d, want 0", boardRequests)
+	}
+}
+
+func TestTaskReferenceGoalStateDecodingAndJSONField(t *testing.T) {
+	const body = `{"tasks":[{"id":"active","project_id":"p1","goal_state":"active"},{"id":"paused","project_id":"p1","goal_state":"paused"},{"id":"cleared","project_id":"p1","goal_state":"cleared"},{"id":"none","project_id":"p1"}]}`
+	tasks, err := decodeTaskReferenceCatalog(json.RawMessage(body))
+	if err != nil {
+		t.Fatalf("decodeTaskReferenceCatalog: %v", err)
+	}
+	want := []string{"active", "paused", "", ""}
+	for i, state := range want {
+		if tasks[i].GoalState != state {
+			t.Errorf("task %q goal_state = %q, want %q", tasks[i].ID, tasks[i].GoalState, state)
+		}
+	}
+
+	encoded, err := json.Marshal(tasks[3])
+	if err != nil {
+		t.Fatalf("marshal task without goal: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatalf("unmarshal task JSON: %v", err)
+	}
+	var state string
+	if raw, ok := fields["goal_state"]; !ok {
+		t.Fatal("JSON task omitted stable goal_state field")
+	} else if err := json.Unmarshal(raw, &state); err != nil || state != "" {
+		t.Fatalf("goal_state JSON = %s, want empty string", raw)
 	}
 }
 
@@ -500,7 +530,7 @@ func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 				</div>
 				<div class="card"><h3>Swarm Overview</h3></div>
 				<div id="task-prompt-panel"><div>Prompt</div><div class="textarea">`+prompt+`</div></div>
-				<div id="task-goal-panel" data-task-id="`+taskID+`"><span class="badge">Active</span></div>
+					<div id="task-goal-panel" data-task-id="`+taskID+`"><span class="badge">active</span><button data-detail-editor="goal" data-goal-status="active" data-value="Finish the release"></button></div>
 			</div>
 			<form><input name="title" value="Exact task"><select name="category"><option value="active" selected>active</option></select>
 				<select name="priority"><option value="3" selected>High</option></select>
@@ -524,7 +554,7 @@ func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 	}
 	want := Task{
 		ID: taskID, ProjectID: "p1", Title: "Exact task", Prompt: boardPrompt,
-		Category: "active", Status: "running", DisplayOrder: 0,
+		Category: "active", Status: "running", GoalState: "active", DisplayOrder: 0,
 		Badges: []string{"Chain", "Goal", "Swarm", "Claude Sonnet", "Planner", "Bug", "High"},
 	}
 	if !reflect.DeepEqual(detail.Task, want) {
@@ -532,6 +562,44 @@ func TestGetTaskMetadataForProjectExactParsesRealDetailMarkup(t *testing.T) {
 	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("requests = %d, want only scoped detail", got)
+	}
+}
+
+func TestTaskDetailGoalStateSeparatesLifecycleFromExecutionStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		goalState string
+		value     string
+		wantBadge bool
+	}{
+		{name: "active", goalState: "active", value: "Finish the release", wantBadge: true},
+		{name: "paused", goalState: "paused", value: "Finish the release", wantBadge: true},
+		{name: "no goal", value: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			markup := `<div id="task-detail-content" data-task-id="t-1" data-project-id="p1"><div data-task-status="running"></div><div id="task-goal-panel"><button data-detail-editor="goal" data-goal-status="` + tc.goalState + `" data-value="` + tc.value + `"></button></div></div>`
+			root, err := html.Parse(strings.NewReader(markup))
+			if err != nil {
+				t.Fatal(err)
+			}
+			task := Task{ID: "t-1", ProjectID: "p1"}
+			populateExactTaskMetadata(root, &task)
+			if task.GoalState != tc.goalState {
+				t.Errorf("goal state = %q, want %q", task.GoalState, tc.goalState)
+			}
+			if task.Status != "running" {
+				t.Errorf("execution status = %q, want running", task.Status)
+			}
+			gotBadge := false
+			for _, badge := range task.Badges {
+				if badge == "Goal" {
+					gotBadge = true
+				}
+			}
+			if gotBadge != tc.wantBadge {
+				t.Errorf("Goal badge present = %v, want %v; badges %v", gotBadge, tc.wantBadge, task.Badges)
+			}
+		})
 	}
 }
 

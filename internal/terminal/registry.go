@@ -139,6 +139,17 @@ func taskMutationAndRender(status string, mutation client.TaskBoardMutation, lis
 	return refreshAndRender(status, list, renderBoard)
 }
 
+func refreshTaskGoalMutation(ctx context.Context, c *client.Client, projectID, status string) (string, error) {
+	tasks, err := c.ListTaskReferences(ctx, projectID)
+	if err != nil {
+		return status, nil
+	}
+	if jsonMode {
+		return marshalJSON(tasks)
+	}
+	return status + "\n\n" + renderBoard(tasks, ""), nil
+}
+
 // actAndReloadText consolidates the "act, then reload a preformatted text
 // page" sequence. If the reload fails after a successful action, the error is
 // swallowed and only the status line is returned.
@@ -1697,12 +1708,12 @@ func tasksCommand() command {
 							if err := c.ClearTaskGoalForProject(ctx, t.ID, pid); err != nil {
 								return "", err
 							}
-							return "cleared goal on " + t.Title, nil
+							return refreshTaskGoalMutation(ctx, c, pid, "cleared goal on "+t.Title)
 						}
 						if err := c.SetTaskGoalForProject(ctx, t.ID, pid, objective); err != nil {
 							return "", err
 						}
-						return "goal set on " + t.Title + ": " + objective, nil
+						return refreshTaskGoalMutation(ctx, c, pid, "goal set on "+t.Title+": "+objective)
 					})
 				}
 
@@ -1731,7 +1742,7 @@ func tasksCommand() command {
 					if err != nil {
 						return "", err
 					}
-					return goalAction + "d goal on " + t.Title, nil
+					return refreshTaskGoalMutation(ctx, c, pid, goalAction+"d goal on "+t.Title)
 				})
 
 			case "reply":

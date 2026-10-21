@@ -14063,6 +14063,96 @@ func TestCLITaskGoalLifecycleUsesProjectScopedRoutes(t *testing.T) {
 	}
 }
 
+func TestCLITaskGoalMutationsRefreshGoalStateWithoutChangingExecutionStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		mutation   string
+		before     string
+		after      string
+		wantStatus string
+	}{
+		{name: "set", args: []string{"tasks", "goal", "Refactor", "|", "Ship it"}, mutation: "/tasks/t-1/goal", after: "active", wantStatus: "running"},
+		{name: "pause", args: []string{"tasks", "goal", "pause", "Refactor"}, mutation: "/tasks/t-1/goal/pause", before: "active", after: "paused", wantStatus: "running"},
+		{name: "resume", args: []string{"tasks", "goal", "resume", "Refactor"}, mutation: "/tasks/t-1/goal/resume", before: "paused", after: "active", wantStatus: "running"},
+		{name: "clear", args: []string{"tasks", "goal", "Refactor", "|", "clear"}, mutation: "/tasks/t-1/goal/clear", before: "active", wantStatus: "running"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := tc.before
+			var catalogReads int
+			var mutationCalls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(cliProjects))
+				case "/api/tasks/reference-catalog":
+					catalogReads++
+					w.Header().Set("Content-Type", "application/json")
+					badges := []string{}
+					if state != "" {
+						badges = []string{"Goal"}
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{"tasks": []client.Task{{
+						ID: "t-1", ProjectID: "p1", Title: "Refactor the API", Category: "active", Status: tc.wantStatus,
+						GoalState: state, Badges: badges,
+					}}})
+				case tc.mutation:
+					if r.Method != http.MethodPost || r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("mutation request = %s %s", r.Method, r.URL.RequestURI())
+					}
+					mutationCalls++
+					state = tc.after
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var plain bytes.Buffer
+			if err := RunCLI(c, &plain, "demo", tc.args, false, false); err != nil {
+				t.Fatalf("goal mutation failed: %v", err)
+			}
+			plainText := stripANSI(plain.String())
+			if mutationCalls != 1 || catalogReads != 2 {
+				t.Fatalf("mutation calls=%d catalog reads=%d, want 1 and 2; output:\n%s", mutationCalls, catalogReads, plainText)
+			}
+			if state == "" {
+				if strings.Contains(plainText, "[goal:") {
+					t.Fatalf("cleared goal still has a state marker:\n%s", plainText)
+				}
+			} else if !strings.Contains(plainText, "[goal: "+state+"]") {
+				t.Fatalf("refreshed board missing goal state %q:\n%s", state, plainText)
+			}
+			if !strings.Contains(plainText, tc.wantStatus) {
+				t.Fatalf("execution status %q missing from refreshed board:\n%s", tc.wantStatus, plainText)
+			}
+
+			var machine bytes.Buffer
+			if err := RunCLI(c, &machine, "demo", []string{"tasks"}, false, true); err != nil {
+				t.Fatalf("JSON task list failed: %v", err)
+			}
+			var tasks []map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(strings.TrimSpace(machine.String())), &tasks); err != nil {
+				t.Fatalf("task-list output is invalid JSON: %v\n%s", err, machine.String())
+			}
+			var gotState string
+			if len(tasks) != 1 || json.Unmarshal(tasks[0]["goal_state"], &gotState) != nil || gotState != state {
+				t.Fatalf("JSON goal_state = %q, tasks %#v; want %q", gotState, tasks, state)
+			}
+			var gotStatus string
+			if err := json.Unmarshal(tasks[0]["status"], &gotStatus); err != nil || gotStatus != tc.wantStatus {
+				t.Fatalf("JSON execution status = %q, err %v; want %q", gotStatus, err, tc.wantStatus)
+			}
+		})
+	}
+}
+
 func TestCLITaskGoalPauseFailureHasNoSuccessOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

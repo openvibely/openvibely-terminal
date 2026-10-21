@@ -2688,15 +2688,21 @@ func TestRenderLifecycleEventsDoesNotMutateDecodedPayload(t *testing.T) {
 // The board must render titles, not blanks, and must show its badges.
 func TestRenderBoardShowsTitlesAndBadges(t *testing.T) {
 	tasks := []client.Task{
-		{ID: "t-1", Title: "Refactor the API", Category: "backlog", Status: "pending",
+		{ID: "t-1", Title: "Refactor the API", Category: "backlog", Status: "pending", GoalState: "active",
 			Badges: []string{"Goal", "Sonnet"}},
-		{ID: "t-2", Title: "Write docs", Category: "active", Status: "running"},
+		{ID: "t-2", Title: "Write docs", Category: "active", Status: "running", GoalState: "paused"},
+		{ID: "t-3", Title: "No goal task", Category: "completed", Status: "completed"},
 	}
 	out := stripANSI(renderBoard(tasks, ""))
 
-	for _, want := range []string{"Refactor the API", "Write docs", "Goal", "Sonnet", "Backlog", "Active"} {
+	for _, want := range []string{"Refactor the API", "Write docs", "No goal task", "Sonnet", "Backlog", "Active", "pending", "running", "completed", "[goal: active]", "[goal: paused]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("board missing %q:\n%s", want, out)
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "No goal task") && strings.Contains(line, "[goal:") {
+			t.Errorf("task without a goal has a goal state marker: %s", line)
 		}
 	}
 }
