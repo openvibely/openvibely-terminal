@@ -1126,23 +1126,10 @@ func taskDetailChainControls(root *html.Node) *html.Node {
 }
 
 func taskDetailChainSelect(root *html.Node, name string) taskDetailChainSelectValue {
-	if root == nil {
+	selectNode := findNamedHTMLControl(root, name, "select")
+	selected := selectedHTMLFormOption(selectNode, htmlSelectFirstOptionFallback)
+	if selected == nil {
 		return taskDetailChainSelectValue{}
-	}
-	selectNode := taskDetailNamedControl(root, "select", name)
-	if selectNode == nil {
-		return taskDetailChainSelectValue{}
-	}
-	options := findAll(selectNode, func(e *html.Node) bool { return e.Data == "option" })
-	if len(options) == 0 {
-		return taskDetailChainSelectValue{}
-	}
-	selected := options[0]
-	for _, option := range options {
-		if nodeHasAttr(option, "selected") {
-			selected = option
-			break
-		}
 	}
 	return taskDetailChainSelectValue{value: strings.TrimSpace(attr(selected, "value")), option: selected}
 }
