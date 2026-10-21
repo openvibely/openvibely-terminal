@@ -912,19 +912,48 @@ func parseAutomationNodeDetail(detail *AutomationDetail, section *html.Node) (Au
 	return parsed, countsPresent
 }
 
+const automationNodeConfigSummaryMaxFields = 6
+
+type automationNodeConfigFieldDescriptor struct {
+	label  string
+	redact bool
+}
+
+// This ordered definition controls both which configuration labels are retained
+// and the order in which they appear in the bounded summary.
+var automationNodeConfigFieldDescriptors = []automationNodeConfigFieldDescriptor{
+	{label: "run at"}, {label: "time"}, {label: "repeat type"}, {label: "repeat"}, {label: "repeat interval"}, {label: "interval"}, {label: "enabled"},
+	{label: "notification type"}, {label: "base"}, {label: "base branch"}, {label: "draft"}, {label: "open as draft pr"}, {label: "labels"}, {label: "approval method"},
+	{label: "agent ref"}, {label: "primary agent"}, {label: "model"}, {label: "category"}, {label: "priority"}, {label: "clear context on start"},
+	{label: "prompt", redact: true}, {label: "task prompt", redact: true}, {label: "goal", redact: true}, {label: "task goal (optional)", redact: true},
+	{label: "instructions", redact: true}, {label: "what needs review", redact: true}, {label: "issue instructions", redact: true}, {label: "pull request instructions", redact: true}, {label: "display name"},
+}
+
 func automationNodeConfigSummary(section *html.Node) string {
-	const maxFields = 6
+	return automationNodeConfigSummaryWithDescriptors(section, automationNodeConfigFieldDescriptors)
+}
+
+func automationNodeConfigSummaryWithDescriptors(section *html.Node, descriptors []automationNodeConfigFieldDescriptor) string {
 	type configField struct {
 		label string
 		value string
 	}
-	fields := make(map[string]configField)
+	byLabel := make(map[string]automationNodeConfigFieldDescriptor, len(descriptors))
+	for _, descriptor := range descriptors {
+		byLabel[descriptor.label] = descriptor
+	}
+
+	fields := make(map[string]configField, len(byLabel))
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode && n.Data == "dt" {
 			label := strings.TrimSpace(NodeText(n))
 			lower := strings.ToLower(label)
-			if strings.Contains(lower, "secret") || strings.Contains(lower, "token") || strings.Contains(lower, "password") || strings.Contains(lower, "credential") || strings.Contains(lower, "api key") {
+			if isSensitiveAutomationConfigLabel(lower) {
+				return
+			}
+			descriptor, supported := byLabel[lower]
+			if !supported {
 				return
 			}
 			value := ""
@@ -937,15 +966,10 @@ func automationNodeConfigSummary(section *html.Node) string {
 			if value == "" {
 				return
 			}
-			switch lower {
-			case "prompt", "goal", "instructions", "task prompt", "task goal (optional)", "what needs review", "issue instructions", "pull request instructions":
+			if descriptor.redact {
 				value = "configured"
-			case "model", "agent ref", "primary agent", "category", "priority", "run at", "time", "repeat type", "repeat", "repeat interval", "interval", "enabled", "clear context on start", "notification type", "base", "base branch", "draft", "open as draft pr", "labels", "approval method", "display name":
-				if len([]rune(value)) > 40 {
-					value = string([]rune(value)[:39]) + "…"
-				}
-			default:
-				return
+			} else if runes := []rune(value); len(runes) > 40 {
+				value = string(runes[:39]) + "…"
 			}
 			if _, exists := fields[lower]; !exists {
 				fields[lower] = configField{label: label, value: value}
@@ -958,28 +982,27 @@ func automationNodeConfigSummary(section *html.Node) string {
 	}
 	walk(section)
 
-	// Prefer fields that explain when a trigger runs and what an action does.
-	// The web template emits keys alphabetically, so retaining the first fields
-	// would otherwise exhaust the bound on generic task settings before schedule
-	// timing appears.
-	priority := []string{
-		"run at", "time", "repeat type", "repeat", "repeat interval", "interval", "enabled",
-		"notification type", "base", "base branch", "draft", "open as draft pr", "labels", "approval method",
-		"agent ref", "primary agent", "model", "category", "priority", "clear context on start",
-		"prompt", "task prompt", "goal", "task goal (optional)", "instructions", "what needs review", "issue instructions", "pull request instructions", "display name",
-	}
-	parts := make([]string, 0, maxFields)
-	for _, key := range priority {
-		field, ok := fields[key]
+	parts := make([]string, 0, automationNodeConfigSummaryMaxFields)
+	for _, descriptor := range descriptors {
+		field, ok := fields[descriptor.label]
 		if !ok {
 			continue
 		}
 		parts = append(parts, field.label+"="+field.value)
-		if len(parts) == maxFields {
+		if len(parts) == automationNodeConfigSummaryMaxFields {
 			break
 		}
 	}
 	return strings.Join(parts, "; ")
+}
+
+func isSensitiveAutomationConfigLabel(lower string) bool {
+	return strings.Contains(lower, "secret") ||
+		strings.Contains(lower, "token") ||
+		strings.Contains(lower, "password") ||
+		strings.Contains(lower, "credential") ||
+		strings.Contains(lower, "api key") ||
+		strings.Contains(lower, "api-key")
 }
 
 func mergeAutomationLiveNode(nodes *[]AutomationLiveNode, index *automationLiveNodeIndex, parsed AutomationLiveNode) {
