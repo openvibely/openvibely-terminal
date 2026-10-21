@@ -2032,6 +2032,103 @@ func TestDeleteAgentUsesProjectScope(t *testing.T) {
 	}
 }
 
+func TestAutomationCardDiscoveryParityAcrossListPaths(t *testing.T) {
+	const page = `<main>
+		<section><div data-automation-url="/automations/outer">
+			<div class="card-body"><div><button data-automation-card-delete="outer" data-automation-name="Outer"><span class="badge"><strong>active</strong></span></button></div>
+				<section><div data-automation-url="/automations/nested"><button data-automation-card-delete="nested" data-automation-name="Nested"></button></div></section>
+			</div>
+		</div></section>
+		<article><div data-automation-url="/automations/missing"><div><span class="badge">paused</span></div></div></article>
+		<section><div data-automation-url="/automations/last"><div><button data-automation-card-delete="last" data-automation-name="Last"></button><span class="badge">draft</span></div></div></section>
+	</main>`
+	root, err := html.Parse(strings.NewReader(page))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+
+	complete := parseAutomations(root)
+	bounded, parsed, stopped := collectBoundedAutomations(root, nil, make(map[string]struct{}), 10)
+	if !reflect.DeepEqual(bounded, complete) {
+		t.Fatalf("bounded discovery = %+v, complete discovery = %+v", bounded, complete)
+	}
+	want := []Automation{
+		{ID: "outer", Name: "Outer", State: "active"},
+		{ID: "last", Name: "Last", State: "draft"},
+	}
+	if !reflect.DeepEqual(complete, want) {
+		t.Errorf("complete automations = %+v, want %+v", complete, want)
+	}
+	if parsed != 3 {
+		t.Errorf("bounded parsed cards = %d, want 3 marked cards including missing ID and excluding nested card", parsed)
+	}
+	if stopped {
+		t.Error("bounded discovery stopped before reaching its limit")
+	}
+}
+
+func TestCollectBoundedAutomationsStopsAtFirstUniqueCardBeyondLimit(t *testing.T) {
+	const page = `<main>
+		<div data-automation-url="/automations/one"><button data-automation-card-delete="one" data-automation-name="One"></button></div>
+		<div data-automation-url="/automations/two"><button data-automation-card-delete="two" data-automation-name="Two"></button></div>
+		<div data-automation-url="/automations/three"><button data-automation-card-delete="three" data-automation-name="Three"></button></div>
+	</main>`
+	root, err := html.Parse(strings.NewReader(page))
+	if err != nil {
+		t.Fatalf("html.Parse: %v", err)
+	}
+
+	got, parsed, stopped := collectBoundedAutomations(root, nil, make(map[string]struct{}), 2)
+	if !reflect.DeepEqual(got, []Automation{{ID: "one", Name: "One"}, {ID: "two", Name: "Two"}}) {
+		t.Errorf("bounded automations = %+v, want first two cards", got)
+	}
+	if parsed != 3 || !stopped {
+		t.Errorf("parsed/stopped = %d/%t, want 3/true", parsed, stopped)
+	}
+}
+
+func TestListAutomationsBoundedStopsBeforeFetchingContinuationPage(t *testing.T) {
+	const page = `<div data-card-pagination-root data-card-pagination-card-selector="[data-automation-url]" data-card-pagination-key="data-automation-url" data-card-pagination-has-more="true" data-card-pagination-total="4">
+		<div data-automation-url="/automations/one"><button data-automation-card-delete="one" data-automation-name="One"></button></div>
+		<div data-automation-url="/automations/two"><button data-automation-card-delete="two" data-automation-name="Two"></button></div>
+		<div data-automation-url="/automations/three"><button data-automation-card-delete="three" data-automation-name="Three"></button></div>
+	</div>`
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Query().Get("offset") != "" {
+			t.Errorf("unexpected continuation request %s", r.URL.RequestURI())
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set(cardPageMoreHeader, "true")
+		w.Header().Set(cardPageTotalHeader, "4")
+		_, _ = io.WriteString(w, page)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := c.ListAutomationsBounded(context.Background(), "p1", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Errorf("requests = %d, want only the initial page", requests)
+	}
+	if !reflect.DeepEqual(result.Automations, []Automation{{ID: "one", Name: "One"}, {ID: "two", Name: "Two"}}) {
+		t.Errorf("bounded automations = %+v, want first two cards", result.Automations)
+	}
+	if result.ParsedCards != 3 {
+		t.Errorf("parsed cards = %d, want 3 including the stop probe", result.ParsedCards)
+	}
+	if result.Complete || !result.MoreAvailable || result.RetainedPages != 0 {
+		t.Errorf("bounded result metadata = %+v, want incomplete, more available, and no retained pages", result)
+	}
+}
+
 func TestListAutomationsReadsCardMarkup(t *testing.T) {
 	// Mirrors the delete-menu button markup on a real automation card, which
 	// carries the id/name the TUI resolves references against.
@@ -2169,7 +2266,7 @@ func TestListAutomationsBoundedRequestBytesAndParsedCards(t *testing.T) {
 	}
 }
 
-func TestListAutomationsBoundedDeduplicatesAcrossContinuationPages(t *testing.T) {
+func TestListAutomationsDeduplicatesFirstSeenAcrossContinuationPages(t *testing.T) {
 	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -2192,6 +2289,22 @@ func TestListAutomationsBoundedDeduplicatesAcrossContinuationPages(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	complete, err := c.ListAutomations(context.Background(), "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 3 {
+		t.Fatalf("complete requests = %d, want 3", requests)
+	}
+	if len(complete) != 101 {
+		t.Fatalf("complete automations = %d, want 101", len(complete))
+	}
+	if complete[0].ID != "au-0000" || complete[0].Name != "Automation 0000" || complete[100].ID != "au-0100" {
+		t.Fatalf("complete first/last automations = %+v / %+v, want first-seen first card and final card", complete[0], complete[100])
+	}
+
+	requests = 0
 	result, err := c.ListAutomationsBounded(context.Background(), "p1", DefaultAutomationListLimit)
 	if err != nil {
 		t.Fatal(err)
