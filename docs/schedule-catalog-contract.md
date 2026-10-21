@@ -7,7 +7,7 @@ GET /api/schedules/catalog?project_id=<selected-project-id>
 Accept: application/json
 ```
 
-The current backend checkout does not register this route. Until the backend implements it, the client falls back to the calendar plus task schedule tabs. It prefers task-board cards and avoids attachment snapshots when that route returns tasks; if the task board is unsupported or empty, it uses the task-reference route for compatibility, whose older responses may include attachments. Both legacy paths still make one request per task. The 1–3 request listing target and a guarantee against attachment metadata therefore depend on backend support for this route.
+The current backend checkout does not register this route. Until the backend implements it, the client falls back to the calendar, the complete task-reference catalog, and each task's schedule tab. The task board is not a complete source because it omits ordinary pending scheduled tasks. Legacy task-reference responses may include attachment metadata, and this fallback still makes one request per task. The 1–3 request listing target and a guarantee against downloading attachment snapshots therefore depend on backend support for this route.
 
 ## Response
 

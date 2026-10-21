@@ -2382,9 +2382,8 @@ type scheduleCatalogRecord struct {
 }
 
 // GetSchedule loads the bounded project schedule catalog when the backend
-// exposes it. Older backends fall back to the calendar and task schedule tabs.
-// The fallback prefers the task board, which avoids loading attachment snapshots;
-// it uses the task-reference endpoint when the board is unavailable or empty.
+// exposes it. Older backends fall back to the calendar, full task-reference
+// catalog, and task schedule tabs so schedules on non-board tasks remain visible.
 func (c *Client) GetSchedule(ctx context.Context, projectID string) ([]ScheduleEntry, string, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
@@ -2518,13 +2517,10 @@ func (c *Client) getScheduleLegacy(ctx context.Context, projectID string) ([]Sch
 	if err != nil {
 		return nil, "", err
 	}
-	tasks, err := c.ListTasks(ctx, projectID)
-	if (err != nil && isUnsupportedScheduleCatalog(err)) || (err == nil && len(tasks) == 0) {
-		// Retain compatibility with older servers whose task board is unavailable
-		// or behaves like a generic empty page. Older task-reference responses
-		// may include attachment metadata.
-		tasks, err = c.ListTaskReferences(ctx, projectID)
-	}
+	// The task board omits ordinary pending scheduled tasks, so the complete
+	// reference catalog is required to preserve the legacy listing behavior.
+	// Older reference responses may also include attachment metadata.
+	tasks, err := c.ListTaskReferences(ctx, projectID)
 	if err != nil {
 		return nil, "", err
 	}
