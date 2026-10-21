@@ -5237,55 +5237,56 @@ func (c *Client) listAutomationsBoundedFromInitial(ctx context.Context, path str
 	return result, nil
 }
 
+// walkAutomationCards visits marked automation cards in document order. A
+// marked card owns its subtree, so nested card markers are not visited
+// separately. Returning false from visit stops the walk immediately.
+func walkAutomationCards(root *html.Node, visit func(*html.Node) bool) bool {
+	var walk func(*html.Node) bool
+	walk = func(n *html.Node) bool {
+		if n.Type == html.ElementNode && attr(n, "data-automation-url") != "" {
+			return visit(n)
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			if !walk(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return walk(root)
+}
+
 func collectBoundedAutomations(root *html.Node, out []Automation, seen map[string]struct{}, limit int) ([]Automation, int, bool) {
 	parsed := 0
 	stopped := false
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if stopped {
-			return
+	walkAutomationCards(root, func(card *html.Node) bool {
+		parsed++
+		a := parseAutomationCard(card)
+		if a.ID == "" {
+			return true
 		}
-		if n.Type == html.ElementNode && attr(n, "data-automation-url") != "" {
-			parsed++
-			if a := parseAutomationCard(n); a.ID != "" {
-				if _, ok := seen[a.ID]; ok {
-					return
-				}
-				if len(out) >= limit {
-					stopped = true
-					return
-				}
-				seen[a.ID] = struct{}{}
-				out = append(out, a)
-			}
-			return
+		if _, ok := seen[a.ID]; ok {
+			return true
 		}
-		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-			if stopped {
-				return
-			}
+		if len(out) >= limit {
+			stopped = true
+			return false
 		}
-	}
-	walk(root)
+		seen[a.ID] = struct{}{}
+		out = append(out, a)
+		return true
+	})
 	return out, parsed, stopped
 }
 
 func parseAutomations(root *html.Node) []Automation {
 	out := make([]Automation, 0)
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode && attr(n, "data-automation-url") != "" {
-			if a := parseAutomationCard(n); a.ID != "" {
-				out = append(out, a)
-			}
-			return
+	walkAutomationCards(root, func(card *html.Node) bool {
+		if a := parseAutomationCard(card); a.ID != "" {
+			out = append(out, a)
 		}
-		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-		}
-	}
-	walk(root)
+		return true
+	})
 	return out
 }
 
