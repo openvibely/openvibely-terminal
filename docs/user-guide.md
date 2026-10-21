@@ -61,7 +61,7 @@ make build          # → bin/openvibely-terminal
 make run
 ```
 
-Requires Go 1.27.2+ and a running OpenVibely server (default `http://localhost:3001`). Bare `/setup` in the TUI and `openvibely-terminal setup` in a shell remain explicit, read-only recovery instructions. To let the terminal check or bootstrap a local backend, opt in with `/setup check`, `/setup start`, or `/setup bootstrap --install`; start/bootstrap disclose effects and require confirmation in the TUI or `--force` in CLI mode. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
+Requires Go 1.27.3+ and a running OpenVibely server (default `http://localhost:3001`). Bare `/setup` in the TUI and `openvibely-terminal setup` in a shell remain explicit, read-only recovery instructions. To let the terminal check or bootstrap a local backend, opt in with `/setup check`, `/setup start`, or `/setup bootstrap --install`; start/bootstrap disclose effects and require confirmation in the TUI or `--force` in CLI mode. If the server is reachable but protected, the TUI shows sign-in guidance and `/login` opens an in-terminal masked login form.
 
 ### Backend setup and recovery
 
