@@ -129,7 +129,10 @@ func TestSetupGuidanceUsesAuthoritativePlatformInstructions(t *testing.T) {
 			want: []string{
 				"In PowerShell",
 				"& ([scriptblock]::Create((irm https://openvibely.ai/install.ps1))) -Variant binary",
-				"./start.sh",
+				"detected installed openvibely binary on PATH",
+				"Native Windows source-checkout startup is unsupported",
+				"Unix-only process and port commands",
+				"start the checkout on macOS or Linux",
 				"/status",
 				"openvibely-terminal status",
 				"$env:OPENVIBELY_SERVER_URL = \"<url>\"; openvibely-terminal status",
@@ -148,6 +151,193 @@ func TestSetupGuidanceUsesAuthoritativePlatformInstructions(t *testing.T) {
 				if strings.Contains(guidance, unwanted) {
 					t.Errorf("setup guidance unexpectedly contains %q:\n%s", unwanted, guidance)
 				}
+			}
+		})
+	}
+}
+
+func TestWindowsSetupDetectsBinaryAndExplainsUnsupportedCheckout(t *testing.T) {
+	t.Setenv("PORT", "")
+	checkout := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkout, "start.sh"), []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(checkout)
+
+	oldLookPath := setupLookPath
+	setupLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+
+	check := inspectLocalBackendSetup("windows", "http://localhost:3001", false)
+	if check.Start.Found {
+		t.Fatal("Windows source checkout was reported as launchable")
+	}
+	for _, want := range []string{
+		"unsupported by Windows setup",
+		"Bash script",
+		"Unix-only process and port commands",
+		"installed openvibely binary on PATH",
+		windowsBackendInstallCommand(),
+		"start the checkout on macOS or Linux",
+	} {
+		if !strings.Contains(check.Start.Description, want) {
+			t.Errorf("Windows checkout detection missing %q: %s", want, check.Start.Description)
+		}
+	}
+	if !strings.Contains(renderSetupCheck(check), "Missing prerequisites") {
+		t.Fatalf("Windows setup check did not show the unsupported checkout as a missing prerequisite:\n%s", renderSetupCheck(check))
+	}
+
+	setupLookPath = func(name string) (string, error) {
+		if name == "openvibely" {
+			return `C:\OpenVibely\openvibely.exe`, nil
+		}
+		return "", exec.ErrNotFound
+	}
+	binary := findLocalBackendStartCommand("windows")
+	if !binary.Found || binary.Kind != setupStartInstalledBinary || binary.Display != "openvibely" || binary.Name != `C:\OpenVibely\openvibely.exe` {
+		t.Fatalf("Windows installed binary detection = %#v", binary)
+	}
+	if err := validateLocalBackendStartCommand("windows", binary); err != nil {
+		t.Fatalf("detected Windows binary rejected: %v", err)
+	}
+}
+
+func TestWindowsBootstrapInstallConfirmationDescribesPostInstallBinary(t *testing.T) {
+	t.Setenv("PORT", "")
+	checkout := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkout, "start.sh"), []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(checkout)
+	oldLookPath := setupLookPath
+	setupLookPath = func(name string) (string, error) {
+		if name == "powershell.exe" {
+			return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, nil
+		}
+		return "", exec.ErrNotFound
+	}
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+
+	check := inspectLocalBackendSetup("windows", "http://localhost:3001", true)
+	if check.Start.Found || !strings.Contains(check.Start.Display, "unsupported on Windows") {
+		t.Fatalf("pre-install Windows start command = %#v, want unsupported checkout path", check.Start)
+	}
+	if len(check.InstallSteps) != 1 || !check.InstallSteps[0].Found {
+		t.Fatalf("Windows bootstrap installer prerequisite = %#v, want detected PowerShell", check.InstallSteps)
+	}
+	message := setupConfirmationMessage(check, setupOptions{action: "bootstrap", install: true})
+	for _, want := range []string{
+		"download and run the documented installer",
+		"start the installed `openvibely` binary after the installer detects it on PATH",
+		"poll local backend health",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("Windows bootstrap confirmation missing %q:\n%s", want, message)
+		}
+	}
+	if strings.Contains(message, "start process `./start.sh") || strings.Contains(message, "unsupported on Windows") {
+		t.Fatalf("Windows bootstrap confirmation describes the unsupported checkout as its startup command:\n%s", message)
+	}
+}
+
+func TestWindowsSetupRejectsUnsupportedCheckoutBeforeStarting(t *testing.T) {
+	t.Setenv("PORT", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	check := setupCheckResult{
+		BaseURL:  c.BaseURL(),
+		Endpoint: c.BaseURL(),
+		Platform: "windows",
+		Start: setupCommandSpec{
+			Name:        "./start.sh",
+			Display:     "./start.sh",
+			Description: windowsCheckoutStartupUnsupportedMessage(),
+			Found:       true,
+			Kind:        setupStartSourceScript,
+		},
+	}
+	var starts atomic.Int32
+	oldStart := setupStartProcess
+	setupStartProcess = func(context.Context, setupCommandSpec) (setupBackendProcess, error) {
+		starts.Add(1)
+		return &testSetupBackendProcess{}, nil
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+
+	_, err = runSetupBootstrap(context.Background(), c, check, setupOptions{action: "start"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported by Windows setup") || !strings.Contains(err.Error(), windowsBackendInstallCommand()) {
+		t.Fatalf("unsupported Windows startup error = %v", err)
+	}
+	if starts.Load() != 0 {
+		t.Fatalf("setup attempted %d unsupported Windows startup(s)", starts.Load())
+	}
+	if err := validateLocalBackendStartCommand("windows", setupCommandSpec{Name: "bash", Display: "./start.sh", Found: true}); err == nil {
+		t.Fatal("Windows startup validation accepted an unsupported shell command")
+	}
+}
+
+func TestWindowsBootstrapInstallRequiresPowerShellBeforeAnyStartup(t *testing.T) {
+	t.Setenv("PORT", "")
+	t.Chdir(t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	c, err := client.New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldLookPath := setupLookPath
+	setupLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+
+	check := inspectLocalBackendSetup("windows", c.BaseURL(), true)
+	var installs, starts atomic.Int32
+	oldInstaller := setupRunInstaller
+	setupRunInstaller = func(context.Context, string, []setupCommandSpec) error {
+		installs.Add(1)
+		return nil
+	}
+	t.Cleanup(func() { setupRunInstaller = oldInstaller })
+	oldStart := setupStartProcess
+	setupStartProcess = func(context.Context, setupCommandSpec) (setupBackendProcess, error) {
+		starts.Add(1)
+		return &testSetupBackendProcess{}, nil
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+
+	_, err = runSetupBootstrap(context.Background(), c, check, setupOptions{action: "bootstrap", install: true})
+	if err == nil || !strings.Contains(err.Error(), "powershell.exe") {
+		t.Fatalf("Windows bootstrap without PowerShell error = %v", err)
+	}
+	if installs.Load() != 0 || starts.Load() != 0 {
+		t.Fatalf("Windows bootstrap attempted installer %d time(s) and startup %d time(s) without PowerShell", installs.Load(), starts.Load())
+	}
+}
+
+func TestUnixSetupStillDiscoversSourceCheckout(t *testing.T) {
+	for _, platform := range []string{"darwin", "linux"} {
+		t.Run(platform, func(t *testing.T) {
+			checkout := t.TempDir()
+			if err := os.WriteFile(filepath.Join(checkout, "start.sh"), []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(checkout)
+			oldLookPath := setupLookPath
+			setupLookPath = func(string) (string, error) { return "", exec.ErrNotFound }
+			t.Cleanup(func() { setupLookPath = oldLookPath })
+
+			start := findLocalBackendStartCommand(platform)
+			if !start.Found || start.Kind != setupStartSourceScript || start.Name != "./start.sh" || start.Display != "./start.sh" {
+				t.Fatalf("%s source checkout command = %#v", platform, start)
 			}
 		})
 	}
@@ -557,6 +747,71 @@ func TestSetupPortlessLocalURLUsesEffectiveEndpointForHealthAndDisplay(t *testin
 	}
 	if !strings.Contains(out.String(), "already running at "+effectiveEndpoint) {
 		t.Fatalf("setup output omitted already-running effective endpoint:\n%s", out.String())
+	}
+}
+
+func TestHealthyRemoteSetupStillRefusesLocalStartup(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"max_workers":1,"available_slots":1,"has_capacity":true}`)
+	}))
+	defer srv.Close()
+	serverURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteAuthority := "backend.example:" + serverURL.Port()
+	oldTransport := http.DefaultTransport
+	dialer := &net.Dialer{}
+	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address == remoteAuthority {
+			address = srv.Listener.Addr().String()
+		}
+		return dialer.DialContext(ctx, network, address)
+	}}
+	http.DefaultTransport = transport
+	t.Cleanup(func() {
+		http.DefaultTransport = oldTransport
+		transport.CloseIdleConnections()
+	})
+
+	c, err := client.New("http://" + remoteAuthority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetGlobalCapacity(context.Background()); err != nil {
+		t.Fatalf("remote fixture health check failed: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("healthy remote fixture received %d requests, want 1", requests.Load())
+	}
+
+	var starts atomic.Int32
+	oldStart := setupStartProcess
+	setupStartProcess = func(context.Context, setupCommandSpec) (setupBackendProcess, error) {
+		starts.Add(1)
+		return &testSetupBackendProcess{}, nil
+	}
+	t.Cleanup(func() { setupStartProcess = oldStart })
+	var out bytes.Buffer
+	err = RunCLI(c, &out, "", []string{"setup", "bootstrap"}, true, false)
+	if err == nil || !strings.Contains(err.Error(), "Configured backend is remote") {
+		t.Fatalf("healthy remote setup bootstrap error = %v, output:\n%s", err, out.String())
+	}
+	if starts.Load() != 0 {
+		t.Fatalf("setup started %d local backend processes for a healthy remote server", starts.Load())
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("remote setup unexpectedly probed the backend %d times after classification", requests.Load()-1)
+	}
+	remoteCheck := inspectLocalBackendSetup("windows", c.BaseURL(), false)
+	if _, err := runSetupBootstrap(context.Background(), c, remoteCheck, setupOptions{action: "bootstrap"}); err == nil || !strings.Contains(err.Error(), "Configured backend is remote") {
+		t.Fatalf("direct healthy remote bootstrap error = %v", err)
+	}
+	if starts.Load() != 0 || requests.Load() != 1 {
+		t.Fatalf("direct remote bootstrap started %d local process(es) or made %d extra request(s)", starts.Load(), requests.Load()-1)
 	}
 }
 
@@ -1399,6 +1654,10 @@ func TestSetupUserGuideParity(t *testing.T) {
 		"Remote server URLs\nfail closed",
 		"curl -fsSL https://openvibely.ai/install.sh | bash -s -- --variant binary",
 		"& ([scriptblock]::Create((irm https://openvibely.ai/install.ps1))) -Variant binary",
+		"Native Windows source-checkout startup is",
+		"unsupported: `./start.sh` is a Bash script",
+		"setup start` and `setup bootstrap` can launch a detected installed",
+		"/setup check` reports which supported launch",
 		"./start.sh",
 		"`openvibely-terminal status`",
 		"`-server <url>`",
