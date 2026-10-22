@@ -106,12 +106,16 @@ curl -fsSL https://openvibely.ai/install.sh | bash -s -- --variant binary
 **Windows PowerShell**
 
 ```powershell
-# Explicitly install the OpenVibely server, if you choose to do so.
+# Explicitly install the OpenVibely server binary, if you choose to do so.
 & ([scriptblock]::Create((irm https://openvibely.ai/install.ps1))) -Variant binary
-
-# A source checkout can be started from a shell that supports it.
-./start.sh
 ```
+
+On Windows, `setup start` and `setup bootstrap` can launch a detected installed
+`openvibely` binary on `PATH`. Native Windows source-checkout startup is
+unsupported: `./start.sh` is a Bash script that relies on Unix process and port
+tools. Install the binary above (or use `/setup bootstrap --install`), or start
+the checkout on macOS or Linux. `/setup check` reports which supported launch
+path is available before startup.
 
 After the server starts, verify its health with `/status` in the TUI or
 `openvibely-terminal status` in a shell. A local server normally listens at

@@ -4057,20 +4057,15 @@ func (c *Client) webhookLocation(pathToken string) (string, string) {
 }
 
 func (c *Client) webhooksFromPages(pages []htmlPage, projectID string) []Webhook {
-	out := make([]Webhook, 0)
-	seen := make(map[string]struct{})
-	for _, page := range pages {
-		for _, card := range scrapeCards(page.root, "data-webhook-id") {
+	return aggregateFirstSeenPages(pages, func(root *html.Node) []Webhook {
+		webhooks := make([]Webhook, 0)
+		for _, card := range scrapeCards(root, "data-webhook-id") {
 			id := strings.TrimSpace(card.Get("webhook-id"))
 			if id == "" {
 				continue
 			}
-			if _, ok := seen[id]; ok {
-				continue
-			}
-			seen[id] = struct{}{}
 			path, endpointURL := c.webhookLocation(card.Get("webhook-token"))
-			out = append(out, Webhook{
+			webhooks = append(webhooks, Webhook{
 				ID:              id,
 				ProjectID:       projectID,
 				Name:            card.Get("webhook-name"),
@@ -4081,8 +4076,10 @@ func (c *Client) webhooksFromPages(pages []htmlPage, projectID string) []Webhook
 				AgentIDs:        make([]string, 0),
 			})
 		}
-	}
-	return out
+		return webhooks
+	}, func(webhook Webhook) string {
+		return webhook.ID
+	})
 }
 
 // ListWebhooks returns every inbound webhook card for exactly one project.
