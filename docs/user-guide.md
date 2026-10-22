@@ -173,8 +173,8 @@ mode, a reachable server that returns `302` to `/login` or `401` is shown as
 **sign-in required**, not offline; use `/login`, enter the username, then enter
 the masked password. A failed attempt returns to the password prompt, and `Esc`
 cancels without adding credentials to history or the transcript. After a
-successful login, health, project data, the selected project, and the SSE stream
-are retried without restarting the TUI.
+successful login, health, project data, the selected project, and the WebSocket
+live stream are retried without restarting the TUI.
 
 ## Using the chat
 
@@ -1335,7 +1335,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Schedules | Project schedule listing prefers the bounded `GET /api/schedules/catalog?project_id=...` contract; older backends fall back to the calendar, task-reference catalog, and per-task schedule tabs. This legacy path may omit non-visible scheduled tasks and may download attachment metadata. Add, edit, toggle, and delete remain project-scoped; toggle uses `POST /api/schedules/:id/toggle`. See [the schedule catalog contract](schedule-catalog-contract.md). |
 | Personality | `POST /personality/custom`, `GET/PUT/DELETE /personality/custom/:key`, `DELETE /personality/custom/bulk` (JSON custom CRUD and guarded bulk deletion); `/personality` remains the scoped HTML list |
 | Auth | `POST /login`, `GET /auth/me` |
-| Events | `GET /events/live` (SSE) |
+| Events | `GET /events/ws` (WebSocket upgrade; `openvibely-live` subprotocol) |
 
 **HTML/HTMX** — the task board, alerts, skills, models, agents, schedule,
 workers, channels, personality list, reflection, grades, insights and
@@ -1370,18 +1370,18 @@ removes a `data-*` attribute will show up as an empty list rather than a crash.
 
 ## Reliability
 
-- **Live events** in the interactive TUI stream from `/events/live` with automatic
-  reconnect and exponential backoff (1s → 30s cap); the header shows the stream
-  state. One-shot `events on` is a foreground, single-connection monitor and
-  exits on `Ctrl-C` or clean server termination.
+- **Live events** in the interactive TUI use the shared WebSocket at `/events/ws`
+  with automatic reconnect and replay; the header shows the stream state. One-shot
+  `events on` is a foreground, project-scoped monitor and exits on `Ctrl-C` or
+  clean server termination.
 - **Connection health** is re-checked every 30s; the header switches to `● offline` for transport failures and to `● sign-in required` for a reachable protected backend. `/status` explains the recovery action.
-- **Interactive auth** uses `/login` with a masked password field, reuses the cookie session, and retries health, projects and SSE after success.
+- **Interactive auth** uses `/login` with a masked password field, reuses the cookie session, and retries health, projects and the live WebSocket after success.
 - **Chat** is asynchronous end to end: the send is accepted with a message ID,
   then polled; server-side queueing behind an active turn is reported inline.
 - **Errors** from any command are printed in the transcript rather than
   discarded; auth failures point to `/login` (or the CLI environment/flags) and
   never print passwords or response bodies.
-- **Shutdown** cancels the SSE context and restores the terminal.
+- **Shutdown** cancels the WebSocket context and restores the terminal.
 
 ## Layout
 
@@ -1396,9 +1396,9 @@ internal/client/
   resources.go               alerts, skills, models, agents, schedule, workers,
                              channels, personality, pulse, reflection, insights
   htmltext.go                HTML → text helpers
-  sse.go                     /events/live stream client
+  websocket.go               shared /events/ws live and execution transport
 internal/terminal/
-  model.go                   chat model: transcript, input, history, SSE, polling
+  model.go                   chat model: transcript, input, history, live events, polling
   command.go                 command type, registry lookup, completion, arg helpers
   registry.go                every command and the backend calls behind it
   view.go                    chrome + all result renderers (tables, ASCII charts)
@@ -1470,7 +1470,7 @@ and tests on normal exit, job cancellation, and timeout termination; the
 harness exercises each interruption path.
 
 Tests cover the HTML scrapers and JSON client against `httptest` servers, the
-chat update loop (history, menus, chat polling, SSE backoff), the renderers,
+chat update loop (history, menus, chat polling, live reconnect), the renderers,
 and an end-to-end dispatch suite asserting that each slash command issues the
 expected HTTP method and path.
 

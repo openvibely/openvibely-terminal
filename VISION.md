@@ -37,7 +37,7 @@ and backend behavior, the backend remains authoritative for data and lifecycle
 semantics, while the TUI chooses the clearest terminal interaction model.
 
 The TUI/CLI should communicate with OpenVibely through the public HTTP, JSON,
-SSE, and documented API routes provided by the backend. It should not reach
+WebSocket, and documented API routes provided by the backend. It should not reach
 into backend databases, mutate backend files directly, or duplicate backend
 business logic except for client-side formatting, command parsing, reference
 resolution, and lightweight workflow convenience.
@@ -100,7 +100,7 @@ terminal-native ways:
 - Compact tables, trees, timelines, status lines, and ASCII charts.
 - Searchable references by ID prefix, title, name, handle, or unique substring.
 - Keyboard-first navigation in the TUI.
-- Live SSE event streaming in the transcript. In interactive mode `/events`
+- Live WebSocket event streaming in the transcript. In interactive mode `/events`
   controls display for the TUI-owned stream; in CLI mode `events on` owns one
   foreground project-scoped stream, emits line-oriented output, and remains
   active until `Ctrl-C` or clean termination. CLI `events off` must fail clearly

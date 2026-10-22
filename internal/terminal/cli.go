@@ -459,7 +459,7 @@ func streamCLIExecutionWithRetryWait(ctx context.Context, c *client.Client, out 
 		if ctx.Err() != nil {
 			return finishForContext()
 		}
-		events, errs := c.StreamExecution(ctx, execID, offset)
+		events, errs := c.StreamExecutionForProject(ctx, projectID, execID, offset)
 		terminal := false
 		var streamErr error
 		for events != nil || errs != nil {
@@ -487,6 +487,21 @@ func streamCLIExecutionWithRetryWait(ctx context.Context, c *client.Client, out 
 					if !jsonOutput && delta != "" {
 						plainWrote = true
 						plainEndsNewline = strings.HasSuffix(delta, "\n")
+					}
+					offset = event.Offset
+					reconnects = 0
+				case client.ExecutionReset:
+					if !jsonOutput && plainWrote {
+						if _, err := io.WriteString(out, "\n[output reset after reconnect]\n"); err != nil {
+							return fmt.Errorf("writing streamed output: %w", err)
+						}
+					}
+					if err := writeCLIExecutionRecord(out, cliExecutionRecord{Type: client.ExecutionReset, ProjectID: projectID, TaskID: taskID, ExecID: execID, Offset: event.Offset, Delta: event.Data}, jsonOutput); err != nil {
+						return err
+					}
+					if !jsonOutput {
+						plainWrote = event.Data != ""
+						plainEndsNewline = strings.HasSuffix(event.Data, "\n")
 					}
 					offset = event.Offset
 					reconnects = 0
@@ -573,7 +588,7 @@ func writeAuthoritativeCLISuffix(out io.Writer, projectID, taskID, execID string
 
 func writeCLIExecutionRecord(out io.Writer, record cliExecutionRecord, jsonOutput bool) error {
 	if !jsonOutput {
-		if record.Type != client.ExecutionDelta || record.Delta == "" {
+		if (record.Type != client.ExecutionDelta && record.Type != client.ExecutionReset) || record.Delta == "" {
 			return nil
 		}
 		if _, err := io.WriteString(out, record.Delta); err != nil {
@@ -753,8 +768,8 @@ type cliEventJSONRecord struct {
 	Data            json.RawMessage `json:"data,omitempty"`
 }
 
-// cliEventPayload covers the fields used by the backend's task and chat SSE
-// payloads. Unknown fields are preserved in cliEventRecord.Data.
+// cliEventPayload covers the fields used by the backend's task and chat live
+// event payloads. Unknown fields are preserved in cliEventRecord.Data.
 type cliEventPayload struct {
 	Type            string `json:"type"`
 	ProjectID       string `json:"project_id"`

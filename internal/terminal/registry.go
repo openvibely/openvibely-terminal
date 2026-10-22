@@ -11824,8 +11824,8 @@ func (m Model) pickProject(name string) (Model, tea.Cmd) {
 	shouldReconnect := m.sseCancel != nil || m.sseRetryAfterProject
 	m.setActiveProject(p)
 	m.append(entry{role: "system", text: "active project: " + p.Name})
-	// If SSE is active, reconnect with the new project ID so the server
-	// delivers only this project's events.
+	// If live events are active, reconnect with the new project ID so the
+	// WebSocket receives only this project's events.
 	if !m.authRequired && shouldReconnect {
 		m.sseRetryAfterProject = false
 		return m, m.connectSSE()
