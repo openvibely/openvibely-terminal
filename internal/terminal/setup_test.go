@@ -203,6 +203,44 @@ func TestWindowsSetupDetectsBinaryAndExplainsUnsupportedCheckout(t *testing.T) {
 	}
 }
 
+func TestWindowsBootstrapInstallConfirmationDescribesPostInstallBinary(t *testing.T) {
+	t.Setenv("PORT", "")
+	checkout := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkout, "start.sh"), []byte("#!/usr/bin/env bash\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(checkout)
+	oldLookPath := setupLookPath
+	setupLookPath = func(name string) (string, error) {
+		if name == "powershell.exe" {
+			return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, nil
+		}
+		return "", exec.ErrNotFound
+	}
+	t.Cleanup(func() { setupLookPath = oldLookPath })
+
+	check := inspectLocalBackendSetup("windows", "http://localhost:3001", true)
+	if check.Start.Found || !strings.Contains(check.Start.Display, "unsupported on Windows") {
+		t.Fatalf("pre-install Windows start command = %#v, want unsupported checkout path", check.Start)
+	}
+	if len(check.InstallSteps) != 1 || !check.InstallSteps[0].Found {
+		t.Fatalf("Windows bootstrap installer prerequisite = %#v, want detected PowerShell", check.InstallSteps)
+	}
+	message := setupConfirmationMessage(check, setupOptions{action: "bootstrap", install: true})
+	for _, want := range []string{
+		"download and run the documented installer",
+		"start the installed `openvibely` binary after the installer detects it on PATH",
+		"poll local backend health",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("Windows bootstrap confirmation missing %q:\n%s", want, message)
+		}
+	}
+	if strings.Contains(message, "start process `./start.sh") || strings.Contains(message, "unsupported on Windows") {
+		t.Fatalf("Windows bootstrap confirmation describes the unsupported checkout as its startup command:\n%s", message)
+	}
+}
+
 func TestWindowsSetupRejectsUnsupportedCheckoutBeforeStarting(t *testing.T) {
 	t.Setenv("PORT", "")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
