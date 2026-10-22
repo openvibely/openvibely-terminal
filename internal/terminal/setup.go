@@ -713,10 +713,16 @@ func setupConfirmationMessage(check setupCheckResult, opts setupOptions) string 
 	} else {
 		b.WriteString("setup does not create files before starting; the backend process may read or write its own data after launch; ")
 	}
-	b.WriteString("start process `")
-	b.WriteString(sanitizeAutomationDetailText(check.Start.Display))
-	b.WriteString("`; poll local backend health; no credentials sent; no projects created; server URL unchanged. " + confirmCancelInstruction)
+	b.WriteString(setupConfirmationStartDescription(check, opts))
+	b.WriteString("; poll local backend health; no credentials sent; no projects created; server URL unchanged. " + confirmCancelInstruction)
 	return b.String()
+}
+
+func setupConfirmationStartDescription(check setupCheckResult, opts setupOptions) string {
+	if check.Platform == "windows" && opts.action == "bootstrap" && opts.install {
+		return "start the installed `openvibely` binary after the installer detects it on PATH"
+	}
+	return "start process `" + sanitizeAutomationDetailText(check.Start.Display) + "`"
 }
 
 func setupClientForEndpoint(c *client.Client, endpoint string) (*client.Client, error) {
