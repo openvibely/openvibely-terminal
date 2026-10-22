@@ -3428,6 +3428,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.acceptsSSEEvent(msg.event) {
 			return m, m.waitForCurrentSSE(msg.generation)
 		}
+		if msg.event.Name == "reconcile" {
+			m.sseConnected = true
+			return m, tea.Batch(m.waitForCurrentSSE(msg.generation), m.reconcileLiveState())
+		}
 		if !m.acceptsOpenThreadTaskEventIdentity(msg.event) {
 			return m, m.waitForCurrentSSE(msg.generation)
 		}
@@ -4094,6 +4098,38 @@ func (m *Model) replaceOpenThreadBody(body string) {
 		}
 	}
 	m.append(entry{role: "result", head: head, text: body})
+}
+
+// reconcileLiveState repairs state missed while the WebSocket was disconnected
+// or a broadcaster dropped an event. Refresh results retain session/project and
+// thread request guards, and control frames never appear in the transcript.
+func (m *Model) reconcileLiveState() tea.Cmd {
+	if m.selectedID == "" || m.loginActive || m.authRequired {
+		return nil
+	}
+	cmds := []tea.Cmd{m.fetchStatusCounts()}
+	if m.pendingMsgID != "" && m.pendingChatScopeCurrent() {
+		cmds = append(cmds, m.fetchChatStatus(m.pendingMsgID))
+	}
+	// A pending reply already owns its transcript through execution/status
+	// reconciliation. Do not replace that transcript with a history snapshot.
+	if m.threadID != "" && m.threadReplyPendingRequestID == 0 && m.pendingMsgTaskID != m.threadID {
+		m.threadRefreshRequestID++
+		requestID := m.threadRefreshRequestID
+		taskID, projectID, c := m.threadID, m.selectedID, m.client
+		cmds = append(cmds, withMessageGeneration(func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
+			defer cancel()
+			detail, err := c.GetTaskForProjectExactTab(ctx, taskID, projectID, "thread")
+			msg := threadUpdatedMsg{requestID: requestID, projectID: projectID, taskID: taskID, err: err}
+			if err == nil && detail != nil {
+				msg.err = detail.TabError("thread")
+				msg.status, msg.body = detail.Task.Status, detail.Thread
+			}
+			return msg
+		}, sessionGenerationOf(*m), projectGenerationOf(*m)))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) refreshTaskThread(taskID, projectID, status string) tea.Cmd {

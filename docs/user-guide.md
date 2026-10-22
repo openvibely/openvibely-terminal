@@ -1375,9 +1375,12 @@ removes a `data-*` attribute will show up as an empty list rather than a crash.
 ## Reliability
 
 - **Live events** in the interactive TUI use the shared WebSocket at `/events/ws`
-  with automatic reconnect and replay; the header shows the stream state. One-shot
-  `events on` is a foreground, project-scoped monitor and exits on `Ctrl-C` or
-  clean server termination.
+  with automatic reconnect and execution-output replay. Like the browser UI,
+  active subscriptions retry connection failures indefinitely with exponential
+  delays from 250 ms up to 15 seconds plus jitter. After reconnecting, and on the
+  backend's periodic reconciliation signal, the TUI refreshes task/alert counts,
+  the pending chat status, and the open task thread. One-shot `events on` remains
+  a foreground, project-scoped monitor across server blips until `Ctrl-C`.
 - **Connection health** is re-checked every 30s; the header switches to `● offline` for transport failures and to `● sign-in required` for a reachable protected backend. `/status` explains the recovery action.
 - **Interactive auth** uses `/login` with a masked password field, reuses the cookie session, and retries health, projects and the live WebSocket after success.
 - **Chat** is asynchronous end to end: the send is accepted with a message ID,
