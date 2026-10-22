@@ -126,6 +126,10 @@ func (p *localBackendProcess) Stop() {
 	})
 }
 
+func windowsBackendInstallCommand() string {
+	return fmt.Sprintf("& ([scriptblock]::Create((irm %s))) -Variant binary", backendInstallerWindowsURL)
+}
+
 // setupGuidance renders only instructions that the user may choose to run. It
 // intentionally performs no backend, project, authentication, process, or file
 // operation so it remains useful on a first launch and when offline.
@@ -146,9 +150,8 @@ func setupGuidance(platform, baseURL string) string {
 	switch platform {
 	case "windows":
 		b.WriteString("In PowerShell, explicitly install the server using the backend's documented Windows command:\n")
-		fmt.Fprintf(&b, "  & ([scriptblock]::Create((irm %s))) -Variant binary\n", backendInstallerWindowsURL)
-		b.WriteString("For a source checkout in a shell that supports it, start the server with:\n")
-		b.WriteString("  ./start.sh\n")
+		fmt.Fprintf(&b, "  %s\n", windowsBackendInstallCommand())
+		b.WriteString("Windows setup start/bootstrap supports a detected installed openvibely binary on PATH. Native Windows source-checkout startup is unsupported: ./start.sh is a Bash script that uses Unix-only process and port commands. Install the binary above, or start the checkout on macOS or Linux.\n")
 	default:
 		b.WriteString("On macOS or Linux, explicitly install the server using the backend's documented command:\n")
 		fmt.Fprintf(&b, "  curl -fsSL %s | bash -s -- --variant binary\n", backendInstallerUnixURL)
@@ -292,6 +295,14 @@ type setupOptions struct {
 	install bool
 }
 
+type setupStartKind uint8
+
+const (
+	setupStartUnknown setupStartKind = iota
+	setupStartSourceScript
+	setupStartInstalledBinary
+)
+
 type setupCommandSpec struct {
 	Name        string
 	Args        []string
@@ -299,6 +310,7 @@ type setupCommandSpec struct {
 	Display     string
 	Description string
 	Found       bool
+	Kind        setupStartKind
 }
 
 type setupCheckResult struct {
@@ -561,21 +573,50 @@ func parseStaticShellAssignmentValue(raw string) (string, bool) {
 }
 
 func findLocalBackendStartCommand(platform string) setupCommandSpec {
-	if platform != "windows" {
-		if info, err := setupStat("./start.sh"); err == nil && !info.IsDir() {
+	checkoutScript := false
+	if info, err := setupStat("./start.sh"); err == nil && !info.IsDir() {
+		checkoutScript = true
+		if platform != "windows" {
 			if info.Mode()&0111 != 0 {
-				return setupCommandSpec{Name: "./start.sh", Display: "./start.sh", Description: "found source checkout start script ./start.sh", Found: true}
+				return setupCommandSpec{Name: "./start.sh", Display: "./start.sh", Description: "found source checkout start script ./start.sh", Found: true, Kind: setupStartSourceScript}
 			}
 			return setupCommandSpec{Display: "./start.sh", Description: "./start.sh exists but is not executable"}
 		}
 	}
 	if path, err := setupLookPath("openvibely"); err == nil && strings.TrimSpace(path) != "" {
-		return setupCommandSpec{Name: path, Display: "openvibely", Description: "found installed openvibely backend binary", Found: true}
+		return setupCommandSpec{Name: path, Display: "openvibely", Description: "found installed openvibely backend binary", Found: true, Kind: setupStartInstalledBinary}
 	}
 	if platform == "windows" {
-		return setupCommandSpec{Display: "openvibely", Description: "missing installed openvibely backend binary on PATH"}
+		if checkoutScript {
+			return setupCommandSpec{
+				Display:     "./start.sh (unsupported on Windows)",
+				Description: windowsCheckoutStartupUnsupportedMessage(),
+			}
+		}
+		return setupCommandSpec{
+			Display:     "openvibely",
+			Description: "missing installed openvibely backend binary on PATH; Windows setup supports installed-binary startup only. " + windowsBackendInstallNextStep(),
+		}
 	}
 	return setupCommandSpec{Display: "./start.sh or openvibely", Description: "missing executable ./start.sh in the current directory or installed openvibely backend binary on PATH"}
+}
+
+func windowsCheckoutStartupUnsupportedMessage() string {
+	return "source checkout ./start.sh is unsupported by Windows setup because it is a Bash script that uses Unix-only process and port commands; setup supports only an installed openvibely binary on PATH. " + windowsBackendInstallNextStep()
+}
+
+func windowsBackendInstallNextStep() string {
+	return "Install the backend binary in PowerShell with `" + windowsBackendInstallCommand() + "`, or start the checkout on macOS or Linux."
+}
+
+func validateLocalBackendStartCommand(platform string, spec setupCommandSpec) error {
+	if platform != "windows" {
+		return nil
+	}
+	if spec.Found && spec.Kind == setupStartInstalledBinary && spec.Display == "openvibely" && strings.TrimSpace(spec.Name) != "" {
+		return nil
+	}
+	return errors.New(windowsCheckoutStartupUnsupportedMessage())
 }
 
 func findLocalBackendInstallCommands(platform string) []setupCommandSpec {
@@ -689,6 +730,16 @@ func setupClientForEndpoint(c *client.Client, endpoint string) (*client.Client, 
 }
 
 func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckResult, opts setupOptions) (string, error) {
+	configuredURL := check.BaseURL
+	if configuredURL == "" && c != nil {
+		configuredURL = c.BaseURL()
+	}
+	if check.Remote || isRemoteServerURL(configuredURL) {
+		if check.RemoteMessage != "" {
+			return "", errors.New(check.RemoteMessage)
+		}
+		return "", fmt.Errorf("Configured backend is remote: %s. Correct -server or OPENVIBELY_SERVER_URL before running local setup start/bootstrap. No local process was started.", serverURLDisplay(configuredURL))
+	}
 	if check.Endpoint != "" {
 		var err error
 		c, err = setupClientForEndpoint(c, check.Endpoint)
@@ -712,6 +763,11 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 	if missing := setupBlockingMissing(check, opts); len(missing) > 0 {
 		return "", errors.New("setup " + opts.action + " cannot continue:\n" + strings.Join(prefixLines(missing, "  - "), "\n") + "\nRun setup check for details.")
 	}
+	if !opts.install {
+		if err := validateLocalBackendStartCommand(check.Platform, check.Start); err != nil {
+			return "", fmt.Errorf("setup %s cannot continue: %w", opts.action, err)
+		}
+	}
 
 	b.WriteString("Local backend setup started after confirmation.\n")
 	b.WriteString("Disclosed effects:\n")
@@ -728,6 +784,9 @@ func runSetupBootstrap(ctx context.Context, c *client.Client, check setupCheckRe
 		check.Start.Env = []string{"PORT=" + localBackendPort(check.BaseURL)}
 		if !check.Start.Found {
 			return b.String(), fmt.Errorf("setup bootstrap could not find a local backend start command after installer completed: %s", check.Start.Description)
+		}
+		if err := validateLocalBackendStartCommand(check.Platform, check.Start); err != nil {
+			return b.String(), fmt.Errorf("setup bootstrap cannot continue: %w", err)
 		}
 	}
 	fmt.Fprintf(&b, "\nStarting local backend with: %s at %s\n", sanitizeAutomationDetailText(check.Start.Display), serverURLDisplay(check.Endpoint))
@@ -766,7 +825,7 @@ func runLocalBackendInstaller(ctx context.Context, platform string, steps []setu
 		if len(steps) == 0 || !steps[0].Found {
 			return errors.New("installer prerequisite missing: powershell.exe")
 		}
-		cmd := setupExecCommand(ctx, steps[0].Name, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& ([scriptblock]::Create((irm "+backendInstallerWindowsURL+"))) -Variant binary")
+		cmd := setupExecCommand(ctx, steps[0].Name, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", windowsBackendInstallCommand())
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
@@ -811,6 +870,11 @@ func runLocalBackendInstaller(ctx context.Context, platform string, steps []setu
 }
 
 func startLocalBackendProcess(ctx context.Context, spec setupCommandSpec) (setupBackendProcess, error) {
+	if runtime.GOOS == "windows" {
+		if err := validateLocalBackendStartCommand("windows", spec); err != nil {
+			return nil, err
+		}
+	}
 	if strings.TrimSpace(spec.Name) == "" {
 		return nil, errors.New("no start command available")
 	}
