@@ -26,9 +26,9 @@ type projectsLoadedMsg struct {
 	echo bool
 	// selectName, when set, selects the matching project after loading.
 	selectName string
-	// startSSE requests that the model open a stream only after a project has
-	// been installed. Startup and post-login loads use this to avoid an
-	// unscoped stream racing project selection.
+	// startSSE requests that the model subscribe only after a project has been
+	// installed. Startup and post-login loads use this to avoid an unscoped
+	// WebSocket subscription racing project selection.
 	startSSE bool
 	err      error
 }
@@ -43,8 +43,8 @@ type projectCreatedMsg struct {
 	// repositorySource retains the create input for source-specific success and
 	// terminal-safe failure output.
 	repositorySource string
-	// startSSE requests that the selected project receive a scoped stream even
-	// when project creation was the first successful backend operation.
+	// startSSE requests a scoped live WebSocket subscription even when project
+	// creation was the first successful backend operation.
 	startSSE bool
 	err      error
 }
@@ -104,7 +104,7 @@ type chatStatusMsg struct {
 	submissionID uint64
 	// resolvedMessageID is the authoritative execution ID returned by the
 	// status endpoint. Queued inputs keep messageID as their polling key while
-	// this field records a promoted execution for SSE correlation.
+	// this field records a promoted execution for live event correlation.
 	resolvedMessageID string
 	projectID         string
 	// pollGeneration is non-zero only for responses to the recurring fallback
@@ -388,19 +388,19 @@ type threadReplyMsg struct {
 	err               error
 }
 
-// sseEventMsg delivers one live event from the SSE stream.
+// sseEventMsg delivers one live event from the WebSocket subscription.
 type sseEventMsg struct {
 	generation int
 	event      client.Event
 }
 
-// sseDisconnectedMsg indicates the SSE stream ended and reconnection is needed.
+// sseDisconnectedMsg indicates the WebSocket subscription ended and reconnect is needed.
 type sseDisconnectedMsg struct {
 	generation int
 	err        error
 }
 
-// sseConnectedMsg indicates a new SSE stream was established.
+// sseConnectedMsg indicates a new WebSocket subscription was established.
 type sseConnectedMsg struct {
 	generation int
 }
@@ -500,7 +500,7 @@ type automationEditSavedMsg struct {
 // tickMsg drives periodic refresh (status re-check).
 type tickMsg struct{}
 
-// reconnectTickMsg fires when the SSE backoff timer elapses. The generation
+// reconnectTickMsg fires when the live WebSocket backoff timer elapses. The generation
 // identifies the stream whose disconnect scheduled this retry, so a queued
 // retry from a canceled stream cannot reopen it after a project switch or
 // successful login.

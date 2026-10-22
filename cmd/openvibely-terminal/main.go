@@ -1,7 +1,7 @@
 // The openvibely-terminal command is a terminal UI and CLI client for the
 // OpenVibely backend.
 //
-// It connects over HTTP/SSE to a running openvibely server (cmd/server or
+// It connects over HTTP and WebSocket to a running openvibely server (cmd/server or
 // cmd/desktop in the openvibely repo).
 //
 // With no arguments it starts the interactive UI: one chat window where plain
@@ -175,7 +175,7 @@ func runCLI(c *client.Client, project string, args []string, force, jsonOutput b
 	}
 
 	// Live events, chat, and task follow-ups own long-lived streaming requests.
-	// Let Ctrl-C cancel them so active SSE response bodies close promptly.
+	// Let Ctrl-C cancel them so active WebSocket connections close promptly.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	return terminal.RunCLIContext(ctx, c, os.Stdout, project, args, force, jsonOutput)

@@ -469,9 +469,9 @@ func (m Model) projectLoadSelectionHint() string {
 	return m.wantProject
 }
 
-// Init kicks off the initial connection check and project load. The first SSE
-// stream is opened by the project-load response after it installs a selected
-// project, rather than racing that response with an unscoped stream.
+// Init kicks off the initial connection check and project load. The first live
+// WebSocket subscription is opened by the project-load response after it installs
+// a selected project, rather than racing that response with an unscoped stream.
 func (m Model) Init() tea.Cmd {
 	if credentials := m.startupLogin; credentials != nil {
 		c := m.client
@@ -1720,6 +1720,10 @@ func (m *Model) updateChatStreamSnapshot(snapshot string) {
 		m.materializeChatStreamOutput()
 		return
 	}
+	m.replaceChatStreamOutput(snapshot)
+}
+
+func (m *Model) replaceChatStreamOutput(snapshot string) {
 	m.chatStreamOutput = ""
 	m.chatStreamBuffer = append([]byte(nil), snapshot...)
 	m.chatStreamOffset = len(m.chatStreamBuffer)
@@ -1843,12 +1847,16 @@ func (m *Model) connectChatStream(execID string, offset int) tea.Cmd {
 	m.chatStreamCancel = cancel
 	m.chatStreamExecID = execID
 	generation := m.chatStreamGeneration
-	events, errs, connected := m.client.StreamChatOutputWithConnect(ctx, execID, offset)
+	projectID := m.pendingMsgProjectID
+	if projectID == "" {
+		projectID = m.selectedID
+	}
+	events, errs, connected := m.client.StreamChatOutputWithConnectForProject(ctx, projectID, execID, offset)
 	m.chatStreamEvents = events
 	m.chatStreamErrs = errs
 	m.chatStreamConnected = connected
-	m.chatStreamWaitCmd = m.waitForChatStream(generation, m.chatSubmissionID, m.pendingMsgProjectID, execID, events, errs)
-	connectedMsg := chatStreamConnectedMsg{generation: generation, submissionID: m.chatSubmissionID, projectID: m.pendingMsgProjectID, execID: execID}
+	m.chatStreamWaitCmd = m.waitForChatStream(generation, m.chatSubmissionID, projectID, execID, events, errs)
+	connectedMsg := chatStreamConnectedMsg{generation: generation, submissionID: m.chatSubmissionID, projectID: projectID, execID: execID}
 	waitConnected := func() tea.Msg {
 		select {
 		case <-connected:
@@ -2122,7 +2130,8 @@ func runWithContext(baseCtx context.Context, title string, timeout time.Duration
 	}
 }
 
-// connectSSE opens the live event stream. Any previous stream is cancelled.
+// connectSSE subscribes to live project events over the shared WebSocket.
+// It cancels any previous subscription.
 func (m *Model) connectSSE() tea.Cmd {
 	if m.sseCancel != nil {
 		m.sseCancel()
@@ -2140,9 +2149,9 @@ func (m *Model) connectSSE() tea.Cmd {
 	)
 }
 
-// waitForSSE blocks on one specific stream and forwards one tagged message.
+// waitForSSE blocks on one live subscription and forwards one tagged message.
 // Capturing the channels and generation here prevents a later reconnect from
-// making a delayed result look like it came from the current stream.
+// making a delayed result look like it came from the current subscription.
 func (m Model) waitForSSE(generation int, events <-chan client.Event, errs <-chan error) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -2187,8 +2196,8 @@ func (m *Model) Cleanup() {
 	}
 }
 
-// invalidateSSE cancels the current stream and advances ownership so all
-// messages already queued from it become stale before a replacement starts.
+// invalidateSSE cancels the current live subscription and advances ownership
+// so queued messages become stale before a replacement starts.
 func (m *Model) invalidateSSE() {
 	if m.sseCancel != nil {
 		m.sseCancel()
@@ -3146,7 +3155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// A queued input is polled by its stable input ID, but the status
 			// response switches to the execution ID once the input is applied.
-			// Record that authoritative alias so the promoted SSE completion can
+			// Record that authoritative alias so the promoted live completion can
 			// settle the same chat without weakening epoch/project guards above.
 			promoted = m.pendingMsgExecutionID != msg.resolvedMessageID
 			m.pendingMsgExecutionID = msg.resolvedMessageID
@@ -3203,6 +3212,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateChatStreamOutput(msg.event.Data)
 			wait := m.waitForCurrentChatStream(msg.generation)
 			return m, tea.Batch(wait, m.scheduleChatStreamRender(), watchdog)
+		case "reset":
+			watchdog := m.markChatStreamHealthy()
+			m.replaceChatStreamOutput(msg.event.Data)
+			wait := m.waitForCurrentChatStream(msg.generation)
+			return m, tea.Batch(wait, watchdog)
 		case "done", "error":
 			m.flushChatStreamOutput()
 			m.materializeChatStreamText()
@@ -3448,8 +3462,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if ce.ProjectID != "" && ce.ProjectID != m.selectedID {
 				return m, m.waitForCurrentSSE(msg.generation)
 			}
-			// Fast path: if the backend populated CompletedOutput in the SSE
-			// payload, display it immediately without an extra HTTP round-trip.
+			// Fast path: if the backend populated CompletedOutput in the live
+			// event payload, display it immediately without an extra HTTP round-trip.
 			if ce.CompletedOutput != "" {
 				m.completeChat(ce.CompletedOutput, nil)
 				return m, m.waitForCurrentSSE(msg.generation)
@@ -4182,7 +4196,7 @@ func (m *Model) promotePendingTaskEventExecution(ev client.Event) {
 }
 
 // handleOpenThreadSSE mirrors the web task view's live behavior for the one task
-// currently in follow-up context. Project and stream ownership have already
+// currently in follow-up context. Project and subscription ownership have already
 // been checked by Update; task identity and running state are checked here.
 func (m *Model) handleOpenThreadSSE(ev client.Event) tea.Cmd {
 	if m.threadID == "" || m.threadStatus != "running" {
@@ -4919,7 +4933,7 @@ func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
 		m.clearAutomationEdit()
 		m.invalidateWorkersLive()
 		m.invalidateSSE()
-	} // An auth failure can arrive from project/SSE work while a health check is
+	} // An auth failure can arrive from project/live-event work while a health check is
 	// still running. Invalidate every in-flight check before it can clear the
 	// sign-in-required state.
 	m.invalidateConnectionChecks()

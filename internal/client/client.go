@@ -1,4 +1,4 @@
-// Package client provides a small REST + SSE client for the OpenVibely
+// Package client provides a small HTTP and WebSocket client for the OpenVibely
 // backend server. It mirrors the JSON API surface exposed by
 // internal/handler in the openvibely repo:
 //
@@ -11,7 +11,7 @@
 //   - GET  /workers                    → combined worker-capacity view
 //   - GET  /auth/me                    → session check
 //   - POST /login                      → cookie session login (optional auth)
-//   - GET  /events/live                → SSE stream (task/chat/file events)
+//   - GET  /events/ws                  → WebSocket live and execution subscriptions
 package client
 
 import (
@@ -52,7 +52,7 @@ func IsInvalidServerURL(err error) bool {
 	return errors.Is(err, ErrInvalidServerURL)
 }
 
-// ErrEventStreamClosed identifies a server-closed SSE connection without a
+// ErrEventStreamClosed identifies a live WebSocket stream that ended without a
 // transport or authentication failure. Callers may treat it as clean EOF when
 // a foreground stream has no reconnect owner.
 var ErrEventStreamClosed = errors.New("event stream closed by server")
@@ -174,6 +174,10 @@ func isReadAuthResponse(resp *http.Response) bool {
 type Client struct {
 	baseURL string
 	http    *http.Client
+
+	liveMu     sync.Mutex
+	live       *liveSession
+	liveNextID uint64
 
 	memorySearchCache        memorySearchCache
 	memoryMu                 sync.RWMutex
