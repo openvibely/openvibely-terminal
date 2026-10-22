@@ -5749,7 +5749,7 @@ func TestListWebhooksPaginatesStablyAndPreservesScope(t *testing.T) {
 		}
 		w.Header().Set(cardPageMoreHeader, strconv.FormatBool(r.URL.Query().Get("card_page") == ""))
 		if r.URL.Query().Get("card_page") == "" {
-			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="w1" data-webhook-name="Pager Duty" data-webhook-enabled="true" data-webhook-token="token-one" data-webhook-default-priority="3"></div><div data-webhook-id="shared" data-webhook-name="First"></div></div>`)
+			_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-name="Missing ID"></div><div data-webhook-id="   " data-webhook-name="Whitespace ID"></div><div data-webhook-id=" w1 " data-webhook-name="Pager Duty" data-webhook-enabled="true" data-webhook-token="token-one" data-webhook-default-priority="3"></div><div data-webhook-id="shared" data-webhook-name="First"></div></div>`)
 			return
 		}
 		_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"><div data-webhook-id="shared" data-webhook-name="Duplicate"></div><div data-webhook-id="w2" data-webhook-name="Build Hook" data-webhook-enabled="false" data-webhook-token="token-two" data-webhook-default-priority="2"></div></div>`)
@@ -5764,11 +5764,37 @@ func TestListWebhooksPaginatesStablyAndPreservesScope(t *testing.T) {
 	if len(got) != 3 || got[0].ID != "w1" || got[1].Name != "First" || got[2].ID != "w2" {
 		t.Fatalf("webhooks = %#v", got)
 	}
-	if got[0].ProjectID != "project two" || got[0].Path != "/webhooks/inbound/token-one" || !got[0].Enabled || got[0].DefaultPriority != 3 {
+	if got[0].ID != "w1" || got[0].ProjectID != "project two" || got[0].Name != "Pager Duty" || !got[0].Enabled || got[0].Path != "/webhooks/inbound/token-one" || got[0].URL != srv.URL+"/webhooks/inbound/token-one" || got[0].DefaultPriority != 3 || got[0].AgentIDs == nil || len(got[0].AgentIDs) != 0 {
 		t.Fatalf("first webhook = %#v", got[0])
 	}
-	if len(requests) != 2 || !strings.Contains(requests[1], "offset=2") || !strings.Contains(requests[1], "project_id=project+two") {
+	if got[2].ProjectID != "project two" || got[2].Name != "Build Hook" || got[2].Enabled || got[2].DefaultPriority != 2 || got[2].AgentIDs == nil || len(got[2].AgentIDs) != 0 {
+		t.Fatalf("third webhook = %#v", got[2])
+	}
+	if len(requests) != 2 || !strings.Contains(requests[1], "offset=3") || !strings.Contains(requests[1], "project_id=project+two") {
 		t.Fatalf("requests = %#v", requests)
+	}
+}
+
+func TestListWebhooksEmptyReturnsNonNilSlice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("project_id") != "p-empty" {
+			t.Errorf("project_id = %q, want p-empty", r.URL.Query().Get("project_id"))
+		}
+		w.Header().Set(cardPageMoreHeader, "false")
+		_, _ = io.WriteString(w, `<div data-card-pagination-root data-card-pagination-card-selector="[data-webhook-id]" data-card-pagination-key="data-webhook-id"></div>`)
+	}))
+	defer srv.Close()
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.ListWebhooks(context.Background(), "p-empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("webhooks = %#v, want a non-nil empty slice", got)
 	}
 }
 
