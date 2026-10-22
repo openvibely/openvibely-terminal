@@ -1300,23 +1300,21 @@ func scanCLIJSONNumber(raw []byte, pos int) (int, bool) {
 	return pos, pos > start
 }
 
-// runCLIEvents monitors one selected project's event stream until cancellation
-// or server closure. The one-shot CLI command does not reconnect.
+// runCLIEvents monitors one selected project's live subscription until cancellation.
+// The shared WebSocket transport owns reconnects and retains the subscription.
 func runCLIEvents(ctx context.Context, c *client.Client, out io.Writer, projectID string, eventsOn bool, jsonOutput bool) error {
 	if !eventsOn {
 		return errors.New(cliEventsOffMessage)
 	}
-	return runCLIEventsWithRetryPolicy(ctx, c, out, projectID, jsonOutput, c.StreamEvents, waitCLIEventRetry, false)
+	return runCLIEventsWithRetryWait(ctx, c, out, projectID, jsonOutput, c.StreamEvents, nil)
 }
 
 type cliEventStreamFunc func(context.Context, string) (<-chan client.Event, <-chan error)
 type cliEventRetryWaitFunc func(context.Context, int) bool
 
+// waitRetry is only needed by stream adapters without a reconnect owner. The
+// production WebSocket client retains its channels across disconnects, so it is nil.
 func runCLIEventsWithRetryWait(ctx context.Context, c *client.Client, out io.Writer, projectID string, jsonOutput bool, openStream cliEventStreamFunc, waitRetry cliEventRetryWaitFunc) error {
-	return runCLIEventsWithRetryPolicy(ctx, c, out, projectID, jsonOutput, openStream, waitRetry, true)
-}
-
-func runCLIEventsWithRetryPolicy(ctx context.Context, c *client.Client, out io.Writer, projectID string, jsonOutput bool, openStream cliEventStreamFunc, waitRetry cliEventRetryWaitFunc, reconnect bool) error {
 	if strings.TrimSpace(projectID) == "" {
 		return errors.New("no project selected — use -project <name|id> and choose a project with live events")
 	}
@@ -1346,6 +1344,9 @@ func runCLIEventsWithRetryPolicy(ctx context.Context, c *client.Client, out io.W
 				if !ok {
 					events = nil
 					continue
+				}
+				if ev.Name == "reconcile" {
+					continue // UI refresh hint, not a printable project event.
 				}
 				line, include, formatErr := formatCLIEventBytes(ev, projectID, jsonOutput)
 				if formatErr != nil {
@@ -1390,7 +1391,7 @@ func runCLIEventsWithRetryPolicy(ctx context.Context, c *client.Client, out io.W
 		if terminalErr == nil || errors.Is(terminalErr, io.EOF) {
 			return nil
 		}
-		if !reconnect && errors.Is(terminalErr, client.ErrEventStreamClosed) {
+		if waitRetry == nil && errors.Is(terminalErr, client.ErrEventStreamClosed) {
 			return nil
 		}
 		if client.IsAuthRequired(terminalErr) {
@@ -1402,7 +1403,7 @@ func runCLIEventsWithRetryPolicy(ctx context.Context, c *client.Client, out io.W
 		if !isRetryableCLIEventTransportError(terminalErr) && !errors.Is(terminalErr, io.ErrUnexpectedEOF) && !errors.Is(terminalErr, client.ErrEventStreamClosed) {
 			return fmt.Errorf("live events: %w", terminalErr)
 		}
-		if !reconnect {
+		if waitRetry == nil {
 			return fmt.Errorf("live events: %w", terminalErr)
 		}
 

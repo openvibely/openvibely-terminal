@@ -103,8 +103,8 @@ terminal-native ways:
 - Live WebSocket event streaming in the transcript. In interactive mode `/events`
   controls display for the TUI-owned stream; in CLI mode `events on` owns one
   foreground project-scoped stream, emits line-oriented output, and remains
-  active until `Ctrl-C` or clean termination. CLI `events off` must fail clearly
-  rather than pretending to control another process.
+  active across connection interruptions until `Ctrl-C`. CLI `events off` must
+  fail clearly rather than pretending to control another process.
 - Clear non-zero exits and stderr messages in CLI mode.
 - Stable, parseable output modes when useful for automation.
 

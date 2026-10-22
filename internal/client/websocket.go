@@ -288,16 +288,16 @@ func (s *liveSession) run() {
 				}
 			}
 			connectCtx, cancel := context.WithTimeout(s.ctx, liveConnectTimeout)
-			opened, resp, err := s.client.dialLiveSocket(connectCtx)
+			opened, _, err := s.client.dialLiveSocket(connectCtx)
 			cancel()
 			if err != nil {
 				if s.ctx.Err() != nil {
 					return
 				}
-				if isAuthResponse(resp) || isFatalLiveHandshake(resp) || IsInvalidServerURL(err) {
-					if isAuthResponse(resp) {
-						err = newAuthRequiredError(http.MethodGet, liveSocketPath, resp)
-					}
+				// Like the browser transport, keep active subscriptions through all
+				// handshake failures, including authentication and HTTP errors.
+				// A malformed local URL cannot become usable by retrying it.
+				if IsInvalidServerURL(err) {
 					s.failAll(subs, err)
 					return
 				}
@@ -539,7 +539,15 @@ func (s *liveSession) scheduleSubscriptionRetry(sub *liveSubscription) {
 }
 
 func handleLiveFrame(frame liveFrame, subs map[string]*liveSubscription, conn *websocket.Conn, session *liveSession) bool {
-	if frame.Event == "ready" || frame.Event == "system_update" || frame.Event == "reconcile" {
+	if frame.Event == "ready" || frame.Event == "system_update" {
+		return true
+	}
+	if frame.Event == "reconcile" {
+		for _, sub := range subs {
+			if sub.command.Op == "live" && sub.subscribed {
+				sendLiveReconcile(sub)
+			}
+		}
 		return true
 	}
 	sub := subs[frame.ID]
@@ -550,6 +558,11 @@ func handleLiveFrame(frame liveFrame, subs map[string]*liveSubscription, conn *w
 	case "subscribed":
 		sub.subscribed = true
 		sub.connectedOnce.Do(func() { close(sub.connected) })
+		if sub.command.Op == "live" {
+			// Broadcaster events are not replayed. Refresh authoritative state
+			// after subscription acceptance, including every reconnect.
+			sendLiveReconcile(sub)
+		}
 		return true
 	case "retry":
 		session.scheduleSubscriptionRetry(sub)
@@ -574,6 +587,18 @@ func handleLiveFrame(frame liveFrame, subs map[string]*liveSubscription, conn *w
 		finishOneLiveSubscription(subs, sub, nil)
 	}
 	return true
+}
+
+// sendLiveReconcile drops best-effort refresh hints when the queue is full;
+// the next periodic signal retries the refresh without delaying project events.
+func sendLiveReconcile(sub *liveSubscription) {
+	payload, _ := json.Marshal(struct {
+		ProjectID string `json:"project_id"`
+	}{ProjectID: sub.command.ProjectID})
+	select {
+	case sub.frames <- liveFrame{ID: sub.command.ID, Event: "reconcile", Data: payload}:
+	default:
+	}
 }
 
 func finishOneLiveSubscription(subs map[string]*liveSubscription, sub *liveSubscription, err error) {
@@ -680,13 +705,6 @@ func (c *Client) dialLiveSocket(ctx context.Context) (*websocket.Conn, *http.Res
 		return nil, nil, fmt.Errorf("connecting to live websocket: %w", err)
 	}
 	return conn, resp, nil
-}
-
-func isFatalLiveHandshake(resp *http.Response) bool {
-	if resp == nil {
-		return false
-	}
-	return resp.StatusCode != http.StatusTooManyRequests && (resp.StatusCode < 500 || resp.StatusCode > 599)
 }
 
 func nextLiveReconnectDelay(attempt int) time.Duration {
