@@ -70,10 +70,13 @@ func (e *TaskWorktreeActionError) Error() string {
 	if message == "" && e.Cause != nil {
 		message = e.Cause.Error()
 	}
-	if message == "" {
+	if message == "" && e.Result.Status != "succeeded" {
 		message = "operation did not complete"
 	}
-	outcome := fmt.Sprintf("%s: %s", e.Result.Status, message)
+	outcome := e.Result.Status
+	if message != "" {
+		outcome += ": " + message
+	}
 	if e.Result.Status == "succeeded" {
 		outcome = "worktree action " + outcome
 	}

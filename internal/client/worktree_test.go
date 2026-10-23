@@ -181,6 +181,62 @@ func TestTaskWorktreeActionPreservesSuccessWhenRefreshFails(t *testing.T) {
 	}
 }
 
+func TestTaskWorktreeActionEmptySuccessToastMessageKeepsOutcomeInError(t *testing.T) {
+	for _, toastStatus := range []string{"completed", "success"} {
+		t.Run(toastStatus, func(t *testing.T) {
+			const projectID = "selected-project"
+			var catalogReads, panelReads, mutations int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+					catalogReads++
+					if r.URL.Query().Get("project_id") != projectID {
+						t.Errorf("catalog project_id = %q, want %q", r.URL.Query().Get("project_id"), projectID)
+					}
+					_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"selected-project","title":"Implement feature"}]}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/merge":
+					mutations++
+					if err := r.ParseForm(); err != nil {
+						t.Errorf("ParseForm: %v", err)
+					}
+					if r.Form.Get("project_id") != projectID {
+						t.Errorf("mutation project_id = %q, want %q", r.Form.Get("project_id"), projectID)
+					}
+					w.Header().Set("HX-Trigger", fmt.Sprintf(`{"openvibelyToast":{"status":%q}}`, toastStatus))
+				case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
+					panelReads++
+					if r.URL.Query().Get("project_id") != projectID {
+						t.Errorf("worktree project_id = %q, want %q", r.URL.Query().Get("project_id"), projectID)
+					}
+					http.Error(w, "panel refresh unavailable", http.StatusServiceUnavailable)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := c.ApplyTaskWorktreeActionForProject(context.Background(), "t-1", projectID, "merge", "squash")
+			if err == nil {
+				t.Fatal("expected refresh error")
+			}
+			if result.Status != "succeeded" || result.Message != "" || result.RefreshStatus != "failed" {
+				t.Fatalf("result = %+v", result)
+			}
+			if !strings.Contains(err.Error(), "worktree action succeeded; refresh failed:") || strings.Contains(err.Error(), "operation did not complete") {
+				t.Fatalf("error contradicts confirmed success: %v", err)
+			}
+			if catalogReads != 2 || panelReads != 1 || mutations != 1 {
+				t.Fatalf("request counts catalog=%d panel=%d mutations=%d, want 2/1/1", catalogReads, panelReads, mutations)
+			}
+		})
+	}
+}
+
 func TestTaskWorktreeActionReportsIneligibleAndConflict(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
