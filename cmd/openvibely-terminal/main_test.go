@@ -20,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/openvibely/openvibely-terminal/internal/client"
 	"github.com/openvibely/openvibely-terminal/internal/terminal"
+	"github.com/openvibely/openvibely-terminal/internal/testutil"
 )
 
 func TestCLISecretInputRejectsEchoingTerminal(t *testing.T) {
@@ -91,6 +92,18 @@ func TestInterspersedGlobalFlagsDispatch(t *testing.T) {
 		switch {
 		case r.URL.Path == "/api/projects":
 			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"openvibely","path":"/tmp/openvibely"}]}`)
+		case r.URL.Path == "/events/ws":
+			live := testutil.AcceptLive(t, w, r)
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			if live.Command.ProjectID != "p1" || live.Command.ExecID != "m1" {
+				t.Errorf("command = %+v", live.Command)
+			}
+			live.Delta("a deer story")
+			live.Send("done", "completed")
+			live.Wait()
 		case r.Method == http.MethodPost && r.URL.Path == "/api/chat/message":
 			if err := r.ParseForm(); err != nil {
 				t.Errorf("ParseForm: %v", err)
@@ -125,7 +138,9 @@ func TestInterspersedGlobalFlagsDispatch(t *testing.T) {
 			t.Fatal(err)
 		}
 		var out bytes.Buffer
-		if err := terminal.RunCLI(c, &out, *project, fs.Args(), false, *jsonOutput); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := terminal.RunCLIContext(ctx, c, &out, *project, fs.Args(), false, *jsonOutput); err != nil {
 			t.Fatalf("RunCLI(%#v): %v", rawArgs, err)
 		}
 		return out.String()
