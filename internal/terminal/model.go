@@ -4562,6 +4562,25 @@ func (m *Model) resize() {
 	m.personalityEditor.SetHeight(editorHeight)
 	m.skillEditor.SetWidth(editorWidth)
 	m.skillEditor.SetHeight(editorHeight)
+
+	width := m.effectiveTranscriptWidth()
+	if m.transcriptReady && m.transcriptRenderWidth == width && m.transcriptLineCacheValid() {
+		if len(m.chatStreamBuffer) > m.chatStreamRenderedOffset {
+			m.flushChatStreamOutput()
+		}
+		// An incomplete UTF-8 suffix is shown by canonical refresh as a replacement
+		// rune. Keep that behavior while allowing complete queued stream data to use
+		// the incremental append path above.
+		incompleteStreamSuffix := m.chatStreamLogIndex >= 0 && len(m.chatStreamBuffer) > m.chatStreamRenderedOffset &&
+			completeUTF8Prefix(m.chatStreamBuffer, m.chatStreamRenderedOffset) < len(m.chatStreamBuffer)
+		if !incompleteStreamSuffix && m.transcriptReady && m.transcriptRenderWidth == width && m.transcriptLineCacheValid() {
+			// SetContent would rebuild viewport lines from transcriptContent, which
+			// can copy every retained reply even though height does not affect wrapping.
+			// The cached viewport lines are already current; only its geometry changed.
+			m.transcript.GotoBottom()
+			return
+		}
+	}
 	m.refreshTranscript()
 }
 
