@@ -6920,6 +6920,21 @@ func validateChannelEmailAddress(value string) error {
 	return nil
 }
 
+func validChannelEmailPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 1 && port <= 65535
+}
+
+func validChannelXPollInterval(value string) bool {
+	seconds, err := strconv.Atoi(value)
+	return err == nil && seconds >= 15 && seconds <= 300
+}
+
+func validChannelEmailPollInterval(value string) bool {
+	seconds, err := strconv.Atoi(value)
+	return err == nil && seconds >= 5
+}
+
 func normalizeGitHubPrivateKey(value string) (string, error) {
 	value = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, `\\n`, "\n"), `\n`, "\n"))
 	if block, rest := pem.Decode([]byte(value)); block != nil && strings.TrimSpace(string(rest)) == "" {
@@ -6952,8 +6967,7 @@ func validateChannelConfiguration(action, channelType string, values map[string]
 		return errors.New("--provider must be one of gmail, outlook, yahoo, fastmail, icloud, custom")
 	}
 	if interval := values["x_poll_interval_seconds"]; interval != "" {
-		seconds, err := strconv.Atoi(interval)
-		if err != nil || seconds < 15 || seconds > 300 {
+		if !validChannelXPollInterval(interval) {
 			return errors.New("--poll-interval must be between 15 and 300 seconds")
 		}
 	}
@@ -7326,20 +7340,17 @@ func validateChannelWizardValue(step channelWizardStep, value string) error {
 		return errors.New("provider must be one of gmail, outlook, yahoo, fastmail, icloud, custom")
 	}
 	if step.field == "email_imap_port" || step.field == "email_smtp_port" {
-		port, err := strconv.Atoi(value)
-		if err != nil || port < 1 || port > 65535 {
+		if !validChannelEmailPort(value) {
 			return errors.New("port must be from 1 to 65535")
 		}
 	}
 	if step.field == "x_poll_interval_seconds" {
-		interval, err := strconv.Atoi(value)
-		if err != nil || interval < 15 || interval > 300 {
+		if !validChannelXPollInterval(value) {
 			return errors.New("poll interval must be between 15 and 300 seconds")
 		}
 	}
 	if step.field == "email_poll_interval_seconds" {
-		interval, err := strconv.Atoi(value)
-		if err != nil || interval < 5 {
+		if !validChannelEmailPollInterval(value) {
 			return errors.New("poll interval must be at least 5 seconds")
 		}
 	}
@@ -7526,20 +7537,17 @@ func parseChannelMutationArgs(action string, args []string) (client.Channel, map
 			return client.Channel{}, nil, errors.New("--bot-token-mode must be oauth or manual")
 		}
 		if backendField == "email_imap_port" || backendField == "email_smtp_port" {
-			port, err := strconv.Atoi(value)
-			if err != nil || port < 1 || port > 65535 {
+			if !validChannelEmailPort(value) {
 				return client.Channel{}, nil, fmt.Errorf("%s must be a port from 1 to 65535", sanitizeAutomationDetailText(args[i]))
 			}
 		}
 		if backendField == "x_poll_interval_seconds" {
-			interval, err := strconv.Atoi(value)
-			if err != nil || interval < 15 || interval > 300 {
+			if !validChannelXPollInterval(value) {
 				return client.Channel{}, nil, errors.New("--poll-interval must be between 15 and 300 seconds")
 			}
 		}
 		if backendField == "email_poll_interval_seconds" {
-			interval, err := strconv.Atoi(value)
-			if err != nil || interval < 5 {
+			if !validChannelEmailPollInterval(value) {
 				return client.Channel{}, nil, errors.New("--poll-interval must be at least 5 seconds")
 			}
 		}

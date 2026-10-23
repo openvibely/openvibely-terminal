@@ -11924,6 +11924,211 @@ func TestChannelAddConditionalValidation(t *testing.T) {
 	}
 }
 
+func TestChannelNumericPoliciesAcrossWizardAndHeadlessPaths(t *testing.T) {
+	type numericValue struct {
+		value string
+		valid bool
+	}
+	type numericPolicy struct {
+		name          string
+		channel       string
+		field         string
+		option        string
+		wizardError   string
+		headlessError string
+		values        []numericValue
+	}
+	portValues := []numericValue{
+		{value: "0"}, {value: "1", valid: true}, {value: "65535", valid: true}, {value: "65536"},
+		{value: "not-a-number"}, {value: "999999999999999999999999999999"},
+	}
+	policies := []numericPolicy{
+		{name: "email IMAP port", channel: "email", field: "email_imap_port", option: "--imap-port", wizardError: "port must be from 1 to 65535", headlessError: "must be a port from 1 to 65535", values: portValues},
+		{name: "email SMTP port", channel: "email", field: "email_smtp_port", option: "--smtp-port", wizardError: "port must be from 1 to 65535", headlessError: "must be a port from 1 to 65535", values: portValues},
+		{name: "X poll interval", channel: "x", field: "x_poll_interval_seconds", option: "--poll-interval", wizardError: "poll interval must be between 15 and 300 seconds", headlessError: "--poll-interval must be between 15 and 300 seconds", values: []numericValue{
+			{value: "14"}, {value: "15", valid: true}, {value: "300", valid: true}, {value: "301"},
+			{value: "not-a-number"}, {value: "999999999999999999999999999999"},
+		}},
+		{name: "email poll interval", channel: "email", field: "email_poll_interval_seconds", option: "--poll-interval", wizardError: "poll interval must be at least 5 seconds", headlessError: "--poll-interval must be at least 5 seconds", values: []numericValue{
+			{value: "4"}, {value: "5", valid: true}, {value: "3600", valid: true},
+			{value: "not-a-number"}, {value: "999999999999999999999999999999"},
+		}},
+	}
+
+	for _, policy := range policies {
+		policy := policy
+		for _, tc := range policy.values {
+			t.Run(policy.name+"/"+tc.value, func(t *testing.T) {
+				wizardErr := validateChannelWizardValue(channelWizardStep{field: policy.field}, tc.value)
+				if tc.valid && wizardErr != nil {
+					t.Fatalf("wizard rejected valid value %q: %v", tc.value, wizardErr)
+				}
+				if !tc.valid && (wizardErr == nil || wizardErr.Error() != policy.wizardError) {
+					t.Errorf("wizard error = %v, want %q", wizardErr, policy.wizardError)
+				}
+
+				for _, action := range []string{"add", "edit"} {
+					args := []string{action, policy.channel}
+					if action == "add" {
+						switch policy.channel {
+						case "x":
+							args = append(args, "--consumer-key", "key", "--consumer-secret", "secret", "--access-token", "token", "--access-token-secret", "access")
+						case "email":
+							args = append(args, "--provider", "gmail", "--address", "bot@example.com", "--password", "secret")
+						}
+					}
+					args = append(args, policy.option, tc.value)
+					channel, values, headlessErr := parseChannelMutationArgs(action, args)
+					if tc.valid {
+						if headlessErr != nil {
+							t.Errorf("%s rejected valid value %q: %v", action, tc.value, headlessErr)
+							continue
+						}
+						if channel.Type != policy.channel || values[policy.field] != tc.value {
+							t.Errorf("%s result = channel %q values %#v, want %q=%q", action, channel.Type, values, policy.field, tc.value)
+						}
+						continue
+					}
+					wantHeadless := policy.headlessError
+					if policy.field == "email_imap_port" || policy.field == "email_smtp_port" {
+						wantHeadless = policy.option + " " + wantHeadless
+					}
+					if headlessErr == nil || headlessErr.Error() != wantHeadless {
+						t.Errorf("%s error = %v, want %q", action, headlessErr, wantHeadless)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestChannelNumericWizardRetriesAndRetainsBlankDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		field        string
+		value        string
+		wantError    string
+		defaultValue string
+	}{
+		{name: "IMAP port retry", field: "email_imap_port", value: "0", wantError: "port must be from 1 to 65535", defaultValue: "993"},
+		{name: "X interval retry", field: "x_poll_interval_seconds", value: "301", wantError: "poll interval must be between 15 and 300 seconds", defaultValue: "30"},
+		{name: "email interval retry", field: "email_poll_interval_seconds", value: "4", wantError: "poll interval must be at least 5 seconds", defaultValue: "15"},
+	} {
+		for _, action := range []string{"add", "edit"} {
+			tc, action := tc, action
+			t.Run(tc.name+"/"+action, func(t *testing.T) {
+				m, rec := dispatchModel(t, nil)
+				channelType, channelName := "email", "Email"
+				if tc.field == "x_poll_interval_seconds" {
+					channelType, channelName = "x", "X"
+				}
+				wizard := &channelWizardState{
+					action: action, channel: client.Channel{Type: channelType, Name: channelName},
+					form: url.Values{tc.field: {tc.defaultValue}}, supplied: make(map[string]bool),
+					steps: []channelWizardStep{{field: tc.field, label: tc.field}, {field: "next"}},
+				}
+				if action == "edit" {
+					wizard.original = url.Values{tc.field: {tc.defaultValue}}
+				}
+				m.channelWizard = wizard
+				m.setChannelWizardPrompt()
+				m.input.SetValue(tc.value)
+				next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				m = next.(Model)
+				if cmd != nil || m.channelWizard.index != 0 || m.channelWizard.form.Get(tc.field) != tc.defaultValue {
+					t.Fatalf("invalid prompt changed wizard state: wizard=%+v cmd=%v", m.channelWizard, cmd)
+				}
+				if !strings.Contains(transcript(m), tc.wantError) {
+					t.Fatalf("retry error missing from transcript: %s", transcript(m))
+				}
+				m.input.SetValue("")
+				next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				m = next.(Model)
+				if cmd != nil || m.channelWizard.index != 1 || m.channelWizard.form.Get(tc.field) != tc.defaultValue {
+					t.Fatalf("blank prompt did not retain default: wizard=%+v cmd=%v", m.channelWizard, cmd)
+				}
+				if calls := rec.all(); calls != "" {
+					t.Fatalf("invalid or blank wizard prompt made requests: %s", calls)
+				}
+			})
+		}
+	}
+
+	m, _ := dispatchModel(t, nil)
+	m, _ = m.beginChannelWizard("add", client.Channel{Type: "x", Name: "X"})
+	if m.channelWizard.form.Get("x_poll_interval_seconds") != "30" {
+		t.Fatalf("X wizard default = %q, want 30", m.channelWizard.form.Get("x_poll_interval_seconds"))
+	}
+	m, _ = m.beginChannelWizard("add", client.Channel{Type: "email", Name: "Email"})
+	for field, want := range map[string]string{"email_imap_port": "993", "email_smtp_port": "587", "email_poll_interval_seconds": "15"} {
+		if got := m.channelWizard.form.Get(field); got != want {
+			t.Errorf("Email wizard default %s = %q, want %q", field, got, want)
+		}
+	}
+}
+
+func TestChannelNumericOmittedAndBlankHeadlessValues(t *testing.T) {
+	cases := []struct {
+		name   string
+		args   []string
+		field  string
+		want   string
+		absent []string
+	}{
+		{name: "X add retains interval default", args: []string{"add", "x", "--consumer-key", "key", "--consumer-secret", "secret", "--access-token", "token", "--access-token-secret", "access"}, field: "x_poll_interval_seconds", want: "30"},
+		{name: "X edit omits interval", args: []string{"edit", "x", "--send-responses", "false"}, field: "x_send_responses", want: "false", absent: []string{"x_poll_interval_seconds"}},
+		{name: "Email add omits numeric values", args: []string{"add", "email", "--provider", "gmail", "--address", "bot@example.com", "--password", "secret"}, absent: []string{"email_imap_port", "email_smtp_port", "email_poll_interval_seconds"}},
+		{name: "Email edit omits numeric values", args: []string{"edit", "email", "--send-responses", "false"}, field: "email_send_responses", want: "false", absent: []string{"email_imap_port", "email_smtp_port", "email_poll_interval_seconds"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, values, err := parseChannelMutationArgs(tc.args[0], tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.field != "" && values[tc.field] != tc.want {
+				t.Errorf("%s = %q, want %q", tc.field, values[tc.field], tc.want)
+			}
+			for _, field := range tc.absent {
+				if _, ok := values[field]; ok {
+					t.Errorf("omitted field %s unexpectedly present: %#v", field, values)
+				}
+			}
+		})
+	}
+	for _, tc := range []struct{ channel, option string }{
+		{channel: "email", option: "--imap-port"},
+		{channel: "email", option: "--smtp-port"},
+		{channel: "x", option: "--poll-interval"},
+		{channel: "email", option: "--poll-interval"},
+	} {
+		for _, action := range []string{"add", "edit"} {
+			_, _, err := parseChannelMutationArgs(action, []string{action, tc.channel, tc.option, ""})
+			if err == nil || err.Error() != tc.option+" cannot be empty" {
+				t.Errorf("blank %s %s value error = %v, want %q", action, tc.option, err, tc.option+" cannot be empty")
+			}
+		}
+	}
+}
+
+func TestChannelXFinalConfigurationValidationUsesSharedIntervalPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		valid bool
+	}{
+		{value: "14"}, {value: "15", valid: true}, {value: "300", valid: true}, {value: "301"},
+		{value: "not-a-number"}, {value: "999999999999999999999999999999"},
+	} {
+		err := validateChannelConfiguration("edit", "x", map[string]string{"x_poll_interval_seconds": tc.value})
+		if tc.valid && err != nil {
+			t.Errorf("valid final X interval %q rejected: %v", tc.value, err)
+		}
+		if !tc.valid && (err == nil || err.Error() != "--poll-interval must be between 15 and 300 seconds") {
+			t.Errorf("invalid final X interval %q error = %v", tc.value, err)
+		}
+	}
+}
+
 func TestChannelWizardEditTransitionsRequireNewModeFields(t *testing.T) {
 	tests := []struct {
 		name     string
