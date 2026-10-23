@@ -20,7 +20,7 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
-// newAnalyticsTestClient starts an httptest server that serves all seven
+// newAnalyticsTestClient starts an httptest server that serves all analytics
 // analytics endpoints. failPaths lists URL paths that should return a 500.
 func newAnalyticsTestClient(t *testing.T, failPaths map[string]bool) *client.Client {
 	t.Helper()
@@ -36,6 +36,8 @@ func newAnalyticsTestClient(t *testing.T, failPaths map[string]bool) *client.Cli
 			})
 		case "/api/analytics/success-failure-rates":
 			json.NewEncoder(w).Encode([]client.SuccessFailureRate{})
+		case "/api/analytics/execution-trends-by-hour":
+			json.NewEncoder(w).Encode([]client.HourlyExecutionCount{{Hour: 9, Count: 3}})
 		case "/api/analytics/avg-execution-time-by-agent":
 			json.NewEncoder(w).Encode([]client.AvgExecutionTime{})
 		case "/api/analytics/avg-execution-time-by-task":
@@ -182,7 +184,7 @@ func TestLoadAnalyticsAllSectionsSucceed(t *testing.T) {
 	}
 
 	order := []string{
-		"Usage & cost", "Success / failure", "Avg execution time by agent", "Avg execution time by task",
+		"Usage & cost", "Success / failure", "Execution counts by hour", "Avg execution time by agent", "Avg execution time by task",
 		"Most frequent tasks", "Failure patterns", "Skill usage",
 	}
 	prev := -1
@@ -336,6 +338,77 @@ func TestRatesAnalyticsDefaultBoundAcrossFixtureSizes(t *testing.T) {
 				t.Fatalf("single-period history decoded %d rows, want 1", len(items))
 			}
 		})
+	}
+}
+
+func TestAnalyticsHourlyArgumentValidationAndHelp(t *testing.T) {
+	cmd := analyticsCommand()
+	for _, args := range [][]string{
+		{"hourly"},
+		{"hourly", "from", "2026-01-01"},
+		{"hourly", "from", "2026-01-01T00:00:00Z", "to", "2026-02-01"},
+	} {
+		if err := cmd.validateArgs(args); err != nil {
+			t.Errorf("valid args %v rejected: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"hourly", "from", "bad-date"},
+		{"hourly", "from", "2026-02-01", "to", "2026-01-01"},
+		{"hourly", "now"},
+	} {
+		if err := cmd.validateArgs(args); err == nil {
+			t.Errorf("invalid args %v accepted", args)
+		}
+	}
+	help := stripANSI(renderCommandHelp(cmd))
+	for _, want := range []string{"analytics hourly", "all 24 server-local hours", "hourly from <start> [to <end>]"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("analytics help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestLoadHourlyExecutionAnalyticsRendersDeterministicFullDay(t *testing.T) {
+	c := newAnalyticsTestClient(t, nil)
+	out, err := loadAnalytics(context.Background(), c, "hourly-project", "hourly")
+	if err != nil {
+		t.Fatalf("load hourly analytics: %v", err)
+	}
+	plain := stripANSI(out)
+	if !strings.Contains(plain, "Execution counts by hour (server local time)") || !strings.Contains(plain, "  00:00  0") || !strings.Contains(plain, "  09:00  3") || !strings.Contains(plain, "  23:00  0") {
+		t.Fatalf("hourly output missing title, zero hours, or decoded count:\n%s", plain)
+	}
+	if got := strings.Count(plain, ":00"); got != 24 {
+		t.Fatalf("hour count = %d, want all 24 hours:\n%s", got, plain)
+	}
+
+	all, err := loadAnalytics(context.Background(), c, "hourly-project", "")
+	if err != nil {
+		t.Fatalf("load all analytics: %v", err)
+	}
+	if !strings.Contains(stripANSI(all), "  09:00  3") || !strings.Contains(stripANSI(all), "  01:00  0") {
+		t.Fatalf("all-sections output omitted hourly counts or zero hours:\n%s", stripANSI(all))
+	}
+}
+
+func TestHourlyExecutionAnalyticsEmptyAndBackendErrors(t *testing.T) {
+	empty := stripANSI(renderHourlyExecutionTrends(nil))
+	if !strings.Contains(empty, "  00:00  0") || !strings.Contains(empty, "  23:00  0") || strings.Count(empty, ":00") != 24 {
+		t.Fatalf("empty hourly output should show 24 zero-count hours:\n%s", empty)
+	}
+
+	c := newAnalyticsTestClient(t, map[string]bool{"/api/analytics/execution-trends-by-hour": true})
+	if _, err := loadAnalytics(context.Background(), c, "hourly-project", "hourly"); err == nil || strings.Contains(strings.ToLower(err.Error()), "no analytics available") {
+		t.Fatalf("dedicated hourly backend failure = %v, want visible request error", err)
+	}
+	all, err := loadAnalytics(context.Background(), c, "hourly-project", "")
+	if err != nil {
+		t.Fatalf("all-sections result with one failed section: %v", err)
+	}
+	plain := stripANSI(all)
+	if !strings.Contains(plain, "Execution counts by hour") || !strings.Contains(plain, "unavailable: request failed") {
+		t.Fatalf("all-sections report hid hourly backend failure:\n%s", plain)
 	}
 }
 
@@ -670,6 +743,8 @@ func TestLoadAnalyticsRendersIndependentAgentAndTaskExecutionTimes(t *testing.T)
 				t.Errorf("rates limit = %q, want omitted", got)
 			}
 			_ = json.NewEncoder(w).Encode([]client.SuccessFailureRate{})
+		case "/api/analytics/execution-trends-by-hour":
+			_ = json.NewEncoder(w).Encode([]client.HourlyExecutionCount{})
 		case "/api/analytics/most-frequent-tasks":
 			if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxFrequentRows) {
 				t.Errorf("frequent limit = %q, want %d", got, maxFrequentRows)
@@ -915,6 +990,8 @@ func TestLoadAnalyticsFailureBoundInAllSections(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(client.UsageAnalytics{})
 		case "/api/analytics/success-failure-rates":
 			_ = json.NewEncoder(w).Encode([]client.SuccessFailureRate{})
+		case "/api/analytics/execution-trends-by-hour":
+			_ = json.NewEncoder(w).Encode([]client.HourlyExecutionCount{})
 		case "/api/analytics/avg-execution-time-by-agent":
 			_ = json.NewEncoder(w).Encode([]client.AvgExecutionTime{})
 		case "/api/analytics/avg-execution-time-by-task":

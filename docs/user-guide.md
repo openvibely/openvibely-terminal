@@ -356,7 +356,7 @@ Every screen in the OpenVibely web UI sidebar has a command.
 | `/grades` | | `show`, `run` |
 | `/insights` | `suggestions` | `show`, `analyze` |
 | `/automations` | `automation` | `list`, `show`, `open`, `create`, `edit`, `run`, `pause`, `resume`, `delete` |
-| `/analytics` | `stats` | `usage`, `rates`, `agents`, `task-times`, `frequent`, `failures`, `skills` |
+| `/analytics` | `stats` | `usage`, `rates`, `hourly`, `agents`, `task-times`, `frequent`, `failures`, `skills` |
 | `/projects` | | `list`, `show <project>`, `create <name> <path>`, `edit <project> [options]`, `delete <project>` |
 | `/project <name\|id>` | | select the active project by exact name/ID, unique prefix, or unique name substring |
 | `/status` | `health` | connection, auth, worker capacity, stream state |
@@ -1152,9 +1152,13 @@ failures, and backend errors retain the normal non-zero command behavior.
 
 `/analytics` renders every section; a section name narrows it. Charts are drawn
 as ASCII bars — usage by model with cost and share, success/failure gauges per
-period, average execution time by agent and by task, the backend-ranked top 12
-most frequent tasks, recurring failure patterns, and skill usage with
-follow-through rates. Success/failure rates default to the recent 28-day window,
+period, execution counts for every server-local hour, average execution time by
+agent and by task, the backend-ranked top 12 most frequent tasks, recurring
+failure patterns, and skill usage with follow-through rates. The hourly section
+fills missing hours with zero counts and accepts the same optional date bounds:
+`/analytics hourly from 2026-01-01 to 2026-02-01`. The end date is exclusive.
+CLI scripts can use `openvibely-terminal -project demo --json analytics hourly`
+to receive 24 sorted records with `hour` and `count` keys. Success/failure rates default to the recent 28-day window,
 which returns at most 30 daily periods. The output and help identify this
 window. Use `/analytics rates full` for all history, or
 `/analytics rates from 2026-01-01 to 2026-02-01` for a custom date range; the
@@ -1332,7 +1336,7 @@ The OpenVibely server exposes two kinds of routes, and the client uses both.
 | Chat | `POST /api/chat/message`, `GET /api/chat/message/:id` |
 | Projects | `GET /api/projects`, `GET /projects/:id/edit`, `POST /projects`, `PUT /projects/:id` (HTMX forms) |
 | Capacity | `GET /api/capacity/global`, `GET /api/capacity/projects`, `GET /api/capacity/models` (compatibility fallback for workers watch) |
-| Analytics | `/api/analytics/usage`, `success-failure-rates?group_by=day&date_from=…&date_to=…` (terminal defaults to the recent 28-day window; omit bounds for full history), `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
+| Analytics | `/api/analytics/usage`, `success-failure-rates?group_by=day&date_from=…&date_to=…` (terminal defaults to the recent 28-day window; omit bounds for full history), `execution-trends-by-hour?project_id=…&date_from=…&date_to=…`, `avg-execution-time-by-{task,agent}`, `most-frequent-tasks?limit=12` (bounded terminal view; `limit=0` is the explicit full-history caller), `failed-task-patterns`, `skills` |
 | Pulse | `--json pulse` builds a scoped structured upcoming-work projection from `GET /api/tasks/reference-catalog?project_id=...` plus current- and next-week structured schedule cards from `GET /schedule?project_id=...` and `GET /schedule?project_id=...&week=1`; exact `data-schedule-next-run` values are preferred, and schedule-tab detail is read only when a card needs exact `Next:` timing |
 | Workflows | `/api/workflows/metrics`, `best-agent`, `cheapest-agent`, `votes/:stepExecID` |
 | Lifecycle | `/api/tasks/:id/lifecycle-executions`, `/api/lifecycle-executions/:id/events` |

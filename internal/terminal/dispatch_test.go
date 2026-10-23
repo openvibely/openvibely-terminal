@@ -3089,6 +3089,7 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 	bodies := map[string]string{
 		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
 		"/api/analytics/success-failure-rates":       `[]`,
+		"/api/analytics/execution-trends-by-hour":    `[{"Hour":8,"Count":4}]`,
 		"/api/analytics/avg-execution-time-by-agent": `[]`,
 		"/api/analytics/avg-execution-time-by-task":  `[]`,
 		"/api/analytics/most-frequent-tasks":         `[]`,
@@ -3098,6 +3099,7 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 	allPaths := []string{
 		"/api/analytics/usage",
 		"/api/analytics/success-failure-rates",
+		"/api/analytics/execution-trends-by-hour",
 		"/api/analytics/avg-execution-time-by-agent",
 		"/api/analytics/avg-execution-time-by-task",
 		"/api/analytics/most-frequent-tasks",
@@ -3111,6 +3113,7 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 		{line: "/analytics", paths: allPaths},
 		{line: "/analytics usage", paths: []string{"/api/analytics/usage"}},
 		{line: "/analytics rates", paths: []string{"/api/analytics/success-failure-rates"}},
+		{line: "/analytics hourly", paths: []string{"/api/analytics/execution-trends-by-hour"}},
 		{line: "/analytics agents", paths: []string{"/api/analytics/avg-execution-time-by-agent"}},
 		{line: "/analytics frequent", paths: []string{"/api/analytics/most-frequent-tasks"}},
 		{line: "/analytics failures", paths: []string{"/api/analytics/failed-task-patterns"}},
@@ -3157,10 +3160,48 @@ func TestAnalyticsInteractiveDispatchPropagatesSelectedProject(t *testing.T) {
 	}
 }
 
+func TestAnalyticsInteractiveHourlyDateRangeAndHelp(t *testing.T) {
+	const projectID = "selected-project"
+	m, rec := dispatchModel(t, map[string]string{
+		"/api/analytics/execution-trends-by-hour": `[{"Hour":18,"Count":6}]`,
+	})
+	m.selectedID = projectID
+	m = runLine(t, m, "/analytics hourly from 2026-05-01 to 2026-05-03")
+	out := stripANSI(transcript(m))
+	if !strings.Contains(out, "Execution counts by hour") || !strings.Contains(out, "  18:00  6") || !strings.Contains(out, "  00:00  0") {
+		t.Fatalf("interactive hourly output missing count/zero hour:\n%s", out)
+	}
+	var hourlyQuery url.Values
+	for _, recorded := range rec.urlsSnapshot() {
+		parts := strings.SplitN(recorded, " ", 2)
+		if len(parts) != 2 {
+			t.Fatalf("malformed request %q", recorded)
+		}
+		parsed, err := url.Parse(parts[1])
+		if err != nil {
+			t.Fatalf("parse request %q: %v", recorded, err)
+		}
+		if parsed.Path == "/api/analytics/execution-trends-by-hour" {
+			hourlyQuery = parsed.Query()
+		}
+	}
+	if hourlyQuery == nil || hourlyQuery.Get("project_id") != projectID || hourlyQuery.Get("date_from") != "2026-05-01" || hourlyQuery.Get("date_to") != "2026-05-03" {
+		t.Fatalf("hourly request lost selected project/date range: %v; requests=%v", hourlyQuery, rec.urlsSnapshot())
+	}
+
+	helpModel, _ := dispatchModel(t, nil)
+	helpModel = runLine(t, helpModel, "/help analytics")
+	help := stripANSI(transcript(helpModel))
+	if !strings.Contains(help, "analytics hourly") || !strings.Contains(help, "server-local hours") {
+		t.Fatalf("TUI help analytics omits hourly section:\n%s", help)
+	}
+}
+
 func TestAnalyticsInteractiveRatesWindowsAndScope(t *testing.T) {
 	bodies := map[string]string{
 		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
 		"/api/analytics/success-failure-rates":       `[{"period":"2026-09-01","successCount":2,"failureCount":1,"totalCount":3,"successRate":66.7}]`,
+		"/api/analytics/execution-trends-by-hour":    `[]`,
 		"/api/analytics/avg-execution-time-by-agent": `[]`,
 		"/api/analytics/avg-execution-time-by-task":  `[]`,
 		"/api/analytics/most-frequent-tasks":         `[]`,
@@ -3285,6 +3326,7 @@ func TestScreenCommandsHitTheirEndpoints(t *testing.T) {
 		{"/agents metrics", "GET", "/api/workflows/metrics"},
 		{"/analytics usage", "GET", "/api/analytics/usage"},
 		{"/analytics rates", "GET", "/api/analytics/success-failure-rates"},
+		{"/analytics hourly", "GET", "/api/analytics/execution-trends-by-hour"},
 		{"/analytics skills", "GET", "/api/analytics/skills"},
 		{"/analytics frequent", "GET", "/api/analytics/most-frequent-tasks"},
 		{"/analytics failures", "GET", "/api/analytics/failed-task-patterns"},

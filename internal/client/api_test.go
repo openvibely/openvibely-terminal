@@ -38,6 +38,43 @@ func TestGetUsageAnalytics(t *testing.T) {
 	}
 }
 
+func TestGetExecutionTrendsByHourWithDateRange(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/execution-trends-by-hour" {
+			t.Errorf("path = %q, want /api/analytics/execution-trends-by-hour", r.URL.Path)
+		}
+		query := r.URL.Query()
+		if query.Get("project_id") != "selected-project" {
+			t.Errorf("project_id = %q, want selected-project", query.Get("project_id"))
+		}
+		if query.Get("date_from") != "2026-04-01T00:00:00Z" || query.Get("date_to") != "2026-04-02T00:00:00Z" {
+			t.Errorf("date bounds = %q/%q", query.Get("date_from"), query.Get("date_to"))
+		}
+		_, _ = io.WriteString(w, `[{"Hour":0,"Count":2},{"Hour":23,"Count":7}]`)
+	}))
+
+	rows, err := c.GetExecutionTrendsByHourWithDateRange(context.Background(), "selected-project", "2026-04-01T00:00:00Z", "2026-04-02T00:00:00Z")
+	if err != nil {
+		t.Fatalf("GetExecutionTrendsByHourWithDateRange: %v", err)
+	}
+	if len(rows) != 2 || rows[0] != (HourlyExecutionCount{Hour: 0, Count: 2}) || rows[1] != (HourlyExecutionCount{Hour: 23, Count: 7}) {
+		t.Fatalf("decoded hourly rows = %+v", rows)
+	}
+}
+
+func TestGetExecutionTrendsByHourPropagatesBackendError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/analytics/execution-trends-by-hour" || r.URL.Query().Get("project_id") != "selected-project" {
+			t.Errorf("request = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		http.Error(w, "analytics unavailable", http.StatusInternalServerError)
+	}))
+
+	if rows, err := c.GetExecutionTrendsByHour(context.Background(), "selected-project"); err == nil || rows != nil {
+		t.Fatalf("GetExecutionTrendsByHour = %+v, %v; want backend error", rows, err)
+	}
+}
+
 func TestGetUsageProviderLimitsRequestsProjectionAndDecodesAccountLimits(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/analytics/usage" {

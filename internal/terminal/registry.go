@@ -10537,6 +10537,32 @@ func parseAnalyticsArgs(actions, args []string) (string, ratesWindow, error) {
 	if action == "" {
 		return "", defaultWindow, analyticsUsageError(actions)
 	}
+	if action == "hourly" {
+		switch {
+		case len(operands) == 0:
+			return action, defaultWindow, nil
+		case len(operands) == 2 && strings.EqualFold(operands[0], "from"):
+			if _, err := parseAnalyticsDate(operands[1]); err != nil {
+				return "", defaultWindow, fmt.Errorf("%w\n%s", err, analyticsHourlyUsage())
+			}
+			return action, ratesWindow{kind: ratesWindowRange, from: operands[1]}, nil
+		case len(operands) == 4 && strings.EqualFold(operands[0], "from") && strings.EqualFold(operands[2], "to"):
+			from, err := parseAnalyticsDate(operands[1])
+			if err != nil {
+				return "", defaultWindow, fmt.Errorf("%w\n%s", err, analyticsHourlyUsage())
+			}
+			to, err := parseAnalyticsDate(operands[3])
+			if err != nil {
+				return "", defaultWindow, fmt.Errorf("%w\n%s", err, analyticsHourlyUsage())
+			}
+			if !to.After(from) {
+				return "", defaultWindow, fmt.Errorf("hourly end date must be later than start date\n%s", analyticsHourlyUsage())
+			}
+			return action, ratesWindow{kind: ratesWindowRange, from: operands[1], to: operands[3]}, nil
+		default:
+			return "", defaultWindow, analyticsUsageError(actions)
+		}
+	}
 	if action != "rates" {
 		if len(operands) == 0 {
 			return action, defaultWindow, nil
@@ -10576,8 +10602,12 @@ func analyticsRatesUsage() string {
 	return "usage: analytics rates [full|from <YYYY-MM-DD|RFC3339> [to <YYYY-MM-DD|RFC3339>]] (to is exclusive)"
 }
 
+func analyticsHourlyUsage() string {
+	return "usage: analytics hourly [from <YYYY-MM-DD|RFC3339> [to <YYYY-MM-DD|RFC3339>]] (to is exclusive)"
+}
+
 func analyticsUsageError(actions []string) error {
-	return fmt.Errorf("usage: %sanalytics [%s]\n%s", cmdPrefix, strings.Join(actions, "|"), analyticsRatesUsage())
+	return fmt.Errorf("usage: %sanalytics [%s]\n%s\n%s", cmdPrefix, strings.Join(actions, "|"), analyticsRatesUsage(), analyticsHourlyUsage())
 }
 
 func validateAnalyticsArgs(actions, args []string) error {
@@ -10589,6 +10619,22 @@ func analyticsCommand() command {
 	return analyticsCommandForSections(analyticsSections)
 }
 
+func loadHourlyExecutionJSON(ctx context.Context, c *client.Client, projectID string, window ratesWindow) (string, error) {
+	dateFrom, dateTo := "", ""
+	if window.kind == ratesWindowRange {
+		dateFrom, dateTo = window.from, window.to
+	}
+	rows, err := c.GetExecutionTrendsByHourWithDateRange(ctx, projectID, dateFrom, dateTo)
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(completeHourlyExecutionCounts(rows))
+	if err != nil {
+		return "", fmt.Errorf("encode hourly execution counts: %w", err)
+	}
+	return string(payload), nil
+}
+
 func analyticsCommandForSections(sections []analyticsSection) command {
 	actions := analyticsSectionNames(sections)
 	return command{
@@ -10596,7 +10642,7 @@ func analyticsCommandForSections(sections []analyticsSection) command {
 		aliases:      []string{"stats"},
 		actions:      actions,
 		validateArgs: func(args []string) error { return validateAnalyticsArgs(actions, args) },
-		desc:         "usage, cost, success rates, execution times, task patterns and skill activity",
+		desc:         "usage, cost, execution rates, hourly counts, task patterns and skill activity",
 		usage:        analyticsUsageLines(sections),
 		examples: []string{
 			`analytics`,
@@ -10618,6 +10664,9 @@ func analyticsCommandForSections(sections []analyticsSection) command {
 			}
 			c, pid := m.client, m.selectedID
 			return m, run("Analytics", cmdTimeout, func(ctx context.Context) (string, error) {
+				if jsonMode && action == "hourly" {
+					return loadHourlyExecutionJSON(ctx, c, pid, window)
+				}
 				return loadAnalyticsSectionsWithRatesWindow(ctx, c, pid, action, window, sections)
 			})
 		},
