@@ -1494,6 +1494,11 @@ func isRecognizedCLIPlainEvent(name string) bool {
 	}
 }
 
+func isTasklessCLIChatEvent(name string, payload cliEventPayload) bool {
+	return strings.TrimSpace(payload.TaskID) == "" &&
+		(strings.TrimSpace(name) == "chat_new_message" || strings.TrimSpace(payload.Type) == "chat_new_message")
+}
+
 func formatCLIEventBytes(ev client.Event, projectID string, jsonOutput bool) ([]byte, bool, error) {
 	var payload cliEventPayload
 	var rawPayload cliEventRawPayload
@@ -1523,7 +1528,7 @@ func formatCLIEventBytes(ev client.Event, projectID string, jsonOutput bool) ([]
 	if !acceptsSSEEventProjectOwnership(projectID, payload.ProjectID, payload.TaskID) {
 		return nil, false, nil
 	}
-	if payload.ProjectID == "" {
+	if payload.ProjectID == "" && (!jsonOutput || payloadErr != nil || !isTasklessCLIChatEvent(ev.Name, payload)) {
 		payload.ProjectID = projectID
 	}
 
