@@ -565,16 +565,18 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 			}
 			w.Header().Set("Location", "/tasks?project_id=created-project")
 			w.WriteHeader(http.StatusFound)
-		case r.Method == http.MethodGet && r.URL.Path == "/events/live":
-			select {
-			case requestURI <- r.URL.RequestURI():
-			default:
+		case r.Method == http.MethodGet && r.URL.Path == "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
+			defer live.Close()
+			live.Subscriptions(func() {
+				select {
+				case requestURI <- live.Command.ProjectID:
+				default:
+				}
+			})
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -614,8 +616,8 @@ func TestProjectsCreateSelectsCreatedProject(t *testing.T) {
 	}
 	select {
 	case got := <-requestURI:
-		if got != "/events/live?project_id=created-project" {
-			t.Fatalf("creation SSE request URI = %q, want scoped created project", got)
+		if got != "created-project" {
+			t.Fatalf("creation WebSocket subscription project = %q, want scoped created project", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for scoped SSE request after project creation")
@@ -641,16 +643,18 @@ func TestProjectsCreateDirectoryOptionSupportsPipeSyntaxAndSelectsProject(t *tes
 			}
 			w.Header().Set("Location", "/tasks?project_id=nested-project")
 			w.WriteHeader(http.StatusFound)
-		case r.Method == http.MethodGet && r.URL.Path == "/events/live":
-			select {
-			case requestURI <- r.URL.RequestURI():
-			default:
+		case r.Method == http.MethodGet && r.URL.Path == "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
+			defer live.Close()
+			live.Subscriptions(func() {
+				select {
+				case requestURI <- live.Command.ProjectID:
+				default:
+				}
+			})
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -671,8 +675,8 @@ func TestProjectsCreateDirectoryOptionSupportsPipeSyntaxAndSelectsProject(t *tes
 	}
 	select {
 	case got := <-requestURI:
-		if got != "/events/live?project_id=nested-project" {
-			t.Fatalf("creation SSE request URI = %q, want selected project scope", got)
+		if got != "nested-project" {
+			t.Fatalf("creation WebSocket subscription project = %q, want selected project scope", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for scoped SSE request after project creation")
@@ -716,16 +720,18 @@ func TestProjectsCreateGitHubSelectsCreatedProject(t *testing.T) {
 			}
 			w.Header().Set("Location", "/tasks?project_id=github-created")
 			w.WriteHeader(http.StatusFound)
-		case r.Method == http.MethodGet && r.URL.Path == "/events/live":
-			select {
-			case requestURI <- r.URL.RequestURI():
-			default:
+		case r.Method == http.MethodGet && r.URL.Path == "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
+			defer live.Close()
+			live.Subscriptions(func() {
+				select {
+				case requestURI <- live.Command.ProjectID:
+				default:
+				}
+			})
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
 		}
@@ -761,8 +767,8 @@ func TestProjectsCreateGitHubSelectsCreatedProject(t *testing.T) {
 	}
 	select {
 	case got := <-requestURI:
-		if got != "/events/live?project_id=github-created" {
-			t.Fatalf("GitHub creation SSE request URI = %q, want scoped created project", got)
+		if got != "github-created" {
+			t.Fatalf("GitHub creation WebSocket subscription project = %q, want scoped created project", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for scoped SSE request after GitHub project creation")

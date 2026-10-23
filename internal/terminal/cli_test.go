@@ -5878,6 +5878,15 @@ func TestCLIChatSendsAndPrintsReply(t *testing.T) {
 		rec.record(r.Method, r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.URL.Path == "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "m1")
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			live.Delta("docs shipped")
+			live.Send("done", "completed")
+			live.Wait()
 		case r.URL.Path == "/api/projects":
 			_, _ = w.Write([]byte(cliProjects))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/chat/message":
@@ -5893,7 +5902,7 @@ func TestCLIChatSendsAndPrintsReply(t *testing.T) {
 
 	c, _ := client.New(srv.URL)
 	var out bytes.Buffer
-	if err := RunCLI(c, &out, "demo", []string{"chat", "ship the docs"}, false, false); err != nil {
+	if err := RunCLIContext(liveTestContext(t), c, &out, "demo", []string{"chat", "ship the docs"}, false, false); err != nil {
 		t.Fatalf("chat failed: %v", err)
 	}
 	if !rec.saw("POST", "/api/chat/message") {
@@ -5915,12 +5924,21 @@ func TestCLIChatFlushesIncrementalOutputBeforeCompletion(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"message_id":"exec-1","status":"processing"}`)
-		case "/events/chat/exec-1":
-			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprint(w, "data: hello\n\n")
-			w.(http.Flusher).Flush()
-			<-release
-			fmt.Fprint(w, "data:  world\n\nevent: done\ndata: completed\n\n")
+		case "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "exec-1")
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			live.Delta("hello")
+			select {
+			case <-release:
+			case <-live.Context.Done():
+				return
+			}
+			live.Delta(" world")
+			live.Send("done", "completed")
+			live.Wait()
 		case "/api/chat/message/exec-1":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"message_id":"exec-1","status":"completed","response":"hello world"}`)
@@ -5933,7 +5951,7 @@ func TestCLIChatFlushesIncrementalOutputBeforeCompletion(t *testing.T) {
 	reader, writer := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := RunCLIContext(context.Background(), c, writer, "demo", []string{"chat", "go"}, false, false)
+		err := RunCLIContext(liveTestContext(t), c, writer, "demo", []string{"chat", "go"}, false, false)
 		_ = writer.Close()
 		done <- err
 	}()
@@ -5967,25 +5985,27 @@ func TestCLIChatReconnectsByOffsetWithoutDuplicateOutput(t *testing.T) {
 		case r.URL.Path == "/api/chat/message/exec-1":
 			statusCalls++
 			w.Header().Set("Content-Type", "application/json")
-			if statusCalls == 1 {
-				fmt.Fprint(w, `{"message_id":"exec-1","status":"processing"}`)
-			} else {
-				fmt.Fprint(w, `{"message_id":"exec-1","status":"completed","response":"hello"}`)
-			}
-		case r.URL.Path == "/events/chat/exec-1":
-			streams++
-			w.Header().Set("Content-Type", "text/event-stream")
-			if streams == 1 {
-				if r.URL.Query().Get("offset") != "0" {
-					t.Fatalf("first offset = %s", r.URL.Query().Get("offset"))
-				}
-				fmt.Fprint(w, "data: hel\n\n")
+			fmt.Fprint(w, `{"message_id":"exec-1","status":"completed","response":"hello"}`)
+		case r.URL.Path == "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "exec-1")
+			if live == nil {
 				return
 			}
-			if r.URL.Query().Get("offset") != "3" {
-				t.Fatalf("resume offset = %s", r.URL.Query().Get("offset"))
+			defer live.Close()
+			streams++
+			if streams == 1 {
+				if live.Command.Offset != 0 {
+					t.Fatalf("first offset = %s", fmt.Sprint(live.Command.Offset))
+				}
+				live.Delta("hel")
+				return
 			}
-			fmt.Fprint(w, "data: lo\n\nevent: done\ndata: completed\n\n")
+			if live.Command.Offset != 3 {
+				t.Fatalf("resume offset = %s", fmt.Sprint(live.Command.Offset))
+			}
+			live.Delta("lo")
+			live.Send("done", "completed")
+			live.Wait()
 		default:
 			t.Fatalf("unexpected request %s", r.URL.String())
 		}
@@ -5993,7 +6013,7 @@ func TestCLIChatReconnectsByOffsetWithoutDuplicateOutput(t *testing.T) {
 	defer srv.Close()
 	c, _ := client.New(srv.URL)
 	var out bytes.Buffer
-	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, false); err != nil {
+	if err := RunCLIContext(liveTestContext(t), c, &out, "demo", []string{"chat", "go"}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "hello\n" || streams != 2 {
@@ -6003,11 +6023,11 @@ func TestCLIChatReconnectsByOffsetWithoutDuplicateOutput(t *testing.T) {
 
 func TestCLIChatStreamingJSONAndFailure(t *testing.T) {
 	for _, tc := range []struct {
-		name, terminal string
-		wantErr        bool
+		name    string
+		wantErr bool
 	}{
-		{name: "completed", terminal: "event: done\ndata: completed\n\n"},
-		{name: "failed", terminal: "event: error\ndata: model failed\n\n", wantErr: true},
+		{name: "completed"},
+		{name: "failed", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6018,9 +6038,19 @@ func TestCLIChatStreamingJSONAndFailure(t *testing.T) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusCreated)
 					fmt.Fprint(w, `{"message_id":"exec","status":"processing"}`)
-				case "/events/chat/exec":
-					w.Header().Set("Content-Type", "text/event-stream")
-					fmt.Fprint(w, "data: chunk\n\n"+tc.terminal)
+				case "/events/ws":
+					live := acceptExecutionTest(t, w, r, "p1", "exec")
+					if live == nil {
+						return
+					}
+					defer live.Close()
+					live.Delta("chunk")
+					if tc.wantErr {
+						live.Send("error", "model failed")
+					} else {
+						live.Send("done", "completed")
+					}
+					live.Wait()
 				case "/api/chat/message/exec":
 					w.Header().Set("Content-Type", "application/json")
 					if tc.wantErr {
@@ -6033,7 +6063,7 @@ func TestCLIChatStreamingJSONAndFailure(t *testing.T) {
 			defer srv.Close()
 			c, _ := client.New(srv.URL)
 			var out bytes.Buffer
-			err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, true)
+			err := RunCLIContext(liveTestContext(t), c, &out, "demo", []string{"chat", "go"}, false, true)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("error = %v", err)
 			}
@@ -6058,9 +6088,15 @@ func TestCLIExecutionTerminalSignalUsesAuthoritativeFailure(t *testing.T) {
 	var statusCalls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/events/chat/exec":
-			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprint(w, "data: partial\n\nevent: done\ndata: completed\n\n")
+		case "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "exec")
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			live.Delta("partial")
+			live.Send("done", "completed")
+			live.Wait()
 		case "/api/chat/message/exec":
 			statusCalls++
 			w.Header().Set("Content-Type", "application/json")
@@ -6073,7 +6109,7 @@ func TestCLIExecutionTerminalSignalUsesAuthoritativeFailure(t *testing.T) {
 	c, _ := client.New(srv.URL)
 	var out bytes.Buffer
 	status := func() (*client.ChatStatus, error) { return c.GetChatStatus(context.Background(), "exec") }
-	err := streamCLIExecution(context.Background(), c, &out, "p1", "", "exec", false, status)
+	err := streamCLIExecution(liveTestContext(t), c, &out, "p1", "", "exec", false, status)
 	if err == nil || !strings.Contains(err.Error(), "authoritative failure") {
 		t.Fatalf("error = %v", err)
 	}
@@ -6085,9 +6121,15 @@ func TestCLIExecutionTerminalSignalUsesAuthoritativeFailure(t *testing.T) {
 func TestCLIExecutionErrorSignalCanReconcileToCompletion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/events/chat/exec":
-			w.Header().Set("Content-Type", "text/event-stream")
-			fmt.Fprint(w, "data: par\n\nevent: error\ndata: transient signal\n\n")
+		case "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "exec")
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			live.Delta("par")
+			live.Send("error", "transient signal")
+			live.Wait()
 		case "/api/chat/message/exec":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"message_id":"exec","status":"completed","response":"partial"}`)
@@ -6099,7 +6141,7 @@ func TestCLIExecutionErrorSignalCanReconcileToCompletion(t *testing.T) {
 	c, _ := client.New(srv.URL)
 	var out bytes.Buffer
 	status := func() (*client.ChatStatus, error) { return c.GetChatStatus(context.Background(), "exec") }
-	if err := streamCLIExecution(context.Background(), c, &out, "p1", "", "exec", false, status); err != nil {
+	if err := streamCLIExecution(liveTestContext(t), c, &out, "p1", "", "exec", false, status); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "partial\n" {
@@ -6110,11 +6152,13 @@ func TestCLIExecutionErrorSignalCanReconcileToCompletion(t *testing.T) {
 func TestCLIExecutionDeadlineIsNotSuccess(t *testing.T) {
 	started := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		w.(http.Flusher).Flush()
+		live := acceptExecutionTest(t, w, r, "p1", "exec")
+		if live == nil {
+			return
+		}
+		defer live.Close()
 		close(started)
-		<-r.Context().Done()
+		live.Wait()
 	}))
 	defer srv.Close()
 	c, _ := client.New(srv.URL)
@@ -6231,69 +6275,82 @@ func TestCLIStreamRetryWaitCancellationUsesRealTimer(t *testing.T) {
 	}
 }
 
-func TestCLIExecutionTerminalStreamErrorsDoNotRetry(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		statusCode int
-	}{
-		{name: "authentication", statusCode: http.StatusUnauthorized},
-		{name: "other terminal", statusCode: http.StatusBadRequest},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var streams, waits int
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				streams++
-				http.Error(w, "stream rejected", tc.statusCode)
+func TestCLIExecutionRetriesHandshakeFailuresUntilCancelled(t *testing.T) {
+	for _, code := range []int{http.StatusUnauthorized, http.StatusBadRequest, http.StatusServiceUnavailable} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			attempts := make(chan struct{}, 8)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case attempts <- struct{}{}:
+				default:
+				}
+				http.Error(w, "rejected", code)
 			}))
 			defer srv.Close()
 			c, _ := client.New(srv.URL)
-			status := func() (*client.ChatStatus, error) {
-				return &client.ChatStatus{MessageID: "exec", Status: "processing"}, nil
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- streamCLIExecution(ctx, c, io.Discard, "p1", "", "exec", false, nil) }()
+			for i := 0; i < 2; i++ {
+				select {
+				case <-attempts:
+				case <-ctx.Done():
+					t.Fatal("no retry")
+				}
 			}
-			err := streamCLIExecutionWithRetryWait(context.Background(), c, io.Discard, "p1", "", "exec", false, status, func(context.Context, int) bool {
-				waits++
-				return true
-			})
-			if err == nil {
-				t.Fatal("expected terminal stream error")
+			select {
+			case err := <-done:
+				t.Fatalf("stream exited before cancellation: %v", err)
+			default:
 			}
-			if streams != 1 || waits != 0 {
-				t.Fatalf("stream attempts=%d retry waits=%d, want 1 and 0", streams, waits)
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("cancellation blocked")
 			}
 		})
 	}
 }
 
-func TestCLIExecutionDisconnectExhaustionIsNotSuccess(t *testing.T) {
-	var streams int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		streams++
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
+func TestCLIExecutionReconnectsAfterClosureUntilCancelled(t *testing.T) {
+	attempts := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		live := acceptExecutionTest(t, w, r, "p1", "exec")
+		if live == nil {
+			return
+		}
+		defer live.Close()
+		select {
+		case attempts <- struct{}{}:
+		default:
+		}
 	}))
 	defer srv.Close()
 	c, _ := client.New(srv.URL)
-	status := func() (*client.ChatStatus, error) {
-		return &client.ChatStatus{MessageID: "exec", Status: "processing"}, nil
-	}
-	var waits []int
-	err := streamCLIExecutionWithRetryWait(context.Background(), c, io.Discard, "p1", "", "exec", false, status, func(_ context.Context, attempt int) bool {
-		waits = append(waits, attempt)
-		return true
-	})
-	if !errors.Is(err, client.ErrEventStreamClosed) {
-		t.Fatalf("error = %v, want event stream closed", err)
-	}
-	if streams != cliStreamReconnectLimit+1 {
-		t.Fatalf("stream attempts = %d, want %d", streams, cliStreamReconnectLimit+1)
-	}
-	if len(waits) != cliStreamReconnectLimit {
-		t.Fatalf("retry waits = %d, want %d", len(waits), cliStreamReconnectLimit)
-	}
-	for i, attempt := range waits {
-		if attempt != i+1 {
-			t.Fatalf("retry wait %d received attempt %d, want %d", i+1, attempt, i+1)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- streamCLIExecution(ctx, c, io.Discard, "p1", "", "exec", false, nil) }()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-attempts:
+		case <-ctx.Done():
+			t.Fatal("no reconnect")
 		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancellation blocked")
 	}
 }
 
@@ -6309,9 +6366,6 @@ func TestCLITaskReplyRecoversMissedPromotionThroughStatus(t *testing.T) {
 			fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case "/tasks":
 			fmt.Fprint(w, board)
-		case "/events/live":
-			w.Header().Set("Content-Type", "text/event-stream")
-			return
 		case "/tasks/task-1/thread":
 			fmt.Fprint(w, `<div data-thread-input-id="input-1" data-task-id="task-1" data-input-mode="queued"></div>`)
 		case "/api/chat/message/input-1":
@@ -6324,8 +6378,18 @@ func TestCLITaskReplyRecoversMissedPromotionThroughStatus(t *testing.T) {
 			} else {
 				fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"recovered"}`)
 			}
-		case "/events/chat/exec-2":
-			fmt.Fprint(w, "data: recovered\n\nevent: done\ndata: completed\n\n")
+		case "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "exec-2")
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			if live.Command.ProjectID != "p1" {
+				t.Errorf("scope=%q", live.Command.ProjectID)
+			}
+			live.Delta("recovered")
+			live.Send("done", "completed")
+			live.Wait()
 		case "/api/chat/message/exec-2":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"recovered"}`)
@@ -6356,11 +6420,13 @@ func TestCLIChatCancellationClosesExecutionStream(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"message_id":"exec","status":"processing"}`)
-		case "/events/chat/exec":
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
+		case "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "exec")
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			live.Wait()
 			close(streamClosed)
 		}
 	}))
@@ -6405,7 +6471,7 @@ func TestCLITaskReplySwarmParentAcceptedWithoutExecutionIdentity(t *testing.T) {
 					fmt.Fprint(w, `<div><div>User: continue coordination</div><div>Assistant: Queued. This message will be sent to the model after the active response finishes.</div></div>`)
 				case "/api/chat/message/swarm-1":
 					statusCalls++
-				case "/events/chat/swarm-1":
+				case "/events/ws":
 					streamCalls++
 				default:
 					t.Fatalf("unexpected request %s", r.URL.String())
@@ -6448,18 +6514,23 @@ func TestCLITaskReplyStreamsScopedExecution(t *testing.T) {
 			fmt.Fprint(w, compactTaskCatalogForTest(board))
 		case "/tasks":
 			fmt.Fprint(w, board)
-		case "/events/live":
-			if r.URL.Query().Get("project_id") != "p1" {
-				t.Fatalf("live project = %q", r.URL.Query().Get("project_id"))
-			}
-			<-r.Context().Done()
 		case "/tasks/task-1/thread":
 			if r.URL.Query().Get("project_id") != "p1" {
 				t.Fatalf("thread project = %q", r.URL.Query().Get("project_id"))
 			}
 			fmt.Fprint(w, `<div data-execution-pair="true" data-exec-id="follow-1" data-exec-status="running"></div>`)
-		case "/events/chat/follow-1":
-			fmt.Fprint(w, "data: task output\n\nevent: done\ndata: completed\n\n")
+		case "/events/ws":
+			live := acceptExecutionTest(t, w, r, "p1", "follow-1")
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			if live.Command.ProjectID != "p1" {
+				t.Errorf("scope=%q", live.Command.ProjectID)
+			}
+			live.Delta("task output")
+			live.Send("done", "completed")
+			live.Wait()
 		case "/api/chat/message/follow-1":
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"message_id":"follow-1","status":"completed","response":"task output"}`)
@@ -6470,7 +6541,7 @@ func TestCLITaskReplyStreamsScopedExecution(t *testing.T) {
 	defer srv.Close()
 	c, _ := client.New(srv.URL)
 	var out bytes.Buffer
-	if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, false); err != nil {
+	if err := RunCLIContext(liveTestContext(t), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if out.String() != "task output\n" {
@@ -6504,8 +6575,18 @@ func TestCLIChatQueuedPromotionStreamsPromotedExecution(t *testing.T) {
 					} else {
 						fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"promoted"}`)
 					}
-				case "/events/chat/exec-2":
-					fmt.Fprint(w, "data: promoted\n\nevent: done\ndata: completed\n\n")
+				case "/events/ws":
+					live := acceptExecutionTest(t, w, r, "p1", "exec-2")
+					if live == nil {
+						return
+					}
+					defer live.Close()
+					if live.Command.ProjectID != "p1" {
+						t.Errorf("scope=%q", live.Command.ProjectID)
+					}
+					live.Delta("promoted")
+					live.Send("done", "completed")
+					live.Wait()
 				default:
 					t.Fatalf("unexpected request %s", r.URL.String())
 				}
@@ -6513,7 +6594,7 @@ func TestCLIChatQueuedPromotionStreamsPromotedExecution(t *testing.T) {
 			defer srv.Close()
 			c, _ := client.New(srv.URL)
 			var out bytes.Buffer
-			if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"chat", "go"}, false, jsonOutput); err != nil {
+			if err := RunCLIContext(liveTestContext(t), c, &out, "demo", []string{"chat", "go"}, false, jsonOutput); err != nil {
 				t.Fatal(err)
 			}
 			if statusCalls != 3 {
@@ -6579,8 +6660,18 @@ func TestCLITaskReplyQueuedPromotionUsesAuthoritativeStatus(t *testing.T) {
 					} else {
 						fmt.Fprint(w, `{"message_id":"exec-2","status":"completed","response":"queued output"}`)
 					}
-				case "/events/chat/exec-2":
-					fmt.Fprint(w, "data: queued output\n\nevent: done\ndata: completed\n\n")
+				case "/events/ws":
+					live := acceptExecutionTest(t, w, r, "p1", "exec-2")
+					if live == nil {
+						return
+					}
+					defer live.Close()
+					if live.Command.ProjectID != "p1" {
+						t.Errorf("scope=%q", live.Command.ProjectID)
+					}
+					live.Delta("queued output")
+					live.Send("done", "completed")
+					live.Wait()
 				default:
 					t.Fatalf("unexpected request %s", r.URL.String())
 				}
@@ -6588,7 +6679,7 @@ func TestCLITaskReplyQueuedPromotionUsesAuthoritativeStatus(t *testing.T) {
 			defer srv.Close()
 			c, _ := client.New(srv.URL)
 			var out bytes.Buffer
-			if err := RunCLIContext(context.Background(), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, jsonOutput); err != nil {
+			if err := RunCLIContext(liveTestContext(t), c, &out, "demo", []string{"tasks", "reply", "Fix stream", "|", "continue"}, false, jsonOutput); err != nil {
 				t.Fatal(err)
 			}
 			if statusCalls != 3 {
@@ -12857,18 +12948,21 @@ func TestFormatCLIEventJSONLargeUTF8AndEscapedPayloads(t *testing.T) {
 }
 
 func TestRunCLIEventsJSONPreservesScopeAndBurstOrder(t *testing.T) {
-	const stream = "event: chat_new_message\ndata: {\"type\":\"chat_new_message\",\"message\":\"first <&>\"}\n\n" +
-		"event: task_status_changed\ndata: {\"type\":\"task_status_changed\",\"project_id\":\"foreign\",\"task_id\":\"foreign-task\"}\n\n" +
-		"event: task_status_changed\ndata: {\"type\":\"task_status_changed\",\"project_id\":\"p1\",\"task_id\":\"selected-task\",\"status\":\"running\"}\n\n" +
-		"event: task_status_changed\ndata: {\"type\":\"task_status_changed\",\"task_id\":\"missing-project\"}\n\n" +
-		"event: future_event\ndata: {\"type\":\"future_event\",\"project_id\":\"p1\",\"message\":\"last\"}\n\n"
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("project_id") != "p1" {
-			t.Errorf("stream project_id = %q, want p1", r.URL.Query().Get("project_id"))
+		live := acceptLiveTest(t, w, r)
+		if live == nil {
+			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, stream)
+		defer live.Close()
+		if live.Command.ProjectID != "p1" {
+			t.Errorf("scope=%q", live.Command.ProjectID)
+		}
+		live.Event("chat_new_message", `{"type":"chat_new_message","message":"first <&>"}`)
+		live.Event("task_status_changed", `{"type":"task_status_changed","project_id":"foreign","task_id":"foreign-task"}`)
+		live.Event("task_status_changed", `{"type":"task_status_changed","project_id":"p1","task_id":"selected-task","status":"running"}`)
+		live.Event("task_status_changed", `{"type":"task_status_changed","task_id":"missing-project"}`)
+		live.Event("future_event", `{"type":"future_event","project_id":"p1","message":"last"}`)
+		live.Wait()
 	}))
 	defer srv.Close()
 
@@ -12877,8 +12971,11 @@ func TestRunCLIEventsJSONPreservesScopeAndBurstOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	// This test checks one finite burst; production reconnects after stream closure.
-	if err := runCLIEventsWithRetryWait(context.Background(), c, &out, "p1", true, c.StreamEvents, func(context.Context, int) bool { return false }); err != nil {
+	// Stop after the visible burst; the shared transport remains persistent.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	writer := &finiteCLIEventWriter{out: &out, cancel: cancel, remaining: 3}
+	if err := runCLIEvents(ctx, c, writer, "p1", true, true); err != nil {
 		t.Fatalf("runCLIEvents() error = %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -12939,34 +13036,25 @@ func TestRunCLIEventsReconnectsAfterInterruptedStreamWithoutDuplicatingOutput(t 
 			var requests []string
 			secondStarted := make(chan struct{})
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/events/live" {
-					http.NotFound(w, r)
+				live := acceptLiveTest(t, w, r)
+				if live == nil {
 					return
 				}
+				defer live.Close()
 				mu.Lock()
-				requests = append(requests, r.URL.RequestURI())
+				requests = append(requests, live.Command.ProjectID)
 				attempt := len(requests)
 				mu.Unlock()
-				if r.URL.Query().Get("project_id") != "p1" {
-					t.Errorf("project_id = %q, want p1", r.URL.Query().Get("project_id"))
+				if live.Command.ProjectID != "p1" {
+					t.Errorf("scope=%q", live.Command.ProjectID)
 				}
-				w.Header().Set("Content-Type", "text/event-stream")
 				if attempt == 1 {
-					conn, _, hijackErr := w.(http.Hijacker).Hijack()
-					if hijackErr != nil {
-						t.Errorf("hijack event stream: %v", hijackErr)
-						return
-					}
-					payload := `event: task_status_changed` + "\n" + `data: {"type":"task_status_changed","project_id":"p1","task_id":"first","status":"running"}` + "\n\n"
-					_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n%x\r\n%s\r\n", len(payload), payload)
-					_ = conn.Close() // Omit the terminal chunk to simulate an interrupted response.
+					live.Event("task_status_changed", `{"type":"task_status_changed","project_id":"p1","task_id":"first","status":"running"}`)
 					return
 				}
-				_, _ = io.WriteString(w, `event: task_status_changed
-data: {"type":"task_status_changed","project_id":"p1","task_id":"second","status":"completed"}`+"\n\n")
-				w.(http.Flusher).Flush()
+				live.Event("task_status_changed", `{"type":"task_status_changed","project_id":"p1","task_id":"second","status":"completed"}`)
 				close(secondStarted)
-				<-r.Context().Done()
+				live.Wait()
 			}))
 			defer srv.Close()
 
@@ -13019,11 +13107,11 @@ data: {"type":"task_status_changed","project_id":"p1","task_id":"second","status
 			mu.Lock()
 			gotRequests := append([]string(nil), requests...)
 			mu.Unlock()
-			if len(gotRequests) != 2 || gotRequests[0] != "/events/live?project_id=p1" || gotRequests[1] != gotRequests[0] {
+			if len(gotRequests) != 2 || gotRequests[0] != "p1" || gotRequests[1] != gotRequests[0] {
 				t.Fatalf("event requests = %v, want two requests scoped to p1", gotRequests)
 			}
-			if retries != 1 {
-				t.Fatalf("retry waits = %d, want 1", retries)
+			if retries != 0 {
+				t.Fatalf("CLI retry waits = %d, want 0 (transport owns reconnect)", retries)
 			}
 			joined := strings.Join(lines, "")
 			if strings.Contains(joined, "reconnect") || strings.Contains(joined, "retry") {
@@ -13252,7 +13340,7 @@ func TestRunCLIEventsStopsOnAuthInvalidServerURLAndOtherErrors(t *testing.T) {
 		{
 			name: "TLS certificate verification",
 			err: &url.Error{
-				Op: "Get", URL: "https://service.example/events/live",
+				Op: "Get", URL: "https://service.example/events/ws",
 				Err: &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}},
 			},
 			want: "live events:",
@@ -13316,11 +13404,14 @@ func TestRunCLIEventsCleanEOFDoesNotReconnect(t *testing.T) {
 func TestRunCLIEventsCancellationClosesStreamQuietly(t *testing.T) {
 	started := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "event: chat_new_message\ndata: {\"type\":\"chat_new_message\",\"message\":\"before cancel\"}\n\n")
-		w.(http.Flusher).Flush()
+		live := acceptLiveTest(t, w, r)
+		if live == nil {
+			return
+		}
+		defer live.Close()
+		live.Event("chat_new_message", `{"type":"chat_new_message","message":"before cancel"}`)
 		close(started)
-		<-r.Context().Done()
+		live.Wait()
 	}))
 	defer srv.Close()
 
@@ -13464,21 +13555,21 @@ func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"other"},{"id":"p2","name":"Demo Project"}]}`)
-		case "/events/live":
-			mu.Lock()
-			eventRequests = append(eventRequests, r.URL.RequestURI())
-			mu.Unlock()
-			w.Header().Set("Content-Type", "text/event-stream")
-			flusher, ok := w.(http.Flusher)
-			if !ok {
-				t.Fatal("SSE response does not support flushing")
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			_, _ = fmt.Fprint(w, "event: task_status_changed\n")
-			_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p2","task_id":"t1","task_name":"Deploy API","status":"running"}`+"\n\n")
-			flusher.Flush()
-			_, _ = fmt.Fprint(w, "event: chat_new_message\n")
-			_, _ = fmt.Fprint(w, `data: {"type":"chat_new_message","project_id":"p2","exec_id":"e1","message":"hello from chat"}`+"\n\n")
-			flusher.Flush()
+			defer live.Close()
+			mu.Lock()
+			eventRequests = append(eventRequests, live.Command.ProjectID)
+			mu.Unlock()
+
+			live.Event("task_status_changed", `{"type":"task_status_changed","project_id":"p2","task_id":"t1","task_name":"Deploy API","status":"running"}`)
+
+			live.Event("chat_new_message", `{"type":"chat_new_message","project_id":"p2","exec_id":"e1","message":"hello from chat"}`)
+
+			live.Wait()
 		default:
 			http.NotFound(w, r)
 		}
@@ -13496,7 +13587,7 @@ func TestCLIEventsOnStreamsSelectedProjectAndWritesLiveLines(t *testing.T) {
 	mu.Lock()
 	requests := append([]string(nil), eventRequests...)
 	mu.Unlock()
-	if len(requests) != 1 || requests[0] != "/events/live?project_id=p2" {
+	if len(requests) != 1 || requests[0] != "p2" {
 		t.Fatalf("event requests = %v, want one scoped request", requests)
 	}
 	var lines []string
@@ -13529,13 +13620,19 @@ func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T)
 				case "/api/projects":
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-				case "/events/live":
-					eventRequest = r.URL.RequestURI()
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","task_id":"unscoped-task","status":"running"}`+"\n\n")
-					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p2","task_id":"foreign-task","status":"running"}`+"\n\n")
-					_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p1","task_id":"valid-task","status":"completed"}`+"\n\n")
-					_, _ = fmt.Fprint(w, `data: {"type":"chat_new_message","exec_id":"legacy-chat","message":"compatible chat"}`+"\n\n")
+				case "/events/ws":
+					live := acceptLiveTest(t, w, r)
+					if live == nil {
+						return
+					}
+					defer live.Close()
+					eventRequest = live.Command.ProjectID
+					live.Event("", `{"type":"task_status_changed","task_id":"unscoped-task","status":"running"}`)
+					live.Event("", `{"type":"task_status_changed","project_id":"p2","task_id":"foreign-task","status":"running"}`)
+					live.Event("", `{"type":"task_status_changed","project_id":"p1","task_id":"valid-task","status":"completed"}`)
+					live.Event("", `{"type":"chat_new_message","exec_id":"legacy-chat","message":"compatible chat"}`)
+
+					live.Wait()
 				default:
 					http.NotFound(w, r)
 				}
@@ -13551,7 +13648,7 @@ func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T)
 				t.Fatalf("events on failed: %v", err)
 			}
 
-			if eventRequest != "/events/live?project_id=p1" {
+			if eventRequest != "p1" {
 				t.Fatalf("event request = %q, want selected-project query", eventRequest)
 			}
 			output := out.String()
@@ -13591,10 +13688,16 @@ func TestCLIEventsJSONEmitsValidStableLines(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/events/live":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, "event: task_status_changed\n")
-			_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"completed","message":"line 1\\nline 2"}`+"\n\n")
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
+			}
+			defer live.Close()
+
+			live.Event("task_status_changed", `{"type":"task_status_changed","project_id":"p1","task_id":"t1","status":"completed","message":"line 1\\nline 2"}`)
+
+			live.Wait()
 		default:
 			http.NotFound(w, r)
 		}
@@ -13640,7 +13743,7 @@ func TestCLIEventsOnEmptyProjectListDoesNotOpenUnscopedStream(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[]}`)
-		case "/events/live":
+		case "/events/ws":
 			eventRequests++
 			http.Error(w, "unexpected unscoped stream", http.StatusInternalServerError)
 		default:
@@ -13674,13 +13777,14 @@ func TestCLIEventsCancellationClosesStream(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/events/live":
-			close(requestStarted)
-			w.Header().Set("Content-Type", "text/event-stream")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			<-r.Context().Done()
+			defer live.Close()
+			close(requestStarted)
+			live.Wait()
 			close(requestClosed)
 		default:
 			http.NotFound(w, r)
@@ -13728,7 +13832,7 @@ func TestCLIEventsOffIsExplicitlyUnsupportedForAnotherProcess(t *testing.T) {
 			projectRequests++
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
-		case "/events/live":
+		case "/events/ws":
 			eventRequests++
 			http.Error(w, "unexpected stream", http.StatusInternalServerError)
 		default:
@@ -13774,7 +13878,7 @@ func TestCLIEventsInvalidArgumentsRejectBeforeProjectLoad(t *testing.T) {
 			if got := rec.count("GET", "/api/projects"); got != 0 {
 				t.Fatalf("invalid events arguments fetched projects %d times", got)
 			}
-			if got := rec.count("GET", "/events/live"); got != 0 {
+			if got := rec.count("GET", "/events/ws"); got != 0 {
 				t.Fatalf("invalid events arguments opened %d streams", got)
 			}
 		})
@@ -13798,14 +13902,20 @@ func TestCLIEventsUsesAuthenticatedCookieSession(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"private"}]}`)
-		case "/events/live":
+		case "/events/ws":
 			if !authed {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, "event: chat_new_message\n")
-			_, _ = fmt.Fprint(w, `data: {"type":"chat_new_message","project_id":"p1","exec_id":"e1","message":"authenticated"}`+"\n\n")
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
+			}
+			defer live.Close()
+
+			live.Event("chat_new_message", `{"type":"chat_new_message","project_id":"p1","exec_id":"e1","message":"authenticated"}`)
+
+			live.Wait()
 		default:
 			http.NotFound(w, r)
 		}
@@ -13835,10 +13945,16 @@ func TestCLIBareEventsResolvesExplicitProjectID(t *testing.T) {
 		case "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"projects":[{"id":"p1","name":"other"},{"id":"p2","name":"demo"}]}`)
-		case "/events/live":
-			eventRequest = r.URL.RequestURI()
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, `data: {"type":"task_status_changed","project_id":"p2","task_id":"t2","status":"queued"}`+"\n\n")
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			eventRequest = live.Command.ProjectID
+			live.Event("", `{"type":"task_status_changed","project_id":"p2","task_id":"t2","status":"queued"}`)
+
+			live.Wait()
 		default:
 			http.NotFound(w, r)
 		}
@@ -13853,7 +13969,7 @@ func TestCLIBareEventsResolvesExplicitProjectID(t *testing.T) {
 	if err := runFiniteCLIEvents(t, c, &out, "p2", []string{"events"}, false, 1); err != nil {
 		t.Fatalf("bare events failed: %v", err)
 	}
-	if eventRequest != "/events/live?project_id=p2" {
+	if eventRequest != "p2" {
 		t.Fatalf("bare events request = %q, want explicit project scope", eventRequest)
 	}
 	if !strings.Contains(out.String(), `task_id="t2"`) {

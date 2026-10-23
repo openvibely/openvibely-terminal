@@ -39,11 +39,13 @@ func TestHealthyChatStreamSuppressesPeriodicStatusRequests(t *testing.T) {
 		t.Run(terminal, func(t *testing.T) {
 			var reads atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.Contains(r.URL.Path, "/events/chat/") {
-					w.Header().Set("Content-Type", "text/event-stream")
-					w.WriteHeader(http.StatusOK)
-					w.(http.Flusher).Flush()
-					<-r.Context().Done()
+				if r.URL.Path == "/events/ws" {
+					live := acceptLiveTest(t, w, r)
+					if live == nil {
+						return
+					}
+					defer live.Close()
+					live.Wait()
 					return
 				}
 				reads.Add(1)
@@ -85,10 +87,13 @@ func TestSilentChatStreamWatchdogFetchesTerminalStatus(t *testing.T) {
 			t.Run(status+"/"+snapshot, func(t *testing.T) {
 				var reads atomic.Int32
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if strings.Contains(r.URL.Path, "/events/chat/") {
-						w.Header().Set("Content-Type", "text/event-stream")
-						w.(http.Flusher).Flush()
-						<-r.Context().Done()
+					if r.URL.Path == "/events/ws" {
+						live := acceptLiveTest(t, w, r)
+						if live == nil {
+							return
+						}
+						defer live.Close()
+						live.Wait()
 						return
 					}
 					reads.Add(1)
@@ -153,20 +158,28 @@ func TestChatStreamFailureFallbackRequests(t *testing.T) {
 		for _, terminal := range []string{"completed", "failed", "cancelled"} {
 			t.Run(mode+"/"+terminal, func(t *testing.T) {
 				var reads atomic.Int32
-				offsets := make(chan string, 4)
+				attempted := make(chan struct{}, 8)
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if strings.Contains(r.URL.Path, "/events/chat/") {
-						offsets <- r.URL.Query().Get("offset")
-						switch mode {
-						case "connect failure":
-							w.WriteHeader(http.StatusServiceUnavailable)
-						case "auth":
-							w.WriteHeader(http.StatusUnauthorized)
+					if r.URL.Path == "/events/ws" {
+						select {
+						case attempted <- struct{}{}:
 						default:
-							w.Header().Set("Content-Type", "text/event-stream")
-							_, _ = w.Write([]byte("data: partial λ\n\n"))
 						}
-						return
+						if mode == "connect failure" {
+							w.WriteHeader(http.StatusServiceUnavailable)
+							return
+						}
+						if mode == "auth" {
+							w.WriteHeader(http.StatusUnauthorized)
+							return
+						}
+						live := acceptLiveTest(t, w, r)
+						if live == nil {
+							return
+						}
+						defer live.Close()
+						live.Delta("partial λ")
+						return // connection loss is repaired inside the transport
 					}
 					reads.Add(1)
 					_ = json.NewEncoder(w).Encode(client.ChatStatus{MessageID: "exec-1", Status: terminal, Response: "partial λ"})
@@ -175,45 +188,36 @@ func TestChatStreamFailureFallbackRequests(t *testing.T) {
 				m := pendingChatStreamTestModel(t)
 				m.client, _ = client.New(srv.URL)
 				defer func() { m.invalidateChatStream() }()
+				m.armChatPoll()
 				batch := m.connectChatStream("exec-1", 0)().(tea.BatchMsg)
-				msg := batch[0]()
-				// Drain the stream, including buffered output before EOF.
-				for {
-					if _, ok := msg.(chatStreamEventMsg); !ok {
-						break
-					}
-					pollTestUpdate(&m, msg)
-					msg = m.chatStreamWaitCmd()
-				}
-				pollTestUpdate(&m, msg)
-				if mode == "auth" {
-					if !m.authRequired || m.pendingMsgID != "exec-1" || m.chatPollPending {
-						t.Fatal("auth failure did not park resumable work")
-					}
-					return
-				}
-				if !m.chatPollPending {
-					t.Fatal("failure did not arm fallback")
+				select {
+				case <-attempted:
+				case <-time.After(3 * time.Second):
+					t.Fatal("no connection attempt")
 				}
 				if mode == "disconnect" {
+					result := make(chan tea.Msg, 1)
+					go func() { result <- batch[0]() }()
+					select {
+					case msg := <-result:
+						pollTestUpdate(&m, msg)
+					case <-time.After(3 * time.Second):
+						t.Fatal("no output")
+					}
 					if m.chatStreamOffset != len("partial λ") {
 						t.Fatalf("offset=%d", m.chatStreamOffset)
 					}
-					reconnect := m.chatStreamReconnectMessage(m.chatStreamGeneration)
-					pollTestUpdate(&m, reconnect)
-					<-offsets // initial attempt
-					select {
-					case offset := <-offsets:
-						if offset != "10" {
-							t.Fatalf("reconnect offset=%s", offset)
-						}
-					case <-time.After(3 * time.Second):
-						t.Fatal("no reconnect")
-					}
 				}
-				cmd := pollTestUpdate(&m, chatPollTickMsg{pollGeneration: m.chatPollGeneration})
+				// No terminal stream error is emitted for a transient socket failure.
+				// The existing fallback poll must still settle the accepted execution.
+				var cmd tea.Cmd
+				if mode == "disconnect" {
+					cmd = pollTestUpdate(&m, chatStreamWatchdogMsg{id: m.chatStreamWatchdogID, activity: m.chatStreamActivity})
+				} else {
+					cmd = pollTestUpdate(&m, chatPollTickMsg{pollGeneration: m.chatPollGeneration})
+				}
 				if cmd == nil {
-					t.Fatal("fallback tick did not fetch")
+					t.Fatal("fallback tick did not fetch status")
 				}
 				pollTestUpdate(&m, cmd())
 				if reads.Load() != 1 || m.busy || !strings.Contains(transcript(m), "agent::partial λ") {
@@ -227,10 +231,13 @@ func TestChatStreamFailureFallbackRequests(t *testing.T) {
 func TestQueuedChatPollsUntilPromotion(t *testing.T) {
 	var reads atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/events/chat/") {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.(http.Flusher).Flush()
-			<-r.Context().Done()
+		if r.URL.Path == "/events/ws" {
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			live.Wait()
 			return
 		}
 		id, status := "queue-1", "queued"
@@ -276,10 +283,13 @@ func TestRepeatedChatReconnectsCannotSuppressFallback(t *testing.T) {
 			t.Run(terminal+"/"+snapshot, func(t *testing.T) {
 				var reads atomic.Int32
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if strings.Contains(r.URL.Path, "/events/chat/") {
-						w.Header().Set("Content-Type", "text/event-stream")
-						w.(http.Flusher).Flush()
-						<-r.Context().Done()
+					if r.URL.Path == "/events/ws" {
+						live := acceptLiveTest(t, w, r)
+						if live == nil {
+							return
+						}
+						defer live.Close()
+						live.Wait()
 						return
 					}
 					n := reads.Add(1)

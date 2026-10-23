@@ -132,14 +132,15 @@ func TestConfiguredLoginStartupIsResponsiveAndGatesProjectRequests(t *testing.T)
 		case "/api/capacity/global":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{}`)
-		case "/events/live":
-			selectedReady <- projectRequest{username: username, started: time.Now()}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = io.WriteString(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			<-r.Context().Done()
+			defer live.Close()
+			live.Subscriptions(func() {
+				selectedReady <- projectRequest{username: username, started: time.Now()}
+			})
 		default:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{}`)
@@ -749,13 +750,13 @@ func TestDelayedStartupProjectLoadDoesNotOfferPrematureCreationGuidance(t *testi
 		case "/auth/me":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"authenticated":true}`))
-		case "/events/live":
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			<-r.Context().Done()
+			defer live.Close()
+			live.Wait()
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1576,17 +1577,18 @@ func TestDeferredProjectSelectionStartsScopedSSE(t *testing.T) {
 		case "/api/capacity/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[]`))
-		case "/events/live":
-			select {
-			case requestURI <- r.URL.RequestURI():
-			default:
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-			<-r.Context().Done()
+			defer live.Close()
+			live.Subscriptions(func() {
+				select {
+				case requestURI <- live.Command.ProjectID:
+				default:
+				}
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -1622,8 +1624,8 @@ func TestDeferredProjectSelectionStartsScopedSSE(t *testing.T) {
 
 	select {
 	case got := <-requestURI:
-		if got != "/events/live?project_id=p2" {
-			t.Fatalf("SSE request URI = %q, want scoped project p2", got)
+		if got != "p2" {
+			t.Fatalf("WebSocket subscription project = %q, want scoped project p2", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for scoped SSE request")
@@ -1721,8 +1723,15 @@ func TestProjectCommandAcceptsUniqueSubstring(t *testing.T) {
 func TestProjectSelectionReconnectsSSEForNewProject(t *testing.T) {
 	projectIDs := make(chan string, 2)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/events/live" {
-			projectIDs <- r.URL.Query().Get("project_id")
+		if r.URL.Path == "/events/ws" {
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
+			}
+			defer live.Close()
+			live.Subscriptions(func() {
+				projectIDs <- live.Command.ProjectID
+			})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -2760,7 +2769,7 @@ func TestStaleSSEMessagesAreIgnoredAfterReconnect(t *testing.T) {
 
 	next, cmd = m.Update(sseDisconnectedMsg{
 		generation: 1,
-		err:        &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/live", StatusCode: http.StatusUnauthorized},
+		err:        &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/ws", StatusCode: http.StatusUnauthorized},
 	})
 	m = next.(Model)
 	if cmd != nil || m.authRequired || m.sseConnected {
@@ -3160,7 +3169,7 @@ func TestBeginLoginInvalidatesActiveSSEBeforeLoginResult(t *testing.T) {
 	// not advance the login session generation or invalidate the in-flight form.
 	next, follow := m.Update(sseDisconnectedMsg{
 		generation: 4,
-		err:        &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/live", StatusCode: http.StatusUnauthorized},
+		err:        &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/ws", StatusCode: http.StatusUnauthorized},
 	})
 	m = next.(Model)
 	if follow != nil || m.sessionGeneration != loginSessionGeneration || !m.loginSubmitting || m.authRequired {
@@ -3355,17 +3364,18 @@ func TestOfflineProjectRecoveryStartsScopedSSEWithoutPriorStream(t *testing.T) {
 		case "/api/capacity/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[]`))
-		case "/events/live":
-			select {
-			case requestURI <- r.URL.RequestURI():
-			default:
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
-			}
-			<-r.Context().Done()
+			defer live.Close()
+			live.Subscriptions(func() {
+				select {
+				case requestURI <- live.Command.ProjectID:
+				default:
+				}
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -3407,8 +3417,8 @@ func TestOfflineProjectRecoveryStartsScopedSSEWithoutPriorStream(t *testing.T) {
 
 	select {
 	case got := <-requestURI:
-		if got != "/events/live?project_id=recovered-project" {
-			t.Fatalf("recovery SSE request URI = %q, want scoped project", got)
+		if got != "recovered-project" {
+			t.Fatalf("recovery WebSocket subscription project = %q, want scoped project", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for recovery SSE request")
@@ -4882,9 +4892,14 @@ func TestChatStreamDisconnectFlushesBeforeReconnect(t *testing.T) {
 func TestChatStreamLargeUpdateAdvancesReconnectOffset(t *testing.T) {
 	requestedOffset := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestedOffset <- r.URL.Query().Get("offset")
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(w, "event: done\ndata: completed\n\n")
+		live := acceptLiveTest(t, w, r)
+		if live == nil {
+			return
+		}
+		defer live.Close()
+		requestedOffset <- fmt.Sprint(live.Command.Offset)
+		live.Send("done", "completed")
+		live.Wait()
 	}))
 	defer srv.Close()
 	streamClient, err := client.New(srv.URL)
@@ -4972,7 +4987,7 @@ func TestChatStreamAuthDisconnectFlushesBeforeInvalidation(t *testing.T) {
 	m := pendingChatStreamTestModel(t)
 	m.updateChatStreamOutput("visible before sign-in")
 	m.chatStreamRenderQueued = true
-	authErr := &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/chat/exec-1", StatusCode: http.StatusUnauthorized}
+	authErr := &client.AuthRequiredError{Method: http.MethodGet, Path: "/events/ws", StatusCode: http.StatusUnauthorized}
 
 	next, cmd := m.Update(chatStreamDisconnectedMsg{generation: 3, submissionID: 9, projectID: "project-A", execID: "exec-1", err: authErr})
 	m = next.(Model)
@@ -5846,17 +5861,21 @@ func TestInteractiveLoginRetriesHealthProjectsAndSSE(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[]`))
-		case "/events/live":
+		case "/events/ws":
 			if !validSession.Load() || !authed {
 				w.Header().Set("Location", "/login")
 				w.WriteHeader(http.StatusFound)
 				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
+			defer live.Close()
+			if live.Command.ProjectID != "p1" {
+				t.Errorf("login subscription project = %q", live.Command.ProjectID)
+			}
+			live.Wait()
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -5908,7 +5927,7 @@ func TestInteractiveLoginRetriesHealthProjectsAndSSE(t *testing.T) {
 	if !strings.Contains(joined, "POST /login") || !strings.Contains(joined, "GET /api/projects") {
 		t.Fatalf("login retry requests missing:\n%s", joined)
 	}
-	if !strings.Contains(joined, "GET /events/live?project_id=p1") {
+	if !strings.Contains(joined, "GET /events/ws") {
 		t.Fatalf("SSE was not refreshed with the selected project:\n%s", joined)
 	}
 	if strings.Contains(strings.ToLower(m.renderStatus()), "offline") {
@@ -5935,13 +5954,15 @@ func runStartupProjectLoginRecovery(t *testing.T, switchProject bool) Model {
 		case "/auth/me":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"authenticated":true}`))
-		case "/events/live":
-			projectIDs <- r.URL.Query().Get("project_id")
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = fmt.Fprint(w, ": ping\n\n")
-			if flusher, ok := w.(http.Flusher); ok {
-				flusher.Flush()
+		case "/events/ws":
+			live := acceptLiveTest(t, w, r)
+			if live == nil {
+				return
 			}
+			defer live.Close()
+			live.Subscriptions(func() {
+				projectIDs <- live.Command.ProjectID
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -6142,47 +6163,34 @@ func BenchmarkAppend100EventBurstWith500EntryTranscript(b *testing.B) {
 	}
 }
 
-// TestConnectSSEPassesSelectedProjectID verifies that connectSSE passes
-// m.selectedID to StreamEvents, resulting in ?project_id=<selectedID> on
-// the GET /events/live request.
+// TestConnectSSEPassesSelectedProjectID verifies scope in the WebSocket command.
 func TestConnectSSEPassesSelectedProjectID(t *testing.T) {
-	reqCh := make(chan *http.Request, 1)
+	scope := make(chan string, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/events/live" {
-			// Record the request, then close the connection so the goroutine exits.
-			select {
-			case reqCh <- r.Clone(r.Context()):
-			default:
-			}
-			// Returning immediately closes the connection, ending the stream.
+		live := acceptLiveTest(t, w, r)
+		if live == nil {
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
+		defer live.Close()
+		live.Subscriptions(func() {
+			scope <- live.Command.ProjectID
+		})
 	}))
-	t.Cleanup(srv.Close)
-
+	defer srv.Close()
 	c, err := client.New(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := New(c)
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	m = updated.(Model)
-
+	defer m.Cleanup()
 	m.selectedID = "proj-123"
-
-	// connectSSE is a pointer-receiver method; it starts the SSE goroutine
-	// immediately (inside StreamEvents) before returning the cmd.
 	_ = m.connectSSE()
-
 	select {
-	case req := <-reqCh:
-		got := req.URL.Query().Get("project_id")
+	case got := <-scope:
 		if got != "proj-123" {
-			t.Errorf("project_id query param = %q, want %q", got, "proj-123")
+			t.Fatalf("project = %q", got)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("no request to /events/live received within 2s")
+		t.Fatal("no WebSocket subscription")
 	}
 }
