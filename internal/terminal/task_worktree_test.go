@@ -138,6 +138,110 @@ func TestTUITaskWorktreeMergeRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestCLITaskWorktreeConfirmedSuccessReportsRefreshFailureSeparately(t *testing.T) {
+	for _, failure := range []string{"reference catalog", "worktree panel", "changes"} {
+		for _, jsonOutput := range []bool{false, true} {
+			name := failure + "/human"
+			if jsonOutput {
+				name = failure + "/json"
+			}
+			t.Run(name, func(t *testing.T) {
+				var catalogReads, panelReads, changesReads, mutations int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+						_, _ = io.WriteString(w, cliProjects)
+					case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+						catalogReads++
+						if r.URL.Query().Get("project_id") != "p2" {
+							t.Errorf("reference catalog project_id = %q, want selected non-default project p2", r.URL.Query().Get("project_id"))
+						}
+						if failure == "reference catalog" && catalogReads == 3 {
+							http.Error(w, "catalog refresh unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p2","title":"Refactor API"}]}`)
+					case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/merge":
+						mutations++
+						if err := r.ParseForm(); err != nil {
+							t.Errorf("ParseForm: %v", err)
+						}
+						if r.Form.Get("project_id") != "p2" {
+							t.Errorf("mutation project_id = %q, want p2", r.Form.Get("project_id"))
+						}
+						w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"Merged locally into main","status":"completed"}}`)
+					case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
+						panelReads++
+						if r.URL.Query().Get("project_id") != "p2" {
+							t.Errorf("worktree project_id = %q, want p2", r.URL.Query().Get("project_id"))
+						}
+						if failure == "worktree panel" {
+							http.Error(w, "panel refresh unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						_, _ = io.WriteString(w, cliWorktreePanel("task/refactor", "main", "merged"))
+					case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes":
+						changesReads++
+						if r.URL.Query().Get("project_id") != "p2" {
+							t.Errorf("changes project_id = %q, want p2", r.URL.Query().Get("project_id"))
+						}
+						if failure == "changes" {
+							http.Error(w, "changes refresh unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						_, _ = io.WriteString(w, `<div id="changes-content"></div>`)
+					default:
+						t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+						http.NotFound(w, r)
+					}
+				}))
+				defer srv.Close()
+				c, err := client.New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				var out bytes.Buffer
+				err = RunCLI(c, &out, "other", []string{"tasks", "merge", "squash", "Refactor API"}, true, jsonOutput)
+				if err == nil || !strings.Contains(err.Error(), "refresh failed") {
+					t.Fatalf("CLI error = %v, want refresh diagnostic", err)
+				}
+				if jsonOutput {
+					var result client.TaskWorktreeActionResult
+					if decodeErr := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &result); decodeErr != nil {
+						t.Fatalf("JSON result decode: %v; output=%q", decodeErr, out.String())
+					}
+					if result.Status != "succeeded" || result.RefreshStatus != "failed" || result.RefreshError == "" {
+						t.Fatalf("JSON result conflates operation and refresh: %+v", result)
+					}
+					if failure == "changes" && (result.Worktree == nil || result.Worktree.Branch != "task/refactor" || result.Worktree.IntegrationStatus != "merged") {
+						t.Fatalf("JSON result lost partial worktree state: %+v", result.Worktree)
+					}
+				} else {
+					if !strings.Contains(out.String(), "merge succeeded: Merged locally into main") || !strings.Contains(out.String(), "Refresh failed:") {
+						t.Fatalf("human output does not separate operation and refresh:\n%s", out.String())
+					}
+					if strings.Contains(out.String(), "merge failed") {
+						t.Fatalf("human output describes confirmed merge as failed:\n%s", out.String())
+					}
+					if failure == "changes" && (!strings.Contains(out.String(), "Branch: task/refactor") || !strings.Contains(out.String(), "Integration: merged")) {
+						t.Fatalf("human output lost partial branch state:\n%s", out.String())
+					}
+				}
+				wantCatalogReads, wantPanelReads, wantChangesReads := 3, 1, 1
+				if failure == "reference catalog" {
+					wantPanelReads, wantChangesReads = 0, 0
+				} else if failure == "worktree panel" {
+					wantChangesReads = 0
+				}
+				if catalogReads != wantCatalogReads || panelReads != wantPanelReads || changesReads != wantChangesReads || mutations != 1 {
+					t.Fatalf("request counts catalog=%d panel=%d changes=%d mutations=%d; want %d/%d/%d/1", catalogReads, panelReads, changesReads, mutations, wantCatalogReads, wantPanelReads, wantChangesReads)
+				}
+			})
+		}
+	}
+}
+
 func TestCLITaskWorktreeActionsReportEligibilityAndConflict(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

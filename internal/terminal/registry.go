@@ -400,6 +400,9 @@ func renderTaskWorktreeActionResult(result client.TaskWorktreeActionResult) stri
 	if result.Strategy != "" {
 		fmt.Fprintf(&b, " (strategy: %s)", sanitizeAutomationDetailText(result.Strategy))
 	}
+	if result.RefreshStatus == "failed" {
+		fmt.Fprintf(&b, "\nRefresh failed: %s", sanitizeAutomationDetailText(firstNonEmpty(result.RefreshError, "worktree state could not be refreshed")))
+	}
 	if result.Worktree != nil {
 		fmt.Fprintf(&b, "\nBranch: %s\nTarget: %s\nIntegration: %s",
 			sanitizeAutomationDetailText(firstNonEmpty(result.Worktree.Branch, "none")),
