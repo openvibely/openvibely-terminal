@@ -42,18 +42,20 @@ type TaskWorktreeInfo struct {
 	PullRequest       *TaskPullRequestInfo `json:"pull_request,omitempty"`
 }
 
-// TaskWorktreeActionResult describes the backend's merge or rebase result and
-// the branch state refreshed after the action.
+// TaskWorktreeActionResult separates the backend's merge or rebase outcome from
+// the follow-up refresh status and any branch state read after the action.
 type TaskWorktreeActionResult struct {
-	Status   string            `json:"status"` // succeeded | ineligible | conflict | failed
-	Action   string            `json:"action"`
-	Strategy string            `json:"strategy,omitempty"`
-	Message  string            `json:"message,omitempty"`
-	Worktree *TaskWorktreeInfo `json:"worktree,omitempty"`
+	Status        string            `json:"status"` // operation status: succeeded | ineligible | conflict | failed
+	Action        string            `json:"action"`
+	Strategy      string            `json:"strategy,omitempty"`
+	Message       string            `json:"message,omitempty"`
+	RefreshStatus string            `json:"refresh_status"` // succeeded | failed
+	RefreshError  string            `json:"refresh_error,omitempty"`
+	Worktree      *TaskWorktreeInfo `json:"worktree,omitempty"`
 }
 
-// TaskWorktreeActionError carries the backend outcome while preserving the
-// current branch snapshot for callers that need to exit non-zero.
+// TaskWorktreeActionError carries mutation and refresh failures separately while
+// preserving any branch snapshot available to callers.
 type TaskWorktreeActionError struct {
 	Result     TaskWorktreeActionResult
 	Cause      error
@@ -71,20 +73,33 @@ func (e *TaskWorktreeActionError) Error() string {
 	if message == "" {
 		message = "operation did not complete"
 	}
+	outcome := fmt.Sprintf("%s: %s", e.Result.Status, message)
+	if e.Result.Status == "succeeded" {
+		outcome = "worktree action " + outcome
+	}
+	if e.RefreshErr != nil {
+		outcome += "; refresh failed: " + e.RefreshErr.Error()
+	}
 	state := "branch state unavailable"
 	if e.Result.Worktree != nil {
 		worktree := e.Result.Worktree
 		state = fmt.Sprintf("branch %s, target %s, integration %s",
 			firstWorktreeValue(worktree.Branch), firstWorktreeValue(worktree.TargetBranch), firstWorktreeValue(worktree.IntegrationStatus))
 	}
-	return fmt.Sprintf("%s: %s (%s)", e.Result.Status, message, state)
+	return fmt.Sprintf("%s (%s)", outcome, state)
 }
 
 func (e *TaskWorktreeActionError) Unwrap() error {
 	if e == nil {
 		return nil
 	}
-	return e.Cause
+	if e.Cause == nil {
+		return e.RefreshErr
+	}
+	if e.RefreshErr == nil {
+		return e.Cause
+	}
+	return errors.Join(e.Cause, e.RefreshErr)
 }
 
 func firstWorktreeValue(value string) string {
@@ -116,7 +131,7 @@ func (c *Client) GetTaskWorktreeInfoForProject(ctx context.Context, taskID, proj
 	info := parseTaskWorktreeInfo(root, taskID, projectID)
 	changes, err := c.getHTML(ctx, "/tasks/"+url.PathEscape(taskID)+"/changes"+query("project_id", projectID))
 	if err != nil {
-		return TaskWorktreeInfo{}, fmt.Errorf("load task pull request state: %w", err)
+		return info, fmt.Errorf("load task pull request state: %w", err)
 	}
 	info.PullRequest = parseTaskPullRequestInfo(changes)
 	return info, nil
@@ -402,12 +417,14 @@ func (c *Client) ApplyTaskWorktreeActionForProject(ctx context.Context, taskID, 
 
 	info, refreshErr := c.GetTaskWorktreeInfoForProject(ctx, taskID, projectID)
 	if refreshErr != nil {
-		if result.Status == "succeeded" {
-			result.Status = "failed"
-			result.Message = "backend accepted the action, but the current branch state could not be refreshed"
+		result.RefreshStatus = "failed"
+		result.RefreshError = refreshErr.Error()
+		if info.TaskID != "" {
+			result.Worktree = &info
 		}
 		return result, &TaskWorktreeActionError{Result: result, Cause: responseErr, RefreshErr: refreshErr}
 	}
+	result.RefreshStatus = "succeeded"
 	result.Worktree = &info
 	if result.Status == "" {
 		result.Status = "succeeded"

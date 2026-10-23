@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -71,10 +72,112 @@ func TestTaskWorktreeActionsUseBackendAndSupportedStrategies(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ApplyTaskWorktreeActionForProject: %v", err)
 			}
-			if !posted || result.Status != "succeeded" || result.Worktree == nil || result.Worktree.IntegrationStatus != "merged" {
+			if !posted || result.Status != "succeeded" || result.RefreshStatus != "succeeded" || result.Worktree == nil || result.Worktree.IntegrationStatus != "merged" {
 				t.Fatalf("result = %+v, posted = %v", result, posted)
 			}
 		})
+	}
+}
+
+func TestTaskWorktreeActionPreservesSuccessWhenRefreshFails(t *testing.T) {
+	for _, action := range []struct {
+		name     string
+		action   string
+		strategy string
+	}{
+		{name: "merge", action: "merge", strategy: "merge"},
+		{name: "fast forward", action: "merge", strategy: "ff"},
+		{name: "squash", action: "merge", strategy: "squash"},
+		{name: "rebase", action: "rebase"},
+	} {
+		for _, failure := range []string{"reference catalog", "worktree panel", "changes"} {
+			t.Run(action.name+"/"+failure, func(t *testing.T) {
+				const projectID = "selected-project"
+				var catalogReads, panelReads, changesReads, mutations int
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path != "/api/tasks/reference-catalog" && r.URL.Query().Get("project_id") != projectID {
+						t.Errorf("%s project_id = %q, want %q", r.URL.Path, r.URL.Query().Get("project_id"), projectID)
+					}
+					switch {
+					case r.Method == http.MethodGet && r.URL.Path == "/api/tasks/reference-catalog":
+						catalogReads++
+						if r.URL.Query().Get("project_id") != projectID {
+							t.Errorf("catalog project_id = %q, want %q", r.URL.Query().Get("project_id"), projectID)
+						}
+						if failure == "reference catalog" && catalogReads == 2 {
+							http.Error(w, "catalog refresh unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"selected-project","title":"Implement feature"}]}`)
+					case r.Method == http.MethodPost && r.URL.Path == "/tasks/t-1/worktree/"+action.action:
+						mutations++
+						if err := r.ParseForm(); err != nil {
+							t.Errorf("ParseForm: %v", err)
+						}
+						if r.Form.Get("project_id") != projectID {
+							t.Errorf("mutation project_id = %q, want %q", r.Form.Get("project_id"), projectID)
+						}
+						if action.action == "merge" && r.Form.Get("merge_type") != action.strategy {
+							t.Errorf("merge_type = %q, want %q", r.Form.Get("merge_type"), action.strategy)
+						}
+						w.Header().Set("HX-Trigger", `{"openvibelyToast":{"message":"Merged locally into main","status":"completed"}}`)
+					case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/worktree":
+						panelReads++
+						if failure == "worktree panel" {
+							http.Error(w, "panel refresh unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						_, _ = io.WriteString(w, taskWorktreeHTML("task/feature", "main", "merged"))
+					case r.Method == http.MethodGet && r.URL.Path == "/tasks/t-1/changes":
+						changesReads++
+						if failure == "changes" {
+							http.Error(w, "changes refresh unavailable", http.StatusServiceUnavailable)
+							return
+						}
+						_, _ = io.WriteString(w, `<div id="changes-content"></div>`)
+					default:
+						t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+						http.NotFound(w, r)
+					}
+				}))
+				defer srv.Close()
+				c, err := New(srv.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				result, err := c.ApplyTaskWorktreeActionForProject(context.Background(), "t-1", projectID, action.action, action.strategy)
+				if err == nil || !strings.Contains(err.Error(), "refresh failed") {
+					t.Fatalf("action error = %v, want separate refresh failure", err)
+				}
+				var refreshStatusErr *HTTPStatusError
+				if !errors.As(err, &refreshStatusErr) || refreshStatusErr.StatusCode != http.StatusServiceUnavailable {
+					t.Fatalf("refresh status error is not discoverable: %v", err)
+				}
+				if strings.Contains(err.Error(), "worktree action failed") {
+					t.Fatalf("confirmed operation described as failed: %v", err)
+				}
+				if result.Status != "succeeded" || result.Message != "Merged locally into main" || result.RefreshStatus != "failed" || result.RefreshError == "" {
+					t.Fatalf("result = %+v", result)
+				}
+				if failure == "changes" {
+					if result.Worktree == nil || result.Worktree.Branch != "task/feature" || result.Worktree.TargetBranch != "main" || result.Worktree.IntegrationStatus != "merged" {
+						t.Fatalf("partial worktree state was not preserved: %+v", result.Worktree)
+					}
+				} else if result.Worktree != nil {
+					t.Fatalf("unexpected worktree snapshot after %s failure: %+v", failure, result.Worktree)
+				}
+				wantCatalogReads, wantPanelReads, wantChangesReads := 2, 1, 1
+				if failure == "reference catalog" {
+					wantPanelReads, wantChangesReads = 0, 0
+				} else if failure == "worktree panel" {
+					wantChangesReads = 0
+				}
+				if catalogReads != wantCatalogReads || panelReads != wantPanelReads || changesReads != wantChangesReads || mutations != 1 {
+					t.Fatalf("request counts catalog=%d panel=%d changes=%d mutations=%d; want %d/%d/%d/1", catalogReads, panelReads, changesReads, mutations, wantCatalogReads, wantPanelReads, wantChangesReads)
+				}
+			})
+		}
 	}
 }
 
