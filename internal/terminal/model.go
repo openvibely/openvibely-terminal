@@ -4120,11 +4120,11 @@ func (m *Model) reconcileLiveState() tea.Cmd {
 		cmds = append(cmds, withMessageGeneration(func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 			defer cancel()
-			detail, err := c.GetTaskForProjectExactTab(ctx, taskID, projectID, "thread")
+			detail, err := c.GetTaskMetadataForProjectExact(ctx, taskID, projectID)
 			msg := threadUpdatedMsg{requestID: requestID, projectID: projectID, taskID: taskID, err: err}
 			if err == nil && detail != nil {
-				msg.err = detail.TabError("thread")
-				msg.status, msg.body = detail.Task.Status, detail.Thread
+				msg.status = detail.Task.Status
+				msg.body, msg.err = c.GetTaskThread(ctx, taskID, projectID)
 			}
 			return msg
 		}, sessionGenerationOf(*m), projectGenerationOf(*m)))
@@ -4968,6 +4968,9 @@ func (m *Model) markAuthRequiredWithMessage(appendMessage bool) {
 		m.clearPersonalityEditor()
 		m.clearAutomationEdit()
 		m.invalidateWorkersLive()
+		// Remember the active subscription before cancellation so both health
+		// recovery and interactive login can restore it in the new session.
+		m.sseRetryAfterProject = m.sseRetryAfterProject || m.sseCancel != nil
 		m.invalidateSSE()
 	} // An auth failure can arrive from project/live-event work while a health check is
 	// still running. Invalidate every in-flight check before it can clear the
