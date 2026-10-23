@@ -12593,7 +12593,7 @@ func TestFormatCLIEventJSONNormalizesWhitespaceEscapesAndOmitsMalformedData(t *t
 			"extra": "<>&  "
 		} `),
 	}
-	want := `{"event":"chat_new_message","type":"chat_new_message","project_id":"p1","task_id":"","task_name":"","status":"","category":"","message":"\u003c\u003e\u0026\u2028\u2029","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false,"data":{"type":"chat_new_message","project_id":"","message":"\u003c\u003e\u0026\u2028\u2029","extra":"\u003c\u003e\u0026\u2028\u2029"}}`
+	want := `{"event":"chat_new_message","type":"chat_new_message","project_id":"","task_id":"","task_name":"","status":"","category":"","message":"\u003c\u003e\u0026\u2028\u2029","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false,"data":{"type":"chat_new_message","project_id":"","message":"\u003c\u003e\u0026\u2028\u2029","extra":"\u003c\u003e\u0026\u2028\u2029"}}`
 
 	for _, raw := range validInputs {
 		got, include, err := formatCLIEvent(client.Event{Name: " chat_new_message ", Data: raw}, "p1", true)
@@ -12621,6 +12621,84 @@ func TestFormatCLIEventJSONNormalizesWhitespaceEscapesAndOmitsMalformedData(t *t
 	}
 	if strings.Contains(got, `"data"`) {
 		t.Fatalf("malformed event unexpectedly included data: %s", got)
+	}
+}
+
+func TestFormatCLIEventJSONPreservesProjectOwnership(t *testing.T) {
+	tests := []struct {
+		name           string
+		eventName      string
+		raw            json.RawMessage
+		wantProjectID  string
+		wantRawProject bool
+		wantTaskID     string
+	}{
+		{
+			name:           "taskless chat omits ownership",
+			eventName:      "chat_new_message",
+			raw:            json.RawMessage(`{"type":"chat_new_message","exec_id":"legacy-chat","message":"hello"}`),
+			wantRawProject: false,
+		},
+		{
+			name:           "taskless chat explicitly matches",
+			eventName:      "chat_new_message",
+			raw:            json.RawMessage(`{"type":"chat_new_message","project_id":"p1","exec_id":"scoped-chat","message":"hello"}`),
+			wantProjectID:  "p1",
+			wantRawProject: true,
+		},
+		{
+			name:           "task explicitly matches",
+			eventName:      "task_status_changed",
+			raw:            json.RawMessage(`{"type":"task_status_changed","project_id":"p1","task_id":"t1"}`),
+			wantProjectID:  "p1",
+			wantRawProject: true,
+			wantTaskID:     "t1",
+		},
+		{
+			name:      "large taskless chat omits ownership",
+			eventName: "chat_new_message",
+			raw:       json.RawMessage(`{"type":"chat_new_message","message":"hello","padding":"` + strings.Repeat("x", 5000) + `"}`),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, include, err := formatCLIEvent(client.Event{Name: tc.eventName, Data: tc.raw}, "p1", true)
+			if err != nil {
+				t.Fatalf("formatCLIEvent() error = %v", err)
+			}
+			if !include {
+				t.Fatal("formatCLIEvent() unexpectedly filtered event")
+			}
+			var record struct {
+				ProjectID string          `json:"project_id"`
+				TaskID    string          `json:"task_id"`
+				Data      json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(got), &record); err != nil {
+				t.Fatalf("JSON event line is invalid: %v\n%s", err, got)
+			}
+			if record.ProjectID != tc.wantProjectID || record.TaskID != tc.wantTaskID {
+				t.Errorf("top-level ownership = (%q, %q), want (%q, %q)", record.ProjectID, record.TaskID, tc.wantProjectID, tc.wantTaskID)
+			}
+			var data map[string]json.RawMessage
+			if err := json.Unmarshal(record.Data, &data); err != nil {
+				t.Fatalf("event data is invalid: %v", err)
+			}
+			rawProjectID, hasRawProject := data["project_id"]
+			if hasRawProject != tc.wantRawProject {
+				t.Errorf("raw project_id present = %t, want %t", hasRawProject, tc.wantRawProject)
+			}
+			if hasRawProject {
+				var rawProject string
+				if err := json.Unmarshal(rawProjectID, &rawProject); err != nil {
+					t.Fatalf("raw project_id is invalid: %v", err)
+				}
+				if rawProject != tc.wantProjectID {
+					t.Errorf("raw project_id = %q, want %q", rawProject, tc.wantProjectID)
+				}
+			}
+		})
 	}
 }
 
@@ -12933,7 +13011,7 @@ func TestFormatCLIEventJSONLargeUTF8AndEscapedPayloads(t *testing.T) {
 				Queued:          payload.Queued,
 				Data:            tc.raw,
 			}
-			if wantRecord.ProjectID == "" {
+			if wantRecord.ProjectID == "" && tc.nameOn != "chat_new_message" {
 				wantRecord.ProjectID = "p1"
 			}
 			want, err := json.Marshal(wantRecord)
@@ -13002,7 +13080,7 @@ func TestRunCLIEventsJSONPreservesScopeAndBurstOrder(t *testing.T) {
 		}
 		records = append(records, record)
 	}
-	if records[0].Event != "chat_new_message" || records[0].ProjectID != "p1" || records[0].Message != "first <&>" {
+	if records[0].Event != "chat_new_message" || records[0].ProjectID != "" || records[0].Message != "first <&>" {
 		t.Fatalf("first record = %#v", records[0])
 	}
 	if string(records[0].Data) != `{"type":"chat_new_message","message":"first \u003c\u0026\u003e"}` {
@@ -13630,7 +13708,9 @@ func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T)
 					live.Event("", `{"type":"task_status_changed","task_id":"unscoped-task","status":"running"}`)
 					live.Event("", `{"type":"task_status_changed","project_id":"p2","task_id":"foreign-task","status":"running"}`)
 					live.Event("", `{"type":"task_status_changed","project_id":"p1","task_id":"valid-task","status":"completed"}`)
+					live.Event("", `{"type":"chat_new_message","project_id":"p2","exec_id":"foreign-chat","message":"foreign chat"}`)
 					live.Event("", `{"type":"chat_new_message","exec_id":"legacy-chat","message":"compatible chat"}`)
+					live.Event("", `{"type":"chat_new_message","project_id":"p1","exec_id":"scoped-chat","message":"explicitly scoped chat"}`)
 
 					live.Wait()
 				default:
@@ -13644,7 +13724,7 @@ func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T)
 				t.Fatal(err)
 			}
 			var out bytes.Buffer
-			if err := runFiniteCLIEvents(t, c, &out, "demo", []string{"events", "on"}, tc.jsonOutput, 2); err != nil {
+			if err := runFiniteCLIEvents(t, c, &out, "demo", []string{"events", "on"}, tc.jsonOutput, 3); err != nil {
 				t.Fatalf("events on failed: %v", err)
 			}
 
@@ -13652,20 +13732,20 @@ func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T)
 				t.Fatalf("event request = %q, want selected-project query", eventRequest)
 			}
 			output := out.String()
-			for _, excluded := range []string{"unscoped-task", "foreign-task"} {
+			for _, excluded := range []string{"unscoped-task", "foreign-task", "foreign-chat"} {
 				if strings.Contains(output, excluded) {
 					t.Errorf("output includes unowned task %q:\n%s", excluded, output)
 				}
 			}
-			for _, included := range []string{"valid-task", "legacy-chat", "compatible chat"} {
+			for _, included := range []string{"valid-task", "legacy-chat", "compatible chat", "scoped-chat", "explicitly scoped chat"} {
 				if !strings.Contains(output, included) {
 					t.Errorf("output missing compatible event field %q:\n%s", included, output)
 				}
 			}
 
 			lines := strings.Split(strings.TrimSpace(output), "\n")
-			if len(lines) != 2 {
-				t.Fatalf("output lines = %d, want valid task and unscoped chat only: %q", len(lines), output)
+			if len(lines) != 3 {
+				t.Fatalf("output lines = %d, want valid task and both allowed chat events: %q", len(lines), output)
 			}
 			if tc.jsonOutput {
 				for _, line := range lines {
@@ -13673,8 +13753,27 @@ func TestCLIEventsRequireExactTaskProjectOwnershipInAllOutputModes(t *testing.T)
 					if err := json.Unmarshal([]byte(line), &record); err != nil {
 						t.Fatalf("invalid JSON event line: %v\n%s", err, line)
 					}
-					if record.ProjectID != "p1" {
-						t.Errorf("project_id = %q, want synthesized selected project", record.ProjectID)
+					var raw map[string]json.RawMessage
+					if err := json.Unmarshal(record.Data, &raw); err != nil {
+						t.Fatalf("invalid raw event data: %v\n%s", err, line)
+					}
+					switch {
+					case record.TaskID == "valid-task", record.ExecID == "scoped-chat":
+						if record.ProjectID != "p1" {
+							t.Errorf("project_id = %q, want explicit matching project", record.ProjectID)
+						}
+						if string(raw["project_id"]) != `"p1"` {
+							t.Errorf("raw project_id = %s, want explicit matching project", raw["project_id"])
+						}
+					case record.ExecID == "legacy-chat":
+						if record.ProjectID != "" {
+							t.Errorf("legacy chat project_id = %q, want empty ownership", record.ProjectID)
+						}
+						if _, exists := raw["project_id"]; exists {
+							t.Errorf("legacy chat raw data unexpectedly has project_id: %s", record.Data)
+						}
+					default:
+						t.Errorf("unexpected JSON event record: %+v", record)
 					}
 				}
 			}
