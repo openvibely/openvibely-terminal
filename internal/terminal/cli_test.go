@@ -12615,7 +12615,7 @@ func TestFormatCLIEventJSONNormalizesWhitespaceEscapesAndOmitsMalformedData(t *t
 	if !include {
 		t.Fatal("formatCLIEvent() unexpectedly filtered malformed metadata")
 	}
-	wantMalformed := `{"event":"task_status_changed","type":"task_status_changed","project_id":"p1","task_id":"","task_name":"","status":"","category":"","message":"","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false}`
+	wantMalformed := `{"event":"task_status_changed","type":"task_status_changed","project_id":"","task_id":"","task_name":"","status":"","category":"","message":"","exec_id":"","source":"","agent_name":"","completed_output":"","queued":false}`
 	if got != wantMalformed {
 		t.Fatalf("formatCLIEvent() malformed = %q, want %q", got, wantMalformed)
 	}
@@ -12645,6 +12645,12 @@ func TestFormatCLIEventJSONPreservesProjectOwnership(t *testing.T) {
 			raw:            json.RawMessage(`{"type":"chat_new_message","project_id":"p1","exec_id":"scoped-chat","message":"hello"}`),
 			wantProjectID:  "p1",
 			wantRawProject: true,
+		},
+		{
+			name:           "future event omits ownership",
+			eventName:      "future_event",
+			raw:            json.RawMessage(`{"type":"future_event","message":"hello"}`),
+			wantRawProject: false,
 		},
 		{
 			name:           "task explicitly matches",
@@ -12818,9 +12824,6 @@ func TestFormatCLIEventJSONFastPayloadDecodeMatchesEncodingJSON(t *testing.T) {
 			if strings.TrimSpace(payload.TaskID) != "" && payload.ProjectID == "" {
 				t.Fatal("fixture unexpectedly describes an unscoped task")
 			}
-			if payload.ProjectID == "" {
-				payload.ProjectID = "p1"
-			}
 			eventName := strings.TrimSpace(payload.Type)
 			if eventName == "" {
 				eventName = "future_event"
@@ -12869,7 +12872,7 @@ func TestFormatCLIEventJSONMalformedPayloadFallsBackToDecodedMetadata(t *testing
 	wantRecord := cliEventRecord{
 		Event:     "chat_new_message",
 		Type:      "chat_new_message",
-		ProjectID: "p1",
+		ProjectID: "",
 		Message:   payload.Message,
 	}
 	want, err := json.Marshal(wantRecord)
@@ -13010,9 +13013,6 @@ func TestFormatCLIEventJSONLargeUTF8AndEscapedPayloads(t *testing.T) {
 				CompletedOutput: payload.CompletedOutput,
 				Queued:          payload.Queued,
 				Data:            tc.raw,
-			}
-			if wantRecord.ProjectID == "" && tc.nameOn != "chat_new_message" {
-				wantRecord.ProjectID = "p1"
 			}
 			want, err := json.Marshal(wantRecord)
 			if err != nil {
