@@ -4266,6 +4266,8 @@ type analyticsSection struct {
 	usageDescription string
 	load             func(context.Context, *client.Client, string) (string, error)
 	loadRates        func(context.Context, *client.Client, string, ratesWindow) (string, error)
+	loadHourly       func(context.Context, *client.Client, string, ratesWindow) (string, error)
+	showAllError     bool
 }
 
 var analyticsSections = []analyticsSection{
@@ -4284,6 +4286,12 @@ var analyticsSections = []analyticsSection{
 		name:             "rates",
 		usageDescription: "last 28 days (up to 30 daily periods); rates full or rates from <start> [to <end>] (end exclusive)",
 		loadRates:        loadRatesSection,
+	},
+	{
+		name:             "hourly",
+		usageDescription: "execution counts for all 24 server-local hours; hourly from <start> [to <end>]",
+		loadHourly:       loadHourlyExecutionSection,
+		showAllError:     true,
 	},
 	{
 		name:             "agents",
@@ -4390,6 +4398,10 @@ func loadAnalyticsSectionsWithRatesWindow(ctx context.Context, c *client.Client,
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if section.loadHourly != nil {
+				slots[i].out, slots[i].err = section.loadHourly(ctx, c, projectID, window)
+				return
+			}
 			if section.loadRates != nil {
 				slots[i].out, slots[i].err = section.loadRates(ctx, c, projectID, window)
 				return
@@ -4407,6 +4419,12 @@ func loadAnalyticsSectionsWithRatesWindow(ctx context.Context, c *client.Client,
 		if s.err != nil {
 			if section == s.name {
 				return "", s.err
+			}
+			for _, definition := range sections {
+				if definition.name == s.name && definition.showAllError {
+					fmt.Fprintf(&b, "%s\n  unavailable: request failed\n\n", sectionStyle.Render("Execution counts by hour (server local time)"))
+					break
+				}
 			}
 			continue
 		}
@@ -4491,6 +4509,41 @@ func loadRatesSection(ctx context.Context, c *client.Client, projectID string, w
 
 func renderRates(rates []client.SuccessFailureRate) string {
 	return renderRatesForWindow(rates, recentRatesWindowLabel)
+}
+
+func loadHourlyExecutionSection(ctx context.Context, c *client.Client, projectID string, window ratesWindow) (string, error) {
+	dateFrom, dateTo := "", ""
+	if window.kind == ratesWindowRange {
+		dateFrom, dateTo = window.from, window.to
+	}
+	rows, err := c.GetExecutionTrendsByHourWithDateRange(ctx, projectID, dateFrom, dateTo)
+	if err != nil {
+		return "", err
+	}
+	return renderHourlyExecutionTrends(rows), nil
+}
+
+func completeHourlyExecutionCounts(rows []client.HourlyExecutionCount) []client.HourlyExecutionCount {
+	counts := [24]int{}
+	for _, row := range rows {
+		if row.Hour >= 0 && row.Hour < len(counts) {
+			counts[row.Hour] += row.Count
+		}
+	}
+	completed := make([]client.HourlyExecutionCount, len(counts))
+	for hour, count := range counts {
+		completed[hour] = client.HourlyExecutionCount{Hour: hour, Count: count}
+	}
+	return completed
+}
+
+func renderHourlyExecutionTrends(rows []client.HourlyExecutionCount) string {
+	var b strings.Builder
+	b.WriteString(sectionStyle.Render("Execution counts by hour (server local time)"))
+	for _, row := range completeHourlyExecutionCounts(rows) {
+		fmt.Fprintf(&b, "\n  %02d:00  %d", row.Hour, row.Count)
+	}
+	return b.String()
 }
 
 func renderRatesForWindow(rates []client.SuccessFailureRate, windowLabel string) string {

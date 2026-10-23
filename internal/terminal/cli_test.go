@@ -1919,6 +1919,7 @@ func TestCLIAnalyticsRatesWindows(t *testing.T) {
 		"/api/projects":                              cliProjects,
 		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
 		"/api/analytics/success-failure-rates":       string(body),
+		"/api/analytics/execution-trends-by-hour":    `[{"Hour":7,"Count":4}]`,
 		"/api/analytics/avg-execution-time-by-agent": `[]`,
 		"/api/analytics/avg-execution-time-by-task":  `[]`,
 		"/api/analytics/most-frequent-tasks":         `[]`,
@@ -1989,6 +1990,7 @@ func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
 		"/api/projects":                              cliProjects,
 		"/api/analytics/usage":                       `{"totals":{"call_count":1}}`,
 		"/api/analytics/success-failure-rates":       `[]`,
+		"/api/analytics/execution-trends-by-hour":    `[{"Hour":9,"Count":3}]`,
 		"/api/analytics/avg-execution-time-by-agent": `[]`,
 		"/api/analytics/avg-execution-time-by-task":  `[]`,
 		"/api/analytics/most-frequent-tasks":         `[]`,
@@ -1998,6 +2000,7 @@ func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
 	allPaths := []string{
 		"/api/analytics/usage",
 		"/api/analytics/success-failure-rates",
+		"/api/analytics/execution-trends-by-hour",
 		"/api/analytics/avg-execution-time-by-agent",
 		"/api/analytics/avg-execution-time-by-task",
 		"/api/analytics/most-frequent-tasks",
@@ -2012,6 +2015,7 @@ func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
 		{name: "bare", args: []string{"analytics"}, want: allPaths},
 		{name: "usage", args: []string{"analytics", "usage"}, want: []string{"/api/analytics/usage"}},
 		{name: "rates", args: []string{"analytics", "rates"}, want: []string{"/api/analytics/success-failure-rates"}},
+		{name: "hourly", args: []string{"analytics", "hourly"}, want: []string{"/api/analytics/execution-trends-by-hour"}},
 		{name: "agents", args: []string{"analytics", "agents"}, want: []string{"/api/analytics/avg-execution-time-by-agent"}},
 		{name: "frequent", args: []string{"analytics", "frequent"}, want: []string{"/api/analytics/most-frequent-tasks"}},
 		{name: "failures", args: []string{"analytics", "failures"}, want: []string{"/api/analytics/failed-task-patterns"}},
@@ -2053,6 +2057,72 @@ func TestCLIAnalyticsValidActionsDispatch(t *testing.T) {
 				t.Errorf("analytics endpoints = %v, want %v; requests:\n%s", got, want, rec.all())
 			}
 		})
+	}
+}
+
+func TestCLIAnalyticsHourlyJSONDateRangeAndHelp(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects": cliProjects,
+		"/api/analytics/execution-trends-by-hour": `[{"Hour":23,"Count":8},{"Hour":2,"Count":5}]`,
+	})
+
+	var helpOut bytes.Buffer
+	if err := RunCLI(c, &helpOut, "", []string{"help", "analytics"}, false, false); err != nil {
+		t.Fatalf("help analytics: %v", err)
+	}
+	if !strings.Contains(stripANSI(helpOut.String()), "analytics hourly") || !strings.Contains(helpOut.String(), "server-local hours") {
+		t.Fatalf("analytics help omits hourly section:\n%s", helpOut.String())
+	}
+	if len(rec.urlsSnapshot()) != 0 {
+		t.Fatalf("help analytics made backend requests: %v", rec.urlsSnapshot())
+	}
+
+	var out bytes.Buffer
+	args := []string{"analytics", "hourly", "from", "2026-03-01", "to", "2026-03-04"}
+	if err := RunCLI(c, &out, "demo", args, false, true); err != nil {
+		t.Fatalf("CLI analytics hourly --json: %v", err)
+	}
+	var rows []client.HourlyExecutionCount
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("hourly JSON is not a record array: %v\n%s", err, out.String())
+	}
+	if len(rows) != 24 || rows[2] != (client.HourlyExecutionCount{Hour: 2, Count: 5}) || rows[23] != (client.HourlyExecutionCount{Hour: 23, Count: 8}) || rows[0].Count != 0 {
+		t.Fatalf("hourly JSON rows missing sorted/zero-filled counts: %+v", rows)
+	}
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("hourly JSON contains terminal styling: %q", out.String())
+	}
+	var keys []map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &keys); err != nil || len(keys) != 24 {
+		t.Fatalf("decode hourly JSON keys: rows=%d err=%v", len(keys), err)
+	}
+	if _, ok := keys[0]["hour"]; !ok {
+		t.Fatalf("hourly JSON missing snake-case hour key: %s", out.String())
+	}
+	if _, ok := keys[0]["count"]; !ok {
+		t.Fatalf("hourly JSON missing snake-case count key: %s", out.String())
+	}
+	if _, ok := keys[0]["Hour"]; ok {
+		t.Fatalf("hourly JSON unexpectedly uses PascalCase keys: %s", out.String())
+	}
+
+	var hourlyURL *url.URL
+	for _, recorded := range rec.urlsSnapshot() {
+		method, target, ok := strings.Cut(recorded, " ")
+		if !ok || method != http.MethodGet {
+			continue
+		}
+		parsed, err := url.ParseRequestURI(target)
+		if err == nil && parsed.Path == "/api/analytics/execution-trends-by-hour" {
+			hourlyURL = parsed
+		}
+	}
+	if hourlyURL == nil {
+		t.Fatalf("hourly request missing: %v", rec.urlsSnapshot())
+	}
+	query := hourlyURL.Query()
+	if query.Get("project_id") != "p1" || query.Get("date_from") != "2026-03-01" || query.Get("date_to") != "2026-03-04" {
+		t.Fatalf("hourly query lost project/date range: %v", query)
 	}
 }
 

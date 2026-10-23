@@ -114,6 +114,13 @@ type FailedTaskPattern struct {
 	LastFailedAt string `json:"lastFailedAt"`
 }
 
+// HourlyExecutionCount mirrors persistence.ExecutionTrend returned by the
+// backend's execution-trends-by-hour endpoint.
+type HourlyExecutionCount struct {
+	Hour  int `json:"hour"`
+	Count int `json:"count"`
+}
+
 // analyticsObject is the shared fetch/decode helper for analytics endpoints
 // that return a JSON object. segment is the URL path segment after /api/analytics/.
 func analyticsObject[T any](ctx context.Context, c *Client, segment, projectID string) (*T, error) {
@@ -229,6 +236,24 @@ func (c *Client) GetFailedTaskPatterns(ctx context.Context, projectID string) ([
 // up to limit records.
 func (c *Client) GetFailedTaskPatternsWithLimit(ctx context.Context, projectID string, limit int) ([]FailedTaskPattern, error) {
 	return analyticsSlice[FailedTaskPattern](ctx, c, "failed-task-patterns", projectID, limit, false)
+}
+
+// GetExecutionTrendsByHour fetches project execution counts grouped by hour.
+func (c *Client) GetExecutionTrendsByHour(ctx context.Context, projectID string) ([]HourlyExecutionCount, error) {
+	return c.GetExecutionTrendsByHourWithDateRange(ctx, projectID, "", "")
+}
+
+// GetExecutionTrendsByHourWithDateRange fetches hourly execution counts in the
+// backend's optional date bounds. Empty bounds are omitted.
+func (c *Client) GetExecutionTrendsByHourWithDateRange(ctx context.Context, projectID, dateFrom, dateTo string) ([]HourlyExecutionCount, error) {
+	var out []HourlyExecutionCount
+	endpoint := "/api/analytics/execution-trends-by-hour" + query(
+		"project_id", projectID,
+		"date_from", dateFrom,
+		"date_to", dateTo,
+	)
+	err := c.getJSON(ctx, endpoint, &out)
+	return out, err
 }
 
 // --- Skill analytics (/api/analytics/skills) ---
