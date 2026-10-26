@@ -14341,9 +14341,10 @@ func TestCLIWebhookEditAcceptsOptionLikeStringValues(t *testing.T) {
 	})
 	args := []string{
 		"channels", "webhooks", "edit", "Pager Duty",
-		"--system-instructions", "-- review each alert",
-		"--title-template", "-- title from alert",
-		"--prompt-template", "-- create a task",
+		"--name=--enabled",
+		"--system-instructions=--enabled",
+		"--title-template=--enabled",
+		"--prompt-template=--enabled",
 	}
 	if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err != nil {
 		t.Fatalf("edit rejected option-like string values: %v", err)
@@ -14353,9 +14354,10 @@ func TestCLIWebhookEditAcceptsOptionLikeStringValues(t *testing.T) {
 		t.Fatalf("edit did not update webhook; calls: %s", rec.all())
 	}
 	want := map[string]string{
-		"system_instructions": "-- review each alert",
-		"title_template":      "-- title from alert",
-		"prompt_template":     "-- create a task",
+		"name":                "--enabled",
+		"system_instructions": "--enabled",
+		"title_template":      "--enabled",
+		"prompt_template":     "--enabled",
 	}
 	for _, form := range rec.formsSnapshot() {
 		if !strings.HasPrefix(form, http.MethodPut+" "+path+"?") {
@@ -14376,6 +14378,50 @@ func TestCLIWebhookEditAcceptsOptionLikeStringValues(t *testing.T) {
 	t.Fatalf("webhook update form not recorded: %v", rec.formsSnapshot())
 }
 
+func TestCLIWebhookCreateAcceptsExplicitOptionLikeStringValues(t *testing.T) {
+	c, rec := cliServer(t, map[string]string{
+		"/api/projects":                cliProjects,
+		"POST /channels/webhooks":      `{"id":"w-new","project_id":"p1"}`,
+		"GET /channels/webhooks/w-new": `{"id":"w-new","project_id":"p1","name":"--enabled","enabled":true,"path_token":"new-token","default_priority":2,"system_instructions":"--title-template instruction text","title_template":"--prompt-template","prompt_template":"--name prompt text","agent_ids":[]}`,
+	})
+	args := []string{
+		"channels", "webhooks", "create", "Seed",
+		"--name=--enabled",
+		"--system-instructions=--title-template instruction text",
+		"--title-template=--prompt-template",
+		"--prompt-template", "--name prompt text",
+	}
+	if err := RunCLI(c, &bytes.Buffer{}, "demo", args, false, false); err != nil {
+		t.Fatalf("create rejected explicit option-like values: %v", err)
+	}
+	if !rec.saw(http.MethodPost, "/channels/webhooks") {
+		t.Fatalf("create did not send mutation request: %s", rec.all())
+	}
+	want := map[string]string{
+		"name":                "--enabled",
+		"system_instructions": "--title-template instruction text",
+		"title_template":      "--prompt-template",
+		"prompt_template":     "--name prompt text",
+	}
+	for _, form := range rec.formsSnapshot() {
+		if !strings.HasPrefix(form, http.MethodPost+" /channels/webhooks?") {
+			continue
+		}
+		query := strings.TrimPrefix(form, http.MethodPost+" /channels/webhooks?")
+		values, err := url.ParseQuery(query)
+		if err != nil {
+			t.Fatalf("could not parse submitted webhook form %q: %v", form, err)
+		}
+		for key, value := range want {
+			if got := values.Get(key); got != value {
+				t.Errorf("submitted %s = %q, want %q", key, got, value)
+			}
+		}
+		return
+	}
+	t.Fatalf("webhook create form not recorded: %v", rec.formsSnapshot())
+}
+
 func TestCLIWebhookOptionsStillValidateBeforeRequests(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -14383,9 +14429,15 @@ func TestCLIWebhookOptionsStillValidateBeforeRequests(t *testing.T) {
 	}{
 		{name: "missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions"}},
 		{name: "recognized option after missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions", "--enabled"}},
+		{name: "inline option after missing value", args: []string{"webhooks", "edit", "pager", "--system-instructions", "--enabled=true"}},
 		{name: "unknown option", args: []string{"webhooks", "edit", "pager", "--unknown", "value"}},
+		{name: "unknown inline option", args: []string{"webhooks", "edit", "pager", "--unknown=value"}},
 		{name: "invalid boolean", args: []string{"webhooks", "edit", "pager", "--enabled", "maybe"}},
+		{name: "invalid inline boolean", args: []string{"webhooks", "edit", "pager", "--enabled=maybe"}},
 		{name: "invalid priority", args: []string{"webhooks", "edit", "pager", "--priority", "5"}},
+		{name: "invalid inline priority", args: []string{"webhooks", "edit", "pager", "--priority=5"}},
+		{name: "duplicate option alias", args: []string{"webhooks", "edit", "pager", "--priority", "2", "--default-priority", "3"}},
+		{name: "missing boolean value", args: []string{"webhooks", "edit", "pager", "--enabled", "--priority", "2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, rec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/channels": webhookCardsHTML})

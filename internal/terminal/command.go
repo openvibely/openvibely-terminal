@@ -262,12 +262,17 @@ func (m Model) runCommand(line string) (tea.Model, tea.Cmd) {
 			return next, cmd
 		}
 	}
-	fields, err := tokenizeCommand(line)
+	tokens, err := tokenizeCommandTokens(line)
 	if err != nil {
 		m.busy = false
 		m.append(entry{role: "error", text: "parse error: " + err.Error()})
 		return m, nil
 	}
+	fields := make([]string, len(tokens))
+	for i, token := range tokens {
+		fields[i] = token.value
+	}
+	fields = normalizeQuotedWebhookOptionValues(tokens, fields)
 	return m.runCommandFields(fields)
 }
 
