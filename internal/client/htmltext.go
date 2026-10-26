@@ -37,10 +37,7 @@ func HTMLToText(fragment string) string {
 	if err != nil {
 		return strings.TrimSpace(fragment)
 	}
-	var b strings.Builder
-	var preserved []string
-	renderNodeText(&b, root, &preserved)
-	return restorePreformattedText(tidyText(b.String()), preserved)
+	return renderNodeText(root, nodeTextRenderOptions{preservePreformatted: true})
 }
 
 // NodeText renders a parsed subtree as plain text.
@@ -51,10 +48,7 @@ func NodeText(n *html.Node) string {
 	if text, ok := simpleNodeText(n); ok {
 		return text
 	}
-	var b strings.Builder
-	var preserved []string
-	renderNodeText(&b, n, &preserved)
-	return restorePreformattedText(tidyText(b.String()), preserved)
+	return renderNodeText(n, nodeTextRenderOptions{preservePreformatted: true})
 }
 
 func simpleNodeText(n *html.Node) (string, bool) {
@@ -135,7 +129,29 @@ func isASCIISpace(ch byte) bool {
 	}
 }
 
-func renderNodeText(b *strings.Builder, n *html.Node, preserved *[]string) {
+type nodeTextRenderOptions struct {
+	excludeFormAndButton bool
+	preservePreformatted bool
+}
+
+// renderNodeText applies the common HTML traversal and cleanup policy, with
+// explicit options for the few differences between general HTML and task
+// conversation text.
+func renderNodeText(root *html.Node, options nodeTextRenderOptions) string {
+	if root == nil {
+		return ""
+	}
+	var b strings.Builder
+	var preserved []string
+	walkNodeText(&b, root, &preserved, options)
+	text := tidyText(b.String())
+	if options.preservePreformatted {
+		text = restorePreformattedText(text, preserved)
+	}
+	return text
+}
+
+func walkNodeText(b *strings.Builder, n *html.Node, preserved *[]string, options nodeTextRenderOptions) {
 	switch n.Type {
 	case html.TextNode:
 		text := strings.Join(strings.Fields(n.Data), " ")
@@ -145,10 +161,10 @@ func renderNodeText(b *strings.Builder, n *html.Node, preserved *[]string) {
 		}
 		return
 	case html.ElementNode:
-		if skippedTags[n.Data] {
+		if skippedTags[n.Data] || (options.excludeFormAndButton && (n.Data == "form" || n.Data == "button")) {
 			return
 		}
-		if n.Data == "pre" {
+		if n.Data == "pre" && options.preservePreformatted {
 			index := len(*preserved)
 			*preserved = append(*preserved, rawPreformattedText(n))
 			b.WriteByte('\n')
@@ -161,7 +177,7 @@ func renderNodeText(b *strings.Builder, n *html.Node, preserved *[]string) {
 		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		renderNodeText(b, c, preserved)
+		walkNodeText(b, c, preserved, options)
 	}
 	if n.Type == html.ElementNode && blockTags[n.Data] {
 		b.WriteString("\n")

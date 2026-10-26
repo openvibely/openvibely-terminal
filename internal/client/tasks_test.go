@@ -1868,6 +1868,99 @@ func TestTaskReviewProjectMethodsRejectEmptyProjectBeforeHTTP(t *testing.T) {
 	}
 }
 
+func TestNodeTextAndConversationTextShareOrdinaryTraversal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fragment string
+		want     string
+	}{
+		{
+			name:     "nested markup",
+			fragment: `<div> Alpha <span>beta <em>gamma</em></span> delta </div>`,
+			want:     "Alpha beta gamma delta",
+		},
+		{
+			name:     "block and whitespace normalization",
+			fragment: "<div>Alpha <p> beta\n  gamma<br>delta </p> Omega</div>",
+			want:     "Alpha\nbeta gamma\n\ndelta\nOmega",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := html.Parse(strings.NewReader(tc.fragment))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, got := range map[string]string{
+				"NodeText":             NodeText(root),
+				"HTMLToText":           HTMLToText(tc.fragment),
+				"nodeConversationText": nodeConversationText(root),
+			} {
+				if got != tc.want {
+					t.Errorf("%s = %q, want %q", name, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func TestNodeTextAndConversationTextKeepControlAndPrePolicies(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		fragment         string
+		wantGeneric      string
+		wantConversation string
+	}{
+		{
+			name:             "control text",
+			fragment:         `<div>before<button>button text</button><form>form text<button>submit</button></form>after</div>`,
+			wantGeneric:      "before button text\nform text submit\nafter",
+			wantConversation: "before after",
+		},
+		{
+			name:             "preformatted text policy",
+			fragment:         "<p>before</p><pre>alpha\n  beta</pre><p>after</p>",
+			wantGeneric:      "before\n\nalpha\n  beta\n\nafter",
+			wantConversation: "before\n\nalpha beta\n\nafter",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := html.Parse(strings.NewReader(tc.fragment))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := NodeText(root); got != tc.wantGeneric {
+				t.Errorf("NodeText = %q, want %q", got, tc.wantGeneric)
+			}
+			if got := HTMLToText(tc.fragment); got != tc.wantGeneric {
+				t.Errorf("HTMLToText = %q, want %q", got, tc.wantGeneric)
+			}
+			if got := nodeConversationText(root); got != tc.wantConversation {
+				t.Errorf("nodeConversationText = %q, want %q", got, tc.wantConversation)
+			}
+		})
+	}
+}
+
+func TestGetTaskThreadStateUsesConversationRendering(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("project_id"); got != "project-1" {
+			t.Errorf("project_id = %q, want project-1", got)
+		}
+		_, _ = fmt.Fprint(w, `<div data-task-thread><div data-execution-pair="true" data-exec-id="turn-1" data-exec-status="running"></div><p>user: <strong>hello</strong><button>hidden button</button><br>next</p><pre>code
+  indented</pre><form>hidden form</form></div>`)
+	}))
+	state, err := c.GetTaskThreadStateForProject(context.Background(), "task-1", "project-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ActiveTurnID != "turn-1" {
+		t.Errorf("ActiveTurnID = %q, want turn-1", state.ActiveTurnID)
+	}
+	if got, want := state.Body, "user: hello\n\nnext\n\ncode indented"; got != want {
+		t.Errorf("Body = %q, want %q", got, want)
+	}
+}
+
 func TestGetTaskThreadStateRequiresOneExplicitActiveTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1988,7 +2081,7 @@ func TestGetTaskThreadPendingInputsParsesSafeProjection(t *testing.T) {
 	var requestURI string
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestURI = r.URL.RequestURI()
-		_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div id="thread-input-q1" data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"><div class="text-sm truncate">continue <b>the docs</b><button>secret control</button></div><span aria-label="Attachments queued with this follow-up">attachment</span><button>secret control</button></div><div id="thread-input-s1" data-thread-input-id="s1" data-task-id="task-1" data-input-mode="steering"><div class="min-w-0 flex-1"><div class="text-xs">Steering pending</div><div class="truncate">stop and use the new interface</div></div><button>Cancel</button></div></div>`)
+		_, _ = fmt.Fprint(w, `<div id="pending-thread-inputs" data-task-id="task-1"><div id="thread-input-q1" data-thread-input-id="q1" data-task-id="task-1" data-input-mode="queued"><div class="text-sm truncate">continue <b>the docs</b> with <i>detail</i><button>secret control</button></div><span aria-label="Attachments queued with this follow-up">attachment</span><button>secret control</button></div><div id="thread-input-s1" data-thread-input-id="s1" data-task-id="task-1" data-input-mode="steering"><div class="min-w-0 flex-1"><div class="text-xs">Steering pending</div><div class="truncate">stop and use the new interface</div></div><button>Cancel</button></div></div>`)
 	}))
 	inputs, err := c.GetTaskThreadPendingInputsForProject(context.Background(), "task-1", "project-2")
 	if err != nil {
@@ -2000,7 +2093,7 @@ func TestGetTaskThreadPendingInputsParsesSafeProjection(t *testing.T) {
 	if len(inputs) != 2 || inputs[0].InputMode != "queued" || inputs[1].InputMode != "steering" {
 		t.Fatalf("inputs = %#v", inputs)
 	}
-	if inputs[0].Preview != "continue the docs" || inputs[1].Preview != "stop and use the new interface" {
+	if inputs[0].Preview != "continue the docs with detail" || inputs[1].Preview != "stop and use the new interface" {
 		t.Fatalf("previews = %#v", inputs)
 	}
 	if !inputs[0].HasAttachments || inputs[1].HasAttachments {
