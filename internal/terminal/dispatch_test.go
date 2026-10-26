@@ -16691,14 +16691,15 @@ func TestWebhooksEditAcceptsQuotedOptionLikeStringValues(t *testing.T) {
 		"GET /channels/webhooks/w1": webhookDetailJSON,
 		"PUT /channels/webhooks/w1": "",
 	})
-	m = runLine(t, m, `/channels webhooks edit "Pager Duty" --system-instructions "-- review each alert" --title-template "-- title from alert" --prompt-template "-- create a task"`)
+	m = runLine(t, m, `/channels webhooks edit "Pager Duty" --name "--enabled" --system-instructions "--enabled" --title-template "--enabled" --prompt-template "--enabled"`)
 	if !rec.saw(http.MethodPut, "/channels/webhooks/w1") {
 		t.Fatalf("interactive edit did not update webhook; calls: %s\n%s", rec.all(), transcript(m))
 	}
 	want := map[string]string{
-		"system_instructions": "-- review each alert",
-		"title_template":      "-- title from alert",
-		"prompt_template":     "-- create a task",
+		"name":                "--enabled",
+		"system_instructions": "--enabled",
+		"title_template":      "--enabled",
+		"prompt_template":     "--enabled",
 	}
 	for _, form := range rec.formsSnapshot() {
 		if !strings.HasPrefix(form, http.MethodPut+" /channels/webhooks/w1?") {
@@ -16719,6 +16720,39 @@ func TestWebhooksEditAcceptsQuotedOptionLikeStringValues(t *testing.T) {
 	t.Fatalf("webhook update form not recorded: %v", rec.formsSnapshot())
 }
 
+func TestWebhooksCreateAcceptsQuotedOptionLikeStringValues(t *testing.T) {
+	m, rec := dispatchModel(t, map[string]string{
+		"POST /channels/webhooks": `{"id":"w-new","project_id":"p1","name":"--enabled","enabled":true,"default_priority":2,"system_instructions":"--title-template instruction text","title_template":"--prompt-template","prompt_template":"--name prompt text","agent_ids":[]}`,
+	})
+	m = runLine(t, m, `/channels webhooks create Seed --name "--enabled" --system-instructions "--enabled" --title-template "--enabled" --prompt-template "--enabled"`)
+	if !rec.saw(http.MethodPost, "/channels/webhooks") {
+		t.Fatalf("interactive create did not create webhook; calls: %s\n%s", rec.all(), transcript(m))
+	}
+	want := map[string]string{
+		"name":                "--enabled",
+		"system_instructions": "--enabled",
+		"title_template":      "--enabled",
+		"prompt_template":     "--enabled",
+	}
+	for _, form := range rec.formsSnapshot() {
+		if !strings.HasPrefix(form, http.MethodPost+" /channels/webhooks?") {
+			continue
+		}
+		query := strings.TrimPrefix(form, http.MethodPost+" /channels/webhooks?")
+		values, err := url.ParseQuery(query)
+		if err != nil {
+			t.Fatalf("could not parse submitted webhook form %q: %v", form, err)
+		}
+		for key, value := range want {
+			if got := values.Get(key); got != value {
+				t.Errorf("submitted %s = %q, want %q", key, got, value)
+			}
+		}
+		return
+	}
+	t.Fatalf("webhook create form not recorded: %v", rec.formsSnapshot())
+}
+
 func TestWebhooksOptionsValidateBeforeAnyRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -16726,9 +16760,15 @@ func TestWebhooksOptionsValidateBeforeAnyRequest(t *testing.T) {
 	}{
 		{name: "missing value", line: "/webhooks edit pager --system-instructions"},
 		{name: "recognized option after missing value", line: "/webhooks edit pager --system-instructions --enabled"},
+		{name: "inline option after missing value", line: "/webhooks edit pager --system-instructions --enabled=true"},
 		{name: "unknown option", line: "/webhooks edit pager --unknown value"},
+		{name: "unknown inline option", line: "/webhooks edit pager --unknown=value"},
 		{name: "invalid boolean", line: "/webhooks edit pager --enabled maybe"},
+		{name: "invalid inline boolean", line: "/webhooks edit pager --enabled=maybe"},
 		{name: "invalid priority", line: "/webhooks edit pager --priority 5"},
+		{name: "invalid inline priority", line: "/webhooks edit pager --priority=5"},
+		{name: "duplicate option alias", line: "/webhooks edit pager --priority 2 --default-priority 3"},
+		{name: "missing boolean value", line: "/webhooks edit pager --enabled --priority 2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, rec := dispatchModel(t, nil)

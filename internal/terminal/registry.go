@@ -8547,7 +8547,8 @@ var webhookOptionNames = map[string]string{
 }
 
 func isWebhookOption(arg string) bool {
-	_, ok := webhookOptionNames[strings.ToLower(arg)]
+	option, _, _ := strings.Cut(arg, "=")
+	_, ok := webhookOptionNames[strings.ToLower(option)]
 	return ok
 }
 
@@ -8574,21 +8575,62 @@ func webhookOptionBoundary(args []string) int {
 	return len(args)
 }
 
+// normalizeQuotedWebhookOptionValues retains the distinction between a quoted
+// option-like value and a missing value after interactive tokenization. The
+// webhook parser's explicit --option=value form carries that distinction through
+// validation and dispatch, and is also available to headless CLI callers.
+func normalizeQuotedWebhookOptionValues(tokens []commandToken, fields []string) []string {
+	if len(tokens) != len(fields) || len(tokens) == 0 {
+		return fields
+	}
+	actionIndex := -1
+	switch strings.ToLower(tokens[0].value) {
+	case "webhooks", "inbound-webhooks":
+		actionIndex = 1
+	case "channels":
+		if len(tokens) > 1 && strings.EqualFold(tokens[1].value, "webhooks") {
+			actionIndex = 2
+		}
+	}
+	if actionIndex < 0 || actionIndex >= len(tokens) ||
+		(strings.ToLower(tokens[actionIndex].value) != "create" && strings.ToLower(tokens[actionIndex].value) != "edit") {
+		return fields
+	}
+
+	out := append([]string(nil), fields[:actionIndex+1]...)
+	for i := actionIndex + 1; i < len(tokens); i++ {
+		flag, _, hasInlineValue := strings.Cut(tokens[i].value, "=")
+		if !hasInlineValue && isWebhookOption(flag) && i+1 < len(tokens) && tokens[i+1].quoted {
+			out = append(out, fields[i]+"="+fields[i+1])
+			i++
+			continue
+		}
+		out = append(out, fields[i])
+	}
+	return out
+}
+
 func parseWebhookOptions(args []string) (map[string]string, error) {
 	values := make(map[string]string)
 	for len(args) > 0 {
-		key, ok := webhookOptionNames[strings.ToLower(args[0])]
+		option, value, hasInlineValue := strings.Cut(args[0], "=")
+		key, ok := webhookOptionNames[strings.ToLower(option)]
 		if !ok {
 			return nil, fmt.Errorf("unknown webhook option %q", args[0])
 		}
-		if len(args) < 2 || isWebhookOption(args[1]) {
-			return nil, fmt.Errorf("webhook option %s requires a value", args[0])
-		}
 		if _, duplicate := values[key]; duplicate {
-			return nil, fmt.Errorf("webhook option %s was provided more than once", args[0])
+			return nil, fmt.Errorf("webhook option %s was provided more than once", option)
 		}
-		values[key] = args[1]
-		args = args[2:]
+		if hasInlineValue {
+			args = args[1:]
+		} else {
+			if len(args) < 2 || isWebhookOption(args[1]) {
+				return nil, fmt.Errorf("webhook option %s requires a value", args[0])
+			}
+			value = args[1]
+			args = args[2:]
+		}
+		values[key] = value
 	}
 	if enabled, ok := values["enabled"]; ok {
 		if enabled != "true" && enabled != "false" {
