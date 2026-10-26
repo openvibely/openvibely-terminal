@@ -4452,6 +4452,10 @@ func (m *Model) transcriptLineCacheValid() bool {
 
 func (m *Model) appendRenderedTranscriptBlock(block string) {
 	blockLines, blockMaxWidth := renderedLines(block)
+	m.appendRenderedTranscriptLines(block, blockLines, blockMaxWidth)
+}
+
+func (m *Model) appendRenderedTranscriptLines(block string, blockLines []string, blockMaxWidth int) {
 	beforeLines := len(m.transcriptLines)
 	m.transcriptLines = appendRenderedLines(m.transcriptLines, blockLines)
 	m.transcriptBlockLineCounts = append(m.transcriptBlockLineCounts, len(m.transcriptLines)-beforeLines)
@@ -4805,11 +4809,19 @@ func renderTranscriptEntry(e entry, wrap lipgloss.Style) string {
 	var b strings.Builder
 	switch e.role {
 	case "you":
-		b.WriteString(chatUserStyle.Render("❯ you") + "\n")
-		b.WriteString(wrap.Render(e.text) + "\n\n")
+		b.WriteString(chatUserStyle.Render("❯ you"))
+		b.WriteByte('\n')
+		if !writeFastTranscriptBody(&b, e.text, wrap.GetWidth()) {
+			b.WriteString(wrap.Render(e.text))
+		}
+		b.WriteString("\n\n")
 	case "agent":
-		b.WriteString(chatAgentStyle.Render("● agent") + "\n")
-		b.WriteString(wrap.Render(e.text) + "\n\n")
+		b.WriteString(chatAgentStyle.Render("● agent"))
+		b.WriteByte('\n')
+		if !writeFastTranscriptBody(&b, e.text, wrap.GetWidth()) {
+			b.WriteString(wrap.Render(e.text))
+		}
+		b.WriteString("\n\n")
 	case "result":
 		if e.head != "" {
 			b.WriteString(sectionStyle.Render("▸ "+e.head) + "\n")
@@ -4823,6 +4835,55 @@ func renderTranscriptEntry(e entry, wrap lipgloss.Style) string {
 		b.WriteString(dimStyle.Render("· "+e.text) + "\n\n")
 	}
 	return b.String()
+}
+
+// writeFastTranscriptBody handles printable ASCII words without spaces or
+// hyphens. That subset wraps at fixed byte boundaries and needs no ANSI-aware
+// width scan. All other text continues through Lipgloss so its wrapping and
+// Unicode behavior remain authoritative.
+func writeFastTranscriptBody(b *strings.Builder, text string, width int) bool {
+	if len(text) == 0 || width <= 0 || width > 4096 {
+		return false
+	}
+	for i := 0; i < len(text); i++ {
+		if text[i] < '!' || text[i] > '~' || text[i] == '-' {
+			return false
+		}
+	}
+
+	lineCount := (len(text)-1)/width + 1
+	lastLineBytes := len(text) - (lineCount-1)*width
+	padding := width - lastLineBytes
+	maxInt := int(^uint(0) >> 1)
+	extraBytes := lineCount - 1
+	if padding > maxInt-extraBytes {
+		return false
+	}
+	extraBytes += padding
+	if extraBytes > maxInt-len(text) {
+		return false
+	}
+	bodyLength := len(text) + extraBytes
+	if bodyLength > maxInt-b.Len() {
+		return false
+	}
+	b.Grow(b.Len() + bodyLength)
+	for start := 0; start < len(text); {
+		end := start + width
+		if end > len(text) {
+			end = len(text)
+		}
+		b.WriteString(text[start:end])
+		if end < len(text) {
+			b.WriteByte('\n')
+		} else {
+			for spaces := width - (end - start); spaces > 0; spaces-- {
+				b.WriteByte(' ')
+			}
+		}
+		start = end
+	}
+	return true
 }
 
 // handleSSEEvent formats a live event; shown only when /events is on.
