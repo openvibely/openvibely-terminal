@@ -4528,13 +4528,18 @@ type agentEdit struct {
 
 var agentEditFields = [...]string{"name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable"}
 
-func isAgentEditField(value string) bool {
+func canonicalAgentEditField(value string) (string, bool) {
 	for _, field := range agentEditFields {
 		if strings.EqualFold(value, field) {
-			return true
+			return field, true
 		}
 	}
-	return false
+	return "", false
+}
+
+func isAgentEditField(value string) bool {
+	_, ok := canonicalAgentEditField(value)
+	return ok
 }
 
 func agentEditFieldCompletions() []string {
@@ -4556,10 +4561,11 @@ func parseAgentEdit(args []string) (string, agentEdit, error) {
 	var update agentEdit
 	seen := map[string]bool{}
 	for i := optionAt; i < len(args); i += 2 {
-		if i+1 >= len(args) || !isAgentEditField(args[i]) || seen[strings.ToLower(args[i])] {
+		key, recognized := canonicalAgentEditField(args[i])
+		if i+1 >= len(args) || !recognized || seen[key] {
 			return "", agentEdit{}, fmt.Errorf("%s", usage)
 		}
-		key, value := strings.ToLower(args[i]), args[i+1]
+		value := args[i+1]
 		seen[key] = true
 		switch key {
 		case "name":
