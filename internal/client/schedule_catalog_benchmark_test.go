@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -20,25 +21,52 @@ const (
 
 func BenchmarkScheduleListingProfiles(b *testing.B) {
 	for _, taskCount := range []int{10, 100, 500} {
-		var current, catalog scheduleBenchmarkStats
-		b.Run(fmt.Sprintf("tasks_%d/current", taskCount), func(b *testing.B) {
-			current = benchmarkScheduleListingProfile(b, taskCount, false)
+		var legacy, catalog scheduleBenchmarkStats
+		b.Run(fmt.Sprintf("tasks_%d/legacy_fallback", taskCount), func(b *testing.B) {
+			legacy = benchmarkScheduleListingProfile(b, taskCount, false)
 		})
 		b.Run(fmt.Sprintf("tasks_%d/catalog", taskCount), func(b *testing.B) {
 			catalog = benchmarkScheduleListingProfile(b, taskCount, true)
 		})
-		if taskCount == 100 && float64(catalog.p95) > float64(current.p95)*0.30 {
-			b.Errorf("100-task p95 reduction = %.1f%%, want at least 70%% (current %.1fms, catalog %.1fms)",
-				100*(1-float64(catalog.p95)/float64(current.p95)),
-				float64(current.p95)/float64(time.Millisecond),
-				float64(catalog.p95)/float64(time.Millisecond))
+
+		if legacy.summary != catalog.summary || !reflect.DeepEqual(legacy.entries, catalog.entries) {
+			b.Errorf("GetSchedule output differs between legacy fallback and catalog for %d tasks", taskCount)
+		}
+		if catalog.bytes*4 > legacy.bytes {
+			b.Errorf("%d-task catalog response bytes = %d, legacy = %d; want at least 75%% fewer bytes", taskCount, catalog.bytes, legacy.bytes)
+		}
+		switch taskCount {
+		case 10:
+			if float64(catalog.p95) > float64(legacy.p95)*1.05 {
+				b.Errorf("10-task p95 regression = %.1f%%, want at most 5%% (legacy %.1fms, catalog %.1fms)",
+					100*(float64(catalog.p95)/float64(legacy.p95)-1),
+					float64(legacy.p95)/float64(time.Millisecond),
+					float64(catalog.p95)/float64(time.Millisecond))
+			}
+		case 100:
+			if float64(catalog.p95) > float64(legacy.p95)*0.10 {
+				b.Errorf("100-task p95 reduction = %.1f%%, want at least 90%% (legacy %.1fms, catalog %.1fms)",
+					100*(1-float64(catalog.p95)/float64(legacy.p95)),
+					float64(legacy.p95)/float64(time.Millisecond),
+					float64(catalog.p95)/float64(time.Millisecond))
+			}
+		case 500:
+			if float64(catalog.p95) > float64(legacy.p95)*0.05 {
+				b.Errorf("500-task p95 reduction = %.1f%%, want at least 95%% (legacy %.1fms, catalog %.1fms)",
+					100*(1-float64(catalog.p95)/float64(legacy.p95)),
+					float64(legacy.p95)/float64(time.Millisecond),
+					float64(catalog.p95)/float64(time.Millisecond))
+			}
 		}
 	}
 }
 
 type scheduleBenchmarkStats struct {
-	p50 time.Duration
-	p95 time.Duration
+	p50     time.Duration
+	p95     time.Duration
+	bytes   int64
+	entries []ScheduleEntry
+	summary string
 }
 
 func benchmarkScheduleListingProfile(b *testing.B, taskCount int, catalog bool) scheduleBenchmarkStats {
@@ -66,7 +94,6 @@ func benchmarkScheduleListingProfile(b *testing.B, taskCount int, catalog bool) 
 			ScheduleID:  scheduleID,
 			TaskID:      taskID,
 			Title:       title,
-			TaskTitle:   title,
 			NextRun:     scheduleBenchmarkNextRun(),
 			Enabled:     scheduleBenchmarkEnabled(),
 			DisplayText: title + " — daily",
@@ -96,7 +123,10 @@ func benchmarkScheduleListingProfile(b *testing.B, taskCount int, catalog bool) 
 		switch r.URL.Path {
 		case "/api/schedules/catalog":
 			if !catalog {
-				b.Errorf("current profile unexpectedly requested schedule catalog")
+				w.WriteHeader(http.StatusNotFound)
+				n, _ := w.Write([]byte("404 page not found\n"))
+				responseBytes.Add(int64(n))
+				return
 			}
 			body = catalogPayload
 		case "/schedule":
@@ -114,7 +144,8 @@ func benchmarkScheduleListingProfile(b *testing.B, taskCount int, catalog bool) 
 					}
 				}
 				if index >= 0 {
-					body = []byte(fmt.Sprintf(`<div id="task-detail-content"><div id="schedule-card-%s" data-schedule-id="schedule-%04d" data-schedule-enabled="true" data-schedule-next-run="2030-04-05T09:30:00.125Z"><div class="font-semibold">%s</div><span>Next: 2030-04-05 9:30 AM</span></div></div>`, legacyTasks[index].ID, index, legacyTasks[index].Title))
+					title := legacyTasks[index].Title
+					body = []byte(fmt.Sprintf(`<div id="task-detail-content"><div id="schedule-card-%s" data-schedule-next-run="2030-04-05T09:30:00.125Z"><span class="font-semibold">%s</span><span> — daily</span><span data-schedule-id="schedule-%04d" data-schedule-enabled="true"></span></div></div>`, legacyTasks[index].ID, title, index))
 				}
 			}
 		}
@@ -143,26 +174,28 @@ func benchmarkScheduleListingProfile(b *testing.B, taskCount int, catalog bool) 
 
 	latencies := make([]time.Duration, 0, scheduleListingBenchmarkSamples*b.N)
 	var totalRequests, totalBytes int64
+	var output scheduleBenchmarkStats
 	for iteration := 0; iteration < b.N; iteration++ {
 		for sample := 0; sample < scheduleListingBenchmarkSamples; sample++ {
 			requests.Store(0)
 			responseBytes.Store(0)
 			started := time.Now()
-			if catalog {
-				_, _, err = c.GetSchedule(context.Background(), "p1")
-			} else {
-				err = benchmarkCurrentScheduleListing(c)
-			}
+			entries, summary, err := c.GetSchedule(context.Background(), "p1")
 			latencies = append(latencies, time.Since(started))
 			if err != nil {
 				b.Fatal(err)
 			}
 			gotRequests := requests.Load()
-			if catalog && gotRequests > 3 {
-				b.Fatalf("catalog profile requests = %d, want at most 3", gotRequests)
+			wantRequests := int64(1)
+			if !catalog {
+				wantRequests = int64(taskCount + 3)
 			}
-			if !catalog && gotRequests != int64(taskCount+2) {
-				b.Fatalf("current profile requests = %d, want %d", gotRequests, taskCount+2)
+			if gotRequests != wantRequests {
+				b.Fatalf("profile requests = %d, want exactly %d", gotRequests, wantRequests)
+			}
+			if sample == 0 && iteration == 0 {
+				output.entries = entries
+				output.summary = summary
 			}
 			totalRequests += gotRequests
 			totalBytes += responseBytes.Load()
@@ -170,59 +203,20 @@ func benchmarkScheduleListingProfile(b *testing.B, taskCount int, catalog bool) 
 	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	samples := len(latencies)
-	p50 := percentileScheduleLatency(latencies, 0.50)
-	p95 := percentileScheduleLatency(latencies, 0.95)
+	output.p50 = percentileScheduleLatency(latencies, 0.50)
+	output.p95 = percentileScheduleLatency(latencies, 0.95)
+	output.bytes = totalBytes / int64(samples)
 	rawSamplesMS := make([]float64, len(latencies))
 	for i, latency := range latencies {
 		rawSamplesMS[i] = float64(latency) / float64(time.Millisecond)
 	}
 	b.Logf("latency_samples_ms=%v", rawSamplesMS)
-	ops := float64(samples)
-	b.ReportMetric(float64(totalRequests)/ops, "req/op")
-	b.ReportMetric(float64(totalBytes)/ops, "response_bytes/op")
-	b.ReportMetric(float64(p50)/float64(time.Millisecond), "p50_ms")
-	b.ReportMetric(float64(p95)/float64(time.Millisecond), "p95_ms")
+	b.ReportMetric(float64(totalRequests)/float64(samples), "req/op")
+	b.ReportMetric(float64(output.bytes), "response_bytes/op")
+	b.ReportMetric(float64(output.p50)/float64(time.Millisecond), "p50_ms")
+	b.ReportMetric(float64(output.p95)/float64(time.Millisecond), "p95_ms")
 	b.ReportMetric(float64(samples), "samples")
-	return scheduleBenchmarkStats{p50: p50, p95: p95}
-}
-
-func benchmarkCurrentScheduleListing(c *Client) error {
-	entries, _, err := c.getScheduleWeek(context.Background(), "p1", 0)
-	if err != nil {
-		return err
-	}
-	tasks, err := c.ListTaskReferences(context.Background(), "p1")
-	if err != nil {
-		return err
-	}
-	byTask, err := c.getTaskScheduleEntries(context.Background(), "p1", tasks)
-	if err != nil {
-		return err
-	}
-	positions := make(map[string]int, len(entries))
-	unique := make([]ScheduleEntry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.ScheduleID == "" {
-			continue
-		}
-		if position, ok := positions[entry.ScheduleID]; ok {
-			unique[position] = mergeScheduleEntry(unique[position], entry)
-			continue
-		}
-		positions[entry.ScheduleID] = len(unique)
-		unique = append(unique, entry)
-	}
-	for _, task := range tasks {
-		for _, entry := range byTask[task.ID] {
-			if position, ok := positions[entry.ScheduleID]; ok {
-				unique[position] = mergeScheduleEntry(unique[position], entry)
-				continue
-			}
-			positions[entry.ScheduleID] = len(unique)
-			unique = append(unique, entry)
-		}
-	}
-	return nil
+	return output
 }
 
 func mapValues(values map[string]any, ordered []Task) []any {

@@ -2921,6 +2921,124 @@ func TestGetScheduleCatalogIsScopedBoundedAndDeduplicatesOccurrences(t *testing.
 	}
 }
 
+func TestGetScheduleCatalogOutputMatchesLegacyFallback(t *testing.T) {
+	const nextRun = "2030-04-05T09:30:00.125Z"
+	const catalog = `{"project_id":"p1","summary":"Upcoming schedules","schedules":[{"schedule_id":"s1","task_id":"t1","title":"Nightly report","next_run":"` + nextRun + `","enabled":false,"display_text":"Nightly report — daily"}]}`
+	const taskDetail = `<div id="task-detail-content"><div id="schedule-card-s1" data-schedule-next-run="` + nextRun + `"><span class="font-semibold">Nightly report</span><span> — daily</span><span data-schedule-id="s1" data-schedule-enabled="false"></span></div></div>`
+	getOutput := func(supportCatalog bool) ([]ScheduleEntry, string) {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/schedules/catalog":
+				if !supportCatalog {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, catalog)
+			case "/schedule":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, `<div id="schedule-content">Upcoming schedules</div>`)
+			case "/api/tasks/reference-catalog":
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"tasks":[{"id":"t1","project_id":"p1","title":"Nightly report"}]}`)
+			case "/tasks/t1":
+				w.Header().Set("Content-Type", "text/html")
+				_, _ = io.WriteString(w, taskDetail)
+			default:
+				t.Errorf("unexpected request %s", r.URL.RequestURI())
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries, summary, err := c.GetSchedule(context.Background(), "p1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return entries, summary
+	}
+
+	legacyEntries, legacySummary := getOutput(false)
+	catalogEntries, catalogSummary := getOutput(true)
+	if legacySummary != catalogSummary || !reflect.DeepEqual(legacyEntries, catalogEntries) {
+		t.Fatalf("catalog result differs from legacy fallback\nlegacy:  summary=%q entries=%+v\ncatalog: summary=%q entries=%+v", legacySummary, legacyEntries, catalogSummary, catalogEntries)
+	}
+}
+
+func TestGetScheduleCatalogAuthErrorsAndCancellationDoNotFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+		wantAuth   bool
+	}{
+		{name: "unauthorized", statusCode: http.StatusUnauthorized, wantAuth: true},
+		{name: "server error", statusCode: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var paths []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				paths = append(paths, r.URL.Path)
+				w.WriteHeader(tc.statusCode)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, err = c.GetSchedule(context.Background(), "p1")
+			if err == nil {
+				t.Fatal("expected catalog request error")
+			}
+			if got := IsAuthRequired(err); got != tc.wantAuth {
+				t.Fatalf("auth error = %t, want %t: %v", got, tc.wantAuth, err)
+			}
+			if !reflect.DeepEqual(paths, []string{"/api/schedules/catalog"}) {
+				t.Fatalf("request paths = %v, auth and server errors must not trigger legacy requests", paths)
+			}
+		})
+	}
+
+	t.Run("canceled catalog request", func(t *testing.T) {
+		started := make(chan struct{})
+		var paths []string
+		var pathsMu sync.Mutex
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			pathsMu.Lock()
+			paths = append(paths, r.URL.Path)
+			pathsMu.Unlock()
+			close(started)
+			<-r.Context().Done()
+		}))
+		defer srv.Close()
+		c, err := New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			_, _, err := c.GetSchedule(ctx, "p1")
+			result <- err
+		}()
+		<-started
+		cancel()
+		err = <-result
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled request error = %v, want context.Canceled", err)
+		}
+		pathsMu.Lock()
+		defer pathsMu.Unlock()
+		if !reflect.DeepEqual(paths, []string{"/api/schedules/catalog"}) {
+			t.Fatalf("request paths = %v, cancellation must not start fallback requests", paths)
+		}
+	})
+}
+
 func TestGetScheduleCatalogRejectsTooManyEntries(t *testing.T) {
 	var body strings.Builder
 	body.WriteString(`{"project_id":"p1","schedules":[`)

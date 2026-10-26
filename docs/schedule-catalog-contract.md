@@ -1,17 +1,17 @@
 # Project schedule catalog client contract
 
-The terminal client prefers a bounded project schedule catalog at:
+The terminal client prefers the bounded, project-scoped catalog:
 
 ```http
 GET /api/schedules/catalog?project_id=<selected-project-id>
 Accept: application/json
 ```
 
-The current backend checkout does not register this route. Until the backend implements it, the client falls back to the calendar, the task-reference catalog, and each reference-visible task's schedule tab. The task board and current task-reference endpoint omit non-visible scheduled-category tasks, so this legacy fallback cannot enumerate every project's schedules. Legacy task-reference responses may include attachment metadata, and the fallback still makes one request per reference-visible task. Full future-schedule coverage, the 1–3 request listing target, and a guarantee against downloading attachment snapshots therefore depend on backend support for this route. The handler must list schedules directly by project, including schedules whose tasks are not visible on the board.
+The backend implements this route as a direct schedule and task-title query. It includes schedules whose tasks are hidden from the task board or task-reference list, and schedules with next runs outside the calendar's current week. Older servers that do not expose the route continue through the calendar, task-reference catalog, and per-task schedule-tab fallback. That fallback may omit non-visible scheduled tasks, may download attachment metadata, and makes one request per reference-visible task in addition to its calendar, reference-catalog, and failed catalog-probe requests.
 
 ## Response
 
-Return one project-scoped envelope and only schedule list fields:
+Return a project-scoped envelope containing schedule display fields only:
 
 ```json
 {
@@ -22,7 +22,6 @@ Return one project-scoped envelope and only schedule list fields:
       "project_id": "project-123",
       "schedule_id": "schedule-456",
       "task_id": "task-789",
-      "title": "Nightly report",
       "task_title": "Nightly report",
       "next_run": "2030-04-05T09:30:00.125-07:00",
       "enabled": false,
@@ -32,8 +31,8 @@ Return one project-scoped envelope and only schedule list fields:
 }
 ```
 
-`project_id` on each item is optional; when present, it must match the envelope. `enabled` is required so disabled schedules remain distinguishable. `next_run` may be `null`; when present it must be an RFC3339 timestamp and retain its exact offset and fractional seconds. `title`, `task_title`, and `display_text` are display-only fields. Do not include task prompts, attachment records, schedule edit forms, or other task detail data.
+`project_id` on each item is optional; when present, it must match the envelope. `enabled` is required so disabled schedules remain distinguishable. `next_run` may be `null`; when present it is an RFC3339 timestamp and retains its exact offset and fractional seconds. `task_title` and `display_text` are display-only fields. Do not include task prompts, attachment records, schedule edit forms, or other task detail data.
 
-Include all schedules in the selected project, including one-time schedules and recurring schedules whose next occurrence falls outside the calendar's default week. Keep response order stable. The client deduplicates repeated recurring occurrence rows by `schedule_id`, preserves first-seen order, and keeps the earliest exact next-run timestamp for duplicates.
+Include every schedule in the selected project, including one-time schedules and recurring schedules whose next occurrence falls outside the calendar's default week. Keep response order deterministic: schedules with a next run come first in ascending next-run order, followed by null next runs; ties use newest creation time and then schedule ID. Return an empty `schedules` array for an empty project.
 
-The client rejects a response whose envelope project ID differs from the requested project, rejects records without schedule/task IDs or enabled state, caps the JSON body at 8 MiB, and caps the catalog at 10,000 records. Empty projects should return `"schedules": []` and the same project ID envelope.
+The backend rejects catalogs above 10,000 entries or 8 MiB with HTTP 413. The client independently caps the response body at 8 MiB and the decoded catalog at 10,000 records, and rejects a response whose envelope project ID differs from the requested project or whose records omit schedule ID, task ID, or enabled state. The client preserves first-seen schedule order and the earliest exact next-run timestamp if a server repeats a schedule row.
