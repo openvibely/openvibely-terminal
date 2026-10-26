@@ -10757,11 +10757,7 @@ func projectCommand() command {
 					return m, cmd
 				}
 				if !cliMode && len(m.projects) > 1 {
-					projects := m.projects
-					return m, selectorFor("Projects", "project", "no projects", false,
-						func(context.Context) ([]selectorItem, error) {
-							return projectSelectorItems(projects, m.client.BaseURL()), nil
-						})
+					return m, projectSelector(m.projects, m.client.BaseURL(), "project", "")
 				}
 				m.append(entry{role: "result", head: "Projects", text: renderProjects(m.projects, nil, m.selectedID, m.client.BaseURL())})
 				return m, nil

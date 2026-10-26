@@ -935,11 +935,44 @@ func TestAutomationsWithoutProjectSkipsSelector(t *testing.T) {
 	}
 }
 
+func TestProjectNoArgSelectorRequiresMultipleProjects(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		projects []client.Project
+		wantText string
+	}{
+		{name: "empty", wantText: "no projects yet"},
+		{
+			name: "single",
+			projects: []client.Project{
+				{ID: "only-project", Name: "Only Project", Path: "/workspace/only"},
+			},
+			wantText: "Only Project",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := dispatchModel(t, nil)
+			defer m.Cleanup()
+			m.projects = tc.projects
+			m.projectsLoaded = true
+
+			m = runLine(t, m, "/project")
+			if m.selectorActive {
+				t.Fatalf("/project opened a selector with %d projects:\n%s", len(tc.projects), transcript(m))
+			}
+			if output := transcript(m); !strings.Contains(output, tc.wantText) {
+				t.Fatalf("/project output does not contain %q:\n%s", tc.wantText, output)
+			}
+		})
+	}
+}
+
 // TestProjectNoArgOpensSelector verifies /project with no argument opens a
 // project picker when more than one project is known, and that choosing one
 // switches the active project.
 func TestProjectNoArgOpensSelector(t *testing.T) {
 	m, _ := dispatchModel(t, nil)
+	defer m.Cleanup()
 	m.projects = []client.Project{
 		{ID: "p1", Name: "demo"},
 		{ID: "p2", Name: "beta"},
@@ -1054,6 +1087,9 @@ func TestProjectPickerRowsMatchAcrossEntryPoints(t *testing.T) {
 			msg, ok := pickerMsg.(selectorActiveMsg)
 			if !ok {
 				t.Fatalf("picker command returned %T, want selectorActiveMsg", pickerMsg)
+			}
+			if msg.title != "Projects" {
+				t.Errorf("title = %q, want %q", msg.title, "Projects")
 			}
 			if msg.command != tc.wantCommand {
 				t.Errorf("command = %q, want %q", msg.command, tc.wantCommand)
