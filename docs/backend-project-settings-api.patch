@@ -1,11 +1,8 @@
 diff --git a/docs/docs.go b/docs/docs.go
-index 3a6a36a7..8320ec29 100644
+index 9f72e4c93..86195c105 100644
 --- a/docs/docs.go
 +++ b/docs/docs.go
-@@ -1136,6 +1136,101 @@ const docTemplate = `{
-                 }
-             }
-         },
+@@ -1138,0 +1139,95 @@ const docTemplate = `{
 +        "/api/projects/{id}/settings": {
 +            "get": {
 +                "description": "Get the authoritative editable settings and server-owned edit metadata for one project.",
@@ -101,13 +98,7 @@ index 3a6a36a7..8320ec29 100644
 +                }
 +            }
 +        },
-         "/api/schedules/{id}/toggle": {
-             "post": {
-                 "description": "Pauses a running schedule or resumes a paused one. When re-enabling, NextRun is recomputed if stale.",
-@@ -1904,6 +1999,95 @@ const docTemplate = `{
-                 }
-             }
-         },
+@@ -1884,0 +1980,89 @@ const docTemplate = `{
 +        "handler.ProjectSettingsAgentOption": {
 +            "type": "object",
 +            "properties": {
@@ -197,17 +188,11 @@ index 3a6a36a7..8320ec29 100644
 +                }
 +            }
 +        },
-         "handler.ProjectsListResponse": {
-             "type": "object",
-             "properties": {
 diff --git a/docs/swagger.json b/docs/swagger.json
-index 69d4ba9e..b2b7458d 100644
+index af9830286..e02af78c0 100644
 --- a/docs/swagger.json
 +++ b/docs/swagger.json
-@@ -1134,6 +1134,101 @@
-                 }
-             }
-         },
+@@ -1136,0 +1137,95 @@
 +        "/api/projects/{id}/settings": {
 +            "get": {
 +                "description": "Get the authoritative editable settings and server-owned edit metadata for one project.",
@@ -303,13 +288,7 @@ index 69d4ba9e..b2b7458d 100644
 +                }
 +            }
 +        },
-         "/api/schedules/{id}/toggle": {
-             "post": {
-                 "description": "Pauses a running schedule or resumes a paused one. When re-enabling, NextRun is recomputed if stale.",
-@@ -1902,6 +1997,95 @@
-                 }
-             }
-         },
+@@ -1882,0 +1978,89 @@
 +        "handler.ProjectSettingsAgentOption": {
 +            "type": "object",
 +            "properties": {
@@ -399,17 +378,11 @@ index 69d4ba9e..b2b7458d 100644
 +                }
 +            }
 +        },
-         "handler.ProjectsListResponse": {
-             "type": "object",
-             "properties": {
 diff --git a/docs/swagger.yaml b/docs/swagger.yaml
-index 6ed20589..b0909121 100644
+index 058f46f76..8ae200921 100644
 --- a/docs/swagger.yaml
 +++ b/docs/swagger.yaml
-@@ -116,6 +116,67 @@ definitions:
-         example: /Users/user/projects/myproject
-         type: string
-     type: object
+@@ -118,0 +119,61 @@ definitions:
 +  handler.ProjectSettingsAgentOption:
 +    properties:
 +      id:
@@ -471,13 +444,7 @@ index 6ed20589..b0909121 100644
 +    - repository_path
 +    - repository_source
 +    type: object
-   handler.ProjectsListResponse:
-     properties:
-       projects:
-@@ -2545,6 +2606,71 @@ paths:
-       summary: List all projects
-       tags:
-       - projects
+@@ -2557,0 +2619,65 @@ paths:
 +  /api/projects/{id}/settings:
 +    get:
 +      description: Get the authoritative editable settings and server-owned edit metadata
@@ -543,30 +510,18 @@ index 6ed20589..b0909121 100644
 +      summary: Update project settings
 +      tags:
 +      - projects
-   /api/schedules/{id}/toggle:
-     post:
-       description: Pauses a running schedule or resumes a paused one. When re-enabling,
 diff --git a/internal/handler/api_project_handler.go b/internal/handler/api_project_handler.go
-index f16fa005..3de5596f 100644
+index f16fa0051..3de5596fd 100644
 --- a/internal/handler/api_project_handler.go
 +++ b/internal/handler/api_project_handler.go
-@@ -1,7 +1,12 @@
- package handler
- 
- import (
+@@ -3,0 +4,3 @@ import (
 +	"encoding/json"
 +	"fmt"
 +	"io"
- 	"net/http"
+@@ -4,0 +8,2 @@ import (
 +	"strconv"
 +	"strings"
- 
- 	"github.com/labstack/echo/v4"
- 	"github.com/openvibely/openvibely/internal/applog"
-@@ -48,6 +53,220 @@ func (h *Handler) APIGetProjects(c echo.Context) error {
- 	return writeAPIProjectsResponse(c, projectResponsesFromAPIItems(projects))
- }
- 
+@@ -50,0 +56,214 @@ func (h *Handler) APIGetProjects(c echo.Context) error {
 +// ProjectSettingsAgentOption is the safe agent selector projection exposed to clients.
 +type ProjectSettingsAgentOption struct {
 +	ID   string `json:"id"`
@@ -781,15 +736,12 @@ index f16fa005..3de5596f 100644
 +	}, opts)
 +}
 +
- func projectResponsesFromAPIItems(projects []models.ProjectAPIItem) []ProjectResponse {
- 	var projectResponses []ProjectResponse
- 	for _, p := range projects {
 diff --git a/internal/handler/api_project_settings_test.go b/internal/handler/api_project_settings_test.go
 new file mode 100644
-index 00000000..1430aa8a
+index 000000000..df3f37391
 --- /dev/null
 +++ b/internal/handler/api_project_settings_test.go
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,340 @@
 +package handler
 +
 +import (
@@ -801,13 +753,11 @@ index 00000000..1430aa8a
 +	"testing"
 +
 +	"github.com/openvibely/openvibely/internal/models"
-+	"github.com/openvibely/openvibely/internal/testutil"
 +)
 +
 +func TestAPIProjectSettingsReadAndUpdateJSONContract(t *testing.T) {
 +	t.Setenv("OPENVIBELY_ENABLE_LOCAL_REPO_PATH", "true")
-+	db := testutil.NewTestDB(t)
-+	h, e, agentRepo := setupTestHandlerForDB(t, db)
++	h, e, agentRepo := setupTestHandler(t)
 +	ctx := context.Background()
 +
 +	agent := createAgent(t, agentRepo, func(agent *models.LLMConfig) {
@@ -993,6 +943,93 @@ index 00000000..1430aa8a
 +	}
 +}
 +
++func TestAPIProjectSettingsRoutesAreRegisteredAndProjectScoped(t *testing.T) {
++	t.Setenv("OPENVIBELY_ENABLE_LOCAL_REPO_PATH", "true")
++	h, e, _ := setupTestHandler(t)
++	ctx := context.Background()
++	first := &models.Project{Name: "First Project", Description: "first", RepoPath: t.TempDir()}
++	second := &models.Project{Name: "Second Project", Description: "second", RepoPath: t.TempDir()}
++	for _, project := range []*models.Project{first, second} {
++		if err := h.projectSvc.Create(ctx, project); err != nil {
++			t.Fatalf("create project %q: %v", project.Name, err)
++		}
++	}
++
++	request := func(method, path string, payload map[string]any) *httptest.ResponseRecorder {
++		t.Helper()
++		body := ""
++		if payload != nil {
++			encoded, err := json.Marshal(payload)
++			if err != nil {
++				t.Fatalf("encode settings: %v", err)
++			}
++			body = string(encoded)
++		}
++		recorder := httptest.NewRecorder()
++		req := httptest.NewRequest(method, path, strings.NewReader(body))
++		if payload != nil {
++			req.Header.Set("Content-Type", "application/json")
++		}
++		e.ServeHTTP(recorder, req)
++		return recorder
++	}
++
++	getFirst := request(http.MethodGet, "/api/projects/"+first.ID+"/settings", nil)
++	if getFirst.Code != http.StatusOK {
++		t.Fatalf("GET project settings route = %d: %s", getFirst.Code, getFirst.Body.String())
++	}
++	var firstSettings ProjectSettingsResponse
++	if err := json.Unmarshal(getFirst.Body.Bytes(), &firstSettings); err != nil {
++		t.Fatalf("decode first project settings: %v", err)
++	}
++	if firstSettings.ID != first.ID || firstSettings.Name != first.Name || firstSettings.Description != first.Description {
++		t.Fatalf("GET returned settings for the wrong project: %+v", firstSettings)
++	}
++
++	update := map[string]any{
++		"name": "Updated First", "description": "changed first", "repository_source": "local",
++		"repository_path": first.RepoPath, "github_url": "", "default_agent_id": "", "max_workers": nil,
++	}
++	putFirst := request(http.MethodPut, "/api/projects/"+first.ID+"/settings", update)
++	if putFirst.Code != http.StatusNoContent {
++		t.Fatalf("PUT project settings route = %d: %s", putFirst.Code, putFirst.Body.String())
++	}
++	persistedFirst, err := h.projectSvc.GetByID(ctx, first.ID)
++	if err != nil {
++		t.Fatalf("read updated first project: %v", err)
++	}
++	persistedSecond, err := h.projectSvc.GetByID(ctx, second.ID)
++	if err != nil {
++		t.Fatalf("read second project: %v", err)
++	}
++	if persistedFirst.Name != "Updated First" || persistedFirst.Description != "changed first" {
++		t.Fatalf("PUT did not update the path project: %+v", persistedFirst)
++	}
++	if persistedSecond.Name != second.Name || persistedSecond.Description != second.Description || persistedSecond.RepoPath != second.RepoPath {
++		t.Fatalf("PUT for %q affected another project: %+v", first.ID, persistedSecond)
++	}
++
++	missingGet := request(http.MethodGet, "/api/projects/missing-project/settings", nil)
++	if missingGet.Code != http.StatusNotFound || !strings.Contains(missingGet.Body.String(), "project not found") {
++		t.Fatalf("GET missing project = %d %s, want clear 404", missingGet.Code, missingGet.Body.String())
++	}
++	missingPut := request(http.MethodPut, "/api/projects/missing-project/settings", update)
++	if missingPut.Code != http.StatusNotFound || !strings.Contains(missingPut.Body.String(), "project not found") {
++		t.Fatalf("PUT missing project = %d %s, want clear 404", missingPut.Code, missingPut.Body.String())
++	}
++	persistedFirst, err = h.projectSvc.GetByID(ctx, first.ID)
++	if err != nil {
++		t.Fatalf("re-read first project: %v", err)
++	}
++	persistedSecond, err = h.projectSvc.GetByID(ctx, second.ID)
++	if err != nil {
++		t.Fatalf("re-read second project: %v", err)
++	}
++	if persistedFirst.Name != "Updated First" || persistedSecond.Name != second.Name {
++		t.Fatalf("missing project update changed stored projects: first=%+v second=%+v", persistedFirst, persistedSecond)
++	}
++}
++
 +func TestAPIProjectSettingsUpdateReclonesChangedRepositoryAndReturnsManagedPath(t *testing.T) {
 +	t.Setenv("OPENVIBELY_ENABLE_LOCAL_REPO_PATH", "false")
 +	h, e, _ := setupTestHandler(t)
@@ -1046,34 +1083,19 @@ index 00000000..1430aa8a
 +	}
 +}
 diff --git a/internal/handler/handler.go b/internal/handler/handler.go
-index 8f177617..db8961b7 100644
+index a162ae73d..c4677d81e 100644
 --- a/internal/handler/handler.go
 +++ b/internal/handler/handler.go
-@@ -1067,6 +1067,8 @@ func (h *Handler) RegisterRoutes(e *echo.Echo) {
- 
- 	// API endpoints (for Chrome extension)
- 	e.GET("/api/projects", h.APIGetProjects)
+@@ -1096,0 +1097,2 @@ func (h *Handler) RegisterRoutes(e *echo.Echo) {
 +	e.GET("/api/projects/:id/settings", h.APIGetProjectSettings)
 +	e.PUT("/api/projects/:id/settings", h.APIUpdateProjectSettings)
- 	e.POST("/api/chat/message", h.APIChatMessage)
- 	e.GET("/api/chat/message/:id", h.APIChatMessageStatus)
- 	e.DELETE("/chat/history", h.ClearChat)
 diff --git a/internal/handler/project_handler.go b/internal/handler/project_handler.go
-index 9d4eb63b..27271178 100644
+index c555bde8d..1c06cb456 100644
 --- a/internal/handler/project_handler.go
 +++ b/internal/handler/project_handler.go
-@@ -27,7 +27,6 @@ const (
- 	githubPATNotConfiguredErrorFragment = "github personal access token is not configured"
- 	githubPATSetupLinkURL               = "/channels"
- 	githubPATSetupLinkText              = "Open Channels"
+@@ -30 +29,0 @@ const (
 -	projectMaxWorkersMin                = 1
- 	projectCleanupWarningParam          = "project_cleanup_warning"
- )
- 
-@@ -104,13 +103,35 @@ type projectFormSettingsOptions struct {
- 	GlobalMaxWorkers     int
- }
- 
+@@ -106,0 +106,10 @@ type projectFormSettingsOptions struct {
 +type projectSettingsValues struct {
 +	Name                 string
 +	Description          string
@@ -1084,7 +1106,7 @@ index 9d4eb63b..27271178 100644
 +	MaxWorkers           string
 +}
 +
- func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (projectFormSettings, error) {
+@@ -107,0 +117,12 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
 +	return parseProjectSettingsValues(projectSettingsValues{
 +		Name:                 c.FormValue("name"),
 +		Description:          c.FormValue("description"),
@@ -1097,7 +1119,7 @@ index 9d4eb63b..27271178 100644
 +}
 +
 +func parseProjectSettingsValues(values projectSettingsValues, opts projectFormSettingsOptions) (projectFormSettings, error) {
- 	settings := projectFormSettings{
+@@ -109,5 +130,5 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
 -		Name:        strings.TrimSpace(c.FormValue("name")),
 -		Description: c.FormValue("description"),
 -		RepoSource:  normalizeRepoSource(c.FormValue("repo_source"), c.FormValue("repo_url")),
@@ -1108,32 +1130,18 @@ index 9d4eb63b..27271178 100644
 +		RepoSource:  normalizeRepoSource(values.RepositorySource, values.GitHubURL),
 +		RepoPath:    normalizeRepoPathInput(values.RepositoryPath),
 +		RepoURL:     strings.TrimSpace(values.GitHubURL),
- 	}
- 	if settings.Name == "" {
- 		return settings, errors.New("Project name is required")
-@@ -127,14 +148,14 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
- 			return settings, errors.New("GitHub integration is not configured")
- 		}
- 	}
+@@ -130,2 +151,2 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
 -	if agentID := c.FormValue("default_agent_config_id"); agentID != "" {
 -		settings.DefaultAgentConfigID = &agentID
 +	if values.DefaultAgentConfigID != "" {
 +		settings.DefaultAgentConfigID = &values.DefaultAgentConfigID
- 	}
+@@ -133 +154 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
 -	maxWorkers, err := parseNonNegativeWorkerLimit(c.FormValue("max_workers"))
 +	maxWorkers, err := parseNonNegativeWorkerLimit(values.MaxWorkers)
- 	if err != nil {
- 		return settings, err
- 	}
+@@ -137 +158 @@ func parseProjectFormSettings(c echo.Context, opts projectFormSettingsOptions) (
 -	if maxWorkers >= projectMaxWorkersMin {
 +	if strings.TrimSpace(values.MaxWorkers) != "" {
- 		if opts.GlobalMaxWorkers > 0 && maxWorkers > opts.GlobalMaxWorkers {
- 			return settings, fmt.Errorf("Max concurrent workers cannot exceed the global worker limit of %d", opts.GlobalMaxWorkers)
- 		}
-@@ -401,41 +422,13 @@ func (h *Handler) CreateProject(c echo.Context) error {
- 	return c.Redirect(http.StatusSeeOther, redirectURL)
- }
- 
+@@ -405,19 +426 @@ func (h *Handler) CreateProject(c echo.Context) error {
 -func (h *Handler) UpdateProject(c echo.Context) error {
 -	projectID := c.Param("id")
 -	applog.Infof("[handler] UpdateProject id=%s", projectID)
@@ -1154,7 +1162,7 @@ index 9d4eb63b..27271178 100644
 -		return h.projectErrorResponse(c, http.StatusInternalServerError, "failed to read global worker limit")
 -	}
 +func (h *Handler) persistProjectSettings(ctx context.Context, p *models.Project, settings projectFormSettings) (bool, error) {
- 	currentRepoPath := p.RepoPath
+@@ -425,10 +427,0 @@ func (h *Handler) UpdateProject(c echo.Context) error {
 -	settings, err := parseProjectFormSettings(c, projectFormSettingsOptions{
 -		LocalRepoPathEnabled: localRepoPathEnabled,
 -		GitHubSvc:            h.githubSvc,
@@ -1165,34 +1173,21 @@ index 9d4eb63b..27271178 100644
 -		return h.projectErrorResponse(c, http.StatusBadRequest, err.Error())
 -	}
 -
- 	recloneGitHubRepo := settings.RepoSource == "github"
- 	if recloneGitHubRepo {
- 		submittedRepo, err := service.ParseGitHubRepoURL(settings.RepoURL)
- 		if err != nil {
+@@ -439 +432 @@ func (h *Handler) UpdateProject(c echo.Context) error {
 -			return h.projectGitHubCloneErrorResponse(c, http.StatusBadRequest, err)
 +			return true, err
- 		}
- 		if p.RepoURL != "" {
- 			if currentRepo, err := service.ParseGitHubRepoURL(p.RepoURL); err == nil {
-@@ -449,9 +442,9 @@ func (h *Handler) UpdateProject(c echo.Context) error {
- 	p.DefaultAgentConfigID = settings.DefaultAgentConfigID
- 	p.MaxWorkers = settings.MaxWorkers
- 	if recloneGitHubRepo {
+@@ -452 +444,0 @@ func (h *Handler) UpdateProject(c echo.Context) error {
+-	applyProjectKnowledgeForm(c, p)
+@@ -455 +447 @@ func (h *Handler) UpdateProject(c echo.Context) error {
 -		reclonedPath, normalizedURL, err := h.githubSvc.RecloneProjectRepo(c.Request().Context(), p.ID, currentRepoPath, settings.RepoURL)
 +		reclonedPath, normalizedURL, err := h.githubSvc.RecloneProjectRepo(ctx, p.ID, currentRepoPath, settings.RepoURL)
- 		if err != nil {
+@@ -457 +449 @@ func (h *Handler) UpdateProject(c echo.Context) error {
 -			return h.projectGitHubCloneErrorResponse(c, http.StatusBadRequest, err)
 +			return true, err
- 		}
- 		p.RepoPath = reclonedPath
- 		p.RepoURL = normalizedURL
-@@ -466,9 +459,48 @@ func (h *Handler) UpdateProject(c echo.Context) error {
- 		p.RepoPath = settings.RepoPath
- 		p.RepoURL = ""
- 	}
+@@ -472 +464 @@ func (h *Handler) UpdateProject(c echo.Context) error {
 -	applog.Infof("[handler] UpdateProject id=%s name=%q repo_source=%q repo_path=%q repo_url=%q default_agent=%v max_workers=%v local_repo_path_enabled=%v legacy_local_project=%v", projectID, p.Name, settings.RepoSource, p.RepoPath, p.RepoURL, p.DefaultAgentConfigID, p.MaxWorkers, localRepoPathEnabled, settings.PreserveLegacyLocalProject)
 +	applog.Infof("[handler] UpdateProject id=%s name=%q repo_source=%q repo_path=%q repo_url=%q default_agent=%v max_workers=%v local_repo_path_enabled=%v legacy_local_project=%v", p.ID, p.Name, settings.RepoSource, p.RepoPath, p.RepoURL, p.DefaultAgentConfigID, p.MaxWorkers, h.isLocalRepoPathEnabled(), settings.PreserveLegacyLocalProject)
- 
+@@ -474 +466,41 @@ func (h *Handler) UpdateProject(c echo.Context) error {
 -	if err := h.projectSvc.Update(c.Request().Context(), p); err != nil {
 +	if err := h.projectSvc.Update(ctx, p); err != nil {
 +		return false, err
@@ -1228,122 +1223,69 @@ index 9d4eb63b..27271178 100644
 +	if err != nil {
 +		return h.projectErrorResponse(c, http.StatusBadRequest, err.Error())
 +	}
++	applyProjectKnowledgeForm(c, p)
 +
 +	cloneFailure, err := h.persistProjectSettings(c.Request().Context(), p, settings)
 +	if err != nil {
 +		if cloneFailure {
 +			return h.projectGitHubCloneErrorResponse(c, http.StatusBadRequest, err)
 +		}
- 		applog.Infof("[handler] UpdateProject error: %v", err)
- 		if isHTMX(c) {
- 			return h.projectErrorResponse(c, http.StatusBadRequest, err.Error())
 diff --git a/internal/handler/project_handler_test.go b/internal/handler/project_handler_test.go
-index 61c604d7..e364c65a 100644
+index eef364d4c..c3f9f6350 100644
 --- a/internal/handler/project_handler_test.go
 +++ b/internal/handler/project_handler_test.go
-@@ -776,7 +776,7 @@ func TestParseProjectFormSettings_ValidatesMaxWorkersContract(t *testing.T) {
- 	}{
- 		{name: "omitted clears", includeField: false},
- 		{name: "empty clears", value: "", includeField: true},
+@@ -763 +763 @@ func TestParseProjectFormSettings_ValidatesMaxWorkersContract(t *testing.T) {
 -		{name: "zero clears", value: "0", includeField: true},
 +		{name: "zero saves explicit no-limit", value: "0", includeField: true, want: intPointer(0)},
- 		{name: "minimum saves", value: "1", includeField: true, want: intPointer(1)},
- 		{name: "high finite saves", value: "25", includeField: true, want: intPointer(25)},
- 		{name: "trimmed finite saves", value: " 5 ", includeField: true, want: intPointer(5)},
 diff --git a/internal/handler/project_settings_test.go b/internal/handler/project_settings_test.go
-index 047048d6..3e9d3b8a 100644
+index 29482ecc7..426556c5b 100644
 --- a/internal/handler/project_settings_test.go
 +++ b/internal/handler/project_settings_test.go
-@@ -259,13 +259,13 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
- 		}
- 	})
- 
+@@ -264 +264 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
 -	// Test 4: Set max_workers to 0 (should clear it, not set to 0)
 +	// Verify max_workers=0 persists as an explicit no-project-limit value.
- 	t.Run("SetMaxWorkersToZero", func(t *testing.T) {
- 		form := url.Values{}
- 		form.Set("name", "Updated Project")
- 		form.Set("description", "Updated description")
- 		form.Set("repo_path", "/tmp/updated")
+@@ -270 +270 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
 -		form.Set("max_workers", "0") // 0 should clear the limit
 +		form.Set("max_workers", "0") // Preserve the explicit no-project-limit value.
- 
- 		req := httptest.NewRequest(http.MethodPut, "/projects/"+project.ID, strings.NewReader(form.Encode()))
- 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-@@ -279,14 +279,14 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
- 			t.Fatalf("UpdateProject failed: %v", err)
- 		}
- 
+@@ -284 +284 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
 -		// Verify max_workers is nil (no limit)
 +		// Verify max_workers preserves explicit zero (no project-specific cap).
- 		updated, err := projectRepo.GetByID(ctx, project.ID)
- 		if err != nil {
- 			t.Fatalf("failed to get updated project: %v", err)
- 		}
- 
+@@ -290,2 +290,2 @@ func TestProjectSettings_EndToEnd(t *testing.T) {
 -		if updated.MaxWorkers != nil {
 -			t.Errorf("expected max_workers to be nil when set to 0, got %d", *updated.MaxWorkers)
 +		if updated.MaxWorkers == nil || *updated.MaxWorkers != 0 {
 +			t.Errorf("expected max_workers to preserve explicit zero, got %v", updated.MaxWorkers)
- 		}
- 	})
- }
 diff --git a/internal/service/project_repo_persistence_test.go b/internal/service/project_repo_persistence_test.go
-index 49c0549d..96a8fd18 100644
+index f09282c12..a10b55167 100644
 --- a/internal/service/project_repo_persistence_test.go
 +++ b/internal/service/project_repo_persistence_test.go
-@@ -605,7 +605,7 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
- 	}
- 
- 	zero := 0
+@@ -578 +578 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
 -	zeroProject := &models.Project{Name: "Inherited Limit", MaxWorkers: &zero}
 +	zeroProject := &models.Project{Name: "Explicit No Project Cap", MaxWorkers: &zero}
- 	if err := svc.Create(ctx, zeroProject); err != nil {
- 		t.Fatalf("Create with zero project limit: %v", err)
- 	}
-@@ -613,23 +613,23 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
- 	if err != nil {
- 		t.Fatalf("GetByID zero project: %v", err)
- 	}
+@@ -586,2 +586,2 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
 -	if storedZero.MaxWorkers != nil {
 -		t.Fatalf("zero project limit persisted as %v, want nil", storedZero.MaxWorkers)
 +	if storedZero.MaxWorkers == nil || *storedZero.MaxWorkers != 0 {
 +		t.Fatalf("zero project limit persisted as %v, want explicit zero", storedZero.MaxWorkers)
- 	}
- 	requestedZero := *storedZero
- 	requestedZero.MaxWorkers = &zero
- 	if err := svc.Update(ctx, &requestedZero); err != nil {
+@@ -592 +592 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
 -		t.Fatalf("Update with requested zero against inherited project cap: %v", err)
 +		t.Fatalf("Update with requested zero against explicit zero project cap: %v", err)
- 	}
- 	updatedZero, err := projectRepo.GetByID(ctx, zeroProject.ID)
- 	if err != nil {
- 		t.Fatalf("GetByID after requested zero update: %v", err)
- 	}
+@@ -598,2 +598,2 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
 -	if updatedZero.MaxWorkers != nil {
 -		t.Fatalf("requested zero project limit persisted as %v, want nil", updatedZero.MaxWorkers)
 +	if updatedZero.MaxWorkers == nil || *updatedZero.MaxWorkers != 0 {
 +		t.Fatalf("requested zero project limit persisted as %v, want explicit zero", updatedZero.MaxWorkers)
- 	}
+@@ -601,2 +601,2 @@ func TestProjectService_ValidatesProjectWorkerLimitAgainstGlobal(t *testing.T) {
 -	if requestedZero.MaxWorkers != nil {
 -		t.Fatalf("requested zero project limit normalized to %v, want nil", requestedZero.MaxWorkers)
 +	if requestedZero.MaxWorkers == nil || *requestedZero.MaxWorkers != 0 {
 +		t.Fatalf("requested zero project limit changed to %v, want explicit zero", requestedZero.MaxWorkers)
- 	}
- 
- 	if err := workerRepo.SetMaxWorkers(ctx, 10); err != nil {
 diff --git a/internal/service/project_service.go b/internal/service/project_service.go
-index f419444f..a538eab4 100644
+index ceda0e200..5a6021572 100644
 --- a/internal/service/project_service.go
 +++ b/internal/service/project_service.go
-@@ -140,10 +140,6 @@ func (s *ProjectService) Update(ctx context.Context, p *models.Project) error {
- }
- 
- func (s *ProjectService) validateProjectWorkerLimit(ctx context.Context, p *models.Project, allowUnchanged bool) error {
+@@ -143,4 +142,0 @@ func (s *ProjectService) validateProjectWorkerLimit(ctx context.Context, p *mode
 -	if p.MaxWorkers != nil && *p.MaxWorkers == 0 {
 -		p.MaxWorkers = nil
 -	}
 -
- 	globalMaxWorkers := 0
- 	if s.workerRepo != nil {
- 		var err error
