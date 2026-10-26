@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -350,6 +351,61 @@ func TestAgentsEditHeadlessJSONRefreshFailureIsPartialSuccess(t *testing.T) {
 	}
 	if strings.Contains(text, `"agent"`) || strings.Contains(text, `"enabled":false`) {
 		t.Fatalf("partial output must not claim unverified persisted state: %s", text)
+	}
+}
+
+func TestAgentEditFieldParsingAndCompletionParity(t *testing.T) {
+	cmd := lookupCommand("agents")
+	if cmd == nil {
+		t.Fatal("agents command missing")
+	}
+
+	fields := []struct {
+		name, value string
+	}{
+		{"name", "Updated Name"},
+		{"description", "Updated description"},
+		{"system-prompt", "Updated prompt"},
+		{"model", "inherit"},
+		{"key", "updated-key"},
+		{"scope", "GLOBAL"},
+		{"enabled", "TRUE"},
+		{"selectable", "FALSE"},
+	}
+	for _, field := range fields {
+		t.Run(field.name, func(t *testing.T) {
+			args := []string{"reviewer", strings.ToUpper(field.name), field.value}
+			ref, _, err := parseAgentEdit(args)
+			if err != nil || ref != "reviewer" {
+				t.Fatalf("parseAgentEdit(%q) = ref %q, err %v", args, ref, err)
+			}
+
+			input := "/agents edit reviewer " + strings.ToUpper(field.name)
+			if got, want := completeSlashInput(input, *cmd), "/agents edit reviewer "+field.name+" "; got != want {
+				t.Fatalf("completion for %q = %q, want %q", field.name, got, want)
+			}
+		})
+	}
+
+	unknownArgs := []string{"reviewer", "unknown-field", "value"}
+	if _, _, err := parseAgentEdit(unknownArgs); err == nil {
+		t.Fatalf("parseAgentEdit(%q) accepted an unknown field", unknownArgs)
+	}
+	if got := completeSlashInput("/agents edit reviewer unknown-field", *cmd); got != "/agents edit reviewer unknown-field" {
+		t.Fatalf("unknown field completion = %q", got)
+	}
+
+	for _, tc := range []struct {
+		after []string
+		want  []string
+	}{
+		{[]string{"edit", "*", "scope"}, []string{"global", "project"}},
+		{[]string{"edit", "*", "enabled"}, []string{"true", "false"}},
+		{[]string{"edit", "*", "selectable"}, []string{"true", "false"}},
+	} {
+		if got := registryCompletionValues("agents", tc.after...); !slices.Equal(got, tc.want) {
+			t.Errorf("completion values after %v = %v, want %v", tc.after, got, tc.want)
+		}
 	}
 }
 

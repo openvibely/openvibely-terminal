@@ -4526,13 +4526,19 @@ type agentEdit struct {
 	SelectableAsPrimary *bool
 }
 
+var agentEditFields = [...]string{"name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable"}
+
 func isAgentEditField(value string) bool {
-	switch strings.ToLower(value) {
-	case "name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable":
-		return true
-	default:
-		return false
+	for _, field := range agentEditFields {
+		if strings.EqualFold(value, field) {
+			return true
+		}
 	}
+	return false
+}
+
+func agentEditFieldCompletions() []string {
+	return append([]string(nil), agentEditFields[:]...)
 }
 
 func parseAgentEdit(args []string) (string, agentEdit, error) {
@@ -5361,7 +5367,7 @@ func agentsCommand() command {
 		actions:      actions,
 		validateArgs: validateAgentArgs,
 		completions: []commandCompletion{
-			{after: []string{"edit", "*"}, values: []string{"name", "description", "system-prompt", "model", "key", "scope", "enabled", "selectable"}},
+			{after: []string{"edit", "*"}, values: agentEditFieldCompletions()},
 			{after: []string{"edit", "*", "scope"}, values: []string{"global", "project"}},
 			{after: []string{"edit", "*", "enabled"}, values: []string{"true", "false"}},
 			{after: []string{"edit", "*", "selectable"}, values: []string{"true", "false"}},
