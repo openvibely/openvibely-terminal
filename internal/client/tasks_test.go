@@ -727,6 +727,9 @@ func selectedAttribute(selected bool) string {
 func TestGetTaskCollectsTabs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
+		if r.URL.RawQuery != "" {
+			t.Errorf("legacy GetTask request %s unexpectedly has query %q", r.URL.Path, r.URL.RawQuery)
+		}
 		switch r.URL.Path {
 		// Mirrors the real task detail page: an <h2 class="... font-bold">
 		// heading plus #tab-<name> panels. The thread and changes panels are
@@ -782,6 +785,139 @@ func TestGetTaskCollectsTabs(t *testing.T) {
 	}
 	if d.Task.Category != "active" {
 		t.Errorf("category = %q", d.Task.Category)
+	}
+}
+
+func TestProjectScopedTaskDetailScopesTitleLookupsAndLazyTabs(t *testing.T) {
+	const taskRef = "A title lookup"
+	const projectID = "project-2"
+
+	tests := []struct {
+		name          string
+		load          func(*Client) (*TaskDetail, error)
+		wantThread    bool
+		wantChanges   bool
+		wantLifecycle bool
+	}{
+		{
+			name: "title lookup thread tab",
+			load: func(c *Client) (*TaskDetail, error) {
+				return c.GetTaskForProjectTab(context.Background(), taskRef, projectID, "thread")
+			},
+			wantThread: true,
+		},
+		{
+			name: "title lookup changes tab",
+			load: func(c *Client) (*TaskDetail, error) {
+				return c.GetTaskForProjectTab(context.Background(), taskRef, projectID, "changes")
+			},
+			wantChanges: true,
+		},
+		{
+			name: "full detail loads both tabs",
+			load: func(c *Client) (*TaskDetail, error) {
+				return c.GetTaskForProject(context.Background(), taskRef, projectID)
+			},
+			wantThread:    true,
+			wantChanges:   true,
+			wantLifecycle: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var initial, thread, changes, lifecycle, missingProject atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				scoped := r.URL.Query().Get("project_id") == projectID
+				if !scoped {
+					missingProject.Add(1)
+				}
+				writeHTML := func(body string) {
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, body)
+				}
+
+				switch r.URL.Path {
+				case "/tasks/" + taskRef:
+					initial.Add(1)
+					title := "DEFAULT PROJECT FALLBACK"
+					if scoped {
+						title = "Selected project task"
+					}
+					writeHTML(`<div data-task-status="running" data-task-category="active"><h2 class="font-bold">` + title + `</h2><div id="tab-chat"></div><div id="tab-changes"></div><div id="tab-lifecycle"></div></div>`)
+				case "/tasks/" + taskRef + "/thread":
+					thread.Add(1)
+					if scoped {
+						writeHTML(`<div>Selected project thread</div>`)
+					} else {
+						writeHTML(`<div>DEFAULT PROJECT FALLBACK THREAD</div>`)
+					}
+				case "/tasks/" + taskRef + "/changes":
+					changes.Add(1)
+					if scoped {
+						writeHTML(`<div>Selected project changes</div>`)
+					} else {
+						writeHTML(`<div>DEFAULT PROJECT FALLBACK CHANGES</div>`)
+					}
+				case "/api/tasks/" + taskRef + "/lifecycle-executions":
+					lifecycle.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `[]`)
+				default:
+					t.Errorf("unexpected request %s", r.URL.RequestURI())
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detail, err := tc.load(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if detail.Task.Title != "Selected project task" {
+				t.Errorf("title = %q, want scoped title", detail.Task.Title)
+			}
+			if tc.wantThread && detail.Thread != "Selected project thread" {
+				t.Errorf("thread = %q, want scoped thread", detail.Thread)
+			}
+			if tc.wantChanges && detail.Changes != "Selected project changes" {
+				t.Errorf("changes = %q, want scoped changes", detail.Changes)
+			}
+			if strings.Contains(detail.TabText("thread"), "DEFAULT PROJECT") || strings.Contains(detail.TabText("changes"), "DEFAULT PROJECT") {
+				t.Fatalf("default-project fallback leaked into scoped detail: thread=%q changes=%q", detail.Thread, detail.Changes)
+			}
+			if got := initial.Load(); got != 1 {
+				t.Errorf("initial requests = %d, want 1", got)
+			}
+			wantThreadRequests := int32(0)
+			if tc.wantThread {
+				wantThreadRequests = 1
+			}
+			if got := thread.Load(); got != wantThreadRequests {
+				t.Errorf("thread requests = %d, want %d", got, wantThreadRequests)
+			}
+			wantChangesRequests := int32(0)
+			if tc.wantChanges {
+				wantChangesRequests = 1
+			}
+			if got := changes.Load(); got != wantChangesRequests {
+				t.Errorf("changes requests = %d, want %d", got, wantChangesRequests)
+			}
+			wantLifecycleRequests := int32(0)
+			if tc.wantLifecycle {
+				wantLifecycleRequests = 1
+			}
+			if got := lifecycle.Load(); got != wantLifecycleRequests {
+				t.Errorf("lifecycle requests = %d, want %d", got, wantLifecycleRequests)
+			}
+			if got := missingProject.Load(); got != 0 {
+				t.Errorf("requests missing project_id = %d, want 0", got)
+			}
+		})
 	}
 }
 
@@ -1262,6 +1398,9 @@ func TestMutationSurfacesServerError(t *testing.T) {
 func TestGetTaskFetchesTabsConcurrently(t *testing.T) {
 	const delay = 150 * time.Millisecond
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			t.Errorf("legacy GetTask request %s unexpectedly has query %q", r.URL.Path, r.URL.RawQuery)
+		}
 		w.Header().Set("Content-Type", "text/html")
 		switch r.URL.Path {
 		case "/tasks/t-1":

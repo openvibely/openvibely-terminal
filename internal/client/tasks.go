@@ -846,7 +846,7 @@ func (c *Client) getTask(ctx context.Context, taskID, projectID string, exact, l
 
 	threadPath := "/tasks/" + url.PathEscape(taskID) + "/thread"
 	changesPath := "/tasks/" + url.PathEscape(taskID) + "/changes"
-	if exact {
+	if projectID != "" {
 		threadPath += query("project_id", projectID)
 		changesPath += query("project_id", projectID)
 	}
