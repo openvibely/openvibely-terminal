@@ -3320,22 +3320,13 @@ func scheduleCommand() command {
 							if err != nil {
 								return nil, err
 							}
-							items := make([]selectorItem, 0, len(entries))
-							for _, entry := range entries {
-								if entry.ScheduleID == "" {
-									continue
+							items := schedulePickerItems(entries, func(entry client.ScheduleEntry, item *selectorItem) {
+								item.detail = "task " + firstNonEmpty(shortID(entry.TaskID), "unavailable")
+								item.dispatch = func(m Model) (Model, tea.Cmd) {
+									m.busy = true
+									return m, scheduleInspectionCommand(c, pid, entry)
 								}
-								entry := entry
-								items = append(items, selectorItem{
-									ref:    entry.ScheduleID,
-									label:  firstNonEmpty(entry.Name, entry.Text, shortID(entry.ScheduleID)),
-									detail: "task " + firstNonEmpty(shortID(entry.TaskID), "unavailable"),
-									dispatch: func(m Model) (Model, tea.Cmd) {
-										m.busy = true
-										return m, scheduleInspectionCommand(c, pid, entry)
-									},
-								})
-							}
+							})
 							return items, nil
 						}))
 				}
@@ -3380,13 +3371,7 @@ func scheduleCommand() command {
 							if err != nil {
 								return nil, err
 							}
-							items := make([]selectorItem, 0, len(entries))
-							for _, e := range entries {
-								if e.ScheduleID != "" {
-									items = append(items, selectorItem{ref: e.ScheduleID, label: firstNonEmpty(e.Name, e.Text, shortID(e.ScheduleID))})
-								}
-							}
-							return items, nil
+							return schedulePickerItems(entries, nil), nil
 						}))
 				}
 				ref, update, err := parseScheduleEdit(rest)
@@ -3432,27 +3417,17 @@ func scheduleCommand() command {
 								if err != nil {
 									return nil, err
 								}
-								items := make([]selectorItem, 0, len(entries))
-								for _, e := range entries {
-									if e.ScheduleID == "" {
-										continue
-									}
-									e := e
-									item := selectorItem{
-										ref:   e.ScheduleID,
-										label: firstNonEmpty(e.Name, e.Text, shortID(e.ScheduleID)),
-									}
+								items := schedulePickerItems(entries, func(entry client.ScheduleEntry, item *selectorItem) {
 									item.dispatch = func(m Model) (Model, tea.Cmd) {
 										if action == "delete" {
-											return confirmScheduleDeletion(m, pid, e)
+											return confirmScheduleDeletion(m, pid, entry)
 										}
 										m.busy = true
 										return m, run("Schedule", cmdTimeout, func(ctx context.Context) (string, error) {
-											return scheduleToggleOutput(ctx, c, pid, e.ScheduleID)
+											return scheduleToggleOutput(ctx, c, pid, entry.ScheduleID)
 										})
 									}
-									items = append(items, item)
-								}
+								})
 								return items, nil
 							}))
 				}
@@ -3479,6 +3454,26 @@ func scheduleCommand() command {
 			return m, nil
 		},
 	}
+}
+
+// schedulePickerItems applies the shared schedule catalog-to-picker projection.
+// Action-specific detail and dispatch behavior stays with each picker caller.
+func schedulePickerItems(entries []client.ScheduleEntry, customize func(client.ScheduleEntry, *selectorItem)) []selectorItem {
+	items := make([]selectorItem, 0, len(entries))
+	for _, entry := range entries {
+		if entry.ScheduleID == "" {
+			continue
+		}
+		item := selectorItem{
+			ref:   entry.ScheduleID,
+			label: firstNonEmpty(entry.Name, entry.Text, shortID(entry.ScheduleID)),
+		}
+		if customize != nil {
+			customize(entry, &item)
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 func isRepeat(s string) bool {

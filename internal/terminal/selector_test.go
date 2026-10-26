@@ -2325,6 +2325,88 @@ func TestScheduleSelectorListsBothIDsAndTargetsSecondSchedule(t *testing.T) {
 	}
 }
 
+func TestSchedulePickerItemsShareBaseCatalogMapping(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries []client.ScheduleEntry
+		want    []selectorItem
+	}{
+		{name: "empty"},
+		{
+			name: "one entry",
+			entries: []client.ScheduleEntry{
+				{ScheduleID: "schedule-1", Name: "Named schedule", Text: "display text"},
+			},
+			want: []selectorItem{{ref: "schedule-1", label: "Named schedule"}},
+		},
+		{
+			name: "multiple entries preserve order and fallbacks",
+			entries: []client.ScheduleEntry{
+				{ScheduleID: "schedule-named-1", Name: "Named schedule", Text: "ignored text"},
+				{ScheduleID: "schedule-text-2", Text: "Text fallback"},
+				{ScheduleID: "short-id-3"},
+				{ScheduleID: "", Name: "Omitted schedule"},
+			},
+			want: []selectorItem{
+				{ref: "schedule-named-1", label: "Named schedule"},
+				{ref: "schedule-text-2", label: "Text fallback"},
+				{ref: "short-id-3", label: "short-id"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := schedulePickerItems(tc.entries, nil)
+			if len(got) != len(tc.want) {
+				t.Fatalf("picker item count = %d, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i].ref != tc.want[i].ref || got[i].label != tc.want[i].label {
+					t.Errorf("picker item %d = {%q, %q}, want {%q, %q}", i, got[i].ref, got[i].label, tc.want[i].ref, tc.want[i].label)
+				}
+			}
+		})
+	}
+}
+
+func TestScheduleActionPickersUseSharedCatalogRows(t *testing.T) {
+	const catalog = `{"project_id":"p1","summary":"Schedules","schedules":[{"schedule_id":"schedule-named-1","task_id":"task-1","title":"Named schedule","display_text":"Named schedule — daily","enabled":true},{"schedule_id":"schedule-text-2","task_id":"task-2","display_text":"Text fallback","enabled":false},{"schedule_id":"short-id-3","task_id":"task-3","enabled":true}]}`
+	wantRefs := []string{"schedule-named-1", "schedule-text-2", "short-id-3"}
+	wantLabels := []string{"Named schedule", "Text fallback", "short-id"}
+	for _, action := range []string{"show", "open", "edit", "delete", "toggle"} {
+		t.Run(action, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/api/schedules/catalog": catalog})
+			m = runLine(t, m, "/schedule "+action)
+			if !m.selectorActive {
+				t.Fatalf("expected schedule selector:\n%s", transcript(m))
+			}
+			if got := selectorCallCount(rec, http.MethodGet, "/api/schedules/catalog"); got != 1 {
+				t.Fatalf("schedule catalog GETs = %d, want 1; calls:\n%s", got, rec.all())
+			}
+			refs := make([]string, len(m.selectorItems))
+			labels := make([]string, len(m.selectorItems))
+			for i, item := range m.selectorItems {
+				refs[i], labels[i] = item.ref, item.label
+			}
+			if !reflect.DeepEqual(refs, wantRefs) || !reflect.DeepEqual(labels, wantLabels) {
+				t.Fatalf("%s picker rows = refs %v labels %v, want refs %v labels %v", action, refs, labels, wantRefs, wantLabels)
+			}
+			if action == "show" || action == "open" {
+				if got := m.selectorItems[0].detail; got != "task task-1" {
+					t.Errorf("show detail = %q, want %q", got, "task task-1")
+				}
+			}
+			if action == "edit" && (!m.selectorPrefill || m.selectorPrefillSuffix != " ") {
+				t.Errorf("edit selector suffix = prefill:%t suffix:%q, want prefill with one trailing space", m.selectorPrefill, m.selectorPrefillSuffix)
+			}
+			if !rec.sawQuery(http.MethodGet + " /api/schedules/catalog?project_id=p1") {
+				t.Errorf("schedule picker catalog request was not project scoped; calls:\n%s", rec.all())
+			}
+		})
+	}
+}
+
 func TestScheduleListRendersBothSchedulesForOneTask(t *testing.T) {
 	m, _ := dispatchModel(t, selFixtures())
 	m = runLine(t, m, "/schedule")
