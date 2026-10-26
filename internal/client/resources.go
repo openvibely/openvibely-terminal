@@ -3647,7 +3647,9 @@ type Channel struct {
 	Address    string `json:"address,omitempty"`
 	Provider   string `json:"provider,omitempty"`
 
-	configuration url.Values
+	configuration                 url.Values
+	configurationIssue            string
+	configurationSnapshotCaptured bool
 }
 
 // KnownChannels is the fixed set of backend-supported channel integrations.
@@ -3716,6 +3718,75 @@ func channelConfiguration(root *html.Node, channelType string, card Card) url.Va
 		values.Set("token", card.Get("channel-token"))
 	}
 	return values
+}
+
+var channelConfigurationSelectors = map[string][]string{
+	"github": {"github_auth_mode"},
+	"slack":  {"slack_bot_token_mode"},
+	"email":  {"email_provider"},
+}
+
+func requiredChannelConfigurationControls(channelType string, values url.Values) []string {
+	switch channelType {
+	case "github":
+		fields := []string{"github_auth_mode", "github_api_endpoint"}
+		switch values.Get("github_auth_mode") {
+		case "pat":
+			return append(fields, "github_pat")
+		case "app":
+			return append(fields, "github_app_id", "github_app_slug", "github_app_private_key")
+		default:
+			return fields
+		}
+	case "slack":
+		fields := []string{"slack_client_id", "slack_client_secret", "slack_app_token", "slack_bot_token_mode", "slack_send_responses"}
+		if values.Get("slack_bot_token_mode") == "manual" {
+			fields = append(fields, "slack_bot_token")
+		}
+		return fields
+	case "telegram":
+		return []string{"telegram_rich_messages_v2"}
+	case "discord":
+		return []string{"discord_bot_token", "discord_send_responses"}
+	case "x":
+		// X credentials are intentionally not scraped from the settings page;
+		// the backend preserves them when they are omitted from an update.
+		return []string{"x_poll_interval_seconds", "x_send_responses"}
+	case "email":
+		return []string{
+			"email_provider", "email_address", "email_password", "email_imap_host", "email_imap_port",
+			"email_smtp_host", "email_smtp_port", "email_poll_interval_seconds",
+		}
+	default:
+		return nil
+	}
+}
+
+func channelConfigurationIssue(root *html.Node, channelType string, card Card, values url.Values) string {
+	for _, name := range channelConfigurationSelectors[channelType] {
+		control := findNamedHTMLControl(root, name)
+		if control == nil || control.Data != "select" {
+			return fmt.Sprintf("required selector %q is missing", name)
+		}
+		selected := selectedHTMLFormOption(control, htmlSelectSelectedOption)
+		if selected == nil || strings.TrimSpace(attr(selected, "value")) == "" {
+			return fmt.Sprintf("required selector %q has no selected value", name)
+		}
+	}
+
+	missing := make([]string, 0)
+	for _, name := range requiredChannelConfigurationControls(channelType, values) {
+		if findNamedHTMLControl(root, name) == nil {
+			missing = append(missing, name)
+		}
+	}
+	if channelType == "telegram" && card.Bool("channel-running") && strings.TrimSpace(card.Get("channel-token")) == "" {
+		missing = append(missing, "channel-token")
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return "required controls are missing: " + strings.Join(missing, ", ")
 }
 
 func cloneChannelConfiguration(values url.Values) url.Values {
@@ -3835,6 +3906,8 @@ func (c *Client) ListChannels(ctx context.Context, projectID string) ([]Channel,
 		seen[base.Type] = true
 		base.Status = channelCardStatus(root, card, base.Type, base.Name)
 		base.configuration = channelConfiguration(root, base.Type, card)
+		base.configurationIssue = channelConfigurationIssue(root, base.Type, card, base.configuration)
+		base.configurationSnapshotCaptured = true
 		lowerStatus := strings.ToLower(base.Status)
 		base.Connected = lowerStatus == "connected"
 		base.Running = card.Bool("channel-running") || strings.Contains(lowerStatus, "running")
@@ -3936,6 +4009,12 @@ func (c *Client) UpdateChannel(ctx context.Context, channelType, projectID strin
 func (c *Client) UpdateChannelFromCurrent(ctx context.Context, current Channel, projectID string, updates url.Values) error {
 	if _, ok := knownChannel(current.Type); !ok {
 		return fmt.Errorf("unsupported channel type %q", current.Type)
+	}
+	if !current.configurationSnapshotCaptured {
+		return errors.New("cannot update channel: authoritative settings snapshot is unavailable")
+	}
+	if current.configurationIssue != "" {
+		return fmt.Errorf("cannot update %s channel: settings are incomplete (%s)", current.Type, current.configurationIssue)
 	}
 	form := cloneChannelConfiguration(current.configuration)
 	for key, entries := range updates {
