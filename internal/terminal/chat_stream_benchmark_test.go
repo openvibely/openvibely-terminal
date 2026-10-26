@@ -14,7 +14,10 @@ import (
 	"github.com/openvibely/openvibely-terminal/internal/client"
 )
 
-const benchmarkChunksPerCadence = int(chatStreamRenderInterval / time.Millisecond)
+const (
+	benchmarkChunksPerCadence      = int(chatStreamRenderInterval / time.Millisecond)
+	transcriptAppendBenchmarkWidth = 100
+)
 
 func BenchmarkTranscriptAppend(b *testing.B) {
 	for _, retained := range []int{499, 500} {
@@ -65,7 +68,7 @@ func BenchmarkTranscriptCumulativeAppend(b *testing.B) {
 }
 
 func transcriptAppendBenchmarkModel(retained int) Model {
-	vp := viewport.New(100, 25)
+	vp := viewport.New(transcriptAppendBenchmarkWidth, 25)
 	input := textinput.New()
 	editor := textarea.New()
 	m := Model{transcript: &vp, input: &input, automationEditor: &editor}
