@@ -409,6 +409,21 @@ func TestAgentEditFieldParsingAndCompletionParity(t *testing.T) {
 	}
 }
 
+func TestParseAgentEditCanonicalizesUnicodeCaseFoldField(t *testing.T) {
+	ref, update, err := parseAgentEdit([]string{"reviewer", "ſcope", "GLOBAL"})
+	if err != nil || ref != "reviewer" {
+		t.Fatalf("parseAgentEdit with Unicode case-fold field = ref %q, err %v", ref, err)
+	}
+	if update.Scope == nil || *update.Scope != "global" {
+		t.Fatalf("parsed scope = %v, want global", update.Scope)
+	}
+
+	duplicate := []string{"reviewer", "scope", "project", "ſcope", "global"}
+	if _, _, err := parseAgentEdit(duplicate); err == nil {
+		t.Fatalf("parseAgentEdit(%q) accepted duplicate canonical fields", duplicate)
+	}
+}
+
 func TestAgentsEditHelpCompletionAndStaleness(t *testing.T) {
 	cmd := lookupCommand("agents")
 	if cmd == nil {
