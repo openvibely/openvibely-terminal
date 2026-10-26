@@ -3096,6 +3096,7 @@ func TestGetScheduleCatalogEmptyProjectAndScopeMismatch(t *testing.T) {
 		wantSize int
 	}{
 		{name: "empty project", body: `{"project_id":"p1","summary":"No schedules","schedules":[]}`, wantSize: 0},
+		{name: "malformed JSON", body: `not-json`, wantErr: "decoding /api/schedules/catalog"},
 		{name: "missing schedules array", body: `{"project_id":"p1"}`, wantErr: "schedules must be an array"},
 		{name: "null schedules array", body: `{"project_id":"p1","schedules":null}`, wantErr: "schedules must be an array"},
 		{name: "foreign project", body: `{"project_id":"p2","schedules":[]}`, wantErr: `project "p2" does not match selected project "p1"`},
