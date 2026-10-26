@@ -1964,36 +1964,7 @@ func (c *Client) GetTaskThread(ctx context.Context, taskID, projectID string) (s
 }
 
 func nodeConversationText(root *html.Node) string {
-	var b strings.Builder
-	var walk func(*html.Node)
-	walk = func(n *html.Node) {
-		if n.Type == html.ElementNode {
-			switch n.Data {
-			case "form", "button":
-				return
-			}
-			if skippedTags[n.Data] {
-				return
-			}
-			if blockTags[n.Data] {
-				b.WriteByte('\n')
-			}
-		}
-		if n.Type == html.TextNode {
-			if text := strings.Join(strings.Fields(n.Data), " "); text != "" {
-				b.WriteString(text)
-				b.WriteByte(' ')
-			}
-		}
-		for child := n.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-		}
-		if n.Type == html.ElementNode && blockTags[n.Data] {
-			b.WriteByte('\n')
-		}
-	}
-	walk(root)
-	return tidyText(b.String())
+	return renderNodeText(root, nodeTextRenderOptions{excludeFormAndButton: true})
 }
 
 // TaskFollowupAccepted identifies the execution started by a thread message or
