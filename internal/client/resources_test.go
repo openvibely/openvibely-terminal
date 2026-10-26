@@ -5170,6 +5170,39 @@ func TestChannelFormValuePreservesControlSpecificExtraction(t *testing.T) {
 	}
 }
 
+func TestChannelConfigurationReportsRequiredSelectExtractionFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		markup    string
+		wantIssue string
+	}{
+		{
+			name:      "unmarked option",
+			markup:    `<form><select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual">Manual</option></select></form>`,
+			wantIssue: `required selector "slack_bot_token_mode" has no selected value`,
+		},
+		{
+			name:      "missing select control",
+			markup:    `<form><input name="slack_client_id" value="client-id"></form>`,
+			wantIssue: `required selector "slack_bot_token_mode" is missing`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root, err := html.Parse(strings.NewReader(tt.markup))
+			if err != nil {
+				t.Fatal(err)
+			}
+			values := channelConfiguration(root, "slack", Card{})
+			if values.Has("slack_bot_token_mode") {
+				t.Fatalf("incomplete selector was extracted as a value: %v", values)
+			}
+			if issue := channelConfigurationIssue(root, "slack", Card{}, values); !strings.Contains(issue, tt.wantIssue) {
+				t.Fatalf("configuration issue = %q, want it to include %q", issue, tt.wantIssue)
+			}
+		})
+	}
+}
+
 func TestChannelEditableSettingsIncludesSlackModeButExcludesCredentials(t *testing.T) {
 	const secret = "stored-slack-secret"
 	c := htmlServer(t, `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form><input name="slack_client_id" value="client-id"><input name="slack_client_secret" value="`+secret+`"><input name="slack_app_token" value="stored-app-token"><select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual" selected>Manual</option></select><input name="slack_bot_token" value="stored-bot-token"><input type="checkbox" name="slack_send_responses" checked></form>`)
@@ -5183,6 +5216,70 @@ func TestChannelEditableSettingsIncludesSlackModeButExcludesCredentials(t *testi
 	}
 	if strings.Contains(settings.Encode(), secret) || settings.Get("slack_client_secret") != "" || settings.Get("slack_app_token") != "" || settings.Get("slack_bot_token") != "" {
 		t.Fatalf("Slack editable settings exposed credentials: %v", settings)
+	}
+}
+
+func TestChannelUpdateRejectsIncompleteConfigurationBeforePost(t *testing.T) {
+	completeSlackFields := `<input name="slack_client_id" value="client-id"><input name="slack_client_secret" value="stored-secret"><input name="slack_app_token" value="stored-app-token"><input type="checkbox" name="slack_send_responses" checked>`
+	tests := []struct {
+		name                string
+		modeControl         string
+		additionalFields    string
+		wantIssue           string
+		useSnapshotMutation bool
+	}{
+		{
+			name:        "unmarked mode select",
+			modeControl: `<select name="slack_bot_token_mode"><option value="oauth">OAuth</option><option value="manual">Manual</option></select>`,
+			wantIssue:   `slack_bot_token_mode`,
+		},
+		{
+			name:                "missing required control",
+			modeControl:         `<select name="slack_bot_token_mode"><option value="oauth" selected>OAuth</option><option value="manual">Manual</option></select>`,
+			additionalFields:    strings.Replace(completeSlackFields, `<input name="slack_client_secret" value="stored-secret">`, "", 1),
+			wantIssue:           `slack_client_secret`,
+			useSnapshotMutation: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pageFields := completeSlackFields
+			if tt.additionalFields != "" {
+				pageFields = tt.additionalFields
+			}
+			page := `<div data-channel-type="slack" data-search-text="Slack Configured"></div><form>` + pageFields + tt.modeControl + `</form>`
+			posts := 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPost {
+					posts++
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				_, _ = io.WriteString(w, page)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var updateErr error
+			if tt.useSnapshotMutation {
+				current, getErr := c.GetChannel(context.Background(), "p1", "slack")
+				if getErr != nil {
+					t.Fatal(getErr)
+				}
+				updateErr = c.UpdateChannelFromCurrent(context.Background(), *current, "p1", url.Values{"slack_send_responses": {"false"}})
+			} else {
+				updateErr = c.UpdateChannel(context.Background(), "slack", "p1", url.Values{"slack_send_responses": {"false"}})
+			}
+			if updateErr == nil || !strings.Contains(updateErr.Error(), "settings are incomplete") || !strings.Contains(updateErr.Error(), tt.wantIssue) {
+				t.Fatalf("update error = %v, want incomplete settings mentioning %q", updateErr, tt.wantIssue)
+			}
+			if posts != 0 {
+				t.Fatalf("incomplete configuration issued %d POST requests", posts)
+			}
+		})
 	}
 }
 
