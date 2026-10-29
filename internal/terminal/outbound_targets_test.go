@@ -252,6 +252,81 @@ func TestOutboundTargetsJSONMutationFailuresDoNotEmitSuccess(t *testing.T) {
 	}
 }
 
+func TestOutboundTargetsCLIAddDoesNotReplaceAfterFailedOrInvalidListRead(t *testing.T) {
+	existing := client.OutboundTarget{ID: "existing", ProjectID: "p1", Platform: "slack", TargetKind: "channel", Name: "ops", Destination: "C-EXISTING"}
+	cases := []struct {
+		name     string
+		failRead int
+		status   int
+		body     string
+	}{
+		{
+			name:     "initial read HTTP error",
+			failRead: 1,
+			status:   http.StatusInternalServerError,
+			body:     terminalOutboundTargetPage("p1", nil, false),
+		},
+		{
+			name:     "latest read HTTP error",
+			failRead: 2,
+			status:   http.StatusInternalServerError,
+			body:     terminalOutboundTargetPage("p1", nil, false),
+		},
+		{
+			name:     "latest read malformed fragment",
+			failRead: 2,
+			status:   http.StatusOK,
+			body:     `<div id="outbound-targets-section" data-project-id="p1"></div>`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			getCalls, postCalls := 0, 0
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/api/projects":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, cliProjects)
+				case r.Method == http.MethodGet && r.URL.Path == "/channels/outbound-targets":
+					getCalls++
+					if r.URL.Query().Get("project_id") != "p1" {
+						t.Errorf("target read project_id = %q, want p1", r.URL.Query().Get("project_id"))
+					}
+					w.Header().Set("Content-Type", "text/html")
+					if getCalls == tc.failRead {
+						w.WriteHeader(tc.status)
+						_, _ = io.WriteString(w, tc.body)
+						return
+					}
+					_, _ = io.WriteString(w, terminalOutboundTargetPage("p1", []client.OutboundTarget{existing}, false))
+				case r.Method == http.MethodPost && r.URL.Path == "/channels/send-message-explicit-targets":
+					postCalls++
+					_, _ = io.WriteString(w, `<div>unexpected replacement</div>`)
+				default:
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.RequestURI())
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			c, err := client.New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = RunCLI(c, &out, "demo", []string{"channels", "targets", "add", "slack", "C-NEW", "--kind", "channel", "--name", "new"}, false, true)
+			if err == nil {
+				t.Fatal("add unexpectedly succeeded after a failed or invalid target-list read")
+			}
+			if postCalls != 0 {
+				t.Fatalf("failed or invalid list read submitted %d replacement saves", postCalls)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("failed add emitted success-shaped JSON: %q", out.String())
+			}
+		})
+	}
+}
+
 func TestOutboundTargetsJSONMutationCancellationDoesNotEmitSuccess(t *testing.T) {
 	postStarted := make(chan struct{})
 	postRelease := make(chan struct{})

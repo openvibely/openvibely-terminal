@@ -121,6 +121,43 @@ func TestListOutboundTargetsEmptyUsesNonNilJSONArray(t *testing.T) {
 	}
 }
 
+func TestGetOutboundTargetsRejectsFailedOrInvalidFragments(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{
+			name:   "server error with empty-looking fragment",
+			status: http.StatusInternalServerError,
+			body:   emptyOutboundTargetsFixture,
+		},
+		{
+			name:   "malformed successful fragment",
+			status: http.StatusOK,
+			body:   `<div id="outbound-targets-section" data-project-id="project-2"></div>`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			c, err := New(srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := c.GetOutboundTargets(context.Background(), "project-2")
+			if err == nil {
+				t.Fatalf("GetOutboundTargets unexpectedly accepted response as empty targets: %#v", page)
+			}
+		})
+	}
+}
+
 func TestGetOutboundTargetPolicyUsesCompactPolicyFormOnly(t *testing.T) {
 	var requests []string
 	var noisyRows strings.Builder
