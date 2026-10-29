@@ -1052,6 +1052,7 @@ func (p *lifecycleJSONPreview) appendStringAnyMap(value map[string]any, depth in
 			return err
 		}
 	}
+	selection.sortKeys()
 	p.append("{")
 	for i, key := range selection.keys {
 		if !p.stopped {
@@ -1620,6 +1621,7 @@ func (p *lifecycleJSONPreview) appendStringStringMap(value map[string]string, de
 			return err
 		}
 	}
+	selection.sortKeys()
 
 	p.append("{")
 	for i, key := range selection.keys {
@@ -1676,6 +1678,7 @@ func (p *lifecycleJSONPreview) appendReflectMap(value reflect.Value, depth int) 
 	if selection.err != nil {
 		return selection.err
 	}
+	selection.sortKeys()
 	p.append("{")
 	for i, key := range selection.keys {
 		if !p.stopped {
@@ -1707,6 +1710,7 @@ type lifecyclePreviewMapKeySelection struct {
 	keys                  []lifecyclePreviewMapKey
 	validationKeys        []lifecyclePreviewMapKey
 	limit                 int
+	truncatedSelected     int
 	perKeyRetainedBudget  int
 	retainedKeyBytes      int
 	sourceOrder           int
@@ -1738,13 +1742,15 @@ func (selection *lifecyclePreviewMapKeySelection) add(key lifecyclePreviewMapKey
 	key.sourceOrder = selection.sourceOrder
 	selection.sourceOrder++
 	selection.retainedKeyBytes += len(key.text)
-	for _, retained := range selection.keys {
-		if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
-			selection.err = errLifecyclePreviewMapKeyOrderingBounds
-			return selection.err
+	if key.textTruncated || selection.truncatedSelected != 0 {
+		for _, retained := range selection.keys {
+			if lifecyclePreviewMapKeyOrderAmbiguous(retained, key) {
+				selection.err = errLifecyclePreviewMapKeyOrderingBounds
+				return selection.err
+			}
 		}
 	}
-	selection.keys = lifecycleInsertPreviewMapKey(selection.keys, key, selection.limit)
+	selection.addSelectedKey(key)
 	if !validate {
 		return nil
 	}
@@ -1762,6 +1768,67 @@ func (selection *lifecyclePreviewMapKeySelection) add(key lifecyclePreviewMapKey
 	return nil
 }
 
+// addSelectedKey retains the smallest limit keys in a max-heap. This keeps
+// selection work logarithmic in the preview width instead of shifting a sorted
+// slice for every map entry.
+func (selection *lifecyclePreviewMapKeySelection) addSelectedKey(key lifecyclePreviewMapKey) {
+	if selection.limit <= 0 {
+		return
+	}
+	if len(selection.keys) < selection.limit {
+		selection.keys = append(selection.keys, key)
+		if key.textTruncated {
+			selection.truncatedSelected++
+		}
+		index := len(selection.keys) - 1
+		for index > 0 {
+			parent := (index - 1) / 2
+			if !lifecyclePreviewMapKeyLess(selection.keys[parent], selection.keys[index]) {
+				break
+			}
+			selection.keys[parent], selection.keys[index] = selection.keys[index], selection.keys[parent]
+			index = parent
+		}
+		return
+	}
+	if !lifecyclePreviewMapKeyLess(key, selection.keys[0]) {
+		return
+	}
+	if selection.keys[0].textTruncated {
+		selection.truncatedSelected--
+	}
+	selection.keys[0] = key
+	if key.textTruncated {
+		selection.truncatedSelected++
+	}
+	selection.siftSelectedDown(0, len(selection.keys))
+}
+
+func (selection *lifecyclePreviewMapKeySelection) siftSelectedDown(root, end int) {
+	for {
+		child := root*2 + 1
+		if child >= end {
+			return
+		}
+		if right := child + 1; right < end && lifecyclePreviewMapKeyLess(selection.keys[child], selection.keys[right]) {
+			child = right
+		}
+		if !lifecyclePreviewMapKeyLess(selection.keys[root], selection.keys[child]) {
+			return
+		}
+		selection.keys[root], selection.keys[child] = selection.keys[child], selection.keys[root]
+		root = child
+	}
+}
+
+// sortKeys converts the max-heap into ascending canonical order in-place.
+func (selection *lifecyclePreviewMapKeySelection) sortKeys() {
+	for end := len(selection.keys) - 1; end > 0; end-- {
+		selection.keys[0], selection.keys[end] = selection.keys[end], selection.keys[0]
+		selection.siftSelectedDown(0, end)
+	}
+}
+
 func (selection *lifecyclePreviewMapKeySelection) validationKeysAfterSelected() []lifecyclePreviewMapKey {
 	if len(selection.keys) == 0 || len(selection.validationKeys) == 0 {
 		return nil
@@ -1774,19 +1841,6 @@ func (selection *lifecyclePreviewMapKeySelection) validationKeysAfterSelected() 
 		return lifecyclePreviewMapKeyLess(cursor, selection.validationKeys[i])
 	})
 	return selection.validationKeys[first:]
-}
-
-func lifecycleInsertPreviewMapKey(keys []lifecyclePreviewMapKey, key lifecyclePreviewMapKey, limit int) []lifecyclePreviewMapKey {
-	index := sort.Search(len(keys), func(i int) bool { return lifecyclePreviewMapKeyLess(key, keys[i]) })
-	if len(keys) >= limit && index >= limit {
-		return keys
-	}
-	if len(keys) < limit {
-		keys = append(keys, lifecyclePreviewMapKey{})
-	}
-	copy(keys[index+1:], keys[index:len(keys)-1])
-	keys[index] = key
-	return keys
 }
 
 type lifecyclePreviewMapKey struct {
@@ -2051,6 +2105,17 @@ func lifecycleReflectValueMayMarshalErrorSeen(value reflect.Value, active map[li
 				return true
 			}
 			keyUsesTextMarshaler = true
+		}
+		if typeOf == reflect.TypeFor[map[string]any]() && value.CanInterface() {
+			for _, item := range value.Interface().(map[string]any) {
+				if item == nil {
+					continue
+				}
+				if indirections >= lifecyclePreviewMaxDepth || lifecycleReflectValueMayMarshalErrorSeen(reflect.ValueOf(item), active, indirections+1) {
+					return true
+				}
+			}
+			return false
 		}
 		iterator := value.MapRange()
 		for iterator.Next() {

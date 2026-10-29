@@ -484,6 +484,56 @@ func BenchmarkRenderLifecycleEventsDecodedPayloads(b *testing.B) {
 	}
 }
 
+func BenchmarkRenderLifecycleEventsDecodedPayloadsAdditionalShapes(b *testing.B) {
+	ordinaryPayload, err := json.Marshal(lifecycleBenchmarkPayload(1<<10, "ASCII"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	fixtures := []struct {
+		name       string
+		payload    json.RawMessage
+		eventCount int
+	}{
+		{name: "small/1_event", payload: json.RawMessage(`{"status":"completed","attempt":2,"ok":true}`), eventCount: 1},
+		{name: "ordinary_burst/100_events", payload: ordinaryPayload, eventCount: 100},
+	}
+	for _, fixture := range fixtures {
+		events, payloadBytes, err := lifecycleDecodedBackendEventsFromPayload(fixture.payload, fixture.eventCount)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Run(fixture.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(payloadBytes))
+			b.ResetTimer()
+			b.ReportMetric(float64(fixture.eventCount), "events/op")
+			b.ReportMetric(float64(payloadBytes), "payload-bytes/op")
+			for i := 0; i < b.N; i++ {
+				lifecycleBenchmarkSink = renderLifecycleEvents(client.Task{ID: "task-1"}, client.LifecycleExecution{ID: "execution-1"}, events)
+			}
+		})
+	}
+}
+
+func BenchmarkLifecyclePreviewMapKeySelection(b *testing.B) {
+	values := make(map[string]any, 64<<10/16)
+	for i := 0; i < 64<<10/16; i++ {
+		values[fmt.Sprintf("key-%08d", i)] = float64(i)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		selection := newLifecyclePreviewMapKeySelection(len(values), 97)
+		for key := range values {
+			candidate := lifecyclePreviewNativeStringKeyWithBudget(key, selection.retainedBudget())
+			if err := selection.add(candidate, false); err != nil {
+				b.Fatal(err)
+			}
+		}
+		selection.sortKeys()
+	}
+}
+
 type lifecycleBackendWireEvent struct {
 	ID        string          `json:"id"`
 	Seq       int             `json:"seq"`
@@ -497,6 +547,10 @@ func lifecycleDecodedBackendEvents(payloadSize, eventCount int) ([]client.Lifecy
 	if err != nil {
 		return nil, 0, fmt.Errorf("marshal lifecycle backend payload: %w", err)
 	}
+	return lifecycleDecodedBackendEventsFromPayload(payload, eventCount)
+}
+
+func lifecycleDecodedBackendEventsFromPayload(payload json.RawMessage, eventCount int) ([]client.LifecycleEvent, int, error) {
 	wire := make([]lifecycleBackendWireEvent, eventCount)
 	for i := range wire {
 		wire[i] = lifecycleBackendWireEvent{
@@ -763,6 +817,62 @@ func TestLifecyclePayloadSummaryMatchesCanonicalJSON(t *testing.T) {
 		if got, want := lifecyclePayloadSummary(payload), truncate(string(encoded), 96); got != want {
 			t.Errorf("lifecyclePayloadSummary(%v) = %q, want canonical preview %q", payload, got, want)
 		}
+	}
+}
+
+func TestLifecyclePayloadSummaryCanonicalMapSelectionOrder(t *testing.T) {
+	small := map[string]any{
+		"z":      nil,
+		"éclair": "café 日本語",
+		"a":      []any{nil, true, float64(2), "<tag> & line\n"},
+		"日本語":    map[string]any{"β": float64(1), "α": "e\u0301"},
+		"middle": false,
+	}
+	assertCanonical := func(name string, payload map[string]any) string {
+		t.Helper()
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("marshal %s fixture: %v", name, err)
+		}
+		want := truncate(string(encoded), 96)
+		if got := lifecyclePayloadSummary(payload); got != want {
+			t.Fatalf("%s preview = %q, want canonical JSON prefix %q", name, got, want)
+		}
+		return want
+	}
+	assertCanonical("small shuffled Unicode", small)
+
+	keys := make([]string, 0, 180)
+	large := make(map[string]any, 180)
+	for i := 0; i < 180; i++ {
+		key := fmt.Sprintf("entry-%03d", i)
+		if i%7 == 0 {
+			key = fmt.Sprintf("漢字-%03d", i)
+		}
+		keys = append(keys, key)
+		var value any
+		switch i % 5 {
+		case 0:
+			value = nil
+		case 1:
+			value = fmt.Sprintf("value-%03d café", i)
+		case 2:
+			value = float64(i)
+		case 3:
+			value = []any{true, nil, map[string]any{"nested": "日本語"}}
+		default:
+			value = map[string]any{"scalar": false, "text": "line\nvalue"}
+		}
+		large[key] = value
+	}
+	want := assertCanonical("large shuffled Unicode", large)
+
+	shuffled := make(map[string]any, len(large))
+	for i := len(keys) - 1; i >= 0; i-- {
+		shuffled[keys[i]] = large[keys[i]]
+	}
+	if got := assertCanonical("large reverse insertion", shuffled); got != want {
+		t.Fatalf("canonical preview changed with insertion order: %q != %q", got, want)
 	}
 }
 
