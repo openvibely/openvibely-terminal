@@ -1633,8 +1633,10 @@ func TestCLITaskAttachmentsDeleteResolvesBeforeForceAndRefreshes(t *testing.T) {
 				if strings.Contains(err.Error(), "--force") {
 					t.Fatalf("resolution error was hidden by force guidance: %v", err)
 				}
-				if rec.count("DELETE", "/attachments/att-1") != 0 || rec.count("DELETE", "/attachments/att-2") != 0 || rec.count("DELETE", "/attachments/att-3") != 0 {
-					t.Fatalf("invalid reference sent DELETE:\n%s", rec.all())
+				for _, request := range rec.urlsSnapshot() {
+					if strings.HasPrefix(request, "DELETE ") {
+						t.Fatalf("invalid reference sent DELETE request %q:\n%s", request, rec.all())
+					}
 				}
 				if got := rec.count("GET", "/tasks/t-1"); (got > 0) != tc.wantAttachmentGet {
 					t.Fatalf("task attachment reads = %d, wantAttachmentRead=%t; calls:\n%s", got, tc.wantAttachmentGet, rec.all())
