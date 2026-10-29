@@ -8308,8 +8308,98 @@ func channelMutationCompletionRules() []commandCompletion {
 	return rules
 }
 
+type channelRootAction struct {
+	action      string
+	args        string
+	description string
+}
+
+func channelRootActionDefinitions() []channelRootAction {
+	return []channelRootAction{
+		{action: "list", description: "list safe channel identity and connection state"},
+		{action: "show", args: "<channel>", description: "show safe channel details"},
+		{action: "add", args: "<type> <options>", description: "configure a new channel"},
+		{action: "connect", args: "<github|slack>", description: "start browser authorization and explain how to check connection status"},
+		{action: "edit", args: "<channel> <options>", description: "update channel settings"},
+		{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, X, or Email"},
+		{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
+		{action: "disconnect", args: "<github|slack>", description: "disconnect credentials without removing other configuration (confirmation required)"},
+		{action: "access", args: "<telegram|slack|discord|x|email|github> <list|add|remove> [identity] [display name]", description: "manage authorized inbound access identities"},
+		{action: "targets", description: "manage saved outbound message destinations"},
+		{action: "webhooks", args: "[action]", description: "manage inbound webhook endpoints"},
+	}
+}
+
+func channelRootActionNames(definitions []channelRootAction) []string {
+	actions := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		actions = append(actions, definition.action)
+	}
+	return actions
+}
+
+func channelRootActionUsages(definitions []channelRootAction) []commandActionUsage {
+	actions := channelRootActionNames(definitions)
+	usages := make([]commandActionUsage, 0, len(definitions)+1)
+	usages = append(usages, commandActionUsage{args: "[" + strings.Join(actions, "|") + "]"})
+	for _, definition := range definitions {
+		usages = append(usages, commandActionUsage{
+			action:      definition.action,
+			args:        definition.args,
+			description: definition.description,
+		})
+	}
+	return usages
+}
+
+func channelNestedActionUsages() []commandActionUsage {
+	return []commandActionUsage{
+		{action: "targets list", description: "list safe saved destinations"},
+		{action: "targets show", args: "<target>", description: "show one safe saved destination"},
+		{action: "targets add", args: "<platform> <destination> [options]", description: "save a Slack, Telegram, Email, Discord, or X destination"},
+		{action: "targets edit", args: "<target> [options]", description: "edit one saved destination"},
+		{action: "targets test", args: "<target>", description: "test a saved destination"},
+		{action: "targets test draft", args: "<platform> <destination> [options]", description: "test an unsaved destination"},
+		{action: "targets remove", args: "<target>", description: "remove one saved destination (confirmation required)"},
+		{action: "targets policy", args: "[show|on|off]", description: "read or set explicit unsaved-target policy"},
+		{action: "webhooks list", description: "list inbound webhooks"},
+		{action: "webhooks show", args: "<webhook>", description: "show secret-free webhook detail"},
+		{action: "webhooks create", args: "<name> [options]", description: "create an inbound webhook"},
+		{action: "webhooks edit", args: "<webhook> <options>", description: "edit only specified configuration"},
+		{action: "webhooks test", args: "<webhook>", description: "create a synthetic test task"},
+		{action: "webhooks rotate", args: "<webhook>", description: "rotate the webhook secret (confirmation required)"},
+		{action: "webhooks delete", args: "<webhook>", description: "delete a webhook (confirmation required)"},
+		{action: "webhooks delete-bulk", args: "<webhook>...", description: "delete selected webhooks (confirmation required)"},
+	}
+}
+
+func channelActionUsages(definitions []channelRootAction) []commandActionUsage {
+	rootUsages := channelRootActionUsages(definitions)
+	nestedUsages := channelNestedActionUsages()
+	usages := make([]commandActionUsage, 0, len(rootUsages)+len(nestedUsages))
+	for _, usage := range rootUsages {
+		usages = append(usages, usage)
+		if usage.action == "targets" {
+			for _, nested := range nestedUsages {
+				if strings.HasPrefix(nested.action, "targets ") {
+					usages = append(usages, nested)
+				}
+			}
+		}
+		if usage.action == "webhooks" {
+			for _, nested := range nestedUsages {
+				if strings.HasPrefix(nested.action, "webhooks ") {
+					usages = append(usages, nested)
+				}
+			}
+		}
+	}
+	return usages
+}
+
 func channelsCommand() command {
-	actions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}
+	rootActions := channelRootActionDefinitions()
+	actions := channelRootActionNames(rootActions)
 	webhookActions := []string{"list", "show", "create", "edit", "test", "rotate", "delete", "delete-bulk"}
 	completions := channelMutationCompletionRules()
 	completions = append(completions,
@@ -8324,41 +8414,13 @@ func channelsCommand() command {
 		commandCompletion{after: []string{"webhooks"}, values: webhookActions},
 	)
 	completions = append(completions, webhookCompletionRules("webhooks")...)
+	actionUsages := channelActionUsages(rootActions)
 	return command{
 		name: "channels", aliases: []string{"integrations"}, args: "[action] [channel]", actions: actions,
 		selectorPaths: [][]string{{"show"}, {"add"}, {"connect"}, {"edit"}, {"test"}, {"remove"}, {"disconnect"}, {"targets", "show"}, {"targets", "edit"}, {"targets", "test"}, {"targets", "remove"}, {"access", "telegram", "remove"}, {"access", "slack", "remove"}, {"access", "discord", "remove"}, {"access", "x", "remove"}, {"access", "email", "remove"}, {"access", "github", "remove"}, {"webhooks", "show"}, {"webhooks", "edit"}, {"webhooks", "test"}, {"webhooks", "rotate"}, {"webhooks", "delete"}, {"webhooks", "delete-bulk"}},
 		completions:   completions,
 		desc:          "manage GitHub, Slack, Telegram, Discord, X, and Email integrations",
-		actionUsages: []commandActionUsage{
-			{action: "", args: "[list|show|add|connect|edit|test|remove|disconnect|access|targets|webhooks]"},
-			{action: "list", description: "list safe channel identity and connection state"},
-			{action: "show", args: "<channel>", description: "show safe channel details"},
-			{action: "add", args: "<type> <options>", description: "configure a new channel"},
-			{action: "connect", args: "<github|slack>", description: "start browser authorization and explain how to check connection status"},
-			{action: "edit", args: "<channel> <options>", description: "update channel settings"},
-			{action: "test", args: "<channel>", description: "test Slack, Telegram, Discord, X, or Email"},
-			{action: "remove", args: "<channel>", description: "remove channel configuration; Slack uses safe disconnect (confirmation required)"},
-			{action: "disconnect", args: "<github|slack>", description: "disconnect credentials without removing other configuration (confirmation required)"},
-			{action: "access", args: "<telegram|slack|discord|x|email|github> <list|add|remove> [identity] [display name]", description: "manage authorized inbound access identities"},
-			{action: "targets", description: "manage saved outbound message destinations"},
-			{action: "targets list", description: "list safe saved destinations"},
-			{action: "targets show", args: "<target>", description: "show one safe saved destination"},
-			{action: "targets add", args: "<platform> <destination> [options]", description: "save a Slack, Telegram, Email, Discord, or X destination"},
-			{action: "targets edit", args: "<target> [options]", description: "edit one saved destination"},
-			{action: "targets test", args: "<target>", description: "test a saved destination"},
-			{action: "targets test draft", args: "<platform> <destination> [options]", description: "test an unsaved destination"},
-			{action: "targets remove", args: "<target>", description: "remove one saved destination (confirmation required)"},
-			{action: "targets policy", args: "[show|on|off]", description: "read or set explicit unsaved-target policy"},
-			{action: "webhooks", args: "[action]", description: "manage inbound webhook endpoints"},
-			{action: "webhooks list", description: "list inbound webhooks"},
-			{action: "webhooks show", args: "<webhook>", description: "show secret-free webhook detail"},
-			{action: "webhooks create", args: "<name> [options]", description: "create an inbound webhook"},
-			{action: "webhooks edit", args: "<webhook> <options>", description: "edit only specified configuration"},
-			{action: "webhooks test", args: "<webhook>", description: "create a synthetic test task"},
-			{action: "webhooks rotate", args: "<webhook>", description: "rotate the webhook secret (confirmation required)"},
-			{action: "webhooks delete", args: "<webhook>", description: "delete a webhook (confirmation required)"},
-			{action: "webhooks delete-bulk", args: "<webhook>...", description: "delete selected webhooks (confirmation required)"},
-		},
+		actionUsages:  actionUsages,
 		usage: []string{
 			"options: --token, --rich-messages, --auth-mode, --pat, --app-id, --app-slug, --private-key, --api-endpoint",
 			"         --client-id, --client-secret, --app-token, --bot-token-mode, --bot-token, --send-responses",
