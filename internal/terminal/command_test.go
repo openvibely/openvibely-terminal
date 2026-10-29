@@ -2181,26 +2181,96 @@ func TestChannelsCompletionDocumentsManagementOptions(t *testing.T) {
 }
 
 func TestChannelsHelpDocumentsSupportedActions(t *testing.T) {
+	defer func() { cmdPrefix = "/" }()
+	cmdPrefix = "/"
+
 	cmd := lookupCommand("channels")
 	if cmd == nil {
 		t.Fatal("channels command missing")
 	}
 
-	if want := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}; !reflect.DeepEqual(cmd.actions, want) {
-		t.Fatalf("channels actions = %#v, want %#v", cmd.actions, want)
+	wantActions := []string{"list", "show", "add", "connect", "edit", "test", "remove", "disconnect", "access", "targets", "webhooks"}
+	if !reflect.DeepEqual(cmd.actions, wantActions) {
+		t.Fatalf("channels actions = %#v, want %#v", cmd.actions, wantActions)
+	}
+	if got := cmd.completionValues(nil); !reflect.DeepEqual(got, wantActions) {
+		t.Fatalf("root channels completion = %#v, want %#v", got, wantActions)
+	}
+	for _, action := range wantActions {
+		gotAction, _ := splitAction(cmd.actions, []string{action, "operand"})
+		if gotAction != action {
+			t.Errorf("root channels action %q was not recognized (got %q)", action, gotAction)
+		}
 	}
 
+	rootUsages := make([]commandActionUsage, 0, len(wantActions))
+	for _, usage := range cmd.actionUsages {
+		if usage.action != "" && !strings.Contains(usage.action, " ") {
+			rootUsages = append(rootUsages, usage)
+		}
+	}
+	gotRootActions := make([]string, 0, len(rootUsages))
+	for _, usage := range rootUsages {
+		gotRootActions = append(gotRootActions, usage.action)
+	}
+	if !reflect.DeepEqual(gotRootActions, wantActions) {
+		t.Fatalf("root channels help actions = %#v, want %#v", gotRootActions, wantActions)
+	}
+	wantSummaryArgs := "[" + strings.Join(wantActions, "|") + "]"
+	if len(cmd.actionUsages) == 0 {
+		t.Fatal("channels help is missing its root action summary")
+	}
+	if summary := cmd.actionUsages[0]; summary.action != "" || summary.args != wantSummaryArgs {
+		t.Fatalf("root channels summary usage = %#v, want empty action and args %q", summary, wantSummaryArgs)
+	}
+
+	wantSyntax := []string{
+		"channels list",
+		"channels show <channel>",
+		"channels add <type> <options>",
+		"channels connect <github|slack>",
+		"channels edit <channel> <options>",
+		"channels test <channel>",
+		"channels remove <channel>",
+		"channels disconnect <github|slack>",
+		"channels access <telegram|slack|discord|x|email|github> <list|add|remove> [identity] [display name]",
+		"channels targets",
+		"channels webhooks [action]",
+	}
+	if len(rootUsages) != len(wantSyntax) {
+		t.Fatalf("root channels help has %d usages, want %d", len(rootUsages), len(wantSyntax))
+	}
 	help := renderCommandHelp(*cmd)
+	for i, usage := range rootUsages {
+		if got := usage.syntax(cmd.name); got != wantSyntax[i] {
+			t.Errorf("root syntax for %q = %q, want %q", usage.action, got, wantSyntax[i])
+		}
+		if want := "  /" + usage.helpLine(cmd.name); !strings.Contains(help, want) {
+			t.Errorf("/help channels missing root usage %q:\n%s", want, help)
+		}
+	}
+
+	for _, nested := range []struct {
+		action  string
+		operand string
+		help    string
+	}{
+		{action: "targets", operand: "list", help: "/channels targets list"},
+		{action: "webhooks", operand: "create", help: "/channels webhooks create <name> [options]"},
+	} {
+		gotAction, rest := splitAction(cmd.actions, []string{nested.action, nested.operand})
+		if gotAction != nested.action || !reflect.DeepEqual(rest, []string{nested.operand}) {
+			t.Errorf("nested channel path %q %q split as %q %v", nested.action, nested.operand, gotAction, rest)
+		}
+		if slices.Contains(cmd.actions, nested.action+" "+nested.operand) {
+			t.Errorf("nested path %q %q was promoted to a root action", nested.action, nested.operand)
+		}
+		if !strings.Contains(help, nested.help) {
+			t.Errorf("/help channels missing nested syntax %q:\n%s", nested.help, help)
+		}
+	}
+
 	for _, want := range []string{
-		"/channels list",
-		"/channels show <channel>",
-		"/channels add <type> <options>",
-		"/channels connect <github|slack>",
-		"/channels edit <channel> <options>",
-		"/channels test <channel>",
-		"/channels remove <channel>",
-		"/channels disconnect <github|slack>",
-		"/channels access <telegram|slack|discord|x|email|github> <list|add|remove> [identity] [display name]",
 		"Telegram accepts a numeric ID or username", "Discord requires a numeric ID",
 		"Email is normalized before it is authorized",
 		"headless removal requires --force",
