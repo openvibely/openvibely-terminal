@@ -890,6 +890,123 @@ func TestTasksAttachmentsDownloadByUniqueFilenameFromSlashCommand(t *testing.T) 
 	}
 }
 
+const optionLikeAttachmentFilenameRowsHTML = `<div id="attachment-list" data-project-id="p1">
+	<div class="attachment-row"><div><p class="text-sm font-medium">--output</p><p class="text-xs">12 B</p></div><button hx-delete="/attachments/att-output?project_id=p1"></button></div>
+	<div class="attachment-row"><div><p class="text-sm font-medium">-o</p><p class="text-xs">6 B</p></div><button hx-delete="/attachments/att-short-o?project_id=p1"></button></div>
+</div>`
+
+const optionLikeAttachmentIDRowsHTML = `<div id="attachment-list" data-project-id="p1">
+	<div class="attachment-row"><div><p class="text-sm font-medium">option-output.txt</p><p class="text-xs">12 B</p></div><button hx-delete="/attachments/--output?project_id=p1"></button></div>
+	<div class="attachment-row"><div><p class="text-sm font-medium">option-short-o.txt</p><p class="text-xs">6 B</p></div><button hx-delete="/attachments/-o?project_id=p1"></button></div>
+</div>`
+
+func TestTasksAttachmentsDownloadOptionLikeNamesFromSlashCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name, reference, option, attachmentID, payload string
+		rows                                           string
+	}{
+		{name: "long output option filename", reference: "--output", option: "--output", attachmentID: "att-output", payload: "long-option filename bytes", rows: optionLikeAttachmentFilenameRowsHTML},
+		{name: "short output option filename", reference: "-o", option: "-o", attachmentID: "att-short-o", payload: "short-option filename bytes", rows: optionLikeAttachmentFilenameRowsHTML},
+		{name: "long output option ID", reference: "--output", option: "--output", attachmentID: "--output", payload: "long-option ID bytes", rows: optionLikeAttachmentIDRowsHTML},
+		{name: "short output option ID", reference: "-o", option: "-o", attachmentID: "-o", payload: "short-option ID bytes", rows: optionLikeAttachmentIDRowsHTML},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "download.bin")
+			m, rec := dispatchModel(t, map[string]string{
+				"/tasks":                          attachmentTaskBoardHTML,
+				"/tasks/t-1":                      tc.rows,
+				"/attachments/" + tc.attachmentID: tc.payload,
+			})
+
+			line := `/tasks attachments download Refactor | ` + tc.reference + " " + tc.option + ` "` + outPath + `"`
+			m = runLine(t, m, line)
+			got, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatalf("reading downloaded file: %v", err)
+			}
+			if string(got) != tc.payload {
+				t.Fatalf("downloaded file = %q, want %q", got, tc.payload)
+			}
+			if !rec.sawQuery("GET /attachments/" + tc.attachmentID + "?project_id=p1") {
+				t.Fatalf("slash download did not resolve the option-like filename with project scope:\n%s", rec.all())
+			}
+		})
+	}
+}
+
+func TestTasksAttachmentsDownloadOptionLikeNamesFromCLI(t *testing.T) {
+	for _, tc := range []struct {
+		name, reference, option, attachmentID, payload string
+		rows                                           string
+	}{
+		{name: "long output option filename", reference: "--output", option: "--output", attachmentID: "att-output", payload: "long-option filename bytes", rows: optionLikeAttachmentFilenameRowsHTML},
+		{name: "short output option filename", reference: "-o", option: "-o", attachmentID: "att-short-o", payload: "short-option filename bytes", rows: optionLikeAttachmentFilenameRowsHTML},
+		{name: "long output option ID", reference: "--output", option: "--output", attachmentID: "--output", payload: "long-option ID bytes", rows: optionLikeAttachmentIDRowsHTML},
+		{name: "short output option ID", reference: "-o", option: "-o", attachmentID: "-o", payload: "short-option ID bytes", rows: optionLikeAttachmentIDRowsHTML},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "download.bin")
+			c, rec := cliServer(t, map[string]string{
+				"/api/projects":                   cliProjects,
+				"/tasks":                          attachmentTaskBoardHTML,
+				"/tasks/t-1":                      tc.rows,
+				"/attachments/" + tc.attachmentID: tc.payload,
+			})
+			args := []string{"tasks", "attachments", "download", "Refactor", "|", tc.reference, tc.option, outPath}
+			var out bytes.Buffer
+			if err := RunCLI(c, &out, "demo", args, false, false); err != nil {
+				t.Fatalf("CLI attachment download failed: %v\n%s", err, out.String())
+			}
+			got, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatalf("reading downloaded file: %v", err)
+			}
+			if string(got) != tc.payload {
+				t.Fatalf("downloaded file = %q, want %q", got, tc.payload)
+			}
+			if !rec.sawQuery("GET /attachments/" + tc.attachmentID + "?project_id=p1") {
+				t.Fatalf("CLI download did not resolve the option-like filename with project scope:\n%s", rec.all())
+			}
+		})
+	}
+}
+
+func TestTasksAttachmentsDownloadOutputOptionsFailBeforeDownload(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing output value", args: []string{"Refactor", "att-1", "--output"}, want: "usage:"},
+		{name: "repeated output options", args: []string{"Refactor", "att-1", "--output", "first", "-o", "second"}, want: "may only be provided once"},
+		{name: "missing value after escaped attachment", args: []string{"Refactor", "|", "--output", "-o"}, want: "usage:"},
+		{name: "repeated options after escaped attachment", args: []string{"Refactor", "|", "--output", "--output", "first", "-o", "second"}, want: "may only be provided once"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := dispatchModel(t, map[string]string{"/tasks": attachmentTaskBoardHTML, "/tasks/t-1": attachmentRowsHTML})
+			line := "/tasks attachments download " + strings.Join(tc.args, " ")
+			m = runLine(t, m, line)
+			if got := stripANSI(transcript(m)); !strings.Contains(got, tc.want) {
+				t.Fatalf("interactive error = %q, want substring %q", got, tc.want)
+			}
+			if rec.count("GET", "/attachments/att-1") != 0 {
+				t.Fatalf("invalid interactive output options issued a download request:\n%s", rec.all())
+			}
+
+			c, cliRec := cliServer(t, map[string]string{"/api/projects": cliProjects, "/tasks": attachmentTaskBoardHTML, "/tasks/t-1": attachmentRowsHTML})
+			args := append([]string{"tasks", "attachments", "download"}, tc.args...)
+			var out bytes.Buffer
+			err := RunCLI(c, &out, "demo", args, false, false)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CLI error = %v, want substring %q", err, tc.want)
+			}
+			if cliRec.count("GET", "/attachments/att-1") != 0 {
+				t.Fatalf("invalid CLI output options issued a download request:\n%s", cliRec.all())
+			}
+		})
+	}
+}
+
 func TestTasksAttachmentsDownloadDuplicateFilenameIsAmbiguous(t *testing.T) {
 	rows := `<div id="attachment-list" data-project-id="p1">` +
 		`<div class="attachment-row"><p class="font-medium">request.txt</p><p class="text-xs">4 B</p><button hx-delete="/attachments/att-1?project_id=p1"></button></div>` +

@@ -1123,6 +1123,7 @@ func tasksCommand() command {
 		"tasks reviews submit <task>                submit all drafts to the task thread (confirm in TUI; CLI requires --force)",
 	}
 	usage = append(usage, taskAttachmentUsageLines()...)
+	usage = append(usage, "tasks attachments download <task> '|' <attachment> [--output <path>] use this when the attachment ID or filename is --output or -o; in shells quote or escape the pipe")
 	usage = append(usage, []string{
 		"tasks lifecycle <task> [execution]         list executions or show ordered events",
 		"tasks logs <task> [execution]              alias for lifecycle event logs",
@@ -1177,9 +1178,10 @@ func tasksCommand() command {
 		`openvibely-terminal --project demo --force tasks reviews submit "Fix login bug"`,
 		`tasks attachments add "Fix login bug" ./fixtures/request.txt ./fixtures/trace.json`,
 		`tasks attachments download "Fix login bug" request.txt --output ./request.txt`,
+		`tasks attachments download "Fix login bug" '|' --output`,
+
 		`tasks attachments delete "Fix login bug" request.txt`,
-		`tasks lifecycle "Fix login bug"`,
-		`tasks logs "Fix login bug" execution-id`,
+		`tasks lifecycle "Fix login bug"`, `tasks logs "Fix login bug" execution-id`,
 	}, append(taskThreadInputExamples(), []string{
 		`tasks reply "Fix login bug" | PR is up — please review`,
 		`tasks steer "Fix login bug" | Stop and use the new interface`,
@@ -2517,17 +2519,54 @@ func taskAttachmentsDownloadCommand(m Model, c *client.Client, projectID string,
 }
 
 func parseAttachmentDownloadArgs(args []string) ([]string, string, error) {
+	for separator := 1; separator < len(args); separator++ {
+		if args[separator] != "|" {
+			continue
+		}
+		// A pipe immediately after an output option is its legacy path value,
+		// not the escape delimiter.
+		if separator > 0 && isAttachmentOutputOption(args[separator-1]) {
+			continue
+		}
+		if separator+1 >= len(args) || strings.TrimSpace(args[separator+1]) == "" {
+			return nil, "", attachmentDownloadUsageError()
+		}
+		// The explicit separator ends the task reference. The first token after
+		// it is always the literal attachment reference, even when it resembles
+		// an output option; any output option follows that token.
+		options, outputPath, err := parseAttachmentDownloadOptions(args[separator+2:])
+		if err != nil {
+			return nil, "", err
+		}
+		if len(options) != 0 {
+			return nil, "", attachmentDownloadUsageError()
+		}
+		operands := make([]string, 0, separator+1)
+		operands = append(operands, args[:separator]...)
+		operands = append(operands, args[separator+1])
+		return operands, outputPath, nil
+	}
+	return parseAttachmentDownloadOptions(args)
+}
+
+func isAttachmentOutputOption(arg string) bool {
+	return arg == "--output" || arg == "-o"
+}
+
+func parseAttachmentDownloadOptions(args []string) ([]string, string, error) {
 	operands := make([]string, 0, len(args))
 	var outputPath string
+	seenOutput := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--output", "-o":
-			if outputPath != "" {
+			if seenOutput {
 				return nil, "", fmt.Errorf("--output may only be provided once")
 			}
 			if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" {
-				return nil, "", fmt.Errorf("usage: /tasks attachments download <task> <attachment> [--output <path>]")
+				return nil, "", attachmentDownloadUsageError()
 			}
+			seenOutput = true
 			outputPath = args[i+1]
 			i++
 		default:
@@ -2535,6 +2574,10 @@ func parseAttachmentDownloadArgs(args []string) ([]string, string, error) {
 		}
 	}
 	return operands, outputPath, nil
+}
+
+func attachmentDownloadUsageError() error {
+	return fmt.Errorf("usage: /tasks attachments download <task> <attachment> [--output <path>] (use | before an option-like attachment ID or filename, for example: tasks attachments download <task> '|' --output)")
 }
 
 func taskAttachmentDownloadSelector(m Model, c *client.Client, projectID, taskRef, outputPath, usage string) (Model, tea.Cmd) {
