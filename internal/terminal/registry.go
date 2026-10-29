@@ -2819,15 +2819,17 @@ func taskAttachmentsDeleteCommand(m Model, c *client.Client, projectID string, a
 		return m, resolveTaskAttachmentTarget(m, c, projectID, args)
 	}
 
+	ctx, cancel := m.commandContext(cmdTimeout)
+	task, attachment, err := lookupTaskAttachmentTargetForModel(m, ctx, c, projectID, args)
+	cancel()
+	if err != nil {
+		return m, errCmd(err.Error())
+	}
 	cmd := m.run("Task Attachments", cmdTimeout, func(ctx context.Context) (string, error) {
-		task, attachment, err := lookupTaskAttachmentTargetForModel(m, ctx, c, projectID, args)
-		if err != nil {
-			return "", err
-		}
 		return deleteTaskAttachmentResult(ctx, c, projectID, task, attachment)
 	})
-	attachmentDisplay := strings.TrimSpace(args[len(args)-1])
-	taskDisplay := strings.TrimSpace(strings.Join(args[:len(args)-1], " "))
+	attachmentDisplay := firstNonEmpty(attachment.FileName, attachment.ID)
+	taskDisplay := firstNonEmpty(task.Title, task.ID)
 	return confirmTaskAttachmentDeletionWithLabels(m, attachmentDisplay, taskDisplay, cmd)
 }
 
@@ -2884,6 +2886,8 @@ func confirmTaskAttachmentDeletion(m Model, projectID string, task client.Task, 
 }
 
 func confirmTaskAttachmentDeletionWithLabels(m Model, attachmentLabel, taskLabel string, cmd tea.Cmd) (Model, tea.Cmd) {
+	attachmentLabel = sanitizeAutomationDetailText(attachmentLabel)
+	taskLabel = sanitizeAutomationDetailText(taskLabel)
 	return confirmOr(m,
 		fmt.Sprintf("Delete attachment %q from task %q? %s", attachmentLabel, taskLabel, confirmCancelInstruction),
 		fmt.Sprintf("use --force to confirm deletion of attachment %q", attachmentLabel),
@@ -2928,7 +2932,7 @@ func deleteTaskAttachmentResult(ctx context.Context, c *client.Client, projectID
 	if err != nil {
 		return "", err
 	}
-	status := fmt.Sprintf("deleted attachment %q from %s", attachment.FileName, firstNonEmpty(task.Title, task.ID))
+	status := fmt.Sprintf("deleted attachment %q from %s", sanitizeAutomationDetailText(firstNonEmpty(attachment.FileName, attachment.ID)), sanitizeAutomationDetailText(firstNonEmpty(task.Title, task.ID)))
 	return renderTaskAttachmentsResult(remaining, status)
 }
 
