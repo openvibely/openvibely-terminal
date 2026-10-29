@@ -3697,6 +3697,22 @@ func bulkDeleteConfirmationPrompt(count int, singularNoun, pluralNoun string, ta
 	return fmt.Sprintf("Delete %d selected %s: %s? %s", count, noun, strings.Join(targets, ", "), confirmCancelInstruction)
 }
 
+// bulkDeleteTargetLabel formats already-sanitized resource identity fields for
+// bulk deletion confirmations. Resource-specific sanitization and fallback
+// wording stay with each caller.
+func bulkDeleteTargetLabel(name, id, fallback string) string {
+	switch {
+	case name != "" && id != "":
+		return fmt.Sprintf("%q (%s)", name, id)
+	case id != "":
+		return id
+	case name != "":
+		return fmt.Sprintf("%q", name)
+	default:
+		return fallback
+	}
+}
+
 // alertBulkDeleteConfirmation names every resolved target so an interactive
 // confirmation describes the canonical alerts captured for deletion.
 func alertBulkDeleteConfirmation(alerts []client.Alert) string {
@@ -3704,16 +3720,7 @@ func alertBulkDeleteConfirmation(alerts []client.Alert) string {
 	for _, alert := range alerts {
 		title := strings.TrimSpace(sanitizeAlertDisplayText(alert.Title))
 		id := strings.TrimSpace(sanitizeAlertDisplayText(alert.ID))
-		switch {
-		case title != "" && id != "":
-			targets = append(targets, fmt.Sprintf("%q (%s)", title, id))
-		case id != "":
-			targets = append(targets, id)
-		case title != "":
-			targets = append(targets, fmt.Sprintf("%q", title))
-		default:
-			targets = append(targets, "(unknown alert)")
-		}
+		targets = append(targets, bulkDeleteTargetLabel(title, id, "(unknown alert)"))
 	}
 	return bulkDeleteConfirmationPrompt(len(alerts), "alert", "alerts", targets)
 }
@@ -9037,16 +9044,7 @@ func webhookBulkDeleteConfirmation(webhooks []client.Webhook) string {
 	for _, webhook := range webhooks {
 		name := strings.TrimSpace(sanitizeAutomationDetailText(webhook.Name))
 		id := strings.TrimSpace(sanitizeAutomationDetailText(webhook.ID))
-		switch {
-		case name != "" && id != "":
-			targets = append(targets, fmt.Sprintf("%q (%s)", name, id))
-		case id != "":
-			targets = append(targets, id)
-		case name != "":
-			targets = append(targets, fmt.Sprintf("%q", name))
-		default:
-			targets = append(targets, "(unknown webhook)")
-		}
+		targets = append(targets, bulkDeleteTargetLabel(name, id, "(unknown webhook)"))
 	}
 	return bulkDeleteConfirmationPrompt(len(webhooks), "webhook", "webhooks", targets)
 }
