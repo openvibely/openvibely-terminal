@@ -170,7 +170,7 @@ func TestSetOutboundTargetPolicyPostsOnlyPolicyFields(t *testing.T) {
 		}
 		posts = append(posts, r.PostForm)
 		for key := range r.PostForm {
-			if strings.HasPrefix(key, "target_") {
+			if strings.HasPrefix(key, "target_") && key != "target_set_present" {
 				t.Fatalf("policy write reposted saved target field %q in %v", key, r.PostForm)
 			}
 		}
@@ -191,7 +191,7 @@ func TestSetOutboundTargetPolicyPostsOnlyPolicyFields(t *testing.T) {
 	if len(requests) != 2 || requests[0] != "POST /channels/send-message-explicit-targets" || requests[1] != "POST /channels/send-message-explicit-targets" {
 		t.Fatalf("requests = %v", requests)
 	}
-	if len(posts) != 2 || posts[0].Get("project_id") != "project-2" || posts[0].Get("enabled") != "true" || posts[1].Get("enabled") != "" {
+	if len(posts) != 2 || posts[0].Get("project_id") != "project-2" || posts[0].Get("enabled") != "true" || posts[1].Get("enabled") != "" || posts[0].Has("target_set_present") || posts[1].Has("target_set_present") {
 		t.Fatalf("policy posts = %#v", posts)
 	}
 }
@@ -460,7 +460,7 @@ func TestSaveOutboundTargetsPreservesBackendFormAndSurfacesValidation(t *testing
 	if err == nil || !strings.Contains(err.Error(), "Duplicate outbound target destination") {
 		t.Fatalf("alert-error save error = %v", err)
 	}
-	if got.Get("project_id") != "project-2" || got.Get("enabled") != "true" || got.Get("target_row_id") != "a" || got.Get("target_target_id") != "C123" || got.Has("target_revision") || got.Has("target_set_present") {
+	if got.Get("project_id") != "project-2" || got.Get("enabled") != "true" || got.Get("target_row_id") != "a" || got.Get("target_target_id") != "C123" || got.Has("target_revision") || got.Get("target_set_present") != "true" {
 		t.Fatalf("submitted form = %v", got)
 	}
 	err = c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, true)

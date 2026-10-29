@@ -130,6 +130,7 @@ func (c *Client) saveOutboundTargets(ctx context.Context, projectID string, targ
 	}
 	form := url.Values{}
 	form.Set("project_id", projectID)
+	form.Set("target_set_present", "true")
 	for _, target := range targets {
 		form.Add("target_row_id", strings.TrimSpace(target.ID))
 		form.Add("target_platform", strings.TrimSpace(target.Platform))
