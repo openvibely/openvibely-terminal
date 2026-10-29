@@ -165,6 +165,7 @@ openvibely-terminal -project demo --force channels access x remove 123456789
 
 ```text
 channels targets list
+channels targets show ops
 channels targets add slack C123 --kind channel --name ops --thread-id 42 --home
 channels targets add slack U123 --kind user --name "Release reviewer"
 channels targets add telegram -1001234567890 --kind chat --name alerts --topic-id 7
@@ -182,7 +183,9 @@ The same registry is available to one-shot CLI callers:
 
 ```bash
 openvibely-terminal -project demo channels targets list
+openvibely-terminal -project demo channels targets show ops
 openvibely-terminal -project demo --json channels targets list
+openvibely-terminal -project demo --json channels targets show ops
 openvibely-terminal -project demo channels targets add slack C123 --kind channel --name ops --thread-id 42 --home
 openvibely-terminal -project demo channels targets add discord 123456789012345678 --kind user --name reviewer
 openvibely-terminal -project demo channels targets edit ops --thread-id 99
@@ -203,6 +206,15 @@ accounts use the corresponding backend forms and normalization. The backend
 remains authoritative for normalization and duplicate validation. Saved and
 draft tests report only `sent` or `failed`, without requiring credentials in the
 terminal or printing backend HTML.
+
+Target add, edit, and remove use the backend's complete replacement form and
+carry the selected project ID on every read and write. The terminal reloads the
+selected project's target set immediately before saving, preserves unrelated
+updates visible in that read, and rejects an edit or confirmed removal if its
+target changed. The backend does not expose a revision or compare-and-swap
+contract, so writes racing after that final read follow replacement semantics:
+the later replacement may overwrite the earlier one. Reload with
+`channels targets list` before retrying a reported stale target.
 
 Read an ID from list or show JSON and pass it as the target reference for a
 later edit or remove. IDs let scripts select one destination when different

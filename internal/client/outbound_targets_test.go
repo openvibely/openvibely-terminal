@@ -14,7 +14,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-const outboundTargetsFixture = `<div id="outbound-targets-section" data-project-id="project-2" data-revision="rev1">
+const outboundTargetsFixture = `<div id="outbound-targets-section" data-project-id="project-2">
 <form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="project-2"><input type="checkbox" name="enabled" value="true" checked></form>
 <table><tbody>
 <tr data-outbound-target-draft-key="target-a"><td>slack</td></tr>
@@ -25,7 +25,7 @@ const outboundTargetsFixture = `<div id="outbound-targets-section" data-project-
 <div data-outbound-target-draft-key="target-b"><input type="hidden" name="target_row_id" value="target-b"><input type="hidden" name="target_platform" value="email"><input type="hidden" name="target_kind" value="email"><input type="hidden" name="target_name" value="client"><input type="hidden" name="target_target_id" value="person@example.com"><input type="hidden" name="target_thread_id" value=""><input type="hidden" name="target_is_home" value="false"><input type="hidden" name="target_default_subject" value="Hello"></div>
 </div></div>`
 
-const emptyOutboundTargetsFixture = `<div id="outbound-targets-section" data-project-id="project-2" data-revision="rev1"><form><input type="hidden" name="project_id" value="project-2"><input type="checkbox" name="enabled" value="true"></form><table><tbody><tr id="outbound-targets-empty-row"><td>No outbound targets saved yet.</td></tr></tbody></table><div id="outbound-targets-draft-fields"></div></div>`
+const emptyOutboundTargetsFixture = `<div id="outbound-targets-section" data-project-id="project-2"><form><input type="hidden" name="project_id" value="project-2"><input type="checkbox" name="enabled" value="true"></form><table><tbody><tr id="outbound-targets-empty-row"><td>No outbound targets saved yet.</td></tr></tbody></table><div id="outbound-targets-draft-fields"></div></div>`
 
 func outboundTargetPolicyFixture(projectID string, allowed bool) string {
 	checked := ""
@@ -58,7 +58,7 @@ func TestGetOutboundTargetsParsesScopedSafeRowsAndPolicy(t *testing.T) {
 		{ID: "target-a", ProjectID: "project-2", Platform: "slack", TargetKind: "channel", Name: "ops", Destination: "C123", TargetID: "C123", ThreadID: "42", Home: true, DefaultSubject: "Deploy"},
 		{ID: "target-b", ProjectID: "project-2", Platform: "email", TargetKind: "email", Name: "client", Destination: "person@example.com", TargetID: "person@example.com", Home: false, DefaultSubject: "Hello"},
 	}
-	if !reflect.DeepEqual(page.Targets, want) || !page.ExplicitUnsavedTargetsAllowed || page.Revision != "rev1" {
+	if !reflect.DeepEqual(page.Targets, want) || !page.ExplicitUnsavedTargetsAllowed {
 		t.Fatalf("page = %#v, want %#v with policy enabled", page, want)
 	}
 	encoded, err := json.Marshal(page.Targets)
@@ -76,23 +76,8 @@ func TestGetOutboundTargetsParsesScopedSafeRowsAndPolicy(t *testing.T) {
 	}
 }
 
-func TestOutboundTargetsRequireRevisionForMutationSafety(t *testing.T) {
-	body := strings.Replace(outboundTargetsFixture, ` data-revision="rev1"`, "", 1)
-	root, err := parseHTML(body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := parseOutboundTargetsPage(root, "project-2"); err == nil || !strings.Contains(err.Error(), "missing its revision") {
-		t.Fatalf("page without revision error = %v, want reload guidance", err)
-	}
-	c := htmlServer(t, outboundTargetsFixture)
-	if err := c.SaveOutboundTargets(context.Background(), "project-2", nil, false, ""); err == nil || !strings.Contains(err.Error(), "reload the target list") {
-		t.Fatalf("save without revision error = %v, want reload guidance", err)
-	}
-}
-
 func TestOutboundTargetsJSONKeepsIDsForSameNamedCrossPlatformTargets(t *testing.T) {
-	body := `<div id="outbound-targets-section" data-project-id="project-2" data-revision="rev1"><form><input name="project_id" value="project-2"></form><table><tbody><tr data-outbound-target-draft-key="slack-id"></tr><tr data-outbound-target-draft-key="email-id"></tr></tbody></table><div id="outbound-targets-draft-fields"><div data-outbound-target-draft-key="slack-id"><input name="target_row_id" value="slack-id"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="shared-name"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="email-id"><input name="target_row_id" value="email-id"><input name="target_platform" value="email"><input name="target_kind" value="email"><input name="target_name" value="shared-name"><input name="target_target_id" value="person@example.com"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div></div>`
+	body := `<div id="outbound-targets-section" data-project-id="project-2"><form><input name="project_id" value="project-2"></form><table><tbody><tr data-outbound-target-draft-key="slack-id"></tr><tr data-outbound-target-draft-key="email-id"></tr></tbody></table><div id="outbound-targets-draft-fields"><div data-outbound-target-draft-key="slack-id"><input name="target_row_id" value="slack-id"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="shared-name"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="email-id"><input name="target_row_id" value="email-id"><input name="target_platform" value="email"><input name="target_kind" value="email"><input name="target_name" value="shared-name"><input name="target_target_id" value="person@example.com"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div></div>`
 	root, err := parseHTML(body)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +198,7 @@ func TestSetOutboundTargetPolicyPostsOnlyPolicyFields(t *testing.T) {
 
 func TestOutboundTargetPolicyRejectsMalformedScopeAndAuth(t *testing.T) {
 	for name, body := range map[string]string{
-		"missing form":  `<div id="outbound-targets-section" data-project-id="project-2" data-revision="rev1"></div>`,
+		"missing form":  `<div id="outbound-targets-section" data-project-id="project-2"></div>`,
 		"wrong project": outboundTargetPolicyFixture("other", true),
 		"bad input":     `<form id="outbound-targets-policy-form"><input type="hidden" name="project_id" value="other"></form>`,
 	} {
@@ -267,7 +252,7 @@ func TestOutboundTargetResponseParsersShareSupportedPlatforms(t *testing.T) {
 				t.Fatalf("page targets = %#v, want first platform %q", page.Targets, platform)
 			}
 
-			canonicalBody := `<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1"><input name="target_row_id" value="target-a"><input name="target_platform" value="` + rawPlatform + `"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div>`
+			canonicalBody := `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="target-a"><input name="target_platform" value="` + rawPlatform + `"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div>`
 			root, err = parseHTML(canonicalBody)
 			if err != nil {
 				t.Fatal(err)
@@ -297,7 +282,7 @@ func TestOutboundTargetResponseParsersShareSupportedPlatforms(t *testing.T) {
 			t.Fatalf("page parser error = %v, want unsupported platform rejection", err)
 		}
 
-		canonicalBody := `<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1"><input name="target_row_id" value="target-a"><input name="target_platform" value="mastodon"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div>`
+		canonicalBody := `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="target-a"><input name="target_platform" value="mastodon"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C123"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div>`
 		root, err = parseHTML(canonicalBody)
 		if err != nil {
 			t.Fatal(err)
@@ -319,7 +304,7 @@ func TestOutboundTargetResponseParsersShareConversionAndValidation(t *testing.T)
 		"target_is_home":         "true",
 		"target_default_subject": "  Release update  ",
 	}
-	canonicalRoot, err := parseHTML(`<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1">` + outboundTargetFieldsHTML(fields) + `</div>`)
+	canonicalRoot, err := parseHTML(`<div id="outbound-target-saved-target" data-project-id="project-2">` + outboundTargetFieldsHTML(fields) + `</div>`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +313,7 @@ func TestOutboundTargetResponseParsersShareConversionAndValidation(t *testing.T)
 		t.Fatalf("canonical parser: %v", err)
 	}
 
-	pageRoot, err := parseHTML(`<div id="outbound-targets-section" data-project-id="project-2" data-revision="rev1"><input name="project_id" value="project-2"><table><tbody><tr data-outbound-target-draft-key="target-a"></tr></tbody></table><div id="outbound-targets-draft-fields"><div data-outbound-target-draft-key="target-a">` + outboundTargetFieldsHTML(fields) + `</div></div></div>`)
+	pageRoot, err := parseHTML(`<div id="outbound-targets-section" data-project-id="project-2"><input name="project_id" value="project-2"><table><tbody><tr data-outbound-target-draft-key="target-a"></tr></tbody></table><div id="outbound-targets-draft-fields"><div data-outbound-target-draft-key="target-a">` + outboundTargetFieldsHTML(fields) + `</div></div></div>`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +353,7 @@ func TestOutboundTargetResponseParsersShareConversionAndValidation(t *testing.T)
 				invalidFields[name] = value
 			}
 			tc.change(invalidFields)
-			canonicalRoot, err := parseHTML(`<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1">` + outboundTargetFieldsHTML(invalidFields) + `</div>`)
+			canonicalRoot, err := parseHTML(`<div id="outbound-target-saved-target" data-project-id="project-2">` + outboundTargetFieldsHTML(invalidFields) + `</div>`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -376,7 +361,7 @@ func TestOutboundTargetResponseParsersShareConversionAndValidation(t *testing.T)
 				t.Fatal("canonical parser accepted invalid target fields")
 			}
 
-			pageRoot, err := parseHTML(`<div id="outbound-targets-section" data-project-id="project-2" data-revision="rev1"><input name="project_id" value="project-2"><table><tbody><tr data-outbound-target-draft-key="target-a"></tr></tbody></table><div data-outbound-target-draft-key="target-a">` + outboundTargetFieldsHTML(invalidFields) + `</div></div>`)
+			pageRoot, err := parseHTML(`<div id="outbound-targets-section" data-project-id="project-2"><input name="project_id" value="project-2"><table><tbody><tr data-outbound-target-draft-key="target-a"></tr></tbody></table><div data-outbound-target-draft-key="target-a">` + outboundTargetFieldsHTML(invalidFields) + `</div></div>`)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -408,26 +393,26 @@ func TestOutboundTargetsRejectMalformedAndDuplicateRows(t *testing.T) {
 	}{
 		{
 			name: "mismatched row ID",
-			body: `<div id="outbound-targets-section" data-project-id="p" data-revision="rev1"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="other"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="a"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
+			body: `<div id="outbound-targets-section" data-project-id="p"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="other"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="a"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
 			want: "mismatched row ID",
 		},
 		{
 			name: "duplicate rows",
-			body: `<div id="outbound-targets-section" data-project-id="p" data-revision="rev1"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr><tr data-outbound-target-draft-key="a"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="a"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="b"><input name="target_target_id" value="C2"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
+			body: `<div id="outbound-targets-section" data-project-id="p"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr><tr data-outbound-target-draft-key="a"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="a"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="b"><input name="target_target_id" value="C2"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
 			want: "duplicate target rows"},
 		{
 			name: "duplicate destinations",
-			body: `<div id="outbound-targets-section" data-project-id="p" data-revision="rev1"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr><tr data-outbound-target-draft-key="b"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="one"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="two"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
+			body: `<div id="outbound-targets-section" data-project-id="p"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr><tr data-outbound-target-draft-key="b"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="one"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="two"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
 			want: "duplicate destinations",
 		},
 		{
 			name: "duplicate names",
-			body: `<div id="outbound-targets-section" data-project-id="p" data-revision="rev1"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr><tr data-outbound-target-draft-key="b"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value=" OPS "><input name="target_target_id" value="C2"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
+			body: `<div id="outbound-targets-section" data-project-id="p"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr><tr data-outbound-target-draft-key="b"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value=" OPS "><input name="target_target_id" value="C2"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
 			want: "duplicate target names",
 		},
 		{
 			name: "mismatched row and field counts",
-			body: `<div id="outbound-targets-section" data-project-id="p" data-revision="rev1"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="other"><input name="target_target_id" value="C2"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
+			body: `<div id="outbound-targets-section" data-project-id="p"><form><input name="project_id" value="p"></form><table><tbody><tr data-outbound-target-draft-key="a"></tr></tbody></table><div data-outbound-target-draft-key="a"><input name="target_row_id" value="a"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="ops"><input name="target_target_id" value="C1"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div><div data-outbound-target-draft-key="b"><input name="target_row_id" value="b"><input name="target_platform" value="slack"><input name="target_kind" value="channel"><input name="target_name" value="other"><input name="target_target_id" value="C2"><input name="target_thread_id" value=""><input name="target_is_home" value="false"><input name="target_default_subject" value=""></div></div>`,
 			want: "mismatched target rows",
 		},
 	}
@@ -471,18 +456,18 @@ func TestSaveOutboundTargetsPreservesBackendFormAndSurfacesValidation(t *testing
 		t.Fatal(err)
 	}
 	target := OutboundTarget{ID: "a", Platform: " Slack ", TargetKind: "channel", Name: "#Ops", Destination: " C123 ", ThreadID: "42", Home: true, DefaultSubject: " Deploy "}
-	err = c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, true, "rev1")
+	err = c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, true)
 	if err == nil || !strings.Contains(err.Error(), "Duplicate outbound target destination") {
 		t.Fatalf("alert-error save error = %v", err)
 	}
-	if got.Get("project_id") != "project-2" || got.Get("enabled") != "true" || got.Get("target_row_id") != "a" || got.Get("target_target_id") != "C123" || got.Get("target_revision") != "rev1" || got.Get("target_set_present") != "true" {
+	if got.Get("project_id") != "project-2" || got.Get("enabled") != "true" || got.Get("target_row_id") != "a" || got.Get("target_target_id") != "C123" || got.Has("target_revision") || got.Has("target_set_present") {
 		t.Fatalf("submitted form = %v", got)
 	}
-	err = c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, true, "rev1")
+	err = c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, true)
 	if err == nil || !strings.Contains(err.Error(), "Duplicate outbound target destination") {
 		t.Fatalf("alert-success save error = %v", err)
 	}
-	if err := c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, false, "rev1"); err != nil {
+	if err := c.SaveOutboundTargets(context.Background(), "project-2", []OutboundTarget{target}, false); err != nil {
 		t.Fatal(err)
 	}
 	if got.Get("enabled") != "" {
@@ -491,7 +476,7 @@ func TestSaveOutboundTargetsPreservesBackendFormAndSurfacesValidation(t *testing
 }
 
 func TestSaveOutboundTargetsWithResultParsesCanonicalTargetSafely(t *testing.T) {
-	body := `<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1" data-token="secret"><input name="target_row_id" value="internal-row"><input name="target_platform" value="EMAIL"><input name="target_kind" value="EMAIL"><input name="target_name" value="Canonical name"><input name="target_target_id" value="person@example.com"><input name="target_thread_id" value="7"><input name="target_is_home" value="true"><input name="target_default_subject" value="Canonical subject"><input name="channel_token" value="provider-secret"></div>`
+	body := `<div id="outbound-target-saved-target" data-project-id="project-2" data-token="secret"><input name="target_row_id" value="internal-row"><input name="target_platform" value="EMAIL"><input name="target_kind" value="EMAIL"><input name="target_name" value="Canonical name"><input name="target_target_id" value="person@example.com"><input name="target_thread_id" value="7"><input name="target_is_home" value="true"><input name="target_default_subject" value="Canonical subject"><input name="channel_token" value="provider-secret"></div>`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/channels/send-message-explicit-targets" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.RequestURI())
@@ -504,7 +489,7 @@ func TestSaveOutboundTargetsWithResultParsesCanonicalTargetSafely(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false, "rev1")
+	page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -531,10 +516,10 @@ func TestSaveOutboundTargetsWithResultParsesCanonicalTargetSafely(t *testing.T) 
 func TestSaveOutboundTargetsWithResultRejectsMalformedCanonicalResponse(t *testing.T) {
 	for name, body := range map[string]string{
 		"wrong project":      `<div id="outbound-target-saved-target" data-project-id="other"><input name="target_row_id" value="a"></div>`,
-		"missing fields":     `<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1"><input name="target_row_id" value="a"></div>`,
-		"missing target ID":  `<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1"></div>`,
-		"empty target ID":    `<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1"><input name="target_row_id" value="  "></div>`,
-		"duplicate wrappers": `<div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1"><input name="target_row_id" value="a"></div><div id="outbound-target-saved-target" data-project-id="project-2" data-revision="rev1"><input name="target_row_id" value="b"></div>`,
+		"missing fields":     `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="a"></div>`,
+		"missing target ID":  `<div id="outbound-target-saved-target" data-project-id="project-2"></div>`,
+		"empty target ID":    `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="  "></div>`,
+		"duplicate wrappers": `<div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="a"></div><div id="outbound-target-saved-target" data-project-id="project-2"><input name="target_row_id" value="b"></div>`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -546,7 +531,7 @@ func TestSaveOutboundTargetsWithResultRejectsMalformedCanonicalResponse(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false, "rev1")
+			page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false)
 			if err == nil || available || len(page.Targets) != 0 {
 				t.Fatalf("malformed response = %#v, available=%t, err=%v", page, available, err)
 			}
@@ -556,7 +541,7 @@ func TestSaveOutboundTargetsWithResultRejectsMalformedCanonicalResponse(t *testi
 
 func TestSaveOutboundTargetsWithResultKeepsLegacyResponseAsUnavailable(t *testing.T) {
 	c := htmlServer(t, `<div class="alert-success">saved</div>`)
-	page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false, "rev1")
+	page, available, err := c.SaveOutboundTargetsWithResult(context.Background(), "project-2", nil, false)
 	if err != nil || available || page.Targets == nil || len(page.Targets) != 0 {
 		t.Fatalf("legacy result = %#v, available=%t, err=%v", page, available, err)
 	}

@@ -34,7 +34,6 @@ type OutboundTarget struct {
 type OutboundTargetsPage struct {
 	Targets                       []OutboundTarget `json:"targets"`
 	ExplicitUnsavedTargetsAllowed bool             `json:"explicit_unsaved_targets_allowed"`
-	Revision                      string           `json:"-"`
 }
 
 // GetOutboundTargets fetches and parses the project-scoped saved destination
@@ -106,11 +105,13 @@ func (c *Client) SetOutboundTargetPolicy(ctx context.Context, projectID string, 
 	return nil
 }
 
-// SaveOutboundTargets submits the same replacement form used by the web UI.
-// Empty IDs are intentionally preserved for new rows so the backend allocates
-// canonical IDs; existing IDs are sent unchanged for edits and removals.
-func (c *Client) SaveOutboundTargets(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool, expectedRevision string) error {
-	_, _, err := c.saveOutboundTargets(ctx, projectID, targets, explicitAllowed, expectedRevision, false)
+// SaveOutboundTargets submits the selected project's complete replacement form,
+// matching the web UI and backend handler. The current backend contract has no
+// revision/CAS field; callers must load the current set before applying changes.
+// Empty IDs are preserved for new rows so the backend allocates canonical IDs;
+// existing IDs are sent unchanged for edits and removals.
+func (c *Client) SaveOutboundTargets(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool) error {
+	_, _, err := c.saveOutboundTargets(ctx, projectID, targets, explicitAllowed, false)
 	return err
 }
 
@@ -118,23 +119,17 @@ func (c *Client) SaveOutboundTargets(ctx context.Context, projectID string, targ
 // canonical saved-target page when the server includes one in its response.
 // A response without that page remains a successful save for compatibility;
 // callers that need persisted fields can then fetch the list.
-func (c *Client) SaveOutboundTargetsWithResult(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool, expectedRevision string) (OutboundTargetsPage, bool, error) {
-	return c.saveOutboundTargets(ctx, projectID, targets, explicitAllowed, expectedRevision, true)
+func (c *Client) SaveOutboundTargetsWithResult(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool) (OutboundTargetsPage, bool, error) {
+	return c.saveOutboundTargets(ctx, projectID, targets, explicitAllowed, true)
 }
 
-func (c *Client) saveOutboundTargets(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool, expectedRevision string, wantCanonical bool) (OutboundTargetsPage, bool, error) {
+func (c *Client) saveOutboundTargets(ctx context.Context, projectID string, targets []OutboundTarget, explicitAllowed bool, wantCanonical bool) (OutboundTargetsPage, bool, error) {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
 		return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, errors.New("project ID is required for outbound targets")
 	}
-	expectedRevision = strings.TrimSpace(expectedRevision)
-	if expectedRevision == "" {
-		return OutboundTargetsPage{Targets: make([]OutboundTarget, 0)}, false, errors.New("outbound target revision is missing; reload the target list before retrying")
-	}
 	form := url.Values{}
 	form.Set("project_id", projectID)
-	form.Set("target_revision", expectedRevision)
-	form.Set("target_set_present", "true")
 	for _, target := range targets {
 		form.Add("target_row_id", strings.TrimSpace(target.ID))
 		form.Add("target_platform", strings.TrimSpace(target.Platform))
@@ -295,10 +290,6 @@ func parseOutboundTargetsPage(root *html.Node, projectID string) (OutboundTarget
 	}
 	if strings.TrimSpace(attr(section, "data-project-id")) != projectID {
 		return page, errors.New("outbound target response does not belong to selected project")
-	}
-	page.Revision = strings.TrimSpace(attr(section, "data-revision"))
-	if page.Revision == "" {
-		return page, errors.New("outbound target response is missing its revision; reload the target list")
 	}
 	projectInputs := findAll(section, func(node *html.Node) bool {
 		return node.Data == "input" && attr(node, "name") == "project_id"
