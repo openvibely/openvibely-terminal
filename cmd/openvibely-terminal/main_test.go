@@ -11,8 +11,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,6 +57,9 @@ func TestParseInterspersedFlags(t *testing.T) {
 		{name: "outer boundary preserves force project name", args: []string{"--", "projects", "edit", "--force", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "--force", "|", "--description", "changed"}},
 		{name: "outer boundary preserves project flag project name", args: []string{"--", "projects", "edit", "--project", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "--project", "|", "--description", "changed"}},
 		{name: "project edit reference separator", args: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}, wantArgs: []string{"projects", "edit", "Alpha", "--name", "Beta", "|", "--description", "changed"}},
+		{name: "attachment separator preserves option-like filename and output option", args: []string{"--project", "demo", "tasks", "attachments", "download", "Refactor", "|", "--output", "--output", "/tmp/out"}, wantProject: "demo", wantArgs: []string{"tasks", "attachments", "download", "Refactor", "|", "--output", "--output", "/tmp/out"}},
+		{name: "attachment separator preserves short option-like filename and output option", args: []string{"tasks", "attachments", "download", "Refactor", "|", "-o", "-o", "/tmp/out"}, wantArgs: []string{"tasks", "attachments", "download", "Refactor", "|", "-o", "-o", "/tmp/out"}},
+
 		{name: "local project directory option after pipe path", args: []string{"projects", "create", "My", "Project", "|", `C:\Users\me\new repo`, "--create-directory"}, wantArgs: []string{"projects", "create", "My", "Project", "|", `C:\Users\me\new repo`, "--create-directory"}}, {name: "unknown global", args: []string{"--unknown", "chat", "hello"}, wantErr: "flag provided but not defined"},
 		{name: "malformed global", args: []string{"--=value", "chat", "hello"}, wantErr: "bad flag syntax"},
 	}
@@ -163,6 +169,86 @@ func TestInterspersedGlobalFlagsDispatch(t *testing.T) {
 	out := dispatch(t, []string{"tasks", "--project", "openvibely", "--json"})
 	if !json.Valid([]byte(out)) || !strings.Contains(out, `"title":"Task with spaces"`) {
 		t.Fatalf("interspersed task JSON output = %q", out)
+	}
+}
+
+func TestExecutableAttachmentDownloadDelimiterAndOptionLikeNames(t *testing.T) {
+	const attachmentRows = `<div id="attachment-list" data-project-id="p1">
+		<div class="attachment-row"><div><p class="text-sm font-medium">--output</p><p class="text-xs">12 B</p></div><button hx-delete="/attachments/att-output?project_id=p1"></button></div>
+		<div class="attachment-row"><div><p class="text-sm font-medium">-o</p><p class="text-xs">6 B</p></div><button hx-delete="/attachments/att-short-o?project_id=p1"></button></div>
+	</div>`
+	payloads := map[string]string{
+		"/attachments/att-output":  "binary from --output attachment",
+		"/attachments/att-short-o": "binary from -o attachment",
+	}
+	var mu sync.Mutex
+	var downloads []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/projects":
+			_, _ = io.WriteString(w, `{"projects":[{"id":"p1","name":"demo"}]}`)
+		case "/api/tasks/reference-catalog":
+			_, _ = io.WriteString(w, `{"tasks":[{"id":"t-1","project_id":"p1","title":"Refactor","category":"backlog","status":"pending"}]}`)
+		case "/tasks/t-1":
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Errorf("attachment list project_id = %q, want p1", got)
+			}
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = io.WriteString(w, attachmentRows)
+		case "/attachments/att-output", "/attachments/att-short-o":
+			if got := r.URL.Query().Get("project_id"); got != "p1" {
+				t.Errorf("download project_id = %q, want p1", got)
+			}
+			mu.Lock()
+			downloads = append(downloads, r.Method+" "+r.URL.RequestURI())
+			mu.Unlock()
+			_, _ = io.WriteString(w, payloads[r.URL.Path])
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("OPENVIBELY_AUTH_USERNAME", "")
+	t.Setenv("OPENVIBELY_AUTH_PASSWORD", "")
+
+	binary := filepath.Join(t.TempDir(), "openvibely-terminal")
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancelBuild()
+	build := exec.CommandContext(buildCtx, "go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building executable: %v\n%s", err, output)
+	}
+
+	for _, tc := range []struct {
+		name, reference, outputOption string
+	}{
+		{name: "long option filename", reference: "--output", outputOption: "--output"},
+		{name: "short option filename", reference: "-o", outputOption: "-o"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outPath := filepath.Join(t.TempDir(), "download.bin")
+			args := []string{"--server", srv.URL, "--project", "demo", "tasks", "attachments", "download", "Refactor", "|", tc.reference, tc.outputOption, outPath}
+			cmd := exec.CommandContext(t.Context(), binary, args...)
+			cmd.Env = os.Environ()
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("executable download failed: %v\n%s", err, output)
+			}
+			got, err := os.ReadFile(outPath)
+			if err != nil {
+				t.Fatalf("reading executable download: %v", err)
+			}
+			want := payloads[map[string]string{"--output": "/attachments/att-output", "-o": "/attachments/att-short-o"}[tc.reference]]
+			if string(got) != want {
+				t.Fatalf("executable downloaded %q, want %q", got, want)
+			}
+		})
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(downloads) != 2 || downloads[0] != "GET /attachments/att-output?project_id=p1" || downloads[1] != "GET /attachments/att-short-o?project_id=p1" {
+		t.Fatalf("executable download requests = %#v", downloads)
 	}
 }
 
