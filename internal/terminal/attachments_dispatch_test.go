@@ -30,6 +30,11 @@ const refreshedAttachmentRowsHTML = `<div id="attachment-list" data-project-id="
 	<div class="attachment-row"><div><p class="text-sm font-medium">trace.json</p><p class="text-xs">2.0 KB</p></div><button hx-delete="/attachments/att-2?project_id=p1"></button></div>
 </div>`
 
+const ambiguousAttachmentRowsHTML = `<div id="attachment-list" data-project-id="p1">
+	<div class="attachment-row"><div><p class="text-sm font-medium">request.txt</p><p class="text-xs">11 B</p></div><button hx-delete="/attachments/att-1?project_id=p1"></button></div>
+	<div class="attachment-row"><div><p class="text-sm font-medium">request-total.txt</p><p class="text-xs">12 B</p></div><button hx-delete="/attachments/att-3?project_id=p1"></button></div>
+</div>`
+
 const ambiguousAttachmentTaskBoardHTML = `<div>
 	<div class="card" data-task-id="t-alpha" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-alpha" title="Alpha">Alpha</a></div>
 	<div class="card" data-task-id="t-alpha-beta-1" data-task-status="pending" data-task-category="backlog"><a href="/tasks/t-alpha-beta-1" title="Alpha Beta">Alpha Beta</a></div>
@@ -1571,38 +1576,93 @@ func TestCLITaskAttachmentsListPresentationModes(t *testing.T) {
 	}
 }
 
-func TestCLITaskAttachmentsDeleteRequiresForceAndRefreshes(t *testing.T) {
-	t.Run("without force", func(t *testing.T) {
-		c, rec := cliServer(t, map[string]string{
-			"/api/projects": cliProjects,
-			"/tasks":        attachmentTaskBoardHTML,
-		})
-		var out bytes.Buffer
-		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor the API", "monthly report.pdf"}, false, false)
-		if err == nil || !strings.Contains(err.Error(), `use --force to confirm deletion of attachment "monthly report.pdf"`) {
-			t.Fatalf("delete without force error = %v, want raw attachment label and --force guidance", err)
+func TestCLITaskAttachmentsDeleteResolvesBeforeForceAndRefreshes(t *testing.T) {
+	t.Run("invalid references fail before force guidance", func(t *testing.T) {
+		cases := []struct {
+			name              string
+			board             string
+			attachmentPage    string
+			args              []string
+			wantError         string
+			wantAttachmentGet bool
+		}{
+			{
+				name:      "unknown task",
+				board:     attachmentTaskBoardHTML,
+				args:      []string{"Missing task", "att-1"},
+				wantError: "nothing matches",
+			},
+			{
+				name:              "unknown attachment",
+				board:             attachmentTaskBoardHTML,
+				attachmentPage:    attachmentRowsHTML,
+				args:              []string{"Refactor", "missing.txt"},
+				wantError:         "nothing matches",
+				wantAttachmentGet: true,
+			},
+			{
+				name:      "ambiguous task",
+				board:     ambiguousAttachmentTaskBoardHTML,
+				args:      []string{"Alpha", "Beta", "att-1"},
+				wantError: "ambiguous",
+			},
+			{
+				name:              "ambiguous attachment",
+				board:             attachmentTaskBoardHTML,
+				attachmentPage:    ambiguousAttachmentRowsHTML,
+				args:              []string{"Refactor", "req"},
+				wantError:         "ambiguous",
+				wantAttachmentGet: true,
+			},
 		}
-		if rec.saw("DELETE", "/attachments/att-1") {
-			t.Fatal("CLI delete ran without --force")
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				bodies := map[string]string{
+					"/api/projects": cliProjects,
+					"/tasks":        tc.board,
+				}
+				if tc.attachmentPage != "" {
+					bodies["/tasks/t-1"] = tc.attachmentPage
+				}
+				c, rec := cliServer(t, bodies)
+				var out bytes.Buffer
+				err := RunCLI(c, &out, "demo", append([]string{"tasks", "attachments", "delete"}, tc.args...), false, false)
+				if err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.wantError) {
+					t.Fatalf("delete error = %v, want %q", err, tc.wantError)
+				}
+				if strings.Contains(err.Error(), "--force") {
+					t.Fatalf("resolution error was hidden by force guidance: %v", err)
+				}
+				if rec.count("DELETE", "/attachments/att-1") != 0 || rec.count("DELETE", "/attachments/att-2") != 0 || rec.count("DELETE", "/attachments/att-3") != 0 {
+					t.Fatalf("invalid reference sent DELETE:\n%s", rec.all())
+				}
+				if got := rec.count("GET", "/tasks/t-1"); (got > 0) != tc.wantAttachmentGet {
+					t.Fatalf("task attachment reads = %d, wantAttachmentRead=%t; calls:\n%s", got, tc.wantAttachmentGet, rec.all())
+				}
+			})
 		}
 	})
 
-	t.Run("without force keeps raw ID guidance", func(t *testing.T) {
+	t.Run("unique partial attachment uses canonical force guidance", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{
 			"/api/projects": cliProjects,
 			"/tasks":        attachmentTaskBoardHTML,
+			"/tasks/t-1":    attachmentRowsHTML,
 		})
 		var out bytes.Buffer
-		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor", "att-1"}, false, false)
-		if err == nil || !strings.Contains(err.Error(), `use --force to confirm deletion of attachment "att-1"`) {
-			t.Fatalf("delete without force error = %v, want raw attachment ID and --force guidance", err)
+		err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor", "req"}, false, false)
+		if err == nil || !strings.Contains(err.Error(), `use --force to confirm deletion of attachment "request.txt"`) {
+			t.Fatalf("delete without force error = %v, want canonical filename guidance", err)
 		}
-		if rec.saw("DELETE", "/attachments/att-1") {
-			t.Fatal("CLI delete ran without --force")
+		if strings.Contains(err.Error(), `attachment "req"`) {
+			t.Fatalf("force guidance used raw partial attachment reference: %v", err)
+		}
+		if strings.Contains(rec.all(), "DELETE ") {
+			t.Fatalf("CLI delete ran without --force:\n%s", rec.all())
 		}
 	})
 
-	t.Run("with force", func(t *testing.T) {
+	t.Run("forced partial reference deletes resolved attachment and renders refresh", func(t *testing.T) {
 		c, rec := cliServer(t, map[string]string{
 			"/api/projects":      cliProjects,
 			"/tasks":             attachmentTaskBoardHTML,
@@ -1610,14 +1670,17 @@ func TestCLITaskAttachmentsDeleteRequiresForceAndRefreshes(t *testing.T) {
 			"/attachments/att-1": refreshedAttachmentRowsHTML,
 		})
 		var out bytes.Buffer
-		if err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor", "att-1"}, true, false); err != nil {
+		if err := RunCLI(c, &out, "demo", []string{"tasks", "attachments", "delete", "Refactor", "req"}, true, false); err != nil {
 			t.Fatalf("CLI attachment delete failed: %v", err)
 		}
-		if !rec.saw("DELETE", "/attachments/att-1") || !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") {
-			t.Fatalf("forced delete request was missing or unscoped:\n%s", strings.Join(rec.urls, "\n"))
+		if !rec.sawQuery("GET /tasks/t-1?project_id=p1") {
+			t.Fatalf("attachment resolution was not scoped to selected project:\n%s", rec.all())
 		}
-		if !strings.Contains(out.String(), "trace.json") || strings.Count(out.String(), "request.txt") != 1 {
-			t.Fatalf("CLI delete did not print refreshed list:\n%s", out.String())
+		if !rec.sawQuery("DELETE /attachments/att-1?project_id=p1") || rec.count("DELETE", "/attachments/att-1") != 1 || rec.count("DELETE", "/attachments/att-2") != 0 {
+			t.Fatalf("forced delete did not target only the resolved attachment in the selected project:\n%s", rec.all())
+		}
+		if !strings.Contains(out.String(), "trace.json") || strings.Contains(out.String(), "att-1") {
+			t.Fatalf("CLI delete did not render the refreshed attachment list:\n%s", out.String())
 		}
 	})
 
