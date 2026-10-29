@@ -1578,6 +1578,114 @@ func TestBulkDeleteConfirmationResourceTargetFormatting(t *testing.T) {
 	}
 }
 
+func TestAlertBulkDeleteConfirmationTargetFormattingParity(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "name and id",
+			got:  alertBulkDeleteConfirmation([]client.Alert{{Title: `Deploy "prod"`, ID: "a-one"}}),
+			want: `Delete 1 selected alert: "Deploy \"prod\"" (a-one)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "id only",
+			got:  alertBulkDeleteConfirmation([]client.Alert{{ID: "a-one"}}),
+			want: `Delete 1 selected alert: a-one? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "name only",
+			got:  alertBulkDeleteConfirmation([]client.Alert{{Title: "Build"}}),
+			want: `Delete 1 selected alert: "Build"? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "neither",
+			got:  alertBulkDeleteConfirmation([]client.Alert{{}}),
+			want: `Delete 1 selected alert: (unknown alert)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "multiple targets preserve order and all label cases",
+			got: alertBulkDeleteConfirmation([]client.Alert{
+				{Title: `First "quoted"`, ID: "a-first"},
+				{ID: "a-second"},
+				{Title: "Third"},
+				{},
+			}),
+			want: `Delete 4 selected alerts: "First \"quoted\"" (a-first), a-second, "Third", (unknown alert)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "alert display sanitizer",
+			got: alertBulkDeleteConfirmation([]client.Alert{{
+				Title: "\x1b[31mBuild\x1b[0m\u2028Hook\n",
+				ID:    "\x1b[34ma-one\x1b[0m\n",
+			}}),
+			want: `Delete 1 selected alert: "Build Hook" (a-one)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("confirmation = %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWebhookBulkDeleteConfirmationTargetFormattingParity(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{
+			name: "name and id",
+			got:  webhookBulkDeleteConfirmation([]client.Webhook{{Name: `Deploy "prod"`, ID: "w-one"}}),
+			want: `Delete 1 selected webhook: "Deploy \"prod\"" (w-one)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "id only",
+			got:  webhookBulkDeleteConfirmation([]client.Webhook{{ID: "w-one"}}),
+			want: `Delete 1 selected webhook: w-one? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "name only",
+			got:  webhookBulkDeleteConfirmation([]client.Webhook{{Name: "Build"}}),
+			want: `Delete 1 selected webhook: "Build"? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "neither",
+			got:  webhookBulkDeleteConfirmation([]client.Webhook{{}}),
+			want: `Delete 1 selected webhook: (unknown webhook)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "multiple targets preserve order and all label cases",
+			got: webhookBulkDeleteConfirmation([]client.Webhook{
+				{Name: `First "quoted"`, ID: "w-first"},
+				{ID: "w-second"},
+				{Name: "Third"},
+				{},
+			}),
+			want: `Delete 4 selected webhooks: "First \"quoted\"" (w-first), w-second, "Third", (unknown webhook)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+		{
+			name: "automation detail sanitizer",
+			got: webhookBulkDeleteConfirmation([]client.Webhook{{
+				Name: "\x1b[32mBuild\tHook\x1b[0m\n",
+				ID:   "\x1b[34mw-one\x1b[0m\n",
+			}}),
+			want: `Delete 1 selected webhook: "Build Hook" (w-one)? Type 'yes' to confirm or Esc to cancel.`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Fatalf("confirmation = %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseAlertListArgs(t *testing.T) {
 	tests := []struct {
 		name       string
