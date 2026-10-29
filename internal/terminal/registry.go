@@ -139,6 +139,21 @@ func taskMutationAndRender(status string, _ client.TaskBoardMutation, list func(
 	return refreshAndRender(status, list, renderBoard)
 }
 
+func taskActionMutationAndRender(action, taskID, fallbackTitle string, list func() ([]client.Task, error)) (string, error) {
+	status := action + ": " + firstNonEmpty(fallbackTitle, taskID)
+	tasks, err := list()
+	if err != nil {
+		return status, nil
+	}
+	for _, task := range tasks {
+		if task.ID == taskID {
+			status = action + ": " + firstNonEmpty(task.Title, fallbackTitle, taskID)
+			break
+		}
+	}
+	return status + "\n\n" + renderBoard(tasks, ""), nil
+}
+
 func refreshTaskGoalMutation(ctx context.Context, c *client.Client, projectID, status string) (string, error) {
 	tasks, err := c.ListTaskReferences(ctx, projectID)
 	if err != nil {
@@ -1671,25 +1686,7 @@ func tasksCommand() command {
 					return m, resolveTaskDeletion(m, c, pid, ref)
 				}
 				cmd := m.run("Tasks", cmdTimeout, func(ctx context.Context) (string, error) {
-					t, err := resolveTaskForModel(m, ctx, c, pid, ref)
-					if err != nil {
-						return "", err
-					}
-					if err := ctx.Err(); err != nil {
-						return "", err
-					}
-					var mutation client.TaskBoardMutation
-					switch action {
-					case "run":
-						mutation, err = c.RunTaskForProjectWithBoard(ctx, t.ID, pid)
-					case "stop":
-						mutation, err = c.CancelTaskForProjectWithBoard(ctx, t.ID, pid)
-					}
-					if err != nil {
-						return "", err
-					}
-					return taskMutationAndRender(action+": "+t.Title, mutation,
-						func() ([]client.Task, error) { return c.ListTaskReferences(ctx, pid) })
+					return runTaskActionForModel(m, ctx, c, pid, action, ref)
 				})
 				return m, cmd
 
@@ -2194,6 +2191,40 @@ func resolveTaskForModel(m Model, ctx context.Context, c *client.Client, project
 		return *m.reviewPrefillTask, nil
 	}
 	return resolveTask(ctx, c, projectID, ref)
+}
+
+func runTaskActionForModel(m Model, ctx context.Context, c *client.Client, projectID, action, ref string) (string, error) {
+	canonicalID := isCanonicalFullTaskID(ref)
+	taskID := ref
+	fallbackTitle := ""
+	if !canonicalID {
+		task, err := resolveTaskForModel(m, ctx, c, projectID, ref)
+		if err != nil {
+			return "", err
+		}
+		taskID, fallbackTitle = task.ID, task.Title
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	var err error
+	switch action {
+	case "run":
+		_, err = c.RunTaskForProjectWithBoard(ctx, taskID, projectID)
+	case "stop":
+		_, err = c.CancelTaskForProjectWithBoard(ctx, taskID, projectID)
+	default:
+		return "", fmt.Errorf("unsupported task action %q", action)
+	}
+	if err != nil {
+		if canonicalID && client.IsNotFoundError(err) {
+			return "", matchRefNotFoundError{ref: ref}
+		}
+		return "", err
+	}
+	return taskActionMutationAndRender(action, taskID, fallbackTitle,
+		func() ([]client.Task, error) { return c.ListTaskReferences(ctx, projectID) })
 }
 
 func resolvePersonality(ctx context.Context, c *client.Client, projectID, ref string) (client.Personality, error) {

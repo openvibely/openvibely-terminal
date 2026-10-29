@@ -1647,8 +1647,14 @@ func TestTasksRunCanonicalFullIDRefreshesCompactReferences(t *testing.T) {
 	board := `<div data-task-id="` + taskID + `" data-task-status="pending" data-task-category="backlog"><a href="/tasks/` + taskID + `" title="Exact task">Exact task</a></div>`
 	m, rec := dispatchModel(t, map[string]string{"/tasks": board})
 	m = runLine(t, m, "/tasks run "+taskID)
-	if rec.count("GET", "/tasks") != 0 || rec.count("GET", "/api/tasks/reference-catalog") != 2 || rec.count("POST", "/tasks/"+taskID+"/run") != 1 {
-		t.Fatalf("run did not use compact references for resolution and refresh:\n%s", rec.all())
+	if rec.count("GET", "/tasks") != 0 || rec.count("GET", "/api/tasks/reference-catalog") != 1 || rec.count("POST", "/tasks/"+taskID+"/run") != 1 {
+		t.Fatalf("run did not bypass pre-mutation resolution and retain the compact refresh:\n%s", rec.all())
+	}
+	if !rec.sawQuery("POST /tasks/" + taskID + "/run?project_id=p1") {
+		t.Fatalf("canonical run mutation omitted selected project scope: %v", rec.urlsSnapshot())
+	}
+	if !strings.Contains(transcript(m), "run: Exact task") {
+		t.Fatalf("post-mutation title missing:\n%s", transcript(m))
 	}
 }
 
