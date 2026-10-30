@@ -1383,8 +1383,8 @@ func TestSelectorItemReplacementInvalidatesFilterCache(t *testing.T) {
 
 	updated, _ = m.handleSelector(selectorActiveMsg{title: "Items", command: "items open", forcePicker: true, items: newItems})
 	m = updated.(Model)
-	if m.selectorSearch == nil || &m.selectorSearch[0] == &oldSearch[0] {
-		t.Fatal("replacement retained the old selector search backing array")
+	if m.selectorSearch != nil {
+		t.Fatalf("unfiltered replacement eagerly built %d selector search entries", len(m.selectorSearch))
 	}
 	if len(m.selectorItems) == 0 || &m.selectorItems[0] == &oldItemsBacking[0] {
 		t.Fatal("replacement retained the old selector item backing array")
@@ -1397,6 +1397,9 @@ func TestSelectorItemReplacementInvalidatesFilterCache(t *testing.T) {
 		t.Fatalf("replacement returned stale items: %+v", got)
 	}
 	m = m.setSelectorFilter("new")
+	if m.selectorSearch == nil || &m.selectorSearch[0] == &oldSearch[0] {
+		t.Fatal("first filter after replacement reused stale search text")
+	}
 	if got := m.filteredSelectorItems(); len(got) != 2 || got[0].ref != "new-1" || got[1].ref != "new-2" {
 		t.Fatalf("replacement filter returned stale items: %+v", got)
 	}
@@ -1537,6 +1540,46 @@ func TestSelectorEmptyInitialFilterPreservesOriginalSlice(t *testing.T) {
 	}
 	if m.selectorFilter != "" || m.selectorFilteredFor != "" {
 		t.Fatalf("empty initial filter cache = %q/%q, want empty", m.selectorFilter, m.selectorFilteredFor)
+	}
+}
+
+func TestTaskSelectorDefersSearchIndexAndKeepsUnfilteredSelectionIdentity(t *testing.T) {
+	tasks := []client.Task{
+		{ID: "task-first", ProjectID: "p1", Title: "Duplicate title", Category: "backlog", Status: "pending"},
+		{ID: "task-second", ProjectID: "p1", Title: "Duplicate title", Category: "active", Status: "running"},
+	}
+	items := taskSelectorItems(tasks)
+	secondResolvedTask := items[1].resolvedTask
+	m, _ := dispatchModel(t, nil)
+	updated, _ := m.handleSelector(selectorActiveMsg{
+		title:         "Tasks",
+		command:       "tasks reviews add",
+		prefill:       true,
+		prefillSuffix: " | ",
+		forcePicker:   true,
+		items:         items,
+	})
+	m = updated.(Model)
+	if m.selectorSearch != nil {
+		t.Fatalf("unfiltered activation built %d search entries before filtering", len(m.selectorSearch))
+	}
+	view := stripANSI(m.renderSelector())
+	first, second := strings.Index(view, "Duplicate title"), strings.LastIndex(view, "Duplicate title")
+	firstRef, secondRef := strings.Index(view, "task-fir"), strings.Index(view, "task-sec")
+	if first < 0 || second <= first || firstRef < 0 || secondRef <= firstRef {
+		t.Fatalf("unfiltered picker output changed or lost ordered duplicate rows:\n%s", view)
+	}
+
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyDown})
+	m = selKey(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if m.selectorActive {
+		t.Fatal("selector remained active after choosing an unfiltered row")
+	}
+	if m.reviewPrefillTask != secondResolvedTask || m.reviewPrefillTask.ID != "task-second" {
+		t.Fatalf("selected task = %p/%+v, want exact second resolved task %p", m.reviewPrefillTask, m.reviewPrefillTask, secondResolvedTask)
+	}
+	if got, want := m.input.Value(), "/tasks reviews add task-second | "; got != want {
+		t.Fatalf("unfiltered selection input = %q, want %q", got, want)
 	}
 }
 
@@ -2933,6 +2976,10 @@ func BenchmarkSelectorFilterChanges(b *testing.B) {
 			tc := tc
 			b.Run(fmt.Sprintf("items_%d/%s", n, tc.name), func(b *testing.B) {
 				initial := benchmarkSelectorFilterModel(n)
+				// Keep this benchmark focused on filter changes after activation.
+				// The opt-in activation evidence separately measures the deferred
+				// first-index construction.
+				initial.selectorSearch = selectorSearchTexts(initial.selectorItems)
 				filters := []string{tc.filter}
 				if tc.prefix {
 					filters = make([]string, 0, len([]rune(tc.filter)))
