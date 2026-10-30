@@ -209,15 +209,8 @@ func selectorActivationPerfDecodeCatalog(t *testing.T, body []byte) []client.Tas
 }
 
 func selectorActivationPerfActivate(base Model, msg selectorActiveMsg, mode selectorActivationPerfMode) Model {
-	updated, _ := base.handleSelector(msg)
-	active := updated.(Model)
-	if mode == selectorActivationPerfEager {
-		// This reproduces the removed unfiltered activation work after the
-		// common selector setup: one lowercase label/detail/reference index
-		// entry per row.
-		active.selectorSearch = selectorSearchTexts(active.selectorItems)
-	}
-	return active
+	updated, _ := base.handleSelectorWithSearchIndex(msg, mode == selectorActivationPerfEager)
+	return updated.(Model)
 }
 
 func selectorActivationPerfMeasureActivation(base Model, msg selectorActiveMsg, mode selectorActivationPerfMode) selectorActivationPerfSample {
