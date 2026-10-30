@@ -424,5 +424,8 @@ OPENVIBELY_PERF_EVIDENCE=1 go test ./internal/client ./internal/terminal -run '^
 go test ./internal/terminal -run '^$' -bench '^BenchmarkListSkillsWithFilteredContentSerialVsBounded$' -benchtime=10x -benchmem -count=1 -v
 ```
 
+The task picker activation comparison and its separate subsequent-filter
+benchmark are documented in [selector activation performance](docs/selector-activation-performance.md).
+
 See the [development section](docs/user-guide.md#development) for coverage and
 live-backend test instructions.

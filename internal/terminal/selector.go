@@ -202,9 +202,10 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	}
 	m.selectorMulti = msg.multiSelect
 	m.selectorMultiDispatch = msg.multiDispatch
-	if search == nil {
-		search = selectorSearchTexts(msg.items)
-	}
+	// Unfiltered selectors only need the original items for rendering and
+	// selection. Build the lowercase search index on the first non-empty
+	// filter so opening a large picker does not prepare data the user may
+	// never use.
 	m.selectorSearch = search
 	m.selectorFilter = msg.initialFilter
 	m.selectorFilterLower = filterLower
