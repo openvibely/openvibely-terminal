@@ -5709,8 +5709,68 @@ type modelAddOutput struct {
 	AuthorizationURL string            `json:"authorization_url,omitempty"`
 }
 
+type modelAddOptionKind uint8
+
+const (
+	modelAddOptionAPIKeyStdin modelAddOptionKind = iota + 1
+	modelAddOptionOAuth
+	modelAddOptionEndpoint
+	modelAddOptionDefaultMaxTokens
+)
+
+type modelAddOptionDefinition struct {
+	name        string
+	kind        modelAddOptionKind
+	helpValue   string
+	actionValue string
+}
+
+var modelAddOptions = []modelAddOptionDefinition{
+	{name: "--api-key-stdin", kind: modelAddOptionAPIKeyStdin},
+	{name: "--oauth", kind: modelAddOptionOAuth},
+	{name: "--endpoint", kind: modelAddOptionEndpoint, helpValue: "<http(s)://base-url>", actionValue: "<url>"},
+	{name: "--default-max-tokens", kind: modelAddOptionDefaultMaxTokens, helpValue: "<n>", actionValue: "<n>"},
+}
+
 func modelAddOptionNames() []string {
-	return []string{"--api-key-stdin", "--oauth", "--endpoint", "--default-max-tokens"}
+	names := make([]string, len(modelAddOptions))
+	for i, option := range modelAddOptions {
+		names[i] = option.name
+	}
+	return names
+}
+
+func modelAddOptionByName(name string) (modelAddOptionDefinition, bool) {
+	name = strings.ToLower(name)
+	for _, option := range modelAddOptions {
+		if option.name == name {
+			return option, true
+		}
+	}
+	return modelAddOptionDefinition{}, false
+}
+
+func formatModelAddOption(option modelAddOptionDefinition, value string) string {
+	if value == "" {
+		return option.name
+	}
+	return option.name + " " + value
+}
+
+func modelAddHelpOptions() string {
+	options := make([]string, len(modelAddOptions))
+	for i, option := range modelAddOptions {
+		options[i] = formatModelAddOption(option, option.helpValue)
+	}
+	return strings.Join(options, " | ")
+}
+
+func modelAddActionOptions() string {
+	options := make([]string, len(modelAddOptions))
+	for i, option := range modelAddOptions {
+		options[i] = formatModelAddOption(option, option.actionValue)
+	}
+	return strings.Join(options, "|")
 }
 
 func normalizeModelAddProvider(value string) (string, error) {
@@ -5757,18 +5817,22 @@ func parseModelAddArgs(args []string) (modelAddSpec, error) {
 	}
 	endpointSet := false
 	for i := 3; i < len(args); i++ {
-		switch strings.ToLower(args[i]) {
-		case "--api-key-stdin":
+		option, ok := modelAddOptionByName(args[i])
+		if !ok {
+			return modelAddSpec{}, errors.New("unsupported models add option")
+		}
+		switch option.kind {
+		case modelAddOptionAPIKeyStdin:
 			if spec.APIKeyFromStdin {
 				return modelAddSpec{}, errors.New("--api-key-stdin may only be provided once")
 			}
 			spec.APIKeyFromStdin = true
-		case "--oauth":
+		case modelAddOptionOAuth:
 			if spec.OAuth {
 				return modelAddSpec{}, errors.New("--oauth may only be provided once")
 			}
 			spec.OAuth = true
-		case "--endpoint":
+		case modelAddOptionEndpoint:
 			if endpointSet {
 				return modelAddSpec{}, errors.New("--endpoint may only be provided once")
 			}
@@ -5780,7 +5844,7 @@ func parseModelAddArgs(args []string) (modelAddSpec, error) {
 			if spec.Endpoint, err = validateOllamaEndpoint(args[i]); err != nil {
 				return modelAddSpec{}, err
 			}
-		case "--default-max-tokens":
+		case modelAddOptionDefaultMaxTokens:
 			if spec.DefaultMaxTokensSet {
 				return modelAddSpec{}, errors.New("--default-max-tokens may only be provided once")
 			}
@@ -6547,7 +6611,7 @@ func modelsCommand() command {
 		"models add                                  guided provider setup with masked API-key input",
 		"models add <provider> <name> <model> [options] add a provider in one-shot CLI mode",
 		fmt.Sprintf("  providers: %s; API keys require piped --api-key-stdin", modelAddProviderList()),
-		"  options: --api-key-stdin | --oauth | --endpoint <http(s)://base-url> | --default-max-tokens <n>",
+		"  options: " + modelAddHelpOptions(),
 		"models edit <model> [options]               safely update explicit fields of an existing model",
 	}, append(modelEditOptionsUsageLines(),
 		"models default <model>                     set the default model",
@@ -6558,7 +6622,7 @@ func modelsCommand() command {
 	actionUsages := []commandActionUsage{
 		{
 			action:      "add",
-			args:        "<provider> <name> <model> [--api-key-stdin|--oauth|--endpoint <url>|--default-max-tokens <n>]",
+			args:        "<provider> <name> <model> [" + modelAddActionOptions() + "]",
 			description: "add a provider (guided when interactive)",
 		},
 		{
