@@ -1133,7 +1133,6 @@ func tasksCommand() command {
 		"tasks merge <merge|ff|squash> <task>        integrate through the backend (confirm in TUI; CLI requires --force)",
 		"tasks rebase <task>                         rebase the task branch onto its target (confirm in TUI; CLI requires --force)",
 		"tasks reviews [list] <task>                list inline review comments",
-		"tasks reviews add <task> <file>:<line> <comment>",
 		"tasks reviews remove <task> <comment-id|file:line> remove one draft comment",
 		"tasks reviews submit <task>                submit all drafts to the task thread (confirm in TUI; CLI requires --force)",
 	}

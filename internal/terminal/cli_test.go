@@ -2157,6 +2157,76 @@ func TestCLIHelpWorksOffline(t *testing.T) {
 	}
 }
 
+func TestTasksReviewHelpUsesCanonicalSyntaxAcrossModes(t *testing.T) {
+	previousPrefix := cmdPrefix
+	cmdPrefix = "/"
+	t.Cleanup(func() { cmdPrefix = previousPrefix })
+
+	const syntax = "tasks reviews add <task> <file>:<line> <comment>"
+	const example = `tasks reviews add "Fix login bug" internal/auth.go:42 Handle token refresh errors`
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{name: "interactive", prefix: "/"},
+		{name: "CLI", prefix: ""},
+	} {
+		cmdPrefix = tc.prefix
+		if got, want := commandUsage("tasks", "reviews add"), "usage: "+tc.prefix+syntax; got != want {
+			t.Errorf("%s commandUsage = %q, want %q", tc.name, got, want)
+		}
+	}
+
+	cmdPrefix = "/"
+	interactiveModel := newTestModel(t)
+	interactiveModel = runLine(t, interactiveModel, "/help tasks")
+	interactiveHelp := transcript(interactiveModel)
+	if got := strings.Count(interactiveHelp, "/"+syntax); got != 1 {
+		t.Errorf("interactive /help tasks shows review-add syntax %d times, want 1:\n%s", got, interactiveHelp)
+	}
+	for _, want := range []string{
+		"/tasks reviews [list] <task>",
+		"/tasks reviews remove <task> <comment-id|file:line>",
+		"/tasks reviews submit <task>",
+		"remove one uniquely matched draft comment",
+		"submit all drafts as a task-thread follow-up",
+		"/" + example,
+		`/tasks reviews remove "Fix login bug" review-comment-id`,
+		`/tasks reviews submit "Fix login bug"`,
+	} {
+		if !strings.Contains(interactiveHelp, want) {
+			t.Errorf("interactive /help tasks missing %q:\n%s", want, interactiveHelp)
+		}
+	}
+
+	c, err := client.New("http://127.0.0.1:1") // help is local and needs no backend
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "", []string{"help", "tasks"}, false, false); err != nil {
+		t.Fatalf("tasks CLI help failed: %v", err)
+	}
+	cliHelp := out.String()
+	if got := strings.Count(cliHelp, syntax); got != 1 {
+		t.Errorf("CLI help tasks shows review-add syntax %d times, want 1:\n%s", got, cliHelp)
+	}
+	for _, want := range []string{
+		"tasks reviews [list] <task>",
+		"tasks reviews remove <task> <comment-id|file:line>",
+		"tasks reviews submit <task>",
+		"remove one uniquely matched draft comment",
+		"submit all drafts as a task-thread follow-up",
+		example,
+		`tasks reviews remove "Fix login bug" review-comment-id`,
+		`tasks reviews submit "Fix login bug"`,
+	} {
+		if !strings.Contains(cliHelp, want) {
+			t.Errorf("CLI help tasks missing %q:\n%s", want, cliHelp)
+		}
+	}
+}
+
 func TestCLIScheduleHelpDocumentsHourlyAddRepeat(t *testing.T) {
 	c, err := client.New("http://127.0.0.1:1") // nothing listening
 	if err != nil {
