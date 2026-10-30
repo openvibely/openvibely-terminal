@@ -655,6 +655,60 @@ func TestParseAutomationDetailUsesPerMetricEdgeCountProvenance(t *testing.T) {
 	}
 }
 
+func TestParseAutomationDetailDoesNotTreatDetailEdgeAliasesAsGraphEdges(t *testing.T) {
+	const detailRecord = `<div data-automation-live-edge-detail="detail-edge" data-automation-edge="wrong-graph-edge" data-recent="7"><div>Start → Review</div><p>approved</p></div>`
+	tests := []struct {
+		name         string
+		graph        string
+		wantGraphKey string
+	}{
+		{
+			name: "detail only",
+		},
+		{
+			name:         "with separate graph edge",
+			graph:        `<div data-automation-graph-panel><svg><line data-automation-live-edge="actual-edge"></line></svg></div>`,
+			wantGraphKey: "actual-edge",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			detail, err := parseAutomationDetailFromString(`<div id="automation-live" data-automation-id="au-edge-aliases" data-project-id="p1" data-automation-lifecycle-state="active">` + tc.graph + `<div data-automation-live-details-panel><div data-automation-live-edge-details>` + detailRecord + `</div></div></div>`)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.wantGraphKey == "" {
+				if detail.GraphAvailable {
+					t.Fatalf("detail-only fragment established graph availability: %+v", detail)
+				}
+				if len(detail.Edges) != 1 || detail.Edges[0].EdgeKey != "detail-edge" {
+					t.Fatalf("detail-only edge key was not retained: %+v", detail.Edges)
+				}
+				if detail.Edges[0].RecentTransitionCountAvailable || detail.Edges[0].RecentTransitionCount != 0 {
+					t.Fatalf("detail-only graph alias leaked a recent count: %+v", detail.Edges[0])
+				}
+			} else {
+				if !detail.GraphAvailable {
+					t.Fatalf("real graph edge did not establish graph availability: %+v", detail)
+				}
+				if len(detail.Edges) != 1 || detail.Edges[0].EdgeKey != tc.wantGraphKey {
+					t.Fatalf("authoritative graph edges = %+v, want only %q", detail.Edges, tc.wantGraphKey)
+				}
+				if len(detail.UnmatchedEdgeDetails) != 1 || detail.UnmatchedEdgeDetails[0].EdgeKey != "detail-edge" {
+					t.Fatalf("incompatible detail edge was not kept separate: %+v", detail.UnmatchedEdgeDetails)
+				}
+				if detail.Edges[0].RecentTransitionCountAvailable || detail.Edges[0].RecentTransitionCount != 0 {
+					t.Fatalf("detail-only graph alias leaked into graph edge: %+v", detail.Edges[0])
+				}
+			}
+			if detail.EdgeCountsAvailable || detail.CountsAvailable {
+				t.Fatalf("detail-only graph alias established graph counts: edge_counts=%t counts=%t", detail.EdgeCountsAvailable, detail.CountsAvailable)
+			}
+		})
+	}
+}
+
 func TestParseAutomationDetailKeepsGraphAndDetailEdgeAliasesDistinct(t *testing.T) {
 	graphDocument, err := html.Parse(strings.NewReader(`<line class="automation-graph-edge" data-automation-edge="graph-edge" data-automation-live-edge-detail="wrong-detail-edge" data-recent="5"></line>`))
 	if err != nil {

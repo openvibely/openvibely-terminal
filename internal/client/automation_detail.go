@@ -367,11 +367,15 @@ func (extraction *automationDetailExtraction) visitElement(n *html.Node) {
 	if hasAnyHTMLAttr(n, "data-automation-live-node-detail", "data-automation-node-detail") {
 		extraction.nodeDetails = append(extraction.nodeDetails, n)
 	}
-	if hasAnyHTMLAttr(n, "data-automation-live-edge", "data-automation-edge", "data-edge") || strings.Contains(attr(n, "class"), "automation-graph-edge") {
-		extraction.graphEdges = append(extraction.graphEdges, n)
-	}
-	if hasAnyHTMLAttr(n, "data-automation-live-edge-detail", "data-automation-edge-detail") {
+	edgeDetail := hasAnyHTMLAttr(n, "data-automation-live-edge-detail", "data-automation-edge-detail")
+	if edgeDetail {
 		extraction.edgeDetails = append(extraction.edgeDetails, n)
+	}
+	// A detail record can carry graph-only aliases for display or legacy
+	// compatibility. Its explicit detail marker takes precedence so those
+	// aliases cannot create authoritative topology or graph counts.
+	if !edgeDetail && (hasAnyHTMLAttr(n, "data-automation-live-edge", "data-automation-edge", "data-edge") || strings.Contains(attr(n, "class"), "automation-graph-edge")) {
+		extraction.graphEdges = append(extraction.graphEdges, n)
 	}
 	if hasAnyHTMLAttr(n, "data-automation-resource", "data-automation-live-resource", "data-automation-resource-row", "data-automation-resource-item", "data-resource-row") {
 		extraction.resourceRows = append(extraction.resourceRows, n)
