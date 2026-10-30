@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
@@ -43,6 +44,14 @@ type Task struct {
 	// Attachments is a complete pre-upload snapshot when supplied by the task
 	// reference endpoint. Nil means the endpoint did not provide one.
 	Attachments []Attachment `json:"attachments,omitempty"`
+
+	// Pulse metadata is decoded only from optional reference-catalog fields and
+	// deliberately excluded from Task's existing JSON representation.
+	PulseTag           string     `json:"-"`
+	PulseAgentName     string     `json:"-"`
+	PulsePromptPreview string     `json:"-"`
+	PulseCreatedAt     *time.Time `json:"-"`
+	PulseUpdatedAt     *time.Time `json:"-"`
 }
 
 // TaskDetail is the task detail page split into its tabs.
@@ -459,17 +468,22 @@ func decodeTaskReferenceCatalog(raw json.RawMessage) ([]Task, error) {
 }
 
 type taskReferenceCatalogEntry struct {
-	ID           string          `json:"id"`
-	ProjectID    string          `json:"project_id"`
-	Title        string          `json:"title"`
-	Prompt       string          `json:"prompt"`
-	Category     string          `json:"category"`
-	Status       string          `json:"status"`
-	GoalState    string          `json:"goal_state"`
-	Priority     int             `json:"priority,omitempty"`
-	DisplayOrder int             `json:"display_order"`
-	Badges       []string        `json:"badges"`
-	Attachments  json.RawMessage `json:"attachments"`
+	ID            string          `json:"id"`
+	ProjectID     string          `json:"project_id"`
+	Title         string          `json:"title"`
+	Prompt        string          `json:"prompt"`
+	PromptPreview string          `json:"prompt_preview"`
+	Category      string          `json:"category"`
+	Status        string          `json:"status"`
+	GoalState     string          `json:"goal_state"`
+	Priority      int             `json:"priority,omitempty"`
+	Tag           string          `json:"tag"`
+	AgentName     string          `json:"agent_name"`
+	CreatedAt     json.RawMessage `json:"created_at"`
+	UpdatedAt     json.RawMessage `json:"updated_at"`
+	DisplayOrder  int             `json:"display_order"`
+	Badges        []string        `json:"badges"`
+	Attachments   json.RawMessage `json:"attachments"`
 }
 
 func normalizeTaskGoalState(state string) string {
@@ -492,10 +506,23 @@ func decodeTaskReferenceEntries(raw json.RawMessage) ([]Task, error) {
 	}
 	tasks := make([]Task, 0, len(entries))
 	for _, entry := range entries {
+		createdAt, err := decodeOptionalTaskTimestamp(entry.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("decoding task reference created_at: %w", err)
+		}
+		updatedAt, err := decodeOptionalTaskTimestamp(entry.UpdatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("decoding task reference updated_at: %w", err)
+		}
 		task := Task{
 			ID: entry.ID, ProjectID: entry.ProjectID, Title: entry.Title, Prompt: entry.Prompt,
 			Category: entry.Category, Status: entry.Status, GoalState: normalizeTaskGoalState(entry.GoalState), Priority: entry.Priority,
 			DisplayOrder: entry.DisplayOrder, Badges: entry.Badges,
+			PulseTag: strings.TrimSpace(entry.Tag), PulseAgentName: strings.TrimSpace(entry.AgentName),
+			PulsePromptPreview: entry.PromptPreview, PulseCreatedAt: createdAt, PulseUpdatedAt: updatedAt,
+		}
+		if task.PulseTag == "" {
+			task.PulseTag = taskTagFromReferenceBadges(entry.Badges)
 		}
 		var attachments []Attachment
 		if len(entry.Attachments) > 0 && json.Unmarshal(entry.Attachments, &attachments) == nil && attachments != nil {
@@ -506,6 +533,47 @@ func decodeTaskReferenceEntries(raw json.RawMessage) ([]Task, error) {
 		tasks = append(tasks, task)
 	}
 	return tasks, nil
+}
+
+func decodeOptionalTaskTimestamp(raw json.RawMessage) (*time.Time, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil && strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	var value time.Time
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return nil, err
+	}
+	if value.IsZero() {
+		return nil, nil
+	}
+	return &value, nil
+}
+
+func nonZeroTaskTimestamp(value *time.Time) *time.Time {
+	if value == nil || value.IsZero() {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+// The current reference catalog exposes tags only as human-facing badges.
+// These two exact labels are the complete supported task-tag set.
+func taskTagFromReferenceBadges(badges []string) string {
+	for _, badge := range badges {
+		switch strings.TrimSpace(badge) {
+		case "Feature":
+			return "feature"
+		case "Bug":
+			return "bug"
+		}
+	}
+	return ""
 }
 
 // parseTaskCards extracts tasks from rendered kanban cards.

@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 )
@@ -4674,8 +4675,8 @@ type PulseTaskEntry struct {
 	Tag            string     `json:"tag,omitempty"`
 	AgentName      string     `json:"agent_name,omitempty"`
 	PromptPreview  string     `json:"prompt_preview,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	CreatedAt      *time.Time `json:"created_at,omitempty"`
+	UpdatedAt      *time.Time `json:"updated_at,omitempty"`
 	ScheduleID     string     `json:"schedule_id,omitempty"`
 	NextRun        *time.Time `json:"next_run,omitempty"`
 	RepeatType     string     `json:"repeat_type,omitempty"`
@@ -4973,14 +4974,44 @@ func buildPulseProjectionFromCatalog(projectID string, tasks []Task, schedules [
 	return out
 }
 
+const pulsePromptPreviewLimit = 200
+
 func pulseTaskEntryFromTask(task Task) PulseTaskEntry {
-	return PulseTaskEntry{
-		TaskID:   task.ID,
-		Title:    task.Title,
-		Status:   task.Status,
-		Category: task.Category,
-		Priority: task.Priority,
+	preview := task.PulsePromptPreview
+	if strings.TrimSpace(preview) == "" {
+		preview = task.Prompt
 	}
+	tag := strings.TrimSpace(task.PulseTag)
+	if tag == "" {
+		tag = taskTagFromReferenceBadges(task.Badges)
+	}
+	return PulseTaskEntry{
+		TaskID:        task.ID,
+		Title:         task.Title,
+		Status:        task.Status,
+		Category:      task.Category,
+		Priority:      task.Priority,
+		Tag:           tag,
+		AgentName:     strings.TrimSpace(task.PulseAgentName),
+		PromptPreview: boundedPulsePromptPreview(preview),
+		CreatedAt:     nonZeroTaskTimestamp(task.PulseCreatedAt),
+		UpdatedAt:     nonZeroTaskTimestamp(task.PulseUpdatedAt),
+	}
+}
+
+func boundedPulsePromptPreview(prompt string) string {
+	if strings.TrimSpace(prompt) == "" {
+		return ""
+	}
+	end := 0
+	for count := 0; count < pulsePromptPreviewLimit && end < len(prompt); count++ {
+		_, size := utf8.DecodeRuneInString(prompt[end:])
+		if size <= 0 {
+			break
+		}
+		end += size
+	}
+	return strings.Clone(prompt[:end])
 }
 
 func accumulatePulseSummary(summary *PulseTaskSummary, task Task) {
