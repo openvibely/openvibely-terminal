@@ -10000,7 +10000,9 @@ func pulseCommand() command {
 		validateArgs: func(args []string) error { return validateBriefingArgs("pulse", actions, args) },
 		desc:         "briefing on upcoming work",
 		usage: []string{
-			"pulse                                      show the upcoming-work briefing; --json emits structured JSON",
+			"pulse                                      show the upcoming-work briefing; --json emits structured task rows",
+			"  JSON task fields: tag, agent_name, prompt_preview (max 200 code points), created_at, updated_at",
+			"  unavailable optional strings and timestamps are omitted; zero dates are never emitted",
 			"pulse summary                              regenerate the briefing",
 		},
 		examples: []string{

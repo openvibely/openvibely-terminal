@@ -15090,13 +15090,13 @@ func cliPulseJSONServer(t *testing.T, tasksJSON, scheduleHTML string) (*client.C
 }
 
 func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
-	const longPrompt = "this full prompt must not leak into pulse JSON output"
+	longPrompt := strings.Repeat("long prompt ", 25) + "TAIL-MUST-NOT-LEAK"
 	tasksJSON := `{"tasks":[
-		{"id":"run-1","project_id":"p1","title":"Running implementation","prompt":"` + longPrompt + `","category":"active","status":"running","priority":4},
-		{"id":"pending-1","project_id":"p1","title":"Pending follow-up","category":"active","status":"pending","priority":3},
-		{"id":"queued-1","project_id":"p1","title":"Queued follow-up","category":"active","status":"queued","priority":3},
-		{"id":"blocked-1","project_id":"p1","title":"Blocked dependency","category":"active","status":"blocked","priority":2},
-		{"id":"sched-1","project_id":"p1","title":"Scheduled today","category":"scheduled","status":"pending","priority":1}
+		{"id":"run-1","project_id":"p1","title":"Running implementation","prompt":"` + longPrompt + `","category":"active","status":"running","priority":4,"tag":"bug","agent_name":"Build Agent","created_at":"2026-02-03T04:05:06Z","updated_at":"2026-02-04T05:06:07Z"},
+		{"id":"pending-1","project_id":"p1","title":"Pending follow-up","prompt_preview":"pending preview","category":"active","status":"pending","priority":3,"tag":"feature","agent_name":"Plan Agent","created_at":"2026-02-05T06:07:08Z","updated_at":"2026-02-06T07:08:09Z"},
+		{"id":"queued-1","project_id":"p1","title":"Queued follow-up","prompt":"queued preview","category":"active","status":"queued","priority":3,"tag":"bug","agent_name":"Queue Agent","created_at":"2026-02-07T08:09:10Z","updated_at":"2026-02-08T09:10:11Z"},
+		{"id":"blocked-1","project_id":"p1","title":"Blocked dependency","prompt":"blocked preview","category":"active","status":"blocked","priority":2,"tag":"feature","agent_name":"Review Agent","created_at":"2026-02-09T10:11:12Z","updated_at":"2026-02-10T11:12:13Z"},
+		{"id":"sched-1","project_id":"p1","title":"Scheduled today","prompt":"scheduled preview","category":"scheduled","status":"pending","priority":1,"tag":"bug","agent_name":"Schedule Agent","created_at":"2026-02-11T12:13:14Z","updated_at":"2026-02-12T13:14:15Z"}
 	]}`
 	scheduleHTML := `<div id="schedule-content"><div data-date="2026-09-18" data-hour="20"><div data-task-id="sched-1" data-schedule-id="schedule-1" data-schedule-enabled="true"><div class="font-semibold">Scheduled today</div><div class="opacity-60 leading-tight">8:00 PM</div></div></div><div data-date="2026-09-18" data-hour="21"><div data-task-id="paused-1" data-schedule-id="schedule-paused" data-schedule-enabled="false"><div class="font-semibold">Paused schedule</div><div class="opacity-60 leading-tight">9:00 PM</div></div></div></div>`
 	c, rec := cliPulseJSONServer(t, tasksJSON, scheduleHTML)
@@ -15114,8 +15114,8 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 	if rec.saw("GET", "/upcoming") {
 		t.Fatalf("pulse JSON fetched HTML briefing")
 	}
-	if strings.Contains(out.String(), longPrompt) {
-		t.Fatalf("pulse JSON leaked full prompt: %s", out.String())
+	if strings.Contains(out.String(), "TAIL-MUST-NOT-LEAK") {
+		t.Fatalf("pulse JSON leaked the unbounded prompt tail: %s", out.String())
 	}
 
 	var got client.PulseProjection
@@ -15128,11 +15128,46 @@ func TestCLIPulseJSONUsesStructuredProjection(t *testing.T) {
 	if len(got.RunningTasks) != 1 || len(got.PendingTasks) != 1 || len(got.QueuedTasks) != 1 || len(got.BlockedTasks) != 1 || len(got.ScheduledTasks) != 1 {
 		t.Fatalf("pulse task groups = running %d pending %d queued %d blocked %d scheduled %d", len(got.RunningTasks), len(got.PendingTasks), len(got.QueuedTasks), len(got.BlockedTasks), len(got.ScheduledTasks))
 	}
+	checkMetadata := func(entry client.PulseTaskEntry, wantTag, wantAgent, wantPreview, wantCreated, wantUpdated string) {
+		t.Helper()
+		if entry.Tag != wantTag || entry.AgentName != wantAgent || entry.PromptPreview != wantPreview {
+			t.Fatalf("Pulse entry %s metadata = tag %q agent %q preview %q", entry.TaskID, entry.Tag, entry.AgentName, entry.PromptPreview)
+		}
+		created, err := time.Parse(time.RFC3339, wantCreated)
+		if err != nil || entry.CreatedAt == nil || !entry.CreatedAt.Equal(created) {
+			t.Fatalf("Pulse entry %s created_at = %v, want %s (parse error %v)", entry.TaskID, entry.CreatedAt, wantCreated, err)
+		}
+		updated, err := time.Parse(time.RFC3339, wantUpdated)
+		if err != nil || entry.UpdatedAt == nil || !entry.UpdatedAt.Equal(updated) {
+			t.Fatalf("Pulse entry %s updated_at = %v, want %s (parse error %v)", entry.TaskID, entry.UpdatedAt, wantUpdated, err)
+		}
+	}
+	checkMetadata(got.RunningTasks[0], "bug", "Build Agent", string([]rune(longPrompt)[:200]), "2026-02-03T04:05:06Z", "2026-02-04T05:06:07Z")
+	checkMetadata(got.PendingTasks[0], "feature", "Plan Agent", "pending preview", "2026-02-05T06:07:08Z", "2026-02-06T07:08:09Z")
+	checkMetadata(got.QueuedTasks[0], "bug", "Queue Agent", "queued preview", "2026-02-07T08:09:10Z", "2026-02-08T09:10:11Z")
+	checkMetadata(got.BlockedTasks[0], "feature", "Review Agent", "blocked preview", "2026-02-09T10:11:12Z", "2026-02-10T11:12:13Z")
+	checkMetadata(got.ScheduledTasks[0], "bug", "Schedule Agent", "scheduled preview", "2026-02-11T12:13:14Z", "2026-02-12T13:14:15Z")
+	if len([]rune(got.RunningTasks[0].PromptPreview)) != 200 {
+		t.Fatalf("running prompt preview length = %d, want 200 code points", len([]rune(got.RunningTasks[0].PromptPreview)))
+	}
 	if got.ScheduledTasks[0].ScheduleID != "schedule-1" || got.ScheduledTasks[0].NextRun == nil {
 		t.Fatalf("scheduled task missing schedule ID or timing: %+v", got.ScheduledTasks[0])
 	}
 	if strings.Contains(out.String(), "schedule-paused") || strings.Contains(out.String(), "Paused schedule") {
 		t.Fatalf("pulse JSON included disabled schedule: %s", out.String())
+	}
+}
+
+func TestCLIPulseJSONOmitsUnavailableMetadataAndZeroTimestamps(t *testing.T) {
+	c, _ := cliPulseJSONServer(t, `{"tasks":[{"id":"bare-1","project_id":"p1","title":"Bare task","category":"active","status":"running","created_at":"0001-01-01T00:00:00Z","updated_at":""}]}`, `<div id="schedule-content"></div>`)
+	var out bytes.Buffer
+	if err := RunCLI(c, &out, "demo", []string{"pulse"}, false, true); err != nil {
+		t.Fatalf("RunCLI pulse --json: %v", err)
+	}
+	for _, absent := range []string{`"tag"`, `"agent_name"`, `"prompt_preview"`, `"created_at"`, `"updated_at"`, `0001-01-01`} {
+		if strings.Contains(out.String(), absent) {
+			t.Fatalf("pulse JSON included unavailable metadata %s: %s", absent, out.String())
+		}
 	}
 }
 

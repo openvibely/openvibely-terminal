@@ -1354,7 +1354,11 @@ capacity tables. Older servers fall back to the individual JSON capacity routes.
 Pulse still uses the HTML briefing for plain output and `summary`, while `--json pulse` combines the compact task catalog with current- and
 next-week structured schedule card attributes, preferring exact
 `data-schedule-next-run` values and reading schedule-tab `Next:` detail only
-for cards that need exact timing, to avoid chat/model-dependent output. Personality custom detail
+for cards that need exact timing, to avoid chat/model-dependent output.
+
+Pulse task rows include optional `tag`, `agent_name`, `prompt_preview`, `created_at`, and `updated_at` fields when the selected-project task catalog supplies them. `prompt_preview` is limited to the first 200 Unicode code points; the full prompt is never included. Recognized catalog tag badges (`Feature` and `Bug`) are normalized to `feature` and `bug` when a structured `tag` is absent. Empty or unavailable optional strings are omitted. Timestamps are source values and are omitted when unavailable or zero, so Pulse JSON never prints a year-1 placeholder. The current reference-catalog response exposes the prompt preview and tag badge but does not expose structured `agent_name` or task timestamps; those fields will appear when the backend catalog adds them.
+
+Personality custom detail
 and CRUD mutations use the JSON routes listed above. For the HTML screens the
 client:
 

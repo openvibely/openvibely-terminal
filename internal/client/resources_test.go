@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 )
@@ -7430,7 +7431,7 @@ func TestXAuthorizedUsersPreserveAuthTransportAndMalformedDiagnostics(t *testing
 }
 
 func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
-	const longPrompt = "this full prompt must not appear in pulse JSON"
+	longPrompt := strings.Repeat("long prompt ", 25) + "TAIL-MUST-NOT-LEAK"
 	now := time.Now()
 	daysUntilNextSunday := (7 - int(now.Weekday())) % 7
 	if daysUntilNextSunday == 0 {
@@ -7455,11 +7456,11 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"tasks":[
-				{"id":"run-1","project_id":"p1","title":"Running work","prompt":"`+longPrompt+`","category":"active","status":"running","priority":4},
-				{"id":"pending-1","project_id":"p1","title":"Pending work","category":"active","status":"pending","priority":3},
-				{"id":"queued-1","project_id":"p1","title":"Queued work","category":"active","status":"queued","priority":3},
-				{"id":"blocked-1","project_id":"p1","title":"Blocked work","category":"active","status":"blocked","priority":2},
-				{"id":"sched-1","project_id":"p1","title":"Scheduled work","category":"scheduled","status":"pending","priority":1},
+				{"id":"run-1","project_id":"p1","title":"Running work","prompt":"`+longPrompt+`","category":"active","status":"running","priority":4,"tag":"bug","agent_name":"Build Agent","created_at":"2026-02-03T04:05:06Z","updated_at":"2026-02-04T05:06:07Z"},
+				{"id":"pending-1","project_id":"p1","title":"Pending work","prompt_preview":"short pending preview","category":"active","status":"pending","priority":3,"tag":"feature","agent_name":"Plan Agent","created_at":"2026-02-05T06:07:08Z","updated_at":"2026-02-06T07:08:09Z"},
+				{"id":"queued-1","project_id":"p1","title":"Queued work","prompt":"queued preview","category":"active","status":"queued","priority":3,"tag":"bug","agent_name":"Queue Agent","created_at":"2026-02-07T08:09:10Z","updated_at":"2026-02-08T09:10:11Z"},
+				{"id":"blocked-1","project_id":"p1","title":"Blocked work","prompt":"blocked preview","category":"active","status":"blocked","priority":2,"tag":"feature","agent_name":"Review Agent","created_at":"2026-02-09T10:11:12Z","updated_at":"2026-02-10T11:12:13Z"},
+				{"id":"sched-1","project_id":"p1","title":"Scheduled work","prompt":"scheduled preview","category":"scheduled","status":"pending","priority":1,"tag":"bug","agent_name":"Schedule Agent","created_at":"2026-02-11T12:13:14Z","updated_at":"2026-02-12T13:14:15Z"},
 				{"id":"sched-2","project_id":"p1","title":"Next week work","category":"scheduled","status":"pending","priority":1}
 			]}`)
 		case "/schedule":
@@ -7505,6 +7506,24 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	if got.WaitingCount != 2 || got.TaskSummary.Status.Blocked != 1 || got.TaskSummary.Status.Queued != 1 || got.TaskSummary.Category.Scheduled != 2 {
 		t.Fatalf("pulse summary = %+v", got.TaskSummary)
 	}
+	assertMetadata := func(entry PulseTaskEntry, tag, agent, preview, createdAt, updatedAt string) {
+		t.Helper()
+		if entry.Tag != tag || entry.AgentName != agent || entry.PromptPreview != preview {
+			t.Fatalf("task metadata for %s = tag %q agent %q preview %q", entry.TaskID, entry.Tag, entry.AgentName, entry.PromptPreview)
+		}
+		created, err := time.Parse(time.RFC3339, createdAt)
+		if err != nil || entry.CreatedAt == nil || !entry.CreatedAt.Equal(created) {
+			t.Fatalf("task %s created_at = %v, want %s (parse error %v)", entry.TaskID, entry.CreatedAt, createdAt, err)
+		}
+		updated, err := time.Parse(time.RFC3339, updatedAt)
+		if err != nil || entry.UpdatedAt == nil || !entry.UpdatedAt.Equal(updated) {
+			t.Fatalf("task %s updated_at = %v, want %s (parse error %v)", entry.TaskID, entry.UpdatedAt, updatedAt, err)
+		}
+	}
+	assertMetadata(got.RunningTasks[0], "bug", "Build Agent", string([]rune(longPrompt)[:pulsePromptPreviewLimit]), "2026-02-03T04:05:06Z", "2026-02-04T05:06:07Z")
+	assertMetadata(got.PendingTasks[0], "feature", "Plan Agent", "short pending preview", "2026-02-05T06:07:08Z", "2026-02-06T07:08:09Z")
+	assertMetadata(got.QueuedTasks[0], "bug", "Queue Agent", "queued preview", "2026-02-07T08:09:10Z", "2026-02-08T09:10:11Z")
+	assertMetadata(got.BlockedTasks[0], "feature", "Review Agent", "blocked preview", "2026-02-09T10:11:12Z", "2026-02-10T11:12:13Z")
 	seenScheduled := map[string]clientlessPulseSchedule{}
 	for _, task := range got.ScheduledTasks {
 		seenScheduled[task.ScheduleID] = clientlessPulseSchedule{taskID: task.TaskID, nextRun: task.NextRun}
@@ -7515,6 +7534,16 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	if seenScheduled["schedule-2"].taskID != "sched-2" || seenScheduled["schedule-2"].nextRun == nil {
 		t.Fatalf("next-week scheduled task within lookahead not included with timing: %+v", got.ScheduledTasks)
 	}
+	for _, task := range got.ScheduledTasks {
+		switch task.TaskID {
+		case "sched-1":
+			assertMetadata(task, "bug", "Schedule Agent", "scheduled preview", "2026-02-11T12:13:14Z", "2026-02-12T13:14:15Z")
+		case "sched-2":
+			if task.Tag != "" || task.AgentName != "" || task.PromptPreview != "" || task.CreatedAt != nil || task.UpdatedAt != nil {
+				t.Fatalf("scheduled task with absent catalog metadata has populated fields: %+v", task)
+			}
+		}
+	}
 	if _, ok := seenScheduled["schedule-disabled"]; ok {
 		t.Fatalf("disabled schedule included in pulse scheduled tasks: %+v", got.ScheduledTasks)
 	}
@@ -7522,8 +7551,38 @@ func TestGetPulseProjectionBuildsDeterministicProjectScopedJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), longPrompt) {
-		t.Fatalf("pulse JSON leaked full prompt: %s", encoded)
+	if strings.Contains(string(encoded), "TAIL-MUST-NOT-LEAK") {
+		t.Fatalf("pulse JSON leaked the unbounded prompt tail: %s", encoded)
+	}
+	if got := utf8.RuneCountInString(got.RunningTasks[0].PromptPreview); got != pulsePromptPreviewLimit {
+		t.Fatalf("running prompt preview has %d code points, want %d", got, pulsePromptPreviewLimit)
+	}
+}
+
+func TestPulseTagUsesReferenceCatalogBadgeWhenStructuredTagUnavailable(t *testing.T) {
+	entry := pulseTaskEntryFromTask(Task{Badges: []string{"Chain", "Bug", "Urgent"}})
+	if entry.Tag != "bug" {
+		t.Fatalf("pulse tag = %q, want bug from the catalog's exact tag badge", entry.Tag)
+	}
+}
+
+func TestPulseTaskEntryOmitsUnavailableMetadataAndZeroTimestamps(t *testing.T) {
+	entry := pulseTaskEntryFromTask(Task{
+		ID:             "task-without-metadata",
+		Title:          "No optional values",
+		Status:         "pending",
+		Category:       "active",
+		PulseCreatedAt: &time.Time{},
+		PulseUpdatedAt: &time.Time{},
+	})
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, omitted := range []string{`"tag"`, `"agent_name"`, `"prompt_preview"`, `"created_at"`, `"updated_at"`, `0001-01-01`} {
+		if strings.Contains(string(encoded), omitted) {
+			t.Fatalf("Pulse JSON included unavailable metadata %s: %s", omitted, encoded)
+		}
 	}
 }
 
