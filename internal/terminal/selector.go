@@ -133,6 +133,12 @@ func optionSelectorWithFilter(m Model, title, command, usage string, values []st
 // handleSelector applies a selectorActiveMsg: error, empty hint, single-item
 // auto-select, or open the interactive picker.
 func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
+	return m.handleSelectorWithSearchIndex(msg, true)
+}
+
+// handleSelectorWithSearchIndex keeps the production eager-index path explicit
+// while allowing the activation evidence harness to compare a lazy candidate.
+func (m Model) handleSelectorWithSearchIndex(msg selectorActiveMsg, eagerSearchIndex bool) (tea.Model, tea.Cmd) {
 	m.ensureInteractiveModels()
 	if !m.acceptsSessionGeneration(msg.sessionGeneration) || !m.acceptsProjectGeneration(msg.projectGeneration) {
 		return m, nil // stale selector response from an older session or project
@@ -172,9 +178,11 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	matchingCount := len(msg.items)
 	matchingAll := false
 	var search []string
+	if eagerSearchIndex || msg.initialFilter != "" {
+		search = selectorSearchTexts(msg.items)
+	}
 	filterLower := ""
 	if msg.initialFilter != "" {
-		search = selectorSearchTexts(msg.items)
 		filterLower = strings.ToLower(msg.initialFilter)
 		matchingIndexes, matchingAll = matchSelectorIndexesLower(msg.items, search, filterLower, nil, true)
 		matchingCount = len(matchingIndexes)
@@ -202,10 +210,6 @@ func (m Model) handleSelector(msg selectorActiveMsg) (tea.Model, tea.Cmd) {
 	}
 	m.selectorMulti = msg.multiSelect
 	m.selectorMultiDispatch = msg.multiDispatch
-	// Unfiltered selectors only need the original items for rendering and
-	// selection. Build the lowercase search index on the first non-empty
-	// filter so opening a large picker does not prepare data the user may
-	// never use.
 	m.selectorSearch = search
 	m.selectorFilter = msg.initialFilter
 	m.selectorFilterLower = filterLower

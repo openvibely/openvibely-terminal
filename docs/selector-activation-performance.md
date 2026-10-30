@@ -1,9 +1,11 @@
 # Task selector activation performance
 
-The unfiltered task picker used to lowercase and concatenate every row's label,
-detail, and reference while handling the selector activation message. The picker
-now keeps the original ordered items and creates search text when filtering
-starts. Initial filters still build the index during activation.
+The unfiltered task picker lowercases and concatenates every row's label,
+detail, and reference during selector activation. A lazy-index candidate was
+measured against that behavior, but the optimization is not retained: this
+checkout has no observed representative project catalog sizes, so the synthetic
+measurements do not establish that the acceptance threshold applies to a size
+users encounter. Production continues to build the search index during activation.
 
 ## Evidence harness
 
@@ -25,8 +27,8 @@ configured task-count cap.
 
 The test runs 8 warmups and 50 matched samples per implementation and size. It
 alternates eager and lazy order. Isolated activation starts with decoded tasks
-and constructed selector rows, and times `handleSelector`; its allocation
-counts and bytes exclude catalog request/JSON decoding. The end-to-end path
+and constructed selector rows, and times the shared activation handler used by
+production; its allocation counts and bytes exclude catalog request/JSON decoding. The end-to-end path
 starts before selector command execution, requests the JSON catalog from a
 controlled local HTTP server, decodes it, constructs task rows, activates and
 renders the picker. The first-filter path continues through typing `review`
@@ -43,37 +45,41 @@ delay.
 
 | Tasks | Mode | Median | p95 | Allocations/op | Bytes/op | Response bytes |
 |---:|---|---:|---:|---:|---:|---:|
-| 100 | Eager | 43.666 µs | 74.083 µs | 202 | 27,664 | 25,613 |
-| 100 | Lazy | 15.000 µs | 33.959 µs | 1 | 3,072 | 25,613 |
-| 1,000 | Eager | 223.583 µs | 296.708 µs | 2,002 | 247,456 | 256,047 |
-| 1,000 | Lazy | 11.292 µs | 14.959 µs | 1 | 3,072 | 256,047 |
-| 10,000 | Eager | 2.052 ms | 2.341 ms | 20,002 | 2,446,912 | 2,560,368 |
-| 10,000 | Lazy | 12.375 µs | 16.958 µs | 1 | 3,072 | 2,560,368 |
+| 100 | Eager | 26.917 µs | 35.250 µs | 202 | 27,664 | 25,613 |
+| 100 | Lazy | 4.625 µs | 11.292 µs | 1 | 3,072 | 25,613 |
+| 1,000 | Eager | 187.334 µs | 202.417 µs | 2,002 | 247,456 | 256,047 |
+| 1,000 | Lazy | 4.334 µs | 6.958 µs | 1 | 3,072 | 256,047 |
+| 10,000 | Eager | 1.730 ms | 1.989 ms | 20,002 | 2,446,912 | 2,560,368 |
+| 10,000 | Lazy | 4.542 µs | 6.291 µs | 1 | 3,072 | 2,560,368 |
 
-At 100 tasks, median activation was 65.6% lower and allocated bytes were 88.9%
-lower. The count fell from 202 allocations to 1. This passes the 30% latency
-and 40% allocation criteria at the ordinary-size profile.
+For the generated 100-task profile, lazy candidate median activation was 82.8%
+lower and allocated bytes were 88.9% lower; the count fell from 202 allocations
+to 1. Those synthetic results meet the numeric thresholds, but do not satisfy
+the observed-project-size requirement. The optimization therefore remains
+rejected pending measurements from representative project catalogs.
 
 ### Request through visible picker and first filter
 
 | Tasks | Mode | Picker median | Picker p95 | First-filter median | First-filter p95 |
 |---:|---|---:|---:|---:|---:|
-| 100 | Eager | 413.667 µs | 507.375 µs | 427.708 µs | 557.042 µs |
-| 100 | Lazy | 389.708 µs | 500.625 µs | 409.541 µs | 533.625 µs |
-| 1,000 | Eager | 2.241 ms | 3.022 ms | 2.323 ms | 3.390 ms |
-| 1,000 | Lazy | 2.044 ms | 2.814 ms | 2.298 ms | 3.011 ms |
-| 10,000 | Eager | 19.904 ms | 21.694 ms | 20.377 ms | 22.115 ms |
-| 10,000 | Lazy | 17.577 ms | 18.998 ms | 20.317 ms | 21.684 ms |
+| 100 | Eager | 286.625 µs | 323.250 µs | 292.542 µs | 337.791 µs |
+| 100 | Lazy | 267.833 µs | 297.458 µs | 291.333 µs | 334.875 µs |
+| 1,000 | Eager | 1.699 ms | 1.751 ms | 1.723 ms | 1.790 ms |
+| 1,000 | Lazy | 1.490 ms | 1.545 ms | 1.733 ms | 1.792 ms |
+| 10,000 | Eager | 15.505 ms | 16.007 ms | 15.832 ms | 16.442 ms |
+| 10,000 | Lazy | 13.750 ms | 14.127 ms | 15.987 ms | 16.480 ms |
 
-First-filter p95 did not regress at any measured size. The index work moves to
-the first non-empty filter; subsequent typing continues to use the existing
-ordered match-index cache.
+On these generated profiles, first-filter p95 stayed within 0.3% of eager at
+every measured size, within the 10% guard. This is supporting comparison data
+only; it does not establish user-facing performance without observed
+representative catalog sizes. The lazy candidate moves index work to the first
+non-empty filter; subsequent typing uses the existing ordered match-index cache.
 
 ## Subsequent filter changes
 
 `BenchmarkSelectorFilterChanges` remains a separate subsequent-filter measure.
 It prepares the lowercase search index outside the timed loop, so its results do
-not include selector activation or deferred first-index construction. Run it
+not include selector activation indexing or first-index construction. Run it
 independently with:
 
 ```bash

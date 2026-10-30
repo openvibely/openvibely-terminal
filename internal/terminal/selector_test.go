@@ -1383,8 +1383,8 @@ func TestSelectorItemReplacementInvalidatesFilterCache(t *testing.T) {
 
 	updated, _ = m.handleSelector(selectorActiveMsg{title: "Items", command: "items open", forcePicker: true, items: newItems})
 	m = updated.(Model)
-	if m.selectorSearch != nil {
-		t.Fatalf("unfiltered replacement eagerly built %d selector search entries", len(m.selectorSearch))
+	if len(m.selectorSearch) != len(newItems) || &m.selectorSearch[0] == &oldSearch[0] {
+		t.Fatalf("replacement search index = %v, want a fresh index for %d items", m.selectorSearch, len(newItems))
 	}
 	if len(m.selectorItems) == 0 || &m.selectorItems[0] == &oldItemsBacking[0] {
 		t.Fatal("replacement retained the old selector item backing array")
@@ -1543,7 +1543,7 @@ func TestSelectorEmptyInitialFilterPreservesOriginalSlice(t *testing.T) {
 	}
 }
 
-func TestTaskSelectorDefersSearchIndexAndKeepsUnfilteredSelectionIdentity(t *testing.T) {
+func TestTaskSelectorKeepsUnfilteredSelectionIdentity(t *testing.T) {
 	tasks := []client.Task{
 		{ID: "task-first", ProjectID: "p1", Title: "Duplicate title", Category: "backlog", Status: "pending"},
 		{ID: "task-second", ProjectID: "p1", Title: "Duplicate title", Category: "active", Status: "running"},
@@ -1560,8 +1560,8 @@ func TestTaskSelectorDefersSearchIndexAndKeepsUnfilteredSelectionIdentity(t *tes
 		items:         items,
 	})
 	m = updated.(Model)
-	if m.selectorSearch != nil {
-		t.Fatalf("unfiltered activation built %d search entries before filtering", len(m.selectorSearch))
+	if len(m.selectorSearch) != len(items) {
+		t.Fatalf("unfiltered activation search index has %d entries, want %d", len(m.selectorSearch), len(items))
 	}
 	view := stripANSI(m.renderSelector())
 	first, second := strings.Index(view, "Duplicate title"), strings.LastIndex(view, "Duplicate title")
